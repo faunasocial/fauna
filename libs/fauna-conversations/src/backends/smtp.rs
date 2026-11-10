@@ -349,7 +349,11 @@ pub async fn poll_inbound_mail(
     // for the ordinary (Sent / non-scoring) sources.
     source.begin_pass().await;
     let result = poll_inbound_mail_pages(source, manager, after_uid, seen, page_limit).await;
-    source.end_pass().await;
+    // What the flush watermarked leaves the held un-watermarked set the
+    // ingest just fed (`mail-spam.md` § Scoring placement → *The app's
+    // catch-up*).
+    let scored = source.end_pass().await;
+    manager.note_spam_disposition(&scored);
     result
 }
 
@@ -433,10 +437,83 @@ async fn poll_inbound_mail_pages(
 /// ([`drain_mail_flag_changes`]). Writes first, so a change delivered in the
 /// same pass can never predate a read still in flight. The receive loop runs
 /// it on every mail sweep — the periodic backstop — and on the
-/// `fauna.mail.flags_changed` wake.
+/// `fauna.mail.flags_changed` wake. Ends with the spam catch-up over the held
+/// un-watermarked set the ingest and the flag drain feed
+/// ([`rescore_held_inbox_copies`]).
 pub async fn sync_mail_read_state(inbox: &dyn InboundMailSource, manager: &ConversationsManager) {
+    sync_mail_seen_and_flags(inbox, manager).await;
+    rescore_held_inbox_copies(inbox, manager).await;
+}
+
+/// The two read-state legs of [`sync_mail_read_state`] without its re-score:
+/// the owed `\Seen` writes out, the flag changes in. The web loop runs this
+/// one, because its re-score cannot ride the [`InboundMailSource`] seam — the
+/// copy's fetch runs in JS while the pass's scorer and the opening keys live
+/// on the wasm manager, so it takes from the held un-watermarked set
+/// ([`ConversationsManager::take_mail_rescore`]) and judges each copy itself
+/// with the same shared calls this driver's source makes
+/// (`judge_held_inbox_copy`, [`ConversationsManager::withdraw_filed_inbox_copy`]).
+pub async fn sync_mail_seen_and_flags(
+    inbox: &dyn InboundMailSource,
+    manager: &ConversationsManager,
+) {
     flush_owed_mail_seen(inbox, manager).await;
     drain_mail_flag_changes(inbox, manager).await;
+}
+
+/// The app's spam catch-up — the twin of the MDA's `SELECT` re-scan
+/// (`mail-spam.md` § Scoring placement → *The app's catch-up*): score what this
+/// source's scorer can score from the held un-watermarked set, newest first, up
+/// to the shared per-pass cap — every copy with a trained model, only a copy
+/// carrying a `report:spam` row without one (the nest's re-open on a rising
+/// aggregate is this rule's report-only case, `report-sharing.md` § Applying
+/// the aggregate) — in one pass of its own, so the disposition flushes once
+/// (`begin_pass` → per copy [`InboundMailSource::rescore_held`], or
+/// [`InboundMailSource::record_vetoed`] for a `$NotJunk` copy, which is
+/// watermarked without being opened → `end_pass`). The filter reads the
+/// source's state from its latest `begin_pass` — the mail drain's, earlier in
+/// the same sweep — so a sweep with nothing to take (steady state, or an
+/// untrained actor whose copies carry no report) costs nothing.
+///
+/// A copy the scorer files Junk leaves the view at once
+/// ([`ConversationsManager::withdraw_filed_inbox_copy`]), as a fresh junk
+/// verdict never enters it; one the mailbox no longer holds leaves the set;
+/// what the flush watermarked leaves it
+/// ([`ConversationsManager::note_spam_disposition`]). A transient failure ends
+/// the pass with the rest still in the set, owed the next sweep; a source that
+/// does not re-score (`Unsupported`) drops the set.
+pub async fn rescore_held_inbox_copies(
+    inbox: &dyn InboundMailSource,
+    manager: &ConversationsManager,
+) {
+    let candidates = manager.take_mail_rescore(inbox.scorer_state());
+    if candidates.is_empty() {
+        return;
+    }
+    inbox.begin_pass().await;
+    for candidate in candidates {
+        if candidate.vetoed {
+            inbox.record_vetoed(candidate.uid);
+            continue;
+        }
+        match inbox.rescore_held(candidate.uid).await {
+            Ok(Some(true)) => {
+                manager.withdraw_filed_inbox_copy(candidate.uid);
+            }
+            Ok(Some(false)) => {}
+            Ok(None) => manager.forget_unscored_mail(candidate.uid),
+            Err(MailFlagCallError::Unsupported) => {
+                manager.drop_unscored_mail();
+                break;
+            }
+            Err(MailFlagCallError::Failed(reason)) => {
+                tracing::warn!("mail re-score failed; retried on the next sweep: {reason}");
+                break;
+            }
+        }
+    }
+    let scored = inbox.end_pass().await;
+    manager.note_spam_disposition(&scored);
 }
 
 /// The most UIDs one `mark_seen` request carries — the nest refuses a longer
@@ -563,6 +640,7 @@ pub fn ingest_inbound_record(
                     uid: rec.uid,
                     has_seen_flag: rec.has_seen_flag,
                     warmup_hold: rec.warmup_hold,
+                    spam: rec.spam,
                 }),
                 fauna_mail::aliases::delivered::delivery_stamps(&rec.rfc5322),
             )?;

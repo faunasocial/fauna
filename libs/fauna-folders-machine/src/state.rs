@@ -674,10 +674,21 @@ pub(crate) struct State {
     pub pending_member_ids: Vec<String>,
     /// Structured submit error for the review surface. `None` until a failure.
     pub error: Option<LocalizedText>,
+    /// The Name step's create-time audience, normalized
+    /// ([`normalize_audience`] over an unbound folder): `private` (default) or
+    /// `public` (`ui/folders.md` § Audience and website serving → *Born
+    /// public*).
+    pub audience: String,
+    /// Whether the seam can attest a born-public create, read once at
+    /// construction. `false` → the choice is not offered and stays private.
+    pub audience_offered: bool,
+    /// A Public wizard's Create armed the declassify confirm
+    /// (`folder-audience-public-confirm`); the confirm is what creates.
+    pub declassify_armed: bool,
 }
 
 impl State {
-    pub(crate) fn new(devices: Vec<WizardDevice>) -> Self {
+    pub(crate) fn new(devices: Vec<WizardDevice>, audience_offered: bool) -> Self {
         Self {
             step: FolderWizardStep::Name,
             name: String::new(),
@@ -688,7 +699,15 @@ impl State {
             created: false,
             pending_member_ids: Vec::new(),
             error: None,
+            audience: AUDIENCE_PRIVATE.to_string(),
+            audience_offered,
+            declassify_armed: false,
         }
+    }
+
+    /// Whether the create this wizard would send is public.
+    pub(crate) fn is_public(&self) -> bool {
+        self.audience == AUDIENCE_PUBLIC
     }
 
     /// Whether the name step's Continue is enabled (non-empty, trimmed name).
@@ -1039,8 +1058,9 @@ mod tests {
 
     #[test]
     fn fresh_state_matches_web_defaults() {
-        let s = State::new(vec![]);
+        let s = State::new(vec![], false);
         assert_eq!(s.step, FolderWizardStep::Name);
+        assert_eq!(s.audience, AUDIENCE_PRIVATE, "a new folder starts private");
         assert_eq!(s.retention, None, "a plain create stamps no retention");
         assert!(!s.name_valid());
     }

@@ -107,6 +107,24 @@ export function accountDisplayHandle(
   }
 }
 
+/** The launch surfaces' cached identity — `<handle>@<domain> · <tier>` from
+ *  the bound account's cached handle / domain / tier, composed by shared Rust
+ *  (`fauna_client_accounts::identity_line`; `onboarding.md` § App-launch
+ *  routing → *The cached identity on the launch surfaces*). `undefined` while
+ *  the cache holds no handle (or before wasm is up): the label is then absent. */
+export function accountIdentityLine(
+  handle: string | null | undefined,
+  domain: string | null | undefined,
+  tier: string | null | undefined,
+): string | undefined {
+  try {
+    return wasmCoreModule().accountIdentityLine(handle ?? null, domain ?? null, tier ?? null) ??
+      undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** This tab's session material (the pinned account's, or the store-active
  *  account's when unpinned) — the session-identity read of `account-scoping.md`
  *  § Concurrent instances → *Session identity resolves through the session's

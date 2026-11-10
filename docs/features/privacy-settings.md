@@ -54,6 +54,8 @@ Stamped 2026-10-01 at d8cb0887cb.
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

@@ -192,6 +192,15 @@ impl Index {
         Ok(())
     }
 
+    /// Delete the document keyed by `content_id` — the retire arm of a
+    /// working index that follows a sealed corpus (a delete, an expunge, a
+    /// compaction rewrite). A no-op when no such doc exists; like
+    /// [`Self::add_doc`], invisible until the next `commit()`.
+    pub fn delete_doc(&mut self, content_id: &ContentId) {
+        let id_term = Term::from_field_bytes(self.fields.content_id, &content_id.0);
+        self.writer.delete_term(id_term);
+    }
+
     /// Commit the writer so subsequent `query()` calls see new docs.
     pub fn commit(&mut self) -> Result<(), IndexError> {
         self.writer.commit()?;

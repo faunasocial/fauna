@@ -14,6 +14,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import com.fauna.ffi.FfiConnectionReportsForTest
 import com.fauna.ffi.FfiConnectionState
+import com.fauna.ffi.FfiKnockNoticesForTest
 import com.fauna.ffi.FfiNestClient
 import com.fauna.ffi.FfiPaintedElement
 import com.fauna.ffi.FfiPaintedErrorTallyForTest
@@ -26,7 +27,8 @@ import java.util.WeakHashMap
  * The loud surfaces' four e2e seams on android — `fauna_e2e_agent::
  * {ALERT_SWEEP_WAKE, RECONNECT_BACKOFF, CONNECTION_REPORTS_KEY,
  * PAINTED_ERRORS_KEY}`, which own the cross-app contracts — plus the sweep's
- * pass counters (`ALERT_SWEEP_PASSES_KEY`) those journeys anchor on. Every one
+ * pass counters (`ALERT_SWEEP_PASSES_KEY`) those journeys anchor on, and the
+ * knock-toast log (`KNOCK_NOTICES_KEY`), the same shape of firing-site seam. Every one
  * is a thin call into `fauna-ffi`'s `test-helpers` exports (`e2e_seams.rs`,
  * `critical_alerts.rs`), so android counts, parses and wakes with the same Rust
  * as tui, linux, web, windows and apple (apple's `E2eLoudSurfaces.swift` and
@@ -45,6 +47,7 @@ object E2eLoudSurfaces {
     // state push reads both on the poll thread (each wrapper locks itself).
     @Volatile private var connectionReports = FfiConnectionReportsForTest()
     @Volatile private var paintedErrors = FfiPaintedErrorTallyForTest()
+    @Volatile private var knockNotices = FfiKnockNoticesForTest()
 
     private val main by lazy { Handler(Looper.getMainLooper()) }
 
@@ -67,6 +70,18 @@ object E2eLoudSurfaces {
      */
     fun observeConnectionReport(state: FfiConnectionState) {
         connectionReports.observe(state)
+    }
+
+    /** A knock push reached the knock-toast arm (before the muted gate). */
+    fun observeKnockNotice() {
+        knockNotices.observe()
+    }
+
+    /** A knock toast was handed to the platform: the catalog key its text
+     *  resolved from (`null` for a verbatim text), the painted text, and the
+     *  notification id it replaces under. */
+    fun recordKnockNotice(key: String?, text: String, replaceId: Int) {
+        knockNotices.record(key, text, replaceId.toUInt())
     }
 
     /**
@@ -180,7 +195,7 @@ object E2eLoudSurfaces {
     }
 
     /**
-     * Write `connection_reports`, `painted_errors` and `alert_sweep_passes` into
+     * Write `connection_reports`, `painted_errors`, `knock_notices` and `alert_sweep_passes` into
      * the agent's top-level state, decoded (a raw JSON string would
      * double-encode at the wire). All three are process-wide and start at zero,
      * so they are published unconditionally — zeros are an answer, the key's
@@ -191,12 +206,15 @@ object E2eLoudSurfaces {
         main.post { observePaintedFrame() }
         state.put("connection_reports", JSONObject(connectionReports.json()))
         state.put("painted_errors", JSONObject(paintedErrors.json()))
+        // `fauna_e2e_agent::KNOCK_NOTICES_KEY` — process-wide from zero like the
+        // two above, so published unconditionally: `seen` 0 is an answer.
+        state.put("knock_notices", JSONObject(knockNotices.json()))
         // The sweep's own counters, bumped inside the shared sweep on the ONE
         // process-wide registry (`criticalAlertsRegistry()` hands back the same
         // `Arc` every call) — never an android-side count. A pair, not one
         // number: the waiter compares `completed` against the `started` it read
         // at plant time. A same-identity re-establish runs one pass, not a
-        // second loop (`CriticalAlertSweepDispatcher`).
+        // second loop (the shared `startCriticalAlertSweep`'s claim).
         val alerts = criticalAlertsRegistry()
         state.put(
             "alert_sweep_passes",
@@ -251,6 +269,7 @@ object E2eLoudSurfaces {
     internal fun clearForTest() {
         connectionReports = FfiConnectionReportsForTest()
         paintedErrors = FfiPaintedErrorTallyForTest()
+        knockNotices = FfiKnockNoticesForTest()
         lastShown = ""
     }
 

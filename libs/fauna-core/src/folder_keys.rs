@@ -1317,6 +1317,23 @@ pub trait FolderKeyResolver: crate::MaybeSendSync {
     async fn read_scope(&self) -> Option<std::sync::Arc<dyn FolderKeyResolver>> {
         None
     }
+
+    /// The holder's **live** cross-nest sets — every
+    /// [`crate::data::ForeignFolder`] record in the custody this resolver
+    /// reads whose member has not left it (a left record is a tombstone,
+    /// never a membership). What a page that browses a foreign set by its
+    /// [`FolderRef::Foreign`] enumerates its options from (`ui/media.md`
+    /// § Cross-nest shared sets → *Which sets are offered*): the custody the
+    /// resolver already opens, so no surface wires a second source.
+    ///
+    /// Unfiltered: the caller runs the MLS join-filter
+    /// (`fauna_protocol::member_rows::admits`) and drops a set its own-nest
+    /// list already carries. The default answers none — a resolver that
+    /// reads no custody holds no foreign set — and `Err` is a failed custody
+    /// read, which a caller treats as "none this read", never as a removal.
+    async fn foreign_sets(&self) -> anyhow::Result<Vec<crate::data::ForeignFolder>> {
+        Ok(Vec::new())
+    }
 }
 
 /// `resolver`'s [`FolderKeyResolver::read_scope`] when it has one, else

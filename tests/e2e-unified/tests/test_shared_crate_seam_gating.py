@@ -594,8 +594,11 @@ def test_the_scan_actually_finds_gated_seams():
 # `lib.rs` resolves as ungated here (no such seed exists today; add file-level
 # resolution when the first one lands, do not ratchet it).
 
+#: A harness seed's name: `FAUNA_E2E_*`, or the mail stack's `FAUNA_MAIL_E2E_*`
+#: (the Go mail bridge's seams and fauna-mail's verification seams share it).
+_E2E_SEED_PREFIXES = ("FAUNA_E2E_", "FAUNA_MAIL_E2E_")
 _E2E_ENV_CONST = re.compile(
-    r'\bconst\s+(?P<name>\w+)\s*:\s*&(?:\'static\s+)?str\s*=\s*"FAUNA_E2E_\w+"'
+    r'\bconst\s+(?P<name>\w+)\s*:\s*&(?:\'static\s+)?str\s*=\s*"FAUNA_(?:MAIL_)?E2E_\w+"'
 )
 # No `\s*` before the capture: on `clean` a literal argument is a run of blanks,
 # and a leading `\s*` would swallow it whole and leave the group empty.
@@ -615,7 +618,7 @@ def _e2e_env_const_names() -> set[str]:
     names: set[str] = set()
     for rs_path in _rust_source_files():
         text = rs_path.read_text(encoding="utf-8")
-        if "FAUNA_E2E_" in text:
+        if any(prefix in text for prefix in _E2E_SEED_PREFIXES):
             names.update(m.group("name") for m in _E2E_ENV_CONST.finditer(text))
     return names
 
@@ -629,7 +632,7 @@ def _e2e_env_reads(text: str, clean: str, const_names: set[str]) -> list[tuple[i
     for m in _ENV_READ.finditer(clean):
         arg = text[m.start("arg") : m.end("arg")].strip()
         if arg.startswith('"'):
-            is_seed = arg.startswith('"FAUNA_E2E_')
+            is_seed = arg.startswith(tuple(f'"{prefix}' for prefix in _E2E_SEED_PREFIXES))
         else:
             is_seed = arg.rsplit("::", 1)[-1] in const_names
         if is_seed:
@@ -719,7 +722,9 @@ def test_the_scan_actually_finds_gated_e2e_env_seed_reads():
             continue
         clean = _strip_strings_and_comments(text)
         seen.update(arg for _, arg in _e2e_env_reads(text, clean, const_names))
-    for expected in ("OFFSET_ENV", '"FAUNA_E2E_RESCAN_MS"'):
+    # `E2E_RESOLVER_ENV` is fauna-mail's `FAUNA_MAIL_E2E_RESOLVER` read — the
+    # second seed prefix, which a selector keyed on `FAUNA_E2E_` alone misses.
+    for expected in ("OFFSET_ENV", '"FAUNA_E2E_RESCAN_MS"', "E2E_RESOLVER_ENV"):
         assert expected in seen, (
             f"the scan never saw a read of {expected} — the read selector broke; saw {sorted(seen)!r}"
         )

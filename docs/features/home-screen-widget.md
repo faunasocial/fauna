@@ -56,6 +56,8 @@ Stamped 2026-10-01 at dfa27a899f.
 | ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | — absent | |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

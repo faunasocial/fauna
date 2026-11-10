@@ -39,10 +39,10 @@ PAGES = [
 # round-trip is sufficient for the smoke test.
 # Use the ui.yaml-documented canonical settings landmark (`account-settings-link`,
 # a shared `settings` page element + the iOS page landmark per ui.yaml notes),
-# present on every app (linux: status.rs sets it). The previous
-# `settings-handle-label` is a registry orphan — not in the settings page's
-# `elements` and absent on linux (web/windows/apple show a handle label on
-# settings; linux's parity gap is a separate linux-area follow-up).
+# present on every app (linux: status.rs sets it). `settings-handle-label` is
+# a required settings element since 2026-11-08 (the identity cell, settings.md
+# § Layout & flow item 1) but is not yet painted on every app — tui and linux
+# lack it until the identity-cell lift lands — so it is not the landmark.
 _LANDMARKS = {
     "settings": "account-settings-link",
 }

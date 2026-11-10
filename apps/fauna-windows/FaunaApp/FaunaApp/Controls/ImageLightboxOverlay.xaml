@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The post image lightbox (`image-lightbox`, feed.md § Element IDs) — one overlay for
-  every page that paints the shared post-card (Controls/PostCardTemplates.xaml): the
-  feed page and the profile's Posts tab. Lifted from FeedPage.xaml unchanged. It is
-  the app's ONLY lightbox shape: a page that wires a picture of its own (ui.yaml lists
-  conversations and media; no app wires either yet) hosts this control, never a
-  ContentDialog.
+  The image lightbox (`image-lightbox`, feed.md § Element IDs) — one overlay for
+  every page that wires a picture to it: the feed page and the profile's Posts tab
+  (the shared post-card, Controls/PostCardTemplates.xaml) and the conversations page
+  (a dm-attachment-image, conversations.md § User actions). Lifted from FeedPage.xaml.
+  It is the app's ONLY lightbox shape: a page that wires a picture of its own hosts
+  this control, never a ContentDialog. A picture whose bytes the device does not hold
+  opens as its declared placeholder (ShowPlaceholder), never a dropped click; Escape
+  closes it (ui.yaml declares no dismiss element inside), so Show focuses the overlay.
 
   A Visibility-toggled full-page overlay, NOT ContentDialog: SettingsAccountPage's
   sign-out-confirm-button / danger-zone confirm already document the same
@@ -37,12 +39,18 @@
             Background="#CC000000" BorderThickness="0" Padding="0"
             HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
             HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
-            Click="ImageLightboxDialog_Click">
+            Click="ImageLightboxDialog_Click"
+            KeyDown="ImageLightboxDialog_KeyDown">
         <ScrollViewer ZoomMode="Enabled" MinZoomFactor="0.5" MaxZoomFactor="5"
                       HorizontalScrollBarVisibility="Auto"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalAlignment="Center" VerticalAlignment="Center">
-            <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
+            <Grid>
+                <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
+                <TextBlock x:Name="LightboxPlaceholder" Visibility="Collapsed"
+                           FontSize="24" Foreground="White" TextWrapping="Wrap" MaxWidth="800"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
         </ScrollViewer>
     </Button>
 </UserControl>

@@ -72,6 +72,8 @@ Stamped 2026-09-19 at acb58fddf3.
 | ios | — absent | |
 | android | — absent | |
 | tui | ✅ full | 0.1.5 docker |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

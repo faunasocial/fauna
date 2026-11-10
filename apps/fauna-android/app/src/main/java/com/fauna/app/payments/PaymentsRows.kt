@@ -43,6 +43,13 @@ data class ProviderItem(
      */
     val lastVerifiedAt: ULong?,
     val lastRejectedAt: ULong?,
+    /**
+     * The product the tier is sold as, in the provider's own reference (Stripe:
+     * the Payment Link id) — `null` maps every verified payment
+     * (`monetization.md` § Pillar 3 → *Configuration*). Not a secret: the §4
+     * form pre-fills it for the kind it edits.
+     */
+    val productRef: String? = null,
 )
 
 /**

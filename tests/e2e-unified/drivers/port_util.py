@@ -464,6 +464,100 @@ def untrack_process(proc: subprocess.Popen) -> None:
         pass
 
 
+# Process groups this run owns but did not spawn itself (POSIX): a group a
+# launched app started for a child it hands over by pgid — the e2e sync agent an
+# opted-in launch moves out of the app's group (`agent_spawner::
+# AGENT_OWN_GROUP_ENV`). pgid → the `comm` prefix its leader must carry.
+_tracked_groups: dict[int, str] = {}
+
+
+def _group_is_ours(pgid: int, comm_prefix: str) -> bool:
+    """True iff signalling group `pgid` can only reach the process this run
+    recorded for it — the guard that keeps a recorded-pgid kill from ever
+    hitting a stranger or the run itself (convention 10).
+
+    A live leader must still lead the group AND carry ``comm_prefix`` (a pid
+    the kernel recycled after the group died fails one or the other). A gone
+    leader is fine while the group still exists: the kernel never hands out a
+    pid still in use as a live group's id, so whoever is left in it is the
+    recorded process's own descendant. Never the run's own group.
+    """
+    if pgid <= 1 or pgid == os.getpgrp():
+        return False
+    try:
+        if os.getpgid(pgid) != pgid:
+            return False
+    except ProcessLookupError:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except OSError:
+            return False
+    except OSError:
+        return False
+    try:
+        if sys.platform == "linux":
+            with open(f"/proc/{pgid}/comm") as f:
+                comm = f.read().strip()
+        else:
+            comm = subprocess.run(
+                ["ps", "-o", "comm=", "-p", str(pgid)],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+    except Exception:
+        return False
+    # linux truncates `comm` to 15 bytes; darwin's `ps` prints the full path.
+    return comm_prefix in comm
+
+
+def track_group(pgid: int, comm_prefix: str) -> None:
+    """Own group `pgid` for this run (POSIX): killed by `kill_group`, at exit by
+    the atexit sweep, and — if the run is SIGKILLed — by this run's reaper."""
+    if os.name != "posix" or pgid in _tracked_groups:
+        return
+    _tracked_groups[pgid] = comm_prefix
+    _start_reaper()
+    if _reaper_w >= 0:
+        try:
+            os.write(_reaper_w, str(pgid).encode() + b"\n")
+        except OSError:
+            pass
+
+
+#: SIGKILL's number, read without `signal.SIGKILL` at import time: Windows'
+#: `signal` has no SIGKILL, and this module is imported by every run there (an
+#: import-time `AttributeError` here failed every windows and win-hosted tui
+#: build before a test ran). `kill_group` itself only ever runs on POSIX.
+_SIGKILL = getattr(signal, "SIGKILL", 9)
+
+
+def kill_group(pgid: int, sig: int = _SIGKILL) -> bool:
+    """Signal a group `track_group` recorded, iff `_group_is_ours` still holds,
+    then (on SIGKILL) wait, bounded, until it is gone. True if it was signalled."""
+    comm = _tracked_groups.get(pgid)
+    if comm is None or not _group_is_ours(pgid, comm):
+        _tracked_groups.pop(pgid, None)
+        return False
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        _tracked_groups.pop(pgid, None)
+        return False
+    if sig == _SIGKILL:
+        _wait_group_gone(pgid)
+        _tracked_groups.pop(pgid, None)
+    return True
+
+
+def group_alive(pgid: int) -> bool:
+    """True while any process is left in group `pgid`."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _cleanup():
     for proc in _tracked:
         try:
@@ -471,6 +565,11 @@ def _cleanup():
         except Exception:
             pass
     _tracked.clear()
+    for pgid in list(_tracked_groups):
+        try:
+            kill_group(pgid)
+        except Exception:
+            pass
     # After the cooperative teardown: anything still alive in a job (a
     # grandchild `terminate_tree` cannot reach) goes with the handle.
     _close_jobs()

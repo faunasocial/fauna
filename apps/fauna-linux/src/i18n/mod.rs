@@ -55,10 +55,21 @@ pub fn notification_push_text(push: &fauna_protocol::push_events::NotificationPa
     resolve_notification_text(fauna_client_notifications::notification_push_text(push))
 }
 
-/// The same decision for a `fauna.knock` push — the knock toast says what the
-/// knock's row says (`fauna_client_notifications::knock_push_text`).
-pub fn knock_push_text(push: &fauna_protocol::push_events::KnockPayload) -> String {
-    resolve_notification_text(fauna_client_notifications::knock_push_text(push))
+/// Resolve a shared knock-toast decision (`fauna_client_notifications::knock_toast`)
+/// into the catalog key it resolved from (`None` for a verbatim text) and the
+/// painted sentence — the pair `crate::notifications::raise_knock_toast` fires
+/// and logs (tui's `knock_toast_body` twin).
+pub fn knock_toast_body(
+    text: fauna_client_notifications::NotificationText,
+) -> (Option<String>, String) {
+    use fauna_client_notifications::NotificationText;
+    match text {
+        NotificationText::Localized(text) => {
+            let body = text.resolve(strings::lookup);
+            (Some(text.key), body)
+        }
+        NotificationText::Verbatim(text) => (None, text),
+    }
 }
 
 fn resolve_notification_text(text: fauna_client_notifications::NotificationText) -> String {
@@ -415,9 +426,18 @@ mod tests {
             ),
             ..Default::default()
         };
-        assert_eq!(knock_push_text(&push), "a1b2c3d4 wants to connect: hi");
+        let toast = |push: &fauna_protocol::push_events::KnockPayload| {
+            knock_toast_body(fauna_client_notifications::knock_push_text(push))
+        };
+        assert_eq!(
+            toast(&push),
+            (
+                Some("notifications.row_knock".to_owned()),
+                "a1b2c3d4 wants to connect: hi".to_owned()
+            )
+        );
         push.body = None;
-        assert_eq!(knock_push_text(&push), "a1b2c3d4 wants to connect");
+        assert_eq!(toast(&push).1, "a1b2c3d4 wants to connect");
     }
 
     #[test]

@@ -638,6 +638,64 @@ fn tombstone_in_tx(
     Ok(removed)
 }
 
+/// The body of a send: the Sent copy stored, the item queued, the room
+/// touched — inside the caller's transaction.
+fn send_in(
+    tx: &rusqlite::Transaction<'_>,
+    actor_id: &[u8; 32],
+    room: &BridgedRoomRow,
+    sealed_for_bridge: &[u8],
+    sealed_for_self: &[u8],
+) -> Result<i64> {
+    let now = now_epoch_millis();
+    let queued = count(
+        tx,
+        "SELECT COUNT(*) FROM bridge_conversation_outbox
+          WHERE actor_id = ?1 AND bridge_principal_id = ?2",
+        rusqlite::params![&actor_id[..], room.bridge_principal_id],
+    )?;
+    if queued >= MAX_BRIDGED_OUTBOX_PER_PRINCIPAL {
+        return Err(anyhow::anyhow!(BridgedRefused::Full));
+    }
+    tx.execute(
+        "INSERT INTO bridge_conversation_messages
+            (room_id, actor_id, direction, far_message_id, sender, sealed_content,
+             created_at, received_at)
+         VALUES (?1, ?2, 'out', NULL, ?3, ?4, ?5, ?5)",
+        rusqlite::params![
+            room.room_id,
+            &actor_id[..],
+            room.self_address.as_deref().unwrap_or(""),
+            sealed_for_self,
+            now
+        ],
+    )
+    .context("insert bridged sent row")?;
+    let id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO bridge_conversation_outbox
+            (message_id, room_id, actor_id, bridge_principal_id, ciphertext, queued_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            id,
+            room.room_id,
+            &actor_id[..],
+            room.bridge_principal_id,
+            sealed_for_bridge,
+            now
+        ],
+    )
+    .context("queue bridged outbound")?;
+    tx.execute(
+        // A send is a new live row: it reopens a removed room (rule 4).
+        "UPDATE bridge_conversation_rooms SET last_at = ?2, removed_at = NULL
+          WHERE room_id = ?1",
+        rusqlite::params![room.room_id, now],
+    )
+    .context("touch bridged room")?;
+    Ok(id)
+}
+
 impl CacheDb {
     /// Find or mint the room `(account, bridge, far_room_id)`, seating the
     /// floor roster at birth; an existing room takes `shape`'s label and self
@@ -1063,56 +1121,43 @@ impl CacheDb {
         sealed_for_bridge: &[u8],
         sealed_for_self: &[u8],
     ) -> Result<i64> {
-        let now = now_epoch_millis();
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction().context("begin bridged send")?;
-        let queued = count(
-            &tx,
-            "SELECT COUNT(*) FROM bridge_conversation_outbox
-              WHERE actor_id = ?1 AND bridge_principal_id = ?2",
-            rusqlite::params![&actor_id[..], room.bridge_principal_id],
-        )?;
-        if queued >= MAX_BRIDGED_OUTBOX_PER_PRINCIPAL {
-            return Err(anyhow::anyhow!(BridgedRefused::Full));
-        }
-        tx.execute(
-            "INSERT INTO bridge_conversation_messages
-                (room_id, actor_id, direction, far_message_id, sender, sealed_content,
-                 created_at, received_at)
-             VALUES (?1, ?2, 'out', NULL, ?3, ?4, ?5, ?5)",
-            rusqlite::params![
-                room.room_id,
-                &actor_id[..],
-                room.self_address.as_deref().unwrap_or(""),
-                sealed_for_self,
-                now
-            ],
-        )
-        .context("insert bridged sent row")?;
-        let id = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO bridge_conversation_outbox
-                (message_id, room_id, actor_id, bridge_principal_id, ciphertext, queued_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                id,
-                room.room_id,
-                &actor_id[..],
-                room.bridge_principal_id,
-                sealed_for_bridge,
-                now
-            ],
-        )
-        .context("queue bridged outbound")?;
-        tx.execute(
-            // A send is a new live row: it reopens a removed room (rule 4).
-            "UPDATE bridge_conversation_rooms SET last_at = ?2, removed_at = NULL
-              WHERE room_id = ?1",
-            rusqlite::params![room.room_id, now],
-        )
-        .context("touch bridged room")?;
+        let id = send_in(&tx, actor_id, room, sealed_for_bridge, sealed_for_self)?;
         tx.commit().context("commit bridged send")?;
         Ok(id)
+    }
+
+    /// [`Self::send_bridged_message`] for a send the NEST makes on the user's
+    /// behalf exactly once per cause — a message no app composed, so no app
+    /// can tell a retry from a second send. `once` runs inside the send's own
+    /// transaction with the new row's id and records the cause (its own
+    /// table, its own key); answering `false` — the cause is already recorded
+    /// — rolls the whole send back and this answers `None`. The record and
+    /// the message therefore exist together or not at all: a crash before the
+    /// commit leaves neither, so the cause's replay sends; after it, both, so
+    /// the replay sends nothing.
+    ///
+    /// # Errors
+    /// [`BridgedRefused::Full`] past [`MAX_BRIDGED_OUTBOX_PER_PRINCIPAL`]; an
+    /// error from `once`.
+    pub async fn send_bridged_message_once(
+        &self,
+        actor_id: &[u8; 32],
+        room: &BridgedRoomRow,
+        sealed_for_bridge: &[u8],
+        sealed_for_self: &[u8],
+        once: impl FnOnce(&rusqlite::Transaction<'_>, i64) -> Result<bool>,
+    ) -> Result<Option<i64>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin bridged send")?;
+        let id = send_in(&tx, actor_id, room, sealed_for_bridge, sealed_for_self)?;
+        if !once(&tx, id)? {
+            // Dropping the transaction rolls the send back.
+            return Ok(None);
+        }
+        tx.commit().context("commit bridged send")?;
+        Ok(Some(id))
     }
 
     /// The principal's undrained items with `id > after_id`, oldest first.

@@ -4,6 +4,9 @@ title: Claim a fresh nest
 section: getting in
 goal: docs/goal/behavior/onboarding.md § 3a. Claim code
 guide: docs/guides/getting-started.md § Step 3b — Claim a new nest
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -18,7 +21,7 @@ unless your nest was set up without mail.
 
 ## Coverage contract
 
-Stamped 2026-10-26 at 4c6eb832b9.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] A nest nobody has claimed yet sends you to the claim-code step, and a wrong code says so in place — `docs/goal/behavior/onboarding.md` § 3a. Claim code
    - `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_unclaimed_nest_routes_to_claim_code`
@@ -37,7 +40,7 @@ Stamped 2026-10-26 at 4c6eb832b9.
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_declining_the_offer_leaves_everything_as_today`
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_accepting_the_offer_also_reaches_the_app`
    - `tests/e2e-unified/tests/test_trust_prompt.py::test_the_manual_dns_resume_offers_the_trust_and_survives_a_crash_on_it`
-4. [app] Claiming with a handle on a real domain, on a nest on the open internet, turns mail on for you, unless your nest was set up without mail; a local handle, or a nest behind your home router, leaves it off until you ask — `docs/goal/behavior/onboarding.md` § 3b. Serving enablement at claim
+4. [app] Claiming with a handle on a real domain, on a nest on the open internet, turns mail on for you, unless your nest was set up without mail; a local handle, or a nest behind your home router, leaves it off until you ask; and signing in again later as that admin turns nothing on or off — `docs/goal/behavior/onboarding.md` § 3b. Serving enablement at claim
    - `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_real_domain_handle_auto_enables_mail`
    - `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_loopback_handle_derives_mail_disabled`
    - `tests/e2e-unified/tests/test_onboarding_localhost.py::test_claiming_with_a_local_handle_leaves_mail_off`
@@ -69,6 +72,10 @@ Stamped 2026-10-26 at 4c6eb832b9.
     - `tests/e2e-unified/tests/api/test_admin_auth.py::test_claim_admin`
     - `tests/e2e-unified/tests/platform/docker/test_cloud_init_claim_code_mount.py::test_mounted_claim_code_box_boots_and_is_claimable`
     - `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_claim_admin`
+13. [nest] Claiming a nest reached by its bare address or as localhost registers no domain and gives the nest no name of its own; only a claim on a real domain does — `docs/goal/architecture/nest/domains-and-tls-bootstrap.md` § Claim: the handle domain IS the deployment's identity domain
+   - `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_local_target_registers_no_mail_domain`
+   - `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_as_localhost_registers_no_mail_domain`
+   - `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_real_domain_registers_primary_and_dns`
 
 ## Status
 
@@ -82,6 +89,8 @@ Stamped 2026-10-26 at 4c6eb832b9.
 | ios | ✅ full | 0.1.5-dev+ede1a6ab standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -98,7 +107,7 @@ Stamped 2026-10-26 at 4c6eb832b9.
 | 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_claim_offers_the_one_tap_trust_before_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_declining_the_offer_leaves_everything_as_today` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_accepting_the_offer_also_reaches_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_manual_dns_resume_offers_the_trust_and_survives_a_crash_on_it` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_trust_prompt.py::test_the_manual_dns_resume_offers_the_trust_and_survives_a_crash_on_it` — requires `unclean-kill` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_real_domain_handle_auto_enables_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_admin_claim_with_loopback_handle_derives_mail_disabled` — requires `admin-claim-onboarding-drive` (test harness) (not built: web) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_onboarding_localhost.py::test_claiming_with_a_local_handle_leaves_mail_off` | web (linux): passed |
@@ -122,4 +131,7 @@ Stamped 2026-10-26 at 4c6eb832b9.
 | 12 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_claim_admin` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 12 | nest | `tests/e2e-unified/tests/platform/docker/test_cloud_init_claim_code_mount.py::test_mounted_claim_code_box_boots_and_is_claimable` | nest (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_claim_admin` | nest (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_local_target_registers_no_mail_domain` | nest (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_as_localhost_registers_no_mail_domain` | nest (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_real_domain_registers_primary_and_dns` | nest (linux): passed |
 <!-- features-render:end -->

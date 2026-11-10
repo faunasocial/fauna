@@ -58,10 +58,18 @@ public enum AppStateObservables {
         state.merge(BarrierTestCommand.stateFragment) { _, new in new }
         #endif
 
+        // The screen-capture posture (`security.md` § On-screen secret exposure,
+        // rule 2) — read back by `helpers/capture_posture.py`; the shape and why
+        // iOS publishes no `window_excluded` live on `ScreenCapturePosture`.
+        state[ScreenCapturePosture.stateKey] = ScreenCapturePosture.observable()
+
         // Convention 14's counter observables — see `AutomationCounters.swift`
         // for why these two are neither `Testing/`-scoped nor `#if DEBUG`.
         state["session_generation"] = SessionGeneration.count
         state["activation_gestures"] = ActivationGestures.count
+        // `launch_verdicts` (`fauna_e2e_agent::LAUNCH_VERDICTS_KEY`) — counted at
+        // `LaunchMachineBox.deliver`, the one seam every launch verdict passes.
+        state["launch_verdicts"] = LaunchVerdicts.observable
 
         // Convention 14's `alert_sweep_passes` observable — a straight
         // read off the shared `CriticalAlerts` registry.

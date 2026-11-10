@@ -4,6 +4,9 @@ title: Build your own feeds
 section: everyday
 goal: docs/goal/ui/feed.md § Feed-rule types
 guide: docs/guides/app-tour.md § Feeds
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -14,7 +17,7 @@ feeds. Feeds you no longer want delete in one step.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at d8cb0887cb.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] A feed built from a rule shows only the posts that match it — `docs/goal/ui/feed.md` § Feed-rule types
    - `tests/e2e-unified/tests/test_feed_creation.py::test_create_feed_body_contains`
@@ -46,19 +49,23 @@ Stamped 2026-10-01 at d8cb0887cb.
    - `tests/e2e-unified/tests/test_feed_creation.py::test_a_custom_feed_never_takes_over_the_feed_page_at_the_next_launch`
 11. [app] After opening a feed of your own, the Local entry in the feed list takes you back to the local feed — `docs/goal/ui/feed.md` § Layout & flow
    - `tests/e2e-unified/tests/test_feed_creation.py::test_the_local_entry_returns_from_a_custom_feed`
+12. [app] Weighing the engagement factor orders the feed by how much engagement each post has gathered — `docs/goal/behavior/trending.md` § The `engagement` factor
+   - `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_weighing_engagement_lists_the_engaged_post_first`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
-| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
+| web | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -75,10 +82,11 @@ Stamped 2026-10-01 at d8cb0887cb.
 | 5 | nest | `tests/e2e-unified/tests/api/test_feed_filter.py::test_feed_single_author_filter` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_feed_filter.py::test_feed_multi_author_filter` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_feed_api.py::test_feed_with_several_rules_serves_all_or_any` | nest (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_with_several_rules_requires_all_of_them_or_any_one` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_with_several_rules_requires_all_of_them_or_any_one` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_the_factor_picker_offers_a_trained_topic_by_its_name` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_watched_to_the_end_and_skipped_past_weigh_into_a_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_custom_feed_never_takes_over_the_feed_page_at_the_next_launch` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_custom_feed_never_takes_over_the_feed_page_at_the_next_launch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_the_local_entry_returns_from_a_custom_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_weighing_engagement_lists_the_engaged_post_first` | windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

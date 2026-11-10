@@ -89,6 +89,16 @@ func nestRuleLineText(_ rule: NestRuleLine) -> String {
     } ?? L.nestRules.ruleLineNoLevel(verdict: verdict, reason: rule.reason)
 }
 
+/// One rule as the joining surface lists it: the rule's line, and under a rule
+/// this device cannot apply (`NestRuleLine::inert`) its not-applied note on a
+/// second line of the same item (`nest-rules.md` § Acceptance at joining, and a
+/// change of rules) — tui's `nest_rules::joining_rule_line`. The settings surface
+/// paints the note as its own `settings-nest-rules-inert-notice` instead.
+func joiningNestRuleLineText(_ rule: NestRuleLine) -> String {
+    let line = nestRuleLineText(rule)
+    return rule.inert.map { "\(line)\n\(renderLocalizedText($0))" } ?? line
+}
+
 /// `onboarding-nest-rules` — the nest's rules at joining (`nest-rules.md` §
 /// Acceptance at joining, *Joining is acceptance*): the heading naming the nest,
 /// followed by the not-applied sentence when none of the document applies here,
@@ -112,7 +122,7 @@ public struct JoiningNestRules: View {
                     .font(.footnote)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(Array(summary.rules.enumerated()), id: \.offset) { index, rule in
-                    let line = nestRuleLineText(rule)
+                    let line = joiningNestRuleLineText(rule)
                     Text(line)
                         .font(.footnote)
                         .foregroundStyle(.secondary)

@@ -53,10 +53,86 @@ fn shared_authenticator() -> Result<&'static mail_auth::MessageAuthenticator, Au
     if let Some(a) = SHARED.get() {
         return Ok(a);
     }
-    let built = mail_auth::MessageAuthenticator::new_system_conf()
-        .map_err(|e| AuthError::ResolverInit(e.to_string()))?;
+    let built = build_shared_authenticator()?;
     Ok(SHARED.get_or_init(|| built))
 }
+
+/// The shipped build of the shared authenticator: the system resolver
+/// configuration, always.
+#[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+fn build_shared_authenticator() -> Result<mail_auth::MessageAuthenticator, AuthError> {
+    mail_auth::MessageAuthenticator::new_system_conf()
+        .map_err(|e| AuthError::ResolverInit(e.to_string()))
+}
+
+/// The deadline the exported entry points run under: [`VERIFY_DEADLINE`] in a
+/// shipped build.
+#[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+fn verify_deadline() -> std::time::Duration {
+    VERIFY_DEADLINE
+}
+
+/// The e2e harness's resolver seam (convention 15, compiled out of every
+/// shipped build — the mail bridge's e2e flavor links a cdylib built with
+/// `test-helpers`, `just mail-bridge-ffi-e2e`): with
+/// [`E2E_RESOLVER_ENV`] set to a loopback `ip:port`, the shared authenticator's
+/// ONLY nameserver is that UDP address, so a process-level test can point the
+/// lookups at a socket that never answers. The per-lookup timeout is set far
+/// past any deadline the harness picks, so the deadline — not a resolver
+/// error turned into a verdict — is what ends the verify. Unset → the system
+/// resolver configuration, as shipped. A value that is not a loopback socket
+/// address is refused as [`AuthError::ResolverInit`].
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn build_shared_authenticator() -> Result<mail_auth::MessageAuthenticator, AuthError> {
+    use hickory_resolver::config::{
+        ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts,
+    };
+
+    let Ok(raw) = std::env::var(E2E_RESOLVER_ENV) else {
+        return mail_auth::MessageAuthenticator::new_system_conf()
+            .map_err(|e| AuthError::ResolverInit(e.to_string()));
+    };
+    let addr: std::net::SocketAddr = raw
+        .trim()
+        .parse()
+        .map_err(|e| AuthError::ResolverInit(format!("{E2E_RESOLVER_ENV}={raw:?}: {e}")))?;
+    if !addr.ip().is_loopback() {
+        return Err(AuthError::ResolverInit(format!(
+            "{E2E_RESOLVER_ENV}={raw:?}: the harness resolver must be a loopback address"
+        )));
+    }
+    let mut udp = ConnectionConfig::udp();
+    udp.port = addr.port();
+    udp.bind_addr = Some(std::net::SocketAddr::new(addr.ip(), 0));
+    let server = NameServerConfig::new(addr.ip(), true, vec![udp]);
+    let config = ResolverConfig::from_parts(None, vec![], vec![server]);
+    let mut opts = ResolverOpts::default();
+    opts.timeout = std::time::Duration::from_secs(600);
+    opts.attempts = 1;
+    mail_auth::MessageAuthenticator::new(config, opts)
+        .map_err(|e| AuthError::ResolverInit(e.to_string()))
+}
+
+/// The e2e harness's deadline seam: [`E2E_VERIFY_DEADLINE_ENV`] (milliseconds,
+/// at least 1) in place of [`VERIFY_DEADLINE`], so a test watches the deadline
+/// fire without waiting out 30 s. Unset or unparseable → [`VERIFY_DEADLINE`].
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn verify_deadline() -> std::time::Duration {
+    std::env::var(E2E_VERIFY_DEADLINE_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(VERIFY_DEADLINE)
+}
+
+/// The harness resolver seam's variable (see `build_shared_authenticator`).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+const E2E_RESOLVER_ENV: &str = "FAUNA_MAIL_E2E_RESOLVER";
+
+/// The harness deadline seam's variable (see `verify_deadline`).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+const E2E_VERIFY_DEADLINE_ENV: &str = "FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS";
 
 // ── verify_inbound ────────────────────────────────────────────────────────────
 
@@ -87,7 +163,7 @@ pub async fn verify_inbound(
     let resolver = shared_authenticator()?;
     verify_inbound_observed_within(
         resolver,
-        VERIFY_DEADLINE,
+        verify_deadline(),
         raw,
         mail_from,
         client_ip,
@@ -115,7 +191,7 @@ pub async fn verify_inbound_observed(
     let resolver = shared_authenticator()?;
     verify_inbound_observed_within(
         resolver,
-        VERIFY_DEADLINE,
+        verify_deadline(),
         raw,
         mail_from,
         client_ip,

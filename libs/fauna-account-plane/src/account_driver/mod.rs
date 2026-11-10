@@ -147,6 +147,10 @@ mod enrollment;
 mod handle;
 mod handle_source;
 mod host;
+/// The `OfflineIntentQueue` every app shares — the driver's outbox door plus
+/// the app's connection word, the queue the shared `OfflineQueued` composer
+/// reads (`account-offline-mutation.md` § The offline-mutation contract).
+pub mod offline_outbox;
 mod pass;
 mod stop;
 
@@ -361,13 +365,14 @@ impl From<ActorKeypair> for SeedHolder {
     }
 }
 
-/// How the runtime learns which `__conv` channels this account has joined —
-/// the member half of the scope set (`scope_set` owns the derivation).
+/// A live MLS engine's membership answer — which `__conv` channels this
+/// account has joined, the member half of the scope set (`scope_set` owns the
+/// derivation).
 ///
 /// Read once per pump pass rather than pushed, so a join or a leave needs no
-/// notification path: the next pass simply derives a different set. The source
-/// is the app's own MLS engine (`MlsEngine::list_groups`), which is local
-/// state — a replica with no nest in sight still knows what it joined.
+/// notification path: the next pass simply derives a different set. The
+/// engine is the app's own (`MlsEngine::list_groups`), which is local state —
+/// a replica with no nest in sight still knows what it joined.
 ///
 /// **`None` means "cannot tell right now", not "no channels".** An engine that
 /// is still loading would otherwise answer with an empty list, which reads as
@@ -378,10 +383,62 @@ impl From<ActorKeypair> for SeedHolder {
 /// SPA's single-threaded process) — a trait object cannot carry the
 /// `MaybeSendSync` marker, so this is the marker's two-arm shape spelled out.
 #[cfg(not(target_arch = "wasm32"))]
-pub type MembershipSource = Arc<dyn Fn() -> Option<Vec<[u8; 32]>> + Send + Sync>;
+pub type MembershipEngine = Arc<dyn Fn() -> Option<Vec<[u8; 32]>> + Send + Sync>;
 /// See the native arm.
 #[cfg(target_arch = "wasm32")]
-pub type MembershipSource = Arc<dyn Fn() -> Option<Vec<[u8; 32]>>>;
+pub type MembershipEngine = Arc<dyn Fn() -> Option<Vec<[u8; 32]>>>;
+
+/// Which membership answer a runtime has — a declared wiring, never inferred
+/// from its principal (`account-runtime-roles.md` § Multi-instance
+/// concurrency → *The membership record*, part (3)). A host with neither
+/// passes `None` for the whole source: it has no answer, walks its own-actor
+/// scopes alone and concludes no departure.
+#[derive(Clone)]
+pub enum MembershipSource {
+    /// The host's own MLS engine — every seed-holding host. When the runtime
+    /// holds the seed-leg role it also writes each answer into the store as
+    /// the membership record ([`crate::membership_record`]).
+    Engine(MembershipEngine),
+    /// The membership record the seed-leg holder beside it writes — the
+    /// seedless agent, which links no engine. Read fresh at every pass; a
+    /// record older than [`crate::membership_record::lease_for`] the backstop
+    /// interval is no answer.
+    Record,
+}
+
+impl MembershipSource {
+    /// Is this the engine wiring — the one whose answers a seed-leg holder
+    /// writes as the record?
+    fn is_engine(&self) -> bool {
+        matches!(self, Self::Engine(_))
+    }
+}
+
+/// This pass's membership answer from `source`: the engine's, or the record's
+/// when it is fresh; `None` (*cannot tell*) otherwise, or when the record
+/// could not be read.
+async fn membership_answer<B: StoreBackend>(
+    source: Option<&MembershipSource>,
+    store: &AccountStore<B>,
+    backstop: Duration,
+) -> Option<Vec<[u8; 32]>> {
+    match source? {
+        MembershipSource::Engine(engine) => engine(),
+        MembershipSource::Record => {
+            let now = now_ms();
+            let lease = crate::membership_record::lease_for(backstop);
+            crate::membership_record::read_fresh(store, now, lease)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "account runtime: the membership record did not read ({e:#}) — no \
+                         membership answer this pass"
+                    );
+                    None
+                })
+        }
+    }
+}
 
 /// Where the escrow-holder trust set comes from — the app's pin store for the
 /// bound nest (`fauna_anon_client::trust::trusted_escrow_holders` natively,
@@ -578,11 +635,14 @@ pub struct LegsOutput {
 /// sync over iroh) and the custody leg (the accounts this machine holds
 /// custody for) — `fauna_sync_engine::account_runtime` implements it over its
 /// `peer_leg` and `custody_leg` modules, in the order the pump always kept:
-/// withdrawal snapshots, ensure-bound, sibling dial, custody serve refresh,
-/// custody nest pull, custody dial + budget, receipts. Web has no iroh and
-/// hosts no custody, so its legs (`web_host::WebLegs`) run nothing per pass
-/// and carry only the restore gesture's custodian dial. Each leg reports into its own
-/// `PumpReport` slot and pushes step failures through [`push_step_error`].
+/// withdrawal snapshots, ensure-bound, sibling dial, custodian nest arm,
+/// custody serve refresh, custody nest pull, custody dial + budget, receipts.
+/// Web has no iroh and hosts no custody, so its legs (`web_host::WebLegs`)
+/// run one leg per pass — the custodian nest arm, on a pass whose own-nest
+/// walk did not answer (`crate::custodian_restore::pass_arm_with_derived_view`)
+/// — over the custodian dial the restore gesture rides too. Each leg reports
+/// into its own `PumpReport` slot and pushes step failures through
+/// [`push_step_error`].
 pub trait HostLegs<B: StoreBackend, R: RpcRequester> {
     fn run(
         &mut self,
@@ -1354,10 +1414,73 @@ impl AccountDriver {
         // assembly loop: app-fed state survives a stale-writer reassembly.)
         // Seeded before the prologue so a fresh replica's very first pass already
         // walks its own content.
+        // The membership record's writer (`crate::membership_record`;
+        // `account-runtime-roles.md` § Multi-instance concurrency → *The
+        // membership record*, part (2)): the seed-leg holder wired to an
+        // engine writes that engine's answer in every pass it runs — an
+        // affirmative one stamped, `None` cleared — and no other runtime
+        // writes. Evaluates to whether a written set changed.
+        macro_rules! write_membership_record {
+            ($answer:expr) => {{
+                if seed_legs.is_holder()
+                    && settings
+                        .memberships
+                        .as_ref()
+                        .is_some_and(MembershipSource::is_engine)
+                {
+                    match crate::membership_record::follow(store, $answer, now_ms()).await {
+                        Ok(changed) => changed,
+                        Err(e) => {
+                            tracing::warn!(
+                                "account runtime: the membership record did not land ({e:#}) — \
+                                 the engine holder beside this app reads no fresh answer"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            }};
+        }
+        // The pass's scope derivation: this pass's membership answer, read
+        // fresh ([`membership_answer`]), through the one `derive_scopes`; a
+        // full pass (`full: true`) also writes it as the record.
+        macro_rules! derive {
+            (full: $full:expr) => {{
+                let answer = membership_answer(
+                    settings.memberships.as_ref(),
+                    store,
+                    settings.backstop_interval,
+                )
+                .await;
+                if $full {
+                    write_membership_record!(answer.as_deref());
+                }
+                derive_scopes(actor, answer, registered, channels)
+            }};
+        }
+        // A clean teardown clears the record its writer kept: a stopped app
+        // vouches for nothing.
+        macro_rules! clear_membership_record {
+            () => {
+                if seed_legs.is_holder()
+                    && settings
+                        .memberships
+                        .as_ref()
+                        .is_some_and(MembershipSource::is_engine)
+                    && let Err(e) = crate::membership_record::clear(store).await
+                {
+                    tracing::warn!(
+                        "account runtime: the membership record did not clear at teardown \
+                         ({e:#}) — it lapses with its lease"
+                    );
+                }
+            };
+        }
         // `answered` rides alongside: it is what licenses the departure step to
         // delete (see `derive_scopes`), and it must never be inferred from the set.
-        let (mut content_scopes, mut answered) =
-            derive_scopes(actor, &settings.memberships, registered, channels);
+        let (mut content_scopes, mut answered) = derive!(full: role.is_holder());
 
         // What a local command may touch (`LocalCtx`), and the pass driver's
         // command side around it (`Drive`). Macros, not bindings: both borrow
@@ -1405,7 +1528,19 @@ impl AccountDriver {
         // state into it, and five of them overflowed that stack (measured
         // 2026-10-01 on a debug build). One allocation per seed pass.
         macro_rules! run_seed_pass {
-            ($label:expr) => {
+            ($label:expr) => {{
+                // The membership record (`write_membership_record`): the seed
+                // pass's own step, ahead of the rest — a step only the app's
+                // conversations engine can run (the seed-leg bullet's part
+                // (2)). A changed set asks the engine holder for its pass at
+                // once below, so a departure folded here is concluded within
+                // this wake (*The membership record*, part (5)).
+                let record_changed = match settings.memberships.as_ref() {
+                    Some(MembershipSource::Engine(engine)) => {
+                        write_membership_record!(engine().as_deref())
+                    }
+                    _ => false,
+                };
                 contained_pump(
                     $label,
                     None,
@@ -1427,12 +1562,13 @@ impl AccountDriver {
                         report.generation_escrow_recovery,
                         Some(crate::generation_escrow_recover::EscrowRecoveryPass::Recovered(n))
                             if n > 0
-                    ) {
+                    ) || record_changed
+                    {
                         cycles.owe_holder_pass();
                     }
                     report
                 })
-            };
+            }};
         }
         // What a report's enrollment verdict licenses, read one way at every
         // site a report is read: a healthy answer re-arms the one-rotation
@@ -1679,7 +1815,11 @@ impl AccountDriver {
                 },
             };
             match wake {
-                Wake::Closed => return ServeEnd::Closed, // every handle dropped
+                // Every handle dropped: a teardown, so the record clears.
+                Wake::Closed => {
+                    clear_membership_record!();
+                    return ServeEnd::Closed;
+                }
                 // Between passes a local command is served exactly as it is
                 // inside one — a tip-sealed put a pass parked included, which
                 // may mint here — and a local write then arms the publish
@@ -1770,8 +1910,7 @@ impl AccountDriver {
                                     }
                                 }
                             }
-                            (content_scopes, answered) =
-                                derive_scopes(actor, &settings.memberships, registered, channels);
+                            (content_scopes, answered) = derive!(full: true);
                             let facts = endpoint_facts.clone();
                             let inputs = PassInputs {
                                 content_scopes: &content_scopes,
@@ -1985,8 +2124,30 @@ impl AccountDriver {
                         // the pass's own derivation, called once the state
                         // planes have landed (bound (d)).
                         Cmd::RestoreFromCustodian { url, reply } => {
+                            // The record is read here, ahead of the restore (an
+                            // async read the sync derivation cannot make); an
+                            // engine is still asked when the planes have landed.
+                            let record = match settings.memberships {
+                                Some(MembershipSource::Record) => {
+                                    membership_answer(
+                                        settings.memberships.as_ref(),
+                                        store,
+                                        settings.backstop_interval,
+                                    )
+                                    .await
+                                }
+                                _ => None,
+                            };
+                            let engine = match &settings.memberships {
+                                Some(MembershipSource::Engine(engine)) => Some(Arc::clone(engine)),
+                                _ => None,
+                            };
                             let mut scopes = || {
-                                derive_scopes(actor, &settings.memberships, registered, channels).0
+                                let answer = match &engine {
+                                    Some(engine) => engine(),
+                                    None => record.clone(),
+                                };
+                                derive_scopes(actor, answer, registered, channels).0
                             };
                             let outcome = legs
                                 .restore_from_custodian(
@@ -2031,6 +2192,7 @@ impl AccountDriver {
                             // engine-singleton lock above all — have dropped
                             // (`ServeEnd::Shutdown` owns why the ordering is
                             // the contract rather than a detail).
+                            clear_membership_record!();
                             return ServeEnd::Shutdown(reply);
                         }
                         // Every local variant was taken by the guard arm above.
@@ -2069,8 +2231,7 @@ impl AccountDriver {
                     // memberships from a signal that says nothing about them —
                     // departures ride full passes, the same cadence rule as the
                     // seen-set producer.
-                    (content_scopes, _) =
-                        derive_scopes(actor, &settings.memberships, registered, channels);
+                    (content_scopes, _) = derive!(full: false);
                     for scope in scopes {
                         // Pump work, so it is driven and cut like any pass.
                         let label = format!("nudge {scope}");
@@ -2108,8 +2269,7 @@ impl AccountDriver {
                         // walks); the holder re-publishes and re-walks, and the
                         // seed-leg role's holder beside it runs its seed pass.
                         Ok(()) if role.is_holder() => {
-                            (content_scopes, answered) =
-                                derive_scopes(actor, &settings.memberships, registered, channels);
+                            (content_scopes, answered) = derive!(full: true);
                             let facts = endpoint_facts.clone();
                             let inputs = PassInputs {
                                 content_scopes: &content_scopes,
@@ -2261,8 +2421,7 @@ impl AccountDriver {
                             }
                         }
                     };
-                    (content_scopes, answered) =
-                        derive_scopes(actor, &settings.memberships, registered, channels);
+                    (content_scopes, answered) = derive!(full: true);
                     let facts = endpoint_facts.clone();
                     let inputs = PassInputs {
                         content_scopes: &content_scopes,
@@ -2345,10 +2504,13 @@ pub fn nudge_scope_for_push(event: &PushEvent) -> Option<&str> {
 /// The pump's walk set: the derived scopes (`scope_set`) plus whatever an app
 /// registered explicitly, which a re-derivation must never drop.
 ///
-/// `channels` carries the last membership answer across calls — see
-/// [`MembershipSource`] for why a `None` reading keeps it rather than clearing
-/// it. Called before every pass, so a channel joined or left between passes
-/// changes the set with no notification path of its own.
+/// `answer` is this pass's membership answer ([`membership_answer`] — an
+/// engine's, or the membership record's for a runtime wired to read it: the
+/// one derivation both feed, so the record reaches the walk set and the
+/// departure step alike). `channels` carries the last affirmative answer
+/// across calls — see [`MembershipEngine`] for why a `None` reading keeps it
+/// rather than clearing it. Called before every pass, so a channel joined or
+/// left between passes changes the set with no notification path of its own.
 ///
 /// The returned flag is whether the membership source **answered
 /// affirmatively on this call**. It exists for the departure seam
@@ -2357,14 +2519,12 @@ pub fn nudge_scope_for_push(event: &PushEvent) -> Option<&str> {
 /// fresh or remembered, but for a deletion it is the whole question.
 pub(crate) fn derive_scopes(
     actor: Option<[u8; 32]>,
-    memberships: &Option<MembershipSource>,
+    answer: Option<Vec<[u8; 32]>>,
     registered: &[ContentScope],
     channels: &mut Vec<[u8; 32]>,
 ) -> (Vec<ContentScope>, bool) {
     let mut answered = false;
-    if let Some(source) = memberships
-        && let Some(fresh) = source()
-    {
+    if let Some(fresh) = answer {
         *channels = fresh;
         answered = true;
     }

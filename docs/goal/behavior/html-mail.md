@@ -220,7 +220,10 @@ see the row below):**
 - **Converters** (`html_markdown.rs`, WASM-safe, unit-tested): HTML→markdown via
   `htmd`/`html5ever` (script/style/embedding tags dropped; link/image destinations
   scheme-gated to `http(s)`/`mailto`; remote images survive as **un-fetched** refs).
-  Outbound markdown→HTML reuses the sanitized `markdown_to_html` — no second
+  htmd escapes markdown punctuation in text (`keep\_snake\_case`) and writes
+  `<strong><em>` as `**_x_**`, so the shared inline scanner resolves CommonMark
+  backslash escapes (outside code spans) and reads emphasis wholly wrapped in the
+  other emphasis as bold-italic. Outbound markdown→HTML reuses the sanitized `markdown_to_html` — no second
   converter. `markdown_to_html` emits real `<img src>` for `![]()` in Fetch mode;
   inbound mail/DM bodies use `markdown_to_html_blocked` + `count_remote_images`.
 - **One shared parser, enriched to a true superset (tracked internally; historical —

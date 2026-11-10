@@ -30,13 +30,17 @@ func TestDummyCredentialKDFRunsArgon2id(t *testing.T) {
 
 // The HKDF arm (OAUTHBEARER) is microsecond-cheap and has no meaningful timing
 // gap, so DummyCredentialKDF must be a no-op there — we don't want to burn a
-// full Argon2id on every OAUTHBEARER unknown-user probe.
+// full Argon2id on every OAUTHBEARER unknown-user probe. Asserted on the gate's
+// admitted-run counter, not a wall-clock ceiling: an upper time bound fails on a
+// loaded machine (it did, at 2 ms), while the counter reads the same under any
+// load. RED if the HKDF arm runs an Argon2id.
 func TestDummyCredentialKDFHkdfIsNoop(t *testing.T) {
 	PrewarmDummyKDF()
-	start := time.Now()
-	DummyCredentialKDF([]byte("token"), KdfKindHkdf, "198.51.100.3")
-	elapsed := time.Since(start)
-	if elapsed > 2*time.Millisecond {
-		t.Fatalf("HKDF dummy should be a no-op, took %v", elapsed)
+	before := KDFRunCount()
+	if err := DummyCredentialKDF([]byte("token"), KdfKindHkdf, "198.51.100.3"); err != nil {
+		t.Fatalf("HKDF dummy: %v", err)
+	}
+	if ran := KDFRunCount() - before; ran != 0 {
+		t.Fatalf("HKDF dummy ran %d Argon2id, want 0", ran)
 	}
 }

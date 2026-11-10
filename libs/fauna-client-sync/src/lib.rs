@@ -392,6 +392,18 @@ impl RecordSigning {
         // verifies that row under, which a name lookup misses when the writer
         // also owns a set of the same name (`set-addressing.md` § The row form).
         let row = req.folder_id.map(fauna_core::folder_keys::FolderRef::Local);
+        self.sign_at(req, row).await;
+    }
+
+    /// [`Self::sign`] with the set's identity supplied — the form a record
+    /// whose set has no row on this nest takes: a cross-nest relay's set is a
+    /// `FolderRef::Foreign(channel)`, which the request's `folder_id` cannot
+    /// spell, and its name resolves only on the home nest.
+    pub async fn sign_at(
+        &self,
+        req: &mut SyncChangeRecordRequest,
+        row: Option<fauna_core::folder_keys::FolderRef>,
+    ) {
         let Some(nonce) = self
             .nonce_for(&req.folder, row.as_ref(), "change record")
             .await
@@ -755,6 +767,75 @@ impl<R: RpcRequester> SyncClient<R> {
             // seat's current identity — what a restore branches on.
             if let fauna_protocol::sync_row_verify::RowVerdict::Verified { writer, .. }
             | fauna_protocol::sync_row_verify::RowVerdict::History { writer, .. } = verdict
+            {
+                version.author_actor_id = hex::encode(writer);
+            }
+            version.signed_as_current = verdict.signed_as(seat.own.as_ref());
+            version.signed_as = crate::row_judge::verified_signer(verdict);
+        }
+        Ok(versions.into_iter().zip(verdicts).collect())
+    }
+
+    /// The version history of one path in a set homed on **another nest** —
+    /// `fauna.files.versions.list { nest_url, channel_id }` through this
+    /// (the member's own) nest, which relays it to the set's home nest's
+    /// `fauna.federation.folder.versions.list` (`ui/media.md` § Cross-nest
+    /// shared sets) — every version paired with the shared foreign judge's
+    /// verdict ([`row_judge::judge_foreign_rows`], under
+    /// `FolderRef::Foreign(channel)` and the relayed `signer_certs`), oldest
+    /// first. The cross-nest twin of [`Self::versions_list_judged_at`]: the
+    /// same attribution stamps, so a restore branches on the same fields; a
+    /// version that carries no statement is refused unsigned, as the
+    /// projection judge refuses it.
+    pub async fn versions_list_judged_foreign(
+        &self,
+        path_hash: [u8; 32],
+        set: row_judge::ForeignSet<'_>,
+        seat: &row_judge::ReaderSeat,
+    ) -> Result<
+        Vec<(
+            fauna_protocol::files::FileVersionInfo,
+            fauna_protocol::sync_row_verify::RowVerdict,
+        )>,
+        R::Error,
+    >
+    where
+        R::Error: RpcErrorClass + core::fmt::Display,
+    {
+        use fauna_protocol::sync_row_verify::RowVerdict;
+        use fauna_protocol::sync_writer_sig::ChangeVerifyError;
+        let reply: FilesVersionsListReply = self
+            .nest
+            .request(
+                "fauna.files.versions.list",
+                FilesVersionsListRequest {
+                    path_hash: ByteBuf::from(path_hash.to_vec()),
+                    nest_url: Some(set.home_nest_url.to_string()),
+                    channel_id: Some(hex::encode(set.channel)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let rows: Vec<Option<fauna_protocol::sync::SyncChange>> =
+            reply.versions.iter().map(|v| v.as_change_row()).collect();
+        let statements: Vec<&fauna_protocol::sync::SyncChange> = rows.iter().flatten().collect();
+        let mut judged =
+            row_judge::judge_foreign_rows(&self.nest, seat, set, &statements, &reply.signer_certs)
+                .await
+                .into_iter();
+        let verdicts: Vec<RowVerdict> = rows
+            .iter()
+            .map(|row| match row {
+                Some(_) => judged
+                    .next()
+                    .unwrap_or(RowVerdict::Refused(ChangeVerifyError::Unsigned)),
+                None => RowVerdict::Refused(ChangeVerifyError::Unsigned),
+            })
+            .collect();
+        let mut versions = reply.versions;
+        for (version, verdict) in versions.iter_mut().zip(&verdicts) {
+            if let RowVerdict::Verified { writer, .. } | RowVerdict::History { writer, .. } =
+                verdict
             {
                 version.author_actor_id = hex::encode(writer);
             }
@@ -1586,6 +1667,63 @@ where
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// `fauna.sync.changes.record` **relayed to the set's home nest** — a
+    /// cross-nest writer member's record (`federation-shared-folders.md`
+    /// § Cross-nest shared folders + channel append): `nest_url` + `channel_id`
+    /// make this nest relay `fauna.federation.folder.changes.record`, where the
+    /// home nest applies its foreign-member + writer gate. The record's
+    /// signature binds the set nonce of `FolderRef::Foreign(channel)` and the
+    /// cert travels inline (the home nest holds no row of this writer's
+    /// grants). No device self-heal: the home nest does not gate on the
+    /// member's device, so `device_unregistered` never comes back from it.
+    /// Returns the home nest's assigned `seq`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn changes_record_foreign(
+        &self,
+        home_nest_url: impl Into<String>,
+        channel: [u8; 32],
+        folder: impl Into<String>,
+        device_id: impl Into<String>,
+        path: impl Into<String>,
+        manifest_hash: Option<String>,
+        size_bytes: i64,
+        change_type: impl Into<String>,
+        content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
+        path_sealed: Option<Vec<u8>>,
+    ) -> Result<SyncChangeRecordReply, R::Error> {
+        let row = fauna_core::folder_keys::FolderRef::Foreign(channel);
+        let req = SyncChangeRecordRequest {
+            nest_url: Some(home_nest_url.into()),
+            channel_id: Some(hex::encode(channel)),
+            folder_id: None,
+            folder: folder.into(),
+            device_id: device_id.into(),
+            path: path.into(),
+            manifest_hash,
+            size_bytes,
+            change_type: change_type.into(),
+            content_key_version,
+            thumbnail_hash,
+            path_sealed: path_sealed.map(ByteBuf::from),
+            name_hash: None,
+            derived_through: None,
+            is_resolution: None,
+            deposited_by: None,
+            extra: Default::default(),
+            signature: None,
+            signer_key: None,
+            signer_cert: None,
+        };
+        // The channel form is the address; the row funnel stamps nothing for
+        // a foreign ref. Signed last, over the final field values.
+        let mut req = fauna_protocol::folders::addressed_at(req, Some(row));
+        if let Some(signing) = &self.signing {
+            signing.sign_at(&mut req, Some(row)).await;
+        }
+        self.nest.request("fauna.sync.changes.record", req).await
     }
 
     /// **Restore version N of a file** — `docs/goal/behavior/file-sync.md` § Restore.

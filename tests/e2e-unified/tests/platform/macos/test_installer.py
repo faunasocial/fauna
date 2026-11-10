@@ -1411,3 +1411,195 @@ class TestFullInstall:
         assert os.path.exists(marker), \
             "Marker file removed — data should be preserved"
         os.remove(marker)
+
+
+# ── Install-then-reach: the installed nest SERVES, seen from outside it ──────────
+#
+# TestFullInstall proves the daemon is loaded; loaded is not serving (installers/
+# macos.md § Implementation status today, the "Nest daemon serve loop" and
+# "Network-reachable bind" rows). This class is the channel's own install-then-
+# reach test (installers/README.md § The channel contract): install the .pkg with
+# the nest component, read the claim code the daemon writes at first boot, then
+# claim and read health at the Mac's own LAN address on the launchd-activated
+# :443 — never loopback, never a spawned stand-in.
+#
+# It carries no feature mark yet: it becomes get-the-app outcome 3's macOS
+# witness (the mark + the contract citation, in one commit) only once a root run
+# has seen it green — until then the outcome's witness stays (none).
+
+#: The port launchd binds for the nest (the plist's FaunaNest SockServiceName).
+INSTALLED_NEST_EXTERNAL_PORT = 443
+#: How long the freshly installed daemon may take to write its claim code and
+#: answer at the LAN address (first boot runs migrations + mints the floor cert).
+INSTALLED_NEST_READY_TIMEOUT = 120.0
+
+
+def _lan_ipv4():
+    """This Mac's own LAN IPv4 address — the source address the kernel picks for
+    an off-box route (a UDP connect sends no packet). ``None`` when the box has
+    no off-box route, or only a loopback / link-local one."""
+    import ipaddress
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))  # TEST-NET-1: routed, never answered
+        addr = s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+    ip = ipaddress.ip_address(addr)
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+        return None
+    return addr
+
+
+def _pinned_health(base_url, timeout=5.0):
+    """``GET /api/v1/health`` over a TLS session whose leaf SPKI equals the pin
+    recorded for ``base_url``'s authority (``common.auth.open_pinned_tls``) —
+    no verification-off path to the nest. Returns ``(status_code, body_json)``."""
+    from urllib.parse import urlsplit
+
+    from common.auth import open_pinned_tls
+
+    tls = open_pinned_tls(base_url, timeout)
+    assert tls is not None, f"no SPKI pin recorded for {base_url}"
+    host = urlsplit(base_url).netloc
+    try:
+        tls.sendall(
+            f"GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\n"
+            "Accept: application/json\r\nConnection: close\r\n\r\n".encode())
+        chunks = []
+        while True:
+            chunk = tls.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        tls.close()
+    raw = b"".join(chunks)
+    head, _, body = raw.partition(b"\r\n\r\n")
+    status = int(head.split(b" ", 2)[1])
+    if b"transfer-encoding: chunked" in head.lower():
+        decoded, rest = b"", body
+        while rest:
+            size_line, _, rest = rest.partition(b"\r\n")
+            size = int(size_line.split(b";")[0], 16)
+            if size == 0:
+                break
+            decoded, rest = decoded + rest[:size], rest[size + 2:]
+        body = decoded
+    return status, json.loads(body) if body.strip() else None
+
+
+def _installed_nest_diagnosis():
+    """What a failure quotes (convention 6): launchd's view of the job and the
+    tail of the daemon's own size-capped log under the system data dir."""
+    from helpers.windows_caldav_nest import _log_tail, nest_log_path
+
+    printed = subprocess.run(
+        ["launchctl", "print", "system/social.fauna.nest"],
+        capture_output=True, text=True,
+    )
+    log = nest_log_path(Path(SYSTEM_DATA_DIR))
+    return (
+        f"launchctl print system/social.fauna.nest (rc={printed.returncode}):\n"
+        f"{(printed.stdout or printed.stderr)[-3000:]}\n"
+        f"daemon log ({log}):\n{_log_tail(log)}"
+    )
+
+
+@pytest.mark.skipif(not _is_root(), reason="Requires sudo")
+class TestInstallThenReach:
+    """The .pkg-installed nest is a network-reachable server: claimed and healthy
+    at the Mac's LAN address on the launchd-activated :443 (installers/macos.md
+    § Network-reachable nest). Requires sudo — the install, and the claim code,
+    which the daemon writes under the `_fauna`-owned system data dir
+    (`fauna_nest::desktop_serve` → `ensure_claim_code_at`)."""
+
+    def test_installed_nest_is_claimed_and_healthy_at_its_lan_address(self, pkg_path):
+        import shutil
+
+        from common.auth import claim_admin, pin_nest_spki, unpin_nest_spki
+        from helpers.windows_caldav_nest import floor_cert_spki
+
+        lan = _lan_ipv4()
+        if lan is None:
+            pytest.skip("this Mac has no LAN IPv4 address to reach the nest at")
+
+        data_dir = Path(SYSTEM_DATA_DIR)
+        claim_file = data_dir / "claim-code"
+        # A claimed nest's data dir is a user's: never touched. An unclaimed one
+        # (claim code still on disk — what TestFullInstall's install leaves) holds
+        # nothing but the nest's own first-boot state, so this test may claim it
+        # and remove it again at teardown.
+        if (data_dir / "nest.db").exists() and not claim_file.exists():
+            pytest.fail(
+                f"{SYSTEM_DATA_DIR} holds an already-CLAIMED nest; this test claims "
+                "a fresh one and never touches a claimed nest's data. Remove it by "
+                f"hand on a test box (sudo rm -rf '{SYSTEM_DATA_DIR}') and re-run.")
+
+        result = _install_pkg(pkg_path, ["social.fauna.nest"])
+        assert result.returncode == 0, \
+            f"installer failed (rc={result.returncode}):\n" \
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+
+        base = f"https://{lan}:{INSTALLED_NEST_EXTERNAL_PORT}"
+        authority = f"{lan}:{INSTALLED_NEST_EXTERNAL_PORT}"
+        claimed = False
+        try:
+            deadline = time.monotonic() + INSTALLED_NEST_READY_TIMEOUT
+            while not claim_file.exists() and time.monotonic() < deadline:
+                time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+            assert claim_file.exists(), (
+                f"the installed daemon never wrote {claim_file} within "
+                f"{INSTALLED_NEST_READY_TIMEOUT:.0f}s\n{_installed_nest_diagnosis()}")
+            claim_code = claim_file.read_text().strip()
+
+            # Trust the nest by the floor it says it serves — its own
+            # acme/fullchain.pem — pinned to the LAN authority, so a leaf that
+            # disagrees is refused before a byte is written.
+            pin_nest_spki(authority, floor_cert_spki(data_dir))
+
+            last = "(never attempted)"
+            healthy = None
+            while time.monotonic() < deadline:
+                try:
+                    status, body = _pinned_health(base)
+                    if status == 200 and (body or {}).get("status") == "ok":
+                        healthy = body
+                        break
+                    last = f"HTTP {status}: {body}"
+                except (OSError, ValueError) as e:
+                    last = f"{type(e).__name__}: {e}"
+                time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+            assert healthy is not None, (
+                f"the installed nest never answered health at {base} (the LAN "
+                f"address on launchd's :443) within {INSTALLED_NEST_READY_TIMEOUT:.0f}s "
+                f"— last: {last}\n{_installed_nest_diagnosis()}")
+
+            admin = claim_admin(
+                INSTALLED_NEST_EXTERNAL_PORT, claim_code, base_url=base, handle="test")
+            claimed = True
+            assert admin["token"], f"claim at {base} returned no bearer: {admin}"
+
+            status, body = _pinned_health(base)
+            assert status == 200 and (body or {}).get("status") == "ok", (
+                f"health at {base} after the claim: HTTP {status}: {body}\n"
+                f"{_installed_nest_diagnosis()}")
+            # The daemon consumes the claim code on claim (reconcile deletes it).
+            deadline = time.monotonic() + 30
+            while claim_file.exists() and time.monotonic() < deadline:
+                time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+            assert not claim_file.exists(), \
+                f"{claim_file} survived the claim — the nest did not record it"
+        finally:
+            unpin_nest_spki(authority)
+            username = _get_console_user()
+            if username:
+                _run_uninstall(username)
+            # Only a nest THIS test claimed is removed: it holds no data but the
+            # test's own claim, and a re-run needs a fresh claim code.
+            if claimed:
+                shutil.rmtree(SYSTEM_DATA_DIR, ignore_errors=True)

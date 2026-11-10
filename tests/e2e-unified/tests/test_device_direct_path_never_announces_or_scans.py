@@ -16,8 +16,9 @@ up and has just carried a file:
   multicast group or a broadcast address, and no raw or packet socket (what a
   scan or ARP sweep needs);
 - **its multicast memberships**: the network namespace's ``igmp``/``igmp6``
-  tables (macos: the box's ``netstat -g``, with the limit the helper names), read before the seats start, while they run and after their agents
-  have exited. The table is per namespace, not per process, so a join is
+  tables (macos: the box's ``netstat -g``, with the limit the helper names;
+  windows: the box's ``netsh … show joins``), read before the seats start,
+  while they run and after their agents have exited. The table is per namespace, not per process, so a join is
   attributed by timing: above the baseline while the agents ran and gone once
   they exited (``agent_sockets.memberships_released``).
 
@@ -68,11 +69,11 @@ pytestmark = [
     pytest.mark.macos,
 ]
 
-# Seat modes collected but not yet observable, per platform: the socket reader
-# for the platform has not landed (`helpers/agent_sockets.py` names each one).
-OWED_SEATS = {
-    "win32": {"native": "no GetExtendedUdpTable reader in helpers/agent_sockets.py yet"},
-}
+# Seat modes collected but not yet observable, per platform, in
+# `sync_seats.UNBUILT_MODES`' shape: a platform whose socket reader has not
+# landed (`helpers/agent_sockets.py` names each one). None owed: linux, macos
+# and windows each have theirs.
+OWED_SEATS: dict = {}
 
 _SEAT_PAIRS = [
     pytest.param(pair, id=sync_seats.seat_set_param_id(pair))

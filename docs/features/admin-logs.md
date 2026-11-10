@@ -4,6 +4,9 @@ title: Logs
 section: admin area
 goal: docs/goal/architecture/apps/observability.md § 3. Surfaces
 guide: docs/guides/admin-tour.md § Logs
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -67,6 +70,8 @@ Stamped 2026-10-21 at 77c610862e.
 | ios | ✅ full | 0.1.5-dev+ede1a6ab standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

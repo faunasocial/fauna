@@ -575,3 +575,31 @@ def test_integration_a_malformed_base_line_does_not_wedge_the_fixing_commit(tmp_
     _git(repo, "commit", "-aqm", "malformed head")
     result = _run_gate(repo)
     assert result.returncode == 2, result.stdout + result.stderr
+
+
+def _run_gate_with(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    script = Path(__file__).resolve().parent / "check-cddl-evolution.py"
+    return subprocess.run([sys.executable, str(script), *args], cwd=str(repo),
+                          capture_output=True, text=True)
+
+
+def test_an_explicit_base_is_diffed_where_the_merge_base_self_diffs(schema_repo: Path):
+    # The merge-gate check's run against the last public sync: HEAD *is*
+    # origin/main, so the default base sees nothing; `--base <the sync's
+    # source commit>` sees the break that landed since.
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=schema_repo, capture_output=True,
+                          text=True, check=True).stdout.strip()
+    (schema_repo / gate.SCHEMAS_DIR / "foo.cddl").write_text("Foo = {\n  id: tstr,\n  * tstr => any,\n}\n")
+    _git(schema_repo, "commit", "-aqm", "drop note")
+    _git(schema_repo, "branch", "-f", "origin/main", "HEAD")
+    assert _run_gate_with(schema_repo).returncode == 0
+    for form in (["--base", base], [f"--base={base}"]):
+        result = _run_gate_with(schema_repo, *form)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "removed field `note`" in result.stdout
+
+
+@pytest.mark.parametrize("form", [["--base"], ["--base", ""], ["--base="], ["--base", "nope"]])
+def test_an_empty_or_unresolvable_base_is_refused(schema_repo: Path, form: list[str]):
+    result = _run_gate_with(schema_repo, *form)
+    assert result.returncode == 2, result.stdout + result.stderr

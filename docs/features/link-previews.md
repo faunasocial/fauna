@@ -4,6 +4,9 @@ title: Link previews
 section: everyday
 goal: docs/goal/architecture/render-model.md § D4 — Link previews — a new async-resolved embed node
 guide: docs/guides/app-tour.md § Feeds
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -43,6 +46,8 @@ Stamped 2026-09-19 at 23b3189e2b.
 | ios | ✅ full | 0.1.6-dev+8438e5ce standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+8438e5ce standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

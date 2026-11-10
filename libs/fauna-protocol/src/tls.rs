@@ -124,7 +124,8 @@ pub struct CertStatusReply {
     pub statuses: Vec<DomainCertStatus>,
     /// Every DNS name the nest's **listener certificate** should cover — the
     /// apex, the single MX host `mail.<primary>`, each active mail domain's apex,
-    /// and any enabled infra host (`relay.`/`pds.`). A client-driven DNS-01 order
+    /// any enabled infra host (`relay.`/`pds.`), and an in-flight primary-domain
+    /// rename's MX host (pre-flip `mail.<new>`, in-grace `mail.<old>`). A client-driven DNS-01 order
     /// requests exactly this set (intersected with the zones its credential
     /// covers), so a client-issued cert covers what the nest actually serves
     /// instead of the clicked domain alone (`tls-certificates.md` § B tier 2).
@@ -144,6 +145,16 @@ pub struct CertStatusReply {
     /// covers every SAN, so a per-domain copy would repeat it on every row.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issuance_errors: Vec<CertIssuanceError>,
+    /// The names in [`Self::desired_sans`] the listener does not serve under a
+    /// trusted covering cert right now — no cert for the name, a cert that does
+    /// not cover it, or only the self-signed floor — empty when the served cert
+    /// covers the whole set (`tls-certificates.md` § B tier 2 → *The set carries
+    /// a rename's hosts, and the nest says what the served cert lacks*).
+    /// Deployment-level like `desired_sans`. The signal a client-issued (DNS-01)
+    /// deployment re-orders on: an in-flight primary-domain rename adds
+    /// `mail.<new>` to the desired set while the installed cert still lacks it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncovered_sans: Vec<String>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

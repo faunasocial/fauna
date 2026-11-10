@@ -264,26 +264,31 @@ public final class ScreenTimeStore {
     /// accrual steps a real caller would tick in, then run one production
     /// heartbeat step — the apple twin of linux `advance_test_clock` +
     /// `flush_usage_report(true)` / android `advanceTestClockAndTick`.
-    /// `active = true` throughout: the poke asserts what a ward actively
-    /// using the app accrues. Driven only by the debug-only TestAgent's
+    /// `focused` (default `true`) is the ward's attention: `true` asserts what
+    /// a ward actively using the app accrues; `false` moves the clock with the
+    /// app out of front (or locked, or asleep), the engine ticked inactive
+    /// throughout, so the advanced time bills nothing — the e2e face of
+    /// decision (b) in `family-client-enforcement.md` § Implementation status
+    /// today, twin of android's `focused` and tui's
+    /// `advance_test_clock_focused`. Driven only by the debug-only TestAgent's
     /// `screen_time_heartbeat` command (`testing.md` § convention 14's fake
     /// clock + run_now poke; § convention 15 keeps this whole path out of
     /// release artifacts via the shell's own `#if DEBUG` command surface).
     @MainActor
-    public func advanceTestClockAndTick(minutes: Int) async {
+    public func advanceTestClockAndTick(minutes: Int, focused: Bool = true) async {
         let step: Int64 = 120 // fauna_core::screen_time::MAX_ACCRUAL_STEP_SECS
         var remaining = Int64(max(minutes, 0)) * 60
         // Prime the engine's reference point before advancing — it accrues
         // from the GAP between calls, so with no prior call the first step
         // would credit nothing and the poke would silently deliver less use
         // than it was asked for.
-        heartbeat.setActive(active: true, nowSecs: nowSecs())
+        heartbeat.setActive(active: focused, nowSecs: nowSecs())
         while remaining > 0 {
             let bump = min(remaining, step)
             testClockSkewSecs += bump
             remaining -= bump
-            heartbeat.setActive(active: true, nowSecs: nowSecs())
+            heartbeat.setActive(active: focused, nowSecs: nowSecs())
         }
-        await heartbeatStep(active: true)
+        await heartbeatStep(active: focused)
     }
 }

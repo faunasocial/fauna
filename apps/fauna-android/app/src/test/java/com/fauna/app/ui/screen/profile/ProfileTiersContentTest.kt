@@ -141,7 +141,7 @@ class ProfileTiersContentTest {
         providers: List<ProviderItem> = emptyList(),
         providerKinds: List<String> = emptyList(),
         claims: List<ClaimItem> = emptyList(),
-        onSetProvider: (String, String, String) -> Unit = { _, _, _ -> },
+        onSetProvider: (String, String, String, String) -> Unit = { _, _, _, _ -> },
         onRemoveProvider: (String) -> Unit = {},
         onMintClaim: (String) -> Unit = {},
         webhookUrl: (String) -> String = { kind -> "https://example.test/webhook/$kind" },
@@ -205,12 +205,14 @@ class ProfileTiersContentTest {
         tier: String = "gold",
         lastVerifiedAt: ULong? = null,
         lastRejectedAt: ULong? = null,
+        productRef: String? = null,
     ) = ProviderItem(
         kind = kind,
         tier = tier,
         createdAt = 0uL,
         lastVerifiedAt = lastVerifiedAt,
         lastRejectedAt = lastRejectedAt,
+        productRef = productRef,
     )
 
     @Test
@@ -254,11 +256,11 @@ class ProfileTiersContentTest {
 
     @Test
     fun providerForm_opens_neverPrefillsSecret_andSaveFires() {
-        var saved: Triple<String, String, String>? = null
+        var saved: List<String>? = null
         render(
             tiers = listOf(tier(name = "gold")),
             providerKinds = listOf("fake", "stripe"),
-            onSetProvider = { kind, secret, tier -> saved = Triple(kind, secret, tier) },
+            onSetProvider = { kind, secret, tier, product -> saved = listOf(kind, secret, tier, product) },
         )
         composeTestRule.onNodeWithTag("subscription-provider-add-button")
             .performScrollTo().performClick()
@@ -267,8 +269,31 @@ class ProfileTiersContentTest {
             .performScrollTo().performTextInput("whsec_test")
         composeTestRule.onNodeWithTag("subscription-provider-form-save")
             .performScrollTo().performClick()
-        // Kind defaults to the registry's first entry; tier to the author's first tier.
-        assertEquals(Triple("fake", "whsec_test", "gold"), saved)
+        // Kind defaults to the registry's first entry; tier to the author's first tier;
+        // an untouched product field is sent empty (as shown), never dropped.
+        assertEquals(listOf("fake", "whsec_test", "gold", ""), saved)
+    }
+
+    /** The §4 form's optional product (`subscription-provider-form-product`): picking a
+     *  configured kind pre-fills its saved product (not a secret), and the field is sent
+     *  as shown on save — tui's `provider_form_product_prefills_from_the_listed_provider…`. */
+    @Test
+    fun providerForm_prefillsSavedProduct_andSendsItAsShown() {
+        var saved: List<String>? = null
+        render(
+            tiers = listOf(tier(name = "gold")),
+            providerKinds = listOf("fake", "stripe"),
+            providers = listOf(provider(kind = "fake", productRef = "plink_old")),
+            onSetProvider = { kind, secret, tier, product -> saved = listOf(kind, secret, tier, product) },
+        )
+        composeTestRule.onNodeWithTag("subscription-provider-add-button")
+            .performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("subscription-provider-form-product")
+            .performScrollTo().assertTextContains("plink_old")
+        composeTestRule.onNodeWithTag("subscription-provider-form-product").performTextReplacement("plink_new")
+        composeTestRule.onNodeWithTag("subscription-provider-form-save")
+            .performScrollTo().performClick()
+        assertEquals(listOf("fake", "", "gold", "plink_new"), saved)
     }
 
     @Test

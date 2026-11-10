@@ -283,6 +283,10 @@ class FakePlcDirectory:
         # Outage hook: when set, every audit-log read answers 503 (see
         # set_unreadable).
         self._unreadable = False
+        # Submit-outage hook: the next N submissions answer 503 and change
+        # nothing (see refuse_next_submissions); each is recorded by did.
+        self._refuse_submissions = 0
+        self.refused_submissions: list[str] = []
         self._lock = threading.Lock()
         outer = self
 
@@ -336,6 +340,16 @@ class FakePlcDirectory:
                 did = self.path.lstrip("/")
                 op = json.loads(body)
                 reject = None  # (error, message)
+                with outer._lock:
+                    if outer._refuse_submissions > 0:
+                        outer._refuse_submissions -= 1
+                        outer.refused_submissions.append(did)
+                        refused = True
+                    else:
+                        refused = False
+                if refused:
+                    self._json(503, {"error": "directory unavailable (test outage)"})
+                    return
                 with outer._lock:
                     entries = outer._log.setdefault(did, [])
                     standing = [e for e in entries if not e["nullified"]]
@@ -493,6 +507,18 @@ class FakePlcDirectory:
         departed-DID alarm). ``False`` restores honest serving."""
         with self._lock:
             self._unreadable = unreadable
+
+    def refuse_next_submissions(self, count: int) -> None:
+        """SUBMIT-OUTAGE HOOK: the next ``count`` ``POST /{did}`` answer 503
+        and change nothing, the way a directory that is down for a moment
+        refuses a write. Each refused submission is recorded in
+        ``refused_submissions`` as ``did``, so a test can tell "the client
+        pressed and the directory said no" from "the client never submitted".
+        It is what lets a test drive a contest press that FAILS
+        (``atproto-identity-custody.md`` § The 72 h recovery-fork contest: the
+        card stays open with the error, and a retry is safe)."""
+        with self._lock:
+            self._refuse_submissions = count
 
     def tamper_also_known_as(self, handles: list[str] | None) -> None:
         """Feeder #3 TAMPER HOOK: serve audit logs whose STANDING HEAD op (and
@@ -826,6 +852,11 @@ class FakeAtprotoFarEnd:
         self.par_states: list[str] = []
         self.created_records: list[dict] = []
         self.deleted_records: list[dict] = []
+        # Every `deleteRecord` body that reached the PDS, refused or not,
+        # and how many more the PDS refuses before it answers again
+        # (:meth:`refuse_next_deletes`).
+        self.delete_attempts: list[dict] = []
+        self._deletes_to_refuse = 0
         self.requests: list[tuple[str, str, str]] = []  # (method, host, path)
         # The timeline's feed items, oldest first: ``{"post": view}``, plus a
         # ``reason`` for a repost (:meth:`repost`).
@@ -988,6 +1019,11 @@ class FakeAtprotoFarEnd:
         if method == "POST" and nsid == "com.atproto.repo.deleteRecord":
             payload = json.loads(body or b"{}")
             with self._lock:
+                self.delete_attempts.append(payload)
+                if self._deletes_to_refuse > 0:
+                    self._deletes_to_refuse -= 1
+                    return 502, {"error": "UpstreamFailure",
+                                 "message": "fake far end: a refused delete"}, None
                 self.deleted_records.append(payload)
             return 200, {}, None
         if nsid.startswith("chat.bsky.convo."):
@@ -1244,6 +1280,19 @@ class FakeAtprotoFarEnd:
         ``at://<did>/<collection>/fake<n>`` comes back as ``rkey == "fake<n>"``."""
         with self._lock:
             return list(self.deleted_records)
+
+    def refuse_next_deletes(self, n: int) -> None:
+        """Answer the next ``n`` ``deleteRecord`` calls with a ``502``, as a PDS
+        in an outage does; the record stays, so the nest must try again."""
+        with self._lock:
+            self._deletes_to_refuse = n
+
+    def delete_attempts_snapshot(self) -> list[dict]:
+        """Every ``deleteRecord`` body that reached the PDS, oldest first —
+        the refused ones (:meth:`refuse_next_deletes`) included, which
+        :meth:`deleted_snapshot` leaves out."""
+        with self._lock:
+            return list(self.delete_attempts)
 
     @property
     def url(self) -> str:

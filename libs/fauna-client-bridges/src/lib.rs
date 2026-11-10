@@ -60,6 +60,7 @@ use fauna_protocol::bridge_routing::{
     ListListSendHistoryReply, ListListSendHistoryRequest, ListSendHistoryRow, SendListMessageReply,
     SendListMessageRequest,
 };
+use fauna_protocol::offline_intent::{ComposeError, Composed, OfflineIntentQueue, send_or_queue};
 // The mail-reports page's failure-report, TLS-report and check-history reads,
 // and the warm-up read.
 use fauna_protocol::bridge_routing::{
@@ -163,6 +164,7 @@ pub use fauna_protocol::bridge_routing::{
 pub mod atproto;
 pub mod atproto_credential;
 pub mod atproto_delegation;
+pub mod card_title;
 pub mod conversations;
 pub mod credential_id;
 pub mod follow_requests;
@@ -172,6 +174,7 @@ pub mod nostr_settings;
 pub mod plugins;
 pub mod settings;
 pub use atproto::AtprotoSettingsClient;
+pub use card_title::{bridge_card_glyph, bridge_card_title, bridge_card_title_of};
 pub use credential_id::derive_credential_id;
 pub use follow_requests::{FOLLOW_REQUEST_HANDLE_KEY, FollowRequestRow, follow_request_row};
 pub use labels::{
@@ -258,6 +261,16 @@ pub const MDA_HOLDER_ROLE: &str = "mda";
 /// future scorer/indexer (`monetization.md` § Pillar 2); a post-tier grant's
 /// target.
 pub const CONTENT_PROCESSOR_ROLE: &str = "content-processor";
+
+/// The `bridge_id` of the nest's own in-process **materializer** holder — a
+/// [`CONTENT_PROCESSOR_ROLE`] service user the nest binary self-approves, the
+/// one holder a materialization grant is sealed to and the one the mint
+/// picker's "Keep my mail searchable on this nest" option derives
+/// (`encryption-at-rest.md` § Capability tiering → *The materialization
+/// grant*, part (b)). Role alone cannot tell it from the web-serve holder, so
+/// the id is the discriminator: one spelling the nest's holder row and every
+/// app's picker share.
+pub const MATERIALIZER_HOLDER_ID: &str = "materializer";
 
 /// A service-user is a content-processor holder iff it *reads* content (a
 /// [`CONTENT_PROCESSOR_ROLES`] role) **and** has attested an X25519 seal target.
@@ -495,6 +508,84 @@ impl<R: RpcRequester> BridgesClient<R> {
             )
             .await?;
         Ok(())
+    }
+
+    /// [`add_follow`](Self::add_follow) through the `OfflineQueued` composer
+    /// (`fauna_protocol::offline_intent::send_or_queue`,
+    /// `account-offline-mutation.md` § The offline-mutation contract): sent now
+    /// while the app has a nest, or — when `queue` is wired and reports no
+    /// nest — appended to the device's outbox and drained once the nest is
+    /// back, the intent id its idempotency key (so a replayed drain collapses
+    /// on the nest's idempotency table, never a second Follow activity). A
+    /// queued follow is not on the nest's list until the drain, so a caller
+    /// lists nothing for it.
+    ///
+    /// The drain FIFO scope is the follow itself ([`follow_scope`]: the bridge
+    /// and the followed account), shared with
+    /// [`remove_follow_or_queue`](Self::remove_follow_or_queue), so a follow
+    /// and a later unfollow of one account drain in order while a refused
+    /// follow never holds another account's.
+    pub async fn add_follow_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        bridge_id: impl Into<String>,
+        id: impl Into<String>,
+        petname: Option<String>,
+        extra: Option<Value>,
+    ) -> Result<Composed<()>, ComposeError<R::Error>> {
+        let bridge_id = bridge_id.into();
+        let id = id.into();
+        let scope = follow_scope(&bridge_id, &id);
+        let composed: Composed<AddFollowReply> = send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.bridges.add_follow",
+            &scope,
+            AddFollowRequest {
+                bridge_id,
+                id,
+                petname,
+                extra,
+                unknown_keys: Default::default(),
+            },
+        )
+        .await?;
+        Ok(match composed {
+            Composed::Sent(_) => Composed::Sent(()),
+            Composed::Queued(id) => Composed::Queued(id),
+        })
+    }
+
+    /// [`remove_follow`](Self::remove_follow) through the `OfflineQueued`
+    /// composer — the same contract as
+    /// [`add_follow_or_queue`](Self::add_follow_or_queue), under the same
+    /// [`follow_scope`]. A queued unfollow leaves the account on the nest's
+    /// list until the drain; the list after it is the word.
+    pub async fn remove_follow_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        bridge_id: impl Into<String>,
+        follow_id: impl Into<String>,
+    ) -> Result<Composed<()>, ComposeError<R::Error>> {
+        let bridge_id = bridge_id.into();
+        let follow_id = follow_id.into();
+        let scope = follow_scope(&bridge_id, &follow_id);
+        let composed: Composed<RemoveFollowReply> = send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.bridges.remove_follow",
+            &scope,
+            RemoveFollowRequest {
+                bridge_id,
+                follow_id,
+                extra: Default::default(),
+            },
+        )
+        .await?;
+        Ok(match composed {
+            Composed::Sent(_) => Composed::Sent(()),
+            Composed::Queued(id) => Composed::Queued(id),
+        })
     }
 
     /// `fauna.bridges.list_follow_requests` — the follow requests waiting on
@@ -2781,6 +2872,13 @@ pub fn is_unified_bridges_page_bridge(id: &str) -> bool {
     id != "nostr" && id != "bluesky"
 }
 
+/// The drain FIFO scope of a queued follow or unfollow: the bridge and the
+/// followed account (`bridges.follow:<bridge>:<account>`), one scope for both
+/// kinds so a follow and a later unfollow of one account drain in order.
+pub fn follow_scope(bridge_id: &str, id: &str) -> String {
+    format!("bridges.follow:{bridge_id}:{id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2794,6 +2892,72 @@ mod tests {
     #[test]
     fn mail_admin_constructor_builds_over_generic_requester() {
         let _c = MailAdminClient::new(MockRequester);
+    }
+
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    /// A follow added with no nest rests in the outbox — kind, the follow's
+    /// scope, the canonical request — and nothing is sent.
+    #[test]
+    fn a_follow_added_with_no_nest_is_queued_scoped_to_the_account() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = BridgesClient::new(rec.clone());
+        let queue = fauna_client_testkit::RecordingQueue::new("disconnected");
+        let out = block_on(client.add_follow_or_queue(
+            Some(&queue),
+            "nostr",
+            "npub1alice",
+            Some("Alice".into()),
+            None,
+        ));
+        assert!(matches!(out, Ok(Composed::Queued(_))));
+        assert!(rec.kinds().is_empty(), "no nest: nothing may be sent");
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        let (kind, scope, payload) = &queued[0];
+        assert_eq!(*kind, "fauna.bridges.add_follow");
+        assert_eq!(scope, "bridges.follow:nostr:npub1alice");
+        let req: AddFollowRequest = fauna_protocol::decode_strict(payload).expect("decodes");
+        assert_eq!(req.id, "npub1alice");
+        assert_eq!(req.petname.as_deref(), Some("Alice"));
+    }
+
+    /// A follow removed with no nest is queued under the SAME scope as the
+    /// add, so a follow then an unfollow of one account drain in order.
+    #[test]
+    fn a_follow_removed_with_no_nest_is_queued_under_the_add_scope() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = BridgesClient::new(rec.clone());
+        let queue = fauna_client_testkit::RecordingQueue::new("unreachable");
+        let out = block_on(client.remove_follow_or_queue(Some(&queue), "nostr", "npub1alice"));
+        assert!(matches!(out, Ok(Composed::Queued(_))));
+        assert!(rec.kinds().is_empty());
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, "fauna.bridges.remove_follow");
+        assert_eq!(queued[0].1, follow_scope("nostr", "npub1alice"));
+        let req: RemoveFollowRequest =
+            fauna_protocol::decode_strict(&queued[0].2).expect("decodes");
+        assert_eq!(req.follow_id, "npub1alice");
+    }
+
+    /// Connected, both calls are the old sends exactly and the outbox stays
+    /// empty.
+    #[test]
+    fn follows_with_the_nest_connected_are_sent_not_queued() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = BridgesClient::new(rec.clone());
+        let queue = fauna_client_testkit::RecordingQueue::new("connected");
+        let added =
+            block_on(client.add_follow_or_queue(Some(&queue), "nostr", "npub1", None, None));
+        assert_eq!(added.unwrap(), Composed::Sent(()));
+        let removed = block_on(client.remove_follow_or_queue(Some(&queue), "nostr", "npub1"));
+        assert_eq!(removed.unwrap(), Composed::Sent(()));
+        assert_eq!(
+            rec.kinds(),
+            vec!["fauna.bridges.add_follow", "fauna.bridges.remove_follow"]
+        );
+        assert!(queue.queued().is_empty());
     }
 
     /// This crate's reply table for the shared [`RecordingRequester`]:

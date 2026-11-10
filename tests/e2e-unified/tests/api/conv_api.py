@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import atexit
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -186,6 +187,19 @@ def room_list_roster(
     return client.call("fauna.conversations.room.list_roster", {"room_id": room_id_hex})
 
 
+def room_generations(
+    port: int, actor: dict, room_id_hex: str, *, scheme: str | None = None
+) -> list[dict]:
+    """``fauna.conversations.room.generations`` as ``actor`` — the room's
+    generations wrapped to ``actor``'s own floor entry, exactly one marked
+    ``is_tip`` (`community-rooms.md` § The three classes → *Community*). A
+    rotation is observable here as the tip's ``generation_id`` moving. Raises
+    on a refusal (``actor`` off the floor)."""
+    client = _client_for(_base_url(port, scheme), actor)
+    reply = client.call("fauna.conversations.room.generations", {"room_id": room_id_hex})
+    return list(reply.get("generations", []))
+
+
 def room_search(
     port: int, actor: dict, room_id_hex: str, query: str, *, scheme: str | None = None
 ) -> list[dict]:
@@ -236,6 +250,58 @@ def channel_fetch(
     client = _client_for(_base_url(port, scheme), actor)
     reply = client.call("fauna.conversations.channel.fetch", payload)
     return reply.get("messages", [])
+
+
+def envelope_class(envelope: bytes) -> str:
+    """The ``ChannelEnvelope`` variant a fetched log entry carries —
+    ``"Application"``, ``"Commit"``, ``"RoomSealed"``, … (the Rust enum in
+    ``libs/fauna-protocol/src/conversations.rs``, externally tagged in CBOR).
+
+    The class is cleartext by design: the nest classifies envelopes without an
+    MLS engine. A journey that counts *messages* counts ``"Application"``
+    entries, never the raw log length — every device's first application send
+    in an epoch rides behind a self-``Update`` takeover Commit (`devices.md`
+    § Cross-device MLS group-state sync, the per-launch takeover), so the log
+    grows by more than the messages sent."""
+    import cbor2
+
+    decoded = cbor2.loads(envelope)
+    if isinstance(decoded, dict) and len(decoded) == 1:
+        return str(next(iter(decoded)))
+    if isinstance(decoded, str):
+        return decoded
+    raise AssertionError(f"not a ChannelEnvelope: {decoded!r:.120}")
+
+
+def application_count(
+    port: int, actor: dict, channel_id_hex: str, *, scheme: str | None = None
+) -> int:
+    """How many application messages ``channel_id_hex``'s log holds — the
+    :func:`channel_fetch` entries whose :func:`envelope_class` is
+    ``"Application"``."""
+    return sum(
+        envelope_class(m["envelope"]) == "Application"
+        for m in channel_fetch(port, actor, channel_id_hex, scheme=scheme)
+    )
+
+
+def channel_actors(
+    port: int, actor: dict, channel_id_hex: str, *, scheme: str | None = None
+) -> list[str]:
+    """``fauna.conversations.channel.actors`` as ``actor`` — the channel's
+    routing roster on this nest, as lower-case actor-id hex.
+
+    The nest writes a member's row there when their Welcome is delivered, so
+    an MLS member missing from it is one whose Welcome never landed
+    (`mls-group-key-material.md` § M2 *Admitting a member*). Member-scoped:
+    ``actor`` must be on the roster itself, and the read never registers the
+    caller — unlike ``channel_fetch``, which auto-registers a local caller on
+    an unclaimed channel and so must never be called as the member whose
+    roster row is under test. Raises on a refusal.
+    """
+    client = _client_for(_base_url(port, scheme), actor)
+    reply = client.call("fauna.conversations.channel.actors", {"channel_id": channel_id_hex})
+    return [a.lower() for a in reply.get("actors", [])]
 
 
 # ── key packages (publish + count + fetch; all on fauna.conversations.*) ─────
@@ -573,6 +639,11 @@ def mint_group_welcome_with_message(
 #: ``ChannelMessageBody`` variant this build has no arm for) instead of text.
 FUTURE_BODY = "--future-body"
 
+#: A prefix for a :func:`mint_group_welcome_with_messages` body: the text after
+#: it is sealed with a sender timestamp one day in the past (``mls-group-gen``'s
+#: ``--backdated:`` form). The nest still assigns the record's ``seq`` at arrival.
+BACKDATED = "--backdated:"
+
 
 def mint_group_welcome_with_messages(
     sender_secret_bytes: bytes, recipient_keypackage_bytes: bytes, bodies: list[str]
@@ -606,6 +677,69 @@ def mint_group_welcome_with_messages(
         lines[0].strip(),
         bytes.fromhex(lines[1].strip()),
         [bytes.fromhex(ln.strip()) for ln in lines[3:]],
+    )
+
+
+@dataclass(frozen=True)
+class RejoinStream:
+    """Every piece of a recipient's removal and re-admission, minted by one
+    sender engine (:func:`mint_group_rejoin_stream`), ready to post one at a
+    time. Application envelopes and commits go to :func:`channel_send`, the two
+    Welcomes to :func:`welcome_deliver`."""
+
+    channel_id_hex: str
+    welcome: bytes
+    before: list[bytes]
+    remove_commit: bytes
+    add_commit: bytes
+    second_welcome: bytes
+    after: list[bytes]
+
+
+def mint_group_rejoin_stream(
+    sender_secret_bytes: bytes,
+    recipient_keypackage_bytes: bytes,
+    recipient_second_keypackage_bytes: bytes,
+    before: list[str],
+    after: list[str],
+) -> RejoinStream:
+    """A 1:1 the recipient is removed from and brought back into, whole.
+
+    ``mls-group-gen --rejoin``: the sender creates the group against the
+    recipient's first key package, seals ``before``, removes the recipient,
+    re-adds them from their second key package (a spent key package cannot
+    seat anyone twice) and seals ``after`` in the re-joined epoch. The one-shot
+    engine's state is gone on exit, which is why the whole stream is minted at
+    once; the proof decides when each piece reaches the nest.
+    """
+    out = subprocess.run(
+        [
+            str(_ensure_group_gen_bin()),
+            "--rejoin",
+            sender_secret_bytes.hex(),
+            recipient_keypackage_bytes.hex(),
+            recipient_second_keypackage_bytes.hex(),
+            *before,
+            "--",
+            *after,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = [bytes.fromhex(ln.strip()) for ln in out.stdout.splitlines() if ln.strip()]
+    want = 3 + len(before) + 3 + len(after)
+    assert len(lines) == want, f"expected {want} line(s) from --rejoin, got {len(lines)}"
+    channel = out.stdout.splitlines()[0].strip()
+    n = len(before)
+    return RejoinStream(
+        channel_id_hex=channel,
+        welcome=lines[1],
+        before=lines[3 : 3 + n],
+        remove_commit=lines[3 + n],
+        add_commit=lines[4 + n],
+        second_welcome=lines[5 + n],
+        after=lines[6 + n :],
     )
 
 

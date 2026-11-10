@@ -548,6 +548,21 @@ public struct FaunaMacApp: App {
         keychain.reconcileCredentialAccessibility()
 
         appState.launchGate = .launching
+        // The sign-out record's gate, before anything reads the registry
+        // (`OnboardingVM.launchMayProceed`; `account-scoping.md` § Erasure
+        // follows scope → *The sign-out record is on all 7 apps*, decisions 3
+        // and 4): the process's first launch finishes whatever a sign-out or a
+        // remove-account cut short, then re-enters here. A finish refused while
+        // its record still owes the wipe fails closed — no launch machine, the
+        // wizard's `identity_choice` painting the refusal line, until Remove
+        // Again clears it and re-enters here.
+        guard onboardingVM.launchMayProceed(relaunch: { runLaunch() }) else {
+            if onboardingVM.launchFailedClosed {
+                appState.isOnboarded = false
+                appState.launchGate = .ready
+            }
+            return
+        }
         // Claimed before the first `await` below, so a session patch landing while
         // the binding resolves retires this launch (`LaunchMachineBox.beginLaunch`).
         let launch = launchMachineBox.beginLaunch()
@@ -606,8 +621,9 @@ public struct FaunaMacApp: App {
         // store read taken before this suspension; anything that superseded the
         // session while it ran — a re-entered launch, a teardown, the e2e session
         // patch — cleared or replaced the box, and this snapshot is answering a
-        // question nobody is asking any more.
-        guard launchMachineBox.machine === machine else {
+        // question nobody is asking any more. `deliver` also counts the verdict
+        // (the `launch_verdicts` barrier).
+        guard launchMachineBox.deliver(machine) else {
             logMessage(
                 level: .info, target: "fauna.app",
                 message: "[launch] verdict \(machine.snapshot().phase.diagnosticName) "
@@ -837,14 +853,10 @@ public struct FaunaMacApp: App {
 
         switch entry {
         case .identityChoice:
-            // No identity in the store — cold start, nothing to seed. The one
-            // thing a signed-out launch still owes: re-sweep a residue record a
-            // previous sign-out left, silently, and paint the
-            // `sign-out-residue` view only if something is still left
-            // (`account-scoping.md` § Erasure follows scope → *the residue
-            // surface*). Shared Rust leaves the record alone unless the
-            // registry is empty.
-            Task { await onboardingVM.recheckSignOutResidueAtLaunch() }
+            // No identity in the store — cold start, nothing to seed. The
+            // residue re-sweep a signed-out launch owes already ran, inside the
+            // sign-out finish `runLaunch` gates on (`launchMayProceed`).
+            break
 
         case .handleEntry:
             if let secret { onboardingVM.machine.seedIdentity(secret: secret) }
@@ -972,6 +984,9 @@ public struct FaunaMacApp: App {
         appState.launchGate = .launching
         Task { @MainActor in
             await machine.trustNestIdentity()
+            // The re-challenge's verdict is a launch verdict like the cold
+            // start's: dropped if a newer session retired this machine meanwhile.
+            guard launchMachineBox.deliver(machine) else { return }
             await dispatchLaunch(machine.snapshot(), keychain: KeychainStore())
         }
     }
@@ -994,6 +1009,7 @@ public struct FaunaMacApp: App {
         appState.launchGate = .launching
         Task { @MainActor in
             await machine.retrySilentChallenge()
+            guard launchMachineBox.deliver(machine) else { return }
             await dispatchLaunch(machine.snapshot(), keychain: KeychainStore())
         }
     }
@@ -1029,7 +1045,8 @@ public struct FaunaMacApp: App {
         appState.launchGate = .accountIndexUnreadable(refusal: refusal, confirming: true)
         Task { @MainActor in
             let refused = await AccountIndexStartOver.confirm(ownLock: appState.instanceLock) {
-                await StatusVM().signOut(sessionState: appState.session)
+                await StatusVM().signOut(
+                    sessionState: appState.session, ownLock: appState.instanceLock)
             }
             if let refused {
                 appState.launchGate = .accountIndexUnreadable(
@@ -1889,6 +1906,13 @@ public struct FaunaMacApp: App {
                 "body": appState.contentPolicy.inputs.paintedBody(of: p),
                 "timestamp": p.timestamp,
                 "tags": p.tags,
+                // The post's classifier labels as the snapshot projects them
+                // (the marker's own `spam`@1000 fold included) — every app's
+                // state row carries them (report-sharing.md § Report capture →
+                // The post's mark-as-spam verb; same as iOS).
+                "labels": p.labels.map {
+                    ["category": $0.category, "confidence_per_mille": Int($0.confidencePerMille)] as [String: Any]
+                },
                 "has_media": p.hasMedia,
                 // Resolved lazily by `resolveMedia` (post-card `.task`, `resolve_media.md`
                 // analogue: `libs/fauna-feed::FeedManager::resolve_media`) once the card
@@ -2014,6 +2038,18 @@ public struct FaunaMacApp: App {
                 }
                 machineMethodResultBox.value = await callMachineMethod(
                     name: method, jsonArg: jsonArg)
+            case "app_log_emit":
+                // The on-device log's size-cap witness burst
+                // (`test_app_log_size_cap_tui.py`, app-log outcome 7). Shared
+                // FaunaKit handler (macOS + iOS, one implementation); slot cleared
+                // FIRST and written only on success, as `device_set_state` below.
+                machineMethodResultBox.value = nil
+                switch AppLogEmitTestCommand.apply(command) {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
             case "device_set_state":
                 // The fleet-removal convergence reader — whether `device_id_hex`'s
                 // `fauna.state.device-set` row reads Removed/Enrolled from THIS
@@ -2042,6 +2078,19 @@ public struct FaunaMacApp: App {
                 // `device_set_state` above (a refusal leaves it empty).
                 machineMethodResultBox.value = nil
                 switch await ReadMarkerStateTestCommand.apply(command, api: appState.liveClient?.api) {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
+            case "folder_set_custody":
+                // The succession journeys' custody read — which content-key
+                // generations this app's folder custody holds for one set
+                // (`succession-aftermath.md` § Re-key scope). Shared FaunaKit
+                // handler (macOS + iOS, one implementation); slot cleared FIRST
+                // and written only on success, exactly as `read_marker_state`.
+                machineMethodResultBox.value = nil
+                switch await FolderSetCustodyTestCommand.apply(command, api: appState.liveClient?.api) {
                 case .report(let json):
                     machineMethodResultBox.value = json
                 case .refused(let reason):
@@ -2194,6 +2243,15 @@ public struct FaunaMacApp: App {
                 if let reason = E2eLoudSurfaces.apply(action, command, api: appState.liveClient?.api) {
                     testAgentFailure(reason)
                 }
+            case "subscriptions_hold_author_drain":
+                // Hold the subscriptions author drain (shared Rust's
+                // process-wide flag, which the in-process author pump reads), so
+                // a payment-backed subscribe request stands in the author's §2
+                // while the test reads its paid badge (`monetization.md` §
+                // Pillar 3). Twin of tui's, linux's, web's and android's arms.
+                subscriptionsHoldAuthorDrainForTest()
+            case "subscriptions_release_author_drain":
+                subscriptionsReleaseAuthorDrainForTest()
             case "archive_import_pause_after", "archive_import_hold_after":
                 // The archive-import run's one-shot pause/hold anchors
                 // (convention 14). Shared FaunaKit handler (macOS + iOS, one
@@ -2231,6 +2289,17 @@ public struct FaunaMacApp: App {
                 // Shared FaunaKit handler (macOS + iOS, one implementation)
                 // over the same Rust seam tui/linux drive.
                 machineMethodResultBox.value = FeedCueVerdictTestCommand.apply(command, feedVM: feedVM)
+            case "feed_cue_hydration_hold":
+                // Set/clear the manager's in-memory cue-hydration hold before
+                // the feed first hydrates — the lever no launch env reaches.
+                // Shared FaunaKit handler (macOS + iOS, one implementation).
+                // AWAITED (it may build the manager first). Convention 11: a
+                // refusal is LOUD.
+                if let reason = await FeedCueHydrationHoldTestCommand.apply(
+                    command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
+                {
+                    testAgentFailure(reason)
+                }
             case "feed_seed_cue_rollup_for_test":
                 // Seeds a real `cues:v1` nest row for "Clear activity data" to
                 // delete. Shared FaunaKit handler (macOS + iOS, one
@@ -2414,7 +2483,11 @@ public struct FaunaMacApp: App {
                 // android `advanceTestClockAndTick`. Convention 11: honour the
                 // command or refuse audibly, never silently drop it.
                 if let minutes = (command["minutes"] as? NSNumber)?.intValue ?? (command["minutes"] as? Int) {
-                    await appState.screenTime.advanceTestClockAndTick(minutes: minutes)
+                    // Additive `focused` (default true): `false` advances the clock
+                    // with the app out of front, billing nothing (outcome 67's
+                    // billing half; the `screen-time-heartbeat-unfocused` surface).
+                    let focused = (command["focused"] as? Bool) ?? true
+                    await appState.screenTime.advanceTestClockAndTick(minutes: minutes, focused: focused)
                 } else {
                     testAgentFailure("screen_time_heartbeat: payload needs an integer `minutes`")
                 }
@@ -3643,7 +3716,17 @@ public struct FaunaMacApp: App {
         // surviving pending-factory-reset slot launches it straight onto a
         // pre-filled claim page for a nest that no longer exists. See `deleteAll()`.
         let keychain = KeychainStore()
-        _ = FaunaAccounts.registry(keychain: keychain).clearAll()
+        // The production path's own record and routine (`StatusVM.signOut`'s),
+        // as linux's agent reset runs it: the registry's wipe, every account's
+        // scopes and auxiliary slots — and any sign-out or residue record a
+        // previous test left, which would otherwise wipe this test's sign-in at
+        // its next launch or fold a stale survivor into its own residue line.
+        // Its residue is dropped deliberately: a reset has no user in front of
+        // it, and the sweeps log their paths either way. The window's own lock
+        // is put down around it, since it still holds it here.
+        _ = SignOutResidueSurface.finish(
+            ownLock: appState.instanceLock, dismissAgent: false,
+            written: SignOutResidueSurface.recordSignOut(servedActor: appState.session.actorId))
         keychain.deleteAll()
         // Erasure follows SCOPE, not just the credential namespace
         // (`account-scoping.md` § Erasure follows scope): the credential wipe above

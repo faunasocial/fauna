@@ -46,6 +46,8 @@ Stamped 2026-09-19 at eb7ece9829.
 | ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+26250b64 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

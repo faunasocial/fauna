@@ -6,6 +6,7 @@ import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -83,6 +84,28 @@ class PhotoBackupWorker @AssistedInject constructor(
          */
         private const val MIN_PERIOD_MINUTES = 15L
 
+        /** The periodic request's constraints, shared with [enqueueOneShot]. */
+        private fun constraints(): Constraints = Constraints.Builder()
+            // Wi-Fi-only, matching NetworkMonitor.shouldSyncPhotos() —
+            // photo backup never spends the user's cellular data.
+            .setRequiredNetworkType(NetworkType.UNMETERED)
+            .build()
+
+        /**
+         * Enqueue ONE pass of this worker through WorkManager — the e2e
+         * scheduled-pass poke's entry point
+         * (`fauna_e2e_agent::PHOTO_BACKUP_SCHEDULED_PASS_NOW`, convention 14's
+         * `run_now` for a schedule WorkManager alone owns). Same worker, same
+         * constraints as [enqueuePeriodicWork], so the poke constructs and runs
+         * the identical `doWork` the 15-minute schedule does — the
+         * `WidgetDataWorker.enqueueOneShot` shape.
+         */
+        fun enqueueOneShot(context: Context) {
+            WorkManager.getInstance(context).enqueue(
+                OneTimeWorkRequestBuilder<PhotoBackupWorker>().setConstraints(constraints()).build()
+            )
+        }
+
         /**
          * Enqueue (or re-period) the recurring photo-backup pass at the
          * constant period.
@@ -97,13 +120,7 @@ class PhotoBackupWorker @AssistedInject constructor(
         fun enqueuePeriodicWork(context: Context) {
             val request = PeriodicWorkRequestBuilder<PhotoBackupWorker>(
                 MIN_PERIOD_MINUTES, TimeUnit.MINUTES,
-            ).setConstraints(
-                Constraints.Builder()
-                    // Wi-Fi-only, matching NetworkMonitor.shouldSyncPhotos() —
-                    // photo backup never spends the user's cellular data.
-                    .setRequiredNetworkType(NetworkType.UNMETERED)
-                    .build(),
-            ).build()
+            ).setConstraints(constraints()).build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 UNIQUE_WORK_NAME,

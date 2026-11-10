@@ -44,6 +44,9 @@ type backend struct {
 	logger *slog.Logger
 	cache  *bodyStructureCache
 	router *notificationRouter
+	// live indexes the AUTH'd sessions by actor for the `account_revoked`
+	// teardown (revocation_teardown.go).
+	live *liveSessions
 	// undecryptableWarn dedups the FETCH path's "record could not be
 	// opened" WARN to once per record across every Session.
 	undecryptableWarn undecryptable.WarnDedup
@@ -185,6 +188,8 @@ func NewBackend(client wsrpc.Caller, logger *slog.Logger, cacheMax int, idleTime
 		logger = slog.Default()
 	}
 	router := newNotificationRouter(logger.With("component", "notification_router"))
+	live := newLiveSessions()
+	onRevoked := accountRevokedHandler(live, logger)
 	switch {
 	case dispatcher != nil:
 		// Composed install: the MDA process consumes more than one push kind
@@ -193,13 +198,17 @@ func NewBackend(client wsrpc.Caller, logger *slog.Logger, cacheMax int, idleTime
 		// route on it; mda.Run registers config_changed and installs the
 		// dispatcher via SetOnPush.
 		dispatcher.Register(wsrpc.BridgeMailboxStatePushKind, router.Handle)
+		dispatcher.Register(wsrpc.PushKindAccountRevoked, onRevoked)
 	default:
 		// Standalone install (no dispatcher → router is the only consumer):
 		// grab the push slot directly when the client supports it. Tests that
 		// drive router.Handle by hand pass a Caller that doesn't satisfy
 		// pushHandlerInstaller, so the install is skipped.
 		if installer, ok := client.(pushHandlerInstaller); ok {
-			installer.SetOnPush(router.Handle)
+			installer.SetOnPush(func(kind string, payload []byte, seq uint64) {
+				router.Handle(kind, payload, seq)
+				onRevoked(kind, payload, seq)
+			})
 		}
 	}
 	b := &backend{
@@ -207,6 +216,7 @@ func NewBackend(client wsrpc.Caller, logger *slog.Logger, cacheMax int, idleTime
 		logger: logger,
 		cache:  newBodyStructureCache(cacheMax),
 		router: router,
+		live:   live,
 		plane:  plane,
 	}
 	b.idleTimeoutNanos.Store(int64(idleTimeout))
@@ -229,8 +239,10 @@ func (b *backend) NewSession(c *imapserver.Conn) imapserver.Session {
 		}
 	}
 	return &Session{
-		conn:              c,
-		client:            b.client,
+		conn: c,
+		// A refusal for a locked or suspended account ends the
+		// session with a BYE (revoked.go).
+		client:            revokedByeCaller{inner: b.client},
 		logger:            b.logger,
 		sourceIP:          sourceIP,
 		lockout:           b.authLockout.Load(),
@@ -238,6 +250,8 @@ func (b *backend) NewSession(c *imapserver.Conn) imapserver.Session {
 		cache:             b.cache,
 		undecryptableWarn: &b.undecryptableWarn,
 		router:            b.router,
+		live:              b.live,
+		revoked:           make(chan struct{}),
 		plane:             b.plane,
 		idleTimeout:       time.Duration(b.idleTimeoutNanos.Load()),
 		spamPolicy:        b.currentSpamPolicy(),

@@ -70,6 +70,10 @@ def _seed_notification_row(nest_instance, actor_id_hex: str, notif_type: str, ke
 @pytest.mark.ios
 @pytest.mark.windows
 @pytest.mark.feature("muted-words")
+# Also `notifications` outcome 14 — a security notice is never hidden by a muted
+# word (`behavior/notifications.md` § Muted words rule 5): the security notice
+# seeded below carries the muted term and must paint in full.
+@pytest.mark.feature("notifications")
 def test_a_muted_word_collapses_the_notification_rows_that_carry_it(
     logged_in_app, nest_instance, test_user
 ):

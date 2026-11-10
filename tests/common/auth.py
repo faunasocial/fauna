@@ -582,6 +582,7 @@ def register_user(
     admin_signing_key,
     handle: str | None = None,
     label: str = "e2e-test",
+    guardian_actor: str | None = None,
 ):
     """Register a user on a node via the WS-RPC admin API.
 
@@ -618,6 +619,11 @@ def register_user(
     the nest (``create_user_with_handle``), which is the shape the pickers were
     designed around — this helper only diverges from it because a recognisable
     constant is useful when an admin screen is being watched by a human.
+
+    ``guardian_actor`` (hex) admits the actor SUPERVISED under that guardian — the
+    direct-admission arm of `family-safety.md` § The guardianship link — which is
+    the only account a kids build accepts (`account-age-band.md`, the kids-app
+    bullet, item (3)).
     """
     base, _ = _resolve_base(port, base_url)
     sk = _coerce_admin_signing_key(admin_signing_key)
@@ -628,6 +634,8 @@ def register_user(
     }
     if handle:
         body["handle"] = handle
+    if guardian_actor:
+        body["guardian_actor"] = bytes.fromhex(guardian_actor)
     _authed_call(base, sk, "fauna.admin.users.create", body)
 
 
@@ -1693,7 +1701,8 @@ def handshake_via_ws(base: str, sk) -> dict:
 
 
 def create_actor_and_register(
-    port, *, base_url: str | None = None, admin_signing_key=None, with_handle: bool = True
+    port, *, base_url: str | None = None, admin_signing_key=None, with_handle: bool = True,
+    guardian_actor: str | None = None,
 ):
     """Create a new Ed25519 keypair, register on the nest, get auth token.
 
@@ -1743,6 +1752,7 @@ def create_actor_and_register(
             port, actor_id_hex, base_url=base,
             admin_signing_key=admin_signing_key,
             handle=handle,
+            guardian_actor=guardian_actor,
         )
 
     # Mint an auth token over the WS-RPC `fauna.auth.handshake` kind (replaces

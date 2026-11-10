@@ -841,6 +841,58 @@ public class RecoveryKitViewModelTests : IDisposable
         Assert.Same(view, vm.SweepView);
     }
 
+    // ── The ephemeral member-review pass's gates ────────
+
+    /// <summary>
+    /// Two of the pass's three gates (<c>settings.md</c> § Recovery kit → <i>The
+    /// ephemeral member-review pass</i>): a succession sweep ran this app run and
+    /// the user has not deferred — the third, that items remain, is the roster.
+    /// Without the sweep gate the pass would paint on every ordinary session that
+    /// carries an open item, the standing clutter the two-surface ruling forbids.
+    /// </summary>
+    [Fact]
+    public void MemberReviewPass_OpensOnlyWithACarriedSweep()
+    {
+        var ordinary = new RecoveryKitViewModel(new MockNestRpcClient());
+        ordinary.HydrateSweep();
+        Assert.False(ordinary.MemberReviewPassOpen, "no ceremony this run: the backlog is the permanent page's");
+
+        SuccessionHandoff.Record(
+            MockNestRpcClient.MakeLandedSuccession(newActorIdHex: Successor)
+                with { sweep = MakeSweepView(unattestedMembers: 1) },
+            Predecessor);
+        var successor = new RecoveryKitViewModel(new MockNestRpcClient());
+        successor.HydrateSweep();
+        Assert.True(successor.MemberReviewPassOpen);
+    }
+
+    /// <summary>Defer hides the pass and decides nothing — and it sticks: the page
+    /// is rebuilt per visit, so the next visit's view model must read the defer
+    /// back from the handoff rather than open the pass again.</summary>
+    [Fact]
+    public void MemberReviewDefer_ClosesThePass_AndTheNextVisitStaysClosed()
+    {
+        SuccessionHandoff.Record(
+            MockNestRpcClient.MakeLandedSuccession(newActorIdHex: Successor)
+                with { sweep = MakeSweepView(unattestedMembers: 1) },
+            Predecessor);
+        var rpc = new MockNestRpcClient();
+        var vm = new RecoveryKitViewModel(rpc);
+        vm.HydrateSweep();
+        var changed = new System.Collections.Generic.List<string?>();
+        vm.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        vm.DeferMemberReview();
+
+        Assert.False(vm.MemberReviewPassOpen);
+        Assert.Contains(nameof(RecoveryKitViewModel.MemberReviewPassOpen), changed);
+        Assert.DoesNotContain("MemberReviewKeep", rpc.Calls);
+
+        var nextVisit = new RecoveryKitViewModel(new MockNestRpcClient());
+        nextVisit.HydrateSweep();
+        Assert.False(nextVisit.MemberReviewPassOpen);
+    }
+
     /// <summary>An ordinary sign-in that never ran a ceremony carries no sweep —
     /// the panel stays fully collapsed, never a silence dressed as an answer.</summary>
     [Fact]

@@ -3700,17 +3700,18 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         // § Implementation status today).
         let plain = std::cell::OnceCell::new();
         let plaintext = || plain.get_or_init(|| msg.document.to_plaintext()).as_str();
+        let report_key = crate::region::ReportKey {
+            item_id: msg
+                .plane_ref
+                .as_ref()
+                .map_or(msg.message_id.0.as_str(), |p| p.record_digest.as_str()),
+            author_id: sender.as_deref(),
+        };
         let composed = crate::region::verdict_for(
             app,
             &msg.message_id.0,
             &msg.labels,
-            Some(crate::region::ReportKey {
-                item_id: msg
-                    .plane_ref
-                    .as_ref()
-                    .map_or(msg.message_id.0.as_str(), |p| p.record_digest.as_str()),
-                author_id: sender.as_deref(),
-            }),
+            Some(report_key),
             || crate::region::message_input(plaintext()),
         );
         let content_verdict = composed.verdict;
@@ -3771,16 +3772,15 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             continue;
         }
         // The viewer's own report: the same placeholder slot, the reporter's
-        // own words ("You reported this"), `source="reported"` beside it.
+        // own words ("You reported this"), `source="reported"` beside it, and
+        // the show-again control (`crate::content_policy::reported_placeholder`).
         if composed.reported() {
-            out.push(
-                Element::label(
-                    ids::CONTENT_POLICY_BLOCKED_NOTICE,
-                    fauna_i18n::strings::moderation::report::HIDDEN_PLACEHOLDER,
-                )
-                .attr("state", "blocked")
-                .attr("source", "reported"),
-            );
+            out.extend(crate::content_policy::reported_placeholder(
+                app,
+                report_key,
+                crate::pages::Page::Conversations,
+                None,
+            ));
             out.push(message_timestamp_element(msg.timestamp_ms, selected));
             continue;
         }
@@ -8491,6 +8491,8 @@ mod tests {
             guardian_state,
             disconnected: false,
             undelivered_rows: Vec::new(),
+            last_removed_at: 0,
+            removed_rows: Vec::new(),
         };
 
         let mut app = authed_app();
@@ -8636,6 +8638,8 @@ mod tests {
             guardian_state: None,
             disconnected: true,
             undelivered_rows: vec![2],
+            last_removed_at: 0,
+            removed_rows: Vec::new(),
         }]);
         manager.register_backend(Arc::new(bridged));
         let state = ConversationsState {
@@ -8738,6 +8742,7 @@ mod tests {
                 )
                 .into_bytes(),
                 suppress_from_view: false,
+                spam: Default::default(),
                 has_seen_flag: true,
                 warmup_hold: None,
             }
@@ -8828,6 +8833,7 @@ mod tests {
                 )
                 .into_bytes(),
                 suppress_from_view: false,
+                spam: Default::default(),
                 has_seen_flag: true,
                 warmup_hold: None,
             }
@@ -8923,6 +8929,7 @@ mod tests {
                     rfc5322: raw.into_bytes(),
                     mailbox: MailFeed::Sent,
                     suppress_from_view: false,
+                    spam: Default::default(),
                     has_seen_flag: false,
                     warmup_hold: Some(hold),
                 },
@@ -11317,6 +11324,7 @@ mod tests {
             role,
             policy_version: 1,
             room_node: None,
+            home_nest_actor_id: None,
         }
     }
 

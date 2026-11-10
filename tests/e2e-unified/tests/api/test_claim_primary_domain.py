@@ -15,8 +15,13 @@ records" bug. A real (non-local) ``mail_domain`` carried by
 
 A LOCAL target (IP literal / ``localhost`` / ``*.localhost`` / ``.local``)
 registers NO mail domain — ``mail.<ip>`` is nonsense — and the identity stays
-the ``"localhost"`` fallback (the ``claim_core.rs`` ``is_local`` gate at
-``!resolve_handle_domain(d).is_local``), so Admin→DNS is correctly empty.
+the ``"localhost"`` fallback (the ``claim_core.rs`` gate at
+``resolve_handle_domain(d).is_public_dns_name``), so Admin→DNS is correctly
+empty. Both local spellings are witnessed: the bare address ``127.0.0.1`` and
+the name ``localhost`` (claim-a-fresh-nest outcome 13). The deployment identity
+has no wire field of its own: the claim reply's ``domain`` reading the
+``"localhost"`` fallback plus an empty ``list_local_domains`` (no primary row)
+is what "no identity domain" looks like from outside.
 
 These tests each start their OWN unclaimed nest via ``start_nest(..., unclaimed=True)``
 and drive the claim themselves (the session ``nest_instance`` is pre-claimed
@@ -53,7 +58,7 @@ def claim_target_nest(request, nest_mode, tmp_path_factory):
     """An UNCLAIMED nest, one per test: the claim itself is the subject here, so
     the harness must not have performed it.
 
-    Function-scoped deliberately — the two tests claim the same nest shape onto
+    Function-scoped deliberately — the tests claim the same nest shape onto
     a real domain and onto a local target, and a claim code is single-use.
     """
     from conftest import _start_dedicated_nest
@@ -108,6 +113,7 @@ def _admin_client(port, sk):
 
 
 @pytest.mark.feature("admin-dns-and-certificates")
+@pytest.mark.feature("claim-a-fresh-nest")
 def test_claim_real_domain_registers_primary_and_dns(claim_target_nest):
     """A real ``mail_domain`` at claim → primary domain + non-empty Admin→DNS."""
     port = claim_target_nest["port"]
@@ -148,26 +154,25 @@ def test_claim_real_domain_registers_primary_and_dns(claim_target_nest):
             f"got {sorted(types)!r}"
         )
 
-def test_claim_local_target_registers_no_mail_domain(claim_target_nest):
+def _assert_local_claim_registers_nothing(nest, local_target):
     """A LOCAL target at claim → no mail domain, localhost identity, empty DNS."""
-    port = claim_target_nest["port"]
-    reply, sk = _claim(claim_target_nest, handle="admin", mail_domain="127.0.0.1")
+    port = nest["port"]
+    reply, sk = _claim(nest, handle="admin", mail_domain=local_target)
 
-    # (1) A local target (IP literal) is an access address, not a mail domain:
-    # nothing is registered and the identity stays the `localhost` fallback.
-    assert reply["domain"] != "127.0.0.1", (
-        f"a local IP must NOT become the identity domain; got {reply!r}"
-    )
+    # (1) A local target is an access address, not a mail domain: nothing is
+    # registered and the identity stays the `localhost` fallback.
     assert reply["domain"] == "localhost", (
-        f"local claim identity should fall back to localhost; got {reply!r}"
+        f"a local claim ({local_target!r}) must leave the identity at the "
+        f"localhost fallback; got {reply!r}"
     )
 
     client = _admin_client(port, sk)
     with client:
-        # (2) No mail domain registered.
+        # (2) No mail domain registered — so no primary row, no identity.
         listed = client.call("fauna.bridges.list_local_domains", {})
         assert listed["active"] == [], (
-            f"a local claim must register no mail domain; got {listed!r}"
+            f"a local claim ({local_target!r}) must register no mail domain; "
+            f"got {listed!r}"
         )
 
         # (3) The Admin→DNS matrix is empty — no primary domain exists.
@@ -175,3 +180,15 @@ def test_claim_local_target_registers_no_mail_domain(claim_target_nest):
         assert dns["domains"] == [], (
             f"Admin→DNS must be empty with no primary domain; got {dns!r}"
         )
+
+
+@pytest.mark.feature("claim-a-fresh-nest")
+def test_claim_local_target_registers_no_mail_domain(claim_target_nest):
+    """A claim by the bare address ``127.0.0.1`` registers no domain."""
+    _assert_local_claim_registers_nothing(claim_target_nest, "127.0.0.1")
+
+
+@pytest.mark.feature("claim-a-fresh-nest")
+def test_claim_as_localhost_registers_no_mail_domain(claim_target_nest):
+    """A claim as ``localhost`` registers no domain either."""
+    _assert_local_claim_registers_nothing(claim_target_nest, "localhost")

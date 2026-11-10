@@ -25,6 +25,7 @@ without a toolchain-free pin the rule is only enforced on the machine that
 happens to own that app.
 """
 
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -112,24 +113,48 @@ def _code_only(text: str) -> str:
     return "\n".join(out)
 
 
+def _skipped_dir(name: str) -> bool:
+    """Directories that hold no hand-written screen source.
+
+    Generated UniFFI bindings and the staged xcframework copies mention element
+    ids in doc comments; they render nothing. `bin`/`obj` are MSBuild output,
+    excluded so the verdict does not depend on whether this machine happens to
+    have built the windows app.
+    """
+    return (
+        _is_build_output(name) or name in {"generated", "Generated", "FaunaFFISwift"}
+    )
+
+
+def _is_build_output(name: str) -> bool:
+    """Build output only — the walk for the generated id maps, which live under
+    `Generated/` and so must not take `_skipped_dir`'s wider cut. `.build` is
+    SwiftPM's, `.xcode-build` xcodebuild's (it holds `UiIds.o` objects and index
+    records named `UiIds.*` — megabytes the id-map regex backtracked on for
+    minutes, 2026-11-07), `bin`/`obj` MSBuild's."""
+    return name in {".build", ".xcode-build", "bin", "obj"} or name.endswith(".xcframework")
+
+
+def _walk_pruned(app_dir: str, skip):
+    for dirpath, dirnames, filenames in os.walk(_REPO / app_dir):
+        dirnames[:] = [d for d in dirnames if not skip(d)]
+        yield dirpath, dirnames, filenames
+
+
 def _sources(app_dir: str) -> list[Path]:
-    root = _REPO / app_dir
-    return [
-        p
-        for p in sorted(root.rglob("*"))
-        if p.suffix in _SOURCE_SUFFIXES
-        # Generated UniFFI bindings and the staged xcframework copies mention
-        # element ids in doc comments; they render nothing.
-        and "generated" not in p.parts
-        and "Generated" not in p.parts
-        and ".build" not in p.parts
-        # MSBuild output. Excluded so the verdict does not depend on whether
-        # this machine happens to have built the windows app.
-        and "bin" not in p.parts
-        and "obj" not in p.parts
-        and not any(part.endswith(".xcframework") for part in p.parts)
-        and "FaunaFFISwift" not in p.parts
-    ]
+    """Every screen source file of `app_dir`.
+
+    The excluded directories are PRUNED from the walk, never filtered out after
+    it: apple's `.build` alone holds a SwiftPM build of tens of gigabytes, and a
+    walk that descended into it ran past pytest's 900 s timeout on a mac whose
+    tree a concurrent build was writing (2026-11-07).
+    """
+    out: list[Path] = []
+    for dirpath, _dirnames, filenames in _walk_pruned(app_dir, _skipped_dir):
+        out.extend(
+            Path(dirpath) / f for f in filenames if Path(f).suffix in _SOURCE_SUFFIXES
+        )
+    return sorted(out)
 
 
 @lru_cache(maxsize=None)
@@ -154,7 +179,13 @@ def _id_spellings(app_dir: str) -> dict[str, tuple[str, ...]]:
     coverage instead of quietly losing it.
     """
     spellings: dict[str, set[str]] = {}
-    for generated in sorted((_REPO / app_dir).rglob("UiIds.*")):
+    generated_maps = sorted(
+        Path(dirpath) / f
+        for dirpath, dirnames, filenames in _walk_pruned(app_dir, _is_build_output)
+        for f in filenames
+        if f.startswith("UiIds.") and Path(f).suffix in _SOURCE_SUFFIXES
+    )
+    for generated in generated_maps:
         for name, value in re.findall(
             r'([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=\s*"([a-z0-9][a-z0-9-]*)"',
             generated.read_text(encoding="utf-8", errors="ignore"),
@@ -275,14 +306,12 @@ def test_the_root_secret_ids_are_still_rendered_somewhere(app_dir, call):
     and go permanently green while covering nothing — the failure mode of every
     grep-shaped assertion.
 
-    ⚠ This asserts that *at least one* of the two ids is painted, not both, and
-    that weakness is load-bearing rather than an oversight: **windows renders
-    only `secret-key-display`** (`Views/Onboarding/IdentityCreatedView.xaml`) —
-    it has no recovery-kit surface yet. Demanding both would fail windows today
-    for a screen it has not built, and demanding neither is what leaves the pin
-    vacuous. So: one is enough to prove the scan reaches real screens, and the
-    honest statement of windows' coverage is "rule 1 is pinned on the identity
-    secret here, and gains the recovery kit when that screen lands".
+    ⚠ This asserts that *at least one* of the two ids is painted, not both: one
+    is enough to prove the scan reaches real screens, and demanding neither is
+    what leaves the pin vacuous. It was written when windows rendered only
+    `secret-key-display`; windows now renders `recovery-kit-secret-display` too
+    (`Views/SettingsAccountPage.xaml`, `Views/Onboarding/RecoveryKitView.xaml`),
+    so the rule-1 pin above already scans both of its root-secret screens.
     """
     rendering = [
         label
@@ -297,10 +326,10 @@ def test_the_root_secret_ids_are_still_rendered_somewhere(app_dir, call):
 
 
 # The apps whose leg covers ALL THREE minted surfaces, so the rule-2 direction
-# can be asserted exhaustively against them. android is deliberately absent: its
-# leg mounts on two (mail + Bluesky) and it pins them at the platform-bit level
-# in its own `ScreenCaptureWindowFlagTest`, which is stronger than a source grep.
-_ALL_THREE_SURFACE_APPS = ("apps/fauna-apple", "apps/fauna-windows")
+# can be asserted exhaustively against them. android joined once its nostr
+# connect-string reveal mounted the suppression; it also pins the platform bit in
+# its own `ScreenCaptureTest`, which is stronger than a source grep.
+_ALL_THREE_SURFACE_APPS = ("apps/fauna-apple", "apps/fauna-windows", "apps/fauna-android")
 
 
 @pytest.mark.parametrize("app_dir", _params(_ALL_THREE_SURFACE_APPS, with_call=False))

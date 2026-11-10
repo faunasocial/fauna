@@ -151,6 +151,17 @@ pub fn maybe_run_factory_reset(db_path: &str, blob_dir: &str) -> io::Result<bool
     remove_file_if_exists(&data_dir.join(crate::mail_enable::CALDAV_PORT_FLAG))?;
     remove_file_if_exists(&data_dir.join(crate::mail_enable::SERVING_PORT_FLAG))?;
 
+    //    The materializer's seed and every materialized view go too: the
+    //    grants they served are wiped with the DB, and the seed is NOT
+    //    preserved (the apps re-mint to the fresh key — `encryption-at-rest.md`
+    //    § Capability tiering → *The materialization grant*, part (b)).
+    remove_file_if_exists(&crate::materializer::holder::holder_key_path(&data_dir))?;
+    match std::fs::remove_dir_all(crate::materializer::area::root(&data_dir)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
     // 4. Stage the post-reset claim code so `ensure_claim_code_at` (later in
     //    startup) preserves it and the freshly-booted nest is claimable with it.
     let claim_path = data_dir.join("claim-code");

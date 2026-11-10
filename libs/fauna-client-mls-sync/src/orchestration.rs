@@ -220,6 +220,15 @@ pub async fn restore_and_wire(
     for slice in &loaded.history {
         bind_restored_slice(backend, manager, slice);
     }
+    // Re-stamp each community room's marker on the engine: the restore above
+    // carried it only when the snapshot was swapped in, and on either refusal
+    // arm this engine's own next export would otherwise drop the one key that
+    // lists the room — and the room with it, on the launch after.
+    if let Some(provider) = &loaded.provider {
+        for room in provider.community_channel_ids() {
+            engine.mark_channel_community(&room);
+        }
+    }
     // Then the routing input the slices above CANNOT carry. A slice with no
     // recorded `home_nest_url` decodes as `None`, which is
     // indistinguishable from a genuine same-nest channel, so the loop just ran
@@ -310,11 +319,19 @@ pub async fn restore_and_wire(
     let (listed, chat_listed, missing_chat) = match loaded.provider.as_ref() {
         Some(p) => {
             let listed = p.channel_ids();
-            let chat: Vec<String> = listed
+            // A community room is a chat channel the group listing never
+            // names; its slice carries its participants just the same.
+            let mut chat: Vec<String> = listed
                 .iter()
                 .filter(|ch| p.is_channel_chat(ch))
                 .map(|ch| ch.to_string())
                 .collect();
+            for room in p.community_channel_ids() {
+                let hex = room.to_string();
+                if !chat.contains(&hex) {
+                    chat.push(hex);
+                }
+            }
             let missing: Vec<String> = chat
                 .iter()
                 .filter(|hex| !arrived.contains(hex.as_str()))
@@ -974,6 +991,7 @@ mod tests {
             flavor: ThreadFlavor::OneToOne,
             participants: vec![addr("me"), addr("peer")],
             messages: vec![MessageSnapshot {
+                queued_send: None,
                 message_id: MessageId(format!("conv:{channel_hex}:{watermark}")),
                 sender: addr("me"),
                 sender_display: String::new(),
@@ -991,6 +1009,7 @@ mod tests {
                 labels: vec![],
                 plane_ref: None,
                 can_delete: false,
+                can_remove: false,
                 undelivered: false,
                 warmup_hold: None,
                 scan_result_lines: Vec::new(),

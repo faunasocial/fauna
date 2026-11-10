@@ -397,12 +397,43 @@ SEEDING_ACCOUNT = "tester"
 SEED_POSTS = ("Hello from the tester account.",
               "A second post, so the feed has more than one.")
 SEED_MESSAGE = "Hello — this conversation was started by the tester account."
+#: What the tester sells on a staging box (never the acceptance nest): one
+#: priced tier and one post sold on its own, made on the full build, so a store
+#: build's buyer half has a priced tier and a sold post to show without their
+#: price (`docs/features/store-install.md` outcomes 2 and 3). Plain content that
+#: claims nothing — the payment link is a reserved example domain that buys
+#: nothing — so, like ``SEED_POSTS``, it is no public text.
+SEED_TIER = {
+    "name": "Supporters",
+    "price_hint": "5 a month",
+    "asking_price": "5000",
+    "payment_url": "https://example.com/tester-supporters",
+}
+SEED_SOLD_POST = {
+    "preview": "A post sold on its own — this preview is free.",
+    "full_text": "A post sold on its own — the rest of it shows once bought.",
+    "price": "3",
+}
 #: The reviewer accounts among the org accounts, in store order.
 REVIEWER_ACCOUNTS = tuple(lp for lp in _ORG_LOCALPARTS if lp != SEEDING_ACCOUNT)
 
 
+#: Accounts the drive ADMITS but never seeds: no reviewer, no first-run
+#: content. ``multiseat-seat`` is the one account every seat of the
+#: three-machine live filesync round signs in as — three devices of one user
+#: (`e2e-live-sync-convergence.md` convention 16 (d)) — a non-admin identity,
+#: so the box's admin seed never leaves the machine that provisioned it.
+#: `dev.fauna.build` alone: `test.fauna.build` is CI's, `fauna.build` humans'.
+MULTISEAT_SEAT_ACCOUNT = "multiseat-seat"
+SEAT_ACCOUNTS = {"dev.fauna.build": (MULTISEAT_SEAT_ACCOUNT,)}
+
+
 def org_accounts_for(domain: str) -> tuple[str, ...]:
     return ORG_ACCOUNTS.get(domain, ())
+
+
+def seat_accounts_for(domain: str) -> tuple[str, ...]:
+    return SEAT_ACCOUNTS.get(domain, ())
 
 
 def account_path(domain: str, localpart: str) -> Path:
@@ -807,6 +838,51 @@ def note_box_bought(state: dict, *, at: str) -> dict:
     now = _instant(at, "the buy time")
     kept = [b.strftime("%Y-%m-%dT%H:%M:%SZ") for b in _buys_in_window(state, now)]
     return {**state, "box_buys": [*kept, at]}
+
+
+# ── Placement: the ordered locations, a refused buy not counted ─────────────
+
+#: The locations the drive buys at, in order. The provider refuses a placement
+#: (412 ``resource_unavailable``) per location, independently of this tree, and
+#: the unattended timer carries no location setting — so the order is a
+#: constant, and a refusal moves the next attempt to the next entry.
+PLACEMENT_LOCATIONS = ("fsn1", "nbg1")
+
+#: How long a location stays behind a placement refusal. Capacity comes back;
+#: after a day the first entry is tried again.
+PLACEMENT_REFUSAL_WINDOW = timedelta(days=1)
+
+
+def placement_refused(snap: dict) -> bool:
+    """True when ``snap`` (a provisioning snapshot) failed at the Server step
+    with the provider's placement refusal and created nothing."""
+    if snap.get("overall") != "Failed" or (snap.get("result") or {}).get("server_id"):
+        return False
+    text = f"{snap.get('final_error')!r} " + " ".join(
+        str(s.get("last_error")) for s in snap.get("steps") or []
+        if s.get("kind") == "Server")
+    return any(k in text for k in ("resource_unavailable", "during placement", "412"))
+
+
+def placement_location(state: dict, *, at: str) -> str:
+    """The first of :data:`PLACEMENT_LOCATIONS` not refused within the window at
+    ``at``; the first again when all are (the window then lapses on its own)."""
+    now = _instant(at, "the placement time")
+    refused = state.get("placement_refused") or {}
+    for loc in PLACEMENT_LOCATIONS:
+        t = refused.get(loc)
+        if t is None or now - _instant(t, "a placement refusal") >= PLACEMENT_REFUSAL_WINDOW:
+            return loc
+    return PLACEMENT_LOCATIONS[0]
+
+
+def note_placement_refused(state: dict, *, location: str, bought_at: str, at: str) -> dict:
+    """``state`` with ``location`` marked refused at ``at`` and the buy recorded
+    at ``bought_at`` taken back out of ``box_buys``: the provider created
+    nothing, so no certificate was requested and the budget is not spent."""
+    buys = [b for b in state.get("box_buys") or [] if b != bought_at]
+    return {**state, "box_buys": buys,
+            "placement_refused": {**(state.get("placement_refused") or {}), location: at}}
 
 
 def certificate_budget_refusal(state: dict, *, at: str) -> str | None:

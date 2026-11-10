@@ -79,6 +79,35 @@ pub fn weighted_bayesian_milli(
     weighted.round() as i32
 }
 
+/// Milli-units per integer point of the 0–15 combined-score scale (dag-cbor
+/// forbids floats, so every score and tier comparison is carried in milli). The
+/// Go MDA's `spamScoreMilliScale` (`spam_score.go`) is its twin.
+pub const SPAM_SCORE_MILLI_SCALE: i32 = 1000;
+
+/// The top of the 0–15 scale in milli — a maximal raw Bayesian verdict.
+const BAYESIAN_CEILING_MILLI: i32 = 15 * SPAM_SCORE_MILLI_SCALE;
+
+/// Whether the per-user Bayesian term has a **say** over a copy — the gate both
+/// scoring positions (the app's `InboxSpamScorer` and the Go MDA's
+/// `scoreSelectedInbox`) put in front of every un-reported copy
+/// (`mail-spam.md` § Scoring placement → *The scorer's say*).
+///
+/// True iff the term's confidence is above zero AND a maximal verdict (15
+/// points) at that confidence, weighted, would reach `spam_folder_tier`. A
+/// scorer without a say is the report-only scorer whatever model it holds: it
+/// leaves every un-reported copy un-watermarked, owed to the sweep at which the
+/// say begins, instead of spending the copy's one-shot watermark on a verdict
+/// the ramp decided before the open. A tier of `0` (auto-Junk off) makes the
+/// second clause vacuous, so the gate is then the ramp's own floor; a tier the
+/// term cannot reach at full confidence leaves the actor report-only for good.
+///
+/// `sample_count` is the FOLDED model's (a folded deployment baseline raises it).
+pub fn bayesian_has_say(sample_count: u32, knobs: &BayesianKnobs, spam_folder_tier: u32) -> bool {
+    let ceiling = weighted_bayesian_milli(BAYESIAN_CEILING_MILLI, sample_count, knobs);
+    ceiling > 0
+        && i64::from(ceiling) >= i64::from(spam_folder_tier) * i64::from(SPAM_SCORE_MILLI_SCALE)
+}
+
 // ── On-device scoring surface (UniFFI/WASM) ─────────────────────────────────────
 //
 // The apps (WASM/UniFFI) and the MDA (Go via UniFFI/cgo) run the shared
@@ -106,6 +135,20 @@ pub fn weighted_bayesian_milli_for_model(
 ) -> i32 {
     let model = SpamModel::from_bytes(model_bytes).unwrap_or_default();
     weighted_bayesian_milli(model.score(text), model.sample_count(), &knobs)
+}
+
+/// [`bayesian_has_say`] over a serialized (already folded) model — reads its
+/// `sample_count()` exactly as [`weighted_bayesian_milli_for_model`] does, so the
+/// gate and the score see one model. Unreadable/empty ⇒ a fresh empty model ⇒
+/// no say. The Go MDA's `mailfauna.BayesianHasSayForModel` wraps it.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn bayesian_has_say_for_model(
+    model_bytes: &[u8],
+    knobs: BayesianKnobs,
+    spam_folder_tier: u32,
+) -> bool {
+    let model = SpamModel::from_bytes(model_bytes).unwrap_or_default();
+    bayesian_has_say(model.sample_count(), &knobs, spam_folder_tier)
 }
 
 /// Fold the published deployment baseline into a just-unwrapped per-user model
@@ -484,5 +527,66 @@ mod tests {
         assert_eq!(default_bayesian_knobs().bayesian_weight_milli, 700);
         assert_eq!(default_bayesian_knobs().min_samples, 50);
         assert_eq!(default_bayesian_knobs().full_confidence_samples, 200);
+    }
+
+    #[test]
+    fn bayesian_has_say_at_the_default_tier_begins_at_122_samples() {
+        // 72/150 × 10 500 = 5 040 ≥ 5 000; 71/150 × 10 500 = 4 970 < 5 000.
+        let k = BayesianKnobs::default();
+        assert!(!bayesian_has_say(0, &k, 5));
+        assert!(!bayesian_has_say(50, &k, 5));
+        assert!(!bayesian_has_say(121, &k, 5));
+        assert!(bayesian_has_say(122, &k, 5));
+        assert!(bayesian_has_say(200, &k, 5));
+        assert!(bayesian_has_say(10_000, &k, 5));
+    }
+
+    #[test]
+    fn bayesian_has_say_with_the_tier_off_is_the_ramp_floor() {
+        let k = BayesianKnobs::default();
+        assert!(!bayesian_has_say(50, &k, 0), "confidence 0 has no say");
+        assert!(bayesian_has_say(51, &k, 0), "any confidence has a say");
+    }
+
+    #[test]
+    fn bayesian_has_say_never_at_a_tier_past_the_terms_ceiling() {
+        // At full confidence the term tops out at 15 × 0.7 = 10.5 points.
+        let k = BayesianKnobs::default();
+        assert!(bayesian_has_say(200, &k, 10));
+        assert!(!bayesian_has_say(200, &k, 11));
+        assert!(!bayesian_has_say(u32::MAX, &k, u32::MAX));
+    }
+
+    #[test]
+    fn bayesian_has_say_for_model_reads_the_folded_count() {
+        let k = BayesianKnobs::default();
+        let mut own = SpamModel::new();
+        for _ in 0..20 {
+            own.train_spam("cheap pills now");
+            own.train_ham("lunch at noon");
+        }
+        assert!(
+            !bayesian_has_say_for_model(&own.to_bytes(), k, 5),
+            "40 samples"
+        );
+        let mut baseline = SpamModel::new();
+        for _ in 0..100 {
+            baseline.train_spam("cheap pills now");
+            baseline.train_ham("lunch at noon");
+        }
+        let folded = fold_spam_model_baseline(own.to_bytes(), baseline.to_bytes(), 200);
+        let folded_count = SpamModel::from_bytes(&folded).unwrap().sample_count();
+        assert!(
+            folded_count >= 122,
+            "fixture: the fold raises the count, got {folded_count}"
+        );
+        assert!(
+            bayesian_has_say_for_model(&folded, k, 5),
+            "the folded baseline counts"
+        );
+        assert!(
+            !bayesian_has_say_for_model(b"not a model", k, 0),
+            "unreadable ⇒ no say"
+        );
     }
 }

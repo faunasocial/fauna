@@ -282,13 +282,21 @@ public sealed partial class StatusPage : Page
                 ["issued"] = uniffi.fauna_ffi.FaunaFfiMethods.FormatUnixLocal(summary.issuedAt),
             }));
 
-        // The whole document's note, unscoped — a rule's own sits beside its item.
+        // The whole document's note, unscoped — a rule's own sits IN its item, as
+        // tui's `.within(item, i)`, FaunaKit's automationScope and web's data-index
+        // place it: the item is the row, its rule line and its note both inside, so
+        // `settings-nest-rules-inert-notice` scoped to `settings-nest-rules-item[i]`
+        // answers for rule i alone.
         if (summary.notAppliedSentence is { } why)
             NestRulesRowsPanel.Children.Add(RegionLine(Ids.SettingsNestRulesInertNotice, S.Resolve(why)));
         foreach (var rule in summary.rules)
         {
+            var line = NestRulesHost.RuleLine(rule);
             var row = new StackPanel { Spacing = 2 };
-            row.Children.Add(RegionLine(Ids.SettingsNestRulesItem, NestRulesHost.RuleLine(rule)));
+            AutomationProperties.SetAutomationId(row, Ids.SettingsNestRulesItem);
+            // A bare container with only an AutomationId is pruned from the UIA tree.
+            AutomationProperties.SetName(row, line);
+            row.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
             if (rule.inert is { } inert)
             {
                 var note = RegionLine(Ids.SettingsNestRulesInertNotice, S.Resolve(inert));

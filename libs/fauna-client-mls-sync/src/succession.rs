@@ -26,7 +26,7 @@
 //! `__mls` has no list kind, which made "what do we re-seal?" look like it
 //! needed a wire addition. It does not: the replica is **self-describing**. The
 //! `provider` blob sits at a constant path ([`PATH_PROVIDER`]) and
-//! [`ProviderReplica::channel_ids`] lists every channel whose history slice can
+//! [`ProviderReplica::history_channel_ids`] lists every channel whose history slice can
 //! exist, exactly as [`crate::MlsStateSync::load`] already enumerates them at
 //! restore.
 //!
@@ -208,7 +208,9 @@ impl MlsReplicaClient {
 
         let mut histories = 0usize;
         let mut owed = 0usize;
-        let channel_ids = provider.channel_ids();
+        // The same set `load` will open: groups AND community rooms (a room
+        // has no group, so only its marker names its slice).
+        let channel_ids = provider.history_channel_ids();
         let channels = channel_ids.len();
         for channel in channel_ids {
             let path = history_path(&channel.to_string());
@@ -477,6 +479,45 @@ mod tests {
             unseal_replica(&sealed, &key(7)).unwrap().as_slice(),
             b"a channel's folded history",
             "the slice must now open under the successor's key"
+        );
+    }
+
+    /// A community room has no MLS group, so `channel_ids()` never names it;
+    /// only its community marker lists it. A pass that walked the group list
+    /// alone left the room's slice sealed to the retired key, and the
+    /// successor's very next `load` — which DOES walk the marker — failed on
+    /// it at the unseal: the device that ran the ceremony lost every community
+    /// room it held (`community-rooms.md` § Implementation status today, *An
+    /// identity succession hands a seat on*).
+    #[test]
+    fn a_community_rooms_slice_is_resealed_though_no_group_lists_it() {
+        let nest = Arc::new(FakeNest::default());
+        let engine = MlsEngine::new_in_memory(keypair(1)).unwrap();
+        let room = fauna_mls::types::ChannelId([41u8; 32]);
+        engine.mark_channel_chat(&room);
+        engine.mark_channel_community(&room);
+        let provider = ProviderReplica::from_engine(&engine);
+        assert!(provider.channel_ids().is_empty(), "a room is not a group");
+        store_sealed(&nest, PATH_PROVIDER, &provider.to_bytes().unwrap(), 1);
+        let history = history_path(&room.to_string());
+        store_sealed(&nest, &history, b"the room's folded history", 1);
+
+        let successor = client(&nest, 7);
+        let outcome = block_on(successor.reseal_from_predecessors(&[key(1)])).unwrap();
+
+        assert_eq!(
+            outcome,
+            ReplicaResealOutcome::Resealed {
+                provider: true,
+                histories: 1,
+                owed: 0
+            }
+        );
+        let sealed = nest.stored.lock().unwrap().get(&history).cloned().unwrap();
+        assert_eq!(
+            unseal_replica(&sealed, &key(7)).unwrap().as_slice(),
+            b"the room's folded history",
+            "the room's slice must now open under the successor's key"
         );
     }
 

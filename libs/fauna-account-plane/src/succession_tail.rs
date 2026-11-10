@@ -79,12 +79,35 @@ pub struct ReauthorPass {
 /// leaves the marker for a re-run, which is idempotent — a compacted row is
 /// simply not walked again.
 ///
-/// The outbox needs no walk, verified at build time (2026-08-15): intents
-/// carry no writer column, `enqueue_intent` has NO production caller yet, and
-/// the drain replays payloads verbatim — so no payload can embed the dead
-/// writer today. The first production intent kind whose payload names the
-/// writer must register a re-author hook here; this comment is that duty's
-/// anchor.
+/// The outbox needs no walk, verified at build time (2026-08-15) and again at
+/// its first production caller (2026-11-07): intents carry no writer column,
+/// the drain replays payloads verbatim, and the production kinds queued through
+/// `fauna_protocol::offline_intent::send_or_queue` name no writer —
+/// `fauna.posts.interact` (the feed manager: the target post, the action, an
+/// optional body) and, since 2026-11-08, `fauna.family.approvals.decide` and
+/// `fauna.family.contact.add` (`fauna_client_family::FamilyClient`: the ward,
+/// the peer or held item, the verdict) and `fauna.email.filters.create`
+/// (`fauna_client_email::EmailClient`: the rule's name, conditions and action)
+/// and `fauna.bridges.add_follow` / `fauna.bridges.remove_follow`
+/// (`fauna_client_bridges::BridgesClient`: the bridge, the followed account,
+/// a petname) and, since 2026-11-09, `fauna.knocks.accept`
+/// (`fauna_client_contacts::ContactsClient`: the knock's sender) and
+/// `fauna.moderation.abuse_report.submit`
+/// (`fauna_client_moderation::ModerationClient`: the subject, its author, the
+/// reason and note);
+/// the nest takes the actor from the
+/// authenticated connection. So no payload can embed the dead writer today —
+/// and none is expected to: "writer" here is the store's device principal
+/// (`WriterId`), which no wire request names. A payload bound to the
+/// IDENTITY instead — signed by the actor key, like `fauna.inbox.send`'s
+/// knock tuple — is a different key, invalidated by a different event (an
+/// identity succession, not a device delete), and it is the identity
+/// drainer's: such a kind queues its inputs and composes at drain under the
+/// then-current identity (`account-offline-mutation.md` § The
+/// offline-mutation contract → *Identity-bound intents compose at
+/// drain*, ruled 2026-11-09), never a re-author hook here. Should a queued
+/// kind ever embed the store writer, its re-author hook registers here; this
+/// comment is that duty's anchor.
 pub async fn tail_reauthor_pass<B: StoreBackend>(
     store: &AccountStore<B>,
 ) -> Result<Option<ReauthorPass>> {

@@ -60,6 +60,12 @@ public enum FamilyReachPolicyFormat {
 ///
 /// Nothing here is optimistic: every mutation is followed by a full re-read, so
 /// the render always comes from nest-confirmed state (linux `run_mutation`).
+/// The one exception is the offline composer (account-offline-mutation.md §
+/// Implementation status today, the family composer): with no nest a decision,
+/// an un-deny or a contact pre-approval rests in the device's outbox and drains
+/// when the nest is back. There is no nest to re-read, so a queued decision
+/// leaves the local list through the shared fold and the other two settle
+/// nothing (``settleDecision(_:queued:)``).
 @MainActor @Observable
 public final class FamilyVM {
     // ── The `fauna.family.status` projection ────────────────────────────
@@ -82,7 +88,7 @@ public final class FamilyVM {
     /// Every ward's pending reach approvals — the queue is **not** ward-scoped
     /// (family-safety.md § Reach approvals: one `approvals.list` read returns
     /// them all).
-    public private(set) var approvals: [FfiFamilyApprovalEntry] = []
+    public internal(set) var approvals: [FfiFamilyApprovalEntry] = []
     /// Proposals awaiting THIS caller's consent as the proposed guardian
     /// (family-safety.md § Graduation & transfer) — rendered as its own group
     /// above the role sections, and what widens the `family-tab` gate for a
@@ -388,29 +394,31 @@ public final class FamilyVM {
     /// `messageId`), so both pass straight through — deciding is keyed on the
     /// **message**, never the address, so approving one held message never
     /// sweeps every other message from that sender.
+    ///
+    /// The entry travels whole: shared Rust passes every item key through, so
+    /// this side never picks which key a kind uses. With no nest the decision
+    /// queues in the device's outbox (``settleDecision(_:queued:)``).
     public func decide(_ entry: FfiFamilyApprovalEntry, approve: Bool) async {
         guard let family else { return }
         errorMessage = nil
         do {
-            try await family.approvalsDecide(
-                supervisedActorId: entry.supervisedActorId,
-                kind: entry.kind,
-                peerActorId: entry.peerActorId,
-                messageId: entry.messageId,
-                // A `feed_source` item's key; empty for every other kind, just
-                // as peerActorId/messageId are empty for the kinds they do not
-                // name. The entry carries whichever key its kind uses.
-                bridgeId: entry.bridgeId,
-                operation: entry.operation,
-                target: entry.target,
-                // A `dm_hold` item's key, with bridgeId — an external DM peer is
-                // not an actor on this nest, so it cannot ride peerActorId.
-                peerAddress: entry.peerAddress,
-                approve: approve)
-            await load()
+            let queued = try await family.approvalsDecideOrQueue(entry: entry, approve: approve)
+            if settleDecision(entry, queued: queued) { await load() }
         } catch {
             errorMessage = DisplayError.message(error)
         }
+    }
+
+    /// Settle one decision's outcome; returns whether the page re-reads. Sent
+    /// (`queued == false`) → re-read from the nest, as every mutation here.
+    /// Queued with no nest → the decided item leaves the local list through the
+    /// shared fold (`approvalsAfterQueuedDecision`, matched by item key, never
+    /// display fields) and nothing is re-read: there is no nest to read.
+    /// Mirrors tui's `Outcome::Queued` and android's `decideApproval`.
+    func settleDecision(_ entry: FfiFamilyApprovalEntry, queued: Bool) -> Bool {
+        guard queued else { return true }
+        approvals = approvalsAfterQueuedDecision(approvals: approvals, decided: entry)
+        return false
     }
 
     /// `fauna.family.contact.add` — pre-approve a contact on the selected ward's
@@ -425,9 +433,11 @@ public final class FamilyVM {
         }
         errorMessage = nil
         do {
-            try await family.contactAdd(supervisedActorId: wardId, peerActorId: peer)
+            // With no nest the pre-approval queues in the device's outbox and
+            // folds nothing; only a sent one re-reads.
+            let queued = try await family.contactAddOrQueue(supervisedActorId: wardId, peerActorId: peer)
             contactAddInput = ""
-            await load()
+            if !queued { await load() }
         } catch {
             errorMessage = DisplayError.message(error)
         }
@@ -510,13 +520,14 @@ public final class FamilyVM {
     /// was tapped in; the `dm_hold` wire kind and the peer riding `peer_address` are
     /// the shared client's. Idempotent and not queue-scoped: it works long after the
     /// hold row is gone. Followed by a full re-read, like every mutation here, so the
-    /// row leaves the list on the nest's word.
+    /// row leaves the list on the nest's word. With no nest the un-deny queues in
+    /// the device's outbox and folds nothing: the row stays until the nest says so.
     public func allowBlockedPeer(wardId: Data, peer: FfiFamilyBlockedPeer) async {
         guard let family else { return }
         errorMessage = nil
         do {
-            try await family.allowBlockedPeer(supervisedActorId: wardId, peer: peer)
-            await load()
+            let queued = try await family.allowBlockedPeerOrQueue(supervisedActorId: wardId, peer: peer)
+            if !queued { await load() }
         } catch {
             errorMessage = DisplayError.message(error)
         }

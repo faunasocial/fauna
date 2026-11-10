@@ -64,7 +64,9 @@ use crate::wizard::Element;
 pub enum LaunchSurface {
     /// The onboarding wizard owns the screen.
     Wizard,
-    /// Hydrating / silent challenge in flight. Chrome only — no ui.yaml element.
+    /// Hydrating / silent challenge in flight (`launch_progress`). Its one
+    /// ui.yaml element is `launch-identity-label`, painted by
+    /// [`LaunchSurface::elements_with_identity`] when the cache holds a handle.
     Launching,
     /// A reachability fault the client cannot reliably classify. Always offer
     /// Retry (`onboarding.md` § App-launch routing — the transient row).
@@ -246,7 +248,32 @@ impl LaunchSurface {
     /// `NeedsUpdate` deliberately omits `launch-retry-button`; its message
     /// renders in `error-message` (see [`Self::error_text`]), not in
     /// `launch-transient-error`, matching web/linux.
+    #[cfg(test)]
     pub fn elements(&self) -> Vec<Element> {
+        self.elements_with_identity(None)
+    }
+
+    /// [`Self::elements`] with the bound account's cached identity:
+    /// `launch_progress` (`Launching`) and `launch_retry` (`TransientRetry`)
+    /// lead with `launch-identity-label` — `handle@domain · tier` from
+    /// `crate::session::launch_identity_line` — so a person whose nest is
+    /// unreachable is told which account and nest the app is trying
+    /// (`onboarding.md` § App-launch routing → *The cached identity on the
+    /// launch surfaces*). Absent, not empty, when the cache holds no handle;
+    /// the other surfaces name their own problem and never carry it.
+    pub fn elements_with_identity(&self, identity: Option<&str>) -> Vec<Element> {
+        let mut out = self.surface_elements();
+        if matches!(
+            self,
+            LaunchSurface::Launching | LaunchSurface::TransientRetry { .. }
+        ) && let Some(line) = identity
+        {
+            out.insert(0, Element::label(ids::LAUNCH_IDENTITY_LABEL, line));
+        }
+        out
+    }
+
+    fn surface_elements(&self) -> Vec<Element> {
         match self {
             LaunchSurface::Wizard | LaunchSurface::Launching => Vec::new(),
             // App-owned (the inputs paint `App::unlock`'s buffers):
@@ -675,6 +702,22 @@ fn fetch_launch_recover_boxes(app: &App, tx: &UnboundedSender<UiMessage>) {
 /// behavior via `become_session_instance_or_exit` inside `session::establish`
 /// (unchanged by this function).
 pub fn start_or_offer_chooser(app: &mut App, tx: &UnboundedSender<UiMessage>) {
+    // Before the launch law reads anything: whatever a sign-out cut short owes
+    // is finished first — the agent dismissed, the wipe, each recorded
+    // account's erase, the residue re-sweep — so this launch never offers the
+    // chooser for an account being signed out, never routes `Online` over it
+    // and never takes an instance lock for it (`account-scoping.md` § Erasure
+    // follows scope → *The sign-out record is on all 7 apps*, decision 3). On
+    // the sealed arm this is the post-unlock call, where routing runs. A
+    // refused finish whose record still owes its wipe FAILS CLOSED: the
+    // wizard on `identity_choice`, painting the retry's refusal line, whose
+    // Remove Again re-runs the routine (decision 4).
+    // The finish's wipe can also relock the sealed store, and then the create
+    // surface comes back instead of routing.
+    if let Some(surface) = crate::account_scope::finish_at_launch(app) {
+        app.launch = surface;
+        return;
+    }
     let registry = crate::session::registry(app);
     let entries: Vec<(String, Option<String>)> = registry
         .list()
@@ -794,10 +837,80 @@ pub fn start(app: &mut App, tx: &UnboundedSender<UiMessage>) {
     let tx = tx.clone();
     tokio::spawn(async move {
         machine.start().await;
-        let _ = tx.send(UiMessage::Data(DataMessage::LaunchPhase(
-            machine.snapshot(),
-        )));
+        send_verdict(&tx, machine);
     });
+}
+
+/// Which launch a delivered verdict came from: the very machine that computed
+/// it. Compared by identity ([`Arc::ptr_eq`]) against [`App::launch_machine`],
+/// never by value — two launches of the same account are different launches.
+#[derive(Clone)]
+pub struct LaunchOrigin(Arc<LaunchMachine>);
+
+impl std::fmt::Debug for LaunchOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LaunchOrigin({:p})", Arc::as_ptr(&self.0))
+    }
+}
+
+/// Post `machine`'s settled snapshot back to the main loop, tagged with the
+/// machine itself so [`deliver`] can tell a superseded launch's verdict apart.
+fn send_verdict(tx: &UnboundedSender<UiMessage>, machine: Arc<LaunchMachine>) {
+    let snapshot = machine.snapshot();
+    let _ = tx.send(UiMessage::Data(DataMessage::LaunchPhase {
+        origin: LaunchOrigin(machine),
+        snapshot,
+    }));
+}
+
+/// Render a delivered launch verdict — **only while its own launch is still the
+/// one the app holds** (`onboarding.md` § App-launch routing → *A verdict
+/// renders only while its own launch is still the current one*). Returns
+/// whether it was rendered.
+///
+/// A verdict is decided from a store read taken when its launch started and
+/// arrives a round trip later; anything that became a newer session in between
+/// (an account switch, a teardown re-entry, the factory-reset re-onboard, the
+/// e2e session patch) retired that launch by replacing or clearing
+/// [`App::launch_machine`], so the verdict is dropped whole. It is an
+/// OWNERSHIP test, never an "is a session present?" one: a verdict from the
+/// current launch still routes in full over a live session — the
+/// `IdentityChanged` teardown depends on it. Nothing needs resolving on a drop:
+/// whatever retired the launch set [`App::launch`] itself (`start` paints
+/// `Launching` for its own launch; the teardown paths and the session patch
+/// paint `Wizard`), and tui's shell reads the session before the launch gate.
+pub fn deliver(
+    app: &mut App,
+    tx: &UnboundedSender<UiMessage>,
+    origin: LaunchOrigin,
+    snapshot: LaunchSnapshot,
+) -> bool {
+    let current = app
+        .launch_machine
+        .as_ref()
+        .is_some_and(|held| Arc::ptr_eq(held, &origin.0));
+    if !current {
+        app.launch_verdicts_superseded += 1;
+        tracing::info!(
+            "[launch] verdict {:?} superseded before it rendered — dropping it",
+            snapshot.phase
+        );
+        return false;
+    }
+    app.launch_verdicts_routed += 1;
+    route(app, tx, snapshot);
+    true
+}
+
+/// Retire a launch still in flight because a newer session has just been
+/// built without it (the e2e session patch): its verdict, when it lands, is
+/// [`deliver`]'s to drop. A SETTLED launch is left alone — nothing of it is
+/// left to render, and its machine may be the session's bearer source.
+pub fn retire_in_flight(app: &mut App) {
+    if matches!(app.launch, LaunchSurface::Launching) && app.launch_machine.is_some() {
+        app.launch_machine = None;
+        app.launch = LaunchSurface::Wizard;
+    }
 }
 
 crate::app::tick_observer! {
@@ -904,12 +1017,11 @@ pub fn route(app: &mut App, tx: &UnboundedSender<UiMessage>, snapshot: LaunchSna
             // integration → *The nest hint*). Every other arm leaves it held.
             app.apply_pending_nest_hint();
             app.launch = LaunchSurface::Wizard;
-            // A residue an earlier sign-out recorded is re-swept silently here,
-            // and painted on `identity_choice` only if something is still left
-            // (`account-scoping.md` § Erasure follows scope → *the residue
-            // surface*). After the surface is set: a re-erase that relocks the
-            // sealed store moves it on to the create surface.
-            crate::account_scope::recheck_residue_at_launch(app);
+            // A residue an earlier sign-out recorded was re-swept before
+            // routing, by the launch's finish (`start_or_offer_chooser`), and
+            // what is left paints on `identity_choice` from
+            // `app.sign_out_residue` (`account-scoping.md` § Erasure follows
+            // scope → *The sign-out record is on all 7 apps*, decision 3).
             spawn_signed_out_onboarding_reconcile();
         }
         // The identity was succeeded — the account belongs to someone else's
@@ -1074,6 +1186,12 @@ pub fn route(app: &mut App, tx: &UnboundedSender<UiMessage>, snapshot: LaunchSna
 /// credentials AND the freshly-minted claim-code record must survive the
 /// transition — wiping them here would destroy the code CR-1 exists to protect.
 pub fn enter_factory_reset_reonboard(app: &mut App) {
+    // The identity-scoped clear and the teardown count every arm that ends the
+    // authenticated session owes (`App::begin_identity_teardown`;
+    // `critical-alerts.md` § Mechanism → Lifetime names factory reset). The
+    // re-claim signs in as the SAME identity, so a surviving alert would be
+    // indistinguishable on the banner from a re-raised one.
+    app.begin_identity_teardown();
     crate::session::sign_out(app, fauna_client_account_runtime::StopReason::AccountSwitch);
     app.launch_machine = None;
     // The re-onboard claims the nest and signs in again, so it waits for the
@@ -1200,15 +1318,10 @@ pub async fn perform(app: &mut App, tx: &UnboundedSender<UiMessage>, action: Lau
             route(app, tx, snapshot);
         }
         LaunchAction::Fallthrough => {
-            // "Use a different nest": seed the identity and hand the screen to
-            // the wizard, which `seed_identity` lands at `HandleEntry`.
-            match crate::session::stored_account(app) {
-                Some((_, secret_hex, _)) => {
-                    app.wizard.machine.seed_identity(secret_hex.to_string())
-                }
-                None => tracing::error!("[launch] fallthrough with no stored identity"),
-            }
-            app.launch = LaunchSurface::Wizard;
+            // "Use a different nest": clear the nest binding, seed the identity
+            // and hand the screen to the wizard, which `seed_identity` lands at
+            // `HandleEntry` — and so does the next launch.
+            use_a_different_nest(app);
         }
         LaunchAction::Recover => enter_recovery(app),
         LaunchAction::PickInstance(actor_id) => pick_instance(app, tx, &actor_id),
@@ -1406,9 +1519,7 @@ pub fn spawn_launch_action(app: &mut App, tx: &UnboundedSender<UiMessage>, actio
             let tx = tx.clone();
             tokio::spawn(async move {
                 machine.retry_silent_challenge().await;
-                let _ = tx.send(UiMessage::Data(DataMessage::LaunchPhase(
-                    machine.snapshot(),
-                )));
+                send_verdict(&tx, machine);
             });
         }
         LaunchAction::Trust => {
@@ -1419,21 +1530,11 @@ pub fn spawn_launch_action(app: &mut App, tx: &UnboundedSender<UiMessage>, actio
             let tx = tx.clone();
             tokio::spawn(async move {
                 machine.trust_nest_identity().await;
-                let _ = tx.send(UiMessage::Data(DataMessage::LaunchPhase(
-                    machine.snapshot(),
-                )));
+                send_verdict(&tx, machine);
             });
         }
         // Purely local — no machine call to await.
-        LaunchAction::Fallthrough => {
-            match crate::session::stored_account(app) {
-                Some((_, secret_hex, _)) => {
-                    app.wizard.machine.seed_identity(secret_hex.to_string())
-                }
-                None => tracing::error!("[launch] fallthrough with no stored identity"),
-            }
-            app.launch = LaunchSurface::Wizard;
-        }
+        LaunchAction::Fallthrough => use_a_different_nest(app),
         // Also purely local — the box list was fetched at launch.
         LaunchAction::Recover => enter_recovery(app),
         // Also purely local (a registry mutation + a re-entrant `start` that
@@ -1451,12 +1552,120 @@ pub fn spawn_launch_action(app: &mut App, tx: &UnboundedSender<UiMessage>, actio
     }
 }
 
+/// The one body both dispatch paths run for [`LaunchAction::Fallthrough`]:
+/// walk the account away from its nest through the registry (the binding is
+/// cleared, the identity kept — [`crate::session::walk_away_from_nest`]),
+/// seed the wizard with the identity and hand it the screen.
+fn use_a_different_nest(app: &mut App) {
+    match crate::session::walk_away_from_nest(app) {
+        Some(secret_hex) => app.wizard.machine.seed_identity(secret_hex.to_string()),
+        None => tracing::error!("[launch] fallthrough with no stored identity"),
+    }
+    app.launch = LaunchSurface::Wizard;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ids(surface: &LaunchSurface) -> Vec<String> {
         surface.elements().iter().map(|e| e.id.clone()).collect()
+    }
+
+    fn test_machine() -> Arc<LaunchMachine> {
+        LaunchMachine::new(
+            Arc::new(fauna_launch_machine::NullObserver),
+            Arc::new(crate::session::tests::NoPersistence),
+        )
+    }
+
+    fn identity_changed_snapshot() -> LaunchSnapshot {
+        LaunchSnapshot {
+            phase: LaunchPhase::IdentityChanged {
+                pinned_hex: "ab".repeat(32),
+                seen_hex: Some("cd".repeat(32)),
+            },
+            last_error: Some("pin mismatch".into()),
+            ..LaunchSnapshot::initial()
+        }
+    }
+
+    /// multiple-accounts outcome 17 — `onboarding.md` § App-launch routing → *A
+    /// verdict renders only while its own launch is still the current one*. A
+    /// verdict whose launch has been replaced (an account switch re-entered
+    /// `start`) or cleared (a teardown, the e2e session patch) is dropped
+    /// whole: the surface the superseding path painted stands, and the drop is
+    /// counted for the e2e barrier.
+    ///
+    /// Red-verify by making `deliver` route unconditionally: the session-
+    /// destroying `IdentityChanged` surface replaces the newer launch's.
+    #[test]
+    fn a_superseded_launch_verdict_is_dropped_whole() {
+        for replaced in [true, false] {
+            let mut app = crate::app::tests::authed_app();
+            let tx = app.tx.clone();
+            let stale = test_machine();
+            app.launch_machine = replaced.then(test_machine);
+            app.launch = LaunchSurface::Launching;
+
+            let rendered = deliver(
+                &mut app,
+                &tx,
+                LaunchOrigin(stale),
+                identity_changed_snapshot(),
+            );
+
+            assert!(!rendered, "replaced={replaced}");
+            assert_eq!(app.launch, LaunchSurface::Launching, "replaced={replaced}");
+            assert_eq!(app.launch_verdicts_superseded, 1, "replaced={replaced}");
+            assert_eq!(app.launch_verdicts_routed, 0, "replaced={replaced}");
+        }
+    }
+
+    /// The other half of the ruling: an OWNERSHIP test, never a "session
+    /// present?" one. The current launch's `IdentityChanged` verdict still
+    /// routes in full though a session is live — the MITM warning must never be
+    /// retired by a presence guard.
+    #[test]
+    fn the_current_launch_verdict_routes_over_a_live_session() {
+        let mut app = crate::app::tests::authed_app();
+        assert!(app.authenticated(), "the session is live");
+        let tx = app.tx.clone();
+        let machine = test_machine();
+        app.launch_machine = Some(Arc::clone(&machine));
+
+        let rendered = deliver(
+            &mut app,
+            &tx,
+            LaunchOrigin(machine),
+            identity_changed_snapshot(),
+        );
+
+        assert!(rendered);
+        assert!(
+            matches!(app.launch, LaunchSurface::IdentityChanged { .. }),
+            "{:?}",
+            app.launch
+        );
+        assert_eq!(app.launch_verdicts_routed, 1);
+        assert_eq!(app.launch_verdicts_superseded, 0);
+    }
+
+    /// The session patch retires a launch only while it is in flight: a
+    /// settled machine stays (it may be the session's bearer source), an
+    /// in-flight one is cleared so its verdict lands on [`deliver`]'s drop.
+    #[test]
+    fn retire_in_flight_clears_only_an_in_flight_launch() {
+        let mut app = crate::app::tests::test_app();
+        app.launch_machine = Some(test_machine());
+        app.launch = LaunchSurface::Launching;
+        retire_in_flight(&mut app);
+        assert!(app.launch_machine.is_none());
+        assert_eq!(app.launch, LaunchSurface::Wizard);
+
+        app.launch_machine = Some(test_machine());
+        retire_in_flight(&mut app);
+        assert!(app.launch_machine.is_some(), "a settled launch is kept");
     }
 
     fn refusal_snapshot(refusal: AccountIndexRefusal) -> LaunchSnapshot {
@@ -1478,6 +1687,50 @@ mod tests {
     ///
     /// Red-verify by deleting the fork arm: the ordinary warning and the trust
     /// button come back.
+    /// connect-and-sign-in outcome 16 — "Use a different nest" walks the
+    /// account away from its nest: the `(nest_url, device_id)` binding is
+    /// cleared through the registry (so the next launch starts at the handle
+    /// step, never the old nest's retry surface) while the identity's secret
+    /// is kept and seeded into the wizard. Both dispatch paths — the spawned
+    /// one the event loop runs and the awaited one the automation driver
+    /// runs — share the one body, and each is pinned here.
+    ///
+    /// Red-verify by dropping the `clear_nest_binding` call from
+    /// `session::walk_away_from_nest`: the nest URL survives.
+    #[test]
+    fn use_a_different_nest_clears_the_nest_binding_and_keeps_the_identity() {
+        for awaited in [false, true] {
+            let mut app = crate::app::tests::test_app();
+            let tx = app.tx.clone();
+            let secret = "01".repeat(32);
+            let actor = crate::session::registry(&app)
+                .add_account(&secret, Some("https://old.example"), Some("dev-1"))
+                .expect("account");
+            if awaited {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("runtime")
+                    .block_on(perform(&mut app, &tx, LaunchAction::Fallthrough));
+            } else {
+                spawn_launch_action(&mut app, &tx, LaunchAction::Fallthrough);
+            }
+
+            let stored = crate::session::registry(&app)
+                .secrets(&actor)
+                .expect("the identity survives the walk-away");
+            assert_eq!(stored.secret_hex.to_string(), secret, "awaited={awaited}");
+            assert_eq!(
+                stored.nest_url, None,
+                "nest URL cleared (awaited={awaited})"
+            );
+            assert_eq!(
+                stored.device_id, None,
+                "device id cleared (awaited={awaited})"
+            );
+            assert_eq!(app.launch, LaunchSurface::Wizard, "awaited={awaited}");
+        }
+    }
+
     #[test]
     fn fork_evidence_names_both_heads_and_offers_no_trust_button() {
         let mut app = crate::app::tests::test_app();
@@ -2255,6 +2508,43 @@ mod tests {
         assert!(ids(&LaunchSurface::Launching).is_empty());
         assert!(ids(&LaunchSurface::Wizard).is_empty());
         assert_eq!(LaunchSurface::Launching.error_text(), None);
+    }
+
+    /// `launch-identity-label` leads `launch_progress` and `launch_retry` when
+    /// the bound account has a cached identity, is absent without one, and
+    /// never rides any other launch surface (`onboarding.md` § App-launch
+    /// routing → *The cached identity on the launch surfaces*).
+    #[test]
+    fn the_cached_identity_leads_only_the_progress_and_retry_surfaces() {
+        let line = Some("alice@fauna.test \u{b7} plus");
+        let launching = LaunchSurface::Launching.elements_with_identity(line);
+        assert_eq!(launching.len(), 1);
+        assert_eq!(launching[0].id, "launch-identity-label");
+        assert_eq!(launching[0].text, "alice@fauna.test \u{b7} plus");
+
+        let retry = LaunchSurface::TransientRetry {
+            error: "connection timed out".into(),
+            recover_boxes: Vec::new(),
+        };
+        let els = retry.elements_with_identity(line);
+        assert_eq!(els[0].id, "launch-identity-label");
+        assert_eq!(els[1].id, "launch-transient-error");
+        assert!(
+            retry
+                .elements_with_identity(None)
+                .iter()
+                .all(|e| e.id != "launch-identity-label")
+        );
+
+        let outdated = LaunchSurface::NeedsUpdate {
+            error: "outdated".into(),
+        };
+        assert!(
+            outdated
+                .elements_with_identity(line)
+                .iter()
+                .all(|e| e.id != "launch-identity-label")
+        );
     }
 
     /// An empty `last_error` still leaves `launch-transient-error` visible —

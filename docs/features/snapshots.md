@@ -4,6 +4,10 @@ title: Backups: snapshots
 section: your data and devices
 goal: docs/goal/ui/backups.md § Goal
 guide: docs/guides/cloud-backup.md § Snapshots: the time machine on your nest
+absences:
+  web (outcome 6): "docs/goal/ui/backups.md § Whole-snapshot restore"
+  ios (outcome 6): "docs/goal/ui/backups.md § Whole-snapshot restore"
+  android (outcome 6): "docs/goal/ui/backups.md § Whole-snapshot restore"
 ---
 
 ## What a user gets
@@ -15,7 +19,7 @@ Deleting a snapshot for good needs a typed confirmation.
 
 ## Coverage contract
 
-Stamped 2026-10-18 at bf8822c2a9.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] A snapshot lists its files, and the newest one is what "last backed up" reports — `docs/goal/ui/backups.md` § Snapshot-list shape
    - `tests/e2e-unified/tests/test_backups.py::test_snapshot_detail_files_visible`
@@ -58,19 +62,23 @@ Stamped 2026-10-18 at bf8822c2a9.
     - `tests/e2e-unified/tests/test_backups.py::test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore`
 15. [nest] A conversation with new messages gets a snapshot by itself, with nothing asked of you — `docs/goal/behavior/backup-restore.md` § 5. Message-kind snapshots
     - `tests/e2e-unified/tests/api/test_snapshot_auto_capture.py::test_a_conversation_with_new_messages_snapshots_itself`
+16. [nest] Restoring a posts snapshot brings back the posts it holds and never removes a post you made since — `docs/goal/architecture/message-segment-store.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_dr_restore.py::test_a_posts_snapshot_restore_adds_its_posts_and_keeps_a_later_one`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -91,6 +99,7 @@ Stamped 2026-10-18 at bf8822c2a9.
 | 5 | nest | `tests/e2e-unified/tests/api/test_snapshot_backups.py::test_snapshot_get_lists_the_seeded_file` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_snapshot_create_idempotency.py::test_repeated_create_restore_cycles` | nest (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_backups.py::test_snapshot_restore_writes_the_whole_tree_byte_identically` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | absent by design on web, ios, android, android-kids, ios-kids | — |
 | 7 | app | `tests/e2e-unified/tests/test_backups.py::test_snapshot_detail_files_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_backups.py::test_every_snapshot_row_reads_as_a_snapshot_newest_first` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_backups.py::test_a_snapshot_on_its_way_out_says_so_on_its_own_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -100,4 +109,5 @@ Stamped 2026-10-18 at bf8822c2a9.
 | 13 | nest | `tests/e2e-unified/tests/api/test_snapshot_diff.py::test_diff_reports_added_removed_and_modified` | nest (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_backups.py::test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_snapshot_auto_capture.py::test_a_conversation_with_new_messages_snapshots_itself` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_dr_restore.py::test_a_posts_snapshot_restore_adds_its_posts_and_keeps_a_later_one` | nest (linux): passed |
 <!-- features-render:end -->

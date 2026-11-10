@@ -3,27 +3,38 @@ package com.fauna.app.core
 import com.fauna.ffi.FfiAccountRegistry
 import com.fauna.ffi.FfiCredentialSweep
 import com.fauna.ffi.FfiResidueCredentialEraser
+import com.fauna.ffi.FfiSignOutHost
 
 /**
- * Android's credential erase — the ONE sequence the sign-out, the
- * account-index reset and the residue retry all run, so the retry re-runs
- * exactly what the sign-out ran (`account-scoping.md` § Erasure follows scope →
- * *the residue surface*, "the seat's own credential erase").
+ * Android's own credential acts — handed to shared Rust by the sign-out
+ * record's finish (`com.fauna.ffi.signOutFinish`, the one routine the sign-out's
+ * tail, the launch and Remove Again run — `account-scoping.md` § Erasure follows
+ * scope → *The sign-out record is on all 7 apps*) as its [FfiSignOutHost].
  *
- * `clearAll` deletes every per-actor slot and the index and reads back what it
- * deleted; `secureStorage.clear()` is the platform store's own wholesale reset;
- * `reverifyErase` re-asks after it, so a key that reset took is not reported.
- * Fold after the LAST wipe — reading back any earlier reports credentials the
- * reset already removed.
+ * - [wipeOwnStore] — the finish's wipe: shared Rust has already run the
+ *   registry's own wipe (`wipe_own`: the index and this app's per-actor slots,
+ *   never the shared account-store namespace, whose slots ride with each
+ *   account's scopes); this is the platform store's own wholesale reset,
+ *   `secureStorage.clear()`, which shared Rust reads back after.
+ * - [eraseCredentials] — the residue retry's credential erase: `clearAll`
+ *   deletes every per-actor slot and the index and reads back what it deleted;
+ *   `secureStorage.clear()`; `reverifyErase` re-asks after it, so a key that
+ *   reset took is not reported. Shared Rust reads the RECORDED keys back on top
+ *   of this answer (the registry is empty by then).
  *
- * Handed to shared Rust as the residue retry's [FfiResidueCredentialEraser],
- * which reads the RECORDED keys back on top of this answer (the registry is
- * empty by then, so its own read-back cannot name them).
+ * Also the [FfiResidueCredentialEraser] the residue face's older exports take.
  */
 class SignOutCredentialEraser(
     private val registry: FfiAccountRegistry,
     private val secureStorage: SecureStorage,
-) : FfiResidueCredentialEraser {
+) : FfiResidueCredentialEraser, FfiSignOutHost {
+    override fun wipeOwnStore(): Boolean {
+        // Best-effort and logged inside `clear()`; the read-back shared Rust
+        // runs after this is the witness of what the reset left.
+        secureStorage.clear()
+        return true
+    }
+
     override fun eraseCredentials(): FfiCredentialSweep {
         val erased = registry.clearAll()
         secureStorage.clear()

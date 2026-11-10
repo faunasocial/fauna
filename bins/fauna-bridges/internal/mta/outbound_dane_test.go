@@ -23,9 +23,13 @@ type daneCaller struct {
 	mtaStsCaller
 	// tlsaRecords is returned for fetch_tlsa (empty = no DANE).
 	tlsaRecords []wsrpc.TlsaRecordWire
-	// tlsaErr, when non-nil, is returned for fetch_tlsa (simulating an RPC
-	// transport / resolver failure — must not block delivery).
+	// tlsaErr, when non-nil, is returned for fetch_tlsa on every host
+	// (simulating an RPC transport failure or a DNSSEC validation failure —
+	// the host is unreachable, RFC 7672 §2.1.2).
 	tlsaErr error
+	// tlsaErrHosts, when it names the fetched mx_host, fails that host's
+	// fetch_tlsa only.
+	tlsaErrHosts map[string]error
 	// nTlsa counts fetch_tlsa calls, so a test can assert the DNSSEC-MX gate
 	// fires BEFORE the fetch rather than discarding its result after.
 	// Guarded by the embedded queueCaller's mu.
@@ -46,6 +50,21 @@ func (c *daneCaller) Call(ctx context.Context, method string, body, reply any) e
 		c.mu.Unlock()
 		if c.tlsaErr != nil {
 			return c.tlsaErr
+		}
+		if len(c.tlsaErrHosts) > 0 {
+			reqBytes, err := dagcbor.Marshal(body)
+			if err != nil {
+				return err
+			}
+			var req struct {
+				MxHost string `cbor:"mx_host"`
+			}
+			if err := cbor.Unmarshal(reqBytes, &req); err != nil {
+				return err
+			}
+			if hostErr, ok := c.tlsaErrHosts[req.MxHost]; ok {
+				return hostErr
+			}
 		}
 		out := struct {
 			Records []wsrpc.TlsaRecordWire `cbor:"records"`
@@ -136,10 +155,41 @@ func TestDaneNoRecordsFallsThrough(t *testing.T) {
 	}
 }
 
-// TestDaneFetchErrorFallsThrough: a fetch_tlsa RPC failure must NOT block
-// delivery — the worker logs and proceeds with the base (opportunistic)
-// posture (a TLSA fetch failure is not a delivery failure).
-func TestDaneFetchErrorFallsThrough(t *testing.T) {
+// TestDaneFetchErrorSkipsTheHost: a fetch_tlsa failure on one host — the
+// RPC failing, or nest's validating lookup failing (Bogus / Indeterminate,
+// SERVFAIL, timeout) — makes that host unreachable (RFC 7672 §2.1.2): it is
+// NEVER sent to unpinned, the next MX host is tried, and the skip is
+// reported to TLSRPT as RFC 8460 `dnssec-invalid`.
+func TestDaneFetchErrorSkipsTheHost(t *testing.T) {
+	c := &daneCaller{
+		mtaStsCaller: mtaStsCaller{
+			queueCaller: queueCaller{batches: [][]wsrpc.OutboundUnit{{twoHostUnit()}, nil}},
+			stsOutcome:  "not_published",
+		},
+		tlsaErrHosts: map[string]error{"mx-a.dest.test": errors.New("TLSA lookup failed: DNSSEC validation failed")},
+	}
+	calls := runDaneUnit(t, c, &stsSender{})
+	if len(calls) != 1 || calls[0].Host != "mx-b.dest.test" {
+		t.Fatalf("calls=%+v want a single send to mx-b.dest.test (mx-a skipped, never sent unpinned)", calls)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var skipped []tlsReportCall
+	for _, r := range c.tlsReports {
+		if r.MxHost == "mx-a.dest.test" {
+			skipped = append(skipped, r)
+		}
+	}
+	if len(skipped) != 1 || skipped[0].ResultType != "dnssec-invalid" {
+		t.Fatalf("TLSRPT reports for mx-a = %+v want one dnssec-invalid", skipped)
+	}
+}
+
+// TestDaneFetchErrorOnEveryHostDelaysDelivery: when every candidate host's
+// TLSA lookup fails, nothing is sent and the unit is reported
+// mark_outbound_failed (temporary — nest reschedules on the retry curve),
+// never bounced and never delivered unpinned.
+func TestDaneFetchErrorOnEveryHostDelaysDelivery(t *testing.T) {
 	c := &daneCaller{
 		mtaStsCaller: mtaStsCaller{
 			queueCaller: queueCaller{batches: [][]wsrpc.OutboundUnit{{twoHostUnit()}, nil}},
@@ -147,9 +197,23 @@ func TestDaneFetchErrorFallsThrough(t *testing.T) {
 		},
 		tlsaErr: errors.New("nest unreachable"),
 	}
-	calls := runDaneUnit(t, c, &stsSender{})
-	if len(calls) != 1 || calls[0].TLSPolicy.Mode != TLSOpportunistic {
-		t.Fatalf("calls=%+v want single opportunistic send on fetch_tlsa error", calls)
+	sender := &stsSender{}
+	w := newDaneWorker(t, c, twoHostMX(), sender)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wg := w.Start(ctx)
+	waitUntil(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.failed) == 1
+	}, "failed")
+	cancel()
+	wg.Wait()
+	if n := len(sender.snapshot()); n != 0 {
+		t.Fatalf("sender called %d times; want 0 (every host's TLSA lookup failed)", n)
+	}
+	if len(c.bounced) != 0 || len(c.delivered) != 0 {
+		t.Fatalf("bounced=%+v delivered=%+v; a TLSA lookup failure delays delivery, never bounces", c.bounced, c.delivered)
 	}
 }
 

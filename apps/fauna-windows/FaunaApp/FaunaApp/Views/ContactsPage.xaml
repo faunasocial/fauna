@@ -191,10 +191,16 @@
                  measuring to infinity. The list is grouped: one section per relationship
                  status in the shared order (RosterSource), headed by the shared status
                  label. A heading carries no AutomationId (ui.yaml scopes none), and the
-                 indexed contact-row ids keep counting across sections in paint order. -->
+                 indexed contact-row ids keep counting across sections in paint order.
+                 IsSynchronizedWithCurrentItem="False" is load-bearing: bound to the
+                 CollectionViewSource's view, a ListView otherwise selects the view's
+                 current item (the first row) as the roster paints, and a selection here
+                 IS the open-profile gesture, so every non-empty roster navigated
+                 straight to its first contact's profile. -->
             <ListView
                 x:Name="ContactsList"
                 MaxHeight="480"
+                IsSynchronizedWithCurrentItem="False"
                 SelectionChanged="ContactsList_SelectionChanged"
                 ContainerContentChanging="ContactsList_ContainerContentChanging">
                 <ListView.GroupStyle>

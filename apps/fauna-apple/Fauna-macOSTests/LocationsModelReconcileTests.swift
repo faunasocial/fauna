@@ -418,7 +418,7 @@ private func makeFolderSummaryFixture(
         cachedLastSnapshotAt: nil, includePaths: nil, excludePaths: nil,
         includePathsUnreadable: false, excludePathsUnreadable: false,
         mlsGroupId: mlsGroupId, role: nil, access: nil, ownerHandle: nil,
-        ownerDisplay: "", webdavEnabled: false, conflictPolicy: nil,
+        ownerDisplay: "", seatForked: false, webdavEnabled: false, conflictPolicy: nil,
         webPaywallTier: nil, homeNestUrl: homeNestUrl, nestSnapshots: nil,
         nestSnapshotQuietSecs: nil,
         // The version-retention bounds pair. `0` is that bound *unset*, so

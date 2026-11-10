@@ -570,6 +570,12 @@ impl Signed for crate::subscription::types::FollowIntent {
     }
 }
 
+impl Signed for crate::subscription::types::ClaimRedeemIntent {
+    fn signer_public_key(&self) -> &[u8; 32] {
+        &self.redeemer.0
+    }
+}
+
 impl Signed for DeviceAuthorization {
     fn signer_public_key(&self) -> &[u8; 32] {
         &self.actor_id.0

@@ -1151,3 +1151,82 @@ def _reset_to_off(bs) -> None:
     assert bs.wait_for_depth_level("off", timeout=15.0), (
         f"could not reset to Off. level={bs.depth_level()!r} error={bs.page_error_text()!r}"
     )
+
+
+@pytest.mark.tui
+@pytest.mark.feature("atproto")
+def test_the_posting_permission_survives_deleting_the_presence(
+    atproto_hosted_logged_in_app,
+):
+    """Letting other apps post as you survives deleting your presence; only
+    revoking it, its lapse or a succession ends it (`atproto-pds-full.md`
+    § Problem 3, the revocation bullet, ruled 2026-10-23: the step-down and the
+    delete-presence sweep leave the delegation in place, where its row — visible
+    at every level — still shows and stops it).
+
+    The step-down half is `test_the_posting_permission_shows_and_stops_below_
+    the_full_level` above; this is the delete-presence half, which a cascade
+    killed silently until the ruling. The journey: hold a delegation at
+    hosted_full, step down to hosted_visible (where the delete action lives),
+    run the delete ceremony through its own card, and the level lands on off
+    with the held row — status, scope, Stop — still rendered and active. Stop
+    then ends it from there, so the revoke is still the user's to make.
+
+    tui first (the lead-app rule, `testing.md` § Default app and nest mode);
+    the other six add their marks in the batched trickle-down.
+    """
+    app = atproto_hosted_logged_in_app
+    bs = app.atproto_settings
+    bs.ensure_hosted_full()
+    assert bs.wait_for_fullpds_visible(), (
+        f"the full-PDS panel must be present. error: {bs.page_error_text()!r}"
+    )
+    if not bs.is_delegation_row_visible():
+        bs.authorize_delegation()
+        assert bs.wait_for_delegation(present=True), (
+            f"authorizing must render the delegation row. error: {bs.page_error_text()!r}"
+        )
+    assert bs.wait_for_delegation_status("active"), (
+        f"a held delegation is active, not {bs.delegation_status()!r}. "
+        f"error: {bs.page_error_text()!r}"
+    )
+
+    bs.select_depth("hosted_visible")
+    assert bs.wait_for_card(), "stepping down from full PDS must stage a card"
+    bs.confirm_transition()
+    assert bs.wait_for_depth_level("hosted_visible"), (
+        f"confirm must step down. level={bs.depth_level()!r} error={bs.page_error_text()!r}"
+    )
+    assert bs.wait_for_delegation(present=True), (
+        "precondition: the held posting permission survives the step-down. "
+        f"error: {bs.page_error_text()!r}"
+    )
+
+    assert bs.is_delete_presence_visible(), "a standing presence offers the delete action"
+    bs.open_delete_confirm()
+    assert bs.wait_for_delete_card(), (
+        f"atproto-delete-presence must open its confirm ceremony. error={bs.page_error_text()!r}"
+    )
+    bs.confirm_delete()
+    assert bs.wait_for_depth_level("off", timeout=20.0), (
+        f"confirming the sweep lands the level on off. level={bs.depth_level()!r} "
+        f"error={bs.page_error_text()!r}"
+    )
+    assert bs.wait_for_no_delete_presence(timeout=20.0), "the presence is destroyed"
+
+    assert bs.wait_for_delegation(present=True), (
+        "the posting permission must survive deleting the presence — only the "
+        "user's revoke, its lapse or a succession ends it. "
+        f"error: {bs.page_error_text()!r}. "
+        f"diagnose: {app.driver.diagnose('atproto-delegation-row')}."
+    )
+    assert bs.wait_for_delegation_status("active"), (
+        f"after the sweep the permission is still active, not {bs.delegation_status()!r}. "
+        f"error: {bs.page_error_text()!r}"
+    )
+    assert bs.delegation_scope_text().strip(), "the row still names what was granted"
+
+    bs.revoke_delegation()
+    assert bs.wait_for_delegation(present=False), (
+        f"Stop must still end the permission after the sweep. error: {bs.page_error_text()!r}"
+    )

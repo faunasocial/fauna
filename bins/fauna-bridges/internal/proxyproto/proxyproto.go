@@ -37,8 +37,20 @@
 // and laundering the per-IP audit. So when a router-auth secret is provisioned
 // (WithRouterAuth), a header is honoured only if it carries a matching
 // TLV_TYPE_ROUTER_AUTH TLV — the router writes a secret from a root-owned file
-// no bridge UID can read. A missing/wrong secret falls back to the genuine
-// loopback peer, never the spoofed address. With no secret configured (a
+// no bridge UID can read.
+//
+// A refused header forfeits loopback trust. A loopback peer that sent the
+// PROXY signature but whose header is not honoured — the router-auth TLV
+// missing or mismatched, a prefix or address block that does not parse, a
+// non-PROXY command, a declared length over the cap, a header cut short or
+// stalled past the read deadline — reports UntrustedProxiedSource (0.0.0.0:0),
+// never the conveyed address (unauthenticated) and never the loopback peer:
+// the loopback peer carries a trust (connlimit's loopback ceiling in place of
+// the admin's per-IP cap) that only a headerless same-box dial has earned, and
+// a router holding a secret this bridge does not would otherwise deliver every
+// internet client as 127.0.0.1. The connection is still served, as one shared
+// untrusted source, and the refusal is logged rate-limited. With no secret
+// configured (a
 // non-router box, or a provisioning gap) the trust-any-loopback
 // behaviour stands, deliberately permissive: failing closed there would collapse
 // every external client onto the router's loopback address, which is worse than
@@ -58,6 +70,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -95,6 +108,48 @@ const (
 	// tlvHeaderLen is what one TLV adds beyond its value: type(1) + length(2 BE).
 	tlvHeaderLen = 3
 )
+
+// UntrustedProxiedSource is the address a loopback connection reports when it
+// carried a PROXY-v2 signature the peel refused to honour (the package doc's
+// *A refused header forfeits loopback trust*). Constant and non-loopback by
+// construction — 0.0.0.0:0 is no peer's real address and IsLoopback is false
+// on it — so every consumer keyed on RemoteAddr (connlimit's per-IP ceiling,
+// the CalDAV AUTH lockout and audit, the XRPC source-IP limiter) treats such
+// connections as ONE untrusted remote source without learning a new flag. The
+// Go twin of the nest's UNTRUSTED_PROXIED_SOURCE; the two MUST stay equal.
+// Callers must not mutate it.
+var UntrustedProxiedSource net.Addr = &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+
+// refusedLogInterval rate-limits the refused-header warning: a misprovisioned
+// router refuses EVERY connection, so one line per interval, carrying the count
+// since the last, is the signal without the flood.
+const refusedLogInterval = time.Minute
+
+var (
+	refusedLastLog atomic.Int64 // unix nanos of the last refused-header line
+	refusedSince   atomic.Int64 // refusals since that line
+	// refusedLogger receives the refused-header warning; a test seam,
+	// slog.Default in production.
+	refusedLogger = slog.Default
+)
+
+// noteRefused counts one refused header and warns at most once per
+// refusedLogInterval, naming the router-auth secret's provisioning as the
+// likely cause.
+func noteRefused(peer net.Addr, reason string) {
+	refusedSince.Add(1)
+	now := time.Now().UnixNano()
+	last := refusedLastLog.Load()
+	if last != 0 && now-last < int64(refusedLogInterval) {
+		return
+	}
+	if !refusedLastLog.CompareAndSwap(last, now) {
+		return
+	}
+	n := refusedSince.Swap(0)
+	refusedLogger().Warn("PROXY-v2 header from loopback peer refused; serving it as an untrusted remote source with no loopback trust — on a router-fronted box check /data/keys/router/proxy-secret provisioning",
+		"peer", peer.String(), "reason", reason, "refused_since_last_line", n)
+}
 
 type prefixInfo struct {
 	famProto       byte
@@ -274,7 +329,8 @@ type Conn struct {
 
 func (c *Conn) readHeader() {
 	c.once.Do(func() {
-		// Default: the genuine TCP peer. Overwritten only by a trusted header.
+		// Default: the genuine TCP peer. Overwritten by a trusted header's
+		// source, or by UntrustedProxiedSource once a header was refused.
 		c.realAddr = c.Conn.RemoteAddr()
 		tcp, ok := c.Conn.RemoteAddr().(*net.TCPAddr)
 		if !ok || !tcp.IP.IsLoopback() {
@@ -286,34 +342,56 @@ func (c *Conn) readHeader() {
 
 		// Peek the first byte without consuming: 0x0D ⇒ a PROXY header, anything
 		// else (a TLS ClientHello's 0x16, an IMAP/SMTP greeting) ⇒ headerless,
-		// leave every byte for the downstream reader.
+		// leave every byte for the downstream reader and keep the genuine peer.
 		sig, err := c.br.Peek(1)
 		if err != nil || sig[0] != Signature[0] {
 			return
 		}
-		// First byte is the signature start ⇒ the router committed a full header.
-		// From here we consume it; a malformed header from a (trusted) loopback
-		// peer leaves the stream out of sync so the TLS handshake fails closed —
-		// acceptable, as only a buggy loopback peer can reach this branch.
+		// First byte is the signature start ⇒ a header was sent. From here on
+		// every path that does not honour it reports UntrustedProxiedSource,
+		// never the loopback peer (the package doc's *A refused header forfeits
+		// loopback trust*). A malformed header leaves the stream out of sync,
+		// so the TLS handshake fails closed anyway.
+		refuse := func(reason string) {
+			c.realAddr = UntrustedProxiedSource
+			noteRefused(tcp, reason)
+		}
 		prefix, err := c.br.Peek(PrefixLen)
 		if err != nil {
+			refuse("header cut short or stalled")
 			return
 		}
 		info, ok := parsePrefix(prefix)
-		if !ok || !info.isProxyCommand || info.addrLen > maxAddrLen {
+		switch {
+		case !ok:
+			refuse("unparseable prefix")
+			return
+		case !info.isProxyCommand:
+			refuse("not a PROXY command")
+			return
+		case info.addrLen > maxAddrLen:
+			refuse("declared length over the cap")
 			return
 		}
 		full, err := c.br.Peek(PrefixLen + info.addrLen)
 		if err != nil {
+			refuse("header cut short or stalled")
 			return
 		}
-		if src, ok := parseSrc(info.famProto, full[PrefixLen:]); ok && c.headerIsTrusted(info.famProto, full[PrefixLen:]) {
-			c.realAddr = src
-		}
-		// The header is consumed whether or not its source was honoured — the
+		// The header is consumed whether or not its source is honoured — the
 		// stream must be positioned at the ClientHello for the TLS acceptor
 		// either way (nest's read_optional_proxy_header does the same).
-		_, _ = c.br.Discard(PrefixLen + info.addrLen)
+		defer func() { _, _ = c.br.Discard(PrefixLen + info.addrLen) }()
+		src, ok := parseSrc(info.famProto, full[PrefixLen:])
+		if !ok {
+			refuse("unparseable address block")
+			return
+		}
+		if !c.headerIsTrusted(info.famProto, full[PrefixLen:]) {
+			refuse("router-auth TLV missing or mismatched")
+			return
+		}
+		c.realAddr = src
 	})
 }
 
@@ -336,7 +414,8 @@ func (c *Conn) Read(p []byte) (int, error) {
 }
 
 // RemoteAddr returns the PROXY-v2-conveyed client address when a trusted header
-// was present, else the genuine TCP peer.
+// was present, UntrustedProxiedSource when a loopback peer's header was
+// refused, else the genuine TCP peer.
 func (c *Conn) RemoteAddr() net.Addr {
 	c.readHeader()
 	return c.realAddr

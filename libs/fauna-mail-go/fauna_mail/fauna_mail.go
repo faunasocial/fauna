@@ -705,11 +705,38 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_mail_checksum_func_effective_spam_score_milli()
+		})
+		if checksum != 19568 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_mail: uniffi_fauna_mail_checksum_func_effective_spam_score_milli: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_mail_checksum_func_report_spam_milli()
+		})
+		if checksum != 41622 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_mail: uniffi_fauna_mail_checksum_func_report_spam_milli: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_mail_checksum_func_apply_spam_training()
 		})
 		if checksum != 31935 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_mail: uniffi_fauna_mail_checksum_func_apply_spam_training: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_mail_checksum_func_bayesian_has_say_for_model()
+		})
+		if checksum != 54388 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_mail: uniffi_fauna_mail_checksum_func_bayesian_has_say_for_model: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -6568,6 +6595,37 @@ func DecideSpamDisposition(combinedScoreMilli int32, verdicts fauna_core.AuthVer
 	}))
 }
 
+// The effective spam score a post-delivery scoring position compares against
+// a message's own threshold: the classifier combination plus the
+// `report:spam` term.
+//
+// `combined_spam_score_milli(rspamd, bayesian) + report_spam_milli(report_pm)`
+// — additive ON TOP of the max, never inside it: the reports are other
+// people's judgments, independent evidence beside the classifiers' estimate
+// (the unlisted-recipient penalty's precedent; `report-sharing.md`
+// § Applying the aggregate). `report_pm = 0` (no live row) leaves the combined
+// value unchanged. Saturating at `i32::MAX`.
+func EffectiveSpamScoreMilli(rspamdScaledMilli int32, weightedBayesianMilli int32, reportPm int64) int32 {
+	return FfiConverterInt32INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int32_t {
+		return C.uniffi_fauna_mail_fn_func_effective_spam_score_milli(FfiConverterInt32INSTANCE.Lower(rspamdScaledMilli), FfiConverterInt32INSTANCE.Lower(weightedBayesianMilli), FfiConverterInt64INSTANCE.Lower(reportPm), _uniffiStatus)
+	}))
+}
+
+// The `report:spam` aggregate's term on the mail scale, in milli-units of the
+// 0–15 scale.
+//
+// The report-sharing curve's per-mille score (`report-sharing.md` § The
+// aggregate) maps its full scale onto the full point scale: 1000‰ → 15 points
+// (15000 milli), so the k = 3 floor's 200‰ is 3 points and the peer-only
+// bucket's 100‰ is 1.5 (`report-sharing.md` § Applying the aggregate). The
+// input is clamped to `0..=1000`: the curve never leaves that range, and a
+// malformed row must neither subtract from the classifiers nor overflow.
+func ReportSpamMilli(scorePm int64) int32 {
+	return FfiConverterInt32INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int32_t {
+		return C.uniffi_fauna_mail_fn_func_report_spam_milli(FfiConverterInt64INSTANCE.Lower(scorePm), _uniffiStatus)
+	}))
+}
+
 // Apply one agent-side `\Junk`-train event to a **decoded (plaintext)** per-user
 // spam model — the mutate step of the Go MDA training a *sealed* model (leg 2 of
 // the tier-1 at-rest sealing end-game, `mail-spam.md`).
@@ -6591,6 +6649,16 @@ func ApplySpamTraining(modelBytes []byte, text string, isSpam bool) SpamTraining
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_mail_fn_func_apply_spam_training(FfiConverterBytesINSTANCE.Lower(modelBytes), FfiConverterStringINSTANCE.Lower(text), FfiConverterBoolINSTANCE.Lower(isSpam), _uniffiStatus),
 		}
+	}))
+}
+
+// [`bayesian_has_say`] over a serialized (already folded) model — reads its
+// `sample_count()` exactly as [`weighted_bayesian_milli_for_model`] does, so the
+// gate and the score see one model. Unreadable/empty ⇒ a fresh empty model ⇒
+// no say. The Go MDA's `mailfauna.BayesianHasSayForModel` wraps it.
+func BayesianHasSayForModel(modelBytes []byte, knobs BayesianKnobs, spamFolderTier uint32) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_mail_fn_func_bayesian_has_say_for_model(FfiConverterBytesINSTANCE.Lower(modelBytes), FfiConverterBayesianKnobsINSTANCE.Lower(knobs), FfiConverterUint32INSTANCE.Lower(spamFolderTier), _uniffiStatus)
 	}))
 }
 

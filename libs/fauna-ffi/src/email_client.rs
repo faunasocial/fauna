@@ -304,6 +304,41 @@ impl FfiEmailClient {
     pub(crate) fn client(&self) -> EmailClient<Arc<NestClient>> {
         EmailClient::new(Arc::clone(&self.nest))
     }
+
+    /// [`Self::filters_create_or_queue`] through an explicit queue.
+    #[allow(clippy::too_many_arguments)]
+    async fn filters_create_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        name: String,
+        rules: Vec<FfiEmailFilterRule>,
+        combination: String,
+        action: FfiEmailFilterAction,
+        priority: i32,
+        continue_on_match: bool,
+    ) -> Result<bool, FfiError> {
+        let rules = rules
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<EmailFilterRule>, _>>()?;
+        let composed = self
+            .client()
+            .filters_create_or_queue(
+                queue,
+                name,
+                rules,
+                combination,
+                action.try_into()?,
+                priority,
+                continue_on_match,
+            )
+            .await
+            .map_err(crate::family::compose_err)?;
+        Ok(matches!(
+            composed,
+            fauna_protocol::offline_intent::Composed::Queued(_)
+        ))
+    }
 }
 
 #[fauna_uniffi_async::export]
@@ -343,6 +378,35 @@ impl FfiEmailClient {
             )
             .await
             .map_err(stringify)
+    }
+
+    /// [`Self::filters_create`] sent now or queued with no nest (the
+    /// `OfflineQueued` composer, `account-offline-mutation.md` § The
+    /// offline-mutation contract), over the device outbox the first connection
+    /// word wired (`offline_outbox::DEVICE`). `true` = queued: the rule has no
+    /// server id until the drain, so a caller resets its form and lists
+    /// nothing; `false` = sent, and the caller re-lists as after a create.
+    #[uniffi::method(default(continue_on_match = false))]
+    pub async fn filters_create_or_queue(
+        &self,
+        name: String,
+        rules: Vec<FfiEmailFilterRule>,
+        combination: String,
+        action: FfiEmailFilterAction,
+        priority: i32,
+        continue_on_match: bool,
+    ) -> Result<bool, FfiError> {
+        let queue = crate::family::device_queue();
+        self.filters_create_through(
+            queue.as_deref(),
+            name,
+            rules,
+            combination,
+            action,
+            priority,
+            continue_on_match,
+        )
+        .await
     }
 
     /// `fauna.email.filters.get`
@@ -631,6 +695,55 @@ pub fn describe_email_filter_rule(rule: FfiEmailFilterRule) -> Option<FfiDescrib
 pub fn email_filter_action_label(action: FfiEmailFilterAction) -> LocalizedText {
     let action = action_for_reading(action);
     filter_action_label(&action)
+}
+
+#[cfg(test)]
+mod offline_composer_tests {
+    use super::*;
+    use fauna_client_testkit::RecordingQueue;
+
+    fn client() -> Arc<FfiEmailClient> {
+        FfiEmailClient::from_nest(NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        ))
+    }
+
+    fn create(queue: &RecordingQueue) -> Result<bool, FfiError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(client().filters_create_through(
+                Some(queue),
+                "Move newsletters".into(),
+                vec![FfiEmailFilterRule::SenderDomain {
+                    domain: "news.example".into(),
+                }],
+                "all".into(),
+                FfiEmailFilterAction::Allow,
+                0,
+                false,
+            ))
+    }
+
+    /// With no nest the door answers QUEUED and the create rests in the outbox.
+    #[test]
+    fn a_filter_create_with_no_nest_is_queued() {
+        let queue = RecordingQueue::new("disconnected");
+        assert!(create(&queue).unwrap(), "no nest: queued");
+        let kinds: Vec<_> = queue.queued().into_iter().map(|q| q.0).collect();
+        assert_eq!(kinds, vec!["fauna.email.filters.create"]);
+    }
+
+    /// Connected, the create is sent (to this dummy nest it fails on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn a_filter_create_with_the_nest_connected_is_sent_not_queued() {
+        let queue = RecordingQueue::new("connected");
+        assert!(create(&queue).is_err(), "the send was attempted");
+        assert!(queue.queued().is_empty());
+    }
 }
 
 #[cfg(test)]

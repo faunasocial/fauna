@@ -243,13 +243,28 @@ def sealed_video_nest(request, nest_mode, tmp_path_factory):
     cleanup()
 
 
+@pytest.fixture
+def sealed_video_spa_url(spa_proxy_for, sealed_video_nest):
+    """The SPA proxy over the dedicated ``sealed_video_nest`` (conftest
+    ``spa_proxy_for``), so the web browser reaches it without CORS: the raw nest
+    sends no ``Access-Control-Allow-Origin``, which blocks the cross-origin
+    blob-upload POST the sealed attachment needs (WS-RPC survives, HTTP does
+    not), and the post never reaches the feed. Requested lazily by ``login_as``
+    on web only, so no native leg triggers the web build."""
+    return spa_proxy_for(sealed_video_nest["url"])
+
+
 @pytest.mark.feature("feed-images-and-video")
+@pytest.mark.web
 def test_a_sealed_video_plays_after_its_post_unlocks(app, request, sealed_video_nest):
     """Post a video to a tier, unlock the post as its author, tap the detail's
     ``video-thumbnail``: ``state`` walks ``idle`` → ``playing``, the position
     advances, and the player was handed the opened sealed item —
     ``source=sealed:<hash>``, never a blob-route path, which would serve only
-    ciphertext."""
+    ciphertext. web's arm reads both off the ``<video>`` itself (the observable
+    ``drivers/base.py::get_attr`` names for it): ``currentTime`` advances and
+    ``currentSrc`` is the SPA's own ``blob:`` object URL of the opened bytes,
+    never a nest URL."""
     from nacl.signing import SigningKey
 
     from common.auth import create_actor_and_register
@@ -264,7 +279,8 @@ def test_a_sealed_video_plays_after_its_post_unlocks(app, request, sealed_video_
     author = create_actor_and_register(
         nest["port"], base_url=nest["url"], admin_signing_key=admin_sk,
     )
-    login_as(app, nest, author, handle="e2e-sealed-video", device_id="test-device-sealed-video")
+    login_as(app, nest, author, handle="e2e-sealed-video", device_id="test-device-sealed-video",
+             request=request, spa_url_fixture="sealed_video_spa_url")
 
     tier = f"gold-{uuid.uuid4().hex[:8]}"
     subs = app.subscriptions
@@ -318,7 +334,16 @@ def test_a_sealed_video_plays_after_its_post_unlocks(app, request, sealed_video_
         f"play the opened bytes), got {state!r}: {app.driver.diagnose('video-thumbnail')}"
     )
 
+    web = app.driver.is_web()
+    video = (
+        f"document.querySelector('[data-testid=\"{scope}\"] "
+        f"[data-testid=\"video-thumbnail\"] video')"
+    )
+
     def position() -> float | None:
+        if web:
+            value = app.driver.eval_js(f"{video}?.currentTime")
+            return float(value) if isinstance(value, (int, float)) else None
         try:
             return float(app.driver.get_attr("video-thumbnail", "position", scope=scope))
         except (TypeError, ValueError):
@@ -331,6 +356,13 @@ def test_a_sealed_video_plays_after_its_post_unlocks(app, request, sealed_video_
         pos = position()
     assert pos and pos > 0, f"playback position should advance past 0, got {pos!r}"
 
+    if web:
+        source = str(app.driver.eval_js(f"{video}?.currentSrc"))
+        assert source.startswith("blob:"), (
+            f"a sealed video plays the opened item as the SPA's own object URL, "
+            f"never a nest URL (which serves only ciphertext): currentSrc={source!r}"
+        )
+        return
     source = str(app.driver.get_attr("video-thumbnail", "source", scope=scope))
     assert re.fullmatch(r"sealed:[0-9a-f]{64}", source), (
         f"a sealed video plays the opened item the app holds, never a nest URL "
@@ -455,15 +487,16 @@ def remote_media(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def bridged_video_nest(remote_media, tmp_path_factory):
-    """One AP-enabled nest whose media proxy reaches ``remote_media``."""
-    from conftest import _ensure_ap_nest_built
+def bridged_video_nest(remote_media, tmp_path_factory, ap_binary):
+    """One AP-enabled nest whose media proxy reaches ``remote_media`` — its binary
+    the ``ap_binary`` fixture's, which the collection-time prebuild warms outside
+    every test's timeout."""
     from drivers.port_util import find_free_port
     from helpers.ap_nest import start_ap_nest
 
     port = find_free_port()
     nest = start_ap_nest(
-        _ensure_ap_nest_built(),
+        ap_binary,
         tmp_path_factory.mktemp("bridged-video-nest"),
         port,
         f"127.0.0.1:{port}",

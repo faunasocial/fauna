@@ -786,6 +786,15 @@ def refuse_loop(monkeypatch):
     for name in ("FAUNA_SLOT_HELD_E2E", "FAUNA_SLOT_HELD_E2E_OTHER", "FAUNA_SLOT_HELD_E2E_LONG",
                  "FAUNA_SLOT_HELD_BUILD", mod.REFUSE_BUILD_ENV):
         monkeypatch.delenv(name, raising=False)
+    # The hosting run's own mode must not reach the fake session: under the
+    # background tester's or the verify queue's warm-only run (`WARM_ONLY_ENV`
+    # set for the whole process) the fake session took the warm-only arm, its
+    # cold fake tree was refused, and the REAL `pytest.exit("binaries not warm
+    # (warm-only run)")` ended the hosting session INTERRUPTED mid-module, 28
+    # passed then exit 2 with no verdict. A test that wants the
+    # warm-only arm sets the variable itself
+    # (`test_a_warm_only_run_on_a_cold_tree_…`).
+    monkeypatch.delenv(conftest.WARM_ONLY_ENV, raising=False)
     monkeypatch.setattr(conftest, "_build_slot_module", lambda: mod)
     monkeypatch.setattr(conftest, "_refuse_drafts_window_collision", lambda session: None)
     monkeypatch.setattr(conftest, "_run_app_set", lambda session: {"linux"})
@@ -799,6 +808,11 @@ def refuse_loop(monkeypatch):
     monkeypatch.setattr(conftest, "_prebuild_jobs", lambda session: list(tree["jobs"]))
     monkeypatch.delenv(conftest.PLAN_ONLY_ENV, raising=False)
     monkeypatch.setattr(conftest, "_E2E_SLOT", None)
+    # The hosting run's own devices stay out of the fake lane's notes: a run
+    # that booted a seat before this test (a File Provider test's `fp_device`
+    # in the same session) has registered it, and every acquire below would
+    # otherwise append a `note` event naming it.
+    monkeypatch.setattr(conftest, "_E2E_SIMULATORS", [])
     yield mod, tree
     # A warm-only run on a warm tree arms the guard through the real path; left
     # armed, it would put the run hosting this test into refuse mode.
@@ -834,6 +848,25 @@ def test_a_cold_in_hold_recheck_releases_the_lane_warms_and_requeues(refuse_loop
     assert conftest._E2E_SLOT is not None and conftest._E2E_SLOT[1], "the lane is held for the tests"
     assert os.environ.get("FAUNA_SLOT_HELD_E2E") == "1"
     assert mod.REFUSE_BUILD_ENV not in os.environ, "refuse mode is off before the first test runs"
+
+
+@pytest.fixture
+def _hosting_run_holds_a_seat(monkeypatch):
+    """The session hosting the refuse-loop tests has already registered a seat
+    of its own — a File Provider test's `fp_device` ran first in the set."""
+    monkeypatch.setattr(conftest, "_E2E_SIMULATORS", ["SIM-1"])
+
+
+def test_the_hosting_runs_own_seat_never_reaches_the_fake_lanes_notes(
+    _hosting_run_holds_a_seat, refuse_loop
+):
+    """`refuse_loop` gives every test an empty simulator registry: a hosting
+    run's registered seat put a `note` event into the fake lane's exact event
+    list and failed the cold-recheck test (mac, 2026-11-09)."""
+    mod, tree = refuse_loop
+    tree["moves_after_warm"] = True
+    conftest.pytest_collection_finish(_FakeSession())
+    assert not any(isinstance(e, tuple) and e[0] == "note" for e in mod.events), mod.events
 
 
 def test_a_warm_in_hold_recheck_keeps_the_lane_without_a_cycle(refuse_loop):
@@ -1585,7 +1618,7 @@ def ios_build_tree(tmp_path, monkeypatch):
         return types.SimpleNamespace(returncode=0, stdout="", stderr=None)
 
     monkeypatch.setattr(conftest, "_repo_root", repo)
-    monkeypatch.setattr(conftest, "_ios_derived_data_dir", lambda: derived)
+    monkeypatch.setattr(conftest, "_ios_derived_data_dir", lambda kids=False: derived)
     monkeypatch.setattr(conftest, "_ios_package_workspace", lambda package_dir: tmp_path / "ws")
     monkeypatch.setattr(conftest.subprocess, "run", fake_run)
     return types.SimpleNamespace(repo=repo, pkg=pkg, derived=derived, calls=calls)
@@ -1794,7 +1827,11 @@ def test_the_file_provider_apps_are_keyed_on_their_fixtures_after_the_restore(mo
     monkeypatch.setattr(conftest, "_helper_bin_jobs", lambda s, r: [])
     monkeypatch.setattr(conftest, "_macos_spawns_a_real_sync_agent", lambda items: False)
     monkeypatch.setattr(conftest, "_ios_seats_needed", lambda s: 1)
-    session = type("S", (), {"items": [object()]})()
+    # The marker scan (`ios_file_provider_app`) reads each item: a bare object()
+    # has no `get_closest_marker`. The fixture closure above is what keys the
+    # File Provider builds here, so the item carries no marker.
+    item = types.SimpleNamespace(get_closest_marker=lambda name: None)
+    session = type("S", (), {"items": [item]})()
     builders = [builder for _, builder, _ in conftest._prebuild_jobs(session)]
     restore = builders.index("_restore_full_apple_ffi")
     assert restore < builders.index("_ensure_ios_fp_app_built") < builders.index("_get_ios_setup")
@@ -1804,6 +1841,88 @@ def test_the_file_provider_apps_are_keyed_on_their_fixtures_after_the_restore(mo
     builders = [builder for _, builder, _ in conftest._prebuild_jobs(session)]
     assert "_ensure_ios_fp_app_built" not in builders
     assert "_ensure_fp_host_app_built" not in builders
+
+
+def _fp_jobs(monkeypatch, apps, closures):
+    """`_prebuild_jobs` over one item per closure in `closures`, the app set `apps`."""
+    monkeypatch.setattr(conftest, "_real_fixture_closure", lambda item: item.closure)
+    monkeypatch.setattr(conftest, "_prebuild_app_set", lambda s, r: set(apps))
+    monkeypatch.setattr(conftest, "_helper_bin_jobs", lambda s, r: [])
+    monkeypatch.setattr(conftest, "_macos_spawns_a_real_sync_agent", lambda items: False)
+    monkeypatch.setattr(conftest, "_ios_seats_needed", lambda s: 1)
+    items = [types.SimpleNamespace(closure=set(c), get_closest_marker=lambda name: None)
+             for c in closures]
+    return conftest._prebuild_jobs(type("S", (), {"items": items})())
+
+
+def test_an_app_less_file_provider_run_builds_the_simulator_slice_before_its_app(monkeypatch):
+    """A set of `tests/platform/ios/` and tier_1 modules reads app set `none`, so
+    no iOS app build wrote the xcframework's simulator slice and the File
+    Provider suites skipped — a green that ran none of them (convention 7). The slice's recipe is a job of its own
+    there, after every app build (a macOS build strips the slice) and before
+    the app that links it; an iOS run's own app build already writes it."""
+    fp = {"fauna_ios_fp_app"}
+    for apps in (set(), {"macos"}):
+        jobs = _fp_jobs(monkeypatch, apps, [fp])
+        builders = [(builder, args) for _, builder, args in jobs]
+        slice_job = builders.index(("_ensure_app_built", ("ios",)))
+        assert slice_job < builders.index(("_ensure_ios_fp_app_built", ())), apps
+        if "macos" in apps:
+            assert builders.index(("_ensure_app_built", ("macos",))) < slice_job
+
+    builders = [(b, a) for _, b, a in _fp_jobs(monkeypatch, {"ios"}, [fp])]
+    assert builders.count(("_ensure_app_built", ("ios",))) == 1
+    assert builders.index(("_ensure_app_built", ("ios",))) < builders.index(
+        ("_ensure_ios_fp_app_built", ()))
+    assert ("_ensure_app_built", ("ios",)) not in [
+        (b, a) for _, b, a in _fp_jobs(monkeypatch, set(), [set()])]
+
+
+def test_every_fp_device_is_booted_in_the_warm_pass_up_to_the_cap(monkeypatch):
+    """`fp_device` made and booted a fresh device inside each test, where the
+    boot's wait is bounded at 120 s, and one boot in three ran unheld. Each `fp_device` item's device is a warm-pass job now,
+    after the app it installs, capped; an app-less run looks at them again in
+    the hold as an iOS run does at its own."""
+    seat = {"fauna_ios_fp_app", "fp_device"}
+    jobs = _fp_jobs(monkeypatch, set(), [seat, seat, {"fauna_ios_fp_app"}])
+    builders = [(b, a) for _, b, a in jobs]
+    seats = [a for b, a in builders if b == "_prewarm_ios_fp_seat"]
+    assert seats == [(0,), (1,)]
+    assert builders.index(("_ensure_ios_fp_app_built", ())) < builders.index(
+        ("_prewarm_ios_fp_seat", (0,))) < builders.index(("_recheck_ios_simulators", ()))
+    assert "_prewarm_ios_fp_seat" in conftest._SESSION_SETUP_BUILDERS
+
+    many = _fp_jobs(monkeypatch, {"ios"}, [seat] * (conftest._IOS_FP_SEATS_MAX + 2))
+    builders = [b for _, b, _ in many]
+    assert builders.count("_prewarm_ios_fp_seat") == conftest._IOS_FP_SEATS_MAX
+    assert builders.count("_recheck_ios_simulators") == 1
+
+
+def test_a_prewarmed_fp_seat_is_booted_held_unbounded_once_and_taken_once(monkeypatch):
+    """The warm pass's boot waits with no bound (`in_test=False`); its in-hold
+    replay makes nothing new; each device goes to one test, and past the last
+    `take_ios_fp_seat` says none is left. No File Provider app: no device."""
+    made, boots = [], []
+
+    def create():
+        made.append(f"FP-{len(made)}")
+        return made[-1]
+
+    monkeypatch.setattr(conftest, "_ios_fp_seat_udids", {})
+    monkeypatch.setattr(conftest, "_ios_fp_seats_taken", set())
+    monkeypatch.setattr(conftest, "create_ios_fp_device", create)
+    monkeypatch.setattr(conftest, "_boot_simulator_held",
+                        lambda udid, **kw: boots.append((udid, kw.get("in_test", False))))
+    monkeypatch.setattr(conftest, "_ensure_ios_fp_app_built", lambda: None)
+    conftest._prewarm_ios_fp_seat(0)
+    assert made == [] and boots == [] and conftest.take_ios_fp_seat() is None
+
+    monkeypatch.setattr(conftest, "_ensure_ios_fp_app_built", lambda: "/x/Fauna-iOS.app")
+    for ordinal in (0, 1, 0, 1):
+        conftest._prewarm_ios_fp_seat(ordinal)
+    assert made == ["FP-0", "FP-1"]
+    assert boots == [("FP-0", False), ("FP-1", False)]
+    assert [conftest.take_ios_fp_seat() for _ in range(3)] == ["FP-0", "FP-1", None]
 
 
 def test_the_ios_simulator_boot_is_reported_as_setup_not_prebuild(monkeypatch):
@@ -2205,6 +2324,72 @@ def test_every_fixture_that_boots_a_second_ios_seat_is_prewarmed():
     )
 
 
+#: The two files that may boot a simulator themselves: the conftest, whose
+#: `_boot_simulator_held` is the one held boot, and the driver, whose
+#: `boot_and_wait_until_usable` that boot calls (and whose `_ensure_booted`
+#: finds a held device already up). The other two are tier_1 tests of that
+#: boot over a fake `simctl`.
+_BOOT_OWNERS = frozenset({
+    "conftest.py", "drivers/ios.py",
+    "tests/test_ios_boot_completion.py", "tests/test_e2e_binary_prebuild.py",
+})
+
+
+#: Calls that RUN their first argument as a command: an argv literal naming
+#: `simctl` and `boot` there is a boot (as a `cmd=` label for slot code it is
+#: data, and counts for nothing).
+_RUNNERS = frozenset({"run", "Popen", "call", "check_call", "check_output", "_run_simctl"})
+
+
+def _unheld_boot_sites(path):
+    """The lines of `path` that boot a simulator outside the held boot: a
+    command runner given an argv literal naming `simctl` and `boot`, a
+    `_sim("boot", …)`-shaped call (a `simctl` wrapper whose first argument is
+    the verb), or a direct call of the driver's `boot_and_wait_until_usable`."""
+    import ast
+
+    sites = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else "")
+        first = node.args[0] if node.args else None
+        argv = ([e.value for e in first.elts if isinstance(e, ast.Constant)]
+                if isinstance(first, (ast.List, ast.Tuple)) else [])
+        if (name == "boot_and_wait_until_usable"
+                or (name in _RUNNERS and "simctl" in argv and "boot" in argv)
+                or ("sim" in name.lower() and isinstance(first, ast.Constant)
+                    and first.value == "boot")):
+            sites.append(node.lineno)
+    return sites
+
+
+def test_no_e2e_module_boots_a_simulator_outside_the_held_boot():
+    """Every simulator a run boots goes through `conftest._boot_simulator_held`
+    under a `sim_boot` grant (mac-simulator-hold.md § Per-core tokens, *The e2e
+    lane's simulator boot*, ruling (a) of 2026-10-27). A test's own fixture
+    that `simctl boot`s a device it made was the one way round it: the File
+    Provider eviction test's `fp_device` booted its device bare, three fresh
+    boots of 8 to 12 cores on 2026-11-06 with no grant, held only at the lane's
+    figure. Pinned over the source."""
+    root = _REPO / "tests" / "e2e-unified"
+    found = {}
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel in _BOOT_OWNERS or "/." in f"/{rel}":
+            continue
+        sites = _unheld_boot_sites(path)
+        if sites:
+            found[rel] = sites
+    assert _unheld_boot_sites(root / "drivers" / "ios.py"), "the scan sees no boot at all — it is broken"
+    assert not found, (
+        f"simulator boots outside conftest._boot_simulator_held (call it, `in_test=True` "
+        f"inside a test, after `register_simulator`): {found}"
+    )
+
+
 _PS_LISTING = """\
     1     0   4:46.03 /sbin/launchd
   100     1   1:30.44 /usr/libexec/logd
@@ -2421,3 +2606,90 @@ def test_drafts_window_collision_lets_a_run_that_executes_nothing_through(monkey
     monkeypatch.delenv(conftest.PLAN_ONLY_ENV, raising=False)
     monkeypatch.setenv(getattr(conftest, env), "1")
     conftest._refuse_drafts_window_collision(_DraftsSession())
+
+
+# ---------------------------------------------------------------------------
+# Lazily-resolved builds reach the prebuild (`helpers/fixture_closure.py`)
+# ---------------------------------------------------------------------------
+
+_E2E_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _mail_venue_callers_missing_the_declaration() -> list[str]:
+    """Every module-level function in conftest.py or a test module whose body
+    calls `_start_mail_venue` but does not carry `@resolves_lazily(...)` under
+    its `@pytest.fixture` (a factory's call in its nested function counts)."""
+    import ast
+
+    def _name(node):
+        target = node.func if isinstance(node, ast.Call) else node
+        if isinstance(target, ast.Attribute):
+            return target.attr
+        return getattr(target, "id", "")
+
+    missing = []
+    files = [_E2E_ROOT / "conftest.py", *sorted((_E2E_ROOT / "tests").rglob("*.py"))]
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == "_start_mail_venue":
+                continue
+            calls = any(isinstance(c, ast.Call) and _name(c) == "_start_mail_venue"
+                        for c in ast.walk(node))
+            if not calls:
+                continue
+            names = [_name(d) for d in node.decorator_list]
+            fixture_at = names.index("fixture") if "fixture" in names else None
+            lazy_at = next((i for i, n in enumerate(names)
+                            if n in {"resolves_lazily", "_resolves_lazily"}), None)
+            if fixture_at is None or lazy_at is None or lazy_at < fixture_at:
+                missing.append(f"{path.relative_to(_E2E_ROOT)}::{node.name}")
+    return missing
+
+
+def test_every_mail_venue_fixture_declares_its_lazy_builds():
+    """A mail venue fetches the mail bridge and the seal helper through
+    `getfixturevalue`, invisible to the static closure, so the prebuild sees
+    them only through the fixture's `@resolves_lazily` declaration. Without it
+    the first test of a cold tree builds the bridge inside its 900 s timeout
+    (measured 2026-11-07, `test_mail_dmarc_reports.py`'s `dmarc_venue`). The
+    declaration goes UNDER `@pytest.fixture`, so it marks the function pytest
+    keeps as the fixturedef's `func`."""
+    missing = _mail_venue_callers_missing_the_declaration()
+    assert not missing, (
+        "these call `_start_mail_venue` without `@resolves_lazily(*MAIL_VENUE_BINARIES)` "
+        f"under their `@pytest.fixture`: {missing}")
+
+
+def test_a_declared_lazy_build_reaches_the_prebuild_jobs(monkeypatch, request):
+    """The REAL fixturedef of a declared venue carries the declaration, and
+    `_prebuild_jobs` turns it into the bridge and seal-helper builds — in a mode
+    that builds a local nest only (docker's venue needs neither binary)."""
+    from helpers import nest_mode as nest_mode_mod
+    from helpers.fixture_closure import lazily_resolved
+
+    defs = request.session._fixturemanager.getfixturedefs("dedicated_mail_nest", request.node)
+    assert defs, "dedicated_mail_nest is not a fixture visible here"
+    item = types.SimpleNamespace(
+        fixturenames=["dedicated_mail_nest"],
+        _fixtureinfo=types.SimpleNamespace(name2fixturedefs={"dedicated_mail_nest": defs}),
+        get_closest_marker=lambda name: None,
+        nodeid="tests/test_x.py::test_venue",
+    )
+    assert lazily_resolved(item) == {"mail_bridge_binary", "seal_helper_binary"}
+
+    monkeypatch.setattr(conftest, "_prebuild_app_set", lambda s, r: set())
+    monkeypatch.setattr(conftest, "_helper_bin_jobs", lambda s, r: [])
+    session = types.SimpleNamespace(items=[item])
+
+    monkeypatch.setattr(nest_mode_mod, "builds_local_nest", lambda mode: True)
+    builders = [builder for _, builder, _ in conftest._prebuild_jobs(session)]
+    assert "_ensure_mail_bridge_built" in builders
+    assert "_ensure_seal_helper_built" in builders
+
+    monkeypatch.setattr(nest_mode_mod, "builds_local_nest", lambda mode: False)
+    builders = [builder for _, builder, _ in conftest._prebuild_jobs(session)]
+    assert "_ensure_mail_bridge_built" not in builders
+    assert "_ensure_seal_helper_built" not in builders

@@ -27,7 +27,10 @@ class MailSettingsActions:
     #: on re-run, and the error surface read '' every time). A ceiling only a
     #: wedge can reach, never a timing assertion: a green run still returns the
     #: moment the state is true. Every post-enable credential wait names this
-    #: one budget (2026-10-11 sweep); the tui baseline (13 mail-settings tests,
+    #: one budget (2026-10-11 sweep), and so does every post-enable status
+    #: wait (2026-11-09 sweep: a 15 s status wait was the web red of the DAV
+    #: witnesses, the status still on the enable's pending-rotation paint with
+    #: the error surface ''); the tui baseline (13 mail-settings tests,
     #: 16–23 s each end to end, Linux dev box) sits far inside it.
     ENABLE_SETTLE_S = 60.0
 
@@ -59,9 +62,10 @@ class MailSettingsActions:
         routes its fake clock — the `mail_token_refresh_advance_clock` agent
         command over `fauna_client_mail_settings::token_refresh` (e2e
         convention 7). tui led; linux, web and android followed in one
-        trickle-down lift; windows, macos and ios follow in theirs
-        (`mail-credentials.md` § Trigger taxonomy, the "Submission-token
-        refresh" row)."""
+        trickle-down lift, macos and ios in FaunaKit's, windows last — so
+        every app is built today and the gate stays only as the one place a
+        new app would declare the gap (`mail-credentials.md` § Trigger
+        taxonomy, the "Submission-token refresh" row)."""
         from helpers.app_surface import require_surface
 
         require_surface(self.driver, "mail-token-refresh-clock")
@@ -770,7 +774,7 @@ class MailSettingsActions:
             return ""
         return self.driver.get_text("mail-settings-status-indicator")
 
-    def wait_for_enabled_status(self, timeout: float = 15.0) -> bool:
+    def wait_for_enabled_status(self, timeout: float = ENABLE_SETTLE_S) -> bool:
         """Poll until the status indicator reports mail as enabled.
 
         After toggling mail on, `EnableMail` dispatches over WS-RPC and the page
@@ -823,10 +827,14 @@ class MailSettingsActions:
     # cross-app read idiom (driver.get_attr(id, "state")). ---
     SERVE_HERE_ID = "mail-settings-serve-here-toggle"
 
-    def serve_here_visible(self, timeout: float = 6.0) -> bool:
+    def serve_here_visible(self, timeout: float | None = None) -> bool:
         """True once the (enabled-gated) serve-here toggle is on screen."""
+        from helpers import budgets
+
         try:
-            self.driver.wait_for(self.SERVE_HERE_ID, timeout=timeout)
+            self.driver.wait_for(
+                self.SERVE_HERE_ID,
+                timeout=budgets.UI_SETTLE_S if timeout is None else timeout)
             return True
         except TimeoutError:
             return False
@@ -835,17 +843,22 @@ class MailSettingsActions:
         """The serve-here toggle's on/off, read via the `state` attr ("on"/"off")."""
         return self.driver.get_attr(self.SERVE_HERE_ID, "state") or ""
 
-    def wait_for_serve_here_state(self, expected: str, timeout: float = 12.0) -> bool:
+    def wait_for_serve_here_state(self, expected: str, timeout: float | None = None) -> bool:
         """Poll until the serve-here toggle reports `expected` ("on"/"off").
 
         The flip is async (dispatch → set_mail_serving_enabled WS-RPC → snapshot
         → re-render writes the `state` attr); the value only flips once the nest
         confirms the write (the dispatch is non-optimistic), so this doubles as
         the regression guard that the toggle reflects the *nest's* state, not an
-        optimistic local one.
+        optimistic local one. The default ceiling is the nest round-trip
+        budget (convention 14), never a tuned latency.
         """
         import time
 
+        from helpers import budgets
+
+        if timeout is None:
+            timeout = budgets.RPC_ROUNDTRIP_S
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.serve_here_state() == expected:
@@ -860,10 +873,25 @@ class MailSettingsActions:
         MailSettingsAction::SetServingEnabled with the new value; we click only
         when the current `state` attr differs from the target so the call is
         idempotent against the session-scoped shared actor.
+
+        The decision reads the toggle only once it carries the nest's value:
+        until the first mail snapshot lands the row has no `state` attr, and a
+        read in that beat (load-sensitive — the flake the background tester counted on
+        `test_admin_serving_indicator`) would click an already-matching toggle
+        and flip it the wrong way. Waiting for "on"/"off" holds the read
+        (convention 14, pre-fetch windows).
         """
-        self.driver.wait_for(self.SERVE_HERE_ID, timeout=10.0)
+        from helpers import budgets
+        from helpers.waiting import wait_until
+
+        self.driver.wait_for(self.SERVE_HERE_ID, timeout=budgets.UI_SETTLE_S)
+        current = wait_until(
+            lambda: self.serve_here_state() in ("on", "off") and self.serve_here_state(),
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: (f"the serve-here toggle never carried the nest's "
+                              f"on/off; state attr {self.serve_here_state()!r}"))
         want = "on" if enabled else "off"
-        if self.serve_here_state() != want:
+        if current != want:
             self.driver.click(self.SERVE_HERE_ID)
 
     def mua_instructions_visible(self, timeout: float = 6.0) -> bool:

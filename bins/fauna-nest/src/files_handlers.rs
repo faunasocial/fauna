@@ -158,6 +158,44 @@ fn list_handler() -> RpcHandler {
             // narrows to that one row alone (`set-addressing.md` § The row
             // form) — empty when it is not among the caller's audience sets.
             let name_hash = crate::routes::parse_name_hash(&req.name_hash, |m| invalid_request(m))?;
+
+            // Cross-nest relay: a foreign shared set's history lives on its
+            // home nest — relay the read there, exactly as
+            // `fauna.sync.changes.list` relays the set's change log
+            // (`ui/media.md` § Cross-nest shared sets). The home nest gates on
+            // the caller's recorded foreign membership bound to THIS nest's
+            // id; the reply's rows and `signer_certs` ride back verbatim, this
+            // nest vouching for none of them (the reader judges every row).
+            if let Some(peer_url) = req.nest_url.as_deref().filter(|u| !u.is_empty()) {
+                let channel_hex = req
+                    .channel_id
+                    .as_deref()
+                    .ok_or_else(|| invalid_request("channel_id is required with nest_url"))?;
+                return match crate::federation_pool::originate_folder_versions_list(
+                    &state.federation_pool,
+                    &state,
+                    peer_url,
+                    &hex::encode(actor_id),
+                    channel_hex,
+                    &hex::encode(path_hash),
+                )
+                .await
+                {
+                    Ok(Ok(reply)) => encode_reply(&FilesVersionsListReply {
+                        versions: reply.versions,
+                        signer_certs: reply.signer_certs,
+                        extra: Default::default(),
+                    }),
+                    Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
+                        peer_err,
+                        "the cross-nest version history read",
+                    )),
+                    Err(pool_err) => {
+                        tracing::error!("federation folder versions list relay: {pool_err}");
+                        Err(internal("federation fetch failed"))
+                    }
+                };
+            }
             let sets = crate::folder_authz::enumerate_readable_folders(&state.db, &actor_id)
                 .await
                 .map_err(internal)?;
@@ -173,12 +211,11 @@ fn list_handler() -> RpcHandler {
                         }
                 })
                 .collect();
-            let scope_ids: Vec<i64> = scope.iter().map(|(fs, _)| fs.id).collect();
-
-            let rows = state
-                .db
-                .list_file_versions_in_sets(
-                    &scope_ids,
+            let scope: Vec<&crate::db::FolderRow> = scope.iter().map(|(fs, _)| fs).collect();
+            encode_reply(
+                &versions_in_sets(
+                    &state,
+                    &scope,
                     &path_hash,
                     crate::db::VersionScope {
                         include_pruned: req.include_pruned.unwrap_or(false),
@@ -190,36 +227,53 @@ fn list_handler() -> RpcHandler {
                         include_superseded: req.include_superseded.unwrap_or(false),
                     },
                 )
-                .await
-                .map_err(internal)?;
-            let handles = author_handles(&state.db, &rows).await?;
-            let versions = rows
-                .iter()
-                .map(|r| {
-                    let set = scope
-                        .iter()
-                        .map(|(fs, _)| fs)
-                        .find(|fs| fs.id == r.folder_id);
-                    row_to_info(r, set, handles.get(&r.actor_id).cloned().flatten())
-                })
-                .collect();
-            let signer_certs = crate::sync_handlers::signer_certs_for_signers(
-                &state.db,
-                rows.iter().filter_map(|r| {
-                    Some((
-                        <[u8; 32]>::try_from(r.actor_id.as_slice()).ok()?,
-                        <[u8; 32]>::try_from(r.signer_key.as_deref()?).ok()?,
-                    ))
-                }),
+                .await?,
             )
-            .await
-            .map_err(internal)?;
-            encode_reply(&FilesVersionsListReply {
-                versions,
-                signer_certs,
-                extra: Default::default(),
-            })
         })
+    })
+}
+
+/// The one versions projection both doors serve — the bearer
+/// `fauna.files.versions.list` over the caller's audience sets, and the
+/// federated `fauna.federation.folder.versions.list` over the one claimed set
+/// a foreign member reads (`federation_handlers`): the rows, oldest→newest,
+/// each carrying its set's name / hash / row, plus the `signer_certs` side
+/// table the reader's judge verifies every delegated signer against.
+pub(crate) async fn versions_in_sets(
+    state: &crate::routes::AppState,
+    scope: &[&crate::db::FolderRow],
+    path_hash: &[u8; 32],
+    version_scope: crate::db::VersionScope,
+) -> Result<FilesVersionsListReply, RpcError> {
+    let scope_ids: Vec<i64> = scope.iter().map(|fs| fs.id).collect();
+    let rows = state
+        .db
+        .list_file_versions_in_sets(&scope_ids, path_hash, version_scope)
+        .await
+        .map_err(internal)?;
+    let handles = author_handles(&state.db, &rows).await?;
+    let versions = rows
+        .iter()
+        .map(|r| {
+            let set = scope.iter().copied().find(|fs| fs.id == r.folder_id);
+            row_to_info(r, set, handles.get(&r.actor_id).cloned().flatten())
+        })
+        .collect();
+    let signer_certs = crate::sync_handlers::signer_certs_for_signers(
+        &state.db,
+        rows.iter().filter_map(|r| {
+            Some((
+                <[u8; 32]>::try_from(r.actor_id.as_slice()).ok()?,
+                <[u8; 32]>::try_from(r.signer_key.as_deref()?).ok()?,
+            ))
+        }),
+    )
+    .await
+    .map_err(internal)?;
+    Ok(FilesVersionsListReply {
+        versions,
+        signer_certs,
+        extra: Default::default(),
     })
 }
 

@@ -98,10 +98,14 @@ func selfSignedCertForSpoofTest(t *testing.T) tls.Certificate {
 //
 //  1. the forged IP accrues NOTHING — IsLockedFor(…, forgedIP) stays false, so a
 //     victim's real connections from that IP are never locked out;
-//  2. the failures accrue against the attacker's OWN genuine loopback peer, so
-//     the coarse-tier brake still bites and rotating forged IPs buys no evasion;
-//  3. every report_auth_event carries the genuine loopback IP, so on-box attack
-//     activity cannot be laundered through an innocent third-party address.
+//  2. the failures accrue against the ONE untrusted-proxied source
+//     (proxyproto.UntrustedProxiedSource, 0.0.0.0) — a refused header forfeits
+//     loopback trust, so they land neither on the forged IP nor on the loopback
+//     key a headerless same-box dial uses — and the coarse-tier brake still
+//     bites, so rotating forged IPs buys no evasion;
+//  3. every report_auth_event carries that sentinel, never the forged address,
+//     so on-box attack activity cannot be laundered through an innocent
+//     third-party address.
 func TestForgedProxyHeaderCannotPoisonTheAuthLockout(t *testing.T) {
 	const limit = 3
 	secret := []byte("a-32-byte-ish-router-auth-secret")
@@ -178,10 +182,16 @@ func TestForgedProxyHeaderCannotPoisonTheAuthLockout(t *testing.T) {
 	if lo.IsLockedFor(principal, auth.DefaultCredentialID, victimIP) {
 		t.Fatalf("forged source IP %s reached the lockout key — a co-resident forger can lock out every real user behind that address", victimIP)
 	}
-	// (2) H2 — the failures landed on the forger's own genuine loopback peer, so
-	// the brake still bites and rotating forged IPs buys nothing.
-	if !lo.IsLockedFor(principal, auth.DefaultCredentialID, "127.0.0.1") {
-		t.Fatalf("after %d forged-header failures the genuine loopback peer is NOT locked out — the failures were attributed somewhere else entirely", limit)
+	// (2) H2 — the failures landed on the one untrusted-proxied source, so the
+	// brake still bites and rotating forged IPs buys nothing; and NOT on the
+	// loopback key, which a refused header no longer earns (security.md § *A
+	// refused header forfeits loopback trust*).
+	untrustedIP := proxyproto.UntrustedProxiedSource.(*net.TCPAddr).IP.String()
+	if !lo.IsLockedFor(principal, auth.DefaultCredentialID, untrustedIP) {
+		t.Fatalf("after %d forged-header failures the untrusted-proxied source %s is NOT locked out — the failures were attributed somewhere else entirely", limit, untrustedIP)
+	}
+	if lo.IsLockedFor(principal, auth.DefaultCredentialID, "127.0.0.1") {
+		t.Fatalf("refused-header failures landed on the loopback lockout key — a refused header kept loopback trust")
 	}
 	// (3) H3 — the audit records the real origin, not the innocent third party.
 	reports := caller.callsOf(wsrpc.MethodReportAuthEvent)
@@ -197,8 +207,8 @@ func TestForgedProxyHeaderCannotPoisonTheAuthLockout(t *testing.T) {
 		if ip == victimIP {
 			t.Fatalf("report %d stamped the forged source_ip %q — on-box attack activity is laundered through an innocent address", i, victimIP)
 		}
-		if !net.ParseIP(ip).IsLoopback() {
-			t.Fatalf("report %d source_ip = %q, want the genuine loopback peer", i, ip)
+		if ip != untrustedIP {
+			t.Fatalf("report %d source_ip = %q, want the untrusted-proxied source %q", i, ip, untrustedIP)
 		}
 	}
 }

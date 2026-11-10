@@ -690,6 +690,10 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // locally and sync as data), and `delete` removes rows the client never
     // holds a copy of. Both queue per criteria ruling 3 (nest-arbitrated,
     // nothing to apply locally). `get` is a plain read of those rows.
+    // Identity-bound (`account-offline-mutation.md` § The offline-mutation
+    // contract → *Identity-bound intents compose at drain*): the wrap is
+    // sealed to the identity's escrow target, so a composer queues its inputs
+    // and seals at drain — none built yet.
     m.insert("fauna.generation.escrow.put", OfflineQueued);
     m.insert("fauna.generation.escrow.get", Read);
     m.insert("fauna.generation.escrow.delete", OfflineQueued);
@@ -769,6 +773,8 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // the NEST-WIDE labeler catalog with cross-subscriber score
     // materialization — not account data; there is nothing to "apply locally
     // and sync as data", so OfflineSafe is conceptually inapplicable.
+    // Identity-bound: `AlgorithmLabeler.signature` is the actor key's, so a
+    // composer queues its inputs and signs at drain — none built yet.
     m.insert("fauna.labelers.publish", OfflineQueued);
     m.insert("fauna.labelers.inspect", Read);
     m.insert("fauna.labelers.list", Read);
@@ -828,6 +834,8 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.email.filters.get", Read);
     m.insert("fauna.email.filters.update", OfflineSafe);
     m.insert("fauna.email.filters.delete", OfflineSafe);
+    // Generic, not identity-bound: raw RFC 5322 bytes, the From handle checked
+    // against the connection's actor at send — nothing signed by the identity.
     m.insert("fauna.email.send", OfflineQueued);
     m.insert("fauna.email.inbox.fetch", Read);
     m.insert("fauna.email.apply_spam_disposition", OfflineSafe);
@@ -842,6 +850,10 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // mark.
     m.insert("fauna.inbox.fetch", Read);
     m.insert("fauna.inbox.ack", OfflineSafe);
+    // Identity-bound: composed at drain. The `(ContactRequest, Post)` tuple is
+    // signed by the actor key and the home nest refuses a superseded author,
+    // so the knock queues its inputs (`contacts::KnockSendIntent`) on the
+    // identity drainer and is signed at drain by the then-current identity.
     m.insert("fauna.inbox.send", OfflineQueued);
 
     // ── register_bluesky_kinds ──────────────────────────────────────
@@ -910,12 +922,23 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
         m.insert("fauna.nostr.zap_signers.remove", OnlineOnly);
     }
 
+    // ── register_nostr_advertise_kinds ──────────────────────────────
+    // The sold-post advertisement. `set` publishes to external relays (an
+    // outbound act the user must see succeed) and is gated with `zaps` in
+    // lockstep with the registry; `clear` retracts (kind 5) and is compiled
+    // always, like its registry entry.
+    #[cfg(feature = "zaps")]
+    m.insert("fauna.nostr.advertise.set", OnlineOnly);
+    m.insert("fauna.nostr.advertise.clear", OnlineOnly);
+
     // ── register_nostr_content_kinds ────────────────────────────────
     // Nostr content. `publish_signed` relay-enqueues a one-shot event via the
     // user's nest. Only `zaps.total` is a `zaps` registry surface.
     #[cfg(feature = "zaps")]
     m.insert("nostr.zaps.total", Read);
     m.insert("nostr.badges.list", Read);
+    // Generic, not identity-bound: signed by the linked extension key, not the
+    // identity (the link row's fate is the re-point axis's).
     m.insert("nostr.events.publish_signed", OfflineQueued);
 
     // ── register_conversations_channel_kinds ────────────────────────
@@ -984,6 +1007,19 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // no floor for a room homed elsewhere, so a "queued" leave would leave
     // the member seated on the only floor that counts.
     m.insert("fauna.conversations.room.leave_remote", OnlineOnly);
+    // The removal's and the two keying acts' relayed twins, for an owner or
+    // admin homed on another nest: membership or key-material ops AND relays,
+    // so `OnlineOnly` on both counts, with no local fallback for the same
+    // reason (no floor and no generation live here for a room homed elsewhere).
+    m.insert("fauna.conversations.room.remove_remote", OnlineOnly);
+    m.insert(
+        "fauna.conversations.room.publish_generation_remote",
+        OnlineOnly,
+    );
+    m.insert(
+        "fauna.conversations.room.backfill_generations_remote",
+        OnlineOnly,
+    );
     // The acceptance's relayed twin: a MEMBERSHIP op (the `accept_invite`
     // reasoning below) AND a relay (it needs a live nest↔nest leg to the
     // room's home), so `OnlineOnly` on both counts — a queued accept would

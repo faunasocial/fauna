@@ -61,10 +61,16 @@ pub trait HostServices: Send + Sync + 'static {
 
     /// `state.get`.
     fn state_get(&self, key: String) -> BoxFut<'_, anyhow::Result<Option<Vec<u8>>>>;
-    /// `state.put`.
-    fn state_put(&self, key: String, value: Vec<u8>) -> BoxFut<'_, anyhow::Result<()>>;
-    /// `state.delete`.
-    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<()>>;
+    /// `state.put`. The outer error is the embedder's fault (the call
+    /// faults); the inner `Err` is a refusal the plugin observes — a reserved
+    /// key, a spent quota — and nothing is written.
+    fn state_put(
+        &self,
+        key: String,
+        value: Vec<u8>,
+    ) -> BoxFut<'_, anyhow::Result<Result<(), String>>>;
+    /// `state.delete`, refused as [`Self::state_put`] is.
+    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<Result<(), String>>>;
 
     /// `holder.public-key` / `holder.open-grant` read this key. Returned by
     /// reference so the secret is never copied into a lowered value.

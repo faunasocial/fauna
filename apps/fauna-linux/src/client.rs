@@ -21,6 +21,12 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::mpsc;
 
+/// The post-auth critical-alert split's process-wide record
+/// (`fauna_client_alert_sweep::LoopClaim`): one GTK app per process, like the
+/// alerts registry beside it.
+static LOOP_CLAIM: fauna_client_alert_sweep::LoopClaim<NestClient> =
+    fauna_client_alert_sweep::LoopClaim::new();
+
 use crate::app::{ActionResult, DataMessage, UiMessage};
 use crate::feed::host::LinuxFeedManager;
 use crate::rows::{ContactRow, KnockRow};
@@ -564,27 +570,66 @@ impl FaunaClient {
     /// constructing FaunaClient, so a fresh bearer is already in hand.
     /// The post-wizard exit path still calls it to surface the AuthSuccess
     /// signal to the UI.
+    ///
+    /// **A machine parked in `Offline { transient: true }` is retried, not
+    /// abandoned.** The WS connect and every post-auth hook ride the
+    /// `AuthSuccess` arm, so a session built while the nest was unreachable
+    /// (the launch's silent challenge or this refresh met a refused dial)
+    /// would otherwise sit "disconnected" for its whole life, never dialing
+    /// again once the nest came back — a client-reachable state only a
+    /// relaunch could leave (`common.md` § Client-state recoverability). So
+    /// the first failure paints `AuthFailed` once, then the silent challenge
+    /// re-runs on the shared reconnect curve (`fauna_protocol::reconnect`,
+    /// the WS supervisor's own bounds) until it mints — `AuthSuccess` then
+    /// connects as on any launch — or the machine reaches a verdict a retry
+    /// cannot change (refused, identity changed, outdated, …), where it stops.
+    /// The loop lives on this client's runtime, so it ends with the session.
     pub fn authenticate(&self) {
+        use fauna_launch_machine::LaunchPhase;
+        use fauna_protocol::reconnect::{Backoff, JitterRng};
+        use fauna_ws_substrate::supervisor::{INITIAL_BACKOFF, MAX_BACKOFF};
+
         let secret_hex = self.secret_hex.clone();
         let tx = self.tx.clone();
         let machine = Arc::clone(&self.machine);
 
         self.spawn_bg(async move {
             machine.refresh_token().await;
-            let msg = if machine.current_bearer().is_some() {
-                let actor_id = actor_id_from_secret_hex(&secret_hex).unwrap_or_default();
-                UiMessage::Data(DataMessage::AuthSuccess {
-                    actor_id,
-                    handle: String::new(),
-                })
-            } else {
-                let error = machine
-                    .snapshot()
-                    .last_error
-                    .unwrap_or_else(|| crate::i18n::strings::errors::AUTH_FAILED.to_string());
-                UiMessage::Data(DataMessage::AuthFailed { error })
-            };
-            tx.send(msg);
+            let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
+            let mut jitter = JitterRng::from_entropy();
+            let mut failure_painted = false;
+            loop {
+                if machine.current_bearer().is_some() {
+                    if failure_painted {
+                        // The FaunaClient was built off `Online`, so the TTL
+                        // refresh loop it spawned returned at once; arm it now
+                        // the machine holds a bearer again.
+                        tokio::spawn(Arc::clone(&machine).ttl_refresh_loop());
+                    }
+                    let actor_id = actor_id_from_secret_hex(&secret_hex).unwrap_or_default();
+                    tx.send(UiMessage::Data(DataMessage::AuthSuccess {
+                        actor_id,
+                        handle: String::new(),
+                    }));
+                    return;
+                }
+                let snapshot = machine.snapshot();
+                let retryable = matches!(snapshot.phase, LaunchPhase::Offline { transient: true })
+                    && !snapshot.sign_in_refused;
+                if !failure_painted || !retryable {
+                    let error = snapshot
+                        .last_error
+                        .unwrap_or_else(|| crate::i18n::strings::errors::AUTH_FAILED.to_string());
+                    tx.send(UiMessage::Data(DataMessage::AuthFailed { error }));
+                    failure_painted = true;
+                }
+                if !retryable {
+                    return;
+                }
+                tokio::time::sleep(backoff.jittered(jitter.next_unit())).await;
+                backoff.grow();
+                machine.retry_silent_challenge().await;
+            }
         });
     }
 
@@ -733,22 +778,16 @@ impl FaunaClient {
     /// Accept a knock from `peer_actor_id` via `fauna.knocks.accept`
     /// (WS-RPC). The typed client controls the wire shape (`peer_id`), so the
     /// hex peer id is passed straight through — no JSON body is reconstructed.
+    /// With no nest the accept rests in the device's outbox
+    /// (`crate::offline_outbox::queue`, the `OfflineQueued` composer —
+    /// account-offline-mutation.md § The offline-mutation contract).
     pub fn accept_knock(&self, peer_actor_id: &str) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         let peer_id = peer_actor_id.to_string();
+        let queue = crate::offline_outbox::queue();
         self.spawn_bg(async move {
-            let contacts = fauna_client_contacts::ContactsClient::new(nest_rpc);
-            let msg = match contacts.knocks_accept(peer_id).await {
-                Ok(_reply) => UiMessage::Action(ActionResult::Success {
-                    context: "knock_accepted".into(),
-                }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.knocks.accept".into(),
-                    error: e.to_string(),
-                }),
-            };
-            tx.send(msg);
+            tx.send(accept_knock_message(nest_rpc, Some(queue), peer_id).await);
         });
     }
 
@@ -2643,6 +2682,36 @@ impl FaunaClient {
         });
     }
 
+    /// The nest half (and the sealed model half) of the post's mark-as-spam
+    /// verb (`report-sharing.md` § Report capture → *The post's mark-as-spam
+    /// verb*), as a future the caller awaits: the shared
+    /// `train_moderation_correction(post_id, is_spam)` with `is_spam` the
+    /// verb's new state — or, when the mail machine cannot be built,
+    /// `ModerationClient::train` alone (the moderation queue's own fallback), so
+    /// `fauna.moderation.train` is never skipped.
+    pub fn train_post_spam_future(
+        &self,
+        post_id: String,
+        is_spam: bool,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+        let machine = crate::mail_glue::build_mail_settings_machine(self);
+        let nest = Arc::clone(&self.nest_rpc);
+        async move {
+            match machine {
+                Ok(machine) => machine
+                    .train_moderation_correction(post_id, is_spam)
+                    .await
+                    .map(|_model_half| ())
+                    .map_err(|e| e.to_string()),
+                Err(_build_error) => fauna_client_moderation::ModerationClient::new(nest)
+                    .train(post_id, if is_spam { "spam" } else { "ham" })
+                    .await
+                    .map(|_reply| ())
+                    .map_err(|e| e.to_string()),
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Bridge Management API — `fauna.bridges.*` WS-RPC kinds
     // -----------------------------------------------------------------------
@@ -3909,6 +3978,10 @@ impl FaunaClient {
                         identity.actor_id(),
                         &phrase,
                         &NativeLinkedNestDial::new(&identity),
+                        // The gesture settles the pending-replacement banner
+                        // from the nests' answers in the same call.
+                        &crate::critical_alerts::registry(),
+                        fauna_core::data::Timestamp::now_secs(),
                     )
                     .await
                     .map(|(_cancelled, status)| status)
@@ -5385,78 +5458,73 @@ impl FaunaClient {
         });
     }
 
-    /// Run the feeders that have no page of their own, at the same universal
-    /// post-auth hook as [`Self::refresh_mail_epoch_schedule`]
-    /// (`critical-alerts.md` § Goal — a set-and-forget deployment must still
-    /// raise its banner). tui's `critical_alerts::spawn_session_start_sweep`
-    /// (`session::establish`) is the reference this mirrors exactly
-    /// (`critical-alerts.md` § Implementation status today: "each is one call
-    /// at the app's own post-auth hook, not a per-app design") — this app's
-    /// `crate::critical_alerts::registry()` substituted in for tui's
-    /// per-`App` one. Best-effort/log-only: sign-in must not fail, or even
-    /// wait, on a nest that cannot answer the recovery/directory planes.
-    ///
-    /// Runs [`fauna_client_alert_sweep::run_alert_sweep_loop`] — sweeps
-    /// immediately, then every `RE_SWEEP_INTERVAL_SECS` for as long as the
-    /// identity lives (§ Mechanism → *Who runs the detector*), logging each
-    /// sweep itself. It stops on the first wake after `CriticalAlerts::clear_all`
-    /// runs, so no cancellation is needed here.
-    ///
-    /// Once per session ESTABLISHMENT (the AuthSuccess hook) — never from the
-    /// same-actor converge arm, which runs [`Self::run_critical_alert_sweep_once`]
-    /// instead: re-firing the loop there stacked one concurrent sweeper per
-    /// re-establish, forever (tui's `spawn_one_shot_sweep` and windows' leg
-    /// ratified the same split, `critical-alerts.md` § Implementation status
-    /// today).
+    /// **The post-auth hook's one critical-alert call** (`critical-alerts.md`
+    /// § Mechanism → *Who runs the detector* / *How often the detector runs*),
+    /// run at both the AuthSuccess hook and the same-actor converge arm: the
+    /// shared `LoopClaim` decides the arm. A first or identity-changing sign-in
+    /// starts the re-sweep loop (first pass at once, then every
+    /// `RE_SWEEP_INTERVAL_SECS` until the identity's teardown); the same identity
+    /// on the client its live loop rides gets ONE pass (a second loop would only
+    /// stack); the same identity on a client its loop does not ride starts a loop
+    /// that opens on the custody door. The claim forgets an identity by the
+    /// registry's teardown epoch, so this app keeps no record of its own.
+    /// Best-effort/log-only: sign-in must not fail, or even wait, on a nest that
+    /// cannot answer the recovery/directory planes.
     pub fn run_critical_alert_sweep(&self) {
+        use fauna_client_alert_sweep::SweepArm;
         let Some((nest_rpc, custody, alerts, actor_id)) = self.alert_sweep_parts() else {
             return;
         };
-        // The e2e build runs the SAME loop with its wait raceable by the agent's
-        // `alert_sweep_wake` (convention 14), minting a fresh wake per identity;
-        // a production build has no wake to race and runs the clock alone.
-        #[cfg(any(debug_assertions, feature = "e2e-agent"))]
-        {
-            let wake = crate::critical_alerts::mint_sweep_wake();
-            self.spawn_bg(async move {
-                fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
-                    nest_rpc,
-                    &custody,
-                    &alerts,
-                    &actor_id,
-                    move || {
+        let identity = format!("{}@{}", actor_id.to_hex(), nest_rpc.nest_url());
+        let (arm, ticket) = LOOP_CLAIM.claim(&identity, &nest_rpc, &alerts);
+        self.spawn_bg(async move {
+            let _ticket = ticket;
+            match arm {
+                SweepArm::OnePass => {
+                    // The shared one-shot waits (bounded) for the custody door,
+                    // which a converge on the live client finds open at once.
+                    fauna_client_alert_sweep::run_one_shot_sweep(
+                        nest_rpc, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                // The e2e build runs the SAME loop with its wait raceable by the
+                // agent's `alert_sweep_wake` (convention 14), minting a fresh wake
+                // per loop; a production build runs the clock alone.
+                #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+                SweepArm::Loop | SweepArm::ReestablishedLoop => {
+                    let wake = crate::critical_alerts::mint_sweep_wake();
+                    let wake = move || {
                         let notify = Arc::clone(&wake);
                         async move { notify.notified().await }
-                    },
-                )
-                .await;
-            });
-        }
-        #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
-        self.spawn_bg(async move {
-            fauna_client_alert_sweep::run_alert_sweep_loop(nest_rpc, &custody, &alerts, &actor_id)
-                .await;
-        });
-    }
-
-    /// Run ONE sweep pass — the same-actor converge arm's re-run of the
-    /// post-auth feeders (`main.rs`'s session patch). The loop
-    /// [`Self::run_critical_alert_sweep`] started at AuthSuccess is still
-    /// running for this identity, so a second loop here would only stack.
-    pub fn run_critical_alert_sweep_once(&self) {
-        let Some((nest_rpc, custody, alerts, actor_id)) = self.alert_sweep_parts() else {
-            return;
-        };
-        self.spawn_bg(async move {
-            let report = fauna_client_alert_sweep::run_session_start_sweep(
-                nest_rpc, &custody, &alerts, &actor_id,
-            )
-            .await;
-            tracing::debug!(
-                failures = report.failures.len(),
-                skipped = report.skipped.len(),
-                "converge-arm critical-alert sweep pass done"
-            );
+                    };
+                    if arm == SweepArm::Loop {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
+                            nest_rpc, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    } else {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_reestablished_wakeable(
+                            nest_rpc, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    }
+                }
+                #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+                SweepArm::Loop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop(
+                        nest_rpc, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+                SweepArm::ReestablishedLoop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop_reestablished(
+                        nest_rpc, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+            }
         });
     }
 
@@ -9322,6 +9390,88 @@ mod find_user_message_tests {
     }
 }
 
+/// The knock accept's settle message: sent → `knock_accepted` (the knocks and
+/// contacts re-read); queued with no nest → [`DataMessage::KnockAcceptQueued`],
+/// which drops the knock from the local list and adds no roster row — the
+/// nest's read after the drain is the word (tui's rule, account-offline-mutation.md
+/// § Implementation status today, the knock-accept composer).
+async fn accept_knock_message(
+    nest_rpc: Arc<NestClient>,
+    queue: Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>,
+    peer_id: String,
+) -> UiMessage {
+    use fauna_protocol::offline_intent::Composed;
+    let contacts = fauna_client_contacts::ContactsClient::new(nest_rpc);
+    match contacts
+        .knocks_accept_or_queue(queue.as_deref(), peer_id.clone())
+        .await
+    {
+        Ok(Composed::Sent(())) => UiMessage::Action(ActionResult::Success {
+            context: "knock_accepted".into(),
+        }),
+        Ok(Composed::Queued(_)) => UiMessage::Data(DataMessage::KnockAcceptQueued { peer_id }),
+        Err(e) => UiMessage::Action(ActionResult::Failed {
+            context: "fauna.knocks.accept".into(),
+            error: e.to_string(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod knock_accept_composer_tests {
+    use super::*;
+    use fauna_client_testkit::RecordingQueue;
+
+    fn accept(word: &'static str) -> (UiMessage, Vec<String>) {
+        let queue = Arc::new(RecordingQueue::new(word));
+        let nest = NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            ActorKeypair::from_secret([9u8; 32]),
+        );
+        let msg = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(accept_knock_message(
+                nest,
+                Some(Arc::clone(&queue) as Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>),
+                "ab".repeat(32),
+            ));
+        let kinds = queue
+            .queued()
+            .into_iter()
+            .map(|q| q.0.to_string())
+            .collect();
+        (msg, kinds)
+    }
+
+    /// With no nest a knock accept rests in the outbox (not sent into the dead
+    /// connection) and settles as a local drop of that one knock.
+    #[test]
+    fn a_knock_accept_with_no_nest_is_queued_and_leaves_the_local_list() {
+        let (msg, kinds) = accept("disconnected");
+        assert_eq!(kinds, vec!["fauna.knocks.accept"]);
+        match msg {
+            UiMessage::Data(DataMessage::KnockAcceptQueued { peer_id }) => {
+                assert_eq!(peer_id, "ab".repeat(32));
+            }
+            _ => panic!("expected a queued accept"),
+        }
+    }
+
+    /// Connected, the accept is sent (to this dummy nest it fails on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn a_knock_accept_with_the_nest_connected_is_sent_not_queued() {
+        let (msg, kinds) = accept("connected");
+        assert!(kinds.is_empty());
+        assert!(
+            matches!(msg, UiMessage::Action(ActionResult::Failed { ref context, .. }) if context == "fauna.knocks.accept"),
+            "the send was attempted"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared-folder (cross-user) owner-side helpers — folders.md § Sharing
 // ---------------------------------------------------------------------------
@@ -10266,8 +10416,8 @@ pub async fn load_selfhosted_recovery_command(
 /// **The deployment-seed custody leg** (`box-recovery.md` § The plane-era
 /// recovery floor → *(c) The writes*) over `nest` and the account-store
 /// handle, mapping a run that ends with custody unconfirmed onto linux's
-/// custody-warning surface — the `ActionResult::Failed` toast (app.rs), never a
-/// silent drop. Called from both edges: [`FaunaClient::run_deployment_seed_custody_leg`]
+/// app-wide `warning-message` banner (`UiMessage::RecoveryCustodyWarning`,
+/// app.rs) in the shared words, never a silent drop. Called from both edges: [`FaunaClient::run_deployment_seed_custody_leg`]
 /// (post-auth, when the store is already up) and `account_runtime::install`'s
 /// installed arm (store-ready, when post-auth already landed).
 pub async fn run_deployment_seed_custody_leg(
@@ -10278,10 +10428,9 @@ pub async fn run_deployment_seed_custody_leg(
     if let Some(warning) =
         fauna_client_account_runtime::deployment_seeds::run_custody_leg(&nest, &store).await
     {
-        tx.send(UiMessage::Action(ActionResult::Failed {
-            context: "deployment-seed recovery custody".into(),
-            error: warning.resolve(crate::i18n::strings::lookup),
-        }));
+        tx.send(UiMessage::RecoveryCustodyWarning(
+            warning.resolve(crate::i18n::strings::lookup),
+        ));
     }
 }
 
@@ -11240,7 +11389,7 @@ fn cred_app() -> String {
 // relaunch. The server is the source of truth. Since 2026-09-24 the cache IS
 // the active account's index entry in the shared `AccountRegistry`
 // (`AccountRegistry::update_cache` / `session_material`) — the same rows the
-// account switcher lists — so `delete_credentials`' registry sweep takes it
+// account switcher lists — so the sign-out finish's wipe takes it
 // with the identity, and the pre-registry `handle` / `domain` / `tier`
 // libsecret items are neither written nor read any more.
 // ---------------------------------------------------------------------------
@@ -11405,56 +11554,28 @@ fn load_account_cache_registry() -> (Option<String>, Option<String>, Option<Stri
 //
 // Two libsecret items (nest_url, handle) under a separate `application`
 
-/// Delete all Fauna credentials from the system keyring, and report what
-/// survived.
-///
-/// **Returns what survived rather than an error.** The erase is best-effort by
-/// design — a sign-out completes either way — but a keyring that refused the
-/// wipe must not look like one that took it. Until 2026-09-13 the sign-out
-/// handler dropped this function's `Result` (`let _ =`) after the residue line
-/// was already built, so a locked collection holding the identity seed painted a
-/// clean "Signed out" (`account-scoping.md` § Erasure follows scope → *the
-/// credential half is a residue class too*). The caller hands it to
-/// `account_scope::record_residue`.
-#[must_use = "a sign-out that drops this reports success over a keyring that may \
-              still hold the signed-out identity - the defect this return exists \
-              to prevent"]
-pub fn delete_credentials() -> fauna_client_accounts::CredentialSweep {
-    // Also clear the in-process account-cache mirror (see `account_cache_mem`):
-    // logout/reset must not let the next signed-in actor inherit this session's
-    // cached `<handle>@<domain>`.
-    *account_cache_mem().lock().unwrap() = (None, None, None);
-    // The per-actor sweep, then the `fauna-desktop` namespace wipe, then a
-    // read-back — the one shared sequence (`long-term-store.md` § Cleanup
-    // contract). The wipe alone cannot reach the shared `fauna-account-store`
-    // namespace holding this machine's writer key and each account's principal
-    // bundle, and the sweep must run first because it enumerates through the
-    // registry index the wipe destroys.
-    fauna_credential_store::erase_all_credentials(
-        &crate::account_registry(),
-        &CredentialStore::for_namespace(cred_app()),
-    )
+/// linux's own credential namespace (`fauna-desktop`, or the test override) —
+/// what the sign-out finish's **wipe** deletes wholesale and its residue retry
+/// reads back (`account_scope::LinuxFinishHost`; `account-scoping.md`
+/// § Erasure follows scope → *The sign-out record is on all 7 apps*, decision
+/// 2). The shared `fauna-account-store` namespace is not in it: each account's
+/// slots there ride with its scopes (`erase_account_credentials`).
+pub(crate) fn credential_namespace() -> CredentialStore {
+    CredentialStore::for_namespace(cred_app())
 }
 
-/// [`delete_credentials`] again for a sign-out residue retry, reading back the
-/// keys the sign-out recorded as surviving — the shared
-/// [`fauna_credential_store::re_erase_credentials`]. Called only when the
-/// recorded credential half is not clean, and only once the retry's serving
-/// gate has passed (`account_scope::retry_residue`).
-pub fn re_delete_credentials(
-    recorded: fauna_client_accounts::CredentialSweep,
-) -> fauna_client_accounts::CredentialSweep {
-    fauna_credential_store::re_erase_credentials(
-        &crate::account_registry(),
-        &CredentialStore::for_namespace(cred_app()),
-        recorded,
-    )
+/// Clear the in-process account-cache mirror (see `account_cache_mem`), once
+/// a sign-out's finish has wiped the credentials: the next signed-in actor
+/// must not inherit the signed-out session's cached `<handle>@<domain>`.
+pub(crate) fn forget_account_cache() {
+    *account_cache_mem().lock().unwrap() = (None, None, None);
 }
 
 /// The namespace wipe alone, with the `application` namespace passed
 /// explicitly — how the per-run isolation tests below exercise the real
 /// secret-service round-trip env-free. Production goes through
-/// [`delete_credentials`], whose shared sequence owns this wipe.
+/// the sign-out finish (`account_scope::LinuxFinishHost::wipe`), whose shared
+/// sequence owns this wipe.
 #[cfg(all(test, feature = "live-secret-service"))]
 fn delete_credentials_in(app: &str) -> Result<(), anyhow::Error> {
     // The shared store owns both arms (file + libsecret) and the routing between

@@ -1,7 +1,7 @@
 //! Shared byte-framing for domain-separated content/idempotency hashes.
 //! Every current caller — the nest's `session_close_idempotency_hash`,
 //! `auth_event_idempotency_hash`, `derive_dav_content_id`,
-//! `rejected_scan_message_id` and `CacheDb::bridge_content_id`, and the two
+//! `rejected_scan_message_id`, and the two
 //! tamper-evidence chain hashes in [`crate::chain_version`] (`audit_log`'s
 //! `entry_hash`, `pending_actions`' `chain_hash`) — hand-rolled
 //! the same "length-prefixed domain tag, then a field sequence" idiom over
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn lenprefixed_before_fixed32_prevents_boundary_aliasing() {
-        // The exact shape `bridge_content_id` fixes: a variable-length field
+        // The shape the former bridge-message content id fixed: a variable-length field
         // immediately followed by a fixed-32 field, then a trailing field.
         // Two decompositions below share the identical 38-byte raw
         // concatenation — an unframed hasher (the pre-fix bug) would

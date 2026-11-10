@@ -69,6 +69,7 @@ fn record(
         internal_date_ms: i64::from(uid),
         rfc5322: raw.into_bytes(),
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: true,
         warmup_hold: None,
     }

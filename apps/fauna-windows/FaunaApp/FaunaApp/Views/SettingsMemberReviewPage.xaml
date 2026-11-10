@@ -5,7 +5,6 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:FaunaApp.Views"
     xmlns:loc="using:FaunaApp.Markup"
-    xmlns:vm="using:FaunaApp.Core.ViewModels"
     xmlns:controls="using:FaunaApp.Controls"
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
@@ -14,8 +13,8 @@
       Settings to Members To Review (succession-aftermath.md § Propagation,
       Removing a flagged member): the
       PERMANENT half of the post-succession unattested-member review. Holds
-      whatever the ephemeral kit-side pass (a separate arm, NOT built here;
-      gated behind windows' identity-stolen ceremony legs) leaves unanswered. No sweep gate on
+      whatever the ephemeral kit-side pass (SettingsAccountPage's Recovery Kit
+      section) leaves unanswered — deferred, or never reached. No sweep gate on
       purpose: the only condition is whether anything is open, so this page is
       reachable at all times and empty most of the time; that is the design,
       not a gap. Reference: apps/fauna-tui/src/settings/member_review.rs.
@@ -48,42 +47,10 @@
                        Opacity="0.6" TextWrapping="Wrap" Visibility="Collapsed"
                        Text="{loc:Localize Key=settings/member_review_page/empty}" />
 
-            <ItemsControl x:Name="ReviewList">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <StackPanel Orientation="Vertical" Spacing="8" />
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="vm:MemberReviewRow">
-                        <!-- The row's own AutomationId carries BOTH the text an
-                             e2e get_text reads and the container the keep/remove
-                             buttons are scoped inside (mirrors nostr-bunker-app-item:
-                             AutomationId + a dynamic Name, no separate static
-                             Name — reference_windows_flaui_gettext_dynamic_label_no_name). -->
-                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewRow}"
-                                AutomationProperties.Name="{x:Bind DisplayText}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1" CornerRadius="6" Padding="12">
-                            <StackPanel Spacing="8">
-                                <TextBlock Text="{x:Bind DisplayText}" TextWrapping="Wrap" />
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewKeepButton}"
-                                            AutomationProperties.Name="{x:Bind DisplayText}"
-                                            Tag="{x:Bind Person}"
-                                            Content="{loc:Localize Key=settings/recovery_kit/review_keep}"
-                                            Click="Keep_Click" />
-                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewRemoveButton}"
-                                            AutomationProperties.Name="{x:Bind DisplayText}"
-                                            Tag="{x:Bind Person}"
-                                            Content="{loc:Localize Key=settings/recovery_kit/review_remove}"
-                                            Click="Remove_Click" />
-                                </StackPanel>
-                            </StackPanel>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <!-- The rows: the SAME control the ephemeral pass on the Recovery
+                 Kit section renders (one id family, two surfaces; the row is
+                 built once — settings.md § Recovery kit). -->
+            <controls:MemberReviewList x:Name="ReviewList" />
         </StackPanel>
     </ScrollViewer>
 </Page>

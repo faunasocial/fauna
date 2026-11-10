@@ -77,13 +77,15 @@ Stamped 2026-09-19 at 8ac16765e4.
 | ios | ✅ full | 0.1.5-dev+390d61b5 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| android-kids |  no run recorded | |
+| ios-kids | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_feed_draft_persistence.py::test_feed_compose_draft_survives_app_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_conversations_draft_persistence.py::test_new_thread_compose_draft_survives_app_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_event_draft_persistence.py::test_event_compose_draft_survives_app_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_conversations_new_thread_cancel.py::test_new_thread_cancel_discards_draft_and_dismisses` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_conversations_new_thread_cancel.py::test_new_thread_cancel_discards_draft_and_dismisses` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, ios-kids (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_windows_window_close_flush.py::test_window_close_forces_conversation_draft_flush_before_exit` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_linux_window_close_flush.py::test_window_close_forces_conversation_draft_flush_before_exit` | linux (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_tui_quit_flush.py::test_exit_tab_forces_conversation_draft_flush_before_exit` | tui (linux): passed |
@@ -95,9 +97,9 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 6 | nest | `tests/e2e-unified/tests/api/test_drafts_sync.py::test_drafts_reserved_set_not_user_listed` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_feed_draft_attachment_restore.py::test_restored_draft_attachment_is_named_refused_and_removable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 8 | app | `tests/e2e-unified/tests/test_conversations_draft_attachment_restore.py::test_restored_message_draft_attachment_is_named_and_its_send_refuses` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_feed_draft_audience_restore.py::test_a_post_drafts_sale_with_its_price_and_teaser_survives_a_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_feed_draft_audience_restore.py::test_a_post_drafts_tier_and_teaser_survive_a_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_feed_draft_audience_restore.py::test_a_post_drafts_room_and_teaser_survive_a_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_feed_draft_audience_restore.py::test_a_post_drafts_sale_with_its_price_and_teaser_survives_a_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_feed_draft_audience_restore.py::test_a_post_drafts_tier_and_teaser_survive_a_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_feed_draft_audience_restore.py::test_a_post_drafts_room_and_teaser_survive_a_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_conversations_new_thread_draft_kept.py::test_a_half_written_new_message_is_kept_across_stepping_out_and_switching` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_event_draft_openers.py::test_a_half_written_event_is_still_in_the_form_each_time_it_is_opened_again` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_event_draft_openers.py::test_a_day_cell_start_a_created_and_a_discarded_event_leave_the_next_form_blank` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

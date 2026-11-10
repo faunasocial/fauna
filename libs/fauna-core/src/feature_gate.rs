@@ -741,9 +741,15 @@ pub const SURFACE_PAYMENTS_CLAIM_REDEEM: &str = "payments.claim.redeem";
 pub const SURFACE_PAYMENTS_UNLOCK_PURCHASE: &str = "payments.unlock.purchase";
 pub const SURFACE_PAYMENTS_TIP_SEND: &str = "payments.tip.send";
 
-/// `zaps` receive side (§ Charter members). The send side is unbuilt.
+/// `zaps` receive side (§ Charter members).
 pub const SURFACE_ZAPS_SIGNER_DESIGNATE: &str = "zaps.signer.designate";
 pub const SURFACE_ZAPS_RECEIPT_INGEST: &str = "zaps.receipt.ingest";
+/// `zaps` — the payee's one send-side act: advertising a sold post on Nostr
+/// with its asking price, a solicitation of Lightning payment
+/// (`monetization.md` § The Nostr advertisement of a sold post → *The gate*).
+/// One operation, no counterparty, no magnitude; composed at
+/// `fauna.nostr.advertise.set` only — its `clear` is de-escalation.
+pub const SURFACE_ZAPS_ADVERTISE: &str = "zaps.advertise";
 
 /// `p2p-share` (§ Charter members). Member admission is the fan-out chokepoint.
 pub const SURFACE_P2P_SHARE_MEMBER_ADMIT: &str = "p2p-share.member.admit";
@@ -903,7 +909,11 @@ static REGISTRY: [FeatureEntry; 3] = [
         unit: MagnitudeUnit::Millisats,
         superset: Some(GatedFeature::Payments),
         tier1: TIER1_ZAPS,
-        gate_surfaces: &[SURFACE_ZAPS_SIGNER_DESIGNATE, SURFACE_ZAPS_RECEIPT_INGEST],
+        gate_surfaces: &[
+            SURFACE_ZAPS_SIGNER_DESIGNATE,
+            SURFACE_ZAPS_RECEIPT_INGEST,
+            SURFACE_ZAPS_ADVERTISE,
+        ],
     },
     FeatureEntry {
         feature: GatedFeature::P2pShare,

@@ -37,10 +37,24 @@ public class KnockToastTextTests
             new Dictionary<string, string> { ["sender"] = "abcd1234", ["message"] = "hi there" });
         var knock = MockNestRpcClient.MakeKnock("abcd1234deadbeef", "hi there", body);
 
-        var (title, text) = KnockToastText.For(knock);
+        var (title, text, _) = KnockToastText.For(knock);
 
         Assert.Equal("New Contact Request", title);
         Assert.Equal("abcd1234 wants to connect: hi there", text);
+    }
+
+    /// <summary>The toast reports the catalog key its body resolved from — what the
+    /// knock-toast log records as <c>key</c> (<c>fauna_e2e_agent::KNOCK_NOTICES_KEY</c>),
+    /// which the witness asserts is <c>notifications.row_knock</c>.</summary>
+    [Fact]
+    public void KnownKeyKnock_ReportsTheCatalogKeyItPaintedFrom()
+    {
+        UseRealKnockStrings();
+        var body = new LocalizedText("notifications.row_knock",
+            new Dictionary<string, string> { ["sender"] = "abcd1234", ["message"] = "hi there" });
+        var knock = MockNestRpcClient.MakeKnock("abcd1234deadbeef", "hi there", body);
+
+        Assert.Equal("notifications.row_knock", KnockToastText.For(knock).BodyKey);
     }
 
     [Fact]
@@ -52,7 +66,7 @@ public class KnockToastTextTests
         // `summary` (the knocker's raw message) painted alone.
         var knock = MockNestRpcClient.MakeKnock("abcd1234deadbeef", "please add me!!!", body: null);
 
-        var (title, text) = KnockToastText.For(knock);
+        var (title, text, _) = KnockToastText.For(knock);
 
         Assert.Equal("New Contact Request", title);
         Assert.Equal("abcd1234 wants to connect", text);
@@ -71,7 +85,7 @@ public class KnockToastTextTests
             new Dictionary<string, string> { ["sender"] = "abcd1234", ["message"] = "hi\nthere\u0007" });
         var knock = MockNestRpcClient.MakeKnock("abcd1234deadbeef", "hi\nthere\u0007", body);
 
-        var (_, text) = KnockToastText.For(knock);
+        var (_, text, _) = KnockToastText.For(knock);
 
         Assert.Equal("abcd1234 wants to connect: hi there", text);
         Assert.DoesNotContain('\n', text);

@@ -30,6 +30,9 @@ host OS (`feature_ledger.host_platform`), one file per platform.
   CLEAN tree both times — the tree did not change, so the outcome did not come from the
   code. A dirty tree is not its commit: a red then a green with edits in between is a
   fix in progress, and a `last` written before `dirty` was recorded counts as dirty.
+  `times` keeps the newest `FLAKY_TIMES_KEPT` flake times, so a reader can count the
+  flakes inside a window (the janitor's "twice in fourteen days"); `count` is for life.
+  A record written before `times` carries none, and a reader counts it as its `last`.
 * `collected` — the day a collection last named the node id: the 45-day prune's clock.
 
 **Never fatal.** A run that produced real results must not be turned red by a
@@ -107,6 +110,21 @@ def begin_run(*, commit: str, base: str | None, dirty: bool, node_ids: dict,
     _observed.clear()
 
 
+def settle_dirt(*, commit: str, dirty: bool) -> bool:
+    """The tree read again at the run's end: a HEAD other than the one collection
+    read, or dirt now, marks the whole run dirty — a tree edited, rebased or
+    checked out while the run ran is not the commit it started at, so none of its
+    reds or greens may count toward `flaky` (a long tier_1 run recorded the
+    text-only checks of a script being edited under it as reds at a clean commit,
+    and a later clean green there as flaky). True when it marked the run."""
+    if not _run or _run["dirty"]:
+        return False
+    if commit != _run["commit"] or dirty:
+        _run["dirty"] = True
+        return True
+    return False
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -145,6 +163,10 @@ def note(nodeid: str, *, duration: float, outcome: str | None = None,
 
 
 # ── the record ──────────────────────────────────────────────────────────────
+#: The newest flake times a record keeps (`flaky.times`), enough for any window's count.
+FLAKY_TIMES_KEPT = 10
+
+
 def empty_record() -> dict:
     return {"collected": None, "flaky": {"count": 0, "last": None}, "last": None,
             "last_green": None, "red_since": None}
@@ -174,7 +196,9 @@ def observe(record: dict | None, *, outcome: str | None, time: str | None,
     if green:
         if (prev and prev.get("outcome") in (RED, ERROR) and prev.get("commit") == run["commit"]
                 and prev.get("dirty") is False and not run["dirty"]):
-            rec["flaky"] = {"count": (rec.get("flaky") or {}).get("count", 0) + 1, "last": time}
+            was = rec.get("flaky") or {}
+            times = ([*(was.get("times") or []), time])[-FLAKY_TIMES_KEPT:]
+            rec["flaky"] = {"count": was.get("count", 0) + 1, "last": time, "times": times}
         rec["last_green"] = green
         rec["red_since"] = None
     elif outcome in (RED, ERROR):

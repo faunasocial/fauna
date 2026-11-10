@@ -6486,6 +6486,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_oversized_spam_mark_row_seals_under_half_the_entry_cap() {
+        use crate::account_state::MAX_STATE_ENTRY_BYTES;
+        use fauna_core::moderation_rows::{HIDDEN_CONTENT_ID_MAX_BYTES, SpamMark};
+        let mark = SpamMark {
+            id: "f".repeat(HIDDEN_CONTENT_ID_MAX_BYTES),
+        };
+        let value = fauna_core::encoding::canonical_encode(&mark).unwrap();
+        let len = moderation_row_seal_len(&mark.plane_key(), &value);
+        assert!(
+            len <= MAX_STATE_ENTRY_BYTES / 2,
+            "the widest spam-mark row seals to {len} bytes, over half the \
+             {MAX_STATE_ENTRY_BYTES}-byte cap"
+        );
+    }
+
     /// **Bytes are byte strings** (the *Bounded rows* rider): the secret rides
     /// as a CBOR byte string (major 2), never serde's default integer array.
     #[test]
@@ -10240,6 +10256,16 @@ mod tests {
             })
         }
 
+        fn forked() -> FolderKeyRecord {
+            FolderKeyRecord::Forked(fauna_core::data::ForkedFolderSeat {
+                channel_id: [0x79; 32],
+                mls_group_id: vec![0x7A; 16],
+                set_name: Some("photos".into()),
+                forked_at: 1,
+                ..Default::default()
+            })
+        }
+
         fn config() -> FoldersConfig {
             FoldersConfig {
                 sets: vec![FolderKeyCustody {
@@ -10255,6 +10281,7 @@ mod tests {
                 }],
                 pending_removals: vec![],
                 foreign_sets: vec![],
+                forked_seats: vec![],
             }
         }
 
@@ -10503,6 +10530,7 @@ mod tests {
                 }),
                 pending(Some(vec![1]), true),
                 foreign("https://a.example", Some("reader"), Some(1)),
+                forked(),
             ];
             for record in &records {
                 let (key, current) = row(record);
@@ -10511,6 +10539,7 @@ mod tests {
                     FolderKeyRecord::Generation(r) => with_extra_field(r),
                     FolderKeyRecord::Removal(r) => with_extra_field(r),
                     FolderKeyRecord::Foreign(r) => with_extra_field(r),
+                    FolderKeyRecord::Forked(r) => with_extra_field(r),
                 };
                 assert!(refused(&entry(&key, &newer), None), "{key}: first contact");
                 assert!(
@@ -10544,6 +10573,7 @@ mod tests {
                 }),
                 pending(Some(vec![1, 2, 3]), false),
                 foreign("https://a.example", Some("reader"), Some(1)),
+                forked(),
             ];
             for record in &records {
                 let value: crate::Value = crate::decode_strict(&record.encode().unwrap()).unwrap();

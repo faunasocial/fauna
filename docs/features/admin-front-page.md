@@ -4,6 +4,9 @@ title: Web: whose site is the front page
 section: admin area
 goal: docs/goal/behavior/admin.md § 7. Web
 guide: docs/guides/admin-tour.md § Web
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -47,13 +50,15 @@ Stamped 2026-10-01 at e129e78aa0.
 | ios | ✅ full | 0.1.5-dev+cdf5f9b7 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+cdf5f9b7 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_apex_designate_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_set_apex_actor_is_admin_only` | nest (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_web_apex_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_web_apex_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_web_apex_picker_offers_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_shows_the_address_it_serves_at` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_opens_on_who_is_the_front_page_now` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

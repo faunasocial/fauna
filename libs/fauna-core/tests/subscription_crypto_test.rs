@@ -5,10 +5,11 @@ use fauna_core::encoding::{
 };
 use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::subscription::crypto::{
-    MintError, build_manage_subscribers_self_delegation, create_key_blob_entry, decrypt_content,
-    decrypt_key_blob_entry, decrypt_key_blob_entry_for, derive_post_key, derive_web_render_key,
-    encrypt_content, mint_key_blob, mint_key_blob_from_bytes, period_key_commitment,
-    subscriber_mlkem_encaps_key, verify_key_blob_signature,
+    MintError, build_manage_subscribers_delegation, build_manage_subscribers_self_delegation,
+    create_key_blob_entry, decrypt_content, decrypt_key_blob_entry, decrypt_key_blob_entry_for,
+    derive_post_key, derive_web_render_key, encrypt_content, mint_key_blob,
+    mint_key_blob_from_bytes, period_key_commitment, subscriber_mlkem_encaps_key,
+    verify_key_blob_signature,
 };
 use fauna_core::subscription::types::{KemSuiteId, KeyBlob};
 
@@ -536,6 +537,24 @@ fn mint_key_blob_self_signed_author_device() {
     let recovered =
         decrypt_key_blob_entry(&subscriber, &minted.blob.entries[0].encrypted_key).unwrap();
     assert_eq!(recovered, period_key);
+}
+
+#[test]
+fn nest_key_delegation_names_the_given_device_key_and_verifies() {
+    // The nest-key case `fauna.subscriptions.delegate.upload` stores: the
+    // author signs, the device key is someone else's (the nest's).
+    let author = ActorKeypair::generate();
+    let nest_key = ActorKeypair::generate().actor_id().0;
+    let signed = build_manage_subscribers_delegation(&author, nest_key, Timestamp(1_000))
+        .expect("delegation signs");
+    assert_eq!(signed.auth.actor_id, author.actor_id());
+    assert_eq!(signed.auth.device_key, nest_key);
+    assert!(matches!(
+        signed.auth.capabilities.as_slice(),
+        [Capability::ManageSubscribers]
+    ));
+    assert!(signed.auth.expires_at.is_none());
+    assert!(verify_envelope(&signed.auth, &signed.bytes, &signed.envelope).is_ok());
 }
 
 #[test]

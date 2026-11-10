@@ -14,7 +14,7 @@ text, and the message itself renders formatted.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at e9152e3330.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] The toolbar wraps your selection in italic, code, link, heading and list formatting — `docs/goal/ui/conversations.md` § Compose-field inline markdown styling
    - `tests/e2e-unified/tests/test_conversations_markdown_toolbar_wrap.py::test_italic_button_wraps_selection`
@@ -32,6 +32,8 @@ Stamped 2026-09-19 at e9152e3330.
    - `tests/e2e-unified/tests/test_capability_gating.py::test_bridged_thread_disables_attachment_and_topic`
 4. [app] The bold button wraps your selection in bold — `docs/goal/ui/conversations.md` § Compose-field inline markdown styling
    - `tests/e2e-unified/tests/test_compose_markdown_styling.py::test_compose_richeditbox_value_and_toolbar`
+5. [app] A message written with checklist items shows them as ticked and unticked boxes, and a nested list shows indented — `docs/goal/architecture/render-model.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_conversations_checklist.py::test_checklist_items_paint_boxes_and_a_nested_list_indents`
 
 ## Status
 
@@ -40,11 +42,13 @@ Stamped 2026-09-19 at e9152e3330.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+acde58f9 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.3-dev+862c7d57 standalone |
+| windows | ⚠ partial | 0.1.3-dev+862c7d57 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5 docker |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -60,4 +64,5 @@ Stamped 2026-09-19 at e9152e3330.
 | 3 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_smtp_enables_markdown` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_capability_gating.py::test_bridged_thread_disables_attachment_and_topic` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_compose_markdown_styling.py::test_compose_richeditbox_value_and_toolbar` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_conversations_checklist.py::test_checklist_items_paint_boxes_and_a_nested_list_indents` — requires `document-painted-read` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

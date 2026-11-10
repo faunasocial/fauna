@@ -198,6 +198,17 @@ pub struct FolderSummary {
     /// empty label is never shown. Computed in the `From<WireFolder>` transcribe
     /// from `FolderSummary::owner_handle` + `owner_actor_id`.
     pub owner_display: String,
+    /// Whether this member's seat in the set is marked **forked** — the owner
+    /// changed identity and this copy could not follow
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*). When `true` the recipient `folder-shared-badge` renders its
+    /// third reading, "Shared by ‹owner_display› · owner changed, ask them to
+    /// share it again" (`docs/goal/ui/folders.md` § Sharing). Painted by
+    /// `DevicesMachine` from the wired `MlsQuery`
+    /// (`fauna_protocol::member_rows::seat_forked`); always `false` on an owner
+    /// row and on a wire transcribe.
+    pub seat_forked: bool,
     /// Whether this set is currently served over WebDAV — the per-set exposure
     /// gate the Settings → Folders `folder-webdav-toggle` reflects and flips
     /// (`docs/goal/behavior/webdav-server.md` § Independent enablement point 2;
@@ -570,6 +581,23 @@ pub struct DevicesSnapshot {
     pub own_p2p_participation: Option<bool>,
 }
 
+impl DevicesSnapshot {
+    /// The name of this actor's folder whose id is `id` (the decimal spelling
+    /// a pending action's `target` carries), or `None` for an id this roster
+    /// does not hold or a folder with no readable name. The lookup every app
+    /// hands `fauna_protocol::pending_actions::describe_pending_action_naming`
+    /// so an automatic prune's row names its folder (`ui/settings.md`
+    /// § Pending actions).
+    pub fn folder_name(&self, id: &str) -> Option<String> {
+        let id: i64 = id.trim().parse().ok()?;
+        self.folders
+            .iter()
+            .find(|f| f.id == id)
+            .map(|f| f.name.clone())
+            .filter(|name| !name.trim().is_empty())
+    }
+}
+
 // ── Wire → snapshot transcription (drops the wire `extra` flatten maps) ──────
 //
 // These live here, beside the summary types they build, and NOT in
@@ -649,6 +677,9 @@ impl From<WireFolder> for FolderSummary {
             access: f.access,
             owner_handle: f.owner_handle,
             owner_display,
+            // Painted by `DevicesMachine` from its wired `MlsQuery` — the wire
+            // knows nothing of this device's seat.
+            seat_forked: false,
             webdav_enabled: f.webdav_enabled,
             conflict_policy: f.conflict_policy,
             web_paywall_tier: f.web_paywall_tier,

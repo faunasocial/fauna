@@ -340,7 +340,7 @@ fn train_handler() -> RpcHandler {
                 factor: fauna_core::scoring::factor::REPORT_SPAM.to_string(),
                 content_kind: "post".to_string(),
             };
-            if let Err(e) = crate::db::reports::capture_report(
+            match crate::db::reports::capture_report(
                 &state.db,
                 &actor_id,
                 &report_key,
@@ -348,11 +348,17 @@ fn train_handler() -> RpcHandler {
             )
             .await
             {
-                tracing::warn!("report capture failed: {e}");
-            } else {
-                // The local aggregate may have transitioned — nudge the
-                // federation exchange originator's debounced push.
-                state.notify_exchange_transition();
+                Err(e) => tracing::warn!("report capture failed: {e}"),
+                Ok(reopened) => {
+                    // A post's hash may also be a mail copy's: wake each app
+                    // whose INBOX copy the aggregate re-opened.
+                    for actor in &reopened {
+                        crate::segments::notify_mail_flags_changed(&state.ws, actor);
+                    }
+                    // The local aggregate may have transitioned — nudge the
+                    // federation exchange originator's debounced push.
+                    state.notify_exchange_transition();
+                }
             }
 
             encode_reply(&ModerationTrainReply {

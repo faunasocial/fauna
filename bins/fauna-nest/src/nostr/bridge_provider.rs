@@ -758,7 +758,9 @@ impl BridgeProvider for NostrProvider {
         // the back-catalogue of exposed posts into the relay store — translated
         // + signed once, deduped — so REQ serves signed rows instead of
         // re-signing per read. Turning it off deletes the derived rows (they are
-        // recreatable — re-derived on re-expose — so this is no data loss).
+        // recreatable — re-derived on re-expose — so this is no data loss),
+        // sparing an advertised sold post's: that is a per-post act with its own
+        // undo, never withdrawn by the account toggle.
         match nostr_settings.expose_content {
             Some(true) => {
                 let acct = {
@@ -778,14 +780,27 @@ impl BridgeProvider for NostrProvider {
                             &state.post_segments,
                             actor_id,
                             &kp,
+                            store::MaterializeClasses::PublicAndAdvertised,
+                            &state.web_serving_domain(),
                         )
                         .await
                         {
-                            Ok(n) if n > 0 => tracing::info!(
-                                "nostr: materialized {n} exposed posts for {}",
-                                &actor_id[..8.min(actor_id.len())]
-                            ),
-                            Ok(_) => {}
+                            Ok(m) => {
+                                if m.count > 0 {
+                                    tracing::info!(
+                                        "nostr: materialized {} exposed posts for {}",
+                                        m.count,
+                                        &actor_id[..8.min(actor_id.len())]
+                                    );
+                                }
+                                // An advertisement the sweep had not yet
+                                // reached is published like any other.
+                                crate::nostr::advertise::push_advertisements(
+                                    state,
+                                    m.advertisements,
+                                )
+                                .await;
+                            }
                             Err(e) => {
                                 tracing::warn!("nostr: materialize on expose-on failed: {e}")
                             }

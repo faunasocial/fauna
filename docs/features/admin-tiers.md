@@ -4,6 +4,9 @@ title: Tiers and paid membership
 section: admin area
 goal: docs/goal/behavior/admin.md § 3. Settings
 guide: docs/guides/admin-tour.md § Tiers
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -14,7 +17,7 @@ can be sold.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e129e78aa0.
+Stamped 2026-11-07 at 1a3d8611f5.
 
 1. [app] Tier definitions list and their caps edit in place — `docs/goal/behavior/admin.md` § 3. Settings
    - `tests/e2e-unified/tests/test_admin.py::test_settings_tier_definitions`
@@ -49,26 +52,34 @@ Stamped 2026-10-01 at e129e78aa0.
     - `tests/e2e-unified/tests/api/test_tier_removal_api.py::test_a_tier_is_removable_only_once_nothing_names_it`
 13. [app] The admin deletes a tier nobody is on from the page; deleting one a member is on is refused with the reason shown, and the tier stays — `docs/goal/behavior/admin.md` § 3. Settings
     - `tests/e2e-unified/tests/test_admin.py::test_settings_tier_delete`
+14. [nest] A refund drops the member to the lapse tier at once — `docs/goal/behavior/monetization.md` § Pillar 4
+   - `tests/e2e-unified/tests/api/test_membership_lapse.py::test_a_refund_drops_the_member_to_the_lapse_tier_at_once`
+15. [app] A negative cap typed into a tier form is saved as 0, and a cap that does not parse never changes the stored one — `docs/goal/behavior/value-formatting.md` § Tier cap validation
+    - `tests/e2e-unified/tests/test_admin.py::test_settings_tier_negative_cap_saves_as_zero_and_garbage_is_refused`
+16. [nest] A negative tier cap sent to the nest is refused and never stored; a cap of 0 is accepted — `docs/goal/behavior/value-formatting.md` § Tier cap validation
+    - `tests/e2e-unified/tests/api/test_tier_negative_cap_api.py::test_the_nest_refuses_a_negative_tier_cap_and_stores_nothing`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| linux | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| windows | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| ios | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| web | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| linux | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| windows | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| macos | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| ios | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_definitions` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_settings.py::test_admin_settings_loads` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin_settings.py::test_admin_designates_a_membership_tier_re_points_it_and_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_definitions` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_settings.py::test_admin_settings_loads` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin_settings.py::test_admin_designates_a_membership_tier_re_points_it_and_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_tier_limits_bind.py::test_the_upload_size_and_inbox_caps_bind_and_a_raised_cap_applies_at_once` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_tier_limits_bind.py::test_the_storage_cap_binds_and_a_changed_cap_applies_at_once` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_tier_limits_bind.py::test_the_feed_cap_binds_and_a_changed_cap_applies_at_once` | nest (linux): passed, nest (macos): passed |
@@ -80,9 +91,12 @@ Stamped 2026-10-01 at e129e78aa0.
 | 7 | nest | `tests/e2e-unified/tests/api/test_membership_lapse.py::test_a_tier_given_by_hand_is_never_undone_by_a_lapse` | nest (linux): passed, nest (macos): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_membership_lapse.py::test_re_pointing_or_clearing_the_membership_never_changes_admitted_members_terms` | nest (linux): passed, nest (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_membership_lapse.py::test_people_who_join_by_paying_do_not_count_against_the_free_account_cap` | nest (linux): passed, nest (macos): passed |
-| 10 | app | `tests/e2e-unified/tests/test_admin_settings.py::test_admin_re_points_a_designated_membership_without_clearing_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_new` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_refuses_empty_and_duplicate_names` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_admin_settings.py::test_admin_re_points_a_designated_membership_without_clearing_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_new` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_refuses_empty_and_duplicate_names` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_tier_removal_api.py::test_a_tier_is_removable_only_once_nothing_names_it` | nest (linux): passed, nest (macos): passed |
-| 13 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_membership_lapse.py::test_a_refund_drops_the_member_to_the_lapse_tier_at_once` | nest (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_negative_cap_saves_as_zero_and_garbage_is_refused` | tui (linux): passed, tui (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_tier_negative_cap_api.py::test_the_nest_refuses_a_negative_tier_cap_and_stores_nothing` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

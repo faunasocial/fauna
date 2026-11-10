@@ -886,6 +886,24 @@ pub fn spam_model_fingerprint(sealed_model: &[u8]) -> [u8; 32] {
     *blake3::hash(sealed_model).as_bytes()
 }
 
+/// Cap on a history row's opaque `message_id` — the nest refuses a longer one
+/// (`mail-spam.md` § Bounded size). Single home so the nest's check and the
+/// writers' digest fallback ([`spam_history_message_id`]) cannot drift.
+pub const SPAM_HISTORY_MESSAGE_ID_MAX_BYTES: usize = 256;
+
+/// The id a history row stores for a trained message: `id` itself when it fits
+/// [`SPAM_HISTORY_MESSAGE_ID_MAX_BYTES`], otherwise `b3:` + the 64-hex blake3-256
+/// digest of `id` (67 bytes). A mail-rail `Message-ID:` header is bounded only by
+/// RFC 5322's 998-octet line, so a long one must not make the train silently
+/// write nothing. The nest keeps the id opaque and compares it only for equality
+/// (the one-lesson rule), which a deterministic digest preserves.
+pub fn spam_history_message_id(id: Vec<u8>) -> Vec<u8> {
+    if id.len() <= SPAM_HISTORY_MESSAGE_ID_MAX_BYTES {
+        return id;
+    }
+    format!("b3:{}", blake3::hash(&id).to_hex()).into_bytes()
+}
+
 /// The stored model a `put_spam_model` write was computed from — the typed
 /// form of [`PutSpamModelRequest::expected_model`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

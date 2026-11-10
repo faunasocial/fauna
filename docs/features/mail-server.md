@@ -4,6 +4,9 @@ title: Mail from and to the outside world
 section: your nest
 goal: docs/goal/behavior/smtp-server.md § Goal
 guide: docs/guides/own-your-mail.md § Why this is normally hard, and what Fauna does about it
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -20,7 +23,7 @@ tuning.
 
 ## Coverage contract
 
-Stamped 2026-10-11 at 29b0959751.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [nest] The mail server in the released image starts and answers on every one of its mail ports, and does so again after an upgrade that adds to its stored data — `docs/goal/behavior/mail-bridge-lifecycle.md` § Lifecycle phases
    - `tests/e2e-unified/tests/platform/docker/test_mail_deploy_lifecycle.py::test_mail_deploy_lifecycle_to_serving`
@@ -93,7 +96,7 @@ Stamped 2026-10-11 at 29b0959751.
 26. [nest] When the mail server stops, a delivery already under way is given time to finish, and a server starting a new message is asked to try again later — `docs/goal/behavior/mail-bridge-lifecycle.md` § Shutting down
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_graceful_shutdown_drains_and_421s`
    - `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_graceful_shutdown_byes_and_exits_clean`
-27. [nest] When the nest rotates a domain's signing key, it keeps signing with the old key for a day after the new one is ready, so receiving servers can learn the new record first — `docs/goal/behavior/mail-bridge-lifecycle.md` § DKIM provisioning (automatic)
+27. [nest] When the nest rotates a domain's signing key, it moves to the new key only once both of its new records have been seen published for a day, and keeps signing with the old key until then, so receiving servers can learn the new record first — `docs/goal/behavior/mail-bridge-lifecycle.md` § DKIM provisioning (automatic)
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_scheduled_flip_waits_for_publication`
 28. [nest] A rotated signing key, or a domain added while mail is running, signs outgoing mail straight away with no restart — `docs/goal/behavior/mail-bridge-lifecycle.md` § Implementation status today
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_force_rotate_dkim_flips_active_selector_live`
@@ -127,6 +130,18 @@ Stamped 2026-10-11 at 29b0959751.
    - `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_wider_than_the_warmup_allowance_reads_back_held_on_sent`
 41. [nest] A domain that asks for reports on the mail sent in its name is sent one each day saying how that mail fared when it reached the nest — `docs/goal/behavior/dmarc-reporting.md` § Outbound aggregate-report sender
    - `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_publishing_a_mailto_rua_receives_our_aggregate_report`
+42. [nest] Mail arriving at your nest is stored only sealed, and a message arriving without its seal is refused — `docs/goal/architecture/encryption-at-rest.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_mail_rests_sealed.py::test_received_mail_rests_only_sealed_on_the_nest`
+   - `tests/e2e-unified/tests/test_mail_rests_sealed.py::test_the_nest_refuses_an_unsealed_mail_record`
+43. [nest] Each domain's signing key is rotated by the nest itself on a schedule of about three months, with no admin action — `docs/goal/behavior/mail-multidomain.md` § Rotation
+   - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_a_domains_signing_key_rotates_by_itself_on_its_schedule`
+44. [nest] Every outgoing message carries two signatures, one under each of the domain's two kinds of key, so a receiver checking either verifies it — `docs/goal/behavior/mail-multidomain.md` § Key shape
+   - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_signature_verifies`
+45. [nest] Forwarded mail and list sends count against the warm-up allowance like your own and are held, never dropped, when over it, while mail to people on your own nest never counts — `docs/goal/behavior/mail-deliverability.md` § Enforcement at submission time
+   - `tests/e2e-unified/tests/api/test_mail_warmup_forwards_and_local.py::test_forwarded_mail_counts_against_the_warmup_and_is_held_not_dropped_over_it`
+   - `tests/e2e-unified/tests/api/test_mail_warmup_forwards_and_local.py::test_mail_to_people_on_your_own_nest_never_counts_against_the_warmup`
+46. [nest] A setting changed while the mail server was disconnected from the nest applies when it reconnects — `docs/goal/behavior/mail-bridge-lifecycle.md` § Lifecycle phases
+   - `tests/e2e-unified/tests/api/test_mail_bridge_config_on_reconnect.py::test_a_setting_changed_while_the_mail_server_was_cut_off_applies_when_it_reconnects`
 
 ## Status
 
@@ -140,6 +155,8 @@ Stamped 2026-10-11 at 29b0959751.
 | ios | ⚠ partial | |
 | android | ⚠ partial | |
 | tui | ⚠ partial | |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -207,4 +224,11 @@ Stamped 2026-10-11 at 29b0959751.
 | 40 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_warmup_held_list_send_reads_back_held_on_sent` | nest (linux): passed |
 | 40 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_wider_than_the_warmup_allowance_reads_back_held_on_sent` | nest (linux): passed, nest (macos): passed |
 | 41 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_publishing_a_mailto_rua_receives_our_aggregate_report` | nest (linux): passed, nest (macos): passed |
+| 42 | nest | `tests/e2e-unified/tests/test_mail_rests_sealed.py::test_received_mail_rests_only_sealed_on_the_nest` | nest (linux): passed |
+| 42 | nest | `tests/e2e-unified/tests/test_mail_rests_sealed.py::test_the_nest_refuses_an_unsealed_mail_record` | nest (linux): passed |
+| 43 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_a_domains_signing_key_rotates_by_itself_on_its_schedule` | nest (linux): passed |
+| 44 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_signature_verifies` | nest (linux): passed, nest (macos): passed |
+| 45 | nest | `tests/e2e-unified/tests/api/test_mail_warmup_forwards_and_local.py::test_forwarded_mail_counts_against_the_warmup_and_is_held_not_dropped_over_it` | nest (linux): passed |
+| 45 | nest | `tests/e2e-unified/tests/api/test_mail_warmup_forwards_and_local.py::test_mail_to_people_on_your_own_nest_never_counts_against_the_warmup` | nest (linux): passed |
+| 46 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_config_on_reconnect.py::test_a_setting_changed_while_the_mail_server_was_cut_off_applies_when_it_reconnects` | nest (linux): passed |
 <!-- features-render:end -->

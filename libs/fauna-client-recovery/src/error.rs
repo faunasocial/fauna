@@ -118,10 +118,18 @@ pub enum RecoveryError {
 
     /// The kit the caller supplied as the prior one is not the kit registered
     /// at the head of this identity's chain — a kit that was already replaced,
-    /// or one belonging to a different account. Caught locally before signing,
-    /// so the screen can say which of the two it is instead of relaying a bare
-    /// "record refused".
+    /// or a bare kit (one naming no account) that belongs to a different one.
+    /// Caught locally before signing, so the screen says that rather than
+    /// relaying a bare "record refused".
     PriorKitMismatch,
+
+    /// The kit **names** an account, and it is not this one. A named kit is
+    /// authoritative for which account it opens, so this is "someone else's
+    /// kit", never "a stale kit" — kept apart from [`Self::PriorKitMismatch`]
+    /// and [`Self::KitNotCurrent`] so the user is not told to dig out a newer
+    /// kit that would not help (`identity-succession.md` § Enforcement on the
+    /// home nest). Refused before anything is minted or sent.
+    KitForAnotherAccount,
 
     /// A kit **replacement** would have overwritten a resting escrow blob this
     /// ceremony could not read, and nothing else carried the material it may
@@ -241,6 +249,13 @@ impl fmt::Display for RecoveryError {
                     fauna_i18n::strings::errors::RECOVERY_PRIOR_KIT_MISMATCH
                 )
             }
+            Self::KitForAnotherAccount => {
+                write!(
+                    f,
+                    "{}",
+                    fauna_i18n::strings::errors::RECOVERY_KIT_FOR_ANOTHER_ACCOUNT
+                )
+            }
             Self::PriorEscrowUnreadable { reason } => write!(
                 f,
                 "{}",
@@ -324,6 +339,10 @@ mod tests {
         assert_eq!(
             format!("{}", RecoveryError::PriorKitMismatch),
             fauna_i18n::strings::errors::RECOVERY_PRIOR_KIT_MISMATCH
+        );
+        assert_eq!(
+            format!("{}", RecoveryError::KitForAnotherAccount),
+            fauna_i18n::strings::errors::RECOVERY_KIT_FOR_ANOTHER_ACCOUNT
         );
     }
 

@@ -148,12 +148,37 @@ func keywordScorer() func(model []byte, text string) int32 {
 
 func newSpamScoreSession(c wsrpc.Caller, scoreFn func([]byte, string) int32, threshold uint32) *Session {
 	return &Session{
-		actorID:    []byte("actor-0000000000000000000000000000"),
-		client:     c,
-		logger:     slog.Default(),
-		spamPolicy: mailfauna.SpamPolicy{SpamFolderThreshold: threshold},
-		scoreFn:    scoreFn,
+		actorID:       []byte("actor-0000000000000000000000000000"),
+		client:        c,
+		logger:        slog.Default(),
+		spamPolicy:    mailfauna.SpamPolicy{SpamFolderThreshold: threshold},
+		bayesianKnobs: mailfauna.DefaultBayesianKnobs(),
+		scoreFn:       scoreFn,
 	}
+}
+
+// modelOfSamples is a real serialized SpamModel of n balanced samples. The
+// injected scoreFn bypasses the scorer but NOT the say gate (mail-spam.md
+// § Scoring placement → *The scorer's say*), which reads the model's sample
+// count against the session knobs and tier — so a fixture model is real.
+func modelOfSamples(n int) []byte {
+	var model []byte
+	for i := 0; i < n; i++ {
+		model = mailfauna.ApplySpamTraining(model, "fixture body", i%2 == 0).NewModelBytes
+	}
+	return model
+}
+
+var (
+	sayModelOnce  sync.Once
+	sayModelBytes []byte
+)
+
+// sayModel is a model past the ramp (250 samples): it has a say at every
+// tier the term can reach, so these tests exercise the trained pass.
+func sayModel() []byte {
+	sayModelOnce.Do(func() { sayModelBytes = modelOfSamples(250) })
+	return append([]byte(nil), sayModelBytes...)
 }
 
 func TestScoreSelectedInboxMovesSpamAndWatermarksAll(t *testing.T) {
@@ -170,7 +195,7 @@ func TestScoreSelectedInboxMovesSpamAndWatermarksAll(t *testing.T) {
 		},
 	}
 	opener := &spamScoreOpenerStub{table: map[string][]byte{
-		"SEALED-MODEL": []byte("MODEL-BYTES"),
+		"SEALED-MODEL": sayModel(),
 	}}
 	s := newSpamScoreSession(caller, keywordScorer(), 5)
 
@@ -208,7 +233,7 @@ func TestScoreSelectedInboxAllHamWatermarksNoMove(t *testing.T) {
 		cipherByID: map[string][]byte{"mid-7": []byte("perfectly normal mail")},
 	}
 	opener := &spamScoreOpenerStub{table: map[string][]byte{
-		"SEALED-MODEL": []byte("MODEL-BYTES"),
+		"SEALED-MODEL": sayModel(),
 	}}
 	s := newSpamScoreSession(caller, keywordScorer(), 5)
 
@@ -232,11 +257,72 @@ func TestScoreSelectedInboxUntrainedIsCheapNoOp(t *testing.T) {
 	if caller.fetchModel != 1 {
 		t.Fatalf("want exactly 1 fetch_spam_model, got %d", caller.fetchModel)
 	}
-	if caller.metaCalls != 0 || caller.cipherCalls != 0 {
-		t.Fatalf("untrained actor must not scan INBOX (meta=%d cipher=%d)", caller.metaCalls, caller.cipherCalls)
+	// One metadata read (the report-term filter); with no copy carrying a
+	// `report:spam` row there is nothing to decrypt.
+	if caller.metaCalls != 1 || caller.cipherCalls != 0 {
+		t.Fatalf("untrained actor: want 1 meta read and no decrypt (meta=%d cipher=%d)", caller.metaCalls, caller.cipherCalls)
 	}
 	if len(caller.storeCalls) != 0 || len(caller.moveCalls) != 0 {
 		t.Fatalf("untrained actor must not store/move")
+	}
+}
+
+// The scorer's say: a model too young for its term to reach the account's
+// tier is the report-only scorer — an unreported copy is neither decrypted
+// nor watermarked (owed to the SELECT at which the say begins), while a
+// reported copy is still scored and filed by the report term.
+func TestScoreSelectedInboxModelWithoutASayIsReportOnly(t *testing.T) {
+	report := []wsrpc.ScoreEntry{{Factor: reportSpamFactor, Score: 200, Tier: 3, ScorerVersion: 1}}
+	caller := &spamScoreCaller{
+		modelBlob: []byte("SEALED-MODEL"),
+		inboxMeta: []wsrpc.MessageMeta{
+			{UID: 4, MessageID: []byte("mid-4"), Scores: report},
+			{UID: 5, MessageID: []byte("mid-5")},
+		},
+		cipherByID: map[string][]byte{"mid-4": []byte("SPAMMY"), "mid-5": []byte("SPAMMY")},
+	}
+	// Tier 3 (so the report term's 3 points file the reported copy): the say
+	// line is 3 000 of the term's 10 500-milli ceiling, about 93 samples — an
+	// 80-sample model sits under it.
+	opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": modelOfSamples(80)}}
+	s := newSpamScoreSession(caller, keywordScorer(), 3)
+
+	s.scoreSelectedInbox(context.Background(), opener)
+
+	if caller.cipherCalls != 1 {
+		t.Fatalf("want only the reported copy decrypted, got %d", caller.cipherCalls)
+	}
+	if len(caller.moveCalls) != 1 || !equalUint32Set(caller.moveCalls[0].UIDs, []uint32{4}) {
+		t.Fatalf("want the reported copy filed at 3 points, got %+v", caller.moveCalls)
+	}
+	if len(caller.storeCalls) != 1 || !equalUint32Set(caller.storeCalls[0].UIDs, []uint32{4}) {
+		t.Fatalf("want only the scored copy watermarked, got %+v", caller.storeCalls)
+	}
+}
+
+// The scorer's say at the default tier begins at 122 samples: the same
+// unreported copy a 121-sample model leaves owed is scored and filed.
+func TestScoreSelectedInboxSayBeginsAtTheLine(t *testing.T) {
+	for _, tc := range []struct {
+		samples  int
+		wantSeen bool
+	}{{121, false}, {122, true}} {
+		caller := &spamScoreCaller{
+			modelBlob:  []byte("SEALED-MODEL"),
+			inboxMeta:  []wsrpc.MessageMeta{{UID: 7, MessageID: []byte("mid-7")}},
+			cipherByID: map[string][]byte{"mid-7": []byte("SPAMMY")},
+		}
+		opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": modelOfSamples(tc.samples)}}
+		s := newSpamScoreSession(caller, keywordScorer(), 5)
+
+		s.scoreSelectedInbox(context.Background(), opener)
+
+		seen := caller.cipherCalls == 1 && len(caller.storeCalls) == 1 && len(caller.moveCalls) == 1
+		none := caller.cipherCalls == 0 && len(caller.storeCalls) == 0 && len(caller.moveCalls) == 0
+		if tc.wantSeen && !seen || !tc.wantSeen && !none {
+			t.Fatalf("%d samples: want scored=%v (cipher=%d store=%+v move=%+v)",
+				tc.samples, tc.wantSeen, caller.cipherCalls, caller.storeCalls, caller.moveCalls)
+		}
 	}
 }
 
@@ -253,7 +339,7 @@ func TestScoreSelectedInboxSkipsAlreadyWatermarked(t *testing.T) {
 		},
 	}
 	opener := &spamScoreOpenerStub{table: map[string][]byte{
-		"SEALED-MODEL": []byte("MODEL-BYTES"),
+		"SEALED-MODEL": sayModel(),
 	}}
 	s := newSpamScoreSession(caller, keywordScorer(), 5)
 
@@ -269,6 +355,89 @@ func TestScoreSelectedInboxSkipsAlreadyWatermarked(t *testing.T) {
 	}
 	if len(caller.storeCalls) != 1 || !equalUint32Set(caller.storeCalls[0].UIDs, []uint32{2}) {
 		t.Fatalf("want only UID 2 watermarked, got %+v", caller.storeCalls)
+	}
+}
+
+// The community `report:spam` term (report-sharing.md § Applying the
+// aggregate) is added on top of the Bayesian term: a ham-ish body (100 milli)
+// with k=3's 200‰ (3000 milli) reaches a threshold of 3; the same body with
+// no report row does not.
+func TestScoreSelectedInboxAddsTheReportTerm(t *testing.T) {
+	report := []wsrpc.ScoreEntry{{Factor: reportSpamFactor, Score: 200, Tier: 3, ScorerVersion: 1}}
+	caller := &spamScoreCaller{
+		modelBlob: []byte("SEALED-MODEL"),
+		inboxMeta: []wsrpc.MessageMeta{
+			{UID: 1, MessageID: []byte("mid-1"), Scores: report},
+			{UID: 2, MessageID: []byte("mid-2")},
+		},
+		cipherByID: map[string][]byte{"mid-1": []byte("ham"), "mid-2": []byte("ham")},
+	}
+	opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": sayModel()}}
+	s := newSpamScoreSession(caller, keywordScorer(), 3)
+
+	s.scoreSelectedInbox(context.Background(), opener)
+
+	if len(caller.moveCalls) != 1 || !equalUint32Set(caller.moveCalls[0].UIDs, []uint32{1}) {
+		t.Fatalf("want only the reported copy filed, got %+v", caller.moveCalls)
+	}
+	if len(caller.storeCalls) != 1 || !equalUint32Set(caller.storeCalls[0].UIDs, []uint32{1, 2}) {
+		t.Fatalf("want both copies watermarked, got %+v", caller.storeCalls)
+	}
+}
+
+// An untrained actor has no Bayesian term, but a reported copy is still
+// scored by the report term alone; an unreported copy is neither decrypted
+// nor watermarked.
+func TestScoreSelectedInboxUntrainedStillAppliesTheReportTerm(t *testing.T) {
+	report := []wsrpc.ScoreEntry{{Factor: reportSpamFactor, Score: 200, Tier: 3, ScorerVersion: 1}}
+	caller := &spamScoreCaller{
+		modelBlob: nil,
+		inboxMeta: []wsrpc.MessageMeta{
+			{UID: 4, MessageID: []byte("mid-4"), Scores: report},
+			{UID: 5, MessageID: []byte("mid-5")},
+		},
+		cipherByID: map[string][]byte{"mid-4": []byte("SPAMMY"), "mid-5": []byte("SPAMMY")},
+	}
+	opener := &spamScoreOpenerStub{table: map[string][]byte{}}
+	s := newSpamScoreSession(caller, keywordScorer(), 3)
+
+	s.scoreSelectedInbox(context.Background(), opener)
+
+	if caller.cipherCalls != 1 {
+		t.Fatalf("want only the reported copy decrypted, got %d", caller.cipherCalls)
+	}
+	if len(caller.moveCalls) != 1 || !equalUint32Set(caller.moveCalls[0].UIDs, []uint32{4}) {
+		t.Fatalf("want the reported copy filed at 3 points, got %+v", caller.moveCalls)
+	}
+	if len(caller.storeCalls) != 1 || !equalUint32Set(caller.storeCalls[0].UIDs, []uint32{4}) {
+		t.Fatalf("want only the scored copy watermarked, got %+v", caller.storeCalls)
+	}
+}
+
+// The RFC 5788 `$NotJunk` veto: a copy carrying it is watermarked without
+// being decrypted or scored, and never re-filed — whatever its report term.
+func TestScoreSelectedInboxNotJunkIsNeverRefiled(t *testing.T) {
+	report := []wsrpc.ScoreEntry{{Factor: reportSpamFactor, Score: 1000, Tier: 3, ScorerVersion: 1}}
+	caller := &spamScoreCaller{
+		modelBlob: []byte("SEALED-MODEL"),
+		inboxMeta: []wsrpc.MessageMeta{
+			{UID: 9, MessageID: []byte("mid-9"), Flags: []string{notJunkKeyword}, Scores: report},
+		},
+		cipherByID: map[string][]byte{"mid-9": []byte("SPAMMY")},
+	}
+	opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": sayModel()}}
+	s := newSpamScoreSession(caller, keywordScorer(), 5)
+
+	s.scoreSelectedInbox(context.Background(), opener)
+
+	if caller.cipherCalls != 0 {
+		t.Fatalf("a vetoed copy must not be decrypted, got %d", caller.cipherCalls)
+	}
+	if len(caller.moveCalls) != 0 {
+		t.Fatalf("a vetoed copy must never be re-filed, got %+v", caller.moveCalls)
+	}
+	if len(caller.storeCalls) != 1 || !equalUint32Set(caller.storeCalls[0].UIDs, []uint32{9}) {
+		t.Fatalf("want the vetoed copy watermarked, got %+v", caller.storeCalls)
 	}
 }
 
@@ -315,7 +484,7 @@ func TestScoreSelectedInboxSpamFolderDisabledHonoursAPerMessageStamp(t *testing.
 		},
 	}
 	opener := &spamScoreOpenerStub{table: map[string][]byte{
-		"SEALED-MODEL": []byte("MODEL-BYTES"),
+		"SEALED-MODEL": sayModel(),
 	}}
 	s := newSpamScoreSession(caller, keywordScorer(), 0) // admin disabled auto-Junk
 
@@ -360,7 +529,7 @@ func TestScoreSelectedInboxPerMessageStampOutranksTheSessionPolicy(t *testing.T)
 		},
 	}
 	opener := &spamScoreOpenerStub{table: map[string][]byte{
-		"SEALED-MODEL": []byte("MODEL-BYTES"),
+		"SEALED-MODEL": sayModel(),
 	}}
 	s := newSpamScoreSession(caller, flat, 5)
 
@@ -387,7 +556,7 @@ func TestScoreSelectedInboxStampedZeroIsNotRoutable(t *testing.T) {
 		cipherByID: map[string][]byte{"mid-40": stamped(0, "SPAMMY buy pills")},
 	}
 	opener := &spamScoreOpenerStub{table: map[string][]byte{
-		"SEALED-MODEL": []byte("MODEL-BYTES"),
+		"SEALED-MODEL": sayModel(),
 	}}
 	s := newSpamScoreSession(caller, keywordScorer(), 5) // deployment WOULD file it
 
@@ -411,7 +580,7 @@ func TestScoreSelectedInboxCapsPerPass(t *testing.T) {
 	total := spamScorePerPassCap + extra
 	meta := make([]wsrpc.MessageMeta, 0, total)
 	cipher := make(map[string][]byte, total)
-	table := map[string][]byte{"SEALED-MODEL": []byte("MODEL-BYTES")}
+	table := map[string][]byte{"SEALED-MODEL": sayModel()}
 	for i := 1; i <= total; i++ {
 		mid := fmt.Sprintf("mid-%d", i)
 		meta = append(meta, wsrpc.MessageMeta{UID: uint32(i), MessageID: []byte(mid)})
@@ -511,14 +680,15 @@ func TestHandleEventAppendScoresInboxBeforeAnnounce(t *testing.T) {
 		inboxMeta:  []wsrpc.MessageMeta{{UID: 42, MessageID: []byte("mid-42")}},
 		cipherByID: map[string][]byte{"mid-42": []byte("subject SPAMMY body buy pills")},
 	}
-	opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": []byte("MODEL")}}
+	opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": sayModel()}}
 	s := &Session{
-		actorID:     []byte("actor-0000000000000000000000000000"),
-		client:      caller,
-		logger:      slog.Default(),
-		spamPolicy:  mailfauna.SpamPolicy{SpamFolderThreshold: 5},
-		scoreFn:     keywordScorer(),
-		scoreOpener: opener,
+		actorID:       []byte("actor-0000000000000000000000000000"),
+		client:        caller,
+		logger:        slog.Default(),
+		spamPolicy:    mailfauna.SpamPolicy{SpamFolderThreshold: 5},
+		bayesianKnobs: mailfauna.DefaultBayesianKnobs(),
+		scoreFn:       keywordScorer(),
+		scoreOpener:   opener,
 	}
 
 	var movedBeforeSnapshot bool
@@ -560,14 +730,15 @@ func TestHandleEventAppendNonInboxSkipsScoring(t *testing.T) {
 		inboxMeta:  []wsrpc.MessageMeta{{UID: 5, MessageID: []byte("mid-5")}},
 		cipherByID: map[string][]byte{"mid-5": []byte("subject SPAMMY body")},
 	}
-	opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": []byte("MODEL")}}
+	opener := &spamScoreOpenerStub{table: map[string][]byte{"SEALED-MODEL": sayModel()}}
 	s := &Session{
-		actorID:     []byte("actor-0000000000000000000000000000"),
-		client:      caller,
-		logger:      slog.Default(),
-		spamPolicy:  mailfauna.SpamPolicy{SpamFolderThreshold: 5},
-		scoreFn:     keywordScorer(),
-		scoreOpener: opener,
+		actorID:       []byte("actor-0000000000000000000000000000"),
+		client:        caller,
+		logger:        slog.Default(),
+		spamPolicy:    mailfauna.SpamPolicy{SpamFolderThreshold: 5},
+		bayesianKnobs: mailfauna.DefaultBayesianKnobs(),
+		scoreFn:       keywordScorer(),
+		scoreOpener:   opener,
 	}
 	fetcher := &orderingFetcher{uids: []uint32{5}}
 	w := &updateWriterFake{}

@@ -54,6 +54,71 @@ pub fn apex_url(domain: &str) -> String {
     format!("https://{domain}/")
 }
 
+/// Why an actor's published content has no public origin
+/// ([`site_origin`]'s refusal). The apps project it into their
+/// copy-affordance's disabled reason; the nest reads any refusal as "no URL to
+/// carry" (the Nostr advertisement's `r` tag is then left out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteOriginRefusal {
+    /// No active custom domain, and subdomain hosting is switched off.
+    SubdomainDisabled,
+    /// Subdomain hosting is on, but the actor has no handle to key the host on.
+    NoHandle,
+    /// The actor's handle is a reserved label ([`is_reserved_subdomain_label`]).
+    ReservedLabel,
+    /// The nest serves no web content at any host — no serving domain. Outranks
+    /// every per-user reason; only an active custom domain still wins over it.
+    NoServingDomain,
+}
+
+/// The origin an actor's published content is reachable at, with a trailing
+/// slash — **the one rule** behind the apps' *Copy web link* and the nest's
+/// own derivation of a post's public URL (`web-content-hosting.md`
+/// § Published-post management; `monetization.md` § The Nostr advertisement of
+/// a sold post → *The event*), so the two can never hand out different links.
+///
+/// **Precedence: an active custom domain beats an enabled subdomain.**
+/// `active_custom_domain` is the actor's first `web_domains` row whose status is
+/// `active` (a `pending`/`verified` one has no cert yet, so linking to it would
+/// hand out a URL that fails to load) — the caller picks it, in the
+/// registration order `fauna.web.domain.get` returns. Otherwise the
+/// `<handle>.<serving_domain>` subdomain, when the actor opted in and the
+/// subdomain can serve (the toggle's own eligibility rules, so the two surfaces
+/// never disagree). `serving_domain` is the nest's web apex, verbatim — empty
+/// means the nest serves no web content at all.
+pub fn site_origin(
+    active_custom_domain: Option<&str>,
+    subdomain_enabled: bool,
+    handle: Option<&str>,
+    serving_domain: &str,
+) -> Result<String, SiteOriginRefusal> {
+    if let Some(domain) = active_custom_domain {
+        return Ok(format!("https://{domain}/"));
+    }
+    if !subdomain_enabled {
+        return Err(SiteOriginRefusal::SubdomainDisabled);
+    }
+    if serving_domain.is_empty() {
+        return Err(SiteOriginRefusal::NoServingDomain);
+    }
+    match handle {
+        None | Some("") => Err(SiteOriginRefusal::NoHandle),
+        Some(h) if is_reserved_subdomain_label(h) => Err(SiteOriginRefusal::ReservedLabel),
+        Some(h) => subdomain_url(h, serving_domain).ok_or(SiteOriginRefusal::NoHandle),
+    }
+}
+
+/// The public page URL of a published post on `origin` — the *Copy web link*
+/// value and the Nostr advertisement's `r` tag. A visitor with no token gets
+/// the teaser (`web-content-hosting.md` § Paywalled serving).
+pub fn post_page_url(origin: &str, slug: &str) -> String {
+    if origin.ends_with('/') {
+        format!("{origin}post/{slug}.html")
+    } else {
+        format!("{origin}/post/{slug}.html")
+    }
+}
+
 /// Rewrites an `http://`/`https://` URL to its `ws://`/`wss://` equivalent by
 /// swapping the scheme only — no path/query/trailing-slash normalization (each
 /// caller does its own, since the WS-RPC path segment differs per endpoint).
@@ -758,6 +823,61 @@ mod tests {
     #[test]
     fn apex_url_shape() {
         assert_eq!(apex_url("example.org"), "https://example.org/");
+    }
+
+    #[test]
+    fn site_origin_active_custom_domain_wins_over_everything() {
+        // Even a nest that serves no subdomain content: the custom domain has
+        // its own cert and resolver entry.
+        assert_eq!(
+            site_origin(Some("blog.example.com"), false, None, ""),
+            Ok("https://blog.example.com/".to_string())
+        );
+        assert_eq!(
+            site_origin(Some("blog.example.com"), true, Some("alice"), "example.org"),
+            Ok("https://blog.example.com/".to_string())
+        );
+    }
+
+    #[test]
+    fn site_origin_subdomain_and_its_refusals() {
+        assert_eq!(
+            site_origin(None, true, Some("alice"), "example.org"),
+            Ok("https://alice.example.org/".to_string())
+        );
+        assert_eq!(
+            site_origin(None, false, Some("alice"), "example.org"),
+            Err(SiteOriginRefusal::SubdomainDisabled)
+        );
+        assert_eq!(
+            site_origin(None, true, None, "example.org"),
+            Err(SiteOriginRefusal::NoHandle)
+        );
+        assert_eq!(
+            site_origin(None, true, Some(""), "example.org"),
+            Err(SiteOriginRefusal::NoHandle)
+        );
+        assert_eq!(
+            site_origin(None, true, Some("www"), "example.org"),
+            Err(SiteOriginRefusal::ReservedLabel)
+        );
+        // The nest-level reason outranks every per-user one.
+        assert_eq!(
+            site_origin(None, true, None, ""),
+            Err(SiteOriginRefusal::NoServingDomain)
+        );
+    }
+
+    #[test]
+    fn post_page_url_joins_with_one_slash() {
+        assert_eq!(
+            post_page_url("https://alice.example.org/", "hello"),
+            "https://alice.example.org/post/hello.html"
+        );
+        assert_eq!(
+            post_page_url("https://alice.example.org", "hello"),
+            "https://alice.example.org/post/hello.html"
+        );
     }
 
     #[test]

@@ -8,8 +8,7 @@ You can run one on its own, or pair it with a nest on the internet so your email
 arrives at home instead of sitting on a rented server. Both are covered here;
 the pairing is a separate guide at the end.
 
-Everything below is typed on the home machine, directly or over SSH. It takes
-about 15 minutes.
+Everything below is typed on the home machine, directly or over SSH. It takes about 15 minutes. Have a Windows computer that stays on instead? The Windows installer can set up a nest on it without these steps: see [From the Windows installer](install.md#from-the-windows-installer).
 
 ---
 

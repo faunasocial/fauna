@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from clients.ws_rpc_admin_client import WsRpcAdminClient
+from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from conftest import _provision_baseline_contributor, _withdraw_baseline_contributors
 from tests.api import ws_api
 
@@ -1012,7 +1012,7 @@ def _stored_microsoft_registration(nest_instance):
 @pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("mailbox-import")
-def test_microsoft_registration_save_round_trips(admin_app, nest_instance):
+def test_microsoft_registration_save_round_trips(admin_app, nest_instance, test_user):
     """An admin sets the deployment's own Microsoft app registration from
     `admin-mail`, sees it read back normalised, is refused a malformed one onto
     `error-message`, and clears it (`mailbox-migration.md` § Microsoft sign-in,
@@ -1021,7 +1021,9 @@ def test_microsoft_registration_save_round_trips(admin_app, nest_instance):
     client ID (upper-cased GUID) + tenant → Save (all UI) → ground truth:
     `fauna.setup.status.microsoft_registration` holds the GUID lowercased and
     the tenant, and the field reads the stored ID back. Then a non-GUID ID is
-    refused and changes nothing; both fields blank clears it, which is also how
+    refused and changes nothing; a non-admin is refused at the nest door and
+    changes nothing (convention 5: the member's app has no such page, so the
+    door is the witness); both fields blank clears it, which is also how
     this test leaves the nest. The sign-in that SENDS the stored ID is witnessed
     by `test_mail_import_microsoft_registration.py` (tui) and
     `test_mail_import.py::test_outlook_signs_in_with_microsoft_and_imports`
@@ -1071,6 +1073,22 @@ def test_microsoft_registration_save_round_trips(admin_app, nest_instance):
             "client_id": _MS_CLIENT_ID,
             "tenant": _MS_TENANT,
         }, "a refused save changed the stored registration"
+
+        # A member who is not an admin is refused, and the stored pair stays.
+        with WsRpcAdminClient(
+            nest_instance["url"],
+            actor_id=test_user["actor_id_bytes"],
+            signing_key=bytes(test_user["signing_key"]),
+        ) as member:
+            with pytest.raises(RpcCallError):
+                member.call(
+                    "fauna.bridges.set_microsoft_registration",
+                    {"client_id": "1f2e3d4c-5b6a-4978-8a9b-0c1d2e3f4a5b", "tenant": "common"},
+                )
+        assert _stored_microsoft_registration(nest_instance) == {
+            "client_id": _MS_CLIENT_ID,
+            "tenant": _MS_TENANT,
+        }, "a non-admin's save changed the stored registration"
     finally:
         # Leave the session nest on the project's own registration.
         admin_app.admin.save_mail_microsoft_registration("", "")

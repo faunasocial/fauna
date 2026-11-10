@@ -1,4 +1,5 @@
 import SwiftUI
+import FaunaFFISwift
 
 /// View-model for the profile **OTHER-profile offers section** (subscriber browse
 /// — `monetization.md` § Pillar 1, surface 2), shared by macOS + iOS. Reads
@@ -18,12 +19,35 @@ public final class ProfileOffersVM {
     public private(set) var pendingTiers: Set<String> = []
     /// Shared page-level error (`error-message`).
     public var errorMessage: String?
+    /// Whether the viewer's follow is queued for the author's approval (the
+    /// `status_get` reply's `follow_pending`).
+    public private(set) var followPending = false
+    /// The optimistic post-press state, set by the reply to a follow or unfollow
+    /// press: it outranks the status read for the label, so a queued leave reads
+    /// *Follow* at once (`profile.md` § Where logic lives → *Follow / unfollow /
+    /// follow-status* — the flip stays app-side). Cleared by a fresh `configure`.
+    private var followFlip: Bool?
+    /// The first press on a paid holder's *Following* only arms the confirm: the
+    /// button reads `profile.unfollow_confirm` and the second press leaves
+    /// (`subscriptions.md` § The free followers tier — follow and unfollow, rule 4).
+    /// Any other press, a fresh open or the reply disarms it. Mirrors tui
+    /// `ProfileState::unfollow_armed`.
+    public private(set) var unfollowArmed = false
+
     /// Whether the viewer follows this creator — drives the header
-    /// `profile-follow-button` label ("Follow" ⇄ "Following", via the shared
-    /// `followToggleLabel`). Optimistic: flips true on a successful `follow()`,
-    /// matching the other natives. The `status_get`-derived *initial* state is
-    /// per-app latitude (ratified 2026-07-08) and intentionally not derived here.
-    public private(set) var isFollowing = false
+    /// `profile-follow-button` toggle. The optimistic flip if a press has
+    /// answered, else the shared `is_following` over the status read (following ⇔ a
+    /// tier is named or a follow is pending).
+    public var isFollowing: Bool {
+        followFlip ?? FaunaFFISwift.isFollowing(tier: statusTier, followPending: followPending)
+    }
+
+    /// The `profile-follow-button` label: the confirm while armed, else
+    /// Follow ⇄ Following through the shared `followToggleLabel`.
+    public var followButtonLabel: String {
+        unfollowArmed ? L.profile.unfollowConfirm
+            : renderLocalizedText(followToggleLabel(isFollowing: isFollowing))
+    }
 
     private var api: APIClient?
     private var authorIdHex: String?
@@ -41,7 +65,7 @@ public final class ProfileOffersVM {
     /// re-loads, and by the page's nil-client phase: More → Profile is not unmounted
     /// by the iOS switch teardown .
     ///
-    /// `statusTier`, `pendingTiers` and `isFollowing` are the VIEWER's own
+    /// `statusTier`, `pendingTiers` and the follow state are the VIEWER's own
     /// relationship to the creator rather than the creator's public offers — so a
     /// survivor tells the incoming account it holds a paid tier, or follows someone,
     /// on the strength of the OUTGOING account's subscription.
@@ -51,7 +75,9 @@ public final class ProfileOffersVM {
         offers = []
         statusTier = nil
         pendingTiers = []
-        isFollowing = false
+        followPending = false
+        followFlip = nil
+        unfollowArmed = false
         errorMessage = nil
     }
 
@@ -60,6 +86,9 @@ public final class ProfileOffersVM {
         if let current = self.api, current !== api { reset() }
         self.api = api
         self.authorIdHex = authorIdHex
+        // A fresh open reads the follow state from the status, disarmed.
+        followFlip = nil
+        unfollowArmed = false
         await refresh()
     }
 
@@ -76,6 +105,7 @@ public final class ProfileOffersVM {
             let status = try await api.subscriptionStatusGet(authorIdHex: authorIdHex)
             guard self.api === api else { return }
             statusTier = status.tier
+            followPending = status.followPending
             errorMessage = nil
         } catch {
             guard self.api === api else { return }
@@ -93,6 +123,7 @@ public final class ProfileOffersVM {
     /// to active; encrypted mode enqueues → pending. Re-reads to confirm.
     public func subscribe(_ tier: String, home: String? = nil) async {
         guard let api, let authorIdHex else { return }
+        unfollowArmed = false
         do {
             let reply = try await api.subscriptionSubscribe(
                 authorIdHex: authorIdHex, tier: tier, homeNestUrl: home)
@@ -112,19 +143,53 @@ public final class ProfileOffersVM {
 #endif
 
 #if !FAUNA_KIDS
-    /// Follow = subscribe to the free "followers" tier (the header button).
-    /// ⚠ Nest-gated until the nest auto-provisions the "followers" tier
-    /// (`monetization.md` § Pillar 1 — currently returns `tier_not_found`); wired
-    /// for parity with the other apps.
+    /// The header `profile-follow-button` press — the Follow ⇄ Following toggle
+    /// (`subscriptions.md` § The free followers tier — follow and unfollow, rule 4;
+    /// tui `profile::Action::Follow`). *Follow* subscribes to the free "followers"
+    /// tier; *Following* unfollows it — confirm-gated when the viewer holds a paid
+    /// tier at the author (`unfollow_ends_paid_tier`): the first press only arms
+    /// the confirm and sends nothing, the second leaves.
     ///
-    /// `home` is the profile page's actor-home slot (`actor_home`): the follow
-    /// carries it so an author homed on another nest is followed across nests
-    /// (`federated-follow.md` § Decision 2); `nil` = today's local follow.
-    public func follow(home: String? = nil) async {
+    /// `home` is the profile page's actor-home slot (`actor_home`): both directions
+    /// carry it so an author homed on another nest is followed and left across nests
+    /// (`federated-follow.md` § Decision 2); `nil` = the local arm.
+    public func toggleFollow(home: String? = nil) async {
+        guard isFollowing else {
+            await follow(home: home)
+            return
+        }
+        if !unfollowArmed && FaunaFFISwift.unfollowEndsPaidTier(tier: statusTier) {
+            unfollowArmed = true
+            return
+        }
+        await unfollow(home: home)
+    }
+
+    /// Follow = subscribe to the free "followers" tier.
+    private func follow(home: String?) async {
         await subscribe(Self.followersTier, home: home)
         // Optimistic on-success flip (the button reads "Following"); `subscribe`
         // clears `errorMessage` on success and sets it on failure.
-        if errorMessage == nil { isFollowing = true }
+        if errorMessage == nil { followFlip = true }
+    }
+
+    /// Unfollow = leave the free "followers" tier — the leave's floor, so a paid
+    /// tier held above it ends too (rule 1). Encrypted mode answers `Queued` until
+    /// the author's client commits the removal; the flip reads *Follow* at once.
+    private func unfollow(home: String?) async {
+        guard let api, let authorIdHex else { return }
+        unfollowArmed = false
+        do {
+            _ = try await api.subscriptionUnsubscribe(
+                authorId: hex_to_data(authorIdHex), tier: Self.followersTier, homeNestUrl: home)
+            guard self.api === api else { return }
+            followFlip = false
+            errorMessage = nil
+            await refresh()
+        } catch {
+            guard self.api === api else { return }
+            errorMessage = DisplayError.message(error)
+        }
     }
 #endif
 }

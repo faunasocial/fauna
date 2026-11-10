@@ -556,9 +556,24 @@ int32_t uniffi_fauna_mail_fn_func_combined_spam_score_milli(int32_t rspamd_scale
 RustBuffer uniffi_fauna_mail_fn_func_decide_spam_disposition(int32_t combined_score_milli, RustBuffer verdicts, RustBuffer policy, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_EFFECTIVE_SPAM_SCORE_MILLI
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_EFFECTIVE_SPAM_SCORE_MILLI
+int32_t uniffi_fauna_mail_fn_func_effective_spam_score_milli(int32_t rspamd_scaled_milli, int32_t weighted_bayesian_milli, int64_t report_pm, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_REPORT_SPAM_MILLI
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_REPORT_SPAM_MILLI
+int32_t uniffi_fauna_mail_fn_func_report_spam_milli(int64_t score_pm, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_APPLY_SPAM_TRAINING
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_APPLY_SPAM_TRAINING
 RustBuffer uniffi_fauna_mail_fn_func_apply_spam_training(RustBuffer model_bytes, RustBuffer text, int8_t is_spam, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_BAYESIAN_HAS_SAY_FOR_MODEL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_BAYESIAN_HAS_SAY_FOR_MODEL
+int8_t uniffi_fauna_mail_fn_func_bayesian_has_say_for_model(RustBuffer model_bytes, RustBuffer knobs, uint32_t spam_folder_tier, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_DEFAULT_BAYESIAN_KNOBS
@@ -1097,9 +1112,27 @@ uint16_t uniffi_fauna_mail_checksum_func_decide_spam_disposition(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_EFFECTIVE_SPAM_SCORE_MILLI
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_EFFECTIVE_SPAM_SCORE_MILLI
+uint16_t uniffi_fauna_mail_checksum_func_effective_spam_score_milli(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_REPORT_SPAM_MILLI
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_REPORT_SPAM_MILLI
+uint16_t uniffi_fauna_mail_checksum_func_report_spam_milli(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_APPLY_SPAM_TRAINING
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_APPLY_SPAM_TRAINING
 uint16_t uniffi_fauna_mail_checksum_func_apply_spam_training(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_BAYESIAN_HAS_SAY_FOR_MODEL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_BAYESIAN_HAS_SAY_FOR_MODEL
+uint16_t uniffi_fauna_mail_checksum_func_bayesian_has_say_for_model(void
     
 );
 #endif

@@ -318,6 +318,90 @@ impl MediaFolder {
     }
 }
 
+/// A set homed on **another nest** that the caller is a member of — offered on
+/// `media-folder-filter` as a browse scope by its `FolderRef::Foreign` ref
+/// (`media.md` § Cross-nest shared sets — the foreign browse scope). The
+/// caller's own nest holds no row for it: the page machine reads it from the
+/// member's custody (`FolderKeyResolver::foreign_sets`), behind the MLS
+/// join-filter, dropping one whose group the control-plane list already
+/// carries.
+///
+/// A browse option for every member; an upload target too for a member who
+/// holds the writer grant (`media.md` § Cross-nest shared sets, *Upload*).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaForeignSet {
+    /// The set's derived `ChannelId` — its identity, and the `foreign:` ref
+    /// the option's value spells.
+    pub channel: [u8; 32],
+    /// The set's name as its home nest resolved it at share time; empty for a
+    /// name-less record (the label then names the set by its ref).
+    pub name: String,
+    /// The owner's qualified handle — the "Shared by" string the Folders page
+    /// shows for a foreign row (`fauna_core::format::qualified_handle`);
+    /// empty when the record carries none.
+    pub owner: String,
+    /// The set's hex MLS group id — what the join-filter asks.
+    pub mls_group_id: String,
+    /// The set's home nest base URL — where its listing is relayed to.
+    pub home_nest_url: String,
+    /// The member holds the `writer` grant on the set — the custody record's
+    /// `access`, as the HOME nest last stamped it. Advisory for the UI exactly
+    /// as the Folders page treats it: the home nest's writer gate decides every
+    /// write (`ui/media.md` § Cross-nest shared sets, *Upload*).
+    pub writer: bool,
+    /// The record states the set **metadata-only** (its content stays on the
+    /// owner's devices) — `ForeignFolder::metadata_only_residency`, the reading
+    /// the Folders page projects; unknown reads as not metadata-only, and the
+    /// home nest's own refusal still stands behind it.
+    pub metadata_only: bool,
+}
+
+impl MediaForeignSet {
+    /// Whether an upload may land in this set: the member holds the writer
+    /// grant (`ui/media.md` § Cross-nest shared sets, *Upload*). A reader's set
+    /// stays a browse option and is refused with its reason when chosen.
+    pub fn is_upload_target(&self) -> bool {
+        self.writer
+    }
+
+    /// The set's identity.
+    pub fn folder_ref(&self) -> FolderRef {
+        FolderRef::Foreign(self.channel)
+    }
+
+    /// The option's value: the set's `foreign:<channel hex>` wire string,
+    /// handed back to `set_filter` verbatim.
+    pub fn option_value(&self) -> String {
+        self.folder_ref().to_wire()
+    }
+
+    /// The option's label: `<name> (<owner>)`, the shape a same-nest shared
+    /// set's label has; the name alone with no owner, and the ref's short
+    /// form for a name-less record, so an option is never blank.
+    pub fn option_label(&self) -> String {
+        let name = if self.name.is_empty() {
+            let hex = fauna_core::hex32::encode(&self.channel);
+            format!("foreign:{}", &hex[..8])
+        } else {
+            self.name.clone()
+        };
+        if self.owner.is_empty() {
+            name
+        } else {
+            format!("{name} ({})", self.owner)
+        }
+    }
+
+    fn option(&self) -> MediaFolderOption {
+        MediaFolderOption {
+            name: self.name.clone(),
+            folder_ref: Some(self.folder_ref()),
+            value: self.option_value(),
+            label: self.option_label(),
+        }
+    }
+}
+
 /// A parsed `media-folder-filter` value (`media.md` § Encryption at rest → *The
 /// filter and the upload target address the row*, (a)): a value that parses as
 /// a `FolderRef` addresses that row; anything else is a set's name — the
@@ -366,6 +450,11 @@ pub struct MediaSnapshot {
     /// only pages `fauna.media.list` leaves it empty and degrades to the
     /// item-derived options (exactly the pre-fix behavior, never worse).
     pub known_folders: Vec<MediaFolder>,
+    /// The caller's cross-nest sets, offered as browse scopes after the
+    /// control-plane rows (`media.md` § Cross-nest shared sets). Populated by
+    /// the page machine from custody; empty for a consumer that only pages
+    /// `fauna.media.list`.
+    pub foreign_sets: Vec<MediaForeignSet>,
     /// How many rows and own sets this read **held back for want of
     /// custody** — media rows the shared row judge could not judge yet
     /// (`ProjectionTally::held`) plus own sets whose sealed name no custody
@@ -491,6 +580,11 @@ impl MediaSnapshot {
     pub fn folders(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for option in self.folder_options() {
+            // A foreign scope has no name a names-only consumer could hand
+            // back (`set_filter` reads a name as an own or item-only set).
+            if matches!(option.folder_ref, Some(FolderRef::Foreign(_))) {
+                continue;
+            }
             if !out.contains(&option.name) {
                 out.push(option.name);
             }
@@ -536,6 +630,11 @@ impl MediaSnapshot {
         }
     }
 
+    /// The cross-nest set at `channel`, if the caller is offered one.
+    pub fn foreign_set(&self, channel: &[u8; 32]) -> Option<&MediaForeignSet> {
+        self.foreign_sets.iter().find(|f| &f.channel == channel)
+    }
+
     /// The label of the option `value` names (`MediaPageSnapshot::filter_label`):
     /// the row's label when the value addresses a listed row, else the set's
     /// name — an item-only name as given, a ref the list does not carry by
@@ -544,6 +643,11 @@ impl MediaSnapshot {
         let filter = FolderFilter::parse(value);
         if let Some(row) = self.row_for(&filter) {
             return row.option_label();
+        }
+        if let FolderFilter::Ref(FolderRef::Foreign(channel)) = &filter
+            && let Some(set) = self.foreign_set(channel)
+        {
+            return set.option_label();
         }
         match filter {
             FolderFilter::Name(name) => name,
@@ -592,18 +696,22 @@ impl MediaSnapshot {
     /// writes, and a name is a label two sets can share
     /// (`on-demand-files.md` § Hosting multiple on-demand folders).
     pub fn folder_options(&self) -> Vec<MediaFolderOption> {
-        self.offer(MediaFolder::is_browsable)
+        self.offer(MediaFolder::is_browsable, |_| true)
     }
 
     /// The **values** of the sets an upload may target
     /// ([`MediaFolder::is_upload_target`]: every own set, every shared set the
-    /// caller may write), then the item-only sets. An own set's value is its
-    /// name.
+    /// caller may write, every cross-nest set the caller may write —
+    /// [`MediaForeignSet::is_upload_target`]), then the item-only sets. An own
+    /// set's value is its name.
     pub fn upload_targets(&self) -> Vec<String> {
-        self.offer(MediaFolder::is_upload_target)
-            .into_iter()
-            .map(|option| option.value)
-            .collect()
+        self.offer(
+            MediaFolder::is_upload_target,
+            MediaForeignSet::is_upload_target,
+        )
+        .into_iter()
+        .map(|option| option.value)
+        .collect()
     }
 
     /// The `upload_selected` target in the all-media view (`media.md`
@@ -615,7 +723,7 @@ impl MediaSnapshot {
     pub fn default_upload_target(&self) -> Option<String> {
         if self.known_folders.is_empty() {
             return self
-                .offer(MediaFolder::is_upload_target)
+                .offer(MediaFolder::is_upload_target, |_| false)
                 .first()
                 .map(|o| o.value.clone());
         }
@@ -631,13 +739,25 @@ impl MediaSnapshot {
     /// listed row and whose name names no own row, one option per name. With no
     /// control-plane list at all, the item-derived names are the whole answer —
     /// so an unwired consumer degrades rather than losing its options.
-    fn offer(&self, in_scope: fn(&MediaFolder) -> bool) -> Vec<MediaFolderOption> {
+    /// The cross-nest scopes `foreign_in_scope` admits follow right after the
+    /// control-plane rows (`media.md` § Cross-nest shared sets).
+    fn offer(
+        &self,
+        in_scope: fn(&MediaFolder) -> bool,
+        foreign_in_scope: fn(&MediaForeignSet) -> bool,
+    ) -> Vec<MediaFolderOption> {
         let mut out: Vec<MediaFolderOption> = self
             .known_folders
             .iter()
             .filter(|fs| in_scope(fs))
             .map(MediaFolder::option)
             .collect();
+        out.extend(
+            self.foreign_sets
+                .iter()
+                .filter(|f| foreign_in_scope(f))
+                .map(MediaForeignSet::option),
+        );
         for it in &self.items {
             let listed = it
                 .folder_id
@@ -649,7 +769,12 @@ impl MediaSnapshot {
                 .known_folders
                 .iter()
                 .any(|f| f.name == it.folder && (!f.member || it.folder_id.is_none()));
-            if listed || named || out.iter().any(|o| o.value == it.folder) {
+            if listed
+                || named
+                || out.iter().any(|o| {
+                    o.value == it.folder && !matches!(o.folder_ref, Some(FolderRef::Foreign(_)))
+                })
+            {
                 continue;
             }
             out.push(MediaFolderOption {
@@ -1260,6 +1385,111 @@ mod tests {
             "{label}"
         );
         assert_ne!(label, "photos ()");
+    }
+
+    // ── cross-nest shared sets (media.md § Cross-nest shared sets) ──────────
+
+    fn foreign(channel: u8, name: &str, owner: &str) -> MediaForeignSet {
+        MediaForeignSet {
+            channel: [channel; 32],
+            name: name.into(),
+            owner: owner.into(),
+            mls_group_id: format!("{channel:02x}{channel:02x}"),
+            home_nest_url: "https://home.example".into(),
+            writer: false,
+            metadata_only: false,
+        }
+    }
+
+    /// A writer's foreign set is an upload target, after the control-plane
+    /// rows; a reader's is not; and the all-media default never lands in one —
+    /// a file reaches someone else's folder only when the user selected it
+    /// (`media.md` § Cross-nest shared sets, *Upload*).
+    #[test]
+    fn a_writers_foreign_set_is_an_upload_target_and_never_the_default() {
+        let writer = MediaForeignSet {
+            writer: true,
+            ..foreign(0xAB, "trip", "bob@away.example")
+        };
+        let reader = foreign(0xCD, "notes", "bob@away.example");
+        assert!(writer.is_upload_target());
+        assert!(!reader.is_upload_target());
+        let snap = MediaSnapshot {
+            known_folders: vec![known_with_id(7, "photos")],
+            foreign_sets: vec![writer.clone(), reader.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            snap.upload_targets(),
+            vec!["photos".to_string(), writer.option_value()]
+        );
+        assert_eq!(snap.default_upload_target().as_deref(), Some("photos"));
+        let only_foreign = MediaSnapshot {
+            foreign_sets: vec![writer],
+            ..Default::default()
+        };
+        assert_eq!(only_foreign.default_upload_target(), None);
+    }
+
+    /// A foreign set is one more option: its value the `foreign:` ref, its
+    /// label `<name> (<owner>)`, after the control-plane rows and before the
+    /// item-only names — a reader's never an upload target, nor in the names
+    /// list.
+    #[test]
+    fn a_foreign_set_is_a_browse_option_after_the_rows_and_a_readers_never_a_target() {
+        let snap = MediaSnapshot {
+            items: vec![item_in("knock", Some(42), "knock/a.jpg")],
+            known_folders: vec![known_with_id(7, "photos")],
+            foreign_sets: vec![foreign(0xAB, "trip", "bob@away.example")],
+            ..Default::default()
+        };
+        let options: Vec<(String, String)> = snap
+            .folder_options()
+            .into_iter()
+            .map(|o| (o.value, o.label))
+            .collect();
+        let value = FolderRef::Foreign([0xAB; 32]).to_wire();
+        assert_eq!(
+            options,
+            vec![
+                ("photos".to_string(), "photos".to_string()),
+                (value.clone(), "trip (bob@away.example)".to_string()),
+                ("knock".to_string(), "knock".to_string()),
+            ]
+        );
+        assert!(!snap.upload_targets().contains(&value));
+        assert_eq!(snap.default_upload_target().as_deref(), Some("photos"));
+        assert!(!snap.folders().contains(&"trip".to_string()));
+        assert_eq!(snap.filter_label(&value), "trip (bob@away.example)");
+    }
+
+    /// The aggregate never holds a foreign set's items: its view is empty
+    /// until the page machine fills the scope.
+    #[test]
+    fn the_aggregate_view_of_a_foreign_ref_is_empty() {
+        let snap = MediaSnapshot {
+            items: vec![item_in("trip", None, "trip/a.jpg")],
+            foreign_sets: vec![foreign(0xAB, "trip", "")],
+            ..Default::default()
+        };
+        let value = FolderRef::Foreign([0xAB; 32]).to_wire();
+        assert!(
+            snap.view(Some(&value), MediaSortKey::Name, false)
+                .is_empty()
+        );
+        assert!(snap.row_for(&FolderFilter::parse(&value)).is_none());
+        assert_eq!(snap.filter_label(&value), "trip");
+    }
+
+    /// A name-less record is labelled by its ref's short form, never blank.
+    #[test]
+    fn a_nameless_foreign_set_is_labelled_by_its_ref() {
+        let label = foreign(0xCD, "", "").option_label();
+        assert_eq!(label, "foreign:cdcdcdcd");
+        assert_eq!(
+            foreign(0xCD, "", "eve").option_label(),
+            "foreign:cdcdcdcd (eve)"
+        );
     }
 
     // ── the control-plane option list (media.md § Layout & flow) ────────────

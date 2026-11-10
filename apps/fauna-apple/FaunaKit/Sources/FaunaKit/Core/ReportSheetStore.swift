@@ -119,4 +119,23 @@ public final class ReportSheetStore {
         sending = false
         target = nil
     }
+
+    /// The reporter's show-again (`moderation.md` § Corollary — the reporter's
+    /// hide is theirs to undo): un-hide each id the shared `reported_show_again`
+    /// fold returned and put the last stored list into the same slot the
+    /// report's hide fills. The report itself is never withdrawn; a failure
+    /// lands on the page's `error-message` line.
+    @MainActor public func showAgain(_ ids: [String], contentPolicy: ContentPolicyStore) async {
+        errorMessage = ""
+        var stored: [String]?
+        for id in ids {
+            do {
+                stored = try await unhideReported(id: id)
+            } catch {
+                errorMessage = "show again: \(error)"
+                break
+            }
+        }
+        if let stored { contentPolicy.setHiddenContent(stored) }
+    }
 }

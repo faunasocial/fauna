@@ -4,6 +4,9 @@ title: The fediverse
 section: bridges and other networks
 goal: docs/goal/behavior/activitypub.md § Goal
 guide: docs/guides/bridges-bluesky-nostr.md § The Fediverse (Mastodon & friends)
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -16,9 +19,9 @@ one, reaches its author.
 
 ## Coverage contract
 
-Stamped 2026-10-08 at f7e52bc137.
+Stamped 2026-11-07 at ac836c937b.
 
-1. [app] Federation turns on from the app and your address resolves from the outside — `docs/goal/behavior/activitypub.md` § Architecture (current, shipped)
+1. [app] Federation turns on from the app, your address resolves from the outside, your server describes itself over NodeInfo, and one of your posts dereferences as an ActivityStreams note — `docs/goal/behavior/activitypub.md` § Architecture (current, shipped)
    - `tests/e2e-unified/tests/test_activitypub_live.py::test_activitypub_live_serving_surface`
 2. [app] A post travels from a private home nest through its public relay to a real fediverse server — `docs/goal/behavior/activitypub.md` § The produce direction
    - `tests/e2e-unified/tests/live/test_activitypub_federation_live.py::test_activitypub_federation_live_three_party`
@@ -101,6 +104,11 @@ Stamped 2026-10-08 at f7e52bc137.
    - `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_dm_arrives_as_a_fediverse_room_and_the_reply_reaches_that_peer_alone`
 34. [app] Typing a fediverse account as `@user@host` into the recipient picker starts a Fediverse conversation with that person, and your message reaches them alone — `docs/goal/ui/conversations.md` § Where logic lives
    - `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_room_started_from_the_picker_by_account_reaches_the_resolved_peer_alone`
+35. [nest] Until you turn federation on, nothing of yours is published to the fediverse and fediverse servers find no account for you; a nest where nobody has turned it on federates nothing — `docs/goal/architecture/nest/network-exposure.md` § Target posture, per surface
+   - `tests/e2e-unified/tests/api/test_fediverse_off_until_enabled.py::test_nothing_federates_until_the_member_turns_it_on`
+36. [nest] Only the server that owns a post can delete or change it in your feed: a Delete or Update from any other server, or one aimed at a post of your own, changes nothing — `docs/goal/behavior/activitypub.md` § Security posture
+   - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_from_another_server_changes_nothing`
+   - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_aimed_at_your_own_post_changes_nothing`
 
 ## Status
 
@@ -114,6 +122,8 @@ Stamped 2026-10-08 at f7e52bc137.
 | ios | ⚠ partial | 0.1.5-dev+c5ea29af standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.5-dev+c5ea29af standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -166,4 +176,7 @@ Stamped 2026-10-08 at f7e52bc137.
 | 32 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_liking_or_boosting_is_refused_while_federation_is_off` | nest (linux): passed |
 | 33 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_dm_arrives_as_a_fediverse_room_and_the_reply_reaches_that_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 34 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_room_started_from_the_picker_by_account_reaches_the_resolved_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 35 | nest | `tests/e2e-unified/tests/api/test_fediverse_off_until_enabled.py::test_nothing_federates_until_the_member_turns_it_on` | nest (linux): passed |
+| 36 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_from_another_server_changes_nothing` | nest (linux): passed |
+| 36 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_delete_or_update_aimed_at_your_own_post_changes_nothing` | nest (linux): passed |
 <!-- features-render:end -->

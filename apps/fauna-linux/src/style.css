@@ -189,7 +189,6 @@ window.background {
     border-left: 3px solid #404040;
     padding-left: 12px;
 }
-.md-list-indent { margin-left: 16px; }
 
 /* Critical-alerts banner (critical-alerts.md) — deliberately loud: possible
  * compromise / data-loss conditions only, never ordinary errors. */

@@ -25,6 +25,7 @@ from .helpers import (
     authed_ws,
     await_registered,
     claim_admin_api,
+    container_exit_code,
     docker_build,
     find_free_port,
     get_repo_root,
@@ -194,10 +195,14 @@ def test_slow_nest_stop_fits_s6_grace(docker_image, tmp_path):
                 ws.close()
             except Exception:
                 pass
-        exit_code = subprocess.run(
-            ["docker", "inspect", name, "--format", "{{.State.ExitCode}}"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
+        exit_code = container_exit_code(name)
+        # sleep-ok: the exit code witnesses a wall-clock CONTRACT, which is this
+        # test's subject — the `_SLOW_STOP_S` hold, the nest's drain and
+        # s6-overlay's ~3 s kill sweep fit inside docker's 15 s
+        # `stop_grace_period` (`installers/docker.md` § s6-overlay Services). No
+        # state can stand in for "within the grace": docker's SIGKILL at its
+        # deadline (137) is the only observable. Decided 2026-11-07: kept as
+        # declared residue, not redesigned; the hold leaves ~4 s of margin.
         assert exit_code == "0", (
             f"the container exited {exit_code} (137 is docker's SIGKILL at the "
             f"15 s stop grace): a {_SLOW_STOP_S} s nest stop plus s6-overlay's "

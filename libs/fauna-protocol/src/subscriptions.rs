@@ -620,6 +620,14 @@ pub struct UnsubscribeRequest {
     /// user. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<EmbedAsBytes>,
+    /// The tier the subscriber leaves — the leave's floor
+    /// (`subscriptions.md` § The free followers tier — follow and unfollow,
+    /// rule 1): `Some(name)` ends `name` and every tier held at a higher rank,
+    /// so `Some("followers")` is the unfollow; `None` is floor rank 1, every
+    /// paid tier, the follow kept. A designated (post-unlock) tier is never
+    /// left. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

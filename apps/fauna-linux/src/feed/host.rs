@@ -32,8 +32,28 @@ pub fn init(nest: Arc<NestClient>, secret: [u8; 32]) -> Arc<LinuxFeedManager> {
     let m = Arc::new(FeedManager::new(nest, secret));
     m.set_period_key_store(crate::account_runtime::period_key_store());
     m.set_preference_store(std::sync::Arc::new(crate::account_runtime::handle_source()));
+    m.set_spam_marked(spam_slot().lock().unwrap().clone());
+    crate::offline_outbox::lend_to_feed(&m);
     *slot().lock().unwrap() = Some(m.clone());
     m
+}
+
+fn spam_slot() -> &'static Mutex<Vec<String>> {
+    static SPAM_MARKED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    SPAM_MARKED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The reader's post spam marks (`report-sharing.md` § Report capture → *The
+/// post's mark-as-spam verb*) — the sealed `spam_marked` list, read beside the
+/// hide list at the post-auth hook or stored by the verb. Handed to the current
+/// manager (whose `snapshot()` folds `spam`@1000 into each marked post's labels
+/// and notifies), and kept so a manager [`init`] builds later starts with it:
+/// the post-auth read may land before the Feed page builds its manager.
+pub fn set_spam_marked(ids: Vec<String>) {
+    *spam_slot().lock().unwrap() = ids.clone();
+    if let Some(m) = manager() {
+        m.set_spam_marked(ids);
+    }
 }
 
 /// The current feed manager, or `None` before the first [`init`]. The Feed
@@ -57,6 +77,9 @@ pub fn manager() -> Option<Arc<LinuxFeedManager>> {
 /// cross-actor read is a wrong-data bug rather than a missing-data one.
 pub fn clear() {
     *slot().lock().unwrap() = None;
+    // The outgoing actor's marks go with its manager; the incoming actor's
+    // post-auth read stores its own.
+    spam_slot().lock().unwrap().clear();
 }
 
 /// Flush the debounced engagement-cue tail on window close

@@ -86,9 +86,17 @@ def _post_and_read(author: Seat, viewer: Seat, word: str) -> tuple[dict, str, st
     )
     assert found.get("author") == author.actor_hex, found
 
+    # The state row answers from the feed's list as soon as the reload lands;
+    # the cards paint from it after that, so the card is waited for in its own
+    # right rather than read once (convention 14).
     feed = viewer.app.feed
-    index = feed.post_index_by_text(word)
-    assert index >= 0, f"no card holds {word!r}"
+    index = wait_for(
+        f"a card on the neighbour's feed holding {word!r}",
+        lambda: feed.post_index_by_text(word),
+        lambda i: i >= 0,
+        READ_BUDGET_S,
+        diagnose=lambda: f"error-message={viewer.app.error_text()!r}\n{seat_story(viewer)}",
+    )
     card = feed.post_author(index)
     feed.open_post_detail(index)
     detail = feed.post_detail_author()

@@ -4,7 +4,11 @@
 //! sender + title/body/tags text fields) and exposes:
 //!
 //! * [`Index::create_in_ram`] / [`Index::add_doc`] / [`Index::commit`] /
-//!   [`Index::query`] — in-memory build and search.
+//!   [`Index::query`] — in-memory build and search; [`Index::delete_doc`]
+//!   retires a doc by its content id.
+//! * [`WorkingIndex`] (native only) — an unsealed working index persisted in
+//!   a directory its holder owns (a client's own posture; the nest's
+//!   materializer reuses it).
 //! * [`Index::seal_to_bytes`] / [`Index::open_from_bytes`] — plaintext
 //!   round-trip of the underlying Tantivy `RamDirectory` (Plan 1).
 //! * [`Index::seal_encrypted`] / [`Index::open_encrypted`] — AEAD-encrypted
@@ -40,6 +44,8 @@ pub mod types;
 #[cfg(feature = "uniffi")]
 mod uniffi_handle;
 pub mod version;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod working;
 
 pub use index::Index;
 pub use key::{ClassKey, IndexMasterKey, IndexSegmentKey};
@@ -65,3 +71,5 @@ pub use version::{
     CURRENT_INDEX_FORMAT_VERSION, IndexFormatStamp, IndexFormatVerdict,
     MIN_READER_INDEX_FORMAT_VERSION, check_index_format_compatibility,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use working::{WORKING_INDEX_FILE, WorkingIndex};

@@ -249,14 +249,19 @@ COPY tools/kache-launcher tools/kache-launcher
 # the production artifact can reach anything. A compile that fails only here
 # names a dependency whose build script fetches at build time: a finding for
 # the dependency venue, never a reason to give this RUN its network back.
+# FAUNA_CACHE_SALT suffixes every cache-mount id of this stage: empty for every
+# ordinary build, so the ids and the warm caches are unchanged; a cold-cache
+# witness (image-pipeline.md § Witnessing an image-plumbing change →
+# *A witness build runs cold*) sets it, so its mounts start empty.
+ARG FAUNA_CACHE_SALT=
 ARG TARGETARCH
-RUN --mount=type=cache,id=cargo-registry-native,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git-native,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=cargo-registry-native${FAUNA_CACHE_SALT},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-native${FAUNA_CACHE_SALT},target=/usr/local/cargo/git \
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
 RUN --network=none \
-    --mount=type=cache,id=cargo-registry-native,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git-native,target=/usr/local/cargo/git \
-    --mount=type=cache,id=rust-target-native-${TARGETARCH},sharing=locked,target=/src/target \
+    --mount=type=cache,id=cargo-registry-native${FAUNA_CACHE_SALT},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-native${FAUNA_CACHE_SALT},target=/usr/local/cargo/git \
+    --mount=type=cache,id=rust-target-native-${TARGETARCH}${FAUNA_CACHE_SALT},sharing=locked,target=/src/target \
     ulimit -c 0 && ulimit -f 16777216 \
     && export CARGO_NET_OFFLINE=true \
     && cargo build --locked --release -p fauna-nest -p fauna-sandbox -p fauna-sni-router --features bluesky,nostr,activitypub \
@@ -317,7 +322,8 @@ RUN --mount=type=bind,from=wasm32-cc,target=/mnt/wasm32-cc \
     mkdir -p /opt/wasm32-cc \
     && tar -xJf /mnt/wasm32-cc/llvm.tar.xz -C /opt/wasm32-cc --strip-components=1 \
        --wildcards '*/bin/clang' '*/bin/clang-[0-9]*' '*/bin/llvm-ar' '*/lib/clang/*/include' \
-    && /opt/wasm32-cc/bin/clang --version \
+    && /opt/wasm32-cc/bin/clang --version > /opt/wasm32-cc/version.txt \
+    && cat /opt/wasm32-cc/version.txt \
     && printf '#include <stddef.h>\n#include <stdint.h>\nsize_t f(uint8_t x) { return x; }\n' \
        | /opt/wasm32-cc/bin/clang --target=wasm32-unknown-unknown -O2 -c -x c - -o /tmp/probe.o \
     && /opt/wasm32-cc/bin/llvm-ar rcs /tmp/probe.a /tmp/probe.o \
@@ -386,8 +392,11 @@ ARG BUILDARCH
 #
 # Three RUNs, so the compile has no network (build-compile-cache.md § The
 # boundary's scope and what OFF means, decision (5); image-pipeline.md § The
-# Dockerfile's stages compile hermetically): (1) fetch the locked graph for
-# wasm32 and for the build host (build scripts and proc-macros run there);
+# Dockerfile's stages compile hermetically): (1) fetch the WHOLE locked graph,
+# every target's packages — wasm-pack's own `cargo metadata` in (3) resolves
+# the graph for all platforms under CARGO_NET_OFFLINE, so a target-filtered
+# fetch leaves it a package to download and it fails offline (the 0.1.6
+# public image build, android_system_properties);
 # (2) compile every chunk with `--network=none`, with exactly the cargo
 # arguments wasm-pack passes (`build --lib --release --target
 # wasm32-unknown-unknown --locked`, measured Fresh behind it 2026-11-05);
@@ -397,13 +406,18 @@ ARG BUILDARCH
 # nothing; a `Compiling` line in its output means it did — a third-party build
 # script ran with the network — and the RUN fails. Every chunk below needs a
 # line in BOTH (2) and (3): the WASM-chunk parity gate holds the two lists equal.
-RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
-    cargo fetch --locked --target wasm32-unknown-unknown --target "$(rustc -vV | sed -n 's/^host: //p')"
+# FAUNA_CACHE_SALT suffixes every cache-mount id of this stage: empty for every
+# ordinary build, so the ids and the warm caches are unchanged; a cold-cache
+# witness (image-pipeline.md § Witnessing an image-plumbing change →
+# *A witness build runs cold*) sets it, so its mounts start empty.
+ARG FAUNA_CACHE_SALT=
+RUN --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/git \
+    cargo fetch --locked
 RUN --network=none \
-    --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
-    --mount=type=cache,id=rust-target-wasm-${BUILDARCH},sharing=locked,target=/src/target \
+    --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/git \
+    --mount=type=cache,id=rust-target-wasm-${BUILDARCH}${FAUNA_CACHE_SALT},sharing=locked,target=/src/target \
     ulimit -c 0 && ulimit -f 16777216 \
     && export CARGO_NET_OFFLINE=true \
     && CPUSET="0-$((BUILD_JOBS - 1))" \
@@ -417,10 +431,10 @@ RUN --network=none \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-share/Cargo.toml \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-connected-apps/Cargo.toml \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-atproto-settings/Cargo.toml
-RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
-    --mount=type=cache,id=rust-target-wasm-${BUILDARCH},sharing=locked,target=/src/target \
-    --mount=type=cache,id=wasm-pack-tool-cache,target=/root/.cache/.wasm-pack \
+RUN --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/git \
+    --mount=type=cache,id=rust-target-wasm-${BUILDARCH}${FAUNA_CACHE_SALT},sharing=locked,target=/src/target \
+    --mount=type=cache,id=wasm-pack-tool-cache${FAUNA_CACHE_SALT},target=/root/.cache/.wasm-pack \
     ulimit -c 0 && ulimit -f 16777216 \
     && export CARGO_NET_OFFLINE=true \
     && CPUSET="0-$((BUILD_JOBS - 1))" \
@@ -502,12 +516,17 @@ COPY bins/fauna-bridges/ bins/fauna-bridges/
 # download` fills the module cache, and the builds run with `--network=none`,
 # `GOPROXY=off` and `-mod=readonly`, so a module missing from the cache fails
 # by name instead of being fetched mid-compile.
+# FAUNA_CACHE_SALT suffixes every cache-mount id of this stage: empty for every
+# ordinary build, so the ids and the warm caches are unchanged; a cold-cache
+# witness (image-pipeline.md § Witnessing an image-plumbing change →
+# *A witness build runs cold*) sets it, so its mounts start empty.
+ARG FAUNA_CACHE_SALT=
 ARG TARGETARCH
-RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
+RUN --mount=type=cache,id=go-mod${FAUNA_CACHE_SALT},target=/go/pkg/mod \
     go -C bins/fauna-bridges mod download
 RUN --network=none \
-    --mount=type=cache,id=go-mod,target=/go/pkg/mod \
-    --mount=type=cache,id=go-build-${TARGETARCH},target=/root/.cache/go-build \
+    --mount=type=cache,id=go-mod${FAUNA_CACHE_SALT},target=/go/pkg/mod \
+    --mount=type=cache,id=go-build-${TARGETARCH}${FAUNA_CACHE_SALT},target=/root/.cache/go-build \
     set -e; \
     export GOPROXY=off GOFLAGS=-mod=readonly; \
     case "$TARGETARCH" in \
@@ -588,7 +607,12 @@ ENV DENO_DIR=/deno-dir
 # cannot run, and the stage holds no credential (build-system.md § The Deno
 # build sandbox, gap (2)).
 ENV FAUNA_DENO_SANDBOX_NO_BWRAP=1
-RUN --mount=type=cache,id=deno-dir,target=/deno-dir deno install
+# FAUNA_CACHE_SALT suffixes every cache-mount id of this stage: empty for every
+# ordinary build, so the ids and the warm caches are unchanged; a cold-cache
+# witness (image-pipeline.md § Witnessing an image-plumbing change →
+# *A witness build runs cold*) sets it, so its mounts start empty.
+ARG FAUNA_CACHE_SALT=
+RUN --mount=type=cache,id=deno-dir${FAUNA_CACHE_SALT},target=/deno-dir deno install
 # The SPA's build identity is the commit (apps/fauna-web/build-id.js), so two
 # builds of one ref yield a byte-identical tree — release-integrity.md
 # § Release signing → Web-app verifiability, piece 1. This stage has no git,
@@ -599,7 +623,7 @@ RUN --mount=type=cache,id=deno-dir,target=/deno-dir deno install
 # SvelteKit's timestamp version.
 ARG FAUNA_BUILD_COMMIT=dev
 ENV VITE_GIT_SHA=${FAUNA_BUILD_COMMIT}
-RUN --mount=type=cache,id=deno-dir,target=/deno-dir deno task build
+RUN --mount=type=cache,id=deno-dir${FAUNA_CACHE_SALT},target=/deno-dir deno task build
 
 # The served SPA tree alone — exactly what the final stage copies to
 # /usr/share/fauna-web/ — for `--target web-tree --output type=local`, so the
@@ -609,6 +633,13 @@ RUN --mount=type=cache,id=deno-dir,target=/deno-dir deno task build
 # final image's path: nothing below copies from it.
 FROM scratch AS web-tree
 COPY --from=web-builder /src/apps/fauna-web/build/ /
+
+# The `clang --version` of the wasm32 C compiler that built the chunks above,
+# exported beside the web tree (never inside it): the asset manifest records
+# the compiler that built the tree, and the workflow host does not hold it
+# (`scripts/web-asset-manifest.py write --wasm32-cc-version-file`).
+FROM scratch AS wasm32-cc-version
+COPY --from=rust-wasm /opt/wasm32-cc/version.txt /wasm32-cc-version.txt
 
 # ── Final image ─────────────────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171

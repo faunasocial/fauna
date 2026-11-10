@@ -76,14 +76,23 @@ pub struct ConnectedAppRow {
     /// family, a suspended grant or a pending signer is listed and revocable
     /// but not connected.
     pub connected: bool,
-    /// The account's external-apps switch is OFF and this row is on the
-    /// external-app plane it suspends — a principal or an ATProto
-    /// app-password session (`atproto-pds-full.md` § F1 detail, the
-    /// kill-switch bullet). A paused row is not [`Self::connected`], stays
-    /// listed and revocable, and works again with nothing redone once the
-    /// switch is back ON; apps word it as paused, not as merely not
-    /// connected.
+    /// The row is on the external-app plane and something reversible holds
+    /// it back: the account's external-apps switch is OFF — a principal or
+    /// an ATProto app-password session (`atproto-pds-full.md` § F1 detail,
+    /// the kill-switch bullet) — or, on a principal, a step-down suspended
+    /// every OAuth grant it holds ([`Self::suspended`]). A paused row is not
+    /// [`Self::connected`], stays listed and revocable, and works again with
+    /// nothing redone once its cause is undone; apps word it as paused, not
+    /// as merely not connected.
     pub paused: bool,
+    /// A principal whose every OAuth grant a step-down suspended — the
+    /// session revoked, the grant kept (`atproto-oauth-provider.md`
+    /// § Detailed design, the OAuth-grant suspension bullet): the cause of
+    /// its [`Self::paused`] when the switch is ON, so the words say what to
+    /// undo. It carries no *lasts-until*; a fresh sign-in clears it.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub suspended: bool,
     /// `Some` on a mail app-password row, and only there: the login, kind and
     /// burned state the row shows beside the columns every row has.
     pub mail: Option<MailAppPassword>,

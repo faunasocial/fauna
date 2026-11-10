@@ -237,6 +237,51 @@ def visible_custodian_blobs(driver) -> tuple[bool, list[str], str]:
     return True, blobs, "; ".join(describe_custodian_store(r) for r in roots)
 
 
+#: The bytes `rot_custodian_store` writes over every sealed blob.
+CUSTODIAN_ROT = b"rot"
+
+
+def rot_custodian_store(driver) -> tuple[int, str]:
+    """Overwrite every sealed blob of the custodian store ``driver``'s device
+    hosts with `CUSTODIAN_ROT`: ``(blobs_overwritten, diagnostic)``.
+
+    The driver-aware seam for the store-rot witness, like
+    `visible_custodian_blobs`: on android the store is inside the emulator's app
+    sandbox and is overwritten there (``drivers/android.py::
+    overwrite_custodian_store_blobs``); everywhere else it is a local directory
+    found through ``config_home`` / ``sync_agent_state_base``. An overwrite,
+    never a delete — see the witness's docstring for why.
+    """
+    if driver.is_android():
+        count = driver.overwrite_custodian_store_blobs()
+        _, names, where = visible_custodian_blobs(driver)
+        return count, f"{where}; {len(names)} blob(s) listed"
+    roots = custodian_store_roots(
+        getattr(driver, "config_home", None), getattr(driver, "sync_agent_state_base", None)
+    )
+    count = 0
+    for root in roots:
+        for blob in custodian_store_blobs(root):
+            blob.write_bytes(CUSTODIAN_ROT)
+            count += 1
+    _, _, where = visible_custodian_blobs(driver)
+    return count, where
+
+
+def custodian_blobs_still_rotten(driver) -> int:
+    """How many of the hosted store's blobs still hold exactly `CUSTODIAN_ROT` —
+    the heal half of the store-rot witness, on either side of the sandbox."""
+    if driver.is_android():
+        return driver.custodian_store_blobs_holding_rot()
+    roots = custodian_store_roots(
+        getattr(driver, "config_home", None), getattr(driver, "sync_agent_state_base", None)
+    )
+    return sum(
+        1 for root in roots for blob in custodian_store_blobs(root)
+        if blob.read_bytes() == CUSTODIAN_ROT
+    )
+
+
 def describe_agent_state_base(
     config_home: str | Path | None, base: str | Path | None = None, depth: int = 3
 ) -> str:

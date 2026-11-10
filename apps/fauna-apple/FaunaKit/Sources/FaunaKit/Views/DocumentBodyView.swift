@@ -33,16 +33,133 @@ import SwiftUI
 /// one flat block arm, no per-line segmentation.
 public struct DocumentBodyView: View {
     let document: RenderDocument
+    /// Where the body's painted lines are measured into, for the caller's
+    /// `get_attr(<id>, painted)` (`DocumentPaintedLines`); `nil` measures nothing.
+    let painted: DocumentPaintedLines?
 
-    public init(document: RenderDocument) {
+    public init(document: RenderDocument, painted: DocumentPaintedLines? = nil) {
         self.document = document
+        self.painted = painted
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let stack = VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(document.blocks.enumerated()), id: \.offset) { _, block in
-                RenderBlockView(block: block, marker: "")
+                RenderBlockView(block: block, marker: "", quoteDepth: 0)
             }
+        }
+        #if DEBUG
+        if let painted {
+            stack
+                .coordinateSpace(name: documentPaintSpace)
+                .onPreferenceChange(DocumentPaintedLineKey.self) { lines in
+                    painted.update(lines)
+                }
+        } else {
+            stack
+        }
+        #else
+        stack
+        #endif
+    }
+}
+
+/// The body AS PAINTED — the test agent's `get_attr(<id>, painted)` read
+/// (`tests/e2e-unified/helpers/painted_lines.py`, the `document-painted-read`
+/// surface), which keeps what the one-line plaintext drops: a task item's box
+/// and a nested item's indent (render-model.md § D7).
+///
+/// Measured off the views actually laid out, never re-derived from the
+/// document: every text leaf the walk paints publishes its own laid-out frame
+/// (`paintedLine`), so a nested list that stopped indenting reads flat here as
+/// the user would see it. One string per painted leaf, top to bottom; its
+/// leading spaces are its left edge against the body's leftmost leaf, one per
+/// 8 pt — web's, linux's and android's rule — and a `│ ` per enclosing
+/// block quote, whose bar the walk paints.
+///
+/// A box the caller holds in `@State` and hands to `DocumentBodyView`; the
+/// `attributes` closure of its automation entry reads `text`. Measured only in
+/// a DEBUG build (the automation surface's own gate, convention 15).
+public final class DocumentPaintedLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [DocumentPaintedLine] = []
+
+    public init() {}
+
+    fileprivate func update(_ next: [DocumentPaintedLine]) {
+        lock.lock(); defer { lock.unlock() }
+        lines = next
+    }
+
+    /// The painted lines joined by `\n`.
+    public var text: String {
+        lock.lock(); let snapshot = lines; lock.unlock()
+        return documentPaintedText(snapshot)
+    }
+}
+
+/// One painted text leaf: its laid-out origin in the body's own coordinate
+/// space, the block quotes around it and the text it shows.
+struct DocumentPaintedLine: Equatable {
+    let x: CGFloat
+    let y: CGFloat
+    let quoteDepth: Int
+    let text: String
+}
+
+/// Points of laid-out left offset that read as one leading space.
+let documentPaintIndentPt: CGFloat = 8
+
+/// Lines ordered top to bottom (left to right on one row), each indented by its
+/// left edge against the leftmost leaf.
+func documentPaintedText(_ lines: [DocumentPaintedLine]) -> String {
+    guard let base = lines.map(\.x).min() else { return "" }
+    return lines
+        .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
+        .map { line in
+            let pad = max(0, Int(((line.x - base) / documentPaintIndentPt).rounded()))
+            let flat = line.text.replacingOccurrences(of: "\n", with: " ")
+            return String(repeating: " ", count: pad)
+                + String(repeating: "\u{2502} ", count: line.quoteDepth) + flat
+        }
+        .joined(separator: "\n")
+}
+
+private let documentPaintSpace = "fauna.document.paint"
+
+struct DocumentPaintedLineKey: PreferenceKey {
+    static var defaultValue: [DocumentPaintedLine] { [] }
+    static func reduce(value: inout [DocumentPaintedLine], nextValue: () -> [DocumentPaintedLine]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+private extension View {
+    /// Publish this text leaf's laid-out frame and text for `DocumentPaintedLines`.
+    @ViewBuilder func paintedLine(_ text: String, quoteDepth: Int) -> some View {
+        #if DEBUG
+        background(
+            GeometryReader { geometry in
+                let frame = geometry.frame(in: .named(documentPaintSpace))
+                Color.clear.preference(
+                    key: DocumentPaintedLineKey.self,
+                    value: [DocumentPaintedLine(
+                        x: frame.minX, y: frame.minY, quoteDepth: quoteDepth, text: text
+                    )]
+                )
+            }
+        )
+        #else
+        self
+        #endif
+    }
+
+    /// A list nested inside a list item sits further right than its parent
+    /// (render-model.md § D7b) — the walk used to paint it flush, flat.
+    @ViewBuilder func nestedListIndent(_ block: RenderBlock) -> some View {
+        switch block {
+        case .listBlock, .taskList: padding(.leading, 20)
+        default: self
         }
     }
 }
@@ -57,27 +174,33 @@ private struct RenderBlockView: View {
     /// A list bullet/number prepended to a paragraph/heading's first inline run (only set by the
     /// list arm for an item's first block); "" otherwise.
     let marker: String
+    /// The block quotes enclosing this block — each paints a bar beside it.
+    let quoteDepth: Int
 
     var body: some View {
         switch block {
         case let .paragraph(inlines):
             let runs = renderInlineLineRuns(inlines: inlines)
             LineRunsView(count: runs.count) { i in
-                Text(attributedInlines(runs[i], prefix: i == 0 ? marker : ""))
+                let run = attributedInlines(runs[i], prefix: i == 0 ? marker : "")
+                Text(run)
                     .textSelection(.enabled)
+                    .paintedLine(String(run.characters), quoteDepth: quoteDepth)
             }
         // A heading is one line by construction (ATX), so it never carries the hard
         // breaks the line-run split exists for.
         case let .heading(level, inlines):
-            Text(attributedInlines(inlines, prefix: marker))
+            let run = attributedInlines(inlines, prefix: marker)
+            Text(run)
                 .font(headingFont(level))
                 .textSelection(.enabled)
+                .paintedLine(String(run.characters), quoteDepth: quoteDepth)
         case let .blockQuote(blocks):
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 1).fill(Color.secondary).frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(blocks.enumerated()), id: \.offset) { _, b in
-                        RenderBlockView(block: b, marker: "")
+                        RenderBlockView(block: b, marker: "", quoteDepth: quoteDepth + 1)
                     }
                 }
                 .foregroundStyle(.secondary)
@@ -91,7 +214,8 @@ private struct RenderBlockView: View {
                 ForEach(Array(items.enumerated()), id: \.offset) { i, item in
                     let m = ordered ? "\(i + 1).\u{00a0}" : "\u{2022}\u{00a0}"
                     ForEach(Array(item.blocks.enumerated()), id: \.offset) { j, b in
-                        RenderBlockView(block: b, marker: j == 0 ? m : "")
+                        RenderBlockView(block: b, marker: j == 0 ? m : "", quoteDepth: quoteDepth)
+                            .nestedListIndent(b)
                     }
                 }
             }
@@ -103,7 +227,8 @@ private struct RenderBlockView: View {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     let m = item.checked ? "\u{2611}\u{00a0}" : "\u{2610}\u{00a0}"
                     ForEach(Array(item.blocks.enumerated()), id: \.offset) { j, b in
-                        RenderBlockView(block: b, marker: j == 0 ? m : "")
+                        RenderBlockView(block: b, marker: j == 0 ? m : "", quoteDepth: quoteDepth)
+                            .nestedListIndent(b)
                     }
                 }
             }
@@ -114,6 +239,7 @@ private struct RenderBlockView: View {
                 Text(runs[i])
                     .font(.body.monospaced())
                     .textSelection(.enabled)
+                    .paintedLine(runs[i], quoteDepth: quoteDepth)
             }
             .padding(6)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -361,6 +487,47 @@ public func documentMediaProxiedVideoPath(_ document: RenderDocument) -> String?
 /// (priority #3 — one concept, one name on all 7 apps).
 public func documentMediaVideoHash(_ document: RenderDocument) -> String? {
     renderDocumentFirstVideoHash(document: document)
+}
+
+/// One painted media element of a post: what a `post-image` or `video-thumbnail` slot paints,
+/// with the label it carries already settled (render-model.md § D6c → *Proxied video*, the `alt`
+/// paragraph: the block's own `alt` when the author wrote one, the shared fixed text otherwise).
+public enum DocumentMediaElement: Equatable {
+    case image(hash: String, alt: String)
+    case proxiedImage(path: String, alt: String)
+    case video(hash: String, alt: String)
+    case proxiedVideo(path: String, alt: String)
+
+    /// The element's label — its `alt` attribute and its accessibility label.
+    public var alt: String {
+        switch self {
+        case .image(_, let alt), .proxiedImage(_, let alt), .video(_, let alt), .proxiedVideo(_, let alt):
+            return alt
+        }
+    }
+}
+
+/// Every media element a post's document folded in, in body order — one per `Image`,
+/// `ProxiedImage`, `Video` and `ProxiedVideo` block of the shared
+/// `RenderDocument::media_blocks` (render-model.md § D6b: paint every item, never the first),
+/// over its `renderDocumentMediaBlocks` UniFFI face. The list card and both post details paint
+/// one `post-image` / `video-thumbnail` per element. Mirrors tui's `feed::media_elements`.
+public func documentMediaElements(_ document: RenderDocument) -> [DocumentMediaElement] {
+    func altOr(_ alt: String, _ fallback: String) -> String { alt.isEmpty ? fallback : alt }
+    return renderDocumentMediaBlocks(document: document).compactMap { block in
+        switch block {
+        case .image(let hash, let alt):
+            return .image(hash: hash, alt: altOr(alt, L.feed.post.imageAltFallback))
+        case .proxiedImage(let path, let alt):
+            return .proxiedImage(path: path, alt: altOr(alt, L.feed.post.imageAltFallback))
+        case .video(let hash, let alt):
+            return .video(hash: hash, alt: altOr(alt, L.feed.post.videoAltFallback))
+        case .proxiedVideo(let path, let alt):
+            return .proxiedVideo(path: path, alt: altOr(alt, L.feed.post.videoAltFallback))
+        default:
+            return nil
+        }
+    }
 }
 
 /// The document's folded `QuotedPost` embed (`post_id`/`author`/`body`/`verification`/

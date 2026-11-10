@@ -59,8 +59,8 @@ use tokio::sync::watch;
 
 use fauna_sync_engine::account_runtime::{
     AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, AgentPresenceLock,
-    AgentPresenceLockOutcome, DEFAULT_BACKSTOP_INTERVAL, RuntimePrincipal, StoreRoot,
-    production_credential_store,
+    AgentPresenceLockOutcome, DEFAULT_BACKSTOP_INTERVAL, MembershipSource, RuntimePrincipal,
+    StoreRoot, production_credential_store,
 };
 use fauna_sync_engine::principal_bundle::load_writer_key;
 
@@ -540,12 +540,17 @@ fn device_leg_client(
 /// * `principal: Seedless` — the fork W5.5a built. Grant mint, fleet bootstrap
 ///   and the succession re-key are skipped rather than faked; each
 ///   belongs to a signed-in app and heals on its next assembly.
-/// * `memberships: None` — the member half of the content-scope set comes from a
-///   live MLS engine, and this process deliberately links none (§ Credential
-///   model: bearer-only). So this replica walks its own-actor scopes only. That
-///   is a real limitation, not an oversight: an app is what walks joined
-///   channels, and `None` means "cannot tell", which the runtime holds the last
-///   derived set through rather than reading as *left every channel*.
+/// * `memberships: Record` — the member half of the content-scope set is a live
+///   MLS engine's answer, and this process deliberately links none (§ Credential
+///   model: bearer-only). So it reads the **membership record** the signed-in
+///   app beside it writes into the shared store at every pass it runs — the
+///   seed-leg holder's engine answer, stamped (`account-runtime-roles.md`
+///   § Multi-instance concurrency → *The membership record*). A fresh record is
+///   this replica's membership answer exactly as an engine's would be: it walks
+///   the joined channels and licenses the departure pass. With no app running,
+///   or a record older than two backstop intervals, there is no answer — "cannot
+///   tell", which the runtime holds the last derived set through rather than
+///   reading as *left every channel*, and which concludes no departure.
 async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Result<Mounted> {
     let rpc = state
         .nest_rpc_client()
@@ -727,7 +732,9 @@ fn runtime_params<R>(
         reconnects,
         pushes,
         backstop_interval: DEFAULT_BACKSTOP_INTERVAL,
-        memberships: None,
+        // The seed-leg holder's membership record, never an engine of its own
+        // (the `memberships` bullet in the doc above).
+        memberships: Some(MembershipSource::Record),
         // The R14 escrow-holder trust: what this machine PINNED for its nest,
         // never what the nest says about itself. The agent reads the same TOFU
         // store the apps do (`crate::trust::install_consumer_pin_store` ran at
@@ -1060,10 +1067,10 @@ mod tests {
              would be the seed reaching a process that must never see it"
         );
         assert!(
-            params.memberships.is_none(),
-            "the member half of the content-scope set comes from a live MLS \
-             engine, and this process links none — a Some(..) here would mean \
-             the agent had grown one, which is exactly the state the T9 \
+            matches!(params.memberships, Some(MembershipSource::Record)),
+            "the member half of the content-scope set is the app's membership \
+             record, never an engine — an Engine(..) here would mean the agent \
+             had grown an MLS engine, which is exactly the state the T9 \
              carve-out assumes it can never be in"
         );
     }

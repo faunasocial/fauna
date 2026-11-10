@@ -141,6 +141,20 @@ def test_an_update_add_is_served_over_both_transports(fake):
     assert _txt_values(_tcp(dns.port, _query("_ACME-challenge.Renew.test."))) == ["tok"]
 
 
+def test_a_foreign_add_survives_a_withdraw_of_another_value_and_served_txt_reads_it(fake):
+    """`add_txt` stands for a record another tool wrote into the zone and
+    `served_txt` reads the zone back as a resolver does — the pair the atproto
+    rename witness observes the provider's withdraw with."""
+    dns, _ = fake
+    name = "_atproto.old.test"
+    dns.add_txt(name, "foreign=1")
+    assert _rcode(_tcp(dns.port, _update("old.test", adds=[(name, "did=plc:x")]))) == 0
+    assert sorted(dns.served_txt(name)) == ["did=plc:x", "foreign=1"]
+    assert _rcode(_tcp(dns.port, _update("old.test", deletes=[(name, "did=plc:x")]))) == 0
+    assert dns.served_txt(name) == ["foreign=1"]
+    assert dns.served_txt("absent.test") == []
+
+
 def test_a_class_none_delete_removes_only_the_withdrawn_value(fake):
     dns, _ = fake
     name = "_acme-challenge.both.test"

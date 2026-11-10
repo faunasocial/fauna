@@ -45,7 +45,7 @@ Authority: owns what counts as a public text (§ The boundary), the inventory of
 
 **What a request carries:** the text or the change (a new text's draft lives in its source file; a change is the diff or the sentences, before and after); the publish path — which pipeline, which console field, which page; why — the need, the submission, the release, the correction; **every claim the text makes about the product, each with the goal-doc section, or the code, that makes it true today**, and for each claim the other inventoried texts that make it too; the companion app strings, if any (§ The boundary); and the inventory entries it touches.
 
-**Who files one, and where.** Any session, in the one queue. A request is never landed by its author: the session that wrote the draft has the view of one task, and the review exists to supply the other.
+**Who files one, and where.** Any session, in the one queue, serving the version task of the release the text is for, else the objective target of the task that needed it (the closure invariant, [`fleet-scheduler.md`](fleet-scheduler.md) § Objectives, rule 2; owner-ruled 2026-11-08). A request is never landed by its author: the session that wrote the draft has the view of one task, and the review exists to supply the other.
 
 ## The review
 

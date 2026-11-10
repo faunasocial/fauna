@@ -49,9 +49,12 @@ Exits 0 silently if up-to-date. Otherwise runs <cmd> and exits with its rc.
     than the stamp (an ignored file has no tree id, so its mtime is still the
     only signal), reports up-to-date. Anything else — a dirty tree, a source
     outside the repository, git unavailable — leaves the mtime verdict
-    standing, so the key can only turn a false "stale" into "fresh". What it
-    buys: a rebase, checkout or seed that touches every file without changing
-    a byte no longer sends a cargo no-op into the build-slot queue.
+    standing. The converse also holds: a clean tree whose ids DIFFER from the
+    recorded ones is stale even when every mtime reads older than the stamp
+    (mtimes moved backwards, observed on macOS 2026-11-09). What it buys: a
+    rebase, checkout or seed that touches every file without changing a byte
+    no longer sends a cargo no-op into the build-slot queue, and a mtime
+    rewrite can no longer hide a content change from the gate.
     Spec: docs/goal/architecture/build-system.md § How the gate works →
     "Gating a cargo step".
 
@@ -233,6 +236,17 @@ def _recorded_key(stamp: Path) -> str | None:
     return None
 
 
+def content_changed(stamp: Path, sources: list[Path]) -> bool:
+    """`--content-key`'s other verdict: the stamp recorded a key and the tree
+    under the sources is clean at a DIFFERENT one — stale whatever the mtimes
+    say. A missing record or a dirty tree (no key to compare) says nothing."""
+    recorded = _recorded_key(stamp)
+    if not recorded:
+        return False
+    current = content_key(sources)
+    return current is not None and current != recorded
+
+
 def content_fresh(stamp: Path, sources: list[Path], excludes: list[str]) -> bool:
     """`--content-key`'s verdict: same tree ids on a clean tree, and no ignored
     source newer than the stamp."""
@@ -333,6 +347,17 @@ def main() -> int:
         if not args.quiet:
             print(f"[build-if-stale] {label}: up-to-date (content key unchanged)", flush=True)
         return 0
+
+    if (source_newest <= target_freshness and args.content_key
+            and content_changed(Path(args.stamp), sources)):
+        # Mtimes moved backwards past the stamp (a pass rewriting checkout
+        # mtimes to a rounded past instant) while the content changed.
+        if args.check:
+            if not args.quiet:
+                print(f"[build-if-stale] {label}: stale (content key changed)", flush=True)
+            return 1
+        print(f"[build-if-stale] {label}: stale (content key changed) → building", flush=True)
+        return run_and_commit("warm")
 
     if source_newest > target_freshness:
         if args.check:

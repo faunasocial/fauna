@@ -209,6 +209,68 @@ def request_seed_alone_replacement(
     return secret, int(reply["lands_at"])
 
 
+def mint_seed_alone_registration(
+    nest_url: str, *, actor_id_hex: str, identity_seed_hex: str
+) -> tuple[str, bytes]:
+    """Mint — but do not submit — a seed-alone replacement record.
+
+    Returns ``(secret, registration)``: what a thief holding only the identity
+    seed can produce. The caller chooses the door, which is the point of the
+    witness that presents it at the IMMEDIATE door
+    (``fauna.recovery.registration.submit``) rather than the pending one.
+    """
+    registrations = registration_chain(nest_url, actor_id_hex)
+    argv = ["--identity-seed", identity_seed_hex]
+    for reg in registrations:
+        argv += ["--registration", reg.hex()]
+    fields = _run_fixture("mint-seed-alone-replacement", argv)
+    return (
+        _require(fields, "recovery_secret", "mint-seed-alone-replacement"),
+        bytes.fromhex(_require(fields, "registration", "mint-seed-alone-replacement")),
+    )
+
+
+def mint_cosigned_registration(
+    nest_url: str, *, actor_id_hex: str, identity_seed_hex: str, prior_secret_hex: str
+) -> tuple[str, bytes]:
+    """Mint — but do not submit — a replacement the head's kit co-signs.
+
+    Returns ``(new_secret, registration)``: the kit-replacement ceremony's
+    record (``kit.rs::next_seq``'s replacement arm), which the nest lands as the
+    new head at once.
+    """
+    registrations = registration_chain(nest_url, actor_id_hex)
+    argv = [
+        "--identity-seed", identity_seed_hex,
+        "--prior-recovery-secret", prior_secret_hex,
+    ]
+    for reg in registrations:
+        argv += ["--registration", reg.hex()]
+    fields = _run_fixture("mint-cosigned-replacement", argv)
+    return (
+        _require(fields, "recovery_secret", "mint-cosigned-replacement"),
+        bytes.fromhex(_require(fields, "registration", "mint-cosigned-replacement")),
+    )
+
+
+def submit_registration(
+    nest_url: str, *, actor_id_hex: str, identity_seed_hex: str, registration: bytes
+) -> dict:
+    """Present a registration record at the immediate door, as the account.
+
+    ``fauna.recovery.registration.submit`` is USER-class, so this signs in with
+    the identity seed. Raises ``RpcCallError`` on a refusal.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    with WsRpcAdminClient(
+        nest_url,
+        actor_id=bytes.fromhex(actor_id_hex),
+        signing_key=bytes.fromhex(identity_seed_hex),
+    ) as ws:
+        return ws.call(_REGISTER_KIND, {"registration": registration})
+
+
 def replacement_status(
     nest_url: str, *, actor_id_hex: str, identity_seed_hex: str
 ) -> Optional[dict]:

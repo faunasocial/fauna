@@ -813,8 +813,8 @@ onboarding:
     status_verify_credentials: Enter this provider's credentials and press Verify to continue.
     status_pick_location: Choose where in the world your server runs to continue.
     status_pick_server_type: Choose a plan for your server to continue.
-    # Section header above the location picker (android-only: no other app
-    # has a separate label — its select-field label doubles as the heading).
+    # The location picker's label (vps-location-picker): android paints it as a
+    # section header above the field; tui and web as the picker's own label.
     location_heading: Location
     # The update-channel radios (vps-config-update-channel-row[<channel>]):
     # a heading, then one label + one-line description per channel.
@@ -1359,6 +1359,15 @@ feed:
   # reporting; IDs user-approved 2026-09-25). Opens the shared report sheet
   # (moderation.report.*); gated !is_own.
   report_post: Report post
+  # The mark-as-spam toggle beside it (report-sharing.md § Report capture →
+  # The post's mark-as-spam verb; IDs user-approved 2026-11-07): collapses the
+  # post for the marker, trains their sealed spam model and — when they share
+  # spam reports — counts in the shared count; a second press un-marks. The
+  # conversation verb's concept and wording (conversations.detail.mark_as_spam).
+  mark_as_spam: Mark as spam
+  # The verb's failure — the plane mark or the shared train (a withheld post,
+  # the rate limit, no connection); the marker's own collapse is never undone.
+  error_mark_spam: 'Could not mark the post as spam: {message}'
   # The muted-word list could not be read, so it is NOT being applied to this
   # feed. Surfaced rather than swallowed: silently dropping the filters would
   # show the user exactly the content they asked never to see, with no hint why.
@@ -1443,6 +1452,7 @@ feed:
     factor_trending: Trending
     factor_watch_complete: Watched to the end
     factor_skip: Skipped past
+    factor_reported_spam: Reported as spam
     factor_weight_placeholder: '1.0'
     factor_global_toggle: Apply to all feeds
     add_factor: Add Factor
@@ -1459,6 +1469,11 @@ feed:
     add_comment: Add your comment...
     whats_on_your_mind: 'What''s on your mind?'
     has_media: '[media]'
+    # A post picture's / video's accessible label when its author wrote no
+    # description (render-model.md § D6c → *Proxied video*, the `alt` paragraph:
+    # the block's `alt` when non-empty, this fixed text otherwise).
+    image_alt_fallback: Picture
+    video_alt_fallback: Video
     view_thread: View Thread
     thread: Thread
     no_thread_data: No thread data
@@ -1671,9 +1686,27 @@ conversations:
     # error's `user_detail` — a product statement when there is one, the generic
     # sentence when the cause was a diagnostic; never a raw engine string.
     error_add_participant_after_heal: 'their undelivered earlier invitation was removed first, so they are no longer in the group — adding them again starts cleanly. The re-invitation failed: {reason}'
+    # Rides {message} above when the person is already seated in the group but
+    # the app cannot read the group's roster to tell whether their invitation
+    # arrived (mls-group-key-material.md § M2, the refuse-to-guess arm). It
+    # refuses rather than guess, and says how to start over.
+    error_add_participant_unconfirmed: 'they are already in this group, but whether their invitation reached them cannot be confirmed right now. If they never received it, remove them from the group and add them again.'
     error_remove_participant: 'Could not remove them from this conversation: {message}'
+    # A community-room removal whose unseat landed but whose re-key did not
+    # (community-rooms.md § Implementation status today, *A removal severs*,
+    # the retry paragraph). Replaces error_remove_participant rather than
+    # riding its {message}: the removal DID happen, so "Could not remove" would
+    # be false. Says the member is out, the room is not re-keyed yet so they
+    # can still read new messages, and that the next owner's or admin's app
+    # completes it with nothing for the user to do. {name} is the member as
+    # the thread renders them.
+    error_remove_participant_unsevered: "{name} is out of this room, but the room's key has not been changed yet, so they can still read new messages until the next owner's or admin's app finishes the removal. Nothing for you to do."
     error_rename_thread: 'Could not rename this conversation: {message}'
     error_leave_room: 'Could not leave this conversation: {message}'
+    # The local remove of a bridged message or conversation failed
+    # (bridged-adapter.md § Removing bridged rows) — same shape.
+    error_remove_message: 'Could not remove this message from your nest: {message}'
+    error_remove_thread: 'Could not remove this conversation from your nest: {message}'
     # The room policy editor's failure (join rule / history policy / admin
     # set — conversation-rooms.md § Roles and authorization), same shape as
     # the three above: the action named here, the reason as {message}.
@@ -2729,6 +2762,10 @@ media:
   error_followed_unavailable: This folder is no longer shared publicly. Its owner may have stopped sharing it, or removed it.
   error_followed_fetch: "Couldn't read that followed folder: {message}"
   error_followed_read_only: You follow this folder — it's read-only here. Switch to one of your own folders to upload.
+  # ── Foreign browse scope (ui/media.md § Cross-nest shared sets): the home
+  # nest refused the member's relayed read — they were removed from the set.
+  # The option stays listed until the member's own record of the share goes.
+  error_foreign_removed: You no longer have access to this shared folder. Its owner may have removed you, or stopped sharing it.
   # public-text: app-strings-public
   error_metadata_only_folder: This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it.
   # public-text-end: app-strings-public
@@ -3799,6 +3836,11 @@ devices:
   # local MlsEngine::forget_group).
   shared_with_you: "Shared with you"
   shared_by: 'Shared by {who}'
+  # The recipient badge's third reading: this copy's seat forked when the owner
+  # changed identity (docs/goal/architecture/federation-shared-folders.md
+  # § Cross-nest shared folders + channel append → A forked seat is final, says
+  # so, and heals only by a fresh Welcome); only the owner's re-share heals it.
+  shared_by_owner_changed: 'Shared by {who} · owner changed, ask them to share it again'
   error_accept_share: "Failed to accept share: {message}"
   error_decline_share: "Failed to decline share: {message}"
   error_leave_share: "Failed to leave share: {message}"
@@ -3867,6 +3909,13 @@ devices:
     review_devices: "Devices"
     create_error: "Failed to create folder: {message}"
     create_member_error: "Folder created, but some devices could not be enrolled: {message}"
+    # Review's read-only line for the Name step's audience choice (ui/folders.md
+    # § Audience and website serving → Born public).
+    review_audience: "Who can see it"
+    # A born-public create landed but the attestation that follows it failed:
+    # the folder exists, public and unattested (every device reads it as
+    # sealed), and confirming Public again on its row finishes it.
+    create_attest_error: "Folder created, but making it public did not finish: {message}. Choose Public again on the folder to finish."
     no_devices_available: "No devices available. Register a device first."
     next: "Next"
     back: "Back"
@@ -4560,6 +4609,14 @@ settings:
     change_handle_to: 'Change handle to {handle}'
     delete_account: Delete this account
     delete_snapshot: 'Delete snapshot {snapshot}'
+    # The automatic retention prunes (file-versions.md § Retention (3),
+    # backup-restore.md): one cancellable action per folder, named by the
+    # folder's name where the app holds it, else the neutral sentence — never
+    # the folder's id.
+    prune_versions_in: 'Remove old versions in {folder}'
+    prune_versions: Remove old versions in a folder
+    prune_snapshots_of: 'Remove old snapshots of {folder}'
+    prune_snapshots: Remove old snapshots of a folder
     # An administrator's delayed actions, as the same renderer describes them —
     # on the target's own list (the against-user ones) and on the admin
     # console's pending-admin-actions section (all of them).
@@ -4567,6 +4624,37 @@ settings:
     admin_add: 'Grant {target} the admin role'
     admin_remove: 'Revoke the admin role of {target}'
     admin_change_role: 'Change the admin role of {target}'
+  # The unsent-changes read model (account-offline-mutation.md § The
+  # offline-mutation contract → The unsent-changes surface): a change made with
+  # no nest that has not reached it yet, in user words. `kind_*` is the shared
+  # describer's label per kind (`fauna_protocol::offline_describe`); an
+  # unregistered kind describes as its kind string (`kind_other`). `state_*` is
+  # the row's state; `reason_*` is the stored failure code in words, with
+  # `reason_fallback` for a code the map does not name.
+  unsent_changes:
+    kind_like: Like on a post
+    kind_unlike: Removed like on a post
+    kind_post_interaction: Interaction on a post
+    kind_message: 'Message: {excerpt}'
+    kind_approval_approve: Approval of a request
+    kind_approval_deny: Refusal of a request
+    kind_contact_pre_approve: Pre-approved contact
+    kind_email_filter_create: 'New email filter: {name}'
+    kind_bridge_follow_add: 'Follow: {account}'
+    kind_bridge_follow_remove: 'Unfollow: {account}'
+    kind_knock_accept: Accepted contact request
+    kind_knock_send: 'Contact request: {recipient}'
+    kind_abuse_report: Report to the admins
+    kind_other: '{kind}'
+    state_waiting: Waiting to send
+    state_held: Waiting behind a change that was not sent
+    state_unsent: Not sent
+    reason_unknown_kind: This version of the app cannot send this change
+    reason_undecodable: This change could not be read
+    reason_mls_no_channel: The conversation could not be found
+    reason_mls_not_a_member: You are no longer a member of this conversation
+    reason_mls_send_failed: The message could not be sent
+    reason_fallback: 'Your nest refused this change ({code})'
   # The PERMANENT half of the post-succession member review — ui.yaml page
   # `member_review`, a Settings sub-page (succession-aftermath.md § Propagation,
   # ruling 1: the ephemeral kit-side pass under `recovery_kit.review_*` above is
@@ -4879,6 +4967,7 @@ nests:
   scope_mail: Mail — and the spam-filter model and training history derived from it
   # public-text-end: app-strings-public
   scope_calendar: Calendar
+  scope_card: Contacts
   scope_posts: Posts
   # content.label-write (bundled into the Mail mint option) — never render the
   # raw scope-class string in a grant row.
@@ -7334,11 +7423,22 @@ moderation:
     sent_local: 'Report sent to the admins of {nest}.'
     sent_forwarded: 'Report sent to the admins of {nest} and forwarded, without your name, to the admins of {home_nest}.'
     # public-text-end: app-strings-public
+    # A report filed with no nest rests in the device's outbox and is sent on
+    # reconnect (account-offline-mutation.md § The offline-mutation contract);
+    # no nest has answered yet, so the line names none.
+    queued: Report saved. It will be sent when you are back online.
+    # A queued report that asked to block its author: the block needs the nest.
+    block_not_sent: The block was not sent because you are offline. Block this person again once you are back online.
     failed: 'The report could not be sent: {error}'
     # The reporter-side hide (moderation.md § Corollary — block also hides):
     # the placeholder the render-verdict engine paints in place of content the
     # viewer reported — a personal filter, hiding nothing for anyone else.
     hidden_placeholder: You reported this
+    # The show-again control on that placeholder (moderation.md § Corollary —
+    # the reporter's hide is theirs to undo): the label names the scope the
+    # shared `show_again_for_item` picked — the item, or the whole account.
+    show_again_item: Show it again
+    show_again_account: Show this account again
     # The reporter's own ledger on the Moderation page (moderation-reports-*).
     ledger_title: Your reports
     ledger_empty: You have not reported anything.
@@ -8155,6 +8255,11 @@ profile:
   tiers: Tiers
   edit: Edit Profile
   follow: Follow
+  # profile-follow-button's armed confirm: the first press on Following when
+  # the viewer holds a paid tier at the author relabels the button to this,
+  # because the unfollow ends the paid tiers too (subscriptions.md § The free
+  # followers tier — follow and unfollow, rule 4); the second press leaves.
+  unfollow_confirm: Unfollow and end your paid subscription?
   copy_id: Copy ID
   start_dm: Message
   block: Block
@@ -8246,12 +8351,27 @@ subscriptions:
   provider_kind_label: 'Provider:'
   provider_tier_label: 'Tier:'
   webhook_secret: Webhook secret
+  # The optional product the tier is sold as (monetization.md § Pillar 3 →
+  # Configuration): on Stripe the Payment Link id. Empty = every verified
+  # payment on the account grants the tier, as before.
+  product_label: Payment Link (optional)
+  product_hint: Only payments through this link grant the tier. Leave empty to grant it for every payment on the account.
   webhook_url_label: 'Webhook URL:'
   return_url_label: 'Return URL:'
   return_url_unavailable: Turn on your public web address (Settings, Web) to get a return URL
   redeem_claim_title: Redeem a claim code
   claim_code: Claim code
   redeem: Redeem
+  # The direct message the nest sends a Nostr stranger whose zap bought an
+  # advertised post (monetization.md § The Nostr advertisement of a sold post →
+  # Delivering the unlock to a stranger who paid): rendered by the nest to
+  # plain text, read before any sign-in, so a public text (round 7, package
+  # claim-delivery). claim_delivery_dm carries exactly {code};
+  # claim_delivery_dm_link exactly {code} and {url} (the post's web page).
+  # public-text: app-strings-public
+  claim_delivery_dm: "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
+  claim_delivery_dm_link: "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
+  # public-text-end: app-strings-public
   offer_status_none: Not subscribed
   offer_status_pending: Pending approval
   offer_status_active: Subscribed
@@ -8375,6 +8495,14 @@ error:
     # client's transient-error handling backs off and resends on its own; no
     # user action is actually needed beyond a short wait.
     rate_limited: This is happening too quickly. Please wait a moment and try again.
+    # fauna.conversations.invitee_inbox_full — a room invitation the invitee's
+    # inbox could not take (community-rooms.md § Implementation status today,
+    # the invitations entry). Deliberately ONE string for every failed check
+    # at that door — invitee unregistered, suspended, envelope over the tier's
+    # blob size, or the inbox over quota — so an inviter cannot probe which.
+    # Not the reach-policy sentence above: a contact request cannot make room
+    # in someone's inbox, so no remedy is offered beyond trying later.
+    invitee_inbox_full: This person's inbox is full, so the invitation couldn't be delivered. Try again later.
   profile:
     # fauna.profile.handle_taken (and the registration twin
     # fauna.account.handle_taken) — the handle belongs to another account on this
@@ -8529,6 +8657,12 @@ error:
     # fauna.nostr.replies_off — a reply (a quote still acks) while the
     # *Publish replies* toggle is off.
     replies_off: Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.
+    # fauna.nostr.not_sold — Advertise on Nostr on a post no tier sells
+    # (monetization.md § The Nostr advertisement of a sold post → The act).
+    not_sold: Only a post you sell can be advertised on Nostr. Sell this post first.
+    # fauna.nostr.no_asking_price — the selling tier has no machine price, so
+    # no zap could ever buy it.
+    no_asking_price: This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.
   nest:
     # fauna.nest.outdated — the nest booted a degraded "needs-update" mode (it
     # cannot safely operate its newer at-rest DB). Actionable: update the nest.
@@ -8636,6 +8770,12 @@ error:
     room_policy_unavailable: This room has no room settings, so there is nothing to change here.
     room_owner_cannot_leave: Hand the room over to someone else before you leave — a room always has an owner.
     room_leave_failed: Leaving this room did not go through. Try again.
+    # A community room this device is seated in but holds no key for yet — a
+    # newcomer between its acceptance and an owner's or admin's key-in
+    # (community-rooms.md § Implementation status today, *A waiting room says
+    # so*). The send is refused before anything is sealed, by name, never as
+    # the generic failure.
+    room_awaiting_key: You can't send in this room until an owner or admin keys you in.
     # conversations.md § Errors & edge cases: an attachment upload to a room
     # homed on ANOTHER nest failed, and that nest said why in its own words.
     # Its words are never shown — the room's home nest is chosen by whoever
@@ -8711,6 +8851,7 @@ errors:
   recovery_malformed: 'The nest sent back something unexpected: {detail}'
   recovery_prior_kit_required: A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead.
   recovery_prior_kit_mismatch: That kit does not match the one currently registered for this identity.
+  recovery_kit_for_another_account: That recovery kit belongs to a different account, not this one. Nothing was changed.
   recovery_prior_escrow_unreadable: 'Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it.'
   recovery_group_ceremony: 'Updating your groups failed: {detail}'
 registrar:
@@ -8887,7 +9028,11 @@ rule_editor:
     standard: Standard
     lenient: Lenient
     very_lenient: Very lenient
+  # Also painted before sign-in, under a rule's line on the joining surface
+  # (nest-rules.md § Acceptance at joining): a public text.
+  # public-text: app-strings-public
   prompt_not_applied: Not applied on this device
+  # public-text-end: app-strings-public
   newer_version: These rules were written by a newer version of Fauna. Update the app to edit them.
   # The editor's own frame — the controls every mounting paints around the
   # crate's view.
@@ -8995,6 +9140,12 @@ connected_apps:
   # atproto_settings.session_status_suspended: the state, then how to undo it,
   # so the app reads as recoverable and its approval as surviving.
   paused: Paused — turn Allow external apps back on to let this app work again
+  # A principal whose every OAuth grant the step-down from full hosting
+  # suspended (`atproto-oauth-provider.md`, the OAuth-grant suspension
+  # bullet): the same paused state, worded with ITS undo — the step-down
+  # ended the app's session, so after stepping back up the app signs in
+  # again; the approval itself survives, listed and revocable.
+  paused_suspended: Paused — turn Bluesky back on, then sign in to this app again
   created: 'Added {time}'
   last_used: 'Last used {time}'
   never_used: Never used

@@ -237,6 +237,15 @@ pub enum TrustMintUseCase {
     Mail,
     Calendar,
     PaywalledPosts,
+    /// "Keep my mail searchable on this nest" — the materialization grant to
+    /// the nest's own materializer, offered on the home row only
+    /// (`encryption-at-rest.md` § Capability tiering → *The materialization
+    /// grant*, part (f)).
+    MaterializeMail,
+    /// The calendar twin — "keep my calendar searchable on this nest".
+    MaterializeCalendar,
+    /// The card twin — "keep my contacts searchable on this nest".
+    MaterializeCard,
 }
 
 /// One option in the trust facet's mint picker (`nest-trust-mint-scope-select`),
@@ -532,6 +541,48 @@ pub fn trust_scope_is_bounded_mail_grant(scope: Vec<TrustScope>) -> bool {
     fauna_client_capabilities::grant_log::is_bounded_mail_grant(&converted)
 }
 
+/// Whether a projected scope list marks a **materialization** grant — thin
+/// FFI-facing wrapper over
+/// [`fauna_client_capabilities::grant_log::is_materialization_grant`], the
+/// [`trust_scope_is_bounded_mail_grant`] twin.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn trust_scope_is_materialization_grant(scope: Vec<TrustScope>) -> bool {
+    let converted: Vec<GrantEventScope> = scope.iter().map(grant_event_scope_from).collect();
+    fauna_client_capabilities::grant_log::is_materialization_grant(&converted)
+}
+
+/// The honest-bound note a grant row renders (`nest-trust-grant-bound-note`,
+/// `nests.md` § Honest bound) — one of three regimes, picked here so no shell
+/// re-derives the choice: a **materialization** grant's (revoking deletes
+/// the searchable copy and the nest's key; a hostile box has already seen
+/// it — `encryption-at-rest.md` § Capability tiering → *The materialization
+/// grant*, part (f)), checked first because its mail tuple is master-key; a
+/// **bounded** mail grant's (the cryptographic window); every other grant's
+/// **standing** bound.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn grant_bound_note(scope: Vec<TrustScope>) -> LocalizedText {
+    let converted: Vec<GrantEventScope> = scope.iter().map(grant_event_scope_from).collect();
+    // A materialization grant's note names the kind it keeps readable — one
+    // grant per kind (part (a)).
+    let materialized = converted
+        .iter()
+        .find(|s| s.class == "materialize")
+        .and_then(|s| s.kind.as_deref());
+    LocalizedText::key(
+        if fauna_client_capabilities::grant_log::is_materialization_grant(&converted) {
+            match materialized {
+                Some("calendar") => "nests.bound_note_materialize_calendar",
+                Some("card") => "nests.bound_note_materialize_card",
+                _ => "nests.bound_note_materialize_mail",
+            }
+        } else if fauna_client_capabilities::grant_log::is_bounded_mail_grant(&converted) {
+            "nests.bound_note_bounded_mail"
+        } else {
+            "nests.bound_note_standing"
+        },
+    )
+}
+
 // ── shell-facing labels: shared enum → i18n key mapping ─────────────
 //
 // Each maps a shared trust type to a `LocalizedText` — a key plus (optional)
@@ -574,6 +625,8 @@ pub fn scope_label(s: &TrustScope) -> LocalizedText {
             }
             Some("mail") => return LocalizedText::key("nests.scope_mail"),
             Some("calendar") => return LocalizedText::key("nests.scope_calendar"),
+            // The card read rides only the card materialization grant.
+            Some("card") => return LocalizedText::key("nests.scope_card"),
             // The keyless grant the spam page's contribute switch mints
             // (`mail-spam.md` § Encrypted-mode interaction).
             Some("spam-model") => return LocalizedText::key("nests.scope_spam_model"),
@@ -585,6 +638,17 @@ pub fn scope_label(s: &TrustScope) -> LocalizedText {
                     None => LocalizedText::key("nests.scope_posts"),
                 };
             }
+            _ => {}
+        }
+    }
+    // The materialization grant's keyless tuple — the row reads "Keeps your
+    // mail searchable" (`encryption-at-rest.md` § Capability tiering → *The
+    // materialization grant*, part (f)).
+    if s.class == "materialize" {
+        match s.kind.as_deref() {
+            Some("mail") => return LocalizedText::key("nests.scope_materialize_mail"),
+            Some("calendar") => return LocalizedText::key("nests.scope_materialize_calendar"),
+            Some("card") => return LocalizedText::key("nests.scope_materialize_card"),
             _ => {}
         }
     }
@@ -702,7 +766,63 @@ pub fn mint_option_label(o: &TrustMintOption) -> LocalizedText {
             "tier",
             o.tier.clone().unwrap_or_default(),
         ),
+        TrustMintUseCase::MaterializeMail => {
+            LocalizedText::key("nests.mint_option_materialize_mail")
+        }
+        TrustMintUseCase::MaterializeCalendar => {
+            LocalizedText::key("nests.mint_option_materialize_calendar")
+        }
+        TrustMintUseCase::MaterializeCard => {
+            LocalizedText::key("nests.mint_option_materialize_card")
+        }
     }
+}
+
+/// The note the mint flow shows before the confirm for this option, or
+/// `None` when it carries none. The materialization option's states the
+/// class-4 honesty bound in words a person can act on — the nest can read
+/// the mail and keeps a searchable copy on its disk; anyone who can read
+/// that disk can read the copy; on an honest nest, turning it off deletes
+/// the copy and the nest's key, and cannot undo what a hostile nest already read
+/// (`encryption-at-rest.md` § Capability tiering → *The materialization
+/// grant*, part (f)).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mint_option_note(o: &TrustMintOption) -> Option<LocalizedText> {
+    match o.use_case {
+        TrustMintUseCase::MaterializeMail => {
+            Some(LocalizedText::key("nests.mint_materialize_note"))
+        }
+        TrustMintUseCase::MaterializeCalendar => {
+            Some(LocalizedText::key("nests.mint_materialize_calendar_note"))
+        }
+        TrustMintUseCase::MaterializeCard => {
+            Some(LocalizedText::key("nests.mint_materialize_card_note"))
+        }
+        TrustMintUseCase::Mail | TrustMintUseCase::Calendar | TrustMintUseCase::PaywalledPosts => {
+            None
+        }
+    }
+}
+
+/// The duration the mint flow pre-selects for this option, given the row's
+/// [`crate::LinkedNestRow::mint_default_duration`]: the row's own for every
+/// option but the materialization one, which pre-selects the standard window
+/// (`fauna_client_capabilities::view_model::MintUseCase::default_duration`).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mint_option_default_duration(
+    o: &TrustMintOption,
+    row_default: TrustGrantDuration,
+) -> TrustGrantDuration {
+    use fauna_client_capabilities::view_model::MintUseCase;
+    let use_case = match o.use_case {
+        TrustMintUseCase::Mail => MintUseCase::Mail,
+        TrustMintUseCase::Calendar => MintUseCase::Calendar,
+        TrustMintUseCase::PaywalledPosts => MintUseCase::PaywalledPosts,
+        TrustMintUseCase::MaterializeMail => MintUseCase::MaterializeMail,
+        TrustMintUseCase::MaterializeCalendar => MintUseCase::MaterializeCalendar,
+        TrustMintUseCase::MaterializeCard => MintUseCase::MaterializeCard,
+    };
+    use_case.default_duration(row_default.into()).into()
 }
 
 #[cfg(test)]
@@ -738,6 +858,132 @@ mod label_tests {
         let lt = scope_label(&scope("content.read", Some("post"), Some("gold")));
         assert_eq!(lt.key, "nests.scope_posts_tier");
         assert_eq!(lt.args.get("tier").map(String::as_str), Some("gold"));
+    }
+
+    /// The materialization grant's row (`encryption-at-rest.md` § Capability
+    /// tiering → *The materialization grant*, part (f)): its keyless tuple
+    /// reads "Keeps your mail searchable", its bound note is the third regime
+    /// — picked before the bounded test, since its mail tuple is master-key —
+    /// and every other grant keeps its standing or bounded note.
+    #[test]
+    fn the_materialization_grant_has_its_own_label_and_bound_note() {
+        let logged = fauna_client_capabilities::grant_log::event_scope_of(
+            &fauna_client_capabilities::materialization_scope("mail"),
+        );
+        let row: Vec<TrustScope> = logged.into_iter().map(project_scope).collect();
+        assert_eq!(scope_label(&row[0]).key, "nests.scope_mail");
+        assert_eq!(scope_label(&row[1]).key, "nests.scope_materialize_mail");
+        assert!(trust_scope_is_materialization_grant(row.clone()));
+        assert_eq!(
+            grant_bound_note(row).key,
+            "nests.bound_note_materialize_mail"
+        );
+
+        let bounded = vec![project_scope(
+            fauna_client_capabilities::grant_log::bounded_mail_event_scope(),
+        )];
+        assert!(!trust_scope_is_materialization_grant(bounded.clone()));
+        assert_eq!(
+            grant_bound_note(bounded).key,
+            "nests.bound_note_bounded_mail"
+        );
+        let standing = vec![scope("content.read", Some("mail"), None)];
+        assert_eq!(grant_bound_note(standing).key, "nests.bound_note_standing");
+        assert_eq!(
+            grant_bound_note(Vec::new()).key,
+            "nests.bound_note_standing"
+        );
+    }
+
+    /// The option's label, its mint-time note (the only option carrying one)
+    /// and its pre-selected standard window.
+    #[test]
+    fn the_materialization_option_has_a_label_a_note_and_the_standard_window() {
+        let option = |use_case| TrustMintOption {
+            use_case,
+            tier: None,
+            scope: Vec::new(),
+            holder_candidates: vec!["materializer".into()],
+        };
+        let materialize = option(TrustMintUseCase::MaterializeMail);
+        assert_eq!(
+            mint_option_label(&materialize).key,
+            "nests.mint_option_materialize_mail"
+        );
+        assert_eq!(
+            mint_option_note(&materialize).map(|n| n.key),
+            Some("nests.mint_materialize_note".to_string())
+        );
+        assert_eq!(
+            mint_option_default_duration(&materialize, TrustGrantDuration::OneOff),
+            TrustGrantDuration::Standard
+        );
+        for other in [
+            TrustMintUseCase::Mail,
+            TrustMintUseCase::Calendar,
+            TrustMintUseCase::PaywalledPosts,
+        ] {
+            assert_eq!(mint_option_note(&option(other)), None);
+            assert_eq!(
+                mint_option_default_duration(&option(other), TrustGrantDuration::OneOff),
+                TrustGrantDuration::OneOff
+            );
+        }
+        // The four keys are not in the catalog yet: a public text's draft may
+        // not land in `en.yaml`, so their wording waits on its public-texts
+        // round and lands there under the round's trailer.
+
+        // Calendar and card: one option per kind, each its own label and
+        // note, each the standard window.
+        for (use_case, label, note) in [
+            (
+                TrustMintUseCase::MaterializeCalendar,
+                "nests.mint_option_materialize_calendar",
+                "nests.mint_materialize_calendar_note",
+            ),
+            (
+                TrustMintUseCase::MaterializeCard,
+                "nests.mint_option_materialize_card",
+                "nests.mint_materialize_card_note",
+            ),
+        ] {
+            let o = option(use_case);
+            assert_eq!(mint_option_label(&o).key, label);
+            assert_eq!(mint_option_note(&o).map(|n| n.key), Some(note.to_string()));
+            assert_eq!(
+                mint_option_default_duration(&o, TrustGrantDuration::OneOff),
+                TrustGrantDuration::Standard
+            );
+        }
+    }
+
+    /// A calendar or card materialization grant's row names its own kind —
+    /// its read, its keyless tuple and its bound note.
+    #[test]
+    fn the_calendar_and_card_materialization_rows_name_their_kind() {
+        for (kind, read_key, mat_key, note_key) in [
+            (
+                "calendar",
+                "nests.scope_calendar",
+                "nests.scope_materialize_calendar",
+                "nests.bound_note_materialize_calendar",
+            ),
+            (
+                "card",
+                "nests.scope_card",
+                "nests.scope_materialize_card",
+                "nests.bound_note_materialize_card",
+            ),
+        ] {
+            let logged = fauna_client_capabilities::grant_log::event_scope_of(
+                &fauna_client_capabilities::materialization_scope(kind),
+            );
+            let row: Vec<TrustScope> = logged.into_iter().map(project_scope).collect();
+            assert_eq!(scope_label(&row[0]).key, read_key);
+            assert_eq!(scope_label(&row[1]).key, mat_key);
+            assert!(trust_scope_is_materialization_grant(row.clone()));
+            assert_eq!(grant_bound_note(row).key, note_key);
+        }
     }
 
     /// The keyless spam-model grant the "Contribute to deployment spam baseline"
@@ -1030,6 +1276,9 @@ pub(crate) fn project_mint_option(
             MintUseCase::Mail => TrustMintUseCase::Mail,
             MintUseCase::Calendar => TrustMintUseCase::Calendar,
             MintUseCase::PaywalledPosts => TrustMintUseCase::PaywalledPosts,
+            MintUseCase::MaterializeMail => TrustMintUseCase::MaterializeMail,
+            MintUseCase::MaterializeCalendar => TrustMintUseCase::MaterializeCalendar,
+            MintUseCase::MaterializeCard => TrustMintUseCase::MaterializeCard,
         },
         tier: o.tier,
         scope: o.scope.into_iter().map(project_scope).collect(),

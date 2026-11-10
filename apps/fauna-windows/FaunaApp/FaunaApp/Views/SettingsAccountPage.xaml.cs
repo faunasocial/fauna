@@ -45,6 +45,24 @@ public sealed partial class SettingsAccountPage : Page
     /// (ui/README.md rule 5), not an omission.</summary>
     private RecoveryKitViewModel? _recoveryKit;
 
+    /// <summary>The ephemeral member-review pass's roster (settings.md § Recovery kit
+    /// → <i>The ephemeral member-review pass</i>) — the permanent page's own view
+    /// model, since the two surfaces are one id family over one roster (apple's
+    /// <c>RecoveryKitSection.reviewVM</c> is the twin). Built per visit beside
+    /// <see cref="_recoveryKit"/>; its gates live there
+    /// (<see cref="RecoveryKitViewModel.MemberReviewPassOpen"/>), not here.</summary>
+    private MemberReviewViewModel? _reviewPass;
+
+    /// <summary>Whether this visit has started the pass's roster read and its
+    /// re-read subscriptions — once per visit, the first time the gates open.</summary>
+    private bool _reviewPassArmed;
+
+    /// <summary>This visit's conversations session: it resolves each reviewed
+    /// person's handle and carries Remove's eviction, the same instance every
+    /// conversations-adjacent surface of the session shares (the permanent page's
+    /// <c>Manager</c>).</summary>
+    private uniffi.fauna_conversations.ConversationsSession? _convSession;
+
     /// <summary>The signed-in identity at the time the section hydrated — one value,
     /// two roles. At ceremony time it is the identity the account is moving <i>away</i>
     /// from, so the succession records which registry row the retired identity is
@@ -74,6 +92,8 @@ public sealed partial class SettingsAccountPage : Page
     {
         this.InitializeComponent();
         Unloaded += Page_Unloaded;
+        MemberReviewPassList.KeepRequested += MemberReviewPassKeep;
+        MemberReviewPassList.RemoveRequested += MemberReviewPassRemove;
     }
 
     /// <summary>Collapsed when false — the qualified-static form x:Bind requires.
@@ -109,7 +129,10 @@ public sealed partial class SettingsAccountPage : Page
             {
                 _recoveryKit = new RecoveryKitViewModel(clients.Rpc);
                 _recoveryKit.PropertyChanged += RecoveryKit_PropertyChanged;
+                _reviewPass = new MemberReviewViewModel(clients.Rpc);
+                _reviewPass.PropertyChanged += ReviewPass_PropertyChanged;
             }
+            _convSession = clients.ConvSession;
         }
 
         // Push notifications: the registration is built on demand, over this visit's
@@ -134,7 +157,13 @@ public sealed partial class SettingsAccountPage : Page
         // then writes ON — making the flag impossible to turn off. Linux hit this and
         // had to add a page-visible re-read; windows gets it structurally.
         _switcherRegistry = Services.CredentialStore.Registry();
-        _switcherViewModel = new AccountSwitcherViewModel(_switcherRegistry)
+        _switcherViewModel = new AccountSwitcherViewModel(
+            _switcherRegistry,
+            // The whole remove gesture, over a registry built for the call and disposed
+            // after it — never `_switcherRegistry`, which this page disposes on
+            // navigation while a removal may still be waiting for a stop.
+            removeAccount: actorId => FaunaApp.Core.Services.AccountStateDir.RemoveAccountGestureAsync(
+                Services.CredentialStore.Registry, actorId))
         {
             // The VM never tears the session down itself — switching disposes the
             // nest/RPC clients, the backup driver and the conversations manager, all
@@ -191,6 +220,13 @@ public sealed partial class SettingsAccountPage : Page
             _recoveryKit = null;
         }
         _recoveryKitHydratedActor = null;
+        DisarmMemberReviewPass();
+        if (_reviewPass is not null)
+        {
+            _reviewPass.PropertyChanged -= ReviewPass_PropertyChanged;
+            _reviewPass = null;
+        }
+        _convSession = null;
         RecoveryPhraseBox.Text = string.Empty;
         StolenConfirmBox.Text = string.Empty;
         LetGoConfirmBox.Text = string.Empty;
@@ -223,7 +259,15 @@ public sealed partial class SettingsAccountPage : Page
         StolenCeremonyHold.Shared.AccountAppeared();
     }
 
-    private void Page_Unloaded(object sender, RoutedEventArgs e) => LeaveAccountMount();
+    private void Page_Unloaded(object sender, RoutedEventArgs e)
+    {
+        // An outer navigation unloads this page with no OnNavigatedFrom (the
+        // mount-count note above): drop the pass's re-read subscriptions too, so
+        // the static aftermath notice never holds an unloaded page. A re-Loaded
+        // page re-arms from its own hydrate.
+        DisarmMemberReviewPass();
+        LeaveAccountMount();
+    }
 
     /// <summary>Queued, not awaited: the escalation re-roots the root frame, which
     /// must not run inside this navigation's own callback.</summary>
@@ -373,6 +417,10 @@ public sealed partial class SettingsAccountPage : Page
         if (_recoveryKitHydratedActor is { } previous && previous != (signedIn ?? "-"))
         {
             _recoveryKit.ResetForIdentityChange();
+            // The previous identity's roster names ITS reviews; the pass re-arms
+            // and re-reads for this one below.
+            DisarmMemberReviewPass();
+            _reviewPass?.Reset();
         }
         _recoveryKitHydratedActor = signedIn ?? "-";
 
@@ -389,6 +437,9 @@ public sealed partial class SettingsAccountPage : Page
         await _recoveryKit.LoadDeadGenerationsAsync();
         FaunaApp.Core.Logs.E2eTrace.Write("[account-page] before DischargeOwedSuccessionKitAsync");
         RenderRecoveryKit();
+        // The ephemeral member-review pass reads its roster once its gates open — a
+        // no-op on every hydrate that did not just run a ceremony.
+        await ArmMemberReviewPassAsync();
         // A relaunch adoption's owed sweep first — the ceremony's own order (sweep,
         // then kit). A no-op on every other hydrate.
         await _recoveryKit.DischargeOwedSweepAsync(signedIn);
@@ -438,6 +489,13 @@ public sealed partial class SettingsAccountPage : Page
             RenderError(_recoveryKit.ErrorMessage);
             return;
         }
+        // A sweep that arrives mid-visit (a relaunch adoption's owed sweep, a
+        // retry) can open the pass's gates: start its roster read then.
+        if (e.PropertyName is nameof(RecoveryKitViewModel.SweepView)
+            or nameof(RecoveryKitViewModel.MemberReviewPassOpen))
+        {
+            _ = ArmMemberReviewPassAsync();
+        }
         RenderRecoveryKit();
     }
 
@@ -452,6 +510,7 @@ public sealed partial class SettingsAccountPage : Page
         if (_recoveryKit is null) return;
 
         RenderSweepChrome();
+        RenderMemberReviewPass();
 
         // A parked persist-failure message is the ONLY surviving copy of the
         // successor's new key — closing it via the InfoBar's own X would hide it
@@ -525,6 +584,122 @@ public sealed partial class SettingsAccountPage : Page
     {
         if (_recoveryKit is not { } vm) return;
         await vm.RetrySweepAsync();
+    }
+
+    // --- The ephemeral member-review pass (settings.md § Recovery kit → The
+    // ephemeral member-review pass; succession-propagation.md § Propagation,
+    // ruling 1, item (ii)) ---
+    //
+    // What is local to this surface is the gate and the defer button; the rows,
+    // Keep and Remove are the permanent page's own control and view model, so the
+    // two surfaces cannot drift on what a verdict means. Reference: apple's
+    // RecoveryKitSection.memberReviewPass, linux's build_ephemeral_pass.
+
+    /// <summary>Null once the handed-over session is retired — see
+    /// <see cref="FaunaApp.Conversations.ConversationsManagerHost.ManagerFor"/>.</summary>
+    private uniffi.fauna_conversations.ConversationsManager? ReviewManager =>
+        FaunaApp.Conversations.ConversationsManagerHost.ManagerFor(_convSession, "member review pass");
+
+    /// <summary>
+    /// Start the pass's roster read the first time its gates open on this visit,
+    /// and keep it current while the page is up: the shared store-change notice
+    /// (a peer device's verdict) and the aftermath's settled notice (the raise
+    /// that writes the roster can land after the successor's first visit began).
+    /// A no-op while the gates are shut — an ordinary session never reads the
+    /// roster here; its backlog is the permanent page's.
+    /// </summary>
+    private async System.Threading.Tasks.Task ArmMemberReviewPassAsync()
+    {
+        if (_reviewPassArmed || _reviewPass is not { } pass
+            || _recoveryKit is not { MemberReviewPassOpen: true })
+            return;
+        _reviewPassArmed = true;
+        pass.StoreResynced -= RenderMemberReviewPass;
+        pass.StoreResynced += RenderMemberReviewPass;
+        pass.WatchStore(() => ReviewManager);
+        FaunaApp.Core.Helpers.AftermathSettled.Settled -= AftermathSettled_ReviewPass;
+        FaunaApp.Core.Helpers.AftermathSettled.Settled += AftermathSettled_ReviewPass;
+        await pass.RefreshQuietAsync(ReviewManager);
+        RenderMemberReviewPass();
+    }
+
+    /// <summary>The notice fires on the FFI runtime's thread — re-read on ours.</summary>
+    private void AftermathSettled_ReviewPass() =>
+        DispatcherQueue?.TryEnqueue(async () =>
+        {
+            if (_reviewPass is not { } pass) return;
+            await pass.RefreshQuietAsync(ReviewManager);
+            RenderMemberReviewPass();
+        });
+
+    /// <summary>Drop the pass's re-read subscriptions (page leave, unload, identity
+    /// change). Idempotent; the next hydrate re-arms.</summary>
+    private void DisarmMemberReviewPass()
+    {
+        FaunaApp.Core.Helpers.AftermathSettled.Settled -= AftermathSettled_ReviewPass;
+        if (_reviewPass is { } pass)
+        {
+            pass.CleanupStoreChange();
+            pass.StoreResynced -= RenderMemberReviewPass;
+        }
+        _reviewPassArmed = false;
+    }
+
+    /// <summary>
+    /// Paint the pass: rows only while every gate holds — the sweep ran this app
+    /// run and was not deferred (<see cref="RecoveryKitViewModel.MemberReviewPassOpen"/>)
+    /// and the roster is non-empty. Otherwise the rows are REMOVED, not hidden,
+    /// so a driver counting <c>member-review-row</c> reads 0 after a defer, and the
+    /// defer button goes with them: it defers the <i>rest</i>, so it renders only
+    /// beside rows.
+    /// </summary>
+    private void RenderMemberReviewPass()
+    {
+        var rows = _recoveryKit is { MemberReviewPassOpen: true } && _reviewPass is { } pass
+            ? pass.Reviews.ToList()
+            : new System.Collections.Generic.List<MemberReviewRow>();
+        MemberReviewPassList.Show(rows);
+        MemberReviewPassPanel.Visibility = BoolToVisibility(rows.Count > 0);
+    }
+
+    private async void MemberReviewPassKeep(byte[] person)
+    {
+        if (_reviewPass is not { } pass) return;
+        await pass.KeepAsync(person, ReviewManager);
+        RenderMemberReviewPass();
+    }
+
+    /// <summary>Remove's verdict is DERIVED from the eviction inside
+    /// <see cref="MemberReviewViewModel.RemoveAsync"/>: a partial one writes
+    /// nothing, leaves the row standing, and says how far it got on this page's
+    /// <c>error-message</c>.</summary>
+    private async void MemberReviewPassRemove(byte[] person)
+    {
+        if (_reviewPass is not { } pass || ReviewManager is not { } manager) return;
+        await pass.RemoveAsync(person, manager);
+        RenderMemberReviewPass();
+    }
+
+    /// <summary><i>Review The Rest Later</i>: hides the pass and decides nothing —
+    /// the open items are exactly what the permanent page inherits.</summary>
+    private void MemberReviewDeferButton_Click(object sender, RoutedEventArgs e)
+    {
+        _recoveryKit?.DeferMemberReview();
+        RenderMemberReviewPass();
+    }
+
+    /// <summary>A Keep/Remove failure — and a partial Remove's account of how far it
+    /// got — lands on this page's one <c>error-message</c>, through the same
+    /// <see cref="RenderError"/> choke point as every other writer.</summary>
+    private void ReviewPass_PropertyChanged(
+        object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is MemberReviewViewModel vm
+            && ReferenceEquals(vm, _reviewPass)
+            && e.PropertyName == nameof(MemberReviewViewModel.ErrorMessage))
+        {
+            RenderError(vm.ErrorMessage);
+        }
     }
 
     /// <summary>Show a freshly minted secret — once. Painted the moment it exists,
@@ -741,8 +916,9 @@ public sealed partial class SettingsAccountPage : Page
 
     /// <summary>Remove a non-active account from this install. Does NOT switch, so the
     /// list must refresh in place — the ObservableCollection is what delivers that.
-    /// Awaited, not blocked on: the erase behind it waits for the removed account's store
-    /// to stop (<see cref="AccountSwitcherViewModel.RemoveAsync"/>).</summary>
+    /// Awaited, not blocked on: the gesture waits for the removed account's store to stop
+    /// and retires this machine over a nest round trip
+    /// (<see cref="AccountSwitcherViewModel.RemoveAsync"/>).</summary>
     private async void AccountRemove_Click(object sender, RoutedEventArgs e)
     {
         if (_switcherViewModel is null) return;

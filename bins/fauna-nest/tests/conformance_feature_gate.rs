@@ -139,7 +139,7 @@ async fn redeem(
 ) -> Result<ClaimRedeemReply, RpcError> {
     let req = encode_canonical(&ClaimRedeemRequest {
         code: code.into(),
-        extra: Default::default(),
+        ..Default::default()
     })
     .unwrap();
     let reply = common::call_raw(

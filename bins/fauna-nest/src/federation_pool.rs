@@ -45,15 +45,18 @@ use crate::federation_handlers::{
     FedFolderChangesFetchRequest, FedFolderChangesRecordReply, FedFolderChangesRecordRequest,
     FedFolderContentKeyFetchReply, FedFolderContentKeyFetchRequest, FedFolderPublicFetchReply,
     FedFolderPublicFetchRequest, FedFolderReadTokenMintReply, FedFolderReadTokenMintRequest,
-    FedFolderWriteTokenMintReply, FedFolderWriteTokenMintRequest, FedInboxDeliverReply,
-    FedInboxDeliverRequest, FedKeypackageFetchReply, FedKeypackageFetchRequest, FedMailAckReply,
-    FedMailAckRequest, FedMailPullReply, FedMailPullRequest, FedPostDeleteReply,
-    FedPostDeleteRequest, FedPostForwardReply, FedPostForwardRequest, FedPostGetReply,
-    FedPostGetRequest, FedProfileGetReply, FedProfileGetRequest, FedReportsExchangeReply,
-    FedReportsExchangeRequest, FedReportsExportReply, FedRoomAcceptReply, FedRoomAcceptRequest,
-    FedRoomGenerationsReply, FedRoomGenerationsRequest, FedRoomInviteIssueReply,
-    FedRoomInviteIssueRequest, FedRoomInviteReply, FedRoomInviteRequest, FedRoomLabelsReply,
-    FedRoomLabelsRequest, FedRoomLeaveReply, FedRoomLeaveRequest, FedRoomRosterReply,
+    FedFolderVersionsListReply, FedFolderVersionsListRequest, FedFolderWriteTokenMintReply,
+    FedFolderWriteTokenMintRequest, FedInboxDeliverReply, FedInboxDeliverRequest,
+    FedKeypackageFetchReply, FedKeypackageFetchRequest, FedMailAckReply, FedMailAckRequest,
+    FedMailPullReply, FedMailPullRequest, FedPostDeleteReply, FedPostDeleteRequest,
+    FedPostForwardReply, FedPostForwardRequest, FedPostGetReply, FedPostGetRequest,
+    FedProfileGetReply, FedProfileGetRequest, FedReportsExchangeReply, FedReportsExchangeRequest,
+    FedReportsExportReply, FedRoomAcceptReply, FedRoomAcceptRequest,
+    FedRoomBackfillGenerationsReply, FedRoomBackfillGenerationsRequest, FedRoomGenerationsReply,
+    FedRoomGenerationsRequest, FedRoomInviteIssueReply, FedRoomInviteIssueRequest,
+    FedRoomInviteReply, FedRoomInviteRequest, FedRoomLabelsReply, FedRoomLabelsRequest,
+    FedRoomLeaveReply, FedRoomLeaveRequest, FedRoomPublishGenerationReply,
+    FedRoomPublishGenerationRequest, FedRoomRemoveReply, FedRoomRemoveRequest, FedRoomRosterReply,
     FedRoomRosterReportReply, FedRoomRosterReportRequest, FedRoomRosterRequest, FedRoomSearchReply,
     FedRoomSearchRequest, FedSuccessionPushReply, FedSuccessionPushRequest, FedSyncPullReply,
     FedSyncPullRequest, FedSyncPushEntry, FedSyncPushReply, FedSyncPushRequest,
@@ -303,8 +306,12 @@ pub enum PeerHostClass {
 pub struct ClassifiedPeerHost {
     pub class: PeerHostClass,
     /// The resolved address to dial, one the class was judged from. `None`
-    /// for a literal host (the literal *is* the dial target, no DNS) and for a
-    /// name that did not resolve (classed `Global`, the strictest).
+    /// for an IP literal host (the literal *is* the dial target, no DNS) and
+    /// for a name that did not resolve (classed `Global`, the strictest). A
+    /// localhost name is classed `Loopback` by its NAME, so it dials
+    /// `127.0.0.1` and is never resolved — a forwarding resolver's answer for
+    /// `x.localhost` would otherwise be admitted under the loopback-fixture
+    /// carve-out.
     pub dial_addr: Option<std::net::SocketAddr>,
 }
 
@@ -414,7 +421,10 @@ pub fn discovery_dial_admits(
 /// Establish a peer URL's [`PeerHostClass`] for [`discovery_dial_admits`],
 /// with the address the dial must use: a loopback literal by text, an IP
 /// literal by [`fauna_core::resolve::is_global_ip`] (no DNS, nothing to pin),
-/// a name by resolving it **once** and classifying that answer set
+/// a localhost name as `Loopback` dialing `127.0.0.1`
+/// ([`fauna_core::resolve::loopback_dial_addr`] — never resolved, so the class
+/// and the destination cannot part), any other name by resolving it **once**
+/// and classifying that answer set
 /// ([`classify_resolved_addrs`] — `NonGlobal` only when every address is).
 /// A name that does not resolve is classed `Global` — the strictest class, so
 /// an unresolvable name can only ever be *more* refused, never admitted
@@ -441,15 +451,20 @@ pub async fn classify_peer_host_resolving(peer_url: &str) -> Result<ClassifiedPe
             PeerHostClass::NonGlobal
         }
     };
+    let port = url.port_or_known_default().unwrap_or(443);
     let name = match host {
         url::Host::Ipv4(ip) => return Ok(literal(ip_class(ip.into()))),
         url::Host::Ipv6(ip) => return Ok(literal(ip_class(ip.into()))),
-        url::Host::Domain("localhost") => {
-            return Ok(literal(PeerHostClass::Loopback));
+        url::Host::Domain(name) => {
+            if let Some(dial_addr) = fauna_core::resolve::loopback_dial_addr(name, port) {
+                return Ok(ClassifiedPeerHost {
+                    class: PeerHostClass::Loopback,
+                    dial_addr: Some(dial_addr),
+                });
+            }
+            name
         }
-        url::Host::Domain(name) => name,
     };
-    let port = url.port_or_known_default().unwrap_or(443);
     let addrs: Vec<std::net::SocketAddr> = match tokio::net::lookup_host((name, port)).await {
         Ok(addrs) => addrs.collect(),
         Err(_) => Vec::new(),
@@ -1617,6 +1632,96 @@ pub async fn originate_room_leave(
     Ok(decode_peer_reply::<FedRoomLeaveReply>(reply).map(|r| r.ack))
 }
 
+/// Originate `fauna.federation.conversation.room.remove` (idempotent for the
+/// re-send: a target the home already unseated is answered with the live
+/// count). `Ok(Ok(ack))` ⇒ the target is off the home's floor. The ack is the
+/// same-nest `room.remove`'s, forwarded unchanged; this nest stores nothing,
+/// and the home reads the requester's rank off its own floor.
+pub async fn originate_room_remove(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    requesting_actor_hex: &str,
+    room_id_hex: &str,
+    principal_hex: &str,
+) -> Result<Result<fauna_protocol::conversations::RoomRemoveReply, RpcError>, PoolError> {
+    let req = FedRoomRemoveRequest {
+        requesting_actor_id: requesting_actor_hex.to_string(),
+        room_id: room_id_hex.to_string(),
+        principal: principal_hex.to_string(),
+    };
+    let reply = pool
+        .originate(
+            state,
+            peer_url,
+            "fauna.federation.conversation.room.remove",
+            fresh_idempotency_key(),
+            to_value(&req),
+        )
+        .await?;
+    Ok(decode_peer_reply::<FedRoomRemoveReply>(reply).map(|r| r.ack))
+}
+
+/// Originate `fauna.federation.conversation.room.publish_generation`
+/// (forbid-replay: a keying act). `Ok(Ok(ack))` ⇒ the home admitted the mint
+/// as the room's tip. Stores nothing.
+pub async fn originate_room_publish_generation(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    requesting_actor_hex: &str,
+    room_id_hex: &str,
+    mint: Vec<u8>,
+) -> Result<Result<fauna_protocol::conversations::RoomPublishGenerationReply, RpcError>, PoolError>
+{
+    let req = FedRoomPublishGenerationRequest {
+        requesting_actor_id: requesting_actor_hex.to_string(),
+        room_id: room_id_hex.to_string(),
+        mint,
+    };
+    let reply = pool
+        .originate(
+            state,
+            peer_url,
+            "fauna.federation.conversation.room.publish_generation",
+            fresh_idempotency_key(),
+            to_value(&req),
+        )
+        .await?;
+    Ok(decode_peer_reply::<FedRoomPublishGenerationReply>(reply).map(|r| r.ack))
+}
+
+/// Originate `fauna.federation.conversation.room.backfill_generations`
+/// (forbid-replay: hands out key material). `Ok(Ok(ack))` ⇒ the home stored
+/// the newcomer's wraps. Stores nothing.
+pub async fn originate_room_backfill_generations(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    requesting_actor_hex: &str,
+    room_id_hex: &str,
+    target_actor_hex: &str,
+    wraps: Vec<Vec<u8>>,
+) -> Result<Result<fauna_protocol::conversations::RoomBackfillGenerationsReply, RpcError>, PoolError>
+{
+    let req = FedRoomBackfillGenerationsRequest {
+        requesting_actor_id: requesting_actor_hex.to_string(),
+        room_id: room_id_hex.to_string(),
+        target_actor_id: target_actor_hex.to_string(),
+        wraps,
+    };
+    let reply = pool
+        .originate(
+            state,
+            peer_url,
+            "fauna.federation.conversation.room.backfill_generations",
+            fresh_idempotency_key(),
+            to_value(&req),
+        )
+        .await?;
+    Ok(decode_peer_reply::<FedRoomBackfillGenerationsReply>(reply).map(|r| r.ack))
+}
+
 /// Originate `fauna.federation.conversation.room.invite` (forbid-replay:
 /// appends an inbox row + charges quota on the invitee's nest per call). The
 /// room home's delivery of a community-room invitation to an invitee homed on
@@ -1755,6 +1860,36 @@ pub async fn originate_folder_changes_fetch(
         )
         .await?;
     Ok(decode_peer_reply::<FedFolderChangesFetchReply>(reply))
+}
+
+/// Originate `fauna.federation.folder.versions.list` (idempotent read) — the
+/// member's own nest relaying a foreign set's version history read for one
+/// `path_hash` (hex) to the set's home nest. `Ok(Ok(reply))` ⇒ the home nest's
+/// version rows (oldest→newest, the same `FileVersionInfo` shape a same-nest
+/// `fauna.files.versions.list` serves) and their `signer_certs` side table.
+pub async fn originate_folder_versions_list(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    requesting_actor_hex: &str,
+    channel_id_hex: &str,
+    path_hash_hex: &str,
+) -> Result<Result<FedFolderVersionsListReply, RpcError>, PoolError> {
+    let req = FedFolderVersionsListRequest {
+        requesting_actor_id: requesting_actor_hex.to_string(),
+        channel_id: channel_id_hex.to_string(),
+        path_hash: path_hash_hex.to_string(),
+    };
+    let reply = pool
+        .originate(
+            state,
+            peer_url,
+            "fauna.federation.folder.versions.list",
+            fresh_idempotency_key(),
+            to_value(&req),
+        )
+        .await?;
+    Ok(decode_peer_reply::<FedFolderVersionsListReply>(reply))
 }
 
 /// Originate `fauna.federation.folder.public.fetch` (idempotent read) — the
@@ -2073,7 +2208,9 @@ pub async fn originate_conversation_write_token_mint(
 /// Originate `fauna.federation.welcome.deliver` (forbid-replay: appends an
 /// inbox row + charges quota per call — rationale at the declaration site in
 /// `federation_handlers.rs`).
-/// `Ok(inbox_id)` ⇒ delivered (the peer's own inbox row id).
+/// `Ok(reply)` ⇒ delivered: the peer's own inbox row id, and on a folder relay
+/// the recipient's name as their nest joins it
+/// ([`FedWelcomeDeliverReply::recipient_handle`]).
 ///
 /// Takes the built [`FedWelcomeDeliverRequest`] rather than its fields: the
 /// envelope has grown three consecutive `Option<String>`s (`origin_nest_url`,
@@ -2086,7 +2223,7 @@ pub async fn originate_welcome_deliver(
     state: &Arc<AppState>,
     peer_url: &str,
     req: FedWelcomeDeliverRequest,
-) -> Result<i64, PoolError> {
+) -> Result<FedWelcomeDeliverReply, PoolError> {
     match pool
         .originate(
             state,
@@ -2098,9 +2235,7 @@ pub async fn originate_welcome_deliver(
         .await?
     {
         Ok(v) => {
-            let reply: FedWelcomeDeliverReply = value_to(&v)
-                .map_err(|()| PoolError::Dial("decode welcome.deliver reply".to_string()))?;
-            Ok(reply.inbox_id)
+            value_to(&v).map_err(|()| PoolError::Dial("decode welcome.deliver reply".to_string()))
         }
         Err(e) => Err(PoolError::Dial(format!("peer welcome.deliver: {}", e.code))),
     }
@@ -2454,6 +2589,28 @@ pub async fn originate_follow_subscribe(
         peer_url,
         home_nest_id,
         crate::follow_federation::SUBSCRIBE_KIND,
+        to_value(&req),
+    )
+    .await
+}
+
+/// Originate `fauna.federation.claims.redeem` — carry the redeemer's signed
+/// claim redeem intent to the code's home and bring back its answer
+/// (idempotent: the home answers a same-redeemer repeat with the same grant).
+#[cfg(feature = "payments")]
+pub async fn originate_claim_redeem(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    home_nest_id: &[u8; 32],
+    req: crate::follow_federation::FedFollowIntentRequest,
+) -> Result<Result<fauna_protocol::payments::ClaimRedeemReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        home_nest_id,
+        crate::follow_federation::CLAIM_REDEEM_KIND,
         to_value(&req),
     )
     .await
@@ -3029,6 +3186,33 @@ mod tests {
             classify_peer_host("not a url").await,
             Err(PoolError::Resolve(_))
         ));
+    }
+
+    /// A localhost name is admitted by its NAME, so the dial goes to
+    /// `127.0.0.1` and the name is never resolved: whatever a forwarding resolver would answer for
+    /// `x.localhost`, the loopback-fixture carve-out reaches only this box.
+    #[tokio::test]
+    async fn a_localhost_name_dials_loopback_never_the_resolver() {
+        for (url, port) in [
+            ("http://localhost:8080/", 8080),
+            ("https://fauna-row-3951-probe.localhost:8443/", 8443),
+            ("https://A.LOCALHOST./", 443),
+            ("http://x.localhost/", 80),
+        ] {
+            let got = classify_peer_host_resolving(url).await.unwrap();
+            assert_eq!(got.class, PeerHostClass::Loopback, "{url}");
+            assert_eq!(
+                got.dial_addr,
+                Some(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+                "{url}"
+            );
+        }
+        // An IP literal is still its own dial target.
+        let lit = classify_peer_host_resolving("http://127.0.0.1:9/")
+            .await
+            .unwrap();
+        assert_eq!(lit.class, PeerHostClass::Loopback);
+        assert_eq!(lit.dial_addr, None);
     }
 
     /// One resolution's answer set decides both the class and the address

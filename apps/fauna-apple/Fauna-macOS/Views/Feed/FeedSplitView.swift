@@ -28,6 +28,9 @@ struct FeedSplitView: View {
             MacFeedDetailView(vm: vm)
                 .accessibilityElement(children: .contain)
         }
+        // The reader's post spam marks reach the manager (report-sharing.md
+        // § Report capture → The post's mark-as-spam verb).
+        .feedSpamMarkSync(vm: vm)
         // task(id:) keys on the ACTOR (the session secret), so it re-fires not
         // only on nil → connected (login) and on every fresh mount (`.id(selectedSidebar)`
         // in ContentView forces one on each Feed-tab re-entry), but ALSO when the

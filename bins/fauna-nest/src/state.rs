@@ -279,7 +279,7 @@ fn build_bluesky_oauth_client(
         let loopback = match url.host() {
             Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
             Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            Some(url::Host::Domain(d)) => d == "localhost",
+            Some(url::Host::Domain(d)) => fauna_core::resolve::is_localhost_name(d),
             None => false,
         };
         anyhow::ensure!(
@@ -843,6 +843,7 @@ impl crate::routes::AppState {
             web_content_service: None,
             host_resolver: None,
             web_serve_holder: None,
+            materializer: None,
             push_service: None,
             services_json_path: scratch.join("services.json"),
             custody_hosting_root: None,
@@ -993,6 +994,10 @@ impl crate::routes::AppState {
             custody_hosting_meter_fault: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
+            #[cfg(feature = "test-hooks")]
+            custodied_fleet_handshakes: std::sync::Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            materialize_tear: std::sync::Arc::default(),
             mta_sts_fetcher: std::sync::Arc::new(fauna_mail::outbound::mta_sts::NullMtaStsFetcher),
             // Null resolver in tests: `fauna.dns.verify_records` answers
             // "checking" (no network). Comparator/cache behaviour is covered by
@@ -1007,6 +1012,9 @@ impl crate::routes::AppState {
             )),
             tlsa_resolver: std::sync::Arc::new(fauna_mail::outbound::dane::NullTlsaResolver),
             mx_resolver: std::sync::Arc::new(fauna_mail::outbound::mx::NullMxRrsetResolver),
+            dnssec_path: fauna_mail::outbound::dnssec_path::DnssecPath::fixed(
+                fauna_mail::outbound::dnssec_path::ResolverPath::Incapable,
+            ),
             #[cfg(feature = "test-hooks")]
             tlsa_override: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -1031,9 +1039,13 @@ impl crate::routes::AppState {
                 std::collections::HashSet::new(),
             )),
             #[cfg(feature = "test-hooks")]
+            nest_id_claim_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
             tls_cert_fetch_withheld: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
+            #[cfg(feature = "test-hooks")]
+            registration_mode_report_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             channel_send_refusal: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),

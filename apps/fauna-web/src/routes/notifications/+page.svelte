@@ -8,7 +8,8 @@
   import type { NotificationDestination } from '#lib/wasm';
   import { setPendingSearchNav } from '#lib/search';
   import { isSafeNavUrl } from '#lib/safe-url';
-  import { mutedKeywordsList, onPushEvent, staleSurfacesForPushKind, type MutedKeyword } from '#lib/rpc';
+  import { onPushEvent, staleSurfacesForPushKind, type MutedKeyword } from '#lib/rpc';
+  import { loadMutedWords } from '#lib/muted-words';
   import { relativeTime } from '#lib/value-format';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { IDS } from '#lib/generated/uiIds';
@@ -30,7 +31,7 @@
     const id = $identity;
     if (!id) return;
     try {
-      mutedKeywords = (await mutedKeywordsList(id.secretHex)).keywords;
+      mutedKeywords = await loadMutedWords(id.secretHex);
     } catch {
       // Not readable yet — leave the list empty (nothing collapses).
     }

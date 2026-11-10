@@ -469,14 +469,22 @@ pub(crate) async fn legal_takedown_gate(
         ground = ground.token(),
         "blob get withheld"
     );
-    Some(match ground {
+    Some(withheld_status(ground).into_response())
+}
+
+/// The status every door answers for a withheld blob: **451** for a legal
+/// takedown, **403** for the admin's block of a reported item — the one
+/// mapping, so the doors onto the store and the manifest walk's consumers (the
+/// share link, the web site) cannot disagree about the ground
+/// (`takedown-and-block.md` § Admin block, *Mechanism*: "the one door gate
+/// answers 403 for a block and 451 for a takedown").
+pub(crate) fn withheld_status(ground: crate::db::blob_withhold::WithholdGround) -> StatusCode {
+    match ground {
         crate::db::blob_withhold::WithholdGround::Legal => {
-            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response()
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
         }
-        crate::db::blob_withhold::WithholdGround::AdminBlock => {
-            StatusCode::FORBIDDEN.into_response()
-        }
-    })
+        crate::db::blob_withhold::WithholdGround::AdminBlock => StatusCode::FORBIDDEN,
+    }
 }
 
 /// The withhold predicate itself, for the readers that are **not routes**.
@@ -492,8 +500,10 @@ pub(crate) async fn is_legally_withheld(db: &crate::db::CacheDb, digest: &[u8; 3
 
 /// The ground withholding `digest` on either withhold (legal takedown or the
 /// admin's block of a reported item), with the fail-OPEN posture both
-/// [`legal_takedown_gate`] and [`is_legally_withheld`] share.
-async fn withhold_ground(
+/// [`legal_takedown_gate`] and [`is_legally_withheld`] share — and that the
+/// manifest walk (`web_content::file_bytes::fetch_decoded`) and the private
+/// share arm read directly, since their refusal must carry the ground too.
+pub(crate) async fn withhold_ground(
     db: &crate::db::CacheDb,
     digest: &[u8; 32],
 ) -> Option<crate::db::blob_withhold::WithholdGround> {

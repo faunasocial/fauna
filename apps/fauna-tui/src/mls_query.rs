@@ -63,4 +63,15 @@ impl MlsQuery for TuiMlsQuery {
         };
         self.session.engine().has_group(&channel_id)
     }
+
+    fn is_forked_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        let Ok(channel_id) = fauna_mls::types::ChannelId::from_group_id_hex(mls_group_id_hex)
+        else {
+            return false;
+        };
+        self.session
+            .engine()
+            .folder_seat_forked(&channel_id)
+            .is_some()
+    }
 }

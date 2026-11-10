@@ -55,7 +55,11 @@ public enum FeedCueClockTestCommand {
         let observer = CueViewportObserver.current
         func probe() -> [String: Any] {
             let json = tracker.probeForTest()
-            return (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+            var reply = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+            // Apple's own diagnostic beside the shared shape: the posts the
+            // capture last saw marked as cue subjects (`CueCardMark.subject`).
+            if let observer { reply["subjects"] = observer.subjectsForTest }
+            return reply
         }
         func frozen() -> Bool { probe()["frozen"] as? Bool ?? false }
         /// One sample of the mounted list, recorded — a no-op off the page.

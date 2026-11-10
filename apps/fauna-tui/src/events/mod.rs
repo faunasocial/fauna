@@ -147,8 +147,13 @@ pub struct EventsState {
     /// The account's mail custody (`fauna.state.mail`) — the MSEK every
     /// encrypted CalDAV op seals and unseals under.
     mail: Option<Arc<dyn fauna_client_config::MailStore>>,
-    /// The actor's own `handle@domain` — the VEVENT `ORGANIZER` (conv_backend's
-    /// `self_address` derivation: empty unless the handle carries `@domain`).
+    /// The actor's own `handle@domain` — the VEVENT `ORGANIZER`, the iMIP
+    /// REQUEST's sender and the REPLY's responding attendee. Live, never baked
+    /// (`conversations.md` § State & data shape → *Self-address: live, never
+    /// baked*): [`init`] seeds it from a full-address handle, and
+    /// [`set_self_address`] pushes the registry's `<handle>@<domain>` at login
+    /// and on every `SelfAddressRefreshed`. Empty until one resolves, and then
+    /// neither iMIP leg sends (`build_event_imip` refuses an empty sender).
     organizer_email: String,
     pub view_mode: ViewMode,
     pub mode: Mode,
@@ -275,6 +280,18 @@ pub fn init(
         focus_day: fd,
         week_start: fauna_core::caltime::locale_week_start(),
         ..EventsState::default()
+    }
+}
+
+/// Push the session's resolved self-address into the page — the Events leg of
+/// the one self-address refresh (`crate::session::session_self_address`, read at
+/// login and on every `SelfAddressRefreshed`, like the conversations cell and the
+/// profile header). `None` keeps what the page holds: never push a partial. A
+/// bare-handle session (every relaunch, the e2e sign-in) otherwise never learns
+/// its address, and every invite and RSVP silently skips its iMIP mail.
+pub fn set_self_address(state: &mut EventsState, address: Option<String>) {
+    if let Some(address) = address.filter(|a| a.contains('@')) {
+        state.organizer_email = address;
     }
 }
 
@@ -3877,6 +3894,33 @@ mod tests {
         assert_eq!(with_domain.organizer_email, "alice@example.com");
         let bare = init(nest, "aa", "alice", fake_mail());
         assert_eq!(bare.organizer_email, "");
+    }
+
+    /// A bare-handle session learns its address from the registry push, and
+    /// the next RSVP carries it — without it `imip_reply_for_rsvp` finds no
+    /// responding attendee and the organizer is never mailed. `None` (nothing
+    /// resolved yet) keeps what the page already holds.
+    #[test]
+    fn set_self_address_feeds_a_bare_handle_session_its_resolved_address() {
+        let mut app = crate::app::tests::test_app();
+        let nest = fauna_client::NestClient::new(
+            "http://127.0.0.1:1".to_string(),
+            fauna_core::identity::ActorKeypair::generate(),
+        );
+        app.events = init(nest, "aa", "alice", fake_mail());
+        set_self_address(&mut app.events, None);
+        assert_eq!(app.events.organizer_email, "");
+        set_self_address(&mut app.events, Some("alice@fauna.test".to_string()));
+        set_self_address(&mut app.events, None);
+        app.events.events_cache = vec![ev("1", "aa", "Standup")];
+        app.events.mode = Mode::EventDetail("1".to_string());
+        let Some(Op::RsvpEvent {
+            organizer_email, ..
+        }) = apply_local(&mut app, Action::Rsvp(RsvpResponse::Going))
+        else {
+            panic!("expected Op::RsvpEvent");
+        };
+        assert_eq!(organizer_email, "alice@fauna.test");
     }
 
     fn events_test_app() -> crate::app::App {

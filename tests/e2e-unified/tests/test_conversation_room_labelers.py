@@ -26,7 +26,7 @@ import secrets
 
 import pytest
 
-from helpers.labeler_publish import FIXTURES, publish_wasm_labeler
+from helpers.labeler_publish import FIXTURES, marked_png, publish_wasm_labeler
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seat_pair are pytest fixtures adopted by import
     MEMBERSHIP_BUDGET_S,
     MESSAGE_BUDGET_S,
@@ -53,6 +53,9 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.android,
+    # web: `RoomLabelerRows.svelte` and `LabelerInspectPanel.svelte` paint the
+    # room settings' labeler rows and the inspect panel.
+    pytest.mark.web,
 ]
 
 
@@ -131,6 +134,91 @@ def test_a_community_rooms_owner_names_a_labeler_and_a_members_message_is_labell
     assert d.count("content-label-badge") == 1, (
         "only the message the labeler had something to say about is labelled — the "
         "founding message carries no 'cat' and was sent before the set existed"
+    )
+    badge = d.get_text("content-label-badge")
+    assert S.moderation.category.commercial in badge, (
+        f"the badge names the labeler's verdict ({S.moderation.category.commercial!r}); "
+        f"got {badge!r}"
+    )
+
+
+@pytest.mark.feature("community-labelers")
+def test_a_rooms_labeler_that_reads_attachments_labels_an_attachment_only_message(
+    room_seat_pair, nest_instance, run_seal_helper, tmp_path
+):
+    """`community-labelers` outcome 22, the message half
+    (`content-moderation-and-ranking.md` § Tier-3 → *The attachment facet*,
+    rule 3): a room's labeler that DECLARES `needs_attachment_bytes` is handed
+    each message's opened attachment bytes by the room's home nest, so an
+    attachment-only message — no words at all — still comes back labelled; and
+    the room's inspect panel says the labeler reads attachments before the
+    owner names it.
+
+    The fixture (``room_attachment_labeler.wat``) says ``commercial`` about any
+    input carrying the bytes "meow"; the only place they appear is a private
+    chunk of the attached PNG, so the badge is a verdict on the bytes."""
+    founder, member = room_seat_pair
+    labeler = publish_wasm_labeler(
+        run_seal_helper, nest_instance, FIXTURES / "room_attachment_labeler.wat",
+        needs_attachment_bytes=True,
+    ).hex()
+    picture = marked_png(tmp_path)
+
+    room_id, founder_thread, member_thread = found_community_room(
+        founder, member, f"hello {secrets.token_hex(4)}"
+    )
+    conv = founder.app.conversations
+
+    # ── the owner inspects it: the panel names the attachment facet ──────
+    conv.open_thread_by_id(founder_thread)
+    conv.open_room_settings()
+    row = conv.room_labeler_index(labeler)
+    assert row is not None, seat_element(founder, "room-labeler-toggle")
+    metadata = conv.inspect_room_labeler(row)
+    assert "needs_attachment_bytes: true" in metadata and "verified: true" in metadata, (
+        "the inspect panel shows the signed declaration that this labeler reads "
+        f"attachment bytes: {metadata!r}"
+    )
+    conv.close_labeler_inspect()
+    conv.toggle_room_labeler(row)
+    conv.save_room_settings(timeout_s=MEMBERSHIP_BUDGET_S)
+    assert not founder.app.has_error(), founder.app.error_text()
+    wait_for(
+        "the room's verified labeler set naming the attachment fixture",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None and (t.room or {}).get("labelers") == [labeler],
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"{seat_story(founder)}\n{seat_log(founder, 'labeler')}",
+    )
+    before = thread_by_channel(founder.app, room_id).message_count
+
+    # ── the member sends a picture and no words ──────────────────────────
+    member.app.conversations.open_thread_by_id(member_thread)
+    member.app.conversations.send_attachment_in_open_thread(str(picture))
+    assert not member.app.has_error(), member.app.error_text()
+    wait_for(
+        "the member's attachment-only message reaching the founder's seat",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None and t.message_count > before,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: f"{seat_story(founder)}\n{seat_story(member)}",
+    )
+    conv.open_thread_by_id(founder_thread)
+    d = founder.app.driver
+    wait_for(
+        "the home nest's verdict on the attachment bytes painting a badge",
+        lambda: d.count("content-label-badge"),
+        lambda n: n >= 1,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"badges={d.count('content-label-badge')} "
+            f"attachments={d.count('dm-attachment-image')}\n{seat_story(founder)}\n"
+            f"{seat_log(founder, 'label')}"
+        ),
+    )
+    assert d.count("content-label-badge") == 1, (
+        "only the attachment-only message is labelled — the founding message "
+        "carries no attachment and was sent before the set existed"
     )
     badge = d.get_text("content-label-badge")
     assert S.moderation.category.commercial in badge, (

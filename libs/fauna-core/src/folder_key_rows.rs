@@ -34,6 +34,8 @@
 //!   replica's unsettled copy cannot resurrect it (the
 //!   `fauna.state.subscriptions` removal row's shape).
 //! - `foreign/<channel hex64>` holds one foreign set ([`ForeignFolder`]).
+//! - `forked/<channel hex64>` holds one forked same-nest seat's record
+//!   ([`ForkedFolderSeat`]).
 //!
 //! Digests are [`canonical_tiebreak_key`] (BLAKE3 over the canonical encoding,
 //! the plaintext buffer zeroized), as the subscriptions rows'. Row keys are
@@ -57,13 +59,16 @@
 //! **Decode posture — strict.** A row's value must decode as its key's type,
 //! re-encode to the SAME canonical bytes and name its key. The three row types
 //! born here carry `deny_unknown_fields` besides; the value types the rows
-//! carry (`ContentKeyGeneration`, `FolderPendingRemoval`, `ForeignFolder`)
+//! carry (`ContentKeyGeneration`, `FolderPendingRemoval`, `ForeignFolder`,
+//! `ForkedFolderSeat`)
 //! keep their tolerant serde, so the round-trip check is what refuses a newer build's field on
 //! the plane rather than silently stripping it.
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::{FolderKeyCustody, FolderPendingRemoval, FoldersConfig, ForeignFolder};
+use crate::data::{
+    FolderKeyCustody, FolderPendingRemoval, FoldersConfig, ForeignFolder, ForkedFolderSeat,
+};
 use crate::encoding::{canonical_decode, canonical_encode, canonical_tiebreak_key};
 use crate::error::{Error, Result};
 use crate::folder_keys::{ContentKeyGeneration, FolderContentKeys};
@@ -77,6 +82,8 @@ pub const GEN_KEY_PREFIX: &str = "gen/";
 pub const REMOVAL_KEY_PREFIX: &str = "removal/";
 /// Key prefix of a foreign-set row.
 pub const FOREIGN_KEY_PREFIX: &str = "foreign/";
+/// Key prefix of a forked same-nest seat's row.
+pub const FORKED_KEY_PREFIX: &str = "forked/";
 
 /// A custody entry's identity — [`FoldersConfig::merge`]'s union key: the set
 /// nonce, else the channel.
@@ -279,6 +286,7 @@ pub enum FolderKeyRecord {
     Generation(FolderGenerationRow),
     Removal(FolderRemovalRow),
     Foreign(ForeignFolder),
+    Forked(ForkedFolderSeat),
 }
 
 impl FolderKeyRecord {
@@ -301,6 +309,9 @@ impl FolderKeyRecord {
                     crate::hex32::encode(&f.channel_id)
                 )
             }
+            Self::Forked(f) => {
+                format!("{FORKED_KEY_PREFIX}{}", crate::hex32::encode(&f.channel_id))
+            }
         })
     }
 
@@ -314,6 +325,7 @@ impl FolderKeyRecord {
             Self::Generation(r) => canonical_encode(r),
             Self::Removal(r) => canonical_encode(r),
             Self::Foreign(r) => canonical_encode(r),
+            Self::Forked(r) => canonical_encode(r),
         }
     }
 
@@ -346,6 +358,10 @@ impl FolderKeyRecord {
                 foreign_sets: vec![f.clone()],
                 ..Default::default()
             },
+            Self::Forked(f) => FoldersConfig {
+                forked_seats: vec![f.clone()],
+                ..Default::default()
+            },
         }
     }
 
@@ -353,7 +369,8 @@ impl FolderKeyRecord {
     /// row joins field-wise ([`FolderKeyCustody::join`]); a generation row is
     /// write-once (its key digests the whole row, so one key holds one value);
     /// a removal folds its `commit` and `gated_attempted` as the merge does,
-    /// and its `settled` marker ORs; a foreign record folds per field.
+    /// and its `settled` marker ORs; a foreign record and a forked-seat
+    /// record fold per field.
     ///
     /// # Errors
     /// The two records name different rows, or two differing generation rows
@@ -409,6 +426,17 @@ impl FolderKeyRecord {
                     }
                 }
             }
+            (Self::Forked(_), Self::Forked(_)) => {
+                let mut m = joined(&self.as_config(), &other.as_config()).forked_seats;
+                match (m.pop(), m.is_empty()) {
+                    (Some(f), true) => Self::Forked(f),
+                    _ => {
+                        return Err(Error::Encoding(
+                            "folder-keys forked-seat join did not stay one row".into(),
+                        ));
+                    }
+                }
+            }
             _ => {
                 return Err(Error::Encoding(
                     "folder-keys records name different rows".into(),
@@ -422,7 +450,7 @@ impl FoldersConfig {
     /// Every entity as its plane row, `(key, record)`: per custody entry its
     /// `set/` row then one `gen/` row per generation (current first), then the
     /// stagings (unsettled — the composite holds only live sentinels), then the
-    /// foreign sets.
+    /// foreign sets, then the forked same-nest seats.
     ///
     /// # Errors
     /// A custody entry with neither a nonce nor a channel (no key; never
@@ -453,6 +481,12 @@ impl FoldersConfig {
                 .cloned()
                 .map(FolderKeyRecord::Foreign),
         );
+        records.extend(
+            self.forked_seats
+                .iter()
+                .cloned()
+                .map(FolderKeyRecord::Forked),
+        );
         records
             .into_iter()
             .map(|r| Ok((r.plane_key()?, r)))
@@ -476,6 +510,7 @@ impl FoldersConfig {
             all.sets.extend(row.sets);
             all.pending_removals.extend(row.pending_removals);
             all.foreign_sets.extend(row.foreign_sets);
+            all.forked_seats.extend(row.forked_seats);
         }
         Ok(Self::default().merge(&all))
     }
@@ -512,6 +547,8 @@ pub fn decode_folder_key_row(key: &str, value: &[u8]) -> Result<FolderKeyRecord>
         FolderKeyRecord::Removal(decode_exact(value, "removal")?)
     } else if key.starts_with(FOREIGN_KEY_PREFIX) {
         FolderKeyRecord::Foreign(decode_exact(value, "foreign")?)
+    } else if key.starts_with(FORKED_KEY_PREFIX) {
+        FolderKeyRecord::Forked(decode_exact(value, "forked seat")?)
     } else {
         return Err(Error::Encoding(format!("not a folder-keys key: {key:?}")));
     };
@@ -601,6 +638,14 @@ mod tests {
                 content_key_floor: Some(2),
                 ..Default::default()
             }],
+            forked_seats: vec![ForkedFolderSeat {
+                channel_id: [0x79; 32],
+                mls_group_id: vec![0x7A; 16],
+                set_name: Some("shared".into()),
+                owner_handle: Some("alice".into()),
+                forked_at: 5,
+                ..Default::default()
+            }],
         }
     }
 
@@ -610,7 +655,11 @@ mod tests {
     fn a_config_round_trips_through_its_rows() {
         let cfg = FoldersConfig::default().merge(&sample());
         assert_eq!(fold(&encoded(cfg.rows().unwrap())), cfg);
-        assert_eq!(cfg.rows().unwrap().len(), 3 + 3 + 1 + 1, "sets + gens + 2");
+        assert_eq!(
+            cfg.rows().unwrap().len(),
+            3 + 3 + 1 + 1 + 1,
+            "sets + gens + 3"
+        );
     }
 
     /// Folding two replicas' rows together (same-key rows joined by the arm,

@@ -248,6 +248,15 @@ public static class NestRulesHost
         return Strings.Resolve(new uniffi.fauna_core.LocalizedText("nest_rules.rule_line_no_level", args));
     }
 
+    /// <summary>One rule as the joining surface lists it: <see cref="RuleLine"/>,
+    /// then — under a rule this device cannot apply (the shared
+    /// <c>NestRuleLine::inert</c>) — its not-applied note on a second line of the
+    /// same item (<c>nest-rules.md</c> § Acceptance at joining; tui's
+    /// <c>nest_rules::joining_rule_line</c>). The settings surface paints the note
+    /// as its own <c>settings-nest-rules-inert-notice</c> instead.</summary>
+    internal static string JoiningRuleLine(NestRuleLine rule) =>
+        rule.inert is { } inert ? $"{RuleLine(rule)}\n{Strings.Resolve(inert)}" : RuleLine(rule);
+
     // ── Persistence: the book's signed records, as JSON under the install base ─
 
     private sealed record Row(

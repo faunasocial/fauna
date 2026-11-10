@@ -126,6 +126,7 @@ class FoldersContentTest {
         access = access,
         ownerHandle = null,
         ownerDisplay = ownerDisplay,
+        seatForked = false,
         webdavEnabled = webdavEnabled,
         conflictPolicy = conflictPolicy,
         webPaywallTier = webPaywallTier,
@@ -247,11 +248,16 @@ class FoldersContentTest {
         step: FolderWizardStep,
         name: String = "",
         devices: List<WizardDevice> = emptyList(),
+        audience: String = "private",
+        audienceOffered: Boolean = false,
+        declassifyArmed: Boolean = false,
     ) = FolderWizardSnapshot(
         step = step,
         name = NameSnapshot(
             name = name,
             continueEnabled = name.isNotEmpty(),
+            audience = audience,
+            audienceOffered = audienceOffered,
         ),
         devicePlaces = DevicePlacesSnapshot(devices = devices, continueEnabled = true),
         review = ReviewSnapshot(
@@ -263,6 +269,8 @@ class FoldersContentTest {
             created = false,
             failedMembers = emptyList(),
             error = null,
+            audience = audience,
+            declassifyArmed = declassifyArmed,
         ),
     )
 
@@ -317,6 +325,7 @@ class FoldersContentTest {
         versionRetentionEdits: Map<String, VersionRetentionEdit> = emptyMap(),
         onDemand: Map<OnDemandRowKey, OnDemandRow> = emptyMap(),
         unverifiedPublicFolders: Set<String> = emptySet(),
+        accessRevoked: Set<OnDemandRowKey> = emptySet(),
     ) {
         composeTestRule.setContent {
             FoldersContent(
@@ -342,6 +351,7 @@ class FoldersContentTest {
                     )
                 },
                 onDemand = onDemand,
+                accessRevoked = accessRevoked,
             )
         }
     }
@@ -511,6 +521,63 @@ class FoldersContentTest {
     fun wizardNameStepWithdrawsTheHintOnceTheNameIsValid() {
         render(snapshot(wizard = wizard(FolderWizardStep.NAME, name = "vacation")))
         composeTestRule.onNodeWithText("Enter a name to continue.").assertDoesNotExist()
+    }
+
+    // ── Born public (`ui/folders.md` § Audience and website serving → *Born
+    // public*): the audience on the Name step, Create arming the owner row's
+    // declassify dialog ───────────────────────────────────────────────────────
+
+    @Test
+    fun wizardNameStepOffersTheAudienceOnlyWhenTheSeamCanAttest() {
+        render(snapshot(wizard = wizard(FolderWizardStep.NAME, name = "site")))
+        composeTestRule.onNodeWithTag("wizard-audience-select").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("wizard-audience-hint").assertDoesNotExist()
+    }
+
+    @Test
+    fun wizardNameStepPaintsTheAudienceSelectAndHintWhenOffered() {
+        render(
+            snapshot(
+                wizard = wizard(FolderWizardStep.NAME, name = "site", audienceOffered = true),
+            ),
+        )
+        composeTestRule.onNodeWithTag("wizard-audience-select").assertExists()
+        composeTestRule.onNodeWithTag("wizard-audience-hint").assertExists()
+        // Never a step of its own: Next is still the Name step's way on.
+        composeTestRule.onNodeWithTag("wizard-next-button").assertIsEnabled()
+    }
+
+    @Test
+    fun wizardReviewPaintsTheArmedDeclassifyDialogWhoseConfirmCreates() {
+        var confirmed = false
+        render(
+            snapshot(
+                wizard = wizard(
+                    FolderWizardStep.REVIEW,
+                    name = "site",
+                    audience = "public",
+                    audienceOffered = true,
+                    declassifyArmed = true,
+                ),
+            ),
+            wizardActions = WizardActions(onConfirmPublic = { confirmed = true }),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-public-names-warning").assertExists()
+        composeTestRule.onNodeWithTag("folder-audience-public-reseal-warning").assertExists()
+        composeTestRule.onNodeWithTag("wizard-create-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").performClick()
+        assertTrue(confirmed)
+    }
+
+    @Test
+    fun wizardReviewShowsNoDeclassifyDialogUntilArmed() {
+        render(
+            snapshot(
+                wizard = wizard(FolderWizardStep.REVIEW, name = "site", audience = "public"),
+            ),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("wizard-create-button").assertIsEnabled()
     }
 
     // ── Wizard step 2 — the three place-flag checkboxes replace the retired
@@ -1924,6 +1991,42 @@ class FoldersContentTest {
         render(snapshot(folders = listOf(own)), onDemand = mapOf(onDemandRow(own, stronger = true)))
         composeTestRule.onNodeWithTag("folder-on-demand-toggle").assertDoesNotExist()
         composeTestRule.onNodeWithText(context.getString(R.string.devices_on_demand_bound_hint)).assertExists()
+    }
+
+    // ── folder-access-revoked-warning on a member row — file-sync.md § Multi-writer
+    // shared sets → *Revocation on a capability host*: it heads the row's one
+    // device-local presence, the toggle ──
+
+    @Test
+    fun aParkedMemberRowPaintsTheRevokedWarningAboveTheToggle() {
+        val (own, shared) = ownAndShared()
+        render(
+            snapshot(folders = listOf(own, shared)),
+            onDemand = mapOf(onDemandRow(own), onDemandRow(shared)),
+            accessRevoked = setOf(OnDemandRowKey.of(shared)),
+        )
+        val warning = composeTestRule.onNodeWithTag("folder-access-revoked-warning")
+        warning.assertExists()
+            .assertTextEquals(context.getString(R.string.devices_access_revoked_warning))
+        // Exactly one: the owner row is not warned.
+        composeTestRule.onAllNodesWithTag("folder-access-revoked-warning").assertCountEquals(1)
+        // It heads the member's toggle (the second one on the page). Unclipped
+        // positions: `boundsInRoot` clips to the viewport, and the scrolled
+        // column leaves both below it.
+        val warningTop = warning.fetchSemanticsNode().positionInRoot.y
+        val toggleTop = composeTestRule.onAllNodesWithTag("folder-on-demand-toggle")[1]
+            .fetchSemanticsNode().positionInRoot.y
+        assertTrue("warning at $warningTop must head the toggle at $toggleTop", warningTop < toggleTop)
+    }
+
+    @Test
+    fun anUnparkedMemberRowPaintsNoRevokedWarning() {
+        val (own, shared) = ownAndShared()
+        render(
+            snapshot(folders = listOf(own, shared)),
+            onDemand = mapOf(onDemandRow(own), onDemandRow(shared)),
+        )
+        composeTestRule.onNodeWithTag("folder-access-revoked-warning").assertDoesNotExist()
     }
 
     @Test

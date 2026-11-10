@@ -7,8 +7,6 @@ import com.fauna.app.core.ApiClient
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.SecureStorage
 import com.fauna.ffi.FfiAccountRegistry
-import com.fauna.ffi.FfiEraseResidueView
-import com.fauna.ffi.FfiEraseSweep
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -94,7 +92,7 @@ class AccountSettingsVMTest {
         verify(registry, never()).clearAll()
         verify(secureStorage, never()).clear()
         verify(actorScope, never()).dropActorScopedState()
-        verify(accountStores, never()).eraseAllAccounts()
+        verify(accountStores, never()).recordSignOut(org.mockito.ArgumentMatchers.any())
     }
 
     @Test
@@ -109,30 +107,28 @@ class AccountSettingsVMTest {
         verify(registry, never()).clearAll()
         verify(secureStorage, never()).clear()
         verify(actorScope, never()).dropActorScopedState()
-        verify(accountStores, never()).eraseAllAccounts()
+        verify(accountStores, never()).recordSignOut(org.mockito.ArgumentMatchers.any())
     }
 
     /**
-     * `signOut` AWAITS the shared account-runtime stop before the erase that
-     * follows (`account-scoping.md` § Erasure follows scope, the ⚠ *An OPEN
-     * store is an unerasable store* note, and "that call before its
-     * `account_state_erase_*`") — and, since
-     * 2026-09-15, the SIGN-OUT-shaped stop specifically
-     * (`stopAccountRuntimeForSignOutAwaited`), which also retires this
-     * machine's enrollment nest-side before the erase takes the writer key
-     * with it (`sync-agent-credentials.md` § Credential model → *The
-     * signed-out reconcile*).
+     * `signOut` writes the sign-out record FIRST — before the runtime stop is
+     * even asked for — naming the account this process serves, so a process
+     * killed inside the stop's budget is finished by the next launch
+     * (`account-scoping.md` § Erasure follows scope → *The sign-out record is
+     * on all 7 apps*, decisions 1 and 7); then it AWAITS the sign-out-shaped
+     * stop (`stopAccountRuntimeForSignOutAwaited`, which also retires this
+     * machine's enrollment nest-side — `sync-agent-credentials.md` §
+     * Credential model → *The signed-out reconcile*) strictly before the finish that erases under it (the ⚠ *An
+     * OPEN store is an unerasable store* note); and the finish is the
+     * gesture's — no agent dismissal (the stop did it), handed the accounts
+     * the record named.
      *
      * `ApiClient.clearAuth()` (inside [ActorScope.dropActorScopedState], also
      * mocked here) already fires the switch-shaped `stopAccountRuntime()`
-     * fire-and-forget for every OTHER teardown path; this pins that sign-out
-     * does NOT rely on that race, by asserting the AWAITED call happens
-     * strictly before the erase in program order. `UnconfinedTestDispatcher`
-     * runs the coroutine eagerly, so a real race (erase reordered before the
-     * await resolves) would show up here as a real ordering violation, not
-     * just an uninteresting "both got called".
+     * fire-and-forget for every OTHER teardown path; `UnconfinedTestDispatcher`
+     * runs the coroutine eagerly, so a real reordering would show up here.
      *
-     * `WidgetDataWorker.refoldForAccountSwitch` (called after the erase, real
+     * `WidgetDataWorker.refoldForAccountSwitch` (called after the finish, real
      * and unmocked) reaches `WorkManager.getInstance` — uninitialized here,
      * against a bare `Context` mock — so this also stands as the regression
      * pin for that call now being individually recoverable rather than able
@@ -141,24 +137,17 @@ class AccountSettingsVMTest {
      * would fail instead.
      */
     @Test
-    fun signOut_awaitsTheAccountRuntimeStopBeforeErasing() = runTest {
-        val (vm, api, registry, _, _, accountStores) = makeVm()
-        val cleanCredentials =
-            com.fauna.ffi.FfiCredentialSweep(survivors = emptyList(), wipeFailed = false)
-        whenever(registry.clearAll()).thenReturn(cleanCredentials)
-        whenever(registry.reverifyErase(cleanCredentials)).thenReturn(cleanCredentials)
-        whenever(accountStores.eraseAllAccounts())
-            .thenReturn(
-                FfiEraseSweep(
-                    erased = 0u,
-                    survivors = emptyList(),
-                    residue = FfiEraseResidueView(
-                        survivors = 0u,
-                        credentialsSurvived = false,
-                        owesWork = false,
-                    ),
-                )
+    fun signOut_recordsFirstThenAwaitsTheStopBeforeTheFinish() = runTest {
+        val (vm, api, _, _, actorScope, accountStores) = makeVm()
+        whenever(accountStores.activeActorHex()).thenReturn(ACTOR)
+        whenever(accountStores.recordSignOut(ACTOR)).thenReturn(listOf(ACTOR))
+        whenever(
+            accountStores.finishSignOut(
+                anyHost(),
+                org.mockito.ArgumentMatchers.eq(false),
+                org.mockito.ArgumentMatchers.eq(listOf(ACTOR)),
             )
+        ).thenReturn(CLEAN_FINISH)
 
         var completed = false
         var residue: com.fauna.ffi.FfiSignOutResidue? = null
@@ -167,55 +156,49 @@ class AccountSettingsVMTest {
             residue = it
         }
 
-        inOrder(api, accountStores).apply {
+        inOrder(api, actorScope, accountStores).apply {
+            verify(accountStores).recordSignOut(ACTOR)
             verify(api).stopAccountRuntimeForSignOutAwaited()
-            verify(accountStores).eraseAllAccounts()
+            verify(actorScope).dropActorScopedState()
+            verify(accountStores).finishSignOut(
+                anyHost(),
+                org.mockito.ArgumentMatchers.eq(false),
+                org.mockito.ArgumentMatchers.eq(listOf(ACTOR)),
+            )
         }
         assertTrue("onComplete must run", completed)
         assertNull(residue)
     }
 
     /**
-     * The credential half of `signOut` is read back AFTER the LAST wipe
-     * (`account-scoping.md` § Erasure follows scope → *the credential half is a
-     * residue class too*, "Fold after the LAST wipe"). `registry.clearAll()`
-     * reads back what it deleted, `secureStorage.clear()` then resets the whole
-     * store, and only `reverifyErase` — asked after that reset — knows what is
-     * still there. A seat that folded `clearAll`'s own answer, or re-asked
-     * before the reset, would report credentials the reset already took.
-     *
-     * The two sweeps differ on purpose: `inOrder` pins the sequence, and the
-     * `recordResidue` argument pins which answer reached the user's line.
+     * What the finish left is what the user is handed: the residue the routine
+     * answered reaches `onComplete` unchanged, for `identity_choice` to paint.
      */
     @Test
-    fun signOut_foldsTheCredentialReadBackTakenAfterTheSecureStorageReset() = runTest {
-        val (vm, _, registry, secureStorage, _, accountStores) = makeVm()
-        val beforeReset =
-            com.fauna.ffi.FfiCredentialSweep(survivors = listOf("fauna/index"), wipeFailed = false)
-        val afterReset =
-            com.fauna.ffi.FfiCredentialSweep(survivors = emptyList(), wipeFailed = false)
-        val sweep = FfiEraseSweep(
-            erased = 0u,
-            survivors = emptyList(),
-            residue = FfiEraseResidueView(
-                survivors = 0u,
-                credentialsSurvived = false,
-                owesWork = false,
-            ),
-        )
-        whenever(registry.clearAll()).thenReturn(beforeReset)
-        whenever(registry.reverifyErase(beforeReset)).thenReturn(afterReset)
-        whenever(accountStores.eraseAllAccounts()).thenReturn(sweep)
+    fun signOut_handsTheFinishesResidueToTheCaller() = runTest {
+        val (vm, _, _, _, _, accountStores) = makeVm()
+        val left = mock(com.fauna.ffi.FfiSignOutResidue::class.java)
+        whenever(accountStores.recordSignOut(null)).thenReturn(emptyList())
+        whenever(
+            accountStores.finishSignOut(
+                anyHost(),
+                org.mockito.ArgumentMatchers.eq(false),
+                org.mockito.ArgumentMatchers.eq(emptyList()),
+            )
+        ).thenReturn(CLEAN_FINISH.copy(residue = left))
 
-        vm.signOut { }
+        var residue: com.fauna.ffi.FfiSignOutResidue? = null
+        vm.signOut { residue = it }
 
-        inOrder(registry, secureStorage, accountStores).apply {
-            verify(registry).clearAll()
-            verify(secureStorage).clear()
-            verify(registry).reverifyErase(beforeReset)
-            verify(accountStores).recordResidue(sweep, afterReset)
-        }
+        assertTrue("the finish's residue reaches the caller", residue === left)
     }
+
+    /** `ArgumentMatchers.any` for a non-null Kotlin parameter. */
+    private fun anyHost(): com.fauna.ffi.FfiSignOutHost {
+        org.mockito.ArgumentMatchers.any(com.fauna.ffi.FfiSignOutHost::class.java)
+        return NO_HOST
+    }
+
 
     /**
      * The append terminal registers the identity the WIZARD MACHINE holds, at
@@ -293,5 +276,23 @@ class AccountSettingsVMTest {
     private companion object {
         const val APPENDED_SECRET =
             "0202020202020202020202020202020202020202020202020202020202020202"
+
+        val ACTOR = "aa11".repeat(16)
+
+        /** A finish that found the record and left nothing. */
+        val CLEAN_FINISH = com.fauna.ffi.FfiSignOutFinish(
+            failsClosed = false,
+            refused = false,
+            residue = null,
+            credentialsWiped = true,
+            foundRecord = true,
+        )
+
+        /** The stand-in an `any()` matcher returns for a non-null parameter. */
+        val NO_HOST = object : com.fauna.ffi.FfiSignOutHost {
+            override fun wipeOwnStore(): Boolean = true
+            override fun eraseCredentials(): com.fauna.ffi.FfiCredentialSweep =
+                com.fauna.ffi.FfiCredentialSweep(survivors = emptyList(), wipeFailed = false)
+        }
     }
 }

@@ -99,6 +99,33 @@ public class SuccessionHandoffTests : IDisposable
         Assert.Null(SuccessionHandoff.SweepOwedTo);
     }
 
+    /// <summary>
+    /// <i>Review The Rest Later</i> on the ephemeral member-review pass
+    /// (<c>settings.md</c> § Recovery kit → <i>The ephemeral member-review
+    /// pass</i>) is a decision ABOUT the carried sweep, so it lives as long as
+    /// the sweep does: it survives the successor's kit claim (the first visit
+    /// after the switch) and only the credential wipe clears it, so a fresh
+    /// identity on a reset box never starts with the pass already dismissed.
+    /// apple's <c>SuccessionHandoffTests</c> and tui's
+    /// <c>App::succession_review_deferred</c> pin the same lifetime.
+    /// </summary>
+    [Fact]
+    public void MemberReviewDefer_OutlivesTheKitClaim_AndOnlyTheWipeClearsIt()
+    {
+        SuccessionHandoff.Record(
+            MockNestRpcClient.MakeLandedSuccession(newActorIdHex: Successor), Predecessor);
+        Assert.False(SuccessionHandoff.MemberReviewDeferred, "a sweep alone defers nothing");
+
+        SuccessionHandoff.DeferMemberReview();
+        Assert.True(SuccessionHandoff.MemberReviewDeferred);
+
+        Assert.True(SuccessionHandoff.ClaimOwedKit(Successor));
+        Assert.True(SuccessionHandoff.MemberReviewDeferred, "the kit claim spends nothing of the defer");
+
+        SuccessionHandoff.ClearOnCredentialWipe();
+        Assert.False(SuccessionHandoff.MemberReviewDeferred);
+    }
+
     /// <summary>The successor owes itself a kit on BOTH arms of <c>persisted</c> —
     /// the account moved either way, so it is kitless and escrowless either way.</summary>
     [Theory]

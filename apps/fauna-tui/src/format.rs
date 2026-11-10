@@ -181,16 +181,11 @@ pub fn backup_audit_alert(
 // from the i18n catalog rather than a platform date library — "referenced
 // directly by app code, not via a fauna_core LocalizedText key".
 //
-// The four lookups themselves now live in `fauna_i18n::time`, beside the table
-// they read (2026-08-19): linux's `views/events/time_utils.rs` carried a
-// byte-for-byte identical set over the *same* constants, so they were one
-// function duplicated, not two apps' glue. They are re-exported here so the
-// tui-wide `crate::format::{month_name, …}` call-site path is unchanged.
-//
-// The three calendar *label* formatters that consume them stay app-side, in
-// `events/grids.rs` — they need `caltime`, and `fauna-i18n` is a dependency-free
-// leaf half the workspace links (see that crate's module docs).
-pub use fauna_i18n::time::{month_name, month_name_short, weekday_name, weekday_short};
+// The name lookups live in `fauna_i18n::time`, beside the table they read; the
+// three calendar label formatters that consume them live in
+// `fauna_client_features::calendar_labels` (shared with linux). Only
+// `weekday_short` is still consumed tui-side, re-exported here.
+pub use fauna_i18n::time::weekday_short;
 
 #[cfg(test)]
 mod tests {
@@ -307,7 +302,7 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "month/weekday names must resolve off the i18n catalog \
-             (`crate::format::{{month_name, month_name_short, weekday_name, weekday_short}}`), \
+             (`fauna_i18n::time::{{month_name, month_name_short, weekday_name, weekday_short}}`), \
              not chrono — `ui/events.md` § Where logic lives. Offending sites:\n  {}",
             offenders.join("\n  ")
         );

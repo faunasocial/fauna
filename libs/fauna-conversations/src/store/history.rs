@@ -685,6 +685,7 @@ mod tests {
 
     fn msg(id: &str, body: &str, is_own: bool, ts: i64) -> MessageSnapshot {
         MessageSnapshot {
+            queued_send: None,
             message_id: MessageId(id.to_string()),
             sender: actor(if is_own { "me" } else { "peer" }),
             sender_display: String::new(),
@@ -702,6 +703,7 @@ mod tests {
             labels: vec![],
             plane_ref: None,
             can_delete: false,
+            can_remove: false,
             undelivered: false,
             warmup_hold: None,
             scan_result_lines: Vec::new(),

@@ -964,8 +964,18 @@ class SettingsActions:
     def member_review_defer_visible(self) -> bool:
         """Whether *Review The Rest Later* is on screen — the EPHEMERAL pass's
         own affordance; the permanent page never renders it (deferring is what
-        sent the backlog there)."""
-        return self.driver.is_visible("member-review-defer-button")
+        sent the backlog there).
+
+        Read through :meth:`is_absent`, not ``is_visible``, because the test reads
+        it both ways — painted, then gone after the defer — and only windows'
+        ``is_visible`` carries a viewport predicate (``!IsOffscreen``): the pass
+        sits on a long Settings page, so a button painted one scroll away would
+        read "not there" for the boring reason, failing the positive read and
+        making the negative one vacuous. ``is_absent`` is ``not is_visible`` on
+        every other driver, so nothing changes there; windows answers it from
+        tree membership, exact both ways (a Collapsed element leaves the tree).
+        """
+        return not self.driver.is_absent("member-review-defer-button")
 
     def member_review_defer(self) -> None:
         """Press *Review The Rest Later* — hides the ephemeral pass and decides

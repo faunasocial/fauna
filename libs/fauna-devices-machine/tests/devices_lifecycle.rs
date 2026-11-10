@@ -462,6 +462,268 @@ async fn member_rows_filtered_by_join_state() {
     assert!(snap.error.is_none());
 }
 
+/// Joined groups plus the subset whose seat the engine marked forked.
+struct ForkedGroups {
+    joined: Vec<String>,
+    forked: Vec<String>,
+}
+impl fauna_devices_machine::FolderChannelOwners for ForkedGroups {
+    fn folder_channel_owner(&self, _: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        None
+    }
+}
+impl MlsQuery for ForkedGroups {
+    fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        self.joined.iter().any(|g| g == mls_group_id_hex)
+    }
+    fn is_forked_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        self.forked.iter().any(|g| g == mls_group_id_hex)
+    }
+}
+
+/// The forked-seat reading reaches the snapshot the apps render
+/// (`federation-shared-folders.md` § … *A forked seat is final, says so, and
+/// heals only by a fresh Welcome*; `ui/folders.md` § Sharing, the badge's third
+/// reading): a joined member row whose seat the wired query reports forked is
+/// painted `seat_forked`, its healthy sibling and the owner row are not.
+#[tokio::test]
+async fn a_forked_member_seat_is_painted_on_its_row() {
+    let (m, nest, _) = setup();
+    m.set_mls_query(Arc::new(ForkedGroups {
+        joined: vec!["aa".into(), "bb".into()],
+        forked: vec!["bb".into()],
+    }));
+    nest.set_folders(vec![
+        folder("my-docs"),
+        member_set("shared-a", "aa"),
+        member_set("shared-b", "bb"),
+    ]);
+
+    m.refresh().await;
+
+    let painted: Vec<(String, bool)> = m
+        .snapshot()
+        .folders
+        .iter()
+        .map(|f| (f.name.clone(), f.seat_forked))
+        .collect();
+    assert_eq!(
+        painted,
+        vec![
+            ("my-docs".to_string(), false),
+            ("shared-a".to_string(), false),
+            ("shared-b".to_string(), true),
+        ]
+    );
+}
+
+/// Part (b)'s self-unlist drops the member's own roster row, so the nest's
+/// folder list stops naming a SAME-nest set the moment the seat forks — yet
+/// the set's row must stay (its files and its leave button stay, and the
+/// badge's third reading needs a row to paint on;
+/// `federation-shared-folders.md` § … *A forked seat is final, says so, and
+/// heals only by a fresh Welcome*, parts (a)/(b); `ui/folders.md` § Sharing).
+/// The row the machine last saw is kept, painted forked, for as long as the
+/// engine reads the seat forked and joined; a leave (no longer joined) or a
+/// fresh Welcome (no longer forked) lets it go.
+#[tokio::test]
+async fn a_forked_same_nest_seat_keeps_its_row_after_its_roster_row_is_dropped() {
+    let (m, nest, _) = setup();
+    let query = Arc::new(SwitchableGroups::default());
+    query.set(&["aa", "bb"], &[]);
+    m.set_mls_query(query.clone());
+    nest.set_folders(vec![
+        folder("my-docs"),
+        member_set("shared-a", "aa"),
+        member_set("shared-b", "bb"),
+    ]);
+    m.refresh().await;
+    assert_eq!(m.snapshot().folders.len(), 3);
+
+    // The walk marks "bb" forked and the unlist lands: the nest list no
+    // longer names it.
+    query.set(&["aa", "bb"], &["bb"]);
+    nest.set_folders(vec![folder("my-docs"), member_set("shared-a", "aa")]);
+    m.refresh().await;
+    let painted: Vec<(String, bool)> = m
+        .snapshot()
+        .folders
+        .iter()
+        .map(|f| (f.name.clone(), f.seat_forked))
+        .collect();
+    assert_eq!(
+        painted,
+        vec![
+            ("my-docs".to_string(), false),
+            ("shared-a".to_string(), false),
+            ("shared-b".to_string(), true),
+        ],
+        "the forked set's row stays, painted forked"
+    );
+    let kept = m
+        .snapshot()
+        .folders
+        .into_iter()
+        .find(|f| f.name == "shared-b")
+        .unwrap();
+    assert_eq!(kept.mls_group_id.as_deref(), Some("bb"));
+    assert_eq!(kept.role.as_deref(), Some("member"));
+
+    // Still kept on a later refresh.
+    m.refresh().await;
+    assert_eq!(m.snapshot().folders.len(), 3);
+
+    // The member leaves the forked set: no longer joined → the row goes.
+    query.set(&["aa"], &["bb"]);
+    m.refresh().await;
+    let names: Vec<String> = m
+        .snapshot()
+        .folders
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    assert_eq!(names, vec!["my-docs".to_string(), "shared-a".to_string()]);
+
+    // ...and does not come back from the retained copy if rejoined later
+    // without the nest naming it.
+    query.set(&["aa", "bb"], &["bb"]);
+    m.refresh().await;
+    assert_eq!(m.snapshot().folders.len(), 2);
+}
+
+/// A row kept for a forked seat is let go once a fresh Welcome replaces the
+/// seat (part (c)): the engine stops reading it forked; the nest names the set
+/// again through the re-invited roster row, never twice.
+#[tokio::test]
+async fn a_healed_seat_lists_once_from_the_nest_again() {
+    let (m, nest, _) = setup();
+    let query = Arc::new(SwitchableGroups::default());
+    query.set(&["bb"], &[]);
+    m.set_mls_query(query.clone());
+    nest.set_folders(vec![member_set("shared-b", "bb")]);
+    m.refresh().await;
+
+    query.set(&["bb"], &["bb"]);
+    nest.set_folders(vec![]);
+    m.refresh().await;
+    assert_eq!(m.snapshot().folders.len(), 1);
+    assert!(m.snapshot().folders[0].seat_forked);
+
+    // Healed but not yet re-listed: nothing forked to keep.
+    query.set(&["bb"], &[]);
+    m.refresh().await;
+    assert!(m.snapshot().folders.is_empty());
+
+    nest.set_folders(vec![member_set("shared-b", "bb")]);
+    m.refresh().await;
+    let rows = m.snapshot().folders;
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].seat_forked);
+}
+
+/// A fake source holding only forked-seat records (no foreign sets).
+struct FixedForked(Vec<fauna_devices_machine::ForkedSeatRow>);
+#[async_trait::async_trait]
+impl ForeignSetsSource for FixedForked {
+    async fn foreign_sets(&self) -> Vec<ForeignSetRow> {
+        Vec::new()
+    }
+    async fn forked_seats(&self) -> Vec<fauna_devices_machine::ForkedSeatRow> {
+        self.0.clone()
+    }
+}
+
+/// After a relaunch the machine holds no memory of the rows the nest listed
+/// before the fork, and the nest no longer names the set (its roster row was
+/// dropped): the member's durable forked-seat record alone keeps the row,
+/// painted forked, with the name, owner label and access it last showed —
+/// while the engine reads the seat joined and forked. A leave (not joined)
+/// or a fresh Welcome (not forked) leaves the record inert; the nest naming
+/// the set again lists it once.
+#[tokio::test]
+async fn a_forked_same_nest_seat_keeps_its_row_across_a_relaunch_from_its_record() {
+    let (m, nest, _) = setup();
+    let query = Arc::new(SwitchableGroups::default());
+    query.set(&["bb"], &["bb"]);
+    m.set_mls_query(query.clone());
+    nest.set_folders(vec![folder("my-docs")]);
+    m.set_foreign_sets_source(Arc::new(FixedForked(vec![
+        fauna_devices_machine::ForkedSeatRow {
+            mls_group_id_hex: "bb".into(),
+            set_name: Some("shared-b".into()),
+            owner_handle: Some("alice".into()),
+            owner_actor_id: Some("ab".repeat(32)),
+            access: Some("writer".into()),
+        },
+    ])));
+    m.refresh().await;
+    let rows = m.snapshot().folders;
+    let names: Vec<(&str, bool)> = rows
+        .iter()
+        .map(|f| (f.name.as_str(), f.seat_forked))
+        .collect();
+    assert_eq!(names, vec![("my-docs", false), ("shared-b", true)]);
+    let kept = &rows[1];
+    assert_eq!(kept.mls_group_id.as_deref(), Some("bb"));
+    assert_eq!(kept.role.as_deref(), Some("member"));
+    assert_eq!(kept.access.as_deref(), Some("writer"));
+    assert_eq!(kept.owner_display, "alice");
+    assert_eq!(kept.id, -1, "no nest row id for a kept-back set");
+
+    // Healed (not forked): the record stands in for nothing.
+    query.set(&["bb"], &[]);
+    m.refresh().await;
+    assert_eq!(m.snapshot().folders.len(), 1);
+
+    // Left (not joined): likewise.
+    query.set(&[], &["bb"]);
+    m.refresh().await;
+    assert_eq!(m.snapshot().folders.len(), 1);
+
+    // The nest names the set again while the record still stands: one row.
+    query.set(&["bb"], &["bb"]);
+    nest.set_folders(vec![folder("my-docs"), member_set("shared-b", "bb")]);
+    m.refresh().await;
+    assert_eq!(m.snapshot().folders.len(), 2);
+}
+
+/// An [`MlsQuery`] whose joined/forked sets a test moves between refreshes.
+#[derive(Default)]
+struct SwitchableGroups {
+    sets: Mutex<(Vec<String>, Vec<String>)>,
+}
+impl SwitchableGroups {
+    fn set(&self, joined: &[&str], forked: &[&str]) {
+        *self.sets.lock().unwrap() = (
+            joined.iter().map(|s| s.to_string()).collect(),
+            forked.iter().map(|s| s.to_string()).collect(),
+        );
+    }
+}
+impl fauna_devices_machine::FolderChannelOwners for SwitchableGroups {
+    fn folder_channel_owner(&self, _: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        None
+    }
+}
+impl MlsQuery for SwitchableGroups {
+    fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        self.sets
+            .lock()
+            .unwrap()
+            .0
+            .iter()
+            .any(|g| g == mls_group_id_hex)
+    }
+    fn is_forked_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        self.sets
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .any(|g| g == mls_group_id_hex)
+    }
+}
+
 /// A fake [`ForeignSetsSource`] returning a fixed record list (mirrors the
 /// production `CustodyForeignSetsSource` over the member's folder-keys custody).
 struct FixedForeign(Vec<ForeignSetRow>);
@@ -487,6 +749,8 @@ async fn refresh_unions_joined_foreign_sets() {
             home_nest_url: "https://home.example".into(),
             access: None,
             metadata_only_residency: None,
+            owner_handle: Some("alice".into()),
+            owner_domain: Some("home.example".into()),
         },
         ForeignSetRow {
             set_name: Some("left-set".into()),
@@ -494,6 +758,8 @@ async fn refresh_unions_joined_foreign_sets() {
             home_nest_url: "https://other.example".into(),
             access: None,
             metadata_only_residency: None,
+            owner_handle: None,
+            owner_domain: None,
         },
     ];
     m.set_foreign_sets_source(Arc::new(FixedForeign(foreign_rows)));
@@ -516,6 +782,10 @@ async fn refresh_unions_joined_foreign_sets() {
         Some("https://home.example")
     );
     assert_eq!(foreign.mls_group_id.as_deref(), Some("cc"));
+    // The home nest's stamped owner label names the sharer by full handle on
+    // the member row, as it does on the pending-share knock
+    // (`federation-shared-folders.md` § … *The cross-nest owner label*).
+    assert_eq!(foreign.owner_display, "alice@home.example");
     assert!(snap.error.is_none());
 }
 

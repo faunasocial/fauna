@@ -65,7 +65,13 @@ def _rows_once(app, predicate, what: str, *, refetch: bool = False):
         if rows and predicate(rows):
             return rows
         if refetch and time.monotonic() - state["fetched"] >= _REFETCH_EVERY_S:
-            _reopen_logs(app)
+            # A re-entry is a gesture inside the wait, not a precondition of it:
+            # one slow dashboard load (its own named wait raising) is an
+            # observation, and the next tick enters again (convention 14).
+            try:
+                _reopen_logs(app)
+            except (AssertionError, RuntimeError, TimeoutError) as e:
+                state["raised"] = f"re-entry {type(e).__name__}: {str(e)[:160]}"
             state["fetched"] = time.monotonic()
             state["fetches"] += 1
         return None
@@ -313,13 +319,7 @@ def test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard(admin_app, plante
         refetch=True,
     )
     app.logs.set_level("Error")
-    shown = _settled_rows(
-        app,
-        lambda rows: all(r[0] == "ERROR" for r in rows) and error.target in {r[2] for r in rows},
-        "the Error view should list only errors, the planted one among them",
-    )
-
-    app.logs.copy()
+    attempt: dict = {"shown": None, "copied": None, "after": None, "copies": 0}
     clip: dict = {"text": None, "raised": None}
 
     def _copied():
@@ -329,18 +329,40 @@ def test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard(admin_app, plante
             clip["raised"] = str(e)[:200]
             return None
         lines = [r for r in map(parse_row, clip["text"].splitlines()) if r]
-        return lines if error.target in {r[2] for r in lines} else None
+        return lines if lines == attempt["shown"] else None
+
+    def _copy_of_a_still_page():
+        """One copy of the rows the page shows, held across the copy: a reply to
+        an earlier re-entry's fetch may still land and re-render the list, so
+        the copy counts only when the page shows the same rows before and after
+        it; otherwise copy again (convention 14 — hold the read on the
+        observable, never on two reads having agreed once)."""
+        attempt["shown"] = _settled_rows(
+            app,
+            lambda rows: all(r[0] == "ERROR" for r in rows)
+            and error.target in {r[2] for r in rows},
+            "the Error view should list only errors, the planted one among them",
+        )
+        app.logs.copy()
+        attempt["copies"] += 1
+        try:
+            attempt["copied"] = wait_until(_copied, budgets.UI_SETTLE_S)
+        except AssertionError:
+            attempt["copied"] = None
+        attempt["after"] = app.logs.rows()
+        if attempt["copied"] is not None and attempt["after"] == attempt["shown"]:
+            return attempt["copied"]
+        return None
 
     copied = wait_until(
-        _copied,
-        budgets.UI_SETTLE_S,
-        diagnose=lambda: f"clipboard: {clip['text']!r}; last read raised: {clip['raised']!r}",
-    )
-    after = app.logs.rows()
-    page_now = "still shows the same rows" if after == shown else f"now shows {after!r}"
-    assert copied == shown, (
-        "the clipboard should hold exactly the lines shown, in the page's order: "
-        f"shown={shown!r} copied={copied!r}; the page {page_now}"
+        _copy_of_a_still_page,
+        budgets.RPC_ROUNDTRIP_S * 3,
+        interval=0.5,
+        diagnose=lambda: "the clipboard should hold exactly the lines shown, in "
+        f"the page's order, after {attempt['copies']} copy(ies): "
+        f"shown={attempt['shown']!r} clipboard={clip['text']!r} "
+        f"page after the copy={attempt['after']!r}; last clipboard read raised: "
+        f"{clip['raised']!r}",
     )
     assert info.target not in {r[2] for r in copied}, (
         f"the filtered-out info line {info.target} reached the clipboard: {copied!r}"

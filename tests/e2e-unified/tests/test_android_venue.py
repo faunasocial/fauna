@@ -374,6 +374,33 @@ def test_the_emulator_agent_runs_the_venue_avd_headless():
     assert "-no-window" in argv
 
 
+def test_the_play_agent_runs_the_play_avd_headless_on_its_own_port():
+    plists = _agent_plists(android_venue.play_launch_agent())
+    assert list(plists) == [android_venue.PLAY_AGENT_LABEL]
+    plist = plists[android_venue.PLAY_AGENT_LABEL]
+    assert plist["RunAtLoad"] is True and plist["KeepAlive"] is True
+    argv = plist["ProgramArguments"]
+    assert argv[0].startswith("/")
+    assert argv[argv.index("-avd") + 1] == android_venue.PLAY_AVD_NAME == "fauna-e2e-play"
+    assert argv[argv.index("-port") + 1] == "5556"
+    assert android_venue.PLAY_SERIAL == "emulator-5556"
+    for flag in ("-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot"):
+        assert flag in argv
+
+
+def test_the_play_agent_is_its_own_script_and_the_main_set_stays_three():
+    main = android_venue.launch_agents("user", "10.0.0.2")
+    assert len(_agent_plists(main)) == 3
+    assert len(android_venue.AGENT_LABELS) == 3
+    assert android_venue.PLAY_AGENT_LABEL not in _agent_plists(main)
+    assert android_venue.PLAY_AGENT_LABEL not in android_venue.AGENT_LABELS
+    play = android_venue.play_launch_agent()
+    assert "launchctl bootstrap gui/$(id -u)" in play
+    # By the labels the script WRITES: the emulator agent's label is a prefix of
+    # the Play agent's, so a substring check could never tell them apart.
+    assert not set(android_venue.AGENT_LABELS) & set(_agent_plists(play))
+
+
 def test_agent_arguments_that_are_not_plain_words_are_refused():
     with pytest.raises(android_venue.AndroidVenueError):
         android_venue.launch_agents("user", "$(id)")
@@ -458,6 +485,19 @@ def test_a_ready_device_reads_up_and_names_it(probe_adb):
     )
 
 
+def test_the_play_probe_names_the_play_serial_not_just_the_venue(probe_adb):
+    answer, _ = probe_adb
+    answer("List of devices attached\nemulator-5554\tdevice\n")
+    up, line = android_venue.probe_play()
+    assert not up and "emulator-5556" in line and "emulator-5554" in line
+    answer("List of devices attached\nemulator-5554\tdevice\nemulator-5556\tdevice\n")
+    assert android_venue.probe_play() == (
+        True, f"Play emulator up: {android_venue.ADB_SERVER_SPEC} serves emulator-5556")
+    answer("", rc=1)
+    up, line = android_venue.probe_play()
+    assert not up and line.startswith("Play emulator down")
+
+
 def test_no_adb_at_all_reads_unknown_never_raises(tmp_path, monkeypatch):
     # Off PATH is not enough: `adb_argv` falls back to `$ANDROID_HOME/
     # platform-tools`, `$ANDROID_SDK_ROOT` and `~/android-sdk`, all present on
@@ -472,6 +512,7 @@ def test_no_adb_at_all_reads_unknown_never_raises(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("recipe, argument", [
     ("android-venue-agents", "--agents"), ("android-venue-probe", "--probe"),
+    ("android-venue-play-agent", "--play-agent"),
 ])
 def test_the_venue_recipes_run_this_module(recipe, argument):
     with open(os.path.join(_REPO_ROOT, "justfile"), encoding="utf-8") as fh:

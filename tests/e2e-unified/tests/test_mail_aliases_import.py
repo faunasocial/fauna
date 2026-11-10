@@ -210,6 +210,23 @@ def test_import_addresses_reports_and_relists(logged_in_app, test_user, nest_ins
                 f"error: {app.mail_aliases.page_error_text(timeout=2.0)!r}"
             )
 
+            # Outcome 34 (mail-aliases.md § Bulk import): the sheet stayed open
+            # on submit — the result above rendered in place, beside the
+            # still-present textarea — and a reopened sheet greets a fresh
+            # paste with no previous batch's summary.
+            assert app.driver.is_visible("mail-aliases-import-textarea"), (
+                "the import sheet should stay open on submit with its result in "
+                f"place; diagnose={app.driver.diagnose('mail-aliases-import-textarea')!r}"
+            )
+            app.mail_aliases.cancel_import()
+            app.driver.click("mail-aliases-import-button")
+            app.driver.wait_for("mail-aliases-import-textarea", timeout=10.0)
+            assert app.driver.is_absent("mail-aliases-import-result"), (
+                "a reopened import sheet should carry no previous result; got "
+                f"{app.driver.get_text('mail-aliases-import-result')!r}"
+            )
+            app.mail_aliases.cancel_import()
+
             # Ground truth over the same user WS-RPC surface: both the
             # already-existing and newly-created addresses are present; the
             # malformed line produced no alias.

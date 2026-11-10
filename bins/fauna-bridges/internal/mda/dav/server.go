@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/httpdrain"
 )
 
 // readHeaderTimeout is the per-request header-read deadline. DAV PROPFIND
@@ -77,7 +79,10 @@ func NewServer(cfg ServerConfig, mounts ...Mount) *Server {
 		mux.Handle(m.Pattern, m.Handler)
 	}
 	inner := &http.Server{
-		Handler:           mux,
+		// The drain discards (never buffers) what a refused request left of its
+		// body — davauth's anonymous 401 comes before any body byte is read — so
+		// a Connection: close client gets the 401 rather than a reset.
+		Handler:           httpdrain.Handler(mux),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

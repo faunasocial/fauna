@@ -53,6 +53,11 @@ zeroize = { workspace = true }
 # the `uniffi` feature forwards `fauna-client-moderation/uniffi` so the session's
 # reader can return `QueueRow`/`LocalDetection` as `uniffi::Record`s cross-crate).
 fauna-client-moderation = { path = "../fauna-client-moderation" }
+# The offline gate's `is_online` verdict, read by the MLS offline composer so a
+# send queues exactly when the gate keeps the control live
+# (`devices.md` § Offline compose). Already in the graph through
+# `fauna-client-moderation`, declared the same featureless way.
+fauna-protocol = { path = "../fauna-protocol", default-features = false }
 # `fauna-mls` backs `FaunaMlsBackend` (encrypt/decrypt, group lifecycle,
 # keypackages, welcome). Per-target feature plumbing mirrors
 # `fauna-client-email`'s `fauna-protocol`: declared featureless in the base

@@ -33,12 +33,20 @@ public partial class AccountSwitcherViewModel : ViewModelBase
 {
     private readonly IFfiAccountRegistry _registry;
 
-    // Erase an account's scoped content stores (MLS, drafts, backup) when it is
-    // removed — § Erasure follows scope. Injected so unit tests exercise Remove
-    // without touching the real profile / native FFI; production and e2e get the
-    // real AccountStateDir.EraseWhenStoppedAsync by default, so a page cannot
-    // forget to wire it — nor the wait for the account's store to stop first.
-    private readonly Func<string, Task> _eraseAccountState;
+    // The whole remove-account gesture — `fauna-ffi`'s `remove_account_gesture`:
+    // the ask, the snapshot-and-remove, this machine's retirement on the removed
+    // account's nest, the erase (account-scoping.md § Erasure follows scope →
+    // "Removing an account retires this machine from it, as a sign-out does").
+    // `null` = removed, a refusal = paint its line, a throw = the registry refused.
+    // Required, so a page cannot forget to wire it: the page passes
+    // AccountStateDir.RemoveAccountGestureAsync over the app's one registry
+    // builder (Core cannot build a registry), and unit tests pass a fake.
+    private readonly Func<string, Task<FfiEraseRemoveBlocked?>> _removeAccount;
+
+    // The accounts whose gesture is in flight. A press on one of them does nothing:
+    // its removal is already running, and a second gesture would meet an account
+    // the first has taken out of the registry and paint that as an error.
+    private readonly HashSet<string> _removing = new();
 
     /// <summary>The accounts held on this client install, in the registry's add order — one
     /// <c>account-switcher-item</c> row each. Reconciled in place (never replaced), so the
@@ -80,20 +88,12 @@ public partial class AccountSwitcherViewModel : ViewModelBase
     /// </summary>
     public Func<Task<bool>>? ConfirmReauth { get; set; }
 
-    // The shared remove-account door (`fauna-ffi`'s `remove_account_blocked`): is
-    // this account one this window serves, or one another live instance serves?
-    // Injected for the same reason as the erase above; production asks through
-    // AccountStateDir, which names the two bases the erase sweeps.
-    private readonly Func<string, FfiEraseRemoveBlocked?> _removeAccountBlocked;
-
     internal AccountSwitcherViewModel(
         IFfiAccountRegistry registry,
-        Func<string, Task>? eraseAccountState = null,
-        Func<string, FfiEraseRemoveBlocked?>? removeAccountBlocked = null)
+        Func<string, Task<FfiEraseRemoveBlocked?>> removeAccount)
     {
         _registry = registry;
-        _eraseAccountState = eraseAccountState ?? Services.AccountStateDir.EraseWhenStoppedAsync;
-        _removeAccountBlocked = removeAccountBlocked ?? Services.AccountStateDir.RemoveAccountBlocked;
+        _removeAccount = removeAccount;
     }
 
     /// <summary>
@@ -148,62 +148,71 @@ public partial class AccountSwitcherViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Drop an account from this install (its per-actor slots + index entry), then re-render.
-    /// No confirmation dialog — matching every sibling client; the identity itself is not
-    /// destroyed, it is only forgotten here, and the user can re-add it by importing the
-    /// secret.
+    /// Remove an account from this install, then re-render. No confirmation dialog —
+    /// matching every sibling client; the identity itself is not destroyed, it is only
+    /// forgotten here, and the user can re-add it by importing the secret.
+    ///
+    /// <para><b>One call, the whole gesture</b> (<c>account-scoping.md</c> § Erasure follows
+    /// scope → <i>Removing an account retires this machine from it, as a sign-out does</i>):
+    /// the shared <c>remove_account_gesture</c> asks the remove door, snapshots and removes the
+    /// registry entry (its per-actor slots and index entry), retires this machine's enrollment
+    /// on the removed account's nest over that snapshot, and erases the account's scoped
+    /// stores (MLS, drafts, backup) — in that order, the order being the part a shell could
+    /// get wrong.</para>
     ///
     /// <para>Only ever offered on rows other than the account this window serves
-    /// (<see cref="AccountRowVm.CanRemove"/>), so this never has to re-route a live session:
-    /// the shared <c>remove()</c> promotes the first remaining account, but the running client
-    /// would still be authenticated as the removed one. Because removing another account does
-    /// not switch, nothing rebuilds the page — the refresh below is what updates the
-    /// already-navigated list. A remove that reaches here anyway is still refused by the
-    /// shared door below, which also refuses an account a sibling instance serves.</para>
+    /// (<see cref="AccountRowVm.CanRemove"/>), so this never has to re-route a live session.
+    /// Because removing another account does not switch, nothing rebuilds the page — the
+    /// refresh below is what updates the already-navigated list. A remove that reaches here
+    /// anyway is refused by the gesture's own first step, which also refuses an account a
+    /// sibling instance serves; each refusal paints its own line.</para>
     ///
-    /// <para><b>Async because the erase waits.</b> The account being removed may be the
-    /// one this window served a moment ago, and its store stops only after the switch
-    /// away from it has returned; the erase waits for that stop (bounded) rather than
-    /// meeting a store windows cannot delete. The row goes as soon as the registry has
-    /// removed the account, so the wait never leaves a removable row on screen.</para>
+    /// <para><b>Async because the gesture waits, and the row goes when it returns.</b> The
+    /// account being removed may be the one this window served a moment ago, and its store
+    /// stops only after the switch away from it has returned; on windows the gesture first
+    /// waits for that stop (bounded), then retires this machine within its own budget. The
+    /// row stays on screen meanwhile, and a second press on it does nothing.</para>
     /// </summary>
     [RelayCommand]
     public async Task RemoveAsync(string actorId)
     {
-        SetError(null);
-        // Ask the shared door BEFORE the registry removal, which drops the account's
-        // secret slots — a refusal after it would strand the scopes on disk with
-        // nothing left to sign in to them. ServedHere (this window runs from the
-        // account's stores) and ServedElsewhere (another live instance does) each
-        // carry their own line, because each names a different remedy.
-        var blocked = _removeAccountBlocked(actorId);
-        if (blocked is not null)
+        if (!_removing.Add(actorId))
         {
-            SetError(Strings.Resolve(blocked switch
-            {
-                FfiEraseRemoveBlocked.ServedHere here => here.@line,
-                FfiEraseRemoveBlocked.ServedElsewhere elsewhere => elsewhere.@line,
-                _ => throw new InvalidOperationException($"unknown refusal {blocked}"),
-            }));
             return;
         }
         try
         {
-            _registry.Remove(actorId);
+            SetError(null);
+            FfiEraseRemoveBlocked? blocked;
+            try
+            {
+                // No ConfigureAwait(false): the continuation below is UI-bound.
+                blocked = await _removeAccount(actorId);
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+                return;
+            }
+            if (blocked is not null)
+            {
+                // ServedHere (this window runs from the account's stores) and
+                // ServedElsewhere (another live instance does) each carry their own
+                // line, because each names a different remedy.
+                SetError(Strings.Resolve(blocked switch
+                {
+                    FfiEraseRemoveBlocked.ServedHere here => here.@line,
+                    FfiEraseRemoveBlocked.ServedElsewhere elsewhere => elsewhere.@line,
+                    _ => throw new InvalidOperationException($"unknown refusal {blocked}"),
+                }));
+                return;
+            }
+            Refresh();
         }
-        catch (Exception ex)
+        finally
         {
-            ShowError(ex);
-            return;
+            _removing.Remove(actorId);
         }
-        Refresh();
-        // Erasure follows scope (account-scoping.md § Erasure follows scope):
-        // forgetting an account drops its per-actor slots + index entry above, so
-        // its content stores (MLS, drafts, backup) must go too — leaving them
-        // readable would be the same leak as leaving its secret in the store. Runs
-        // only after a SUCCESSFUL registry remove (a rejection returned above).
-        // No ConfigureAwait(false): the caller's continuation is UI-bound.
-        await _eraseAccountState(actorId);
     }
 
     /// <summary>

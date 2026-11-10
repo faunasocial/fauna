@@ -68,14 +68,86 @@ class Actions
     private void Gate(string route, string id, int index, AutomationElement el)
         => _gate.Check(route, id, index, LiveEnabled(el));
 
+    /// <summary>The registry's <c>actuable</c> predicate (<see cref="RegistrySnapshot"/>):
+    /// the element exposes a UIA activation pattern. Throws on an unreadable
+    /// property — each caller picks the default its own question needs.</summary>
+    private static bool ActuableOf(AutomationElement el)
+        => el.Patterns.Invoke.IsSupported
+            || el.Patterns.Toggle.IsSupported
+            || el.Patterns.SelectionItem.IsSupported
+            || el.Patterns.ExpandCollapse.IsSupported;
+
+    /// <summary>The registry's <c>editable</c> predicate: a writable ValuePattern.
+    /// Throws on an unreadable property, like <see cref="ActuableOf"/>.</summary>
+    private static bool EditableOf(AutomationElement el)
+        => el.Patterns.Value.IsSupported && !el.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
+
+    /// <summary>Can <paramref name="el"/> take keyboard focus? An unreadable property
+    /// answers YES: <see cref="InertGesture"/> refuses only what is provably
+    /// unreachable, and a failed cross-process read proves nothing.</summary>
+    private static bool KeyboardFocusable(AutomationElement el)
+    {
+        try { return el.Properties.IsKeyboardFocusable.ValueOrDefault; }
+        catch { return true; }
+    }
+
+    /// <summary>Does <paramref name="el"/> hold any UIA child? Unreadable answers
+    /// YES, for the same reason as <see cref="KeyboardFocusable"/>.</summary>
+    private static bool HasChildren(AutomationElement el)
+    {
+        try { return el.FindFirstChild() is not null; }
+        catch { return true; }
+    }
+
+    /// <summary>Is <paramref name="el"/> or any ancestor up to the main window
+    /// actuable or editable? Stops at the window root, as <see cref="ScopeOf"/> does.
+    /// Any unreadable step answers YES (never evidence of inertness).</summary>
+    private bool ChainActivates(AutomationElement el)
+    {
+        IntPtr rootHwnd;
+        try { rootHwnd = (IntPtr)_session.RootElement.Properties.NativeWindowHandle.ValueOrDefault; }
+        catch { return true; }
+        AutomationElement? cur = el;
+        for (int i = 0; cur is not null && i < 64; i++)
+        {
+            try
+            {
+                if (rootHwnd != IntPtr.Zero
+                    && (IntPtr)cur.Properties.NativeWindowHandle.ValueOrDefault == rootHwnd)
+                    return false;
+                if (ActuableOf(cur) || EditableOf(cur)) return true;
+                cur = cur.Parent;
+            }
+            catch { return true; }
+        }
+        return cur is not null;
+    }
+
+    /// <summary>Refuse a click on a text label nothing can activate
+    /// (<see cref="InertGesture.ClickReachesNothing"/>). Reads the control type
+    /// first, so a click on anything but a text element — nearly every click —
+    /// pays one property read and no ancestor walk.</summary>
+    private void RefuseInertClick(string id, int index, AutomationElement el)
+    {
+        bool isText;
+        try { isText = el.ControlType == FlaUI.Core.Definitions.ControlType.Text; }
+        catch { return; }
+        if (!isText) return;
+        if (InertGesture.ClickReachesNothing(
+                isText, KeyboardFocusable(el), HasChildren(el), ChainActivates(el)))
+            throw new NotActuableException("click", id, index, InertGesture.ClickWhy);
+    }
+
     public void Click(string id, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
     {
         // Prefer InvokePattern / Toggle / SelectionItem — these don't require the
         // target window to be foreground. FlaUI's physical Click() uses mouse
         // SendInput which fails with UIA "Access is denied" when the FaunaApp
         // window is behind another app (common in long test runs on a shared
-        // desktop). Fall back to physical click only when no invocation pattern
-        // is available.
+        // desktop), and always on a disconnected automation session. Fall back to
+        // physical click only when no invocation pattern is available — and not
+        // even then on a text label nothing above it can activate, which is
+        // refused "not actuable" instead (RefuseInertClick).
         //
         // Retry-on-disabled: a previous click may have toggled state that
         // re-enables this element (e.g. unchecking dns-same-provider-checkbox
@@ -102,6 +174,11 @@ class Actions
                 Thread.Sleep(50);
                 continue;
             }
+            // Structural before state, tui's order (e2e-conventions.md § convention
+            // 11): a text label no click can reach is "not actuable" — a different
+            // bug class from a disabled control — and is refused before the
+            // enabled gate reads it (InertGesture).
+            RefuseInertClick(id, index, el);
             // Convention 11's gate rides the SAME window the retry above describes,
             // rather than firing on the first disabled read. That is not leniency:
             // the retry exists because a legitimate chain (toggle → TwoWay binding →
@@ -466,11 +543,11 @@ class Actions
         {
             while (DateTime.UtcNow < scanDeadline && match is null)
             {
-                // An option is named by its Name or by its AutomationId. Most pickers
-                // carry their stable key as the Name; one whose Name is the label it
-                // paints (`feed-factor-select` — a trained topic reads by the name the
-                // user gave it) carries the key as the item's AutomationId instead, so
-                // `select(id, key)` names the same thing on every picker. The key is
+                // An option is named by its AutomationId or by its Name. A keyed
+                // picker option (FaunaApp's Helpers/PickerOption.cs) paints its label
+                // as its Name and carries its stable key as its AutomationId, so
+                // `select(id, key)` names the same thing as on every other app; an
+                // option with no key is named by the label it paints. The key is
                 // tried first across the scan: a key names one item, a label may not.
                 var candidates = el.FindAllDescendants(
                     cf.ByControlType(FlaUI.Core.Definitions.ControlType.ListItem));
@@ -793,6 +870,14 @@ class Actions
     public void PressKey(string id, string key, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
     {
         var el = Find(id, index, scope);
+        // A key is routed from the focused element up through its ancestors, so an
+        // element that takes no focus and holds nothing that can is on no key's
+        // route. Injecting anyway sends the key to whatever else holds focus — an
+        // Enter "on" the critical-alert row pressed whichever button had it — so
+        // the gesture is refused "not actuable", as tui and linux refuse a key on
+        // an inert element (InertGesture).
+        if (InertGesture.KeyReachesNothing(KeyboardFocusable(el), HasChildren(el)))
+            throw new NotActuableException($"press_key \"{key}\"", id, index, InertGesture.KeyWhy);
         var vk = key.ToLowerInvariant() switch
         {
             "enter" or "return" => VirtualKeyShort.ENTER,
@@ -832,8 +917,9 @@ class Actions
     ///   * <c>"name"</c> — <c>AutomationProperties.Name</c>.
     ///   * <c>"checked"</c> — the element's HelpText when it publishes one, else
     ///     <c>"true"</c> / <c>"false"</c> off its TogglePattern.
-    ///   * <c>"options"</c> — a ComboBox's items as a JSON array of their Names,
-    ///     in model order (<see cref="OptionsJson"/>); <c>null</c> on a non-ComboBox.
+    ///   * <c>"options"</c> — a ComboBox's items as a JSON array of their Names —
+    ///     the labels they paint — in model order (<see cref="OptionsJson"/>);
+    ///     <c>null</c> on a non-ComboBox.
     ///   * any other key — <c>AutomationProperties.HelpText</c> (UIA exposes
     ///     a single application-supplied free-text channel per element). An element
     ///     publishing several attributes packs them there as <c>key=value</c> pairs
@@ -1008,11 +1094,20 @@ class Actions
                 // uses as the `selected` channel — so a missing case here would
                 // not fail, it would quietly answer the WRONG element state.
                 //
-                // Centre-of-element, not area-overlap: `VisibleFraction` exists
-                // for the "substantially visible" question (`ScrollIntoViewFraction`),
+                // Centre-of-element, not a visible share: `MakeWhole` answers the
+                // "substantially visible" question (`ScrollIntoViewFraction`),
                 // and a half-clipped row at the edge of the band is genuinely
-                // "in view" for this contract while its area fraction is not.
+                // "in view" for this contract while its share is not.
                 // No scrolling — a read, never a gesture.
+                //
+                // The centre is the WHOLE element's, and WinUI clips the UIA rect
+                // to the ScrollViewer, so a sliver's rect is a small element
+                // wholly in view. The answer is therefore given only once both of
+                // the reading's edges are proven the element's own
+                // (`ScrollPolicy.ReadInViewport`); a reading that cannot be proven
+                // whole without moving the list answers `undecided: <why>`, which
+                // the driver raises as `ViewportUndecided` — never `true`, which is
+                // what a 28 % sliver read until 2026-11-06.
                 {
                     try
                     {
@@ -1020,12 +1115,13 @@ class Actions
                         // No scroller above it: nothing can have scrolled it out
                         // of view, so UIA's own offscreen bit is the whole answer.
                         if (viewport is null) return el.IsOffscreen ? "false" : "true";
-                        var r = el.BoundingRectangle;
-                        var vp = viewport.BoundingRectangle;
-                        if (r.Height <= 0 || vp.Height <= 0) return "false";
-                        var centre = r.Y + (r.Height / 2.0);
-                        var inBand = centre >= vp.Y && centre <= vp.Y + vp.Height;
-                        return inBand && !el.IsOffscreen ? "true" : "false";
+                        var (verdict, why) = ReadInViewport(el, viewport);
+                        return verdict switch
+                        {
+                            ScrollPolicy.ViewportVerdict.InView => "true",
+                            ScrollPolicy.ViewportVerdict.OutOfView => "false",
+                            _ => $"undecided: {why}",
+                        };
                     }
                     catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
                 }
@@ -1209,22 +1305,14 @@ class Actions
             bool enabled;
             try { enabled = el.IsEnabled; } catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { enabled = false; }
 
+            // The same two predicates the inert-click refusal walks
+            // (InertGesture), so /registry and a refused click cannot disagree.
             bool actuable = false;
-            try
-            {
-                actuable = el.Patterns.Invoke.IsSupported
-                    || el.Patterns.Toggle.IsSupported
-                    || el.Patterns.SelectionItem.IsSupported
-                    || el.Patterns.ExpandCollapse.IsSupported;
-            }
+            try { actuable = ActuableOf(el); }
             catch { }
 
             bool editable = false;
-            try
-            {
-                editable = el.Patterns.Value.IsSupported
-                    && !el.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
-            }
+            try { editable = EditableOf(el); }
             catch { }
 
             bool declaresEnabled = false;
@@ -1437,9 +1525,22 @@ class Actions
     /// ~2 s" is refuted, and the step COUNT, not the read count, is the whole
     /// budget. Do not add steps to buy precision; buy
     /// it from the reads.</para>
+    ///
+    /// <para>"On screen" here is UIA's: any sliver. The base driver's <c>scroll_to</c>
+    /// contract (centre, whole element) is <see cref="ScrollIntoViewWhole"/>, which runs
+    /// this and then <see cref="MakeWhole"/>.</para>
     /// </summary>
     public bool ScrollIntoView(string id, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
+        => Reveal(id, index, scope, out _, out _);
+
+    /// <summary><see cref="ScrollIntoView"/>'s body, also handing back the element it
+    /// found (null when it is not in the tree) and the scrollable ancestor its sweep
+    /// moved (null when it never needed one).</summary>
+    private bool Reveal(string id, int index, IReadOnlyList<ScopeStep>? scope,
+        out AutomationElement? foundEl, out AutomationElement? scroller)
     {
+        foundEl = null;
+        scroller = null;
         var total = System.Diagnostics.Stopwatch.StartNew();
         var phase = System.Diagnostics.Stopwatch.StartNew();
         var steps = 0;
@@ -1461,6 +1562,7 @@ class Actions
             var elements = ElementFinder.FindAll(scoped, cf, id);
             if (elements.Length <= index) return false;
             var el = elements[index];
+            foundEl = el;
             if (!el.IsOffscreen) { outcome = "already-visible"; return true; }
             find = phase.ElapsedMilliseconds; phase.Restart();
 
@@ -1479,6 +1581,7 @@ class Actions
             // 2. Sweep the nearest vertically-scrollable ancestor.
             var container = FindScrollableAncestor(el);
             if (container is null) { outcome = "no-scrollable-ancestor"; return !el.IsOffscreen; }
+            scroller = container;
             var sp = container.Patterns.Scroll.Pattern;
             if (!sp.VerticallyScrollable.ValueOrDefault) { outcome = "not-scrollable"; return !el.IsOffscreen; }
             ancestor = phase.ElapsedMilliseconds; phase.Restart();
@@ -1777,96 +1880,548 @@ class Actions
     }
 
     /// <summary>
-    /// Bring an element into the viewport of its nearest scrollable ancestor until
-    /// at least <paramref name="minFraction"/> of its own bounding-rect AREA overlaps
-    /// the ancestor's viewport rect — not merely "any part visible", which is all
-    /// <see cref="ScrollIntoView"/> (and UIA's own <c>IsOffscreen</c>) guarantee.
-    /// <c>IsOffscreen</c> flips false as soon as a small sliver enters the viewport
-    /// (empirically as low as ~25% in a typical feed post-card layout, traced live),
-    /// so a caller that needs a specific mid-list visibility — e.g. a dwell test
-    /// proving a real "substantially visible" exposure, not merely "on screen at
-    /// all" — has had no primitive to reach for; this is that
-    /// primitive.
+    /// The measured scroll behind <c>POST /element/scroll-into-view-fraction</c>
+    /// (<c>scroll_to_visible_fraction</c>): <see cref="ScrollIntoViewWhole"/>, answered as
+    /// the share of the element's TRUE height that then shows — 1.0 once it is whole.
+    /// <c>IsOffscreen</c> flips false as soon as a sliver enters the viewport, and
+    /// WinUI's clipped rect reads that sliver as whole, so this used to answer 1.0 for
+    /// 20 % of a post-card and never move it (measured 2026-11-06); the share
+    /// now comes from a whole reading's height (<see cref="ScrollPolicy.VisibleShare"/>).
     ///
-    /// A <c>SetScrollPercent</c> sweep too, but deliberately its OWN fixed 5% step —
-    /// NOT <see cref="ScrollIntoView"/>'s <see cref="ScrollPolicy.SweepStepViewportFraction"/>
-    /// policy. That policy is sized for DISCOVERY (any part onscreen is a hit,
-    /// so a step of a full viewport is provably gap-free); this method's exit
-    /// condition is a measured AREA fraction, where the step size directly bounds
-    /// measurement precision — a step here jumps the achieved-fraction reading by
-    /// up to a whole step's worth between samples, so shrinking it trades cost for
-    /// precision the same way the sweep's step trades cost for discovery margin,
-    /// just against a different threshold. Returns the achieved fraction once the
-    /// sweep ends (whether or not the threshold was reached), or null when the
-    /// element itself is never found.
+    /// <para>Bringing the element in whole is the most any scroll can show, so there is no
+    /// lesser stop to aim at: <paramref name="minFraction"/>, the caller's threshold, only
+    /// reaches the trace, and the caller judges the share it gets back. Null when the
+    /// element is not in the tree.</para>
     /// </summary>
-    public double? ScrollIntoViewFraction(
+    public WholeOutcome? ScrollIntoViewFraction(
         string id, double minFraction, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
     {
+        T($"scroll-into-view-fraction {id}[{index}]: asked for at least {minFraction:0.##}");
+        return ScrollIntoViewWhole(id, index, scope);
+    }
+
+    /// <summary>What <see cref="ScrollIntoViewWhole"/> did: whether the element came on
+    /// screen at all, what <see cref="MakeWhole"/> proved about it, the share of its TRUE
+    /// height that then shows (null when that height is unknown — taller than the
+    /// viewport, or never proven), how many scroll moves it took, and why it stopped.</summary>
+    public sealed record WholeOutcome(
+        bool OnScreen, ScrollPolicy.WholeVerdict Verdict, double? Fraction, int Moves, string Detail);
+
+    /// <summary>
+    /// <see cref="ScrollIntoView"/>, then <see cref="MakeWhole"/>: the base driver's
+    /// <c>scroll_to</c> contract (centre, whole element) on windows, behind
+    /// <c>POST /element/scroll-into-view</c> with <c>whole: true</c>. Null when the
+    /// element is not in the tree; <c>OnScreen: false</c> when it is but the reveal
+    /// never brought it on screen.
+    /// </summary>
+    public WholeOutcome? ScrollIntoViewWhole(string id, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
+    {
+        var onScreen = Reveal(id, index, scope, out var el, out var container);
+        if (el is null) return null;
+        if (!onScreen)
+            return new WholeOutcome(false, ScrollPolicy.WholeVerdict.Unknown, 0.0, 0, "never came on screen");
+        var total = System.Diagnostics.Stopwatch.StartNew();
+        WholeOutcome outcome;
         try
         {
-            var root = _session.RootElement;
-            var cf = _session.Automation.ConditionFactory;
-            var scoped = ElementFinder.WalkScope(root, cf, scope);
-            AutomationElement el;
-            try { el = ElementFinder.FindOne(scoped, cf, id, index); }
-            catch (ElementNotFoundException) { return null; }
-
-            var container = FindScrollableAncestor(el);
-            var fraction = VisibleFraction(el, container);
-            if (fraction >= minFraction || container is null) return fraction;
-
-            var sp = container.Patterns.Scroll.Pattern;
-            if (!sp.VerticallyScrollable.ValueOrDefault) return fraction;
-
-            for (double p = 0; p <= 100.0; p += 5.0)
-            {
-                try { sp.SetScrollPercent(-1, p); } // -1 = leave horizontal as-is
-                catch { break; }
-                Thread.Sleep(40);
-                fraction = VisibleFraction(el, container);
-                if (fraction >= minFraction) return fraction;
-            }
-            return fraction;
+            outcome = MakeWhole(el, container);
         }
-        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex))
+        catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e))
         {
-            return null;
+            // Named, as the reveal names its own: the element was on screen a moment ago,
+            // so a swallow here is a lost element, never a measurement.
+            outcome = new WholeOutcome(true, ScrollPolicy.WholeVerdict.Unknown, null, 0,
+                $"threw {e.GetType().Name}: {e.Message.Split('\n')[0]}");
         }
+        T($"scroll-whole {id}[{index}]: {outcome.Verdict} in {outcome.Moves} move(s), "
+          + $"{total.ElapsedMilliseconds}ms, share={(outcome.Fraction is double f ? f.ToString("0.###") : "unmeasured")} "
+          + $"({outcome.Detail})");
+        return outcome;
     }
 
     /// <summary>
-    /// Fraction of <paramref name="el"/>'s own bounding-rect AREA that overlaps
-    /// <paramref name="viewport"/>'s bounding-rect (both screen coordinates) — 0
-    /// when off entirely, 1 when fully inside. Reads only X/Y/Width/Height (the
-    /// members <see cref="DumpNode"/> already relies on) rather than a Rect's
-    /// Left/Right/Top/Bottom, so this makes no new assumption about the FlaUI
-    /// bounding-rect type's surface. <paramref name="viewport"/> null (no
-    /// scrollable ancestor found) falls back to the element's own
-    /// <c>IsOffscreen</c>: 1 if on, 0 if off — the best this primitive can do with
-    /// nothing to measure against.
+    /// Bring an element ALREADY ON SCREEN in whole: centre it in its nearest scrollable
+    /// ancestor, and prove its true extent while doing so.
+    ///
+    /// <para>WinUI clips an element's UIA <c>BoundingRectangle</c> to its
+    /// <c>ScrollViewer</c>, so one reading of a partly hidden card is a smaller card wholly
+    /// on screen — a 28 % sliver measured whole on 2026-11-04, and both the
+    /// reveal and the old measured scroll stopped there. Two readings at different scroll
+    /// positions tell them apart (<see cref="ScrollPolicy.ClassifyMove"/>): a whole element
+    /// keeps its height as both its edges move, a clipped one grows or shrinks, and one
+    /// taller than the viewport does not move at all. So each move centres what the
+    /// reading shows; a sliver takes two (the first uncovers the card, the second centres
+    /// the whole of it), an off-centre whole element one, and one already centred none.
+    /// One reading clear of both edges (<see cref="ScrollPolicy.ClearOfEdges"/>) proves
+    /// its element whole with no move at all. Measured 2026-11-06 on the 600 × 600 feed:
+    /// two moves, about 200 ms, each <c>SetScrollPercent</c> about 11 ms — the ~2 s a
+    /// call the sweep's comments record is gone, so centring always is cheap.</para>
+    ///
+    /// <para>The share it answers is the shown part (a clipped rect's height is exactly
+    /// that) over the true height a whole reading measured
+    /// (<see cref="ScrollPolicy.VisibleShare"/>) — null when no reading proved the true
+    /// height, never a reading over itself.</para>
     /// </summary>
-    private static double VisibleFraction(AutomationElement el, AutomationElement? viewport)
+    private WholeOutcome MakeWhole(AutomationElement el, AutomationElement? container)
     {
-        if (viewport is null) return el.IsOffscreen ? 0.0 : 1.0;
-        double elX, elY, elW, elH;
+        container ??= FindScrollableAncestor(el);
+        // No scroller above it: nothing can have clipped it to a viewport, so UIA's own
+        // offscreen bit is the whole answer (the in-viewport attribute's rule).
+        if (container is null)
+            return new WholeOutcome(true, ScrollPolicy.WholeVerdict.Unknown, el.IsOffscreen ? 0.0 : 1.0, 0,
+                "no scrollable ancestor");
+        var sp = container.Patterns.Scroll.Pattern;
+        if (!sp.VerticallyScrollable.ValueOrDefault)
+            return new WholeOutcome(true, ScrollPolicy.WholeVerdict.Unknown, el.IsOffscreen ? 0.0 : 1.0, 0,
+                "the container does not scroll");
+
+        var band = BandOf(container);
+        var cur = SpanOf(el);
+        if (band.Height <= 0 || cur.Height <= 0)
+            return new WholeOutcome(true, ScrollPolicy.WholeVerdict.Unknown, null, 0,
+                $"no rect to measure (element {cur.Height:0.#} px, viewport {band.Height:0.#} px)");
+        double viewSize;
+        try { viewSize = sp.VerticalViewSize.ValueOrDefault; }
+        catch { viewSize = 0; }
+        var percent = sp.VerticalScrollPercent.ValueOrDefault;
+        var tolerance = ScrollPolicy.CentreTolerance(band.Height);
+        // A reading clear of both edges is the whole element already; it is centred all
+        // the same, the base contract every other driver keeps.
+        double? trueHeight = ScrollPolicy.ClearOfEdges(cur, band) ? cur.Height : null;
+        var spans = false;
+        var moves = 0;
+        var why = "move budget spent";
+        var trail = new System.Text.StringBuilder($"band {band.Top:0.#}+{band.Height:0.#} view-size {viewSize:0.##}%:");
+        trail.Append($" {cur.Top:0.#}+{cur.Height:0.#}@{percent:0.##}%");
+
+        while (true)
+        {
+            var delta = cur.Centre - band.Centre;
+            var whole = trueHeight is double h && cur.Height >= h - ScrollPolicy.SameEdgePx;
+            var nudge = false;
+            if (Math.Abs(delta) <= tolerance)
+            {
+                if (whole) { why = "centred"; break; }
+                if (trueHeight is null && ScrollPolicy.ClearOfEdges(cur, band))
+                {
+                    trueHeight = cur.Height;
+                    why = "centred, clear of both edges";
+                    break;
+                }
+                // Centred and filling most of the band: a small nudge tells a whole element
+                // (it moves) from one spanning the viewport (it does not).
+                delta = (delta >= 0 ? 1 : -1) * tolerance;
+                nudge = true;
+            }
+            if (moves >= ScrollPolicy.MakeWholeMaxMoves) break;
+
+            var target = ScrollPolicy.PercentAfterMove(percent, viewSize, band.Height, delta);
+            if (nudge && Math.Abs(target - percent) < 0.01)
+                target = ScrollPolicy.PercentAfterMove(percent, viewSize, band.Height, -delta);
+            if (Math.Abs(target - percent) < 0.01)
+            {
+                why = "the list cannot move further";
+                break;
+            }
+            sp.SetScrollPercent(-1, target); // -1 = leave horizontal as-is
+            moves++;
+
+            // SetScrollPercent returns before the container has moved (the sweep's own
+            // lesson), and the element's rect follows the layout after that.
+            var achieved = percent;
+            var settle = System.Diagnostics.Stopwatch.StartNew();
+            do
+            {
+                Thread.Sleep(20);
+                achieved = sp.VerticalScrollPercent.ValueOrDefault;
+            }
+            while (!ScrollPolicy.MoveLanded(percent, achieved, target)
+                   && settle.ElapsedMilliseconds < ScrollPolicy.SweepSettleMs);
+            if (Math.Abs(achieved - percent) < 0.01)
+            {
+                why = $"the list did not move toward {target:0.##}%";
+                break;
+            }
+            var next = SettledSpan(el, cur);
+            trail.Append($" → {next.Top:0.#}+{next.Height:0.#}@{achieved:0.##}%");
+            switch (ScrollPolicy.ClassifyMove(cur, next, band))
+            {
+                case ScrollPolicy.WholeVerdict.Whole:
+                    trueHeight = next.Height;
+                    break;
+                case ScrollPolicy.WholeVerdict.SpansViewport:
+                    spans = true;
+                    break;
+            }
+            cur = next;
+            percent = achieved;
+            if (spans) { why = "taller than its viewport"; break; }
+        }
+
+        // At an end of the range a reading on the near half cannot be clipped either.
+        if (trueHeight is null && !spans
+            && ScrollPolicy.AtRangeEnd(cur, band, percent) == ScrollPolicy.WholeVerdict.Whole)
+            trueHeight = cur.Height;
+
+        var detail = $"{why}; {trail}";
+        if (spans)
+            return new WholeOutcome(true, ScrollPolicy.WholeVerdict.SpansViewport, null, moves,
+                $"{detail} — clipped at both edges, so its true height is unknown");
+        if (trueHeight is not double trueH)
+            return new WholeOutcome(true, ScrollPolicy.WholeVerdict.Unknown, null, moves,
+                $"{detail} — no two readings proved its true height");
+        var verdict = cur.Height >= trueH - ScrollPolicy.SameEdgePx
+            ? ScrollPolicy.WholeVerdict.Whole
+            : ScrollPolicy.WholeVerdict.Unknown;
+        return new WholeOutcome(true, verdict, ScrollPolicy.VisibleShare(cur.Height, trueH), moves, detail);
+    }
+
+    /// <summary>What <see cref="ScrollToBottomFraction"/> did: the share of the element's
+    /// TRUE height that shows after the placement (null, with the reason in
+    /// <paramref name="Detail"/>, when no reading proved that height), and how many scroll
+    /// moves the whole reveal and the placement took between them.</summary>
+    public sealed record BottomOutcome(double? Fraction, int Moves, string Detail);
+
+    /// <summary>
+    /// The placement behind <c>POST /element/scroll-to-bottom-fraction</c>
+    /// (<c>scroll_to_bottom_fraction</c>; e2e-conventions.md § Driver primitives →
+    /// <i>Placing an element at a measured fraction</i>): leave
+    /// <paramref name="fraction"/> of the element's own height above its nearest
+    /// scrollable ancestor's bottom edge, by the container's real scroll position, and
+    /// answer the share that then shows.
+    ///
+    /// <para>UIA's rect is clipped to the viewport, so a reading near the bottom edge
+    /// cannot say how tall the element is — and bringing it in whole
+    /// (<see cref="MakeWhole"/>) cannot either when it is taller than the viewport, as a
+    /// playing video card on the 600 × 600 window is. So the placement walks the element's
+    /// edges (<see cref="PlaceAtBottomFraction"/>; the arithmetic is
+    /// <see cref="ScrollPolicy"/>'s): it proves the top its own, calibrates the pixels a
+    /// scroll percent moves from a second reading of it, then proves the bottom and
+    /// measures the true height across the two; then the top is moved to
+    /// <c>fraction · trueHeight</c> above the clip line
+    /// (<see cref="ScrollPolicy.BottomPlacementDelta"/>), which a reading cut short of the
+    /// true height measures (<see cref="ScrollPolicy.ClipBottomOf"/>).</para>
+    ///
+    /// <para>The answer is the shown part over the true height
+    /// (<see cref="ScrollPolicy.VisibleShare"/>), whether or not the asked share was
+    /// reached: a list with too little content above the element cannot scroll it that
+    /// far, and the caller asserts on what was measured. Null when the element is not in
+    /// the tree.</para>
+    /// </summary>
+    public BottomOutcome? ScrollToBottomFraction(
+        string id, double fraction, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
+    {
+        var onScreen = Reveal(id, index, scope, out var el, out var container);
+        if (el is null) return null;
+        if (!onScreen) return new BottomOutcome(null, 0, "never came on screen");
+        var total = System.Diagnostics.Stopwatch.StartNew();
+        BottomOutcome outcome;
         try
         {
-            var r = el.BoundingRectangle;
-            elX = r.X; elY = r.Y; elW = r.Width; elH = r.Height;
+            outcome = PlaceAtBottomFraction(el, container, fraction);
         }
-        catch { return 0.0; }
-        if (elW <= 0 || elH <= 0) return 0.0;
-        double vpX, vpY, vpW, vpH;
+        catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e))
+        {
+            outcome = new BottomOutcome(null, 0, $"threw {e.GetType().Name}: {e.Message.Split('\n')[0]}");
+        }
+        T($"scroll-to-bottom-fraction {id}[{index}]: asked {fraction:0.###}, "
+          + $"share={(outcome.Fraction is double f ? f.ToString("0.###") : "unmeasured")} in {outcome.Moves} move(s), "
+          + $"{total.ElapsedMilliseconds}ms ({outcome.Detail})");
+        return outcome;
+    }
+
+    /// <summary>The edge walk behind <see cref="ScrollToBottomFraction"/>, for an element
+    /// already on screen. Each reading is noted: a top proven its own
+    /// (<see cref="ScrollPolicy.TopOwn"/>) becomes the reference, and with an earlier one
+    /// calibrates the pixels a percent moves; both edges proven at once give the true
+    /// height directly, a bottom proven with the top out of view gives it across the
+    /// reference (<see cref="ScrollPolicy.EdgeAt"/>); a reading whose top is its own but
+    /// which is shorter than the true height measures the clip line. Then each move is
+    /// the next the readings call for: bring the top in, calibrate, bring the bottom in,
+    /// place, correct.</summary>
+    private BottomOutcome PlaceAtBottomFraction(AutomationElement el, AutomationElement? container, double fraction)
+    {
+        container ??= FindScrollableAncestor(el);
+        if (container is null) return new BottomOutcome(null, 0, "no scrollable ancestor");
+        var sp = container.Patterns.Scroll.Pattern;
+        if (!sp.VerticallyScrollable.ValueOrDefault)
+            return new BottomOutcome(null, 0, "the container does not scroll");
+        var band = BandOf(container);
+        var cur = SpanOf(el);
+        if (band.Height <= 0 || cur.Height <= 0)
+            return new BottomOutcome(null, 0,
+                $"no rect to measure (element {cur.Height:0.#} px, viewport {band.Height:0.#} px)");
+        double viewSize;
+        try { viewSize = sp.VerticalViewSize.ValueOrDefault; }
+        catch { viewSize = 0; }
+        var percent = sp.VerticalScrollPercent.ValueOrDefault;
+        var allowance = ScrollPolicy.EdgeAllowance(band.Height);
+        var step = ScrollPolicy.WalkStepPx(band.Height);
+
+        double? pxPerPercent = null, refTop = null, refPercent = null, trueH = null;
+        ScrollPolicy.Span? cutReading = null; // top its own, bottom not yet: its bottom may be the clip
+        var clipBottom = band.Bottom;
+        var moves = 0;
+        var why = "move budget spent";
+        var trail = new System.Text.StringBuilder(
+            $"band {band.Top:0.#}+{band.Height:0.#} view-size {viewSize:0.##}%: {cur.Top:0.#}+{cur.Height:0.#}@{percent:0.##}%");
+
+        void Note()
+        {
+            var topOwn = ScrollPolicy.TopOwn(cur, band, percent);
+            var bottomOwn = ScrollPolicy.BottomOwn(cur, band, percent);
+            if (topOwn)
+            {
+                if (refTop is double t && refPercent is double p
+                    && ScrollPolicy.PxPerPercent(t, p, cur.Top, percent) is double k)
+                    pxPerPercent = k;
+                refTop = cur.Top;
+                refPercent = percent;
+                if (!bottomOwn) cutReading = cur;
+            }
+            if (trueH is null)
+            {
+                if (topOwn && bottomOwn) trueH = cur.Height;
+                else if (bottomOwn && pxPerPercent is double k2 && refTop is double t2 && refPercent is double p2)
+                    trueH = cur.Bottom - ScrollPolicy.EdgeAt(t2, p2, k2, percent);
+            }
+            if (trueH is double h)
+            {
+                if (topOwn && ScrollPolicy.ClipBottomOf(cur, h) is double clip) clipBottom = clip;
+                else if (cutReading is { } cut && ScrollPolicy.ClipBottomOf(cut, h) is double cutClip)
+                    clipBottom = cutClip;
+            }
+        }
+
+        // Move the content up by deltaPx (negative: down), through the calibrated pixels a
+        // percent moves once two readings of the top have measured it; false when the list
+        // did not move.
+        bool MoveBy(double deltaPx)
+        {
+            var target = pxPerPercent is double k
+                ? Math.Clamp(percent + deltaPx / k, 0.0, 100.0)
+                : ScrollPolicy.PercentAfterMove(percent, viewSize, band.Height, deltaPx);
+            if (Math.Abs(target - percent) < 0.01) { why = "the list cannot move further"; return false; }
+            sp.SetScrollPercent(-1, target); // -1 = leave horizontal as-is
+            moves++;
+            // As MakeWhole: SetScrollPercent returns before the container has moved.
+            var achieved = percent;
+            var settle = System.Diagnostics.Stopwatch.StartNew();
+            do
+            {
+                Thread.Sleep(20);
+                achieved = sp.VerticalScrollPercent.ValueOrDefault;
+            }
+            while (!ScrollPolicy.MoveLanded(percent, achieved, target)
+                   && settle.ElapsedMilliseconds < ScrollPolicy.SweepSettleMs);
+            if (Math.Abs(achieved - percent) < 0.01)
+            {
+                why = $"the list did not move toward {target:0.##}%";
+                return false;
+            }
+            cur = SettledSpan(el, cur);
+            percent = achieved;
+            trail.Append($" → {cur.Top:0.#}+{cur.Height:0.#}@{percent:0.##}%");
+            Note();
+            return true;
+        }
+
+        Note();
+        while (true)
+        {
+            if (trueH is double h && cur.Height > 0 && ScrollPolicy.PlacedAt(cur.Height, h, fraction))
+            {
+                why = "placed";
+                break;
+            }
+            if (moves >= ScrollPolicy.BottomPlacementMaxMoves) break;
+            var topOwn = ScrollPolicy.TopOwn(cur, band, percent);
+            double delta;
+            if (trueH is double height)
+            {
+                double top;
+                if (topOwn) top = cur.Top;
+                else if (pxPerPercent is double k && refTop is double t && refPercent is double p)
+                    top = ScrollPolicy.EdgeAt(t, p, k, percent);
+                else { why = "its top is out of view and its position unmeasured"; break; }
+                delta = ScrollPolicy.BottomPlacementDelta(top, height, clipBottom, fraction);
+            }
+            else if (cur.Height <= 0) { why = "it left the viewport before its height was measured"; break; }
+            else if (!topOwn) delta = -step; // bring the top in
+            else if (pxPerPercent is null)
+            {
+                // Calibrate: move the top toward the band's top edge, still its own; one
+                // already there moves down instead.
+                delta = cur.Top - (band.Top + allowance + 2 * ScrollPolicy.SameEdgePx);
+                if (delta < ScrollPolicy.MinCalibrationPx) delta = -Math.Max(ScrollPolicy.MinCalibrationPx, step / 2);
+            }
+            else delta = step; // bring the bottom in
+            if (!MoveBy(delta)) break;
+        }
+
+        if (trueH is not double trueHeight)
+            return new BottomOutcome(null, moves, $"its true height is unknown: {why}; {trail}");
+        var shown = cur.Height > 0 ? cur.Height : 0.0;
+        return new BottomOutcome(ScrollPolicy.VisibleShare(shown, trueHeight), moves,
+            $"{why}; true height {trueHeight:0.#}, clip {clipBottom:0.#}; {trail}");
+    }
+
+    /// <summary>An element's vertical span on screen; empty for a scrolled-out element,
+    /// whose rect UIA reports as zero-sized.</summary>
+    private static ScrollPolicy.Span SpanOf(AutomationElement e)
+    {
+        var r = e.BoundingRectangle;
+        return r.Width > 0 && r.Height > 0 ? new ScrollPolicy.Span(r.Y, r.Height) : new ScrollPolicy.Span(0, 0);
+    }
+
+    /// <summary>The band a scroll container can show: its rect, cut to its top-level
+    /// window's (a container laid out past the window is clipped by it —
+    /// <see cref="DescribeGeometry"/>'s case).</summary>
+    private static ScrollPolicy.Span BandOf(AutomationElement container)
+    {
+        var c = SpanOf(container);
         try
         {
-            var r = viewport.BoundingRectangle;
-            vpX = r.X; vpY = r.Y; vpW = r.Width; vpH = r.Height;
+            var cur = container.Parent;
+            for (var i = 0; i < 40 && cur is not null; i++)
+            {
+                if (cur.ControlType == FlaUI.Core.Definitions.ControlType.Window)
+                {
+                    var w = SpanOf(cur);
+                    if (w.Height <= 0) break;
+                    var top = Math.Max(c.Top, w.Top);
+                    var bottom = Math.Min(c.Bottom, w.Bottom);
+                    return bottom > top ? new ScrollPolicy.Span(top, bottom - top) : new ScrollPolicy.Span(0, 0);
+                }
+                cur = cur.Parent;
+            }
         }
-        catch { return el.IsOffscreen ? 0.0 : 1.0; }
-        var ix = Math.Max(0, Math.Min(elX + elW, vpX + vpW) - Math.Max(elX, vpX));
-        var iy = Math.Max(0, Math.Min(elY + elH, vpY + vpH) - Math.Max(elY, vpY));
-        return (ix * iy) / (elW * elH);
+        catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e)) { }
+        return c;
+    }
+
+    /// <summary>
+    /// The <c>in-viewport</c> attribute's verdict on <paramref name="el"/> inside its
+    /// nearest scroll container, from what the bridge can read without moving the list
+    /// (<see cref="ScrollPolicy.ReadInViewport"/> decides; this only reads). The cheap
+    /// verdict comes first: a reading clear of both edges, or at an end of the range,
+    /// needs nothing else. Only an edge it cannot prove that way sends the read to the
+    /// element's neighbours (<see cref="ReadingsAround"/>), looking for one that reads past it.
+    /// </summary>
+    private (ScrollPolicy.ViewportVerdict Verdict, string Why) ReadInViewport(
+        AutomationElement el, AutomationElement container)
+    {
+        var band = BandOf(container);
+        var reading = SpanOf(el);
+        var offscreen = el.IsOffscreen;
+        (double FromTop, double FromBottom)? range = null;
+        try
+        {
+            var sp = container.Patterns.Scroll.Pattern;
+            range = ScrollPolicy.RangeOffsetsPx(
+                sp.VerticalScrollPercent.ValueOrDefault, sp.VerticalViewSize.ValueOrDefault, band.Height);
+        }
+        catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e)) { }
+
+        var first = ScrollPolicy.ReadInViewport(reading, offscreen, band, range, null, null);
+        if (first.Verdict != ScrollPolicy.ViewportVerdict.Undecided) return first;
+        var needTop = !ScrollPolicy.TopProven(reading, band, range?.FromTop, null);
+        var needBottom = !ScrollPolicy.BottomProven(reading, band, range?.FromBottom, null);
+        var (highestTop, lowestBottom, looked) = ReadingsAround(el, container, reading, needTop, needBottom);
+        var verdict = ScrollPolicy.ReadInViewport(reading, offscreen, band, range, highestTop, lowestBottom);
+        if (verdict.Verdict == ScrollPolicy.ViewportVerdict.Undecided)
+            verdict = (verdict.Verdict, $"{verdict.Why} ({looked} neighbour(s) read)");
+        return verdict;
+    }
+
+    /// <summary>
+    /// The highest top and the lowest bottom that <paramref name="el"/>'s neighbours inside
+    /// <paramref name="container"/> read — the evidence that proves an edge of a reading
+    /// the element's own: WinUI cuts every reading in one scroll container at the same clip
+    /// line, so a neighbour reading past an edge puts the line past it too. Neighbours are
+    /// the element's siblings, then each ancestor below the container and that ancestor's
+    /// siblings, nearest first and bounded (<see cref="ScrollPolicy.EvidenceSiblings"/>,
+    /// <see cref="ScrollPolicy.EvidenceLevels"/>); the walk stops as soon as the edges it
+    /// needs are proven. A scroll bar is the container's frame, not its content, and is
+    /// never clipped with it, so it is never evidence. Also answers how many neighbours
+    /// were read, for the undecided answer's reason.
+    /// </summary>
+    private (double? HighestTop, double? LowestBottom, int Looked) ReadingsAround(
+        AutomationElement el, AutomationElement container, ScrollPolicy.Span reading,
+        bool needTop, bool needBottom)
+    {
+        double? highestTop = null, lowestBottom = null;
+        var looked = 0;
+        bool Proven() =>
+            (!needTop || highestTop is double t && t < reading.Top - ScrollPolicy.SameEdgePx)
+            && (!needBottom || lowestBottom is double b && b > reading.Bottom + ScrollPolicy.SameEdgePx);
+        void Weigh(AutomationElement neighbour)
+        {
+            try
+            {
+                looked++;
+                if (neighbour.ControlType == FlaUI.Core.Definitions.ControlType.ScrollBar) return;
+                var s = SpanOf(neighbour);
+                if (s.Height <= 0) return;
+                highestTop = highestTop is double t ? Math.Min(t, s.Top) : s.Top;
+                lowestBottom = lowestBottom is double b ? Math.Max(b, s.Bottom) : s.Bottom;
+            }
+            catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e)) { }
+        }
+
+        var walker = _session.Automation.TreeWalkerFactory.GetControlViewWalker();
+        var cur = el;
+        for (var level = 0; level < ScrollPolicy.EvidenceLevels && !Proven(); level++)
+        {
+            AutomationElement? parent;
+            try { parent = walker.GetParent(cur); }
+            catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e)) { break; }
+            if (parent is null) break;
+            var parentIsContainer = SameEl(parent, container);
+            // An ancestor below the container is content, clipped with the element.
+            if (!parentIsContainer) Weigh(parent);
+            foreach (var step in new Func<AutomationElement, AutomationElement?>[]
+                     { walker.GetNextSibling, walker.GetPreviousSibling })
+            {
+                AutomationElement? sibling = cur;
+                for (var i = 0; i < ScrollPolicy.EvidenceSiblings && !Proven(); i++)
+                {
+                    try { sibling = step(sibling); }
+                    catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e)) { break; }
+                    if (sibling is null) break;
+                    Weigh(sibling);
+                }
+            }
+            if (parentIsContainer) break;
+            cur = parent;
+        }
+        return (highestTop, lowestBottom, looked);
+    }
+
+    /// <summary>The element's span once the layout has followed a scroll: read until it
+    /// differs from <paramref name="before"/>, then until two reads agree — bounded by
+    /// <see cref="ScrollPolicy.SpanSettleMs"/>, which only an element that does not move
+    /// (one spanning the viewport) pays in full. Each read costs about a millisecond.</summary>
+    private static ScrollPolicy.Span SettledSpan(AutomationElement el, ScrollPolicy.Span before)
+    {
+        static bool Same(ScrollPolicy.Span a, ScrollPolicy.Span b)
+            => Math.Abs(a.Top - b.Top) <= ScrollPolicy.SameEdgePx
+               && Math.Abs(a.Height - b.Height) <= ScrollPolicy.SameEdgePx;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var last = SpanOf(el);
+        while (Same(last, before) && clock.ElapsedMilliseconds < ScrollPolicy.SpanSettleMs)
+        {
+            Thread.Sleep(20);
+            last = SpanOf(el);
+        }
+        while (clock.ElapsedMilliseconds < ScrollPolicy.SpanSettleMs)
+        {
+            Thread.Sleep(40);
+            var again = SpanOf(el);
+            if (Same(again, last)) break;
+            last = again;
+        }
+        return last;
     }
 
     /// <summary>

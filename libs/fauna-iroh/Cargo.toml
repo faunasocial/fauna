@@ -25,17 +25,26 @@ quic = [
     "dep:tokio",
     "dep:fauna-sync-engine",
 ]
+# The offline-share ceremony's transport factory (`ceremony_transport()`),
+# split from `quic` 2026-11-09 because its types live behind
+# `fauna-sync-engine/p2p-share`: under `quic` that forward reached every
+# artifact carrying the same-account peer leg, the store-safe flavors
+# included, so the `p2p-share` member re-entered builds that excise it
+# (`dynamic-features.md` § The App-Store escape hatch). A consumer names
+# this from its own `p2p-share` feature, never from its dep line.
+ceremony = ["quic", "fauna-sync-engine/p2p-share"]
 
 [dependencies]
 fauna-transport = { workspace = true, optional = true }
-# `ceremony_transport()`'s `CeremonyTransportFactory`/`CeremonyBinding` types
-# (`offline_share` — needs both features below). Every `quic`-enabled
-# consumer (tui, linux) already depends on `fauna-sync-engine` directly with
-# these same features, so this adds no new build-graph weight, only a
-# formal edge for the wrapper both apps otherwise hand-rolled identically.
+# `peer_leg_factory()`'s `PeerTransportFactory`/`PeerLegBinding` types
+# (`account_runtime`), and — `ceremony` adding `p2p-share` —
+# `ceremony_transport()`'s `CeremonyTransportFactory`/`CeremonyBinding`
+# (`offline_share` needs both). Every consumer already depends on
+# `fauna-sync-engine` directly with these features, so this adds no new
+# build-graph weight, only a formal edge for the wrappers the apps would
+# otherwise hand-roll identically.
 fauna-sync-engine = { workspace = true, optional = true, features = [
     "account-runtime",
-    "p2p-share",
 ] }
 tokio = { workspace = true, optional = true }
 # iroh + its TLS provider ride the `quic` feature. `tls-ring`, NOT

@@ -466,6 +466,14 @@ impl ArchiveImportMachine {
             self.nest
                 .write_file(&run.folder, MARKER_PATH, encode(&run.marker)?)
                 .await?;
+            // The crash window between the two writes, reachable on demand
+            // (`TestAnchor::StopBeforeRawCopy`; armed in test-capable builds
+            // only, so production never takes this arm).
+            if self.stop_before_raw_copy_due() {
+                return Err(ArchiveImportDispatchError::InvalidState(
+                    "the import stopped before the archive's raw copy was written".into(),
+                ));
+            }
             self.nest
                 .write_file(&run.folder, &raw_path(&run.marker.raw_file_name), bytes)
                 .await?;
@@ -671,7 +679,8 @@ impl ArchiveImportMachine {
                     // Still `Running`; the next iteration's check takes
                     // whichever stop the user's gesture requested.
                     Some(TestAnchor::HoldAfter(_)) => self.stop_requested_wait().await,
-                    None => {}
+                    // Never due by a record count (`test_anchor_due`).
+                    Some(TestAnchor::StopBeforeRawCopy) | None => {}
                 }
             }
         }
@@ -2338,6 +2347,64 @@ mod tests {
         m3.dispatch(Act::Resume).await.unwrap();
         m3.run_import().await.unwrap();
         assert_eq!(nest.read_state(&folder).phase, ImportPhase::Finished);
+    }
+
+    /// The raw-phase anchor stops the run after the marker learned the zip's
+    /// length + hash and before the raw copy exists — so a restart finds the
+    /// import, its Resume asks for the archive back (no raw copy to read),
+    /// and the handed-back zip, checked against that marker, resumes.
+    #[tokio::test]
+    async fn the_stop_before_raw_copy_anchor_leaves_a_folder_whose_resume_asks_for_the_archive() {
+        use crate::nest::ArchiveNest as _;
+        let nest = Arc::new(FakeNest::new());
+        let m = ready_on(nest.clone(), fixture_zip("facebook-json")).await;
+        m.set_stop_before_raw_copy_for_test();
+        m.dispatch(Act::Start).await.unwrap();
+        let err = m.run_import().await.expect_err("the anchor stops the run");
+        assert!(err.to_string().contains("raw copy"), "{err}");
+        assert_eq!(m.snapshot().run_state, Some(RunState::Errored));
+        let folder = m.snapshot().folder_name.expect("folder");
+        let marker: crate::state::ArchiveMarker = fauna_cbor::decode_strict(
+            &nest
+                .read_file(&folder, crate::state::MARKER_PATH)
+                .await
+                .unwrap()
+                .expect("the marker was written"),
+        )
+        .expect("decode marker");
+        assert!(
+            marker.raw_len.is_some() && marker.raw_blake3.is_some(),
+            "{marker:?}"
+        );
+        let raw = crate::state::raw_path(&marker.raw_file_name);
+        assert!(
+            nest.read_file(&folder, &raw).await.unwrap().is_none(),
+            "no raw copy was written"
+        );
+        assert!(!m.stop_before_raw_copy_due(), "the anchor is spent");
+
+        // Another device: the import is found, its Resume asks for the archive.
+        let m2 = machine_over(nest.clone(), fixture_zip("facebook-json"));
+        m2.hydrate().await.unwrap();
+        assert!(m2.snapshot().resume_available);
+        let err = m2
+            .dispatch(Act::Resume)
+            .await
+            .expect_err("no raw copy to read");
+        assert!(err.to_string().contains("open the archive again"), "{err}");
+        m2.dispatch(Act::SetArchivePath {
+            value: ARCHIVE_PATH.into(),
+        })
+        .await
+        .unwrap();
+        m2.dispatch(Act::OpenArchive).await.unwrap();
+        m2.dispatch(Act::Resume).await.unwrap();
+        m2.run_import().await.unwrap();
+        assert_eq!(nest.read_state(&folder).phase, ImportPhase::Finished);
+        assert!(
+            nest.read_file(&folder, &raw).await.unwrap().is_some(),
+            "the resume wrote the raw copy"
+        );
     }
 
     /// Two records carrying one external id inside a model file — a parser

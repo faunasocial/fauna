@@ -89,6 +89,49 @@ pub async fn read_nest_info<R: RpcRequester + ?Sized>(nest: &R) -> Result<NestIn
     Ok(reply)
 }
 
+/// Why an act that may cross nests failed on the client: the nest's own
+/// error, or a signed intent this client could not mint (its nest names no
+/// well-formed id). The follow (`fauna-client-subscriptions`'s `FollowError`)
+/// and the claim redeem (`fauna-client-payments`) share it.
+#[derive(Debug)]
+pub enum CrossNestError<E> {
+    Nest(E),
+    Intent(String),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for CrossNestError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nest(e) => e.fmt(f),
+            Self::Intent(why) => write!(f, "signed intent: {why}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for CrossNestError<E> {}
+
+/// An app-supplied home nest URL as the cross-nest wire carries it: trimmed,
+/// without a trailing slash, `None` when blank (blank means this nest).
+#[must_use]
+pub fn normalize_home_nest_url(home: Option<String>) -> Option<String> {
+    home.map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+}
+
+/// The id of the nest this client is connected to, as `fauna.nest.info`
+/// states it — the `home_nest_id` every cross-nest intent names (the follow's
+/// `FollowIntent`, the redeem's `ClaimRedeemIntent`), which the nest compares
+/// against its own key before relaying. Fixed for the life of a connection, so
+/// it comes off the per-connection memo ([`read_nest_info`]).
+pub async fn read_nest_id<R: RpcRequester + ?Sized>(
+    nest: &R,
+) -> Result<[u8; 32], CrossNestError<R::Error>> {
+    let info = read_nest_info(nest).await.map_err(CrossNestError::Nest)?;
+    fauna_core::hex32::decode(&info.nest_id).map_err(|e| {
+        CrossNestError::Intent(format!("this nest's id is not a 32-byte hex key: {e}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

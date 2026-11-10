@@ -30,6 +30,37 @@ pub enum FeedStatus {
     Error,
 }
 
+/// The like control's state word ([`PostSummary::like_state`]). Serializes
+/// lowercase — the word the `state` attribute carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "lowercase")]
+pub enum LikeState {
+    /// The viewer likes the post; nothing of it is queued.
+    On,
+    /// The viewer does not like the post; nothing of it is queued.
+    #[default]
+    Off,
+    /// A like or unlike of the post waits (or is held) in the outbox; the
+    /// control toggles as ever, the compensating intent queueing behind.
+    Queued,
+    /// A like or unlike of the post was refused by the nest and parked;
+    /// activating the control retries it, discard lives in the list.
+    Unsent,
+}
+
+impl LikeState {
+    /// The `state` attribute's word.
+    pub fn word(self) -> &'static str {
+        match self {
+            LikeState::On => "on",
+            LikeState::Off => "off",
+            LikeState::Queued => "queued",
+            LikeState::Unsent => "unsent",
+        }
+    }
+}
+
 /// Which empty state the Feed page shows — the answer of
 /// [`FeedSnapshot::empty_state`] (`feed.md` § Errors & edge cases: two
 /// elements, at most one present at a time). Serializes as its variant name
@@ -250,6 +281,15 @@ pub struct PostSummary {
     /// per-app consumption is a follow-on (`feed.md` § Interaction bar →
     /// Repost). `false` when the viewer has not liked the post.
     pub viewer_liked: bool,
+    /// The like control's state word — `feed-like-button`'s `state`
+    /// attribute (`account-offline-mutation.md` § The offline-mutation
+    /// contract → *The unsent-changes surface*, point 2): `on`/`off` from
+    /// [`viewer_liked`](Self::viewer_liked), or `queued` / `unsent` while a
+    /// like or unlike of this post rests in the device's outbox. Derived by
+    /// the manager at every [`crate::FeedManager::snapshot`] from the outbox's
+    /// `posts.interact:<post_id>` scope, so no app decides it.
+    #[serde(default)]
+    pub like_state: LikeState,
     /// The first media attachment's blob hash (64-hex), resolved lazily by
     /// [`crate::FeedManager::resolve_media`] for a `has_media` post — drives the
     /// `post-image` render. `None` until resolved (the feed-index projection

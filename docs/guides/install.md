@@ -65,7 +65,9 @@ Details: [`apps/fauna-apple/README.md`](../../apps/fauna-apple/README.md).
 
 ### Android (Jetpack Compose)
 
-Needs JDK 21 + the Android SDK — setup walkthrough in
+**Installing from Google Play.** If the project invited you to test the Android app, you don't need to build it: open the link in your invitation on your Android phone, signed in to Google with the account the invitation was sent to, accept the invitation, and install Fauna from Google Play through the link on that page. Only the Google accounts the project invited can install it this way.
+
+**Building from source** instead needs JDK 21 + the Android SDK — setup walkthrough in
 [`apps/fauna-android/BUILD-SETUP.md`](../../apps/fauna-android/BUILD-SETUP.md).
 
 ```sh
@@ -126,9 +128,11 @@ on the **Stable** channel.
 
 ## The server
 
-The nest server is its own guide: [on the internet](nest-internet-setup.md)
-or [at home](nest-home-setup.md).
-For development, `just docker-run` builds and runs a local nest container with the web app at `https://localhost:3443/app/`.
+The nest server is its own guide: [on the internet](nest-internet-setup.md) or [at home](nest-home-setup.md). Both run the nest from the project's container image, the recommended way to run a nest on a server. For development, `just docker-run` builds and runs a local nest container with the web app at `https://localhost:3443/app/`.
+
+### From the Windows installer
+
+The Windows installer can also set up a nest on the computer it installs on: tick its "Nest Service" choice, which is off by default. The macOS package, once published, does the same. The nest then runs as a service that starts with the computer and keeps running with nobody signed in, and your other devices reach it at the computer's address on your network. On its first start it writes a one-time claim code to the file `C:\ProgramData\Fauna\nest\claim-code` on that computer. To claim the nest, set up the Fauna app on one of your devices with a handle at that address — `you@192.168.1.50`, with the computer's real address after the `@`, as [Claim it from the app](nest-home-setup.md#step-7--claim-it-from-the-app) explains — and enter the claim code when asked.
 
 ## What "alpha" means for you
 

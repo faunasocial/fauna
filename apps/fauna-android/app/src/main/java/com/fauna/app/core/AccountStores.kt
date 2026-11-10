@@ -326,7 +326,7 @@ class AccountStores @Inject constructor(
      *
      * Erasure still follows scope: the store lands *inside*
      * `<filesDir>/<actor-hex>/`, which `accountStateEraseScope` (one account)
-     * and `accountStateEraseAllScopes` (sign-out) both drop wholesale.
+     * and the sign-out finish (`signOutFinish`) both drop wholesale.
      */
     fun custodianStoreBaseDir(): String = filesRoot.also { it.mkdirs() }.absolutePath
 
@@ -380,7 +380,7 @@ class AccountStores @Inject constructor(
      * handle has to be closeable and re-openable, and a cached `@Singleton`
      * would hand every consumer built after a sign-out the same closed
      * instance. Hilt's `provideDatabase` delegates here instead, so a
-     * consumer constructed after [eraseAllAccounts] gets a fresh, empty store.
+     * consumer constructed after a sign-out ([finishSignOut]) gets a fresh, empty store.
      */
     @Synchronized
     fun database(): FaunaDatabase {
@@ -435,104 +435,67 @@ class AccountStores @Inject constructor(
     }
 
     /**
-     * The all-accounts erase behind sign-out (`account-scoping.md` § Erasure
-     * follows scope, extending `long-term-store.md` § Cleanup contract from the
-     * credential namespace to the content stores).
+     * **The sign-out's decision**, written before anything else — after the
+     * serving question passed, before the runtime's stop is awaited
+     * (`account-scoping.md` § Erasure follows scope → *The sign-out record is on
+     * all 7 apps*, decision 1): `sign-out-record.json` under `filesDir` names
+     * every account the registry lists plus [servedActor] and owes the
+     * credential wipe, so a process killed anywhere after this is finished by
+     * the next launch ([finishSignOut]). The account-index reset passes `null`
+     * over an index it cannot read: a wipe owed with no accounts. Returns the
+     * accounts recorded, for the gesture's own [finishSignOut].
+     */
+    fun recordSignOut(servedActor: String?): List<String> =
+        com.fauna.ffi.signOutRecordBegin(registry, filesRoot.absolutePath, servedActor)
+
+    /**
+     * **The one routine** the sign-out's tail, the cold launch and Remove Again
+     * run — shared Rust's finish over both roots and the account-store container:
+     * the serving question, the sync agent dismissed ([dismissAgent]; the
+     * gesture's own stop already did it), the wipe (the registry's own store,
+     * then [host]'s `secureStorage.clear()`), each recorded account's scopes and
+     * shared-namespace slots, the residue re-sweep, the residue record written
+     * before the sign-out record clears (decisions 2–6). [written] is the
+     * gesture's [recordSignOut] answer, `null` elsewhere.
      *
-     * Drops every per-account scope under both roots. Install-scoped state
-     * survives by construction — it is not an actor scope. Best-effort per
-     * root: a failure to erase one root must not skip the other, and sign-out
-     * itself must still complete (the credentials are already gone by then).
-     *
-     * **Returns what would NOT go, folded across both roots into the ONE answer
-     * the user is owed about this device.** Proceeding must not be
-     * indistinguishable from succeeding: a sweep with survivors means the user's
-     * readable data is still here, and the caller owes them a line
-     * ([recordResidue]). Dropping this on the floor *is* the defect — it is what
-     * android did until 2026-09-09, and what tui did on the sweep it reaches by
-     * another route until that was fixed the same way.
-     *
-     * The fold is shared Rust's (`eraseSweepFold`), not a sum taken here:
-     * android is the one host whose app base is two directories, and adding up
-     * survivor counts is precisely where a seat re-derives "is the device
-     * clean?" in a fourth language.
+     * Closes the open account-scoped handles first — deleting a SQLite file out
+     * from under an open connection leaves it serving a deleted inode — but only
+     * when a record is pending or this is the gesture: at a launch with nothing
+     * to finish, the identity closers must not blank the live account's state.
+     * Blocking file I/O (and, with [dismissAgent], the agent's budget): call it
+     * off the main thread.
      */
     @Synchronized
-    fun eraseAllAccounts(): com.fauna.ffi.FfiEraseSweep {
-        closeOpenStores()
-        return com.fauna.ffi.eraseSweepFold(
-            listOf(
-                eraseRoot(filesRoot),
-                eraseRoot(dbRoot),
-            )
+    fun finishSignOut(
+        host: com.fauna.ffi.FfiSignOutHost,
+        dismissAgent: Boolean,
+        written: List<String>?,
+    ): com.fauna.ffi.FfiSignOutFinish {
+        if (written != null || com.fauna.ffi.signOutRecordPending(filesRoot.absolutePath)) {
+            closeOpenStores()
+        }
+        val outcome = com.fauna.ffi.signOutFinish(
+            registry,
+            listOf(filesRoot.absolutePath, dbRoot.absolutePath),
+            accountStoreContainerDir(),
+            // `ownLock = null`: android admits one instance per app and takes
+            // no raw lock, so there is no reflection of its own to put down.
+            null,
+            host,
+            dismissAgent,
+            written,
         )
-    }
-
-    /**
-     * Turn what a sign-out's erase left behind into the reports it owes
-     * (`account-scoping.md` § Erasure follows scope → *the residue surface*):
-     * the survivor **paths** to the log, the **record** to install-scoped state
-     * (`sign-out-residue.json` under `filesDir`, so it outlives this process),
-     * and the residue the `sign-out-residue` view on `identity_choice` paints.
-     *
-     * `null` is the clean outcome and the only one — *"0 items were left
-     * behind"* is reassurance by vacuity — and it keeps no record on disk. The
-     * record, its line and the decision of what is clean are all shared Rust's
-     * (`signOutResidueRecord`); android only logs and hands the result on. Twin
-     * of tui's and linux's `account_scope::record_residue`.
-     *
-     * `credentials` is the credential erase's read-back
-     * ([SignOutCredentialEraser]), so this is built after that erase — both
-     * halves of the sign-out, or the line answers for half of one.
-     */
-    fun recordResidue(
-        sweep: com.fauna.ffi.FfiEraseSweep,
-        credentials: com.fauna.ffi.FfiCredentialSweep,
-    ): com.fauna.ffi.FfiSignOutResidue? {
-        if (sweep.survivors.isNotEmpty()) {
+        if (outcome.refused) {
             ShellLog.w(
                 "AccountStores",
-                "${sweep.survivors.size} path(s) SURVIVED the erase and still hold " +
-                    "this user's data: ${sweep.survivors.joinToString(", ")}",
+                "sign-out finish REFUSED — another instance serves an account it reaches " +
+                    "(fails closed: ${outcome.failsClosed})",
             )
+        } else if (outcome.residue != null) {
+            ShellLog.w("AccountStores", "sign-out finish left this user's data on the device")
         }
-        if (credentials.survivors.isNotEmpty() || credentials.wipeFailed) {
-            ShellLog.w(
-                "AccountStores",
-                "sign-in credentials SURVIVED the erase (wipe failed: ${credentials.wipeFailed}); " +
-                    "still readable: ${credentials.survivors.joinToString(", ")}",
-            )
-        }
-        return com.fauna.ffi.signOutResidueRecord(filesRoot.absolutePath, sweep, credentials)
+        return outcome
     }
-
-    /**
-     * Remove Again (`sign-out-residue-retry-button`): the shared re-sweep over
-     * exactly what [residue] recorded, behind the sign-out's own serving-lock
-     * question. `null` when the device is now clean — the view closes.
-     * Blocking file I/O: call it off the main thread.
-     */
-    fun retryResidue(
-        residue: com.fauna.ffi.FfiSignOutResidue,
-        eraser: com.fauna.ffi.FfiResidueCredentialEraser,
-    ): com.fauna.ffi.FfiSignOutResidue? =
-        // `ownLock = null`: android admits one instance per app and takes no
-        // raw lock, so there is no reflection of its own to put down.
-        residue.retry(registry, filesRoot.absolutePath, accountStoreContainerDir(), null, eraser)
-
-    /**
-     * The signed-out launch's silent re-check: a record a previous sign-out left
-     * is re-swept FIRST, and a residue comes back only if something is still
-     * left. Shared Rust skips it while the registry holds an account — a
-     * signed-in launch is not the user the residue was reported to. Blocking
-     * file I/O: call it off the main thread.
-     */
-    fun recheckResidueAtLaunch(
-        eraser: com.fauna.ffi.FfiResidueCredentialEraser,
-    ): com.fauna.ffi.FfiSignOutResidue? =
-        com.fauna.ffi.signOutResidueRecheckAtLaunch(
-            registry, filesRoot.absolutePath, accountStoreContainerDir(), null, eraser,
-        )
 
     /**
      * Remove ONE account from this install — the account-switcher's "remove
@@ -574,36 +537,6 @@ class AccountStores @Inject constructor(
             null,
             activeActorHex(),
         )
-
-    /**
-     * One root's share of the sign-out sweep. Hands back what would not go —
-     * the shared call no longer throws on a survivor, it reports one, which is
-     * the whole reason android can now tell the user instead of logging at them.
-     *
-     * Shared Rust folds a panic into a survivor itself, so the `catch` only sees
-     * an FFI load failure. It still answers with ONE survivor, never an empty
-     * sweep: an empty one would tell the user the device is clean on the one path
-     * where we know least about it.
-     */
-    private fun eraseRoot(root: File): com.fauna.ffi.FfiEraseSweep {
-        return try {
-            com.fauna.ffi.accountStateEraseAllScopes(
-                root.absolutePath,
-                accountStoreContainerDir(),
-            )
-        } catch (e: Exception) {
-            ShellLog.w("AccountStores", "erase under ${root.name} failed outright: ${e.message}")
-            com.fauna.ffi.FfiEraseSweep(
-                erased = 0u,
-                survivors = listOf("<erase failed: ${e.message}>"),
-                residue = com.fauna.ffi.FfiEraseResidueView(
-                    survivors = 1u,
-                    credentialsSurvived = false,
-                    owesWork = true,
-                ),
-            )
-        }
-    }
 
     /**
      * Where one account's stores live under `root`: `<root>/<actor-id-hex>/`,

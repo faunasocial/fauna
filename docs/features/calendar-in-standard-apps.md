@@ -4,6 +4,9 @@ title: Your calendar in Apple Calendar, Thunderbird and friends
 section: mail, calendar and contacts
 goal: docs/goal/behavior/caldav-server.md § Goal
 guide: docs/guides/calendar-and-contacts.md § Connecting Apple Calendar, Thunderbird, DAVx⁵…
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -23,7 +26,7 @@ groups you're in — and when and how much you send.
 
 ## Coverage contract
 
-Stamped 2026-10-21 at 77c610862e.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] A calendar app finds your calendars from the address alone and can add a new calendar — `docs/goal/behavior/caldav-server.md` § Calendar collection model
    - `tests/e2e-unified/tests/test_caldav_discovery_sequence.py::test_apple_style_caldav_discovery_walk`
@@ -99,6 +102,15 @@ Stamped 2026-10-21 at 77c610862e.
 28. [app] On a nest with no domain, your mail settings show the address and port to enter in a calendar app — `docs/goal/behavior/caldav-server.md` § Network exposure
     - `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate`
     - `tests/e2e-unified/tests/test_mail_settings_caldav_direct_listener.py::test_mail_settings_paints_direct_listener_host_and_admin_port`
+29. [nest] Given only your domain, a calendar app's automatic setup finds the server through the DNS service record, and the bare domain's well-known address sends it on to the mail host — `docs/goal/behavior/caldav-server.md` § Network exposure
+   - `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_given_only_your_domain_a_calendar_app_finds_the_calendar_server`
+30. [nest] An attendee without a mailbox answers an invitation over the sealed rail, and the organizer's event shows them accepted — `docs/goal/behavior/caldav-server.md` § Scheduling & invitations
+   - `tests/e2e-unified/tests/api/test_scheduling_client_authority.py::test_a_mailbox_less_attendees_answer_over_the_sealed_rail_shows_them_accepted`
+31. [nest] Only the signed-in organizer can send invitations: a calendar app cannot have invitations sent in someone else's name — `docs/goal/behavior/caldav-server.md` § Scheduling & invitations
+   - `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_a_calendar_app_cannot_send_invitations_in_someone_elses_name`
+32. [nest] Moving or copying an event honours the calendar app's conditions: a copy between your own calendars works, an overwrite the app forbade is refused, and a destination outside your calendars is refused — `docs/goal/behavior/caldav-server.md` § Write surface
+   - `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_copying_an_event_honours_the_calendar_apps_conditions`
+   - `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_moving_an_event_moves_it_and_a_failed_move_leaves_it`
 
 ## Status
 
@@ -112,12 +124,14 @@ Stamped 2026-10-21 at 77c610862e.
 | ios | ⚠ partial | |
 | android |  no run recorded | |
 | tui | ⚠ partial | |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_caldav_discovery_sequence.py::test_apple_style_caldav_discovery_walk` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_caldav_mkcalendar_create.py::test_macos_style_mkcalendar_create_then_event_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_client_sealed_event_visible_to_mua` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_client_sealed_event_visible_to_mua` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_guard_real_domain_mail_caldav` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_caldav_live_nest.py::test_three_client_caldav_roundtrip` | — |
 | 3 | app | `tests/e2e-unified/tests/test_caldav_onboarding_derived_enablement.py::test_caldav_derived_enablement_by_address_type` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -142,8 +156,8 @@ Stamped 2026-10-21 at 77c610862e.
 | 11 | app | `tests/e2e-unified/tests/test_caldav_onboarding_variants.py::test_caldav_onboarding_variant` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_enable_at_admin_claim.py::test_a_new_user_on_a_social_only_box_gets_the_calendar_credential_at_first_setup` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_a_bare_account_mints_its_first_credential_from_add_credential` | tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_a_reply_by_mail_shows_on_the_organizers_event_in_the_calendar_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_interested_shows_as_tentative_and_a_calendar_apps_tentative_stays_tentative` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_a_reply_by_mail_shows_on_the_organizers_event_in_the_calendar_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 13 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_interested_shows_as_tentative_and_a_calendar_apps_tentative_stays_tentative` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 14 | nest | `tests/e2e-unified/tests/platform/docker/test_caldav_sni_router.py::test_sni_router_splits_nest_and_mda_caldav` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/platform/docker/test_caldav_sni_router.py::test_caldav_auth_event_carries_real_client_ip` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_a_password_is_never_accepted_over_an_unencrypted_connection` | nest (linux): passed, nest (macos): passed |
@@ -161,4 +175,9 @@ Stamped 2026-10-21 at 77c610862e.
 | 27 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_no_one_else_on_the_nest_can_read_or_change_your_calendar` | nest (linux): passed, nest (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_direct_listener.py::test_mail_settings_paints_direct_listener_host_and_admin_port` | tui (linux): passed |
+| 29 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_given_only_your_domain_a_calendar_app_finds_the_calendar_server` | nest (linux): passed |
+| 30 | nest | `tests/e2e-unified/tests/api/test_scheduling_client_authority.py::test_a_mailbox_less_attendees_answer_over_the_sealed_rail_shows_them_accepted` | nest (linux): passed |
+| 31 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_a_calendar_app_cannot_send_invitations_in_someone_elses_name` | nest (linux): passed |
+| 32 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_copying_an_event_honours_the_calendar_apps_conditions` | nest (linux): passed |
+| 32 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_moving_an_event_moves_it_and_a_failed_move_leaves_it` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

@@ -143,6 +143,7 @@ public class NestRpcPushDispatchTests
     [InlineData("fauna.bridges.push.import_progress")]
     [InlineData("fauna.bridges.push.import_error")]
     [InlineData("fauna.bridges.push.import_complete")]
+    [InlineData("fauna.bridges.push.import_session_changed")]
     public async Task ImportPushes_RaiseMailImportPushChanged_AndNothingElse(string kind)
     {
         // mailbox-migration.md § A failed import is a record the wizard shows until the
@@ -165,6 +166,7 @@ public class NestRpcPushDispatchTests
     [InlineData("fauna.bridges.push.export_progress")]
     [InlineData("fauna.bridges.push.export_error")]
     [InlineData("fauna.bridges.push.export_complete")]
+    [InlineData("fauna.bridges.push.export_session_changed")]
     public async Task ExportPushes_RaiseMailExportPushChanged_AndNothingElse(string kind)
     {
         // mail-export.md § A failed export is a record the wizard shows until the user

@@ -1,11 +1,14 @@
 """What an app seat does with changes it did not see arrive live — catch-up,
-an un-appliable change, a delete on a backup place.
+an un-appliable change, a delete on a backup place, and edits made while apart.
 
 Owner doc: ``docs/goal/behavior/file-sync.md`` § Technical Flow → *5. Offline
 Catch-Up* (a restarted device pulls everything after its anchor; a change it
 can never apply is recorded and skipped, never a block) and § 4 (*a backup seat
 never applies a peer's delete to its own disk*, the shared
-``SyncMode::applies_remote_deletes`` predicate).
+``SyncMode::applies_remote_deletes`` predicate). Edits made on both sides while
+the seat is down resolve by ``docs/goal/behavior/conflicts.md`` § Target model:
+a clean three-way merge, else newest-wins with no conflict markers and the
+loser retained in version history.
 
 These three behaviours were pinned until 2026-10-01 only on the legacy headless
 daemon as a reader (``tests/platform/sync/test_catchup_permanent_skip.py`` and
@@ -34,6 +37,7 @@ observed state, never a settle sleep).
 from __future__ import annotations
 
 import contextlib
+import os
 import secrets
 import shutil
 import sys
@@ -47,9 +51,12 @@ from common.accounts import actor_id_hex
 from common.envelope import CID_RAW_PREFIX, cid_link
 from common.auth import (
     UNBINDING_MAX_DEVICES,
+    _addressed,
+    _user_call,
     mint_token_via_handshake,
     sealed_path,
     set_tier_caps,
+    sync_changes_list,
     sync_changes_record,
     sync_conflicts_list,
     sync_devices_list,
@@ -241,7 +248,7 @@ def _upload_chunk_and_manifest(base: str, token: str, data: bytes, *,
     return _upload(base, token, "/api/v1/manifests", cbor2.dumps(manifest, canonical=True))
 
 
-@pytest.mark.timeout(int(2 * STARTUP_WINDOW + 3 * WINDOW + 120))
+@pytest.mark.timeout(int(3 * STARTUP_WINDOW + 5 * WINDOW + 120))
 @pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
 @pytest.mark.feature("local-folder-sync")
 def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
@@ -337,12 +344,32 @@ def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
             f"{folder}: {S.devices.conflicts.unreadable_path} ({label})",
         ]), f"the review list's Not applied rows: {set_rows!r}\n{seat.diagnostics()}"
 
+        # ── While the skip stands, this device's own edit of the skipped path is
+        # never silently overwritten by the later change (`conflicts.md`
+        # § Skipped catch-up changes reach the review list, the verbatim-winner
+        # fence): the edit is made while the seat is down, so the later change
+        # meets it on restart. Its mtime is older than the later change, so
+        # newest-wins picks the later change — and the device's edit must then
+        # be RETAINED in version history, never dropped. ──
+        seat.stop_keeping_state()
+        own_edit = b"this device's own edit of the skipped file, made while apart"
+        own_path = seat.path / stuck_path
+        own_path.write_bytes(own_edit)
+        an_hour_ago = own_path.stat().st_mtime - 3600
+        os.utime(own_path, (an_hour_ago, an_hour_ago))
+
         # ── The cure: any later version of the file applies normally and the
         # row clears on its own — off the nest's unresolved list and off the
         # page — while the sealed-path skip, which nothing cured, stays. ──
         writer.write(stuck_path, "a version this device can apply")
         writer.sync(expect=[stuck_path])
+        seat.restart(STARTUP_WINDOW)
         _await_bytes(seat, stuck_path, b"a version this device can apply", "the cure")
+        _await_version_sizes(
+            nest_instance, secret_key, folder, stuck_path,
+            {len(own_edit), len(b"a version this device can apply")}, seat,
+            "the device's own edit was overwritten with no retained version",
+        )
         wait_until(
             lambda: set(_unresolved_skips(nest_instance, secret_key, writer))
             == {_UNOPENABLE_SEAL},
@@ -427,6 +454,123 @@ def _await_not_applied_rows(seat, folder: str, count: int) -> list:
                diagnose=lambda: f"expected {count} Not applied row(s) for {folder}, "
                                 f"read {got!r}\n{seat.diagnostics()}")
     return got
+
+
+def _version_sizes(nest, secret_key: str, folder: str, rel: str) -> list[int]:
+    """The sizes of every version the nest's history lists for ``rel`` in
+    ``folder`` — the user's version history, read through the same
+    ``fauna.files.versions.list`` kind every app's history view calls. The path
+    is addressed by the ``path_hash`` of its recorded change rows (the rows rest
+    no plaintext path; the convergent seal finds them)."""
+    port, url = nest["port"], nest["url"]
+    seal = sealed_path(secret_key, rel)
+    changes = sync_changes_list(port, secret_key=secret_key, folder=folder,
+                                base_url=url)["changes"]
+    path_hash = next((c.get("path_hash") for c in changes
+                      if bytes(c.get("path_sealed") or b"") == seal), None)
+    if path_hash is None:
+        return []
+    if isinstance(path_hash, str):
+        path_hash = bytes.fromhex(path_hash)
+    reply = _user_call(port, secret_key, "fauna.files.versions.list",
+                       _addressed({"path_hash": bytes(path_hash), "folder": folder}), url)
+    return [v["size_bytes"] for v in reply["versions"]]
+
+
+def _await_version_sizes(nest, secret_key: str, folder: str, rel: str,
+                         sizes: set, seat, what: str) -> None:
+    """Wait until ``rel``'s version history holds a version of every size in
+    ``sizes`` — the bodies a test makes differ in length, so a size names one."""
+    got: list = []
+
+    def retained() -> bool:
+        got[:] = _version_sizes(nest, secret_key, folder, rel)
+        return sizes <= set(got)
+
+    wait_until(retained, WINDOW, interval=1.0,
+               diagnose=lambda: f"{what}: {rel}'s version history holds sizes "
+                                f"{sorted(got)}, wanted {sorted(sizes)} among them\n"
+                                f"{seat.diagnostics()}")
+
+
+_MARKERS = (b"<<<<<<<", b"=======", b">>>>>>>")
+
+
+@pytest.mark.timeout(int(2 * STARTUP_WINDOW + 8 * WINDOW + 120))
+@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
+@pytest.mark.feature("local-folder-sync")
+def test_edits_made_apart_merge_cleanly_or_resolve_newest_wins_without_markers(
+    nest_instance, request, seat_pair
+):
+    """Both devices edit while the seat is down. Edits to different lines of a
+    text file merge cleanly; edits to the same line, and edits of a non-text
+    file, resolve newest-wins — no conflict markers in the user's file, and the
+    losing version kept in version history (`conflicts.md` § Target model; the
+    pure decision core is `fauna_sync_engine::conflict_resolver`, whose
+    latest-wins stamp is the local file's mtime against the incoming change's
+    ``created_at`` — so the test sets each side's age and names the winner).
+
+    Every body differs in length, so a version's size says whose it is.
+    """
+    folder = "apart-docs"
+    base = "".join(f"line {i}: the shared base\n" for i in range(1, 8))
+    seat_notes = base.replace("line 7: the shared base", "line 7: edited on the seat")
+    writer_notes = base.replace("line 1: the shared base", "line 1: edited elsewhere, longer")
+    merged = base.replace(
+        "line 7: the shared base", "line 7: edited on the seat"
+    ).replace("line 1: the shared base", "line 1: edited elsewhere, longer")
+    clash_base, clash_seat, clash_writer = (
+        b"clash: base\n", b"clash: the seat's older edit\n", b"clash: the newer edit\n")
+    bin_base, bin_seat, bin_writer = (
+        b"\x00\x01base", b"\x00\x02the seat's newer binary\xff", b"\x00\x03older\xfe")
+
+    with _writer_and_seat(nest_instance, request, folder, seat_pair) as (writer, seat, secret_key):
+        writer.write("notes.txt", base)
+        writer.write("clash.txt", clash_base)
+        writer.write("photo.bin", bin_base)
+        writer.sync(expect=["notes.txt", "clash.txt", "photo.bin"])
+        _await_bytes(seat, "notes.txt", base.encode(), "baseline text")
+        _await_bytes(seat, "clash.txt", clash_base, "baseline clash")
+        _await_bytes(seat, "photo.bin", bin_base, "baseline binary")
+
+        # ── Apart: the seat is down, and both sides edit. ──
+        seat.stop_keeping_state()
+        for rel, body in (("notes.txt", seat_notes.encode()), ("clash.txt", clash_seat),
+                          ("photo.bin", bin_seat)):
+            (seat.path / rel).write_bytes(body)
+        now = (seat.path / "notes.txt").stat().st_mtime
+        # The seat's same-line text edit is the OLDER one; its binary edit the NEWER.
+        os.utime(seat.path / "clash.txt", (now - 3600, now - 3600))
+        os.utime(seat.path / "photo.bin", (now + 3600, now + 3600))
+
+        writer.write("notes.txt", writer_notes)
+        writer.write("clash.txt", clash_writer)
+        writer.write("photo.bin", bin_writer)
+        writer.sync(expect=["notes.txt", "clash.txt", "photo.bin"])
+
+        seat.restart(STARTUP_WINDOW)
+
+        # Different lines: a clean three-way merge holding both edits.
+        _await_bytes(seat, "notes.txt", merged.encode(), "the clean merge of edits made apart")
+        # Same line / not text: the newest wins, whichever side made it.
+        _await_bytes(seat, "clash.txt", clash_writer, "newest-wins on an overlapping edit")
+        _await_bytes(seat, "photo.bin", bin_seat, "newest-wins on a binary file")
+        for rel in ("notes.txt", "clash.txt", "photo.bin"):
+            body = (seat.path / rel).read_bytes()
+            assert not any(m in body for m in _MARKERS), (
+                f"conflict markers were written into the user's {rel}: {body!r}")
+
+        # The losers are kept: each side's version is in the file's history,
+        # and the merge's result was published as a version of its own.
+        _await_version_sizes(nest_instance, secret_key, folder, "clash.txt",
+                             {len(clash_seat), len(clash_writer)}, seat,
+                             "the overlapping edit's loser was not retained")
+        _await_version_sizes(nest_instance, secret_key, folder, "photo.bin",
+                             {len(bin_seat), len(bin_writer)}, seat,
+                             "the binary file's loser was not retained")
+        _await_version_sizes(nest_instance, secret_key, folder, "notes.txt",
+                             {len(seat_notes), len(writer_notes), len(merged)}, seat,
+                             "the merge's parents and result are not all in history")
 
 
 @pytest.mark.timeout(int(STARTUP_WINDOW + 4 * WINDOW + 120))

@@ -160,6 +160,12 @@ macro_rules! store_conformance_suite {
             an_ack_deletes_and_a_double_ack_is_a_no_op,
             fifo_holds_within_a_scope_and_scopes_are_independent,
             a_parked_intent_stays_and_attempts_are_counted,
+            a_parked_intent_carries_its_failure_reason,
+            a_retried_intent_returns_to_pending_with_its_seq_and_reset_counters,
+            retrying_an_unknown_or_pending_intent_is_a_no_op,
+            a_discarded_intent_is_gone_and_a_double_discard_is_a_no_op,
+            discard_refuses_a_pending_intent,
+            discarding_the_parked_head_leaves_its_scope_remainder_pending_in_order,
             a_departure_proceeds_but_cannot_reach_the_outbox,
         );
         $crate::__store_conformance_emit!($medium, $attr, segment_cases;
@@ -3335,15 +3341,150 @@ pub mod cases {
         let (_medium, s) = store::<M>().await;
         s.outbox_append(&intent(1, "state", b"x")).await.unwrap();
         assert!(s.outbox_record_attempt(&[1u8; 16]).await.unwrap());
-        assert!(s.outbox_mark_failed(&[1u8; 16]).await.unwrap());
+        assert!(s.outbox_mark_failed(&[1u8; 16], PARK_CODE).await.unwrap());
         let undrained = s.outbox_undrained().await.unwrap();
         assert_eq!(undrained.len(), 1);
         assert_eq!(undrained[0].status, crate::types::IntentStatus::Failed);
         assert_eq!(undrained[0].retry_count, 1);
         assert!(undrained[0].last_attempt_at.is_some());
         assert!(
-            !s.outbox_mark_failed(&[9u8; 16]).await.unwrap(),
+            !s.outbox_mark_failed(&[9u8; 16], PARK_CODE).await.unwrap(),
             "unknown id"
+        );
+    }
+
+    /// The stable code a park stores in these cases — shaped like a nest
+    /// error code, which is what the generic drain passes.
+    const PARK_CODE: &str = "fauna.contacts.knock_refused";
+
+    /// The park records why — the stable code the unsent-changes surface
+    /// renders — and a pending intent carries none, across a restart.
+    pub async fn a_parked_intent_carries_its_failure_reason<M: Medium>() {
+        let dir = M::fresh();
+        {
+            let s = store_on(&dir).await;
+            s.outbox_append(&intent(1, "state", b"x")).await.unwrap();
+            s.outbox_append(&intent(2, "state", b"y")).await.unwrap();
+            assert!(s.outbox_mark_failed(&[1u8; 16], PARK_CODE).await.unwrap());
+        }
+        let s = store_on(&dir).await;
+        let undrained = s.outbox_undrained().await.unwrap();
+        assert_eq!(undrained[0].failure_reason.as_deref(), Some(PARK_CODE));
+        assert_eq!(undrained[1].failure_reason, None, "a pending intent");
+    }
+
+    /// Retry re-arms a parked intent where it stood: pending again at its own
+    /// `channel_seq` (so it drains first in its scope), the backoff pair and
+    /// the reason cleared, the payload untouched.
+    pub async fn a_retried_intent_returns_to_pending_with_its_seq_and_reset_counters<M: Medium>() {
+        let (_medium, s) = store::<M>().await;
+        s.outbox_append(&intent(1, "state", b"head")).await.unwrap();
+        s.outbox_append(&intent(2, "state", b"next")).await.unwrap();
+        s.outbox_record_attempt(&[1u8; 16]).await.unwrap();
+        s.outbox_mark_failed(&[1u8; 16], PARK_CODE).await.unwrap();
+
+        assert!(s.outbox_retry(&[1u8; 16]).await.unwrap());
+        let undrained = s.outbox_undrained().await.unwrap();
+        assert_eq!(undrained.len(), 2);
+        let head = &undrained[0];
+        assert_eq!(head.intent_id, [1u8; 16], "still first in its scope");
+        assert_eq!(head.channel_seq, 1);
+        assert_eq!(head.status, crate::types::IntentStatus::Pending);
+        assert_eq!(head.retry_count, 0);
+        assert_eq!(head.last_attempt_at, None);
+        assert_eq!(head.failure_reason, None);
+        assert_eq!(head.payload, b"head");
+    }
+
+    /// Retry touches only a parked intent: an unknown id and a pending intent
+    /// report `false` and the pending one keeps its counters.
+    pub async fn retrying_an_unknown_or_pending_intent_is_a_no_op<M: Medium>() {
+        let (_medium, s) = store::<M>().await;
+        s.outbox_append(&intent(1, "state", b"x")).await.unwrap();
+        s.outbox_record_attempt(&[1u8; 16]).await.unwrap();
+
+        assert!(!s.outbox_retry(&[9u8; 16]).await.unwrap(), "unknown id");
+        assert!(!s.outbox_retry(&[1u8; 16]).await.unwrap(), "pending intent");
+        let undrained = s.outbox_undrained().await.unwrap();
+        assert_eq!(undrained.len(), 1);
+        assert_eq!(undrained[0].status, crate::types::IntentStatus::Pending);
+        assert_eq!(undrained[0].retry_count, 1, "a pending row is untouched");
+        assert!(undrained[0].last_attempt_at.is_some());
+    }
+
+    /// Discard deletes a parked intent; discarding it again is a no-op.
+    pub async fn a_discarded_intent_is_gone_and_a_double_discard_is_a_no_op<M: Medium>() {
+        let (_medium, s) = store::<M>().await;
+        s.outbox_append(&intent(1, "state", b"x")).await.unwrap();
+        s.outbox_mark_failed(&[1u8; 16], PARK_CODE).await.unwrap();
+
+        assert!(s.outbox_discard(&[1u8; 16]).await.unwrap());
+        assert!(s.outbox_undrained().await.unwrap().is_empty());
+        assert!(
+            !s.outbox_discard(&[1u8; 16]).await.unwrap(),
+            "double discard"
+        );
+        assert!(!s.outbox_discard(&[9u8; 16]).await.unwrap(), "unknown id");
+    }
+
+    /// A pending intent may be in flight at the drain: discard refuses it and
+    /// the row stays, verbatim.
+    pub async fn discard_refuses_a_pending_intent<M: Medium>() {
+        let (_medium, s) = store::<M>().await;
+        s.outbox_append(&intent(1, "state", b"in-flight"))
+            .await
+            .unwrap();
+
+        assert!(!s.outbox_discard(&[1u8; 16]).await.unwrap());
+        let undrained = s.outbox_undrained().await.unwrap();
+        assert_eq!(undrained.len(), 1);
+        assert_eq!(undrained[0].payload, b"in-flight");
+        assert_eq!(undrained[0].status, crate::types::IntentStatus::Pending);
+    }
+
+    /// Discarding a scope's parked head deletes that one intent only: the
+    /// remainder behind it stays pending, in its compose order, and another
+    /// scope is untouched.
+    pub async fn discarding_the_parked_head_leaves_its_scope_remainder_pending_in_order<
+        M: Medium,
+    >() {
+        let (_medium, s) = store::<M>().await;
+        s.outbox_append(&intent(1, &post_scope(), b"head"))
+            .await
+            .unwrap();
+        s.outbox_append(&intent(2, &post_scope(), b"second"))
+            .await
+            .unwrap();
+        s.outbox_append(&intent(3, &mail_scope(), b"other"))
+            .await
+            .unwrap();
+        s.outbox_append(&intent(4, &post_scope(), b"third"))
+            .await
+            .unwrap();
+        s.outbox_mark_failed(&[1u8; 16], PARK_CODE).await.unwrap();
+
+        assert!(s.outbox_discard(&[1u8; 16]).await.unwrap());
+        let undrained = s.outbox_undrained().await.unwrap();
+        let posts: Vec<_> = undrained
+            .iter()
+            .filter(|i| i.scope == post_scope())
+            .collect();
+        assert_eq!(
+            posts
+                .iter()
+                .map(|i| i.payload.as_slice())
+                .collect::<Vec<_>>(),
+            [b"second".as_slice(), b"third".as_slice()]
+        );
+        assert!(posts[0].channel_seq < posts[1].channel_seq);
+        assert!(
+            posts
+                .iter()
+                .all(|i| i.status == crate::types::IntentStatus::Pending)
+        );
+        assert!(
+            undrained.iter().any(|i| i.scope == mail_scope()),
+            "another scope is untouched"
         );
     }
 

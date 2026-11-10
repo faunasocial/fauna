@@ -23,12 +23,22 @@ public struct BridgeCardContent: View {
     let isDesktop: Bool
     let compact: Bool
     let index: Int
+    /// Paint the card's own title (`bridge-card-name`, the shared
+    /// `bridge_card_title`) as its first member, inside the `bridge-card[i]`
+    /// scope — the Bridges page's two shells pass `true` (linux's
+    /// `build_bridge_detail_content` shape). The AT Protocol page's Linked
+    /// panel reuses this card under its own page heading and passes `false`.
+    let showsTitle: Bool
     /// The follows group opens expanded: its add-follow row and its rows are
     /// the card's own controls, as on every other app (`bridges.md` § Follows).
     @State private var followsExpanded = true
 
-    public init(bridge: BridgeInfo, vm: BridgeManagerVM, isDesktop: Bool, compact: Bool, index: Int) {
+    public init(
+        bridge: BridgeInfo, vm: BridgeManagerVM, isDesktop: Bool, compact: Bool, index: Int,
+        showsTitle: Bool = false
+    ) {
         self.bridge = bridge
+        self.showsTitle = showsTitle
         self.vm = vm
         self.isDesktop = isDesktop
         self.compact = compact
@@ -36,7 +46,14 @@ public struct BridgeCardContent: View {
     }
 
     public var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 8) {
+            if showsTitle {
+                // `bridge-card-name` — the glyph-headed title, scoped inside
+                // this card so a test reads card i's title, never a section
+                // header outside it (`bridges.md` § the owner-approved ids).
+                automationText(Ids.bridgeCardName, bridge.cardTitle)
+                    .font(.headline)
+            }
             if !bridge.available {
                 Text(L.bridges.notAvailable(name: bridge.name))
                     .foregroundStyle(.secondary)

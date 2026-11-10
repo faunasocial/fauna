@@ -39,6 +39,8 @@ use fauna_feed::{
     FeedSnapshotObserver, FilterRuleInput, LeaveModel, QuotedPostView, ScoredExemplar,
     SellComposeState, TrainResult, TrainVerb, TrainedModelReview,
 };
+use fauna_sync_engine::account_runtime::AccountHandleSource;
+use fauna_sync_engine::offline_intent_queue::AccountOutbox;
 
 /// UniFFI handle wrapping the shared, stateful `FeedManager<Arc<NestClient>>`.
 /// Methods are exposed to Swift as `async`/`func`, Kotlin as `suspend fun`/`fun`,
@@ -47,6 +49,12 @@ use fauna_feed::{
 #[derive(uniffi::Object)]
 pub struct FfiFeedManager {
     inner: Arc<FeedManager<Arc<NestClient>>>,
+    /// The device's offline outbox (`crate::offline_outbox`) as lent to this
+    /// manager — at its build when a connection word had already wired it,
+    /// else at the first [`set_connection_state`].
+    ///
+    /// [`set_connection_state`]: FfiFeedManager::set_connection_state
+    outbox: std::sync::Mutex<Option<Arc<AccountOutbox>>>,
 }
 
 impl FfiFeedManager {
@@ -58,9 +66,35 @@ impl FfiFeedManager {
         let inner = FeedManager::new(nest, actor_secret);
         inner.set_period_key_store(crate::account_runtime::period_key_store());
         inner.set_preference_store(Arc::new(crate::account_runtime::handle_source()));
-        Arc::new(Self {
+        let manager = Arc::new(Self {
             inner: Arc::new(inner),
-        })
+            outbox: std::sync::Mutex::new(None),
+        });
+        if let Some(outbox) = crate::offline_outbox::DEVICE.wired() {
+            manager.lend(outbox);
+        }
+        manager
+    }
+
+    fn lend(&self, outbox: Arc<AccountOutbox>) {
+        let mut slot = self.outbox.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            self.inner
+                .set_offline_intent_queue(Arc::clone(&outbox) as _);
+            *slot = Some(outbox);
+        }
+    }
+
+    /// [`set_connection_state`](Self::set_connection_state) through an
+    /// explicit device outbox and handle source — the testable half (the
+    /// export feeds the process's, over the process's runtime).
+    fn feed_connection_word(
+        &self,
+        device: &crate::offline_outbox::DeviceOutbox,
+        source: impl FnOnce() -> AccountHandleSource,
+        connection_state: &str,
+    ) {
+        self.lend(device.feed_word(source, connection_state));
     }
 
     /// The wrapped manager, for the factory's seam wiring
@@ -97,7 +131,36 @@ impl FfiFeedManager {
     pub fn author_window(&self, actor_id: String) -> Arc<FfiFeedManager> {
         Arc::new(Self {
             inner: Arc::new(self.inner.author_window(actor_id)),
+            outbox: std::sync::Mutex::new(
+                self.outbox
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
         })
+    }
+
+    /// The app's connection word — `"connected"`, `"connecting"`,
+    /// `"disconnected"`, `"unreachable"`, the word its offline gate reads.
+    /// Call once when this manager is built and again on every change.
+    ///
+    /// The first call wires the device's offline outbox — one per process,
+    /// lent to every feed manager and to the conversations session's manager,
+    /// whose MLS sends then queue offline and drain on reconnect
+    /// (`devices.md` § Offline compose): the queue the shared
+    /// `OfflineQueued` composer puts a gesture in while the app has no nest,
+    /// so a like tapped offline is kept in the account store and sent when
+    /// the nest is back (`account-offline-mutation.md` § The offline-mutation
+    /// contract). The queue reads this process's account runtime when it
+    /// enqueues, so it needs no store-ready call and survives a runtime
+    /// restart. Until the first call nothing is queued: every gesture is
+    /// sent, as before the outbox existed.
+    pub fn set_connection_state(&self, connection_state: String) {
+        self.feed_connection_word(
+            &crate::offline_outbox::DEVICE,
+            crate::offline_outbox::runtime_source,
+            &connection_state,
+        );
     }
 
     /// Drop all registered observers (call at sign-out so stale receiver loops
@@ -210,6 +273,19 @@ impl FfiFeedManager {
             .refresh_archive_comments()
             .await
             .map_err(|e| crate::general_err(format!("read the archive comments: {e}")))
+    }
+
+    /// Re-read the like and unlike intents resting in the device's outbox
+    /// onto `PostSummary.like_state` (`queued` / `unsent` beside `on` /
+    /// `off`), then notify — `account-offline-mutation.md` § The
+    /// offline-mutation contract → *The unsent-changes surface*, point 2.
+    /// Call it on opening the feed and on reconnect; a like toggle and a
+    /// retry re-read it themselves. A no-op before the outbox is wired.
+    pub async fn refresh_unsent_likes(&self) -> Result<(), FfiError> {
+        self.inner
+            .refresh_unsent_likes()
+            .await
+            .map_err(|e| crate::general_err(format!("read the unsent likes: {e}")))
     }
 
     /// Refresh the subscribed bridge-feed list (`fauna.bridges.feeds.list`) — the
@@ -780,6 +856,27 @@ impl FfiFeedManager {
         }
     }
 
+    /// The sold post's external checkout — `FeedManager::pay_unlock_offer`:
+    /// the subscribe to the offer's tier first (across nests at the post's
+    /// home), then the checkout URL to hand to the OS, `client_reference_id`
+    /// appended for a host the shared rule names (`monetization.md` § Pillar 3
+    /// → *Buyer↔actor binding (Q4)*, the Q13 rules (1) and (2)). `Ok(None)` =
+    /// nothing to open (no resolved offer or link, the caller's own post, or
+    /// an unsafe link — nothing subscribed then); `Err` = the subscribe was
+    /// refused and nothing opens.
+    // `payments`-gated doc line — see `update_compose_sell` above.
+    #[cfg_attr(
+        feature = "payments",
+        doc = " The affordance is `gated-post-payment-link`."
+    )]
+    pub async fn pay_unlock_offer(&self, post_id: String) -> Result<Option<String>, FfiError> {
+        match self.inner.pay_unlock_offer(post_id).await {
+            Some(Ok(url)) => Ok(Some(url)),
+            Some(Err(msg)) => Err(FfiError::General { msg }),
+            None => Ok(None),
+        }
+    }
+
     /// Resolve a loaded gated post's sealed-blob hash (hex `encrypted_ref`) for
     /// the client to fetch (`GET /api/v1/blob/{hash}` — platform glue), caching
     /// the decoded gate info for [`unlock_gated_post`](Self::unlock_gated_post).
@@ -873,6 +970,19 @@ impl FfiFeedManager {
     /// `RemoteImage.revealed: true`. In-memory only (no persistence).
     pub fn reveal_remote_images(&self, post_id: String) {
         self.inner.reveal_remote_images(post_id);
+    }
+
+    /// Hand the manager the reader's spam marks (the `spam_marked` list,
+    /// `load_spam_marked` / `mark_spam` / `unmark_spam`); the next
+    /// `snapshot()` folds `spam`@1000 into each marked post's labels
+    /// (`report-sharing.md` § Report capture → *The post's mark-as-spam verb*).
+    pub fn set_spam_marked(&self, ids: Vec<String>) {
+        self.inner.set_spam_marked(ids);
+    }
+
+    /// Whether the reader marked this post as spam — the verb's `state`.
+    pub fn is_spam_marked(&self, post_id: String) -> bool {
+        self.inner.is_spam_marked(&post_id)
     }
 
     // ── Engagement cues (engagement-cues.md §§ Cue vocabulary / At rest) ──────
@@ -1381,6 +1491,16 @@ impl FfiFeedManager {
         serde_json::json!({ "hydrated": hydrated, "verdict": verdict }).to_string()
     }
 
+    /// Set or clear the e2e cue-hydration hold (`feed_cue_hydration_hold`):
+    /// the lever for a phone or sandboxed app process no environment variable
+    /// reaches, which tui and linux take as a launch-time file instead — set
+    /// before the feed first hydrates, the seat's rollup fetch parks until it
+    /// is cleared. web's twin is `WasmFeedManager.setCueHydrationHoldForTest`.
+    /// See [`fauna_feed::FeedManager::set_cue_hydration_hold_for_test`].
+    pub fn set_cue_hydration_hold_for_test(&self, held: bool) {
+        self.inner.set_cue_hydration_hold_for_test(held);
+    }
+
     /// Arm the one-shot hold on the NEXT reload (`feed_hold_next_reload`). See
     /// [`fauna_feed::FeedManager::hold_next_reload_for_test`].
     pub fn hold_next_reload_for_test(&self) {
@@ -1533,6 +1653,45 @@ mod tests {
         assert_eq!(snap.selected_feed, None);
         assert!(!snap.trending_selected);
         assert_eq!(snap.author_selected, None);
+    }
+
+    /// The offline outbox door every UniFFI app calls: nothing is wired until
+    /// the first connection word; that word wires ONE outbox, which later
+    /// words update rather than replace, and a profile's author window shares
+    /// it — so a like tapped offline on either queues into the same place.
+    #[test]
+    fn the_first_connection_word_wires_one_outbox_that_later_words_follow() {
+        let nest = NestClient::new(
+            "wss://127.0.0.1:0/ws".into(),
+            ActorKeypair::from_secret([4u8; 32]),
+        );
+        let mgr = FfiFeedManager::new(nest, [4u8; 32]);
+        let wired = |m: &FfiFeedManager| m.outbox.lock().unwrap().clone();
+        assert!(wired(&mgr).is_none(), "no word yet: every gesture is sent");
+        let device = crate::offline_outbox::DeviceOutbox::new(|_, _| {}, || {});
+        let no_runtime = || -> AccountHandleSource { Arc::new(|| None) };
+
+        mgr.feed_connection_word(&device, no_runtime, "disconnected");
+        let first = wired(&mgr).expect("the first word wires the outbox");
+        assert_eq!(
+            fauna_core::offline_intent::OfflineIntentQueue::connection_state(&*first),
+            "disconnected"
+        );
+
+        mgr.feed_connection_word(&device, no_runtime, "connected");
+        let second = wired(&mgr).expect("still wired");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a later word updates, never replaces"
+        );
+        assert_eq!(
+            fauna_core::offline_intent::OfflineIntentQueue::connection_state(&*second),
+            "connected"
+        );
+
+        let window = mgr.author_window("aa".repeat(32));
+        let shared = wired(&window).expect("the author window shares the outbox");
+        assert!(Arc::ptr_eq(&first, &shared));
     }
 
     /// The cue-verdict face crosses as the `{hydrated, verdict}` JSON every

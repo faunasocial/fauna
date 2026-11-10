@@ -817,7 +817,7 @@ called from `App.xaml.cs::StartMainAppAsync`), through two new `INestRpcClient` 
 `nest.Folders()`/`nest.Snapshots()` façades. Unit-pinned in `SealBackfillSweepTests.cs` (D1-then-D3
 ordering, the owner-only `role == "member"` skip, never-throws), `FaunaApp.Tests` 1265/1265 green.
 The `folders.name` cutover leg (gated on the per-app
-hash-sender batch) remains separate. **The S9 flip itself LANDED
+hash-sender batch) stayed separate, and landed 2026-10-02 (schema 114 — § the set-name plane). **The S9 flip itself LANDED
 2026-08-02 (v32):** the scrub graduated to production as the boot reconcile's every-boot pass
 (`migrations.rs::SCRUB_PLANES` / `run_scrub_plaintext`; the `test-hooks` method wraps the same
 table), minus `folders.retention_policy` — withdrawn from the planes at the flip per the
@@ -826,7 +826,10 @@ label) — and plus `import_sessions.source_descriptor`, whose plaintext lock in
 `source_hash`. The at-rest proof is now the pair in
 `bins/fauna-nest/tests/conformance_at_rest_byte_scan.rs`: the never-rests scan through the next
 boot's scrub + `VACUUM` (the pre-flip-image reconcile boot retired with the flip at the
-2026-09-24 genesis of the nest schema), and the self-backup rotation proof; and
+2026-09-24 genesis of the nest schema), the runtime-blank proof (a set name blanked by a
+folders writer leaves no byte behind with no `VACUUM` run: the nest connection's
+`secure_delete`, `db/mod.rs::CONNECTION_PRAGMAS`, zeroes every copy a write frees), and the
+self-backup rotation proof; and
 a test in the legacy daemon pinned its cache-dir artifact state
 after the real apply flow — every resting entry flat and hash-shaped (at artifact
 level) — until the daemon's removal, 2026-10-02.

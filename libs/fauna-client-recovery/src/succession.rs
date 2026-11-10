@@ -410,13 +410,13 @@ where
     // mint a successor keypair that then has nothing to authorize it.
     let parsed = crate::restore::parse_kit(kit_input)?;
     // A kit that names an account names *which* one authoritatively, so a
-    // phrase for a different account is caught here rather than surfacing as
-    // `PriorKitMismatch` — which would tell the user their kit is stale when
-    // in fact it is simply someone else's.
+    // phrase for a different account is caught here as `KitForAnotherAccount`
+    // rather than surfacing as `PriorKitMismatch` — which would tell the user
+    // their kit is stale when in fact it is simply someone else's.
     if let Some(named) = parsed.actor_id
         && named != old_actor_id
     {
-        return Err(RecoveryError::PriorKitMismatch);
+        return Err(RecoveryError::KitForAnotherAccount);
     }
     let successor = ActorKeypair::generate();
     // Still pre-submit: an `Err` here cannot have moved the account, so the seed

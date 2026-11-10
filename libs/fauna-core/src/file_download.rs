@@ -219,6 +219,29 @@ impl FolderHint {
     }
 }
 
+/// The home nest of a cross-nest shared set refused this member its byte-plane
+/// token — the member is no longer on the set's roster (`relay-serving.md`
+/// § Relay serving → *A member on another nest*, step (5): a removal ends the
+/// member's reads at once). A member-door fetcher attaches it to the error its
+/// mint failed with, so a reader can name the removal instead of reporting a
+/// retryable transport fault; find it with [`is_membership_refused`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipRefused;
+
+impl std::fmt::Display for MembershipRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the shared folder's home nest refused this member a read token")
+    }
+}
+
+impl std::error::Error for MembershipRefused {}
+
+/// Whether `err`'s chain carries [`MembershipRefused`].
+pub fn is_membership_refused(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<MembershipRefused>().is_some())
+}
+
 /// A [`BlobFetcher`] reading for one folder: every chunk batch goes through the
 /// inner fetcher's [`BlobFetcher::fetch_folder_chunks`] with the folder's
 /// [`FolderHint`]. Built per download over a shared fetcher (`file-sync.md`
@@ -1961,9 +1984,12 @@ pub struct WasmPublicChunkFetcher {
     bearer: Option<std::rc::Rc<dyn SessionBearer>>,
 }
 
-/// The browser session's bearer, as a [`WasmPublicChunkFetcher`] reads it for a
-/// hinted folder read. `fauna-core` sits below the WS-RPC client, so the
-/// session supplies it (`fauna-media-machine` over `WsRpcClient::bearer`).
+/// The bearer a [`WasmPublicChunkFetcher`] sends with a hinted folder read:
+/// the browser session's own for its own nest, or — over a foreign home — the
+/// member's read token its own nest mints (`relay-serving.md` § Relay serving
+/// → *A member on another nest*, step (5)). `fauna-core` sits below the WS-RPC
+/// client, so the session supplies it (`fauna-media-machine` over
+/// `WsRpcClient`).
 #[cfg(all(target_arch = "wasm32", feature = "blob-fetch-wasm"))]
 #[async_trait::async_trait(?Send)]
 pub trait SessionBearer {
@@ -2067,10 +2093,12 @@ impl BlobFetcher for WasmPublicChunkFetcher {
         let Some(source) = &self.bearer else {
             return self.fetch_chunks(store_keys, relative_path).await;
         };
+        // `context`, never a re-format: a member door's refused mint carries
+        // `MembershipRefused` in its chain for the reader to name.
         let token = source
             .bearer()
             .await
-            .map_err(|e| anyhow::anyhow!("session bearer for {relative_path}: {e}"))?;
+            .with_context(|| format!("bearer for {relative_path}"))?;
         let query = folder.query_string();
         let mut out = Vec::with_capacity(store_keys.len());
         for key in store_keys {

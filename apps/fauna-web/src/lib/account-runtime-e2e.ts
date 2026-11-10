@@ -3,7 +3,8 @@
 // account pump), the `account_pump_cycles` accessor its barrier reads
 // (`fauna_e2e_agent::ACCOUNT_PUMP_CYCLES_KEY`), and the `device_set_state`
 // plane reader (`tests/e2e-unified/helpers/fleet.py`), with its siblings
-// `read_marker_state` and `escrow_wrap_coordinates`. Each is one line over
+// `read_marker_state`, `escrow_wrap_coordinates` and `folder_set_custody`
+// (`fauna_client_folders::custody::read_held_generations`). Each is one line over
 // `fauna-wasm`'s `account_runtime` module, so the pass poked is the
 // production pass, the counters are the shared `PumpCyclesView` every hosting
 // app publishes, and the reader is the shared
@@ -16,6 +17,7 @@
 import {
   accountDeviceSetState,
   accountEscrowWrapCoordinates,
+  accountFolderSetCustody,
   accountPumpCycles,
   accountPumpNow,
   accountReadMarkerState,
@@ -27,6 +29,7 @@ const ACCOUNT_RUNTIME_COMMANDS = [
   'device_set_state',
   'read_marker_state',
   'escrow_wrap_coordinates',
+  'folder_set_custody',
 ] as const;
 
 /** Register the account runtime's commands and install the
@@ -53,6 +56,21 @@ export function registerAccountRuntimeCommands(): void {
         throw new Error('read_marker_state needs a `channel_id_hex` string');
       }
       return accountReadMarkerState(id);
+    }
+    if (action === 'folder_set_custody') {
+      // Same reader shape: the set is named by `channel_id_hex` (a member's
+      // form) or `set_name` (an owner's live entry); a mistyped field is a
+      // loud refusal, and the shared reader refuses a missing or malformed
+      // selector the same way (convention 11) — never "nothing held".
+      const name = payload?.set_name;
+      const channel = payload?.channel_id_hex;
+      if (name !== undefined && typeof name !== 'string') {
+        throw new Error('folder_set_custody: `set_name` must be a string');
+      }
+      if (channel !== undefined && typeof channel !== 'string') {
+        throw new Error('folder_set_custody: `channel_id_hex` must be a string');
+      }
+      return accountFolderSetCustody(name, channel);
     }
     if (action === 'escrow_wrap_coordinates') {
       // Same reader shape, no payload: the recovery-kit let-go journey's

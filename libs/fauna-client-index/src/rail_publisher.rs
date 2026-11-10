@@ -863,10 +863,10 @@ pub async fn resume_mail_builder(
     };
     let builder = IndexBuilder::with_manifest(
         IndexBuilder::mail_key(msek),
-        // Mail only, not all of `MAILCAL_KINDS`: the calendar kind shares this
-        // class's key and manifest but has no producer yet, and a kind is added
-        // to a builder when its arm lands, not when its class does.
-        [ContentKind::Mail],
+        // The class's built kinds — mail, and calendar since its reconcile walk
+        // and resolver landed. A kind is added to a builder when its arm lands,
+        // not when its class does.
+        crate::index_builder::MAIL_CLASS_KINDS_BUILT.iter().copied(),
         manifest,
         rail,
     );

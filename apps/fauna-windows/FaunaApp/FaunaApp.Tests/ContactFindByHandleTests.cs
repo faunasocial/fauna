@@ -108,50 +108,55 @@ public class ContactFindByHandleTests
     }
 
     [Fact]
-    public async Task FindRecipientActorId_BareLocalpart_AsksFindUserWithEmptyDomain_TakesSlotZero()
+    public async Task FindRecipient_BareLocalpart_AsksFindUserWithEmptyDomain_HomeNest()
     {
         // The folder-share picker's handle leg (FoldersPage.ShareFolderAsync) runs the
         // SAME shared find_user lookup the contacts find does: a bare localpart reaches
         // it with the classifier's EMPTY domain slot unchanged, so find_user probes the
-        // home nest alone (contacts.md § Layout & flow region 3), and the actor id is
-        // slot 0 of [actor_id, handle, domain, nest_url].
+        // home nest alone (contacts.md § Layout & flow region 3). The actor id is slot 0
+        // of [actor_id, handle, domain, nest_url]; a home-nest user's empty nest_url is
+        // no nest URL at all, so the share stays same-nest.
         (string Home, string User, string? Domain)? asked = null;
         var c = ClassifyRecipientInput("alice");
 
-        var actorId = await FindRecipientActorIdAsync("https://home.example", c, (h, u, d) =>
+        var found = await FindRecipientAsync("https://home.example", c, (h, u, d) =>
         {
             asked = (h, u, d);
             return Task.FromResult(new[] { new string('a', 64), "alice", "home.example", "" });
         });
 
         Assert.Equal(("https://home.example", "alice", (string?)""), asked);
-        Assert.Equal(new string('a', 64), actorId);
+        Assert.Equal(new string('a', 64), found.ActorId);
+        Assert.Null(found.NestUrl);
     }
 
     [Fact]
-    public async Task FindRecipientActorId_QualifiedHandle_CarriesTypedDomain()
+    public async Task FindRecipient_QualifiedHandle_CarriesTypedDomain_AndThePeerNestUrl()
     {
-        // A qualified handle keeps working: the typed domain rides to find_user as typed.
+        // A qualified handle's typed domain rides to find_user as typed, and a person
+        // found on a peer nest comes back with that nest's URL — the member_nest_url the
+        // cross-nest share passes (folders.md § Sharing a folder, Cross-nest members).
         (string Home, string User, string? Domain)? asked = null;
         var c = ClassifyRecipientInput("bob@peer.example");
 
-        var actorId = await FindRecipientActorIdAsync("https://home.example", c, (h, u, d) =>
+        var found = await FindRecipientAsync("https://home.example", c, (h, u, d) =>
         {
             asked = (h, u, d);
             return Task.FromResult(new[] { new string('b', 64), "bob", "peer.example", "https://peer.example" });
         });
 
         Assert.Equal(("https://home.example", "bob", (string?)"peer.example"), asked);
-        Assert.Equal(new string('b', 64), actorId);
+        Assert.Equal(new string('b', 64), found.ActorId);
+        Assert.Equal("https://peer.example", found.NestUrl);
     }
 
     [Fact]
-    public async Task FindRecipientActorId_NotFound_Throws()
+    public async Task FindRecipient_NotFound_Throws()
     {
         // A miss is find_user's throw, surfaced unchanged — the picker's catch is what
         // maps it to the not-found resolve state.
         var c = ClassifyRecipientInput("nobody");
-        await Assert.ThrowsAnyAsync<Exception>(() => FindRecipientActorIdAsync(
+        await Assert.ThrowsAnyAsync<Exception>(() => FindRecipientAsync(
             "https://home.example", c, (_, _, _) => throw new InvalidOperationException("not found")));
     }
 

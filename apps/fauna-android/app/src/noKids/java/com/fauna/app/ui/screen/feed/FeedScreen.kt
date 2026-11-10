@@ -60,10 +60,9 @@ import com.fauna.app.ui.components.ProtocolBadge
 import com.fauna.app.ui.components.DelegatedOriginBadge
 import com.fauna.app.ui.components.UnverifiedSourceBadge
 import com.fauna.app.ui.components.documentHasBlockedRemoteImage
-import com.fauna.app.ui.components.documentMediaImageHash
-import com.fauna.app.ui.components.documentProxiedPostImagePath
-import com.fauna.app.ui.components.documentProxiedPostVideoPath
-import com.fauna.app.ui.components.documentMediaVideoHash
+import com.fauna.app.ui.components.documentMediaBlocks
+import com.fauna.app.ui.components.mediaAlt
+import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.app.ui.components.documentQuotedPost
 import com.fauna.app.ui.components.documentResolvedLinkPreviews
 import com.fauna.app.ui.components.documentResolvingLinkPreviewUrls
@@ -81,6 +80,7 @@ import com.fauna.ffi.classifySources
 import com.fauna.ffi.legalTakedownTombstone
 import com.fauna.ffi.shortId
 import com.fauna.ffi.urlHost
+import uniffi.fauna_core.RenderBlock
 import uniffi.fauna_core.RenderDocument
 import uniffi.fauna_core.ContentLabelEntry
 import uniffi.fauna_core.isSafePaymentUrl
@@ -551,6 +551,12 @@ internal fun PostActionsMenu(
     // when the caller built a report target for it; it opens the shared sheet
     // the shell's ReportHost paints. `null` paints nothing.
     onReport: (() -> Unit)? = null,
+    // The mark-as-spam verb (`report-sharing.md` § Report capture → *The post's
+    // mark-as-spam verb*): `feed-post-mark-as-spam-button` beside report, only on
+    // ANOTHER author's post, a toggle whose `state` is [spamMarked]. `null`
+    // paints nothing.
+    spamMarked: Boolean = false,
+    onMarkSpam: (() -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     // The destructive delete is a two-step inside the same flyout: tapping
@@ -707,6 +713,24 @@ internal fun PostActionsMenu(
                 }
             }
 
+            if (!isOwn && onMarkSpam != null) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            stringResource(R.string.feed_mark_as_spam),
+                            fontWeight = if (spamMarked) FontWeight.Bold else FontWeight.Normal,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onMarkSpam()
+                    },
+                    modifier = Modifier
+                        .testTag(Ids.FEED_POST_MARK_AS_SPAM_BUTTON)
+                        .semantics { stateDescription = if (spamMarked) "on" else "off" },
+                )
+            }
+
             if (!isOwn && onReport != null) {
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.feed_report_post)) },
@@ -826,6 +850,9 @@ internal fun FeedVerbFailureEffects(vm: FeedVM) {
     // Training-gesture failures (feed-post-more-like-this / -less-like-this)
     // reach the same `error-message` banner, wrapped in the localized
     // feed_error_train template — mirrors the delete-error handling above.
+    val markSpamError by vm.markSpamError.collectAsState()
+    val markSpamErrorText = markSpamError?.let { stringResourceFmt(R.string.feed_error_mark_spam, it) }
+    LaunchedEffect(markSpamErrorText) { markSpamErrorText?.let { appMessages.showError(it) } }
     val trainError by vm.trainError.collectAsState()
     val trainErrorText = trainError?.let { stringResourceFmt(R.string.feed_error_train, it) }
     LaunchedEffect(trainErrorText) { trainErrorText?.let { appMessages.showError(it) } }
@@ -945,6 +972,12 @@ internal fun PostCard(
     }
     val reported = decision.reported
     val contentVerdict = decision.verdict
+    // The reporter's show-again beside their own placeholder (moderation.md
+    // § Corollary — the reporter's hide is theirs to undo): the shared fold over
+    // the same keys the verdict matched.
+    val showAgain = remember(post, contentPolicyInputs, reported) {
+        if (reported) contentPolicyInputs.showAgainFor(post.postId, post.author) else null
+    }
     RegionBlockWitness("feed:${post.postId}", decision.isRegionBlocked)
     NestBlockWitness("feed:${post.postId}", decision.isNestBlocked)
     // A `collapse` verdict hides the body behind a one-tap reveal, session-local
@@ -994,7 +1027,12 @@ internal fun PostCard(
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
         } else if (contentVerdict == "block") {
-            ContentPolicyBlockedBody(reported = reported, reason = decision.guardianReason)
+            ContentPolicyBlockedBody(
+                reported = reported,
+                reason = decision.guardianReason,
+                showAgain = showAgain,
+                onShowAgain = vm::showAgain,
+            )
         } else if (!muteRevealed && vm.isMuted(post.postId)) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
@@ -1018,6 +1056,9 @@ internal fun PostCard(
                 onReveal = { contentRevealed = true },
             )
         } else {
+            // Only this arm shows the post, so only it makes the card a cue
+            // subject — a placeholder above is never measured as the post.
+            CueSubjectMark(post.postId)
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1150,6 +1191,8 @@ internal fun PostCard(
                             // Another author's post only (`!isOwn` inside the menu).
                             // The shared constructor carries the sealed rule once, so a
                             // gated post offers the include-text checkbox.
+                            spamMarked = vm.isSpamMarked(post.postId),
+                            onMarkSpam = if (isOwnPost) null else { { vm.markPostSpam(post.postId) } },
                             onReport = if (isOwnPost) null else {
                                 {
                                     vm.openReport(
@@ -1196,15 +1239,14 @@ internal fun PostCard(
                 }
 
                 // Media — paint the folded feed `Image`/`Video` block from the post
-                // `document` (render-model.md § D6/D6b): `FeedPostImage` triggers
+                // `document` (render-model.md § D6/D6b): `FeedPostMedia` triggers
                 // `resolve_media` fire-once to fold the block, then fetches + paints the
                 // blob bytes (the feed image painter android previously lacked — its
-                // placeholder was empty); `FeedPostVideo` reads the same fold's `Video`
-                // sibling and renders nothing when this attachment isn't a video.
+                // placeholder was empty) — one `post-image` / `video-thumbnail` per block,
+                // in body order.
                 if (post.hasMedia) {
                     Spacer(Modifier.height(8.dp))
-                    FeedPostImage(document = post.document, postId = post.postId, mediaHash = post.mediaHash, vm = vm)
-                    FeedPostVideo(document = post.document, postId = post.postId, vm = vm)
+                    FeedPostMedia(document = post.document, postId = post.postId, mediaHash = post.mediaHash, vm = vm)
                     // `c2pa-badge` on the list card — the same
                     // `PostImageC2paBadge`/`FeedVM.checkBlobC2pa` pair `feed.post_detail`
                     // already uses (`PostDetailScreen.kt`), lifted onto the list card too.
@@ -1340,7 +1382,12 @@ internal fun PostCard(
  * post-card); its `state` (`stateDescription`) tells it from the collapse arm's.
  */
 @Composable
-private fun ContentPolicyBlockedBody(reported: Boolean = false, reason: String? = null) {
+private fun ContentPolicyBlockedBody(
+    reported: Boolean = false,
+    reason: String? = null,
+    showAgain: com.fauna.ffi.FfiShowAgain? = null,
+    onShowAgain: (List<String>) -> Unit = {},
+) {
     // `reported` is the same notice for the viewer's OWN report (moderation.md
     // § Corollary): "You reported this" in place of the family words, no body, no
     // reveal — a personal filter, so it names the viewer's own act, not a policy.
@@ -1362,6 +1409,7 @@ private fun ContentPolicyBlockedBody(reported: Boolean = false, reason: String? 
                 .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
                 .semantics { stateDescription = "blocked" },
         )
+        com.fauna.app.ui.components.ShowAgainButton(showAgain, onShowAgain)
         GuardianReason(reason)
     }
 }
@@ -1744,37 +1792,60 @@ fun QuotedPostEmbed(document: RenderDocument, quotedPostId: String, vm: FeedVM) 
 }
 
 /**
- * The feed post media image (ui.yaml `post-image`) — painted from the folded
- * `RenderBlock.Image` in the post `document` (render-model.md § D6). A
- * `LaunchedEffect` triggers `resolve_media` **fire-once** (only while the block
- * isn't folded yet) to fold the media `Image` block (the post's first attachment
- * hash) into the document; once folded, the hash drives an async blob-bytes fetch
- * (`vm.fetchBlobBytes` → `BitmapFactory` → `asImageBitmap`) — the feed image painter
- * android previously lacked (its `post-image` was an empty placeholder). A
- * tier-restricted post's photo is sealed under its per-post key, and
- * `vm.fetchBlobBytes` opens it through the shared manager before this decodes it —
- * a public post's bytes pass through unchanged, so this composable carries no
- * is-this-post-gated branch (`media.md` § Encryption at rest); the async byte load
- * stays client-side (render-model.md § The boundary). The `post-image` element
- * always renders — a placeholder `Box` until the bytes arrive, and for good when a
- * sealed item does not open — so the test element is stable.
+ * Every media attachment of a feed post, in body order (render-model.md § D6b *Accessors*): one
+ * `post-image` per picture block and one `video-thumbnail` per video block of the shared fold's
+ * `media_blocks` ([documentMediaBlocks]), each publishing its block's `alt` — or the shared
+ * `feed.post.image_alt_fallback` / `video_alt_fallback` string — as its `alt` attribute. The list
+ * card and the post detail both paint through here.
  *
- * The fire-once `resolve_media` guard keys on the snapshot's [mediaHash] being
- * `null` (render-model.md § D6c), never on the document's image hash: an
- * all-remote bridged post resolves to `mediaHash == ""` and never folds a blob
- * `Image`, so a document-keyed guard re-fired the resolve on every composition.
- * Such a post's own picture — the first `ProxiedImage` of a document with no blob
- * image — paints in the same slot from its nest-relative path, fetched with the
- * session bearer like a blob ([FeedVM.fetchProxiedBytes]); no open step, and its
- * placeholder carries the path as text until the bytes arrive.
+ * A `LaunchedEffect` triggers `resolve_media` **fire-once** to fold the blocks into the
+ * document. The guard keys on the snapshot's [mediaHash] being `null` (render-model.md § D6c),
+ * never on the document: an all-remote bridged post resolves to `mediaHash == ""` and never folds
+ * a blob `Image`, so a document-keyed guard re-fired the resolve on every composition. Until the
+ * fold lands a single `post-image` placeholder stands in, so the element is never absent.
  */
 @Composable
-fun FeedPostImage(document: RenderDocument, postId: String, mediaHash: String?, vm: FeedVM) {
+fun FeedPostMedia(document: RenderDocument, postId: String, mediaHash: String?, vm: FeedVM) {
     LaunchedEffect(postId, mediaHash) {
         if (mediaHash == null) vm.resolveMedia(postId)
     }
-    val hash = documentMediaImageHash(document)
-    val proxiedPath = documentProxiedPostImagePath(document)
+    val blocks = documentMediaBlocks(document)
+    if (blocks.isEmpty()) {
+        PostImagePaint(null, null)
+        return
+    }
+    val imageFallback = stringResource(R.string.feed_post_image_alt_fallback)
+    val videoFallback = stringResource(R.string.feed_post_video_alt_fallback)
+    blocks.forEachIndexed { index, block ->
+        key(index, block) {
+            when (block) {
+                is RenderBlock.Image ->
+                    FeedPostImage(postId, block.hash, null, mediaAlt(block.alt, imageFallback), vm)
+                is RenderBlock.ProxiedImage ->
+                    FeedPostImage(postId, null, block.path, mediaAlt(block.alt, imageFallback), vm)
+                is RenderBlock.Video ->
+                    FeedPostVideo(block, block.hash, postId, mediaAlt(block.alt, videoFallback), vm)
+                is RenderBlock.ProxiedVideo ->
+                    FeedPostVideo(block, block.path, postId, mediaAlt(block.alt, videoFallback), vm)
+                else -> {}
+            }
+        }
+    }
+}
+
+/**
+ * One feed post picture (ui.yaml `post-image`): a blob `Image` by its [hash], or a bridged
+ * post's `ProxiedImage` by its nest-relative [proxiedPath] (render-model.md § D6c), fetched
+ * with the session bearer like a blob ([FeedVM.fetchProxiedBytes]) — no open step, and its
+ * placeholder carries the path as text until the bytes arrive. A blob's bytes come through
+ * `vm.fetchPostBlobBytes`, which opens a tier-restricted post's sealed item through the shared
+ * manager before this decodes it — a public post's bytes pass through unchanged, so this
+ * composable carries no is-this-post-gated branch (`media.md` § Encryption at rest); the async
+ * byte load stays client-side (render-model.md § The boundary). The element always renders — a
+ * placeholder `Box` until the bytes arrive, and for good when a sealed item does not open.
+ */
+@Composable
+fun FeedPostImage(postId: String, hash: String?, proxiedPath: String?, alt: String, vm: FeedVM) {
     val bitmap by produceState<ImageBitmap?>(null, hash, proxiedPath) {
         val bytes = when {
             hash != null -> vm.fetchPostBlobBytes(postId, hash)
@@ -1783,7 +1854,7 @@ fun FeedPostImage(document: RenderDocument, postId: String, mediaHash: String?, 
         }
         value = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
     }
-    PostImagePaint(bitmap, proxiedPath)
+    PostImagePaint(bitmap, proxiedPath, alt)
 }
 
 /** `post-image`'s `state` tokens (its `stateDescription`) — the contract
@@ -1791,10 +1862,15 @@ fun FeedPostImage(document: RenderDocument, postId: String, mediaHash: String?, 
 internal const val POST_IMAGE_PAINTED = "painted"
 internal const val POST_IMAGE_PLACEHOLDER = "placeholder"
 
+/** `post-image`'s published attributes: its `state` token alone, or packed with its `alt`
+ *  (`AutomationAttributePack`, read back per key by the debug bridge). */
+internal fun postImageState(state: String, alt: String?): String =
+    if (alt == null) state else AutomationAttributePack.pack("state" to state, "alt" to alt)
+
 /** The `post-image` element itself: the picture once [bmp] decoded (`painted`), an
  *  empty box otherwise (`placeholder`) — never absent, so the test element is stable. */
 @Composable
-internal fun PostImagePaint(bmp: ImageBitmap?, proxiedPath: String?) {
+internal fun PostImagePaint(bmp: ImageBitmap?, proxiedPath: String?, alt: String? = null) {
     if (bmp != null) {
         // Tapping the painted picture opens it full screen (`image-lightbox`, feed.md § Layout & flow).
         var lightbox by remember { mutableStateOf(false) }
@@ -1812,14 +1888,14 @@ internal fun PostImagePaint(bmp: ImageBitmap?, proxiedPath: String?) {
                 .heightIn(max = 300.dp)
                 .clickable { lightbox = true }
                 .testTag(Ids.POST_IMAGE)
-                .semantics { stateDescription = POST_IMAGE_PAINTED },
+                .semantics { stateDescription = postImageState(POST_IMAGE_PAINTED, alt) },
         )
     } else {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag(Ids.POST_IMAGE)
-                .semantics { stateDescription = POST_IMAGE_PLACEHOLDER },
+                .semantics { stateDescription = postImageState(POST_IMAGE_PLACEHOLDER, alt) },
         ) {
             if (proxiedPath != null) Text(proxiedPath, style = MaterialTheme.typography.labelSmall)
         }

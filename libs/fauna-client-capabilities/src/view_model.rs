@@ -245,6 +245,73 @@ pub enum MintUseCase {
     /// Serve one tier's paywalled posts on the web: `content.read{post, tier}`
     /// (the tier rides [`MintOptionModel::tier`]).
     PaywalledPosts,
+    /// Keep my mail searchable on this nest — the materialization grant: the
+    /// master-key `content.read{mail}` plus the keyless `materialize{mail}`,
+    /// to the nest's own materializer holder
+    /// ([`fauna_client_bridges::MATERIALIZER_HOLDER_ID`]) and no other
+    /// (`encryption-at-rest.md` § Capability tiering → *The materialization
+    /// grant*, part (f)). Offered on the home row only, and never part of the
+    /// one-tap default set: the user opts in after reading what it costs.
+    MaterializeMail,
+    /// Keep my calendar searchable on this nest — the calendar twin of
+    /// [`Self::MaterializeMail`]: `content.read{calendar}` (the calendar's own
+    /// key, so it opens no mail) plus `materialize{calendar}`. One option per
+    /// kind, never one umbrella option (`encryption-at-rest.md` § Capability
+    /// tiering → *The materialization grant*, part (a)).
+    MaterializeCalendar,
+    /// Keep my contacts searchable on this nest — the card twin:
+    /// `content.read{card}` (the card's own key) plus `materialize{card}`.
+    MaterializeCard,
+}
+
+impl MintUseCase {
+    /// Whether this option is a materialization grant — the class that
+    /// leaves the box able to read one kind of the user's content at rest.
+    #[must_use]
+    pub fn is_materialization(self) -> bool {
+        matches!(
+            self,
+            Self::MaterializeMail | Self::MaterializeCalendar | Self::MaterializeCard
+        )
+    }
+
+    /// The own-actor kind a materialization option covers, `None` for every
+    /// other option.
+    #[must_use]
+    pub fn materialized_kind(self) -> Option<&'static str> {
+        match self {
+            Self::MaterializeMail => Some(ScopeTuple::KIND_MAIL),
+            Self::MaterializeCalendar => Some(ScopeTuple::KIND_CALENDAR),
+            Self::MaterializeCard => Some(ScopeTuple::KIND_CARD),
+            Self::Mail | Self::Calendar | Self::PaywalledPosts => None,
+        }
+    }
+
+    /// Whether the one-tap "trust this box" default set mints this option.
+    /// Every option but the materialization ones ([`Self::is_materialization`]),
+    /// each of which leaves the box able to read one kind of the user's
+    /// content at rest and is therefore its own opt-in, after the mint-time
+    /// note (`nests.md` § Trust facet — grants → *The materialization
+    /// option*).
+    #[must_use]
+    pub fn in_default_set(self) -> bool {
+        !self.is_materialization()
+    }
+
+    /// The duration the picker pre-selects for this option, given the row's
+    /// own default (standard on a blessed nest, one-off otherwise). The
+    /// materialization option pre-selects the standard window whatever the
+    /// blessing: a searchable copy that lapses in hours is churn
+    /// (`encryption-at-rest.md` § Capability tiering → *The materialization
+    /// grant*, part (f)).
+    #[must_use]
+    pub fn default_duration(self, row_default: crate::GrantDuration) -> crate::GrantDuration {
+        if self.is_materialization() {
+            crate::GrantDuration::Standard
+        } else {
+            row_default
+        }
+    }
 }
 
 /// One option in the trust facet's mint picker (`nest-trust-mint-scope-select`)
@@ -280,6 +347,12 @@ pub struct MintOptionModel {
 /// generic picker does not mint (a folder read mints through its own flow).
 pub fn holder_role_for_scope(scope: &GrantEventScope) -> Option<&'static str> {
     match (scope.class.as_str(), scope.kind.as_deref()) {
+        // The materializer is a generic content-processor holder, told from
+        // the web-serve one by its id ([`scope_belongs_with_holder`]).
+        (
+            ScopeTuple::CLASS_MATERIALIZE,
+            Some(ScopeTuple::KIND_MAIL | ScopeTuple::KIND_CALENDAR | ScopeTuple::KIND_CARD),
+        ) => Some(fauna_client_bridges::CONTENT_PROCESSOR_ROLE),
         (ScopeTuple::CLASS_CONTENT_LABEL_WRITE, None) => {
             Some(fauna_client_bridges::MDA_HOLDER_ROLE)
         }
@@ -294,6 +367,55 @@ pub fn holder_role_for_scope(scope: &GrantEventScope) -> Option<&'static str> {
     }
 }
 
+/// Whether a grant of `scope` may be sealed to `holder` — the guard a `Mint`
+/// checks before any side effect, against the same mapping [`mint_options`]
+/// derives its candidates from (`nests.md` § Mint: the holder is derived
+/// from the scope). `Err` names the first scope that does not belong.
+///
+/// A grant declaring a `materialize` tuple belongs with the nest's own
+/// materializer ([`fauna_client_bridges::MATERIALIZER_HOLDER_ID`]) and no
+/// other holder — its `content.read{mail}` included, which on any other
+/// grant belongs with the MDA; conversely the materializer takes nothing
+/// but such a grant. Every other grant is checked tuple by tuple against
+/// [`holder_role_for_scope`].
+pub fn scope_belongs_with_holder<'a>(
+    scope: &'a [GrantEventScope],
+    holder: &MintHolder,
+) -> Result<(), &'a GrantEventScope> {
+    let is_materializer = holder.bridge_id == fauna_client_bridges::MATERIALIZER_HOLDER_ID;
+    if crate::grant_log::is_materialization_grant(scope) {
+        let materialize = scope
+            .iter()
+            .find(|s| s.class == ScopeTuple::CLASS_MATERIALIZE);
+        if !is_materializer || holder.role != fauna_client_bridges::CONTENT_PROCESSOR_ROLE {
+            return materialize.map_or(Ok(()), Err);
+        }
+        // Each read must be the master-key read of a kind the grant
+        // materializes — a calendar grant carries no mail read.
+        let materialized: Vec<Option<&str>> = scope
+            .iter()
+            .filter(|s| s.class == ScopeTuple::CLASS_MATERIALIZE)
+            .map(|s| s.kind.as_deref())
+            .collect();
+        return match scope.iter().find(|s| {
+            !(s.class == ScopeTuple::CLASS_MATERIALIZE
+                || (s.class == ScopeTuple::CLASS_CONTENT_READ
+                    && materialized.contains(&s.kind.as_deref())
+                    && s.tier.is_none()))
+        }) {
+            Some(stray) => Err(stray),
+            None => Ok(()),
+        };
+    }
+    match scope
+        .iter()
+        .find(|s| is_materializer || holder_role_for_scope(s) != Some(holder.role.as_str()))
+    {
+        Some(stray) => Err(stray),
+        None => Ok(()),
+    }
+}
+
 /// Build the trust facet's mint-picker options from what the owner's mail
 /// custody (`fauna.state.mail`) and period-key custody (`period_keys`, the
 /// `fauna.state.subscriptions` fold)
@@ -305,7 +427,8 @@ pub fn holder_role_for_scope(scope: &GrantEventScope) -> Option<&'static str> {
 /// [`derive_scope_payload`] refuses as a grant payload
 /// ([`DerivePayloadError::ReservedTier`]; `nests.md` § Mint → *Which tiers*,
 /// ruled 2026-10-23), so the probe below drops them with no second list to
-/// drift.
+/// drift; last, [`MintUseCase::MaterializeMail`] when the roster lists the
+/// nest's materializer (the caller offers it on the home row only).
 ///
 /// Holder derivation is by role ([`holder_role_for_scope`]): mail/calendar target the `"mda"` holder(s);
 /// a post-tier grant targets the generic `"content-processor"` holder(s) (the
@@ -317,11 +440,15 @@ pub fn mint_options(
     mail: &MailConfig,
     holders: &[MintHolder],
 ) -> Vec<MintOptionModel> {
+    // The materializer takes the materialization grant alone, so no generic
+    // option ever lists it as a candidate — no existing option grows a
+    // holder select on a box that runs one.
     let candidates = |scope: &GrantEventScope| -> Vec<String> {
         let role = holder_role_for_scope(scope);
         holders
             .iter()
             .filter(|h| Some(h.role.as_str()) == role)
+            .filter(|h| h.bridge_id != fauna_client_bridges::MATERIALIZER_HOLDER_ID)
             .map(|h| h.bridge_id.clone())
             .collect()
     };
@@ -350,9 +477,10 @@ pub fn mint_options(
     let mut options = Vec::new();
 
     let mail = read_scope(ScopeTuple::KIND_MAIL, None);
+    let mail_derivable = derivable(&mail);
     let mda = candidates(&mail);
     if !mda.is_empty() {
-        if derivable(&mail) {
+        if mail_derivable {
             options.push(MintOptionModel {
                 use_case: MintUseCase::Mail,
                 tier: None,
@@ -390,6 +518,38 @@ pub fn mint_options(
                     holder_candidates: generic.clone(),
                 });
             }
+        }
+    }
+
+    // Keep my mail searchable on this nest — offered when the mail payload
+    // derives and the roster lists the nest's own materializer, the holder
+    // derived from that id (`encryption-at-rest.md` § Capability tiering →
+    // *The materialization grant*, part (f)). The caller offers it on the
+    // home row alone: a linked nest holds no mail plane.
+    // Calendar and card follow, one option per kind, each offered when its
+    // own key derives (part (a): the user chooses per kind what the nest
+    // keeps readable).
+    if holders.iter().any(|h| {
+        h.bridge_id == fauna_client_bridges::MATERIALIZER_HOLDER_ID
+            && h.role == fauna_client_bridges::CONTENT_PROCESSOR_ROLE
+    }) {
+        for use_case in [
+            MintUseCase::MaterializeMail,
+            MintUseCase::MaterializeCalendar,
+            MintUseCase::MaterializeCard,
+        ] {
+            let Some(kind) = use_case.materialized_kind() else {
+                continue;
+            };
+            if !derivable(&read_scope(kind, None)) {
+                continue;
+            }
+            options.push(MintOptionModel {
+                use_case,
+                tier: None,
+                scope: crate::grant_log::event_scope_of(&crate::materialization_scope(kind)),
+                holder_candidates: vec![fauna_client_bridges::MATERIALIZER_HOLDER_ID.to_string()],
+            });
         }
     }
 
@@ -2393,6 +2553,220 @@ mod tests {
             msek: Some([0x42; 32].into()),
             ..MailConfig::default()
         }
+    }
+
+    fn materializer_holder() -> MintHolder {
+        MintHolder {
+            bridge_id: fauna_client_bridges::MATERIALIZER_HOLDER_ID.into(),
+            role: fauna_client_bridges::CONTENT_PROCESSOR_ROLE.into(),
+        }
+    }
+
+    fn held_gold() -> fauna_core::data::SubscriptionsConfig {
+        let mut custody = fauna_core::data::SubscriptionsConfig::default();
+        fauna_client_subscriptions::custody::record_new_tier(
+            &mut custody,
+            fauna_core::identity::ActorId([9u8; 32]),
+            "gold",
+            [0x11; 32],
+            1000,
+        );
+        custody
+    }
+
+    /// The materialization option (`encryption-at-rest.md` § Capability
+    /// tiering → *The materialization grant*, part (f)): offered last, only
+    /// with the materializer listed and the mail payload derivable, scoped to
+    /// the master-key read plus the keyless `materialize{mail}`, its one
+    /// candidate the materializer — and its presence leaves every other
+    /// option's holder set exactly as it was.
+    #[test]
+    fn the_materialization_option_needs_the_materializer_and_mail() {
+        let custody = held_gold();
+        let mail = mail_with_msek();
+        let without = mint_options(&custody, &mail, &[mda_holder(), web_serve_holder()]);
+        let with = mint_options(
+            &custody,
+            &mail,
+            &[mda_holder(), materializer_holder(), web_serve_holder()],
+        );
+        assert_eq!(with.len(), without.len() + 3);
+        assert_eq!(
+            &with[..without.len()],
+            &without[..],
+            "no other option changes"
+        );
+        // One option per kind, mail first, each over its own kind alone.
+        let added: Vec<&MintOptionModel> = with[without.len()..].iter().collect();
+        assert_eq!(
+            added.iter().map(|o| o.use_case).collect::<Vec<_>>(),
+            vec![
+                MintUseCase::MaterializeMail,
+                MintUseCase::MaterializeCalendar,
+                MintUseCase::MaterializeCard
+            ]
+        );
+        for (option, kind) in added.iter().zip(["mail", "calendar", "card"]) {
+            assert!(
+                option.scope.iter().all(|s| s.kind.as_deref() == Some(kind)),
+                "{option:?}"
+            );
+            assert_eq!(option.scope.len(), 2);
+            assert!(!option.use_case.in_default_set());
+            assert_eq!(
+                option
+                    .use_case
+                    .default_duration(crate::GrantDuration::OneOff),
+                crate::GrantDuration::Standard
+            );
+            let holder = materializer_holder();
+            assert_eq!(scope_belongs_with_holder(&option.scope, &holder), Ok(()));
+        }
+        // A calendar materialization smuggling a mail read is refused.
+        let mut smuggled = added[1].scope.clone();
+        smuggled.push(GrantEventScope {
+            class: "content.read".into(),
+            kind: Some("mail".into()),
+            tier: None,
+        });
+        assert!(scope_belongs_with_holder(&smuggled, &materializer_holder()).is_err());
+        let last = added[0];
+        assert_eq!(last.use_case, MintUseCase::MaterializeMail);
+        assert_eq!(last.tier, None);
+        assert_eq!(
+            last.scope,
+            vec![
+                GrantEventScope {
+                    class: "content.read".into(),
+                    kind: Some("mail".into()),
+                    tier: None,
+                },
+                GrantEventScope {
+                    class: "materialize".into(),
+                    kind: Some("mail".into()),
+                    tier: None,
+                },
+            ]
+        );
+        assert_eq!(last.holder_candidates, vec!["materializer".to_string()]);
+        assert!(!last.use_case.in_default_set());
+        assert!(without.iter().all(|o| o.use_case.in_default_set()));
+
+        // Mail not derivable → no option of any kind (every kind's key is
+        // MSEK-derived), materializer or not.
+        assert!(
+            !mint_options(&custody, &MailConfig::default(), &[materializer_holder()])
+                .iter()
+                .any(|o| o.use_case.is_materialization())
+        );
+        // The materializer alone suffices; no MDA needed.
+        assert_eq!(
+            mint_options(
+                &fauna_core::data::SubscriptionsConfig::default(),
+                &mail,
+                &[materializer_holder()]
+            )
+            .iter()
+            .map(|o| o.use_case)
+            .collect::<Vec<_>>(),
+            vec![
+                MintUseCase::MaterializeMail,
+                MintUseCase::MaterializeCalendar,
+                MintUseCase::MaterializeCard
+            ]
+        );
+        // A `materializer` id under another role is not the materializer.
+        let impostor = MintHolder {
+            role: "mda".into(),
+            ..materializer_holder()
+        };
+        assert!(
+            !mint_options(&custody, &mail, &[impostor])
+                .iter()
+                .any(|o| o.use_case == MintUseCase::MaterializeMail)
+        );
+    }
+
+    /// The materializer is never a generic candidate: a post-tier option on a
+    /// box running one keeps its single web-serve candidate (no holder select
+    /// appears), and with the materializer as the only content processor no
+    /// post option is offered at all.
+    #[test]
+    fn the_materializer_is_never_a_post_tier_candidate() {
+        let custody = held_gold();
+        let opts = mint_options(
+            &custody,
+            &MailConfig::default(),
+            &[materializer_holder(), web_serve_holder()],
+        );
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].use_case, MintUseCase::PaywalledPosts);
+        assert_eq!(opts[0].holder_candidates, vec!["web-serve".to_string()]);
+        assert!(
+            mint_options(&custody, &MailConfig::default(), &[materializer_holder()]).is_empty()
+        );
+    }
+
+    /// The `Mint` guard: the materialization grant belongs with the
+    /// materializer alone, and the materializer takes nothing else.
+    #[test]
+    fn scope_belongs_with_holder_pins_the_materializer() {
+        let materialize = crate::grant_log::event_scope_of(&crate::materialization_scope("mail"));
+        let mail_option = vec![
+            GrantEventScope {
+                class: "content.read".into(),
+                kind: Some("mail".into()),
+                tier: None,
+            },
+            GrantEventScope {
+                class: "content.label-write".into(),
+                kind: None,
+                tier: None,
+            },
+        ];
+        let post = vec![GrantEventScope {
+            class: "content.read".into(),
+            kind: Some("post".into()),
+            tier: Some("gold".into()),
+        }];
+        assert!(scope_belongs_with_holder(&materialize, &materializer_holder()).is_ok());
+        assert!(scope_belongs_with_holder(&materialize, &mda_holder()).is_err());
+        assert!(scope_belongs_with_holder(&materialize, &web_serve_holder()).is_err());
+        assert!(scope_belongs_with_holder(&mail_option, &mda_holder()).is_ok());
+        assert!(scope_belongs_with_holder(&mail_option, &materializer_holder()).is_err());
+        assert!(scope_belongs_with_holder(&post, &web_serve_holder()).is_ok());
+        assert!(scope_belongs_with_holder(&post, &materializer_holder()).is_err());
+        // A label-write smuggled into a materialization grant is refused.
+        let mut bundled = materialize.clone();
+        bundled.push(mail_option[1].clone());
+        assert_eq!(
+            scope_belongs_with_holder(&bundled, &materializer_holder()),
+            Err(&mail_option[1])
+        );
+        assert_eq!(
+            holder_role_for_scope(&materialize[1]),
+            Some(fauna_client_bridges::CONTENT_PROCESSOR_ROLE)
+        );
+    }
+
+    /// The materialization option pre-selects the standard window whatever
+    /// the row's default; every other option keeps the row's.
+    #[test]
+    fn the_materialization_option_defaults_to_the_standard_window() {
+        use crate::GrantDuration::{OneOff, Standard};
+        assert_eq!(
+            MintUseCase::MaterializeMail.default_duration(OneOff),
+            Standard
+        );
+        assert_eq!(
+            MintUseCase::MaterializeMail.default_duration(Standard),
+            Standard
+        );
+        assert_eq!(MintUseCase::Mail.default_duration(OneOff), OneOff);
+        assert_eq!(
+            MintUseCase::PaywalledPosts.default_duration(Standard),
+            Standard
+        );
     }
 
     #[test]

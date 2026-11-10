@@ -30,6 +30,7 @@ fn row(key: &str, class: &str, name: &str) -> ConnectedAppRow {
         lasts_until_millis: None,
         connected: true,
         paused: false,
+        suspended: false,
         mail: None,
         signer_burned: false,
         oracle: None,
@@ -51,6 +52,7 @@ fn mail_row(id: &str, name: &str, revoked: bool) -> ConnectedAppRow {
         lasts_until_millis: None,
         connected: !revoked,
         paused: false,
+        suspended: false,
         mail: Some(fauna_client_connected_apps::MailAppPassword {
             mua_username: format!("{{handle}}+{id}@example.test"),
             kind: LocalizedText::key("settings.mail.kind_password"),
@@ -1095,6 +1097,31 @@ fn a_paused_row_reads_paused_in_words_and_as_a_value() {
     let item = find(&els, ids::CONNECTED_APPS_ITEM);
     assert!(item.text.contains(t::PAUSED), "{}", item.text);
     assert!(!item.text.contains(t::NOT_CONNECTED), "{}", item.text);
+    assert_eq!(attr(item, "status"), Some("paused"));
+    assert!(
+        has(&els, ids::CONNECTED_APPS_ITEM_REVOKE),
+        "still revocable"
+    );
+}
+
+/// A principal whose every OAuth grant a step-down suspended is paused too:
+/// the same `status` value, worded with its own undo, no lasts-until, and
+/// still revocable (`ui/atproto.md`'s downward matrix).
+#[test]
+fn a_suspended_row_reads_paused_with_its_own_undo() {
+    let app = app_with(|s| {
+        s.principals = vec![ConnectedAppRow {
+            connected: false,
+            paused: true,
+            suspended: true,
+            lasts_until_millis: None,
+            ..row("principal:01", class::DEVICE, "Example App")
+        }]
+    });
+    let els = els(&app);
+    let item = find(&els, ids::CONNECTED_APPS_ITEM);
+    assert!(item.text.contains(t::PAUSED_SUSPENDED), "{}", item.text);
+    assert!(!item.text.contains(t::OPEN_ENDED), "{}", item.text);
     assert_eq!(attr(item, "status"), Some("paused"));
     assert!(
         has(&els, ids::CONNECTED_APPS_ITEM_REVOKE),

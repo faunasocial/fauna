@@ -43,13 +43,25 @@
 //! [`IntentDrainer::Mls`] intents are listed but never sent here: they
 //! drain only through the gated MLS send path, from a process hosting the
 //! account's conversations engine — sealing at the then-current epoch is
-//! the whole point (`devices.md` § Offline compose). That drainer is T6's
-//! consumer, built with the MLS compose surface, not in this module.
+//! the whole point (`devices.md` § Offline compose). That drain is
+//! `AccountStoreHandle::drain_mls_outbox`, which an app hosting the
+//! conversations engine runs with the engine's `MlsIntentSender`; the pump
+//! never calls it.
+//!
+//! [`IntentDrainer::Identity`] intents are listed but never sent here either:
+//! their payload is the inputs of an identity-bound request, which only a
+//! process holding the identity seed composes and signs, at drain, as the
+//! then-current identity (`account-offline-mutation.md` § The
+//! offline-mutation contract → *Identity-bound intents compose at
+//! drain*). That drain is `AccountStoreHandle::drain_identity_outbox`, run by
+//! the app with its `IdentityIntentSender`; the sync agent, whose bundle
+//! carries no seed, never runs it.
 
 use anyhow::{Context, Result, bail};
 use fauna_account_store::backend::StoreBackend;
 use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::{IntentDrainer, IntentStatus, NewOutboxIntent};
+use fauna_core::offline_intent::park_code;
 use fauna_protocol::offline_class::{OfflineClass, offline_class_keyed};
 use fauna_protocol::{KeyedRpcRequester, RpcErrorClass, Value};
 
@@ -107,6 +119,8 @@ pub struct DrainReport {
     pub held_behind_park: usize,
     /// [`IntentDrainer::Mls`] intents — not this leg's to send.
     pub held_for_mls: usize,
+    /// [`IntentDrainer::Identity`] intents — not this leg's to send.
+    pub held_for_identity: usize,
     /// Inconclusive attempts recorded before a transport fault stopped the
     /// pass.
     pub retried: usize,
@@ -150,9 +164,16 @@ where
             report.held_behind_park += 1;
             continue;
         }
-        if intent.drainer == IntentDrainer::Mls {
-            report.held_for_mls += 1;
-            continue;
+        match intent.drainer {
+            IntentDrainer::Rpc => {}
+            IntentDrainer::Mls => {
+                report.held_for_mls += 1;
+                continue;
+            }
+            IntentDrainer::Identity => {
+                report.held_for_identity += 1;
+                continue;
+            }
         }
 
         // Recover the canonical &'static str for the wire seam from the same
@@ -165,6 +186,7 @@ where
                 intent,
                 &mut parked_scopes,
                 &mut report,
+                park_code::UNKNOWN_KIND,
                 "unknown kind",
             )
             .await;
@@ -174,7 +196,15 @@ where
             Ok(v) => v,
             Err(e) => {
                 let why = format!("payload does not decode: {e}");
-                park(store, intent, &mut parked_scopes, &mut report, &why).await;
+                park(
+                    store,
+                    intent,
+                    &mut parked_scopes,
+                    &mut report,
+                    park_code::UNDECODABLE,
+                    &why,
+                )
+                .await;
                 continue;
             }
         };
@@ -189,7 +219,12 @@ where
             },
             Err(e) if e.is_rejection() => {
                 let why = format!("nest rejected: {e}");
-                park(store, intent, &mut parked_scopes, &mut report, &why).await;
+                // The nest's own error code is the stored reason; a
+                // rejection without one gets the drain's generic code.
+                let code = e
+                    .as_rpc_error()
+                    .map_or(park_code::REJECTED, |r| r.code.as_str());
+                park(store, intent, &mut parked_scopes, &mut report, code, &why).await;
             }
             Err(e) => {
                 // Transport fault — the connection is gone; nothing after
@@ -211,16 +246,19 @@ where
     report
 }
 
-/// Park one intent and its scope, recording why. A park is durable,
-/// user-visible state — the opposite of a drop.
+/// Park one intent and its scope, recording why: `code` is the stable
+/// reason stored on the row (the unsent-changes surface renders it), `why`
+/// the diagnostic for the report. A park is durable, user-visible state —
+/// the opposite of a drop.
 async fn park<B: StoreBackend>(
     store: &AccountStore<B>,
     intent: &fauna_account_store::types::OutboxIntent,
     parked_scopes: &mut std::collections::BTreeSet<String>,
     report: &mut DrainReport,
+    code: &str,
     why: &str,
 ) {
-    if let Err(e) = store.outbox_mark_failed(&intent.intent_id).await {
+    if let Err(e) = store.outbox_mark_failed(&intent.intent_id, code).await {
         report.errors.push(format!("outbox park: {e:#}"));
     }
     parked_scopes.insert(intent.scope.clone());

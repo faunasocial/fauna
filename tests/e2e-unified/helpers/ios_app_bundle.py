@@ -38,8 +38,20 @@ def write_package_workspace(ws_dir: Path, package_dir: Path) -> Path:
     return ws_dir
 
 
-def write_app_bundle(app_dir: Path, exe: Path, bundle_id: str) -> None:
-    """Wrap the bare SPM executable `exe` in the `.app` bundle `simctl install` takes."""
+#: The Swift conditions the kids build compiles under, on the command line: a
+#: target's `SWIFT_ACTIVE_COMPILATION_CONDITIONS` does not reach the FaunaKit
+#: package, a command-line `OTHER_SWIFT_FLAGS` does — the same three
+#: `just apple-kids-check` archives `Fauna-Kids-iOS` with (the kids build is a
+#: store-safe build one complement further).
+KIDS_SWIFT_FLAGS = "OTHER_SWIFT_FLAGS=$(inherited) -D FAUNA_KIDS -D FAUNA_EXCISE_PAYMENTS -D FAUNA_EXCISE_P2P_SHARE"
+
+
+def write_app_bundle(app_dir: Path, exe: Path, bundle_id: str, *, kids: bool = False) -> None:
+    """Wrap the bare SPM executable `exe` in the `.app` bundle `simctl install` takes.
+
+    `kids` writes the Fauna Kids shape of the plist (`Fauna-iOS/Resources/
+    Info-Kids.plist`'s rule): photo backup is not in the kids app's Kept set, so
+    no Photos usage string."""
     app_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(str(exe), str(app_dir / "FaunaiOS"))
 
@@ -54,6 +66,11 @@ def write_app_bundle(app_dir: Path, exe: Path, bundle_id: str) -> None:
     # pair unable to disagree at all; `test_apple_identifier_pins.py` holds both
     # to the shipping `.xcodeproj` value.
     info_plist = app_dir / "Info.plist"
+    name = "Fauna Kids" if kids else "Fauna"
+    photos = "" if kids else (
+        "    <key>NSPhotoLibraryUsageDescription</key>\n"
+        "    <string>Fauna backs up your photos to your own nest.</string>\n"
+    )
     info_plist.write_text(f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -62,7 +79,7 @@ def write_app_bundle(app_dir: Path, exe: Path, bundle_id: str) -> None:
 <dict>
     <key>CFBundleExecutable</key><string>FaunaiOS</string>
     <key>CFBundleIdentifier</key><string>{bundle_id}</string>
-    <key>CFBundleName</key><string>Fauna</string>
+    <key>CFBundleName</key><string>{name}</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -73,9 +90,7 @@ def write_app_bundle(app_dir: Path, exe: Path, bundle_id: str) -> None:
     <key>UIDeviceFamily</key>
     <array><integer>1</integer><integer>2</integer></array>
     <key>UILaunchScreen</key><dict/>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>Fauna backs up your photos to your own nest.</string>
-    <key>NSAppTransportSecurity</key>
+{photos}    <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key><true/>
     </dict>

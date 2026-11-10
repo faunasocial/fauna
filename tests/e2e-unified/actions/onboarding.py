@@ -568,9 +568,43 @@ class OnboardingActions:
 
         Triggers the machine's ``submit_handle_check_continue()`` (after a
         handle check has completed and ``continue_enabled`` is true).
-        Caller waits for the next-stage IDs.
+        Caller waits for the next-stage IDs. A Continue still disabled here
+        means the check never reached an outcome that admits it: the failure
+        names what the page says (convention 6), not just the refused click.
         """
+        try:
+            enabled = self.driver.is_enabled("handle-entry-continue-button")
+        except Exception:  # noqa: BLE001 - the click below reports its own error
+            enabled = True
+        if not enabled:
+            def read(element_id: str) -> str:
+                try:
+                    return (self.driver.get_text(element_id) or "").strip()
+                except Exception as e:  # noqa: BLE001 - a diagnosis never raises
+                    return f"<unreadable: {e}>"
+            raise AssertionError(
+                "handle-entry-continue-button is disabled: the handle check did "
+                "not reach an outcome that admits Continue. handle-message-area="
+                f"{read('handle-message-area')!r} error-message="
+                f"{read('error-message')!r} handle-input={read('handle-input')!r} "
+                f"nest_override={self._nest_override()!r}\n"
+                f"--- app log tail ---\n{self._log_tail()}"
+            )
         self.driver.click("handle-entry-continue-button")
+
+    def _nest_override(self) -> str:
+        """The machine's E2E nest-leg override — the probe base when set."""
+        try:
+            return str(self.driver.call_machine_method(
+                "provider_base_url", json.dumps("nest")))
+        except Exception as e:  # noqa: BLE001 - a diagnosis never raises
+            return f"<unreadable: {e}>"
+
+    def _log_tail(self) -> str:
+        try:
+            return (self.driver.app_stderr_text() or "")[-4000:]
+        except Exception as e:  # noqa: BLE001 - a diagnosis never raises
+            return f"<unreadable: {e}>"
 
     def run_handle_check(self, timeout: float = 20) -> None:
         """Click ``handle-check-button`` and wait for the check to complete.
@@ -795,9 +829,8 @@ class OnboardingActions:
         The shared ``select_vps_location`` re-lists on whatever runtime its
         caller has, or on the machine's own when a UniFFI shell calls it from a
         UI thread with none (``native-async-execution.md`` § Implementation
-        status today). Witnessed on linux, tui, macos, ios and windows;
-        android shares the fix but has not run these journeys yet. Web omits
-        the picker."""
+        status today). Witnessed on linux, tui, macos, ios, windows and web;
+        android shares the fix but has not run these journeys yet."""
         d = self.driver
         from helpers.app_surface import require_surface
 

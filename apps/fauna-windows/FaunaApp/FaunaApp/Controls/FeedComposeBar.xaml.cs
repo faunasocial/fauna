@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
+using FaunaApp.Helpers;
 using S = FaunaApp.Core.Services.Strings;
 using FaunaApp.UiIds;
 using uniffi.fauna_feed;
@@ -95,7 +95,7 @@ public sealed partial class FeedComposeBar : UserControl
 
     /// <summary>Suppresses <see cref="AudienceChanged"/>/<see cref="GatePreviewChanged"/> while
     /// this control writes the audience controls itself: <see cref="RebuildGateItems"/> (whose
-    /// <c>Items.Clear()</c> alone raises SelectionChanged), <see cref="PaintAudience"/> and
+    /// teardown of a changed option list alone raises SelectionChanged), <see cref="PaintAudience"/> and
     /// <see cref="RestoreAudienceFieldsIfUntouched"/>. Without it a rebuild that briefly shows
     /// Public — the restored tier's option not offered yet — would forward Public and erase the
     /// restored answer from the manager before it could ever be shown.</summary>
@@ -254,7 +254,7 @@ public sealed partial class FeedComposeBar : UserControl
     {
         var answer = AnswerOf(compose);
         if (_paintedAnswer == answer) return;
-        var idx = ResolveGateIndex(answer);
+        var idx = ResolveGateIndex(answer, GateTierSelect.Items.Count);
         if (idx == 0 && answer.Kind != GateKind.Public) return;
         _paintedAnswer = answer;
         if (GateTierSelect.SelectedIndex == idx) return;
@@ -401,19 +401,22 @@ public sealed partial class FeedComposeBar : UserControl
     // able to hijack another answer (mirrors linux's `GateOptions`, pinned by its own
     // `gate_options_keep_a_tier_named_like_a_room_option_a_tier` test).
 
-    /// <summary>Rebuild the <c>compose-gate-tier-select</c> options from the CURRENT
-    /// <see cref="_gateTierNames"/> / <see cref="_ownRooms"/>. Called by
-    /// <see cref="SetGateTiers"/> and <see cref="SetOwnRooms"/>, each only on an actual
-    /// change to its own list (mirrors linux post_list.rs) — clearing Items mid-interaction
-    /// would disrupt an in-progress selection. The prior selection is preserved by KIND +
-    /// KEY (tier name / room id), never by index or text, so a list that grew or shrank on
-    /// the OTHER axis (a room joined while a tier list is unchanged, or vice versa) cannot
-    /// silently move the selection onto a different answer. Each item carries its label in
-    /// BOTH Content (the visible label) and AutomationProperties.Name — <c>driver.select</c>
-    /// matches Name EXACTLY (reference_windows_flaui_select_exact_name).</summary>
-    private void RebuildGateItems()
+    /// <summary>Repaint the <c>compose-gate-tier-select</c> options from the CURRENT
+    /// <see cref="_gateTierNames"/> / <see cref="_ownRooms"/>, through
+    /// <see cref="PickerOption.ReconcileAtIndex"/>: the items are torn down only when the
+    /// painted option list changed (a tier list that changed only on a tier the list
+    /// paints identically, say, keeps them), and never on a tick that changed nothing.
+    /// Called by <see cref="SetGateTiers"/> and <see cref="SetOwnRooms"/>, each only on an
+    /// actual change to its own list (mirrors linux post_list.rs), with
+    /// <paramref name="current"/> read BEFORE that list was reassigned. The prior
+    /// selection is preserved by KIND + KEY (tier name / room id), never by index or
+    /// text, so a list that grew or shrank on the OTHER axis (a room joined while a tier
+    /// list is unchanged, or vice versa) cannot silently move the selection onto a
+    /// different answer. Each item is named by the label it paints (Content and
+    /// AutomationProperties.Name alike) and carries no key, which is what
+    /// <c>driver.select</c> names here.</summary>
+    private void RebuildGateItems((GateKind Kind, string? Key) current)
     {
-        var current = CurrentGateSelection();
         _suppressAudienceForward = true;
         try { RebuildGateItemsCore(current); }
         finally { _suppressAudienceForward = false; }
@@ -421,39 +424,18 @@ public sealed partial class FeedComposeBar : UserControl
 
     private void RebuildGateItemsCore((GateKind Kind, string? Key) current)
     {
-        GateTierSelect.Items.Clear();
-
-        var publicItem = new ComboBoxItem { Content = S.Get("feed/post/gate_public") };
-        AutomationProperties.SetName(publicItem, S.Get("feed/post/gate_public"));
-        GateTierSelect.Items.Add(publicItem);
-
-        foreach (var name in _gateTierNames)
-        {
-            var item = new ComboBoxItem { Content = name };
-            AutomationProperties.SetName(item, name);
-            GateTierSelect.Items.Add(item);
-        }
-
+        var labels = new List<string> { S.Get("feed/post/gate_public") };
+        labels.AddRange(_gateTierNames);
         foreach (var room in _ownRooms)
-        {
-            var label = S.Get("feed/post/gate_room").Replace("{room}", room.@label);
-            var item = new ComboBoxItem { Content = label };
-            AutomationProperties.SetName(item, label);
-            GateTierSelect.Items.Add(item);
-        }
-
+            labels.Add(S.Get("feed/post/gate_room").Replace("{room}", room.@label));
 #if PAYMENTS
-        var sellLabel = S.Get("feed/post/gate_sell");
-        var sellItem = new ComboBoxItem { Content = sellLabel };
-        AutomationProperties.SetName(sellItem, sellLabel);
-        GateTierSelect.Items.Add(sellItem);
+        labels.Add(S.Get("feed/post/gate_sell"));
 #endif
-
-        GateTierSelect.SelectedIndex = ResolveGateIndex(current);
+        PickerOption.ReconcileAtIndex(GateTierSelect, labels, ResolveGateIndex(current, labels.Count));
     }
 
     /// <summary>The currently-selected answer, read BEFORE <see cref="RebuildGateItems"/>
-    /// clears <c>GateTierSelect.Items</c> — against the layout <see cref="_gateTierNames"/> /
+    /// repaints <c>GateTierSelect</c> — against the layout <see cref="_gateTierNames"/> /
     /// <see cref="_ownRooms"/> describe right now (i.e. call this before reassigning either
     /// backing field for the rebuild it precedes).</summary>
     private (GateKind Kind, string? Key) CurrentGateSelection()
@@ -468,15 +450,16 @@ public sealed partial class FeedComposeBar : UserControl
 
     /// <summary>The item index <paramref name="selection"/> maps to under the layout
     /// <see cref="_gateTierNames"/> / <see cref="_ownRooms"/> describe NOW (i.e. call this
-    /// AFTER updating whichever backing field changed) — 0 (Public) when the prior answer
-    /// no longer exists (its tier was removed, or its room was left).</summary>
-    private int ResolveGateIndex((GateKind Kind, string? Key) selection)
+    /// AFTER updating whichever backing field changed), of <paramref name="optionCount"/>
+    /// options — 0 (Public) when the prior answer no longer exists (its tier was removed,
+    /// or its room was left).</summary>
+    private int ResolveGateIndex((GateKind Kind, string? Key) selection, int optionCount)
     {
         switch (selection.Kind)
         {
 #if PAYMENTS
             case GateKind.Sell:
-                return GateTierSelect.Items.Count - 1;
+                return optionCount - 1;
 #endif
             case GateKind.Tier:
                 for (var i = 0; i < _gateTierNames.Count; i++)
@@ -505,8 +488,9 @@ public sealed partial class FeedComposeBar : UserControl
     public void SetGateTiers(IReadOnlyList<string> tierNames)
     {
         if (GateTierSelect.Items.Count > 0 && _gateTierNames.SequenceEqual(tierNames)) return;
+        var current = CurrentGateSelection();
         _gateTierNames = tierNames.ToList();
-        RebuildGateItems();
+        RebuildGateItems(current);
     }
 
     /// <summary>Rebuild the room segment of <c>compose-gate-tier-select</c> from the
@@ -519,8 +503,9 @@ public sealed partial class FeedComposeBar : UserControl
     internal void SetOwnRooms(IReadOnlyList<GateRoomOption> rooms)
     {
         if (GateTierSelect.Items.Count > 0 && _ownRooms.SequenceEqual(rooms)) return;
+        var current = CurrentGateSelection();
         _ownRooms = rooms.ToList();
-        RebuildGateItems();
+        RebuildGateItems(current);
     }
 
     private void GateTierSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)

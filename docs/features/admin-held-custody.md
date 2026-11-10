@@ -4,6 +4,9 @@ title: Held Custody: encrypted copies kept for people elsewhere
 section: admin area
 goal: docs/goal/architecture/account-replica-posture.md § The custody grant + ceremony
 guide: docs/guides/admin-tour.md § Held Custody
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -14,7 +17,7 @@ when there are none.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e129e78aa0.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] With nothing held for anyone, the page opens with no copies listed and no error — `docs/goal/architecture/account-replica-posture.md` § The custody grant + ceremony
    - `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_admin_custody_hosting_page_reachable_and_honestly_empty`
@@ -46,6 +49,8 @@ Stamped 2026-10-01 at e129e78aa0.
 13. [app] The page says that nothing is held only once the nest has answered, never while it is still loading — `docs/goal/architecture/account-replica-posture.md` § The custody grant + ceremony
     - `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_the_page_says_nothing_is_held_only_once_the_nest_has_answered`
     - `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_tui_names_no_count_while_the_registry_read_is_held`
+14. [app] Each held copy shows its budget, how much it holds, whether it is stopped and how fresh its last confirmation is, heaviest first — `docs/goal/architecture/account-data-plane.md` § Implementation status today
+    - `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_each_held_copy_shows_its_budget_hold_stop_mark_and_freshness_heaviest_first`
 
 ## Status
 
@@ -59,6 +64,8 @@ Stamped 2026-10-01 at e129e78aa0.
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -79,4 +86,5 @@ Stamped 2026-10-01 at e129e78aa0.
 | 12 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_what_the_nest_holds_never_grows_past_the_allowance_set_for_it` | nest (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_the_page_says_nothing_is_held_only_once_the_nest_has_answered` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
 | 13 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_tui_names_no_count_while_the_registry_read_is_held` | tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_each_held_copy_shows_its_budget_hold_stop_mark_and_freshness_heaviest_first` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

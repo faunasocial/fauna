@@ -1,6 +1,7 @@
 <script lang="ts">
   import { rejectionText } from '#lib/rejection';
   import { identity } from '#lib/store';
+  import { sessionFolderName } from '#lib/devices-session';
   import { copyAndConfirm } from '#lib/copy-confirm';
   import { aftermathProgress, configStageSettled } from '#lib/succession-aftermath';
   import {
@@ -9,6 +10,7 @@
     accountsSwitchConfirmed,
     accountsSetRequireConfirm,
     accountsRemove,
+    accountDisplayHandle,
     type AccountEntry,
   } from '#lib/accounts';
   import { resolve } from '$app/paths';
@@ -32,7 +34,7 @@
     spamThresholdBand,
     inboxModeValues,
     validateHandle,
-    describePendingAction,
+    describePendingActionWithFolder,
     ensureLogging,
     logSnapshot,
     logClear,
@@ -64,7 +66,7 @@
     getInboxMode,
     setInboxMode,
     listEmailFilters,
-    createEmailFilter,
+    createEmailFilterOrQueue,
     getEmailFilter,
     updateEmailFilter,
     deleteEmailFilter,
@@ -80,6 +82,7 @@
     type RecoveryStatus,
     type RecoveryMinted,
   } from '#lib/api';
+  import { createFilter } from '#lib/email-filter-create';
   import {
     getConversationsManager,
     scheduleMlsSave,
@@ -107,6 +110,7 @@
   import { ownSupersessionHold } from '#lib/own-supersession-hold';
   import { performHeldBackSupersession } from '#lib/post-auth-escalation';
   import type { SweepCopy } from '#lib/rpc';
+  import { holdMutedWords } from '#lib/muted-words';
   import {
     keypackageCount as wsKeypackageCount,
     statusNode,
@@ -183,7 +187,7 @@
   import CredentialStoreSection from '#lib/components/CredentialStoreSection.svelte';
   import ContentLabelBadge from '#lib/components/ContentLabelBadge.svelte';
   import { t } from '#lib/i18n/strings';
-  import { byteSize } from '#lib/value-format';
+  import { byteSize, localTimestamp } from '#lib/value-format';
   import { IDS } from '#lib/generated/uiIds';
 
   // The Settings sidebar-swap shell (settings.md § Navigation model): the rail
@@ -222,6 +226,12 @@
   let deleteConfirmText = $state('');
   let deleteAccountError = $state('');
   let actorIdCopied = $state(false);
+  // The identity cell's handle text — the shared display twin over the cached
+  // handle + domain (settings.md § Layout & flow item 1); undefined while the
+  // cache holds no handle, and the cell is then absent.
+  const settingsDisplayHandle = $derived(
+    $identity?.handle ? accountDisplayHandle($identity.handle, $identity.domain) : undefined,
+  );
   let nodeUrlCopied = $state(false);
   // What the last click actually put on the clipboard — painted as the
   // buttons' `data-copied` (the copy-button contents contract; the label
@@ -1373,6 +1383,14 @@
   // for the returned record (`ui/settings.md` § Muted words — the level picker).
   let mutedWordsBusy = $state(false);
 
+  // Every record this page reads or a write returns replaces the session-held
+  // copy (`#lib/muted-words`), so the knock toast's gate and the collapses
+  // read what the page shows. Only a returned record: the unread placeholder
+  // is an absence, not an empty list.
+  $effect(() => {
+    if (mutedWords.loaded) holdMutedWords(mutedWords.keywords);
+  });
+
   async function loadMutedWords() {
     const id = $identity;
     if (!id) return;
@@ -2008,8 +2026,13 @@
       // kind (caught below). An empty reject reason rides the canonical default.
       await ensureWasm();
       const { rule, action, priority } = encodeFilterForm();
-      await createEmailFilter(id.secretHex, newFilterName, [rule], 'all', action, priority, newFilterContinue);
-      emailFilters = await listEmailFilters(id.secretHex);
+      // With no nest the create is queued: the form resets, nothing is listed.
+      const listed = await createFilter({
+        createOrQueue: () =>
+          createEmailFilterOrQueue(id.secretHex, newFilterName, [rule], 'all', action, priority, newFilterContinue),
+        reread: () => listEmailFilters(id.secretHex),
+      });
+      if (listed) emailFilters = listed;
       showFilterForm = false;
       newFilterName = '';
     } catch (e: any) {
@@ -2170,17 +2193,21 @@
       <code class="mono" data-testid={IDS.ACCOUNT_ACTOR_ID}>{$identity?.actorId}</code>
       <button class="btn-copy" data-testid={IDS.ACCOUNT_ACTOR_ID_COPY_BTN} data-copied={copiedActorId ?? undefined} onclick={copyActorId}>{actorIdCopied ? t.common.copied : t.common.copy}</button>
     </div>
-    {#if $identity?.handle}
+    <!-- The identity cell (settings.md § Layout & flow item 1): from the
+         registry's server-data cache ($identity), on the first frame, absent
+         while it holds no handle. The handle text is the shared display twin
+         (`display_handle`), so a primary-domain rename moves it everywhere. -->
+    {#if $identity?.handle && settingsDisplayHandle}
       <div class="field">
         <span class="field-label">{t.common.handle}</span>
-        <span data-testid={IDS.SETTINGS_HANDLE_LABEL}>{$identity.handle}@{$identity.domain}</span>
+        <span data-testid={IDS.SETTINGS_HANDLE_LABEL}>{settingsDisplayHandle}</span>
       </div>
-    {/if}
-    {#if $identity?.tier}
-      <div class="field">
-        <span class="field-label">{t.common.tier}</span>
-        <span>{$identity.tier}</span>
-      </div>
+      {#if $identity.tier}
+        <div class="field">
+          <span class="field-label">{t.common.tier}</span>
+          <span data-testid={IDS.SETTINGS_TIER_LABEL}>{$identity.tier}</span>
+        </div>
+      {/if}
     {/if}
     <div class="field">
       <span class="field-label">{t.settings.nest_url}</span>
@@ -2843,11 +2870,15 @@
       {#each pendingActions ?? [] as action (action.id)}
         <div data-testid={IDS.PENDING_ACTION_ITEM} class="pending-action-item">
           <span data-testid={IDS.PENDING_ACTION_DESCRIPTION}>
-            {describePendingAction(action.action_type, action.target)}
+            {describePendingActionWithFolder(
+              action.action_type,
+              action.target,
+              action.target ? sessionFolderName(action.target) : null,
+            )}
           </span>
           <span data-testid={IDS.PENDING_ACTION_EXECUTE_AFTER}>
             {t.settings.pending_actions.applies({
-              time: new Date(action.execute_after * 1000).toLocaleString(),
+              time: localTimestamp(action.execute_after * 1000),
             })}
           </span>
           <button

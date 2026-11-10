@@ -206,6 +206,17 @@ pub fn bridge_link_block(
     )
 }
 
+/// UniFFI face of [`fauna_client_bridges::bridge_card_title`] — a Bridges page
+/// network row's title: `"<emoji> <name>"` when the row declares a glyph (a
+/// consented bridge app's), the bare name otherwise (`bridges.md` § Coverage
+/// contract, outcome 11). Field-shaped like [`bridge_link_block`]: pass the
+/// row's `name` and `glyph`, so no shell rebuilds the record to get a title.
+/// The emoji comes from the one `SourceGlyph::emoji` map — no app keeps its own.
+#[uniffi::export]
+pub fn bridge_card_title(name: String, glyph: Option<String>) -> String {
+    fauna_client_bridges::bridge_card_title_of(&name, glyph.as_deref())
+}
+
 // ── Record mirrors ─────────────────────────────────────────────────────
 
 /// FFI mirror of [`fauna_client_bridges::BridgeToggleOption`] — one row of a
@@ -365,6 +376,12 @@ pub struct FfiBridgeStatus {
     pub supports_follow_requests: bool,
     pub link_modes: Option<Vec<FfiBridgeLinkMode>>,
     pub error: Option<String>,
+    /// `BridgeStatus.glyph` — a consented bridge app's declared `SourceGlyph`
+    /// id, `None` on a first-party row. Feed it to [`bridge_card_title`]; never
+    /// map it to an emoji per app. Last and defaulted, so existing positional
+    /// constructions in the bindings keep compiling.
+    #[uniffi(default = None)]
+    pub glyph: Option<String>,
 }
 
 impl TryFrom<BridgeStatus> for FfiBridgeStatus {
@@ -389,6 +406,7 @@ impl TryFrom<BridgeStatus> for FfiBridgeStatus {
                 .link_modes
                 .map(|modes| modes.into_iter().map(Into::into).collect()),
             error: s.error,
+            glyph: s.glyph,
         })
     }
 }

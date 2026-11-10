@@ -209,6 +209,9 @@ class MainActivity : FragmentActivity() {
             "FAUNA_E2E_NEST_EXTRA_CA_PEM",
             "FAUNA_E2E_IMAP_HOST_MAP",
             "FAUNA_E2E_MICROSOFT_AUTHORITY",
+            // app-log's lowered size cap (`fauna_log::rolling::E2E_TOTAL_CAP_ENV`),
+            // re-read by TestAgent.start once it is process env.
+            "FAUNA_E2E_LOG_TOTAL_CAP_BYTES",
         )
     }
 }

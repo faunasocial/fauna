@@ -41,10 +41,13 @@ struct BridgesView: View {
                 }
             } else {
                 ForEach(Array(vm.bridges.enumerated()), id: \.offset) { index, bridge in
+                    // The title is the card's own first member
+                    // (`bridge-card-name`), not a section header outside the
+                    // `bridge-card[i]` scope.
                     Section {
-                        BridgeCardContent(bridge: bridge, vm: vm, isDesktop: false, compact: false, index: index)
-                    } header: {
-                        Text(bridge.name)
+                        BridgeCardContent(
+                            bridge: bridge, vm: vm, isDesktop: false, compact: false,
+                            index: index, showsTitle: true)
                     }
                 }
             }
@@ -55,7 +58,7 @@ struct BridgesView: View {
 
             if appState.isAdmin {
                 Section {
-                    PluginAdminSection(isAdmin: appState.isAdmin)
+                    PluginAdminSection(isAdmin: appState.isAdmin, reloadToken: appState.navGeneration)
                 }
             }
 
@@ -72,8 +75,12 @@ struct BridgesView: View {
         // its half-typed link-form credentials — would otherwise survive into the
         // incoming account's page (`BridgeManagerVM.reset()` names why that is the
         // sharp one). `account-scoping.md` § The scoping taxonomy, the "reused shell"
-        // case.
-        .task(id: SessionKey(client)) {
+        // case. Keyed on `navGeneration` too, as macOS's shell and the other
+        // pages are: a navigate to the already-open page re-reads the bridges
+        // and the plugin cards (the e2e poll-by-re-navigate pattern), so a
+        // consent approved on Connected apps, or a fault counted after the
+        // first read, is painted on the next visit rather than never.
+        .task(id: SessionKey(client, reloadToken: appState.navGeneration)) {
             guard let client else {
                 vm.reset()
                 return
@@ -85,7 +92,9 @@ struct BridgesView: View {
             await familyStatus?.refresh(api: client.api)
             await vm.refresh()
         }
-        .task(id: SessionKey(client)) { await pluginCards.start(client: client) }
+        .task(id: SessionKey(client, reloadToken: appState.navGeneration)) {
+            await pluginCards.start(client: client)
+        }
     }
 }
 #endif // !FAUNA_KIDS

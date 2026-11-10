@@ -27,8 +27,9 @@ is the user's*). Two journeys over a real consent ceremony:
 - the deposits are not folder entries yet: the owner's ``fauna.sync.files``
   lists neither (adoption is the owner's next sync's);
 - refusals: a deposit into another of the owner's folders (outside the
-  scope), and into the scoped folder once it is metadata-only — nothing to
-  park.
+  scope); an unsigned one, one signed over another body and one signed by a
+  key that is not this app's own; and one into the scoped folder once it is
+  metadata-only — nothing to park.
 - the re-consent path: the same document, a request naming one folder's
   qualified string, approved with no choice; it deposits over both doors.
 - a deposit larger than one message over each door — the session's staged
@@ -342,6 +343,30 @@ def test_a_connected_app_deposits_into_a_folder_blind_over_both_doors(
     status, body = _http_deposit(nest, client, token, folder, "forged.txt", b"forged", sig=forged)
     assert status == 400 and body.get("error") == "fauna.folders.invalid_params", (
         f"the HTTP door refuses a signature over another body: {status} {body!r}"
+    )
+    # A well-formed signature over the very same deposit, made by a key that
+    # is not the one this app attested — another app's — is refused too: the
+    # deposit must be signed by THIS app's own writer key.
+    stranger = ed25519.Ed25519PrivateKey.generate()
+    ok, reply = session.call(
+        "fauna.folders.deposit",
+        {
+            "folder_id": folder,
+            "name": "stranger.txt",
+            "content_type": "text/plain",
+            "body": b"stranger",
+            "sig": deposit_signing.sign(stranger, folder, "stranger.txt", "text/plain", b"stranger"),
+        },
+    )
+    assert not ok and refusal_code(reply) == "fauna.folders.invalid_params", (
+        f"a deposit signed by another app's key is refused: {reply!r}"
+    )
+    status, body = _http_deposit(
+        nest, client, token, folder, "stranger.txt", b"stranger",
+        sig=deposit_signing.sign(stranger, folder, "stranger.txt", "text/plain", b"stranger"),
+    )
+    assert status == 400 and body.get("error") == "fauna.folders.invalid_params", (
+        f"the HTTP door refuses another app's signature alike: {status} {body!r}"
     )
     assert len(_inbox(nest, folder)) == 2, "a refused signature parked nothing"
 

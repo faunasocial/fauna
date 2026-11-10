@@ -196,6 +196,18 @@ pub fn reason_label(verdict: &ComposedVerdict) -> Option<gtk::Label> {
     Some(label)
 }
 
+/// The show-again control for an item the viewer's own report hid
+/// (`moderation.md` § Corollary — the reporter's hide is theirs to undo): the
+/// shared `show_again_for_item` over the engine's hide list — the hidden ids
+/// one press removes and the label naming the scope — or `None` when nothing
+/// of the viewer's matched. Same keys as [`verdict_for_item`].
+pub fn show_again_for_item(
+    item_id: &str,
+    author_id: Option<&str>,
+) -> Option<fauna_core::obligation::ShowAgain> {
+    CORE.with(|c| c.borrow().show_again_for_item(item_id, author_id))
+}
+
 /// Replace the viewer's reported-and-hidden ids with the stored list a load or
 /// a hide returned (never merged — the store's own list is the truth).
 pub fn set_hidden_content(ids: Vec<String>) {

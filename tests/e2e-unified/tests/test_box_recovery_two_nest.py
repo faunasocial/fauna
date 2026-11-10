@@ -162,7 +162,6 @@ from drivers import create_driver  # noqa: E402
 from helpers.app_launch import app_launch_config  # noqa: E402
 from helpers.waiting import await_account_runtime_assembled  # noqa: E402
 from helpers.indexed_rows import (  # noqa: E402
-    click_row,
     diagnose_row,
     row_absent,
     row_present,
@@ -175,10 +174,14 @@ from helpers.app_launch import app_launch_config  # noqa: E402
 from helpers.box_recovery_launch import (  # noqa: E402
     LINKED_CUSTODY_NEEDLES,
     LOGGED_IN_MARKERS,
+    RECOVER_BOX_ITEM,
     app_path_for,
     claim_fresh_identity,
     clear_stored_nest_url,
     drive_handle_check_and_claim,
+    enter_nest_recovery,
+    recheck_into_nest_recovery,
+    resolve_row_nest_id,
     rewrite_stored_node_url,
     rust_log,
     start_boxes,
@@ -718,7 +721,7 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
                 # render"): the cold read of the dead box answers nothing, so the
                 # seed in the command can only have come from H1's own custody
                 # of A — and it must derive to A's id.
-                offered = _resolve_row_nest_id(app2, 0).lower()
+                offered = resolve_row_nest_id(app2, 0).lower()
                 assert offered == id_a, (
                     "the dead box's self-hosted command must carry box A's seed "
                     f"({id_a[:8]}…), resolved from this device's own store: "
@@ -730,27 +733,6 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
         if seat is not None:
             seat.close()
         stop_boxes()
-
-
-def _enter_nest_recovery(app, secret_hex: str, handle: str) -> None:
-    """On a fresh device: recovery intent, import the identity, check `handle`
-    and land on `nest_recovery`."""
-    app.onboarding.navigate_to_status()
-    app.click("recover-lost-box-button")
-    app.driver.wait_for("paste-secret-field", timeout=15)
-    app.driver.type_text("paste-secret-field", secret_hex)
-    app.click("import-submit-button")
-    _recheck_into_nest_recovery(app, handle)
-
-
-def _recheck_into_nest_recovery(app, handle: str) -> None:
-    """From handle_entry under recovery intent: check `handle` and land on
-    `nest_recovery`, whose page entry re-reads the box list."""
-    app.driver.wait_for("handle-input", timeout=15)
-    app.onboarding.fill_handle(handle)
-    app.onboarding.run_handle_check(timeout=45)
-    app.onboarding.submit_handle()
-    app.driver.wait_for("recover-back-button", timeout=30)
 
 
 def _recover_box_labels(app) -> list[str]:
@@ -971,7 +953,7 @@ def _fresh_device_resolves_row(seat, secret_hex, handle, row: int, *,
     driver = seat.fresh_device(holder)
     try:
         app = ActionLayer(driver)
-        _enter_nest_recovery(app, secret_hex, handle)
+        enter_nest_recovery(app, secret_hex, handle)
         # The list is read on page entry, and the replica is completed by the
         # holder's pass in the background: re-enter the page until both boxes
         # are listed. A state poll, bounded only against a hang.
@@ -979,7 +961,7 @@ def _fresh_device_resolves_row(seat, secret_hex, handle, row: int, *,
         labels = _recover_box_labels(app)
         while len(labels) < 2 and time.monotonic() < deadline:
             app.click("recover-back-button")
-            _recheck_into_nest_recovery(app, handle)
+            recheck_into_nest_recovery(app, handle)
             labels = _recover_box_labels(app)
         assert len(labels) == 2, (
             "a fresh device reaching only the linked box must list BOTH boxes "
@@ -989,40 +971,9 @@ def _fresh_device_resolves_row(seat, secret_hex, handle, row: int, *,
             f"{holder.app_stderr_text()[-8000:]}"
         )
 
-        return _resolve_row_nest_id(app, row)
+        return resolve_row_nest_id(app, row)
     finally:
         driver.teardown()
-
-
-def _resolve_row_nest_id(app, row: int) -> str:
-    """On `nest_recovery`: pick row `row`, resolve its self-hosted command and
-    return the nest id (hex) the command's seed derives to."""
-    from nacl.signing import SigningKey
-
-    click_row(app.driver, RECOVER_BOX_ITEM, row)
-    app.click("recover-method-selfhosted-button")
-    app.driver.wait_for("recover-selfhosted-command", timeout=30)
-
-    def _command_seeds() -> list[str]:
-        command = app.driver.get_text("recover-selfhosted-command") or ""
-        return [
-            token for token in command.replace("=", " ").split()
-            if len(token) == 64
-            and all(c in "0123456789abcdef" for c in token.lower())
-        ]
-
-    # The page paints a placeholder until the resolver answers the selected
-    # box's seed: poll the element, bounded against a hang.
-    deadline = time.monotonic() + 60.0
-    seeds = _command_seeds()
-    while not seeds and time.monotonic() < deadline:
-        time.sleep(0.5)
-        seeds = _command_seeds()
-    assert len(seeds) == 1, (
-        f"row {row}'s self-hosted command should carry exactly one seed: "
-        f"{len(seeds)} found ({app.driver.diagnose('recover-selfhosted-command')})"
-    )
-    return bytes(SigningKey(bytes.fromhex(seeds[0])).verify_key).hex()
 
 
 @pytest.mark.parametrize("client", _LINKED_APPS)
@@ -1140,7 +1091,6 @@ def test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both(
 # success wording (i18n `admin.nest_page.rotate_seed_done`, en.yaml) — the
 # same ids and string `test_nest_rotation_admin_journey.py` drives.
 _ROTATE_ARM = "admin-nest-seed-rotate-button"
-RECOVER_BOX_ITEM = "recover-box-item"  # indexed; read via helpers.indexed_rows
 _ROTATE_ROSTER_ITEM = "admin-nest-seed-rotate-roster-item"
 _ROTATE_CONFIRM = "admin-nest-seed-rotate-confirm-button"
 _ROTATE_STATUS = "admin-nest-seed-rotate-status"
@@ -1329,7 +1279,7 @@ def test_a_rotated_away_identity_is_never_offered_for_recovery(
                 f"({predecessor[:8]}…), marked superseded, which the resolution "
                 f"point must exclude: listed {len(labels)} ({labels!r})"
             )
-            offered = _resolve_row_nest_id(app2, 0).lower()
+            offered = resolve_row_nest_id(app2, 0).lower()
             assert offered == successor, (
                 "the one box offered must be the successor "
                 f"({successor[:8]}…), never the identity rotated away "

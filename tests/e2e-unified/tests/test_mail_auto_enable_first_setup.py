@@ -53,7 +53,8 @@ XCUITest). Web runs the same shared step through the wasm
 `applyPostClaimServingEnablement` on the onboarding page's `LoggedIn` handoff; a
 browser tab cannot pin a self-signed loopback nest, so its leg rides a plain-HTTP
 nest behind the `"nest"` override and a domain-shaped handle (the fixture says
-how). The remaining clients' lift is tracked elsewhere.
+how). windows runs the same shared step from its wizard's `LoggedIn` handoff
+(`App.xaml.cs` `onOnboardingCompleted`), on the native loopback-handle shape.
 """
 
 from __future__ import annotations
@@ -90,9 +91,9 @@ from helpers.mail_wire import (  # noqa: E402
 )
 
 _avail_clients = get_available_apps()
-if not any(c in _avail_clients for c in ("linux", "macos", "ios", "tui", "android", "web")):
+if not any(c in _avail_clients for c in ("linux", "macos", "ios", "tui", "android", "web", "windows")):
     pytest.skip(
-        "drives the linux/macOS/iOS/tui/android/web client first-setup onboarding UI",
+        "drives the linux/macOS/iOS/tui/android/web/windows client first-setup onboarding UI",
         allow_module_level=True,
     )
 
@@ -100,7 +101,7 @@ if not any(c in _avail_clients for c in ("linux", "macos", "ios", "tui", "androi
 pytestmark = [
     pytest.mark.tier1, pytest.mark.tier_3,
     pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.tui,
-    pytest.mark.android, pytest.mark.web,
+    pytest.mark.android, pytest.mark.web, pytest.mark.windows,
 ]
 
 
@@ -333,8 +334,6 @@ def test_non_admin_first_setup_auto_mints_and_imap_logs_in(
 ):
     """Fresh non-admin user → first client setup → auto-mint → IMAP-login, with
     no admin call and no manual mail-settings enable (the goal's "Done =")."""
-    require_surface(app.driver, "first-setup-mail-auto-mint")
-
     nest = autoenable_nest
 
     # Relaunch trusting `nest` BEFORE the wizard below points the app at it —

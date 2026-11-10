@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -1011,6 +1012,10 @@ def test_media_delete_removes_the_file_from_disk(bound_location_media_app):
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+# macos: the agent-driven desktop the delete-from-disk sibling runs on; iOS keeps
+# no resident folder (apps/ios.md: no sync daemon).
+@pytest.mark.macos
 @pytest.mark.real_sync_agent
 @pytest.mark.isolated_sync_agent
 @pytest.mark.feature("media")
@@ -1056,6 +1061,165 @@ def test_media_upload_reaches_the_folder_this_device_serves(bound_location_media
         f"on disk: {sorted(p.name for p in tracked.parent.iterdir())}"
     )
     assert landed.read_bytes() == FIXTURE_IMAGE.read_bytes()
+    assert not app.has_error(), f"unexpected page error: {app.error_text()!r}"
+
+
+def _wait_for_bytes(path: Path, expected: bytes, timeout: float = 60.0) -> bytes | None:
+    """Poll the DISK until ``path`` holds exactly ``expected``; return what it last
+    held (``None`` when absent) so the caller's assertion names the divergence."""
+    deadline = time.monotonic() + timeout
+    seen = path.read_bytes() if path.exists() else None
+    while seen != expected and time.monotonic() < deadline:
+        time.sleep(0.5)
+        seen = path.read_bytes() if path.exists() else None
+    return seen
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.real_sync_agent
+@pytest.mark.isolated_sync_agent
+@pytest.mark.feature("media")
+def test_media_restore_of_an_older_version_reaches_the_resident_disk(
+    bound_location_media_app,
+):
+    """A version restored from Media — another door than the engine — reaches the
+    **disk** of the folder this device keeps resident (``docs/goal/behavior/
+    file-versions.md`` § Restore, *The other two doors owe it from the echo*).
+
+    Media records the restore under this device's id with no anchor, so it comes back
+    to the engine as its own echo, never as a remote change; the echo writes the
+    owed-restore intent and the drain applies the kept-copy replace. Before that ruling
+    the restore reached every device but this one.
+
+    Red probe: make ``SyncEngine::owe_another_doors_restore`` a no-op, rebuild, rerun —
+    the disk assertion must fail while the version listing shows the restore.
+    """
+    app, tracked, folder = bound_location_media_app
+    v1 = tracked.read_bytes()
+    v2 = b"a second version, written on this device's disk\n" * 8
+
+    # v2: an ordinary edit on the disk, which the live engine uploads and records.
+    tracked.write_bytes(v2)
+
+    app.media.navigate()
+    app.media.ensure_loaded()
+    assert app.media.wait_for_item_count(1, timeout=30) == 1, (
+        f"precondition: {tracked.name!r} in {folder!r} should be listed; "
+        f"error={app.error_text()!r}"
+    )
+    app.media.open_item_detail(0)
+    deadline = time.monotonic() + 60
+    versions = app.media.wait_for_version_count(2, timeout=RPC_ROUNDTRIP_S)
+    while versions < 2 and time.monotonic() < deadline:
+        # The edit is recorded by the engine on its own cadence, and the open
+        # history lists once per open: reopening is the poll (deadline-bounded).
+        app.media.close_detail()
+        app.media.open_item_detail(0)
+        versions = app.media.wait_for_version_count(2, timeout=RPC_ROUNDTRIP_S)
+    assert versions == 2, (
+        f"precondition: the disk edit should record a second version, got {versions}; "
+        f"error={app.error_text()!r}"
+    )
+    assert tracked.read_bytes() == v2, "precondition: v2 is on disk before the restore"
+
+    # Restore the oldest version (rows run oldest → newest) through Media.
+    app.media.restore_version(0)
+    assert app.media.wait_for_version_count(3, timeout=30) == 3, (
+        f"the restore appends a version; error={app.error_text()!r}"
+    )
+
+    seen = _wait_for_bytes(tracked, v1)
+    assert seen == v1, (
+        f"THE BUG: Media restored v1 of {tracked.name!r} and the nest lists it as the "
+        f"head, but {tracked} still holds {len(seen or b'')} bytes of "
+        f"{'v2' if seen == v2 else 'something else'} — the restore reached every "
+        f"device but the one whose Media recorded it (the echo owed no restore)."
+    )
+    assert not app.has_error(), f"unexpected page error: {app.error_text()!r}"
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.real_sync_agent
+@pytest.mark.isolated_sync_agent
+@pytest.mark.feature("media")
+def test_media_restore_of_a_file_deleted_on_this_device_brings_it_back_to_disk(
+    bound_location_media_app_and_key, nest_instance,
+):
+    """A restore of a file deleted on this device brings it back to this device's
+    **disk**, as it does on every other device (``docs/goal/behavior/
+    file-versions.md`` § Restore, *A door's record of a path with no file here applies
+    as a remote change*, 2026-10-31).
+
+    The user has the file's version history open in Media when the file is deleted
+    on the disk; the engine records the tombstone, and the user restores the version
+    still listed. That record is this device's own create with no anchor over a path
+    with no file, so every echo arm would only account it; the ruling downloads and
+    writes it as a peer's row.
+
+    Red probe: make ``SyncEngine::doors_record_owes_the_file`` return false, rebuild,
+    rerun — the file must stay gone while Media lists it again.
+    """
+    from common.auth import _user_call
+
+    app, tracked, folder, secret_key = bound_location_media_app_and_key
+    v1 = tracked.read_bytes()
+
+    def listed_paths() -> list[str]:
+        reply = _user_call(
+            nest_instance["port"], secret_key, "fauna.media.list",
+            {"limit": 100, "cursor_version": 2}, nest_instance["url"],
+        )
+        return [i.get("path") for i in reply.get("items", [])]
+
+    app.media.navigate()
+    app.media.ensure_loaded()
+    assert app.media.wait_for_item_count(1, timeout=30) == 1, (
+        f"precondition: {tracked.name!r} in {folder!r} should be listed; "
+        f"error={app.error_text()!r}"
+    )
+    app.media.open_item_detail(0)
+    assert app.media.wait_for_version_count(1, timeout=RPC_ROUNDTRIP_S) == 1, (
+        f"precondition: the open history lists the one version; "
+        f"error={app.error_text()!r}"
+    )
+
+    # Deleted on this device: the engine records the tombstone. Its arrival in the
+    # nest's own listing is the causal barrier for the restore (the open detail owns
+    # tui's pane, so the browse's item count cannot be read while it is open).
+    tracked.unlink()
+    wait_until(
+        lambda: listed_paths() == [],
+        60,
+        diagnose=lambda: f"the nest still lists {listed_paths()!r} after the disk delete",
+    )
+    assert app.driver.is_visible("media-item-detail"), (
+        "precondition: the open history stays open while the delete lands under it"
+    )
+
+    app.media.restore_version(0)
+    assert app.media.wait_for_version_count(2, timeout=30) == 2, (
+        f"the restore past the delete appends a version; error={app.error_text()!r}"
+    )
+
+    seen = _wait_for_bytes(tracked, v1)
+    assert seen == v1, (
+        f"THE BUG: the restore of {tracked.name!r} past its delete is on the nest and "
+        f"in Media, but {tracked} is "
+        f"{'still absent' if seen is None else f'holding {len(seen)} other bytes'} on "
+        f"the device that deleted and restored it — its own record over a path with no "
+        f"file was only accounted (file-versions.md § Restore, 2026-10-31)."
+    )
+
+    # The browse lists the restored file again once the page re-reads.
+    app.media.reenter()
+    assert app.media.wait_for_item_count(1, timeout=60) == 1, (
+        f"the file is back on disk, but the browse does not list the restore past "
+        f"its delete; error={app.error_text()!r}"
+    )
     assert not app.has_error(), f"unexpected page error: {app.error_text()!r}"
 
 

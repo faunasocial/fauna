@@ -120,6 +120,13 @@ pub struct FfiSubscriptionStatus {
     pub tier: Option<String>,
     pub expires_at: Option<u64>,
     pub auto_approve: bool,
+    /// A follow asked and waiting on the author's client — with `tier`, the
+    /// input of `value_format::is_following` (`subscriptions.md` § The free
+    /// followers tier — follow and unfollow, rule 4). Defaulted at the FFI
+    /// boundary so memberwise construction in app tests keeps compiling
+    /// (`version-compatibility.md` § I4 — the FFI binding boundary rule).
+    #[uniffi(default = false)]
+    pub follow_pending: bool,
 }
 
 impl From<StatusGetReply> for FfiSubscriptionStatus {
@@ -128,6 +135,7 @@ impl From<StatusGetReply> for FfiSubscriptionStatus {
             tier: r.tier,
             expires_at: r.expires_at.map(|t| t.0),
             auto_approve: r.auto_approve,
+            follow_pending: r.follow_pending,
         }
     }
 }
@@ -478,10 +486,21 @@ impl FfiSubscriptionsClient {
         reply.try_into()
     }
 
-    /// `fauna.subscriptions.unsubscribe`
-    pub async fn unsubscribe(&self, author_id: Vec<u8>) -> Result<FfiUnsubscribeReply, FfiError> {
+    /// `fauna.subscriptions.unsubscribe` — leave `tier` and every tier held
+    /// above it (`Some("followers")` is the unfollow); `None` leaves every
+    /// paid tier and keeps the follow
+    /// ([`fauna_client_subscriptions::SubscriptionsClient::unsubscribe`]).
+    pub async fn unsubscribe(
+        &self,
+        author_id: Vec<u8>,
+        tier: Option<String>,
+    ) -> Result<FfiUnsubscribeReply, FfiError> {
         let author = bytes_to_actor_id(&author_id)?;
-        let reply = self.client().unsubscribe(author).await.map_err(stringify)?;
+        let reply = self
+            .client()
+            .unsubscribe(author, tier)
+            .await
+            .map_err(stringify)?;
         reply.try_into()
     }
 
@@ -610,13 +629,14 @@ mod tests {
             tier: Some("silver".into()),
             expires_at: Some(Timestamp(42)),
             auto_approve: true,
-            follow_pending: false,
+            follow_pending: true,
             extra: Default::default(),
         };
         let ffi: FfiSubscriptionStatus = proto.into();
         assert_eq!(ffi.tier.as_deref(), Some("silver"));
         assert_eq!(ffi.expires_at, Some(42));
         assert!(ffi.auto_approve);
+        assert!(ffi.follow_pending);
     }
 
     #[test]

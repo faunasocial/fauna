@@ -83,6 +83,9 @@ private class WindowCaptureGuard(private val window: Window) : CaptureGuard {
     private var holders = 0
 
     @Synchronized
+    fun holdCount(): Int = holders
+
+    @Synchronized
     override fun acquire() {
         if (holders++ == 0) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -99,6 +102,29 @@ private class WindowCaptureGuard(private val window: Window) : CaptureGuard {
 }
 
 private val guardsByWindow = WeakHashMap<Window, CaptureGuard>()
+
+/**
+ * The running app's screen-capture posture, read back for the e2e
+ * `capture_posture` state observable (`helpers/capture_posture.py`, apple's
+ * `ScreenCapturePosture` is the reference shape): `holds` is the live count of
+ * composed [SuppressScreenCapture] effects across real windows, and
+ * `windowExcluded` is the platform bit itself — whether any window's attributes
+ * carry [WindowManager.LayoutParams.FLAG_SECURE] — so a flag that outlives its
+ * holds (the stuck-on failure) is visible.
+ */
+internal object CapturePostureProbe {
+    data class Reading(val holds: Int, val windowExcluded: Boolean)
+
+    fun read(): Reading = synchronized(guardsByWindow) {
+        val guards = guardsByWindow.entries.toList()
+        Reading(
+            holds = guards.sumOf { (it.value as? WindowCaptureGuard)?.holdCount() ?: 0 },
+            windowExcluded = guards.any {
+                it.key.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0
+            },
+        )
+    }
+}
 
 private fun captureGuardFor(window: Window): CaptureGuard = synchronized(guardsByWindow) {
     guardsByWindow.getOrPut(window) { WindowCaptureGuard(window) }

@@ -35,14 +35,12 @@ import com.fauna.app.core.feed.InlineVideoPlayback
 import com.fauna.app.core.feed.RangedNestDataSource
 import com.fauna.app.core.feed.VideoPlayerState
 import social.fauna.generated.Ids
-import com.fauna.app.ui.components.documentMediaVideoHash
-import com.fauna.app.ui.components.documentProxiedPostVideoPath
 import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.app.ui.viewmodel.FeedVM
 import com.fauna.ffi.cueSampleIntervalMs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import uniffi.fauna_core.RenderDocument
+import uniffi.fauna_core.RenderBlock
 
 /**
  * The feed post video attachment (ui.yaml `video-thumbnail`) — the inline player host
@@ -58,15 +56,13 @@ import uniffi.fauna_core.RenderDocument
  * engagement — `true` at the tap (loading counts) and while it plays, `false` on pause
  * (the poll's `isPlaying` true→false edge — the app has no pause control), end, error
  * and teardown — is noted on the shared tracker (`notePlaying`): a play is attention.
- * Renders
- * nothing when the document has no video block.
+ * One element per video block: [FeedPostMedia] paints every block of the document in body
+ * order, passing the `Video` / `ProxiedVideo` [block], its [label] (the hash or path the idle
+ * element shows) and its [alt] (the block's own, or the shared fallback), which the element
+ * publishes as its `alt` attribute.
  */
 @Composable
-fun FeedPostVideo(document: RenderDocument, postId: String, vm: FeedVM) {
-    val hash = documentMediaVideoHash(document)
-    val proxiedPath = if (hash == null) documentProxiedPostVideoPath(document) else null
-    val block = InlineVideoPlayback.videoBlock(hash, proxiedPath) ?: return
-    val label = hash ?: proxiedPath ?: return
+fun FeedPostVideo(block: RenderBlock, label: String, postId: String, alt: String, vm: FeedVM) {
     val cacheDir = LocalContext.current.cacheDir
     val scope = rememberCoroutineScope()
     val machine = remember(label) { VideoPlayerState() }
@@ -96,12 +92,13 @@ fun FeedPostVideo(document: RenderDocument, postId: String, vm: FeedVM) {
         modifier = Modifier
             .testTag(Ids.VIDEO_THUMBNAIL)
             .semantics {
-                // `state`, `position` (seconds) and `source` ride one `stateDescription`
+                // `state`, `position` (seconds), `source` and `alt` ride one `stateDescription`
                 // (`AutomationAttributePack`), read back per key by the debug bridge.
                 stateDescription = AutomationAttributePack.pack(
                     "state" to phase.wire,
                     "position" to (positionMs / 1000.0).toString(),
                     "source" to machine.source,
+                    "alt" to alt,
                 )
             }
             .clickable {

@@ -7,7 +7,7 @@
   // like linux `build_profile_view(target: Option<hex>)`:
   //   • SELF  → header `profile-edit-button` + the Tiers-tab author management
   //             (§1 My tiers / §2 Pending requests / §3 Subscribers) + edit form.
-  //   • OTHER → header `profile-follow-button` (follow = subscribe to the free
+  //   • OTHER → header `profile-follow-button` (the Follow ⇄ Following toggle over the free
   //             "followers" tier) + the Tiers-tab subscriber-browse offers section
   //             (`subscription-offers-section` — one row per offered paid tier).
   //
@@ -54,6 +54,7 @@
     subscriptionsRemoveSubscriber,
     subscriptionsOffersList,
     subscriptionsSubscribeAcrossNests,
+    subscriptionsUnsubscribeAcrossNests,
     subscriptionsStatusGet,
     profileHeaderRead,
     postBlobGet,
@@ -77,6 +78,8 @@
     contactToggleBlockLabel,
     contactRowBlocksActor,
     followToggleLabel,
+    isFollowing as wasmIsFollowing,
+    unfollowEndsPaidTier,
     offerStatusLabel as wasmOfferStatusLabel,
     parseCount,
     wardAskRules,
@@ -209,14 +212,27 @@
   // on the status-derived label until the next reload (mirrors android's set).
   let pendingTiers = $state<Set<string>>(new Set());
   let offerBusy = $state(false);
-  // Optimistic follow flip for the encrypted-mode queued case (status won't yet
-  // reflect a pending follow); null ⇒ derive from status.
+  // Whether the viewer's `status.get` reports a follow waiting on the author's client.
+  let viewerFollowPending = $state(false);
+  // Optimistic follow flip set by a press's reply (tui's `follow_flip`): it
+  // outranks the status for the label, so a queued leave reads *Follow* at once;
+  // null ⇒ derive from status.
   let followedOverride = $state<boolean | null>(null);
-  const isFollowing = $derived(followedOverride ?? viewerStatusTier === FOLLOWERS_TIER);
-  // The toggle wording (`following` vs `follow`) lives in shared Rust
-  // (`fauna_core::format::follow_toggle_label` over wasm), so web shares the label
-  // instead of its own ternary. The `isFollowing` derivation above stays web-local.
-  const followLabel = $derived(resolveLocalized(followToggleLabel(isFollowing)));
+  // The paid-tier confirm (tui's `unfollow_armed`): the first press on a paid
+  // holder's *Following* only relabels the button with the cost
+  // (`profile.unfollow_confirm`); the second leaves. Another profile gesture, a
+  // fresh open or the reply disarms it.
+  let unfollowArmed = $state(false);
+  // Following and the confirm gate are shared Rust (`fauna_core::format::
+  // is_following` / `unfollow_ends_paid_tier` over wasm; `subscriptions.md` § The
+  // free followers tier — follow and unfollow, rule 4), as is the toggle wording
+  // (`follow_toggle_label`).
+  const isFollowing = $derived(
+    followedOverride ?? wasmIsFollowing(viewerStatusTier, viewerFollowPending),
+  );
+  const followLabel = $derived(
+    unfollowArmed ? t.profile.unfollow_confirm : resolveLocalized(followToggleLabel(isFollowing)),
+  );
 
   // OTHER — secondary relationship actions (start DM + block; profile.md § Layout
   // & flow). `profile-block-button` is the `contact_status`-driven Block⇄Unblock
@@ -679,8 +695,10 @@
       try {
         const st = await subscriptionsStatusGet(s, viewedActorId);
         viewerStatusTier = st.tier;
+        viewerFollowPending = st.follow_pending ?? false;
       } catch {
         viewerStatusTier = null;
+        viewerFollowPending = false;
       }
       offers = (await subscriptionsOffersList(s, viewedActorId)).filter(
         (tr) => tr.name !== FOLLOWERS_TIER,
@@ -699,6 +717,7 @@
   // was "never" — the $effect below is keyed on the viewed actor, not the tab.
   function showTiers(): void {
     activeTab = 'tiers';
+    unfollowArmed = false;
     if (!wasmReady || !viewedActorId) return;
     if (isSelf) void loadSelf();
     else void loadOffers();
@@ -907,6 +926,7 @@
     copiedActorId = '';
     pendingTiers = new Set();
     followedOverride = null;
+    unfollowArmed = false;
     blockEdge = unknownBlockEdge();
     blockBusy = false;
     knockAsk = knockStateFor(self ? null : id);
@@ -1110,13 +1130,29 @@
     }
   }
 
+  // The Follow ⇄ Following toggle (`subscriptions.md` § The free followers tier —
+  // follow and unfollow, rule 4; lifts tui's `Action::Follow`): *Follow*
+  // subscribes to the free `followers` tier; *Following* leaves it — at once for a
+  // free follower, behind a second press when the status names a paid tier, which
+  // the leave ends too (the first press only relabels the button with the cost).
+  // Both go through the page's actor-home slot (`federated-follow.md` § Decision 2).
   async function follow(): Promise<void> {
     const s = secret();
     if (!s || !viewedActorId) return;
+    const leaving = isFollowing;
+    if (leaving && unfollowEndsPaidTier(viewerStatusTier) && !unfollowArmed) {
+      unfollowArmed = true;
+      return;
+    }
+    unfollowArmed = false;
     try {
-      await subscriptionsSubscribeAcrossNests(s, viewedActorId, FOLLOWERS_TIER, actorHomeSlot);
+      if (leaving) {
+        await subscriptionsUnsubscribeAcrossNests(s, viewedActorId, FOLLOWERS_TIER, actorHomeSlot);
+      } else {
+        await subscriptionsSubscribeAcrossNests(s, viewedActorId, FOLLOWERS_TIER, actorHomeSlot);
+      }
       error = '';
-      followedOverride = true;
+      followedOverride = !leaving;
       await loadOffers();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

@@ -212,9 +212,20 @@ impl ContentPolicyState {
     }
 
     /// Replace the viewer's reported-and-hidden ids — the stored list the
-    /// login read, or a report's hide, returns (`crate::report`).
+    /// login read, or a report's hide or show-again, returns (`crate::report`).
     pub fn set_hidden_content(&self, ids: Vec<String>) {
         self.engine.borrow_mut().set_hidden_content(ids);
+    }
+
+    /// The show-again control for an item the viewer's own report hid — the
+    /// shared `obligation::show_again_for_item` over the engine's hide list
+    /// (`moderation.md` § Corollary — the reporter's hide is theirs to undo).
+    pub fn show_again_for_item(
+        &self,
+        item_id: &str,
+        author_id: Option<&str>,
+    ) -> Option<fauna_core::obligation::ShowAgain> {
+        self.engine.borrow().show_again_for_item(item_id, author_id)
     }
 
     /// Record any **guardian-floor** render-enforcement on `item_id` for Guardian
@@ -307,6 +318,55 @@ pub fn placeholder(
             family::CONTENT_REVEAL_BUTTON,
             true,
             reveal,
+        ));
+    }
+    match scope {
+        Some((container, i)) => els.into_iter().map(|e| e.within(container, i)).collect(),
+        None => els,
+    }
+}
+
+/// The placeholder painted **in place of** an item the viewer's own report hid
+/// (`moderation.md` § Corollary — block also hides): the same
+/// `content-policy-blocked-notice` slot every other engine `Block` uses, the
+/// reporter's own words ("You reported this"), `state="blocked"` and
+/// `source="reported"` beside it — and the show-again control (§ Corollary —
+/// the reporter's hide is theirs to undo): `content-policy-show-again-button`,
+/// whose one activation un-hides every hidden id the shared
+/// `show_again_for_item` matched to this item and whose label names the scope
+/// it picked (the item, or the whole account). `page` is where a failed
+/// un-hide lands (`error-message` is per page); `scope` the item's own
+/// container (`post-card[i]`), or `None` for a flat surface (a bubble). The
+/// button paints only when the engine's list still matches — the frame the
+/// un-hide repaints has nothing to offer.
+pub fn reported_placeholder(
+    app: &crate::app::App,
+    key: crate::region::ReportKey<'_>,
+    page: crate::pages::Page,
+    scope: Option<(&str, usize)>,
+) -> Vec<crate::element::Element> {
+    use crate::element::Element;
+    use fauna_ui_ids as ids;
+    let mut els = vec![
+        Element::label(
+            ids::CONTENT_POLICY_BLOCKED_NOTICE,
+            fauna_i18n::strings::moderation::report::HIDDEN_PLACEHOLDER,
+        )
+        .attr("state", "blocked")
+        .attr("source", "reported"),
+    ];
+    if let Some(again) = app
+        .content_policy
+        .show_again_for_item(key.item_id, key.author_id)
+    {
+        els.push(Element::gesture_button(
+            ids::CONTENT_POLICY_SHOW_AGAIN_BUTTON,
+            crate::wizard::localized(&again.label),
+            true,
+            crate::element::Gesture::Report(crate::report::Action::ShowAgain {
+                page,
+                ids: again.ids,
+            }),
         ));
     }
     match scope {

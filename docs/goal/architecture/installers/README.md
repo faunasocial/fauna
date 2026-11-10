@@ -12,6 +12,8 @@ Getting the app is **one promise fulfilled through a different channel per platf
 
 A platform without a channel yet does not weaken the contract — it simply has no witness, and the feature catalog's column for it stays honestly short until the channel and its test exist. Nothing here is a per-platform behavior fork: the differences between channels end the moment the app is open.
 
+**The nest itself has channels of its own, and one promise across them (ratified 2026-11-07):** however you obtain your nest — the ready-made image anywhere Docker runs, the bare-metal install under systemd, or the nest component of the macOS `.pkg` and the Windows MSI, which the installer that installs the app sets up on that computer as a machine service that starts with the computer and runs with nobody signed in — it is a real network-reachable server your other devices reach at the computer's address, waiting for its owner with a one-time claim code. Which channels exist and how each works is per-channel mechanism owned by the docs on the *nest itself* row below; the promise is stated once here and witnessed per channel by that channel's own install-then-reach test, as the feature catalog's `get-the-app` page lists it in `[nest]` outcomes — a nest record counts for every column, so no app is excused from it: a phone reaches a Mac-mini nest exactly as it reaches a Docker one.
+
 ## Per-platform channel docs
 
 | Platform | Channel doc |
@@ -24,7 +26,7 @@ A platform without a channel yet does not weaken the contract — it simply has 
 | android | [`android.md`](android.md) |
 | tui | per-OS archives from the tag-triggered release (plus the same binary in the macOS `.pkg` and Windows MSI), ratified and built 2026-09-26 — [`tui.md`](tui.md); its first artifacts are in the `v0.1.5` pre-release of 2026-10-22 |
 | cli | the terminal app's channel — `fauna-cli` is the archive's third member and rides the same `.pkg` component and MSI feature (built 2026-10-18 on the recommendation, the owner's word pending) — [`tui.md`](tui.md) § Decisions, decision 4; no update notice is owed: the app has no UI of its own, its host launches it |
-| the nest itself | [`docker.md`](docker.md), [`linux-nest.md`](linux-nest.md), [`vps.md`](vps.md), [`home-relay.md`](home-relay.md) |
+| the nest itself | [`docker.md`](docker.md), [`linux-nest.md`](linux-nest.md), [`vps.md`](vps.md), [`home-relay.md`](home-relay.md); the desktop installers' nest component — [`macos.md`](macos.md) § Network-reachable nest (the `.pkg`), [`windows.md`](windows.md) § Implementation status today (the MSI's *Nest Service* feature) |
 
 What each store publishes about the organisation on its listing — which contact fields, whether a DSA trader declaration changes them, what was declared — and the readback rule every store track follows before trusting a console answer are owned by [`store-listing-contact.md`](store-listing-contact.md). The store review process as one process — each store's tracks and which pass a review, the states a submission passes through, and the one record of every submission's live state (`installer/store-review.toml`), so "is anything in review?" is answered by reading it — is owned by [`store-review.md`](store-review.md).
 

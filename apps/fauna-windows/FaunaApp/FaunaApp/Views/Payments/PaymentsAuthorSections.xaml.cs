@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel.DataTransfer;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using S = FaunaApp.Core.Services.Strings;
 
 namespace FaunaApp.Views.Payments;
@@ -101,8 +102,7 @@ public sealed partial class PaymentsAuthorSections : UserControl
         ProviderForm.Visibility = _vm.ShowProviderForm ? Visibility.Visible : Visibility.Collapsed;
         // TierNames may have grown/shrunk this hydrate (a tier created/deleted) —
         // keep the §4/§5 tier pickers' options in sync, preserving the VM's
-        // current selection (the §3 TierSelect pattern, value/Tag split for
-        // FlaUI Select() exactness — reference_windows_flaui_select_exact_name).
+        // current selection (the §3 TierSelect pattern).
         PopulateComboBox(ProviderTierSelect, _vm.TierNames, _vm.ProviderFormTier);
         PopulateComboBox(ClaimTierSelect, _vm.TierNames, _vm.ClaimTier);
     }
@@ -194,25 +194,16 @@ public sealed partial class PaymentsAuthorSections : UserControl
 
     private void KeepClaim_Click(object sender, RoutedEventArgs e) => _vm?.CancelVoidClaim();
 
-    /// <summary>Rebuild <paramref name="combo"/>'s items from <paramref name="values"/>
-    /// (Content = the value; <c>Tag</c> + an explicit <c>AutomationProperties.Name</c>
-    /// also carry the raw value, so <c>driver.select(id, value)</c> matches exactly —
-    /// reference_windows_flaui_select_exact_name, the folder-conflict-policy-select
-    /// precedent). Preserves <paramref name="selected"/>
-    /// if still present, else the first item.</summary>
+    /// <summary>Paint <paramref name="combo"/> from <paramref name="values"/> (Content = the
+    /// value, which is also its <c>Tag</c> and its name: a tier or provider name paints
+    /// as itself, so it needs no separate key and <c>driver.select(id, value)</c> names
+    /// the painted label). Selects <paramref name="selected"/> if still present, else
+    /// the first item. Through <see cref="PickerOption.Reconcile"/>: <see cref="UpdateDerivedUi"/>
+    /// runs after every hydrate and action, so the items are torn down only when the
+    /// tier list itself changed.</summary>
     /// <remarks>Travelled here with its only three call sites (the provider-kind,
     /// provider-tier and claim-tier pickers); ProfilePage's own §3 picker binds
     /// <c>ItemsSource</c> instead.</remarks>
     private static void PopulateComboBox(ComboBox combo, IEnumerable<string> values, string selected)
-    {
-        combo.Items.Clear();
-        foreach (var value in values)
-        {
-            var item = new ComboBoxItem { Content = value, Tag = value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, value);
-            combo.Items.Add(item);
-        }
-        var match = combo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == selected);
-        combo.SelectedItem = match ?? combo.Items.OfType<ComboBoxItem>().FirstOrDefault();
-    }
+        => PickerOption.Reconcile(combo, values.ToList(), selected, firstIfAbsent: true);
 }

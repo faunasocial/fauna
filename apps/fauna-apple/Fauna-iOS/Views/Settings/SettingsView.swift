@@ -42,17 +42,9 @@ struct SettingsView: View {
             // rule-6 tradeoff (same as `SnapshotListView`/`AdminDashboardView`).
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if let handle = appState.session.handle {
-                        Text("@\(handle)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier(Ids.settingsHandleLabel)
-                            // Read-only label; re-read the live handle so the
-                            // in-process driver's /element/text reflects current
-                            // session state (no a11y tree to walk).
-                            .automationValue(Ids.settingsHandleLabel,
-                                             text: { appState.session.handle.map { "@\($0)" } })
-                    }
+                    // `settings-handle-label` is the identity cell's, on the Status
+                    // sub-page beside the actor id (`StatusDetailView`;
+                    // `settings.md` § Layout & flow item 1), not the root.
 
                     // Inbox-mode lives on the shared Privacy sub-page (the canonical
                     // `inbox-mode-<id>` radios in `PrivacySettingsView`, matching linux
@@ -167,13 +159,16 @@ struct SettingsView: View {
                         #endif
                         // Consumer-side subscriptions ("my subscriptions across all
                         // creators"), a Settings sub-page sibling of mail/web
-                        // (monetization.md § Pillar 1).
+                        // (monetization.md § Pillar 1). Monetization is excised from
+                        // the kids build (account-age-band.md, D-K5).
+                        #if !FAUNA_KIDS
                         navRow {
                             NavigationLink(value: SettingsPage.subscriptions) {
                                 Label(L.subscriptions.title, systemImage: "star")
                             }
                             .settingsNavRow(.subscriptions, appState)
                         }
+                        #endif
                         navRow {
                             NavigationLink(value: SettingsPage.linkedNests) {
                                 Label(L.linkedNests.title, systemImage: "link")
@@ -574,8 +569,8 @@ struct SettingsView: View {
                 MailListMembersView()
             }
         case .web: WebSettingsView(webPublish: appState.webPublish, reloadToken: appState.navGeneration)
-        #endif
         case .subscriptions: SubscriptionSettingsView()  // consumer "my subscriptions" page (shared FaunaKit)
+        #endif
         case .linkedNests: LinkedNestsView(reloadToken: appState.navGeneration)
         case .taskDelegation: TaskDelegationView(reloadToken: appState.navGeneration)
         #if !FAUNA_KIDS
@@ -623,6 +618,30 @@ struct StatusDetailView: View {
                                     .accessibilityIdentifier(Ids.accountActorId)
                                     .automationValue(Ids.accountActorId, text: { actorId })
                                 CopyButton(Ids.statusActorIdCopyBtn, text: actorId)
+                            }
+                        }
+                        // The identity cell (`settings.md` § Layout & flow item 1),
+                        // beside the actor id, off the registry's server-data cache
+                        // — never the session handle or the quota reply; the bare
+                        // values carry the ids, the shared `common.*` labels sit
+                        // beside them (mirrors macOS `MacStatusView`). Absent while
+                        // the cache holds no handle.
+                        if let cell = appState.session.identityCell {
+                            HStack {
+                                Text(L.common.handle)
+                                Spacer()
+                                automationText(Ids.settingsHandleLabel, cell.handle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let tier = cell.tier {
+                                HStack {
+                                    Text(L.common.tier)
+                                    Spacer()
+                                    automationText(Ids.settingsTierLabel, tier)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                         if let nodeUrl = appState.session.nodeUrl {

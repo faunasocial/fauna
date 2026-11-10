@@ -53,13 +53,39 @@ const LINK: Color = Color::Cyan;
 
 /// Paint a body into ratatui lines. Pure — the only entry point.
 ///
-/// The automation read of the same body is `document.to_plaintext()` (the shared
+/// The automation *text* of the same body is `document.to_plaintext()` (the shared
 /// projection every app's `feed-post-text` / `dm-message-text` reads —
 /// render-model.md § Implementation status), **not** a re-flattening of these lines.
+/// What these lines add beyond it — a task item's ☑/☐ box, a nested item's indent —
+/// is read through [`painted_text`] instead.
 pub fn render_document(doc: &RenderDocument) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     blocks_into(&doc.blocks, "", &mut out);
     out
+}
+
+/// The body exactly as [`render_document`] paints it, as text: one painted line per
+/// `\n`-separated line, markers and indentation included, before the terminal wraps
+/// anything — the `painted` attribute of every document element
+/// (`crate::automation`'s `/element/attr`).
+///
+/// It exists because `to_plaintext` joins the whole body into one line and so drops
+/// the two things a list paints beyond its words: whether a task item's box is ticked
+/// and how deep an item nests (feed-read outcome 15). The raw frame stream is no
+/// substitute — the terminal redraws only the cells that changed. Built from the very
+/// lines the paint draws, so the read cannot disagree with the pixels; computed only
+/// when a driver asks, never per frame.
+pub fn painted_text(doc: &RenderDocument) -> String {
+    render_document(doc)
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Marks a remote image the reader has not consented to load. Its url is not
@@ -362,6 +388,26 @@ mod tests {
     fn task_items_paint_a_static_checkbox() {
         let doc = markdown_to_document("- [x] done\n- [ ] todo");
         assert_eq!(painted(&doc), vec!["☑ done", "☐ todo"]);
+    }
+
+    /// `painted_text` is the paint, line for line: a ticked box reads ☑ and an
+    /// unticked one ☐ (where the one-line plaintext reads the same words for both),
+    /// and a nested item keeps its indent under its parent's marker.
+    #[test]
+    fn painted_text_keeps_the_boxes_and_the_nesting_the_plaintext_drops() {
+        let doc = markdown_to_document("- [x] done\n- [ ] todo\n  - [x] nested\n  - deeper");
+        let text = painted_text(&doc);
+        assert_eq!(text.lines().collect::<Vec<_>>(), painted(&doc));
+        assert_eq!(text.lines().next(), Some("☑ done"));
+        assert_eq!(text.lines().nth(1), Some("☐ todo"));
+        assert!(
+            text.lines().skip(2).all(|l| l.starts_with("  ")),
+            "nested items indent under their parent: {text:?}"
+        );
+        assert!(
+            !doc.to_plaintext().contains('\n'),
+            "the plaintext is the one-line read this attribute exists beside"
+        );
     }
 
     #[test]

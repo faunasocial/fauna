@@ -201,6 +201,19 @@ fun FoldersScreen(
             defaultConflictPolicy = defaultConflictPolicy,
             pendingShares = pendingShares,
             onDemand = onDemand,
+            // The member rows whose `folder-access-revoked-warning` shows: the ONE
+            // shared decision (`binding_section`, FFI) asked with the documents
+            // provider's park as its `parked` input (`file-sync.md` § Multi-writer
+            // shared sets → *Revocation on a capability host*), injected as plain
+            // data like the lease statuses.
+            accessRevoked = snapshot?.folders.orEmpty()
+                .filter { f ->
+                    val parked = onDemand[OnDemandRowKey.of(f)]?.parked ?: false
+                    com.fauna.ffi.bindingSection(f.role, f.access, parked)
+                        .let { it.shown && it.revokedWarning }
+                }
+                .map { OnDemandRowKey.of(it) }
+                .toSet(),
             // Per-conflict localized badge text, computed here (FFI) and injected as
             // plain data — keeps FoldersContent FFI-free for Robolectric (mirrors
             // nestSnapshotsOptions below). Keyed by conflict id.
@@ -269,6 +282,9 @@ fun FoldersScreen(
                 onBack = vm::wizardBack,
                 onCreate = vm::wizardSubmit,
                 onCancel = vm::closeWizard,
+                onSetAudience = vm::wizardSetAudience,
+                onConfirmPublic = vm::wizardConfirmPublic,
+                onCancelPublic = vm::wizardCancelPublic,
             ),
             // photo-backup-controls (ui.yaml, used_in: [folders]) — injected as a
             // composable slot (not threaded through FoldersContent's plain-data
@@ -484,6 +500,12 @@ data class WizardActions(
     val onBack: () -> Unit = {},
     val onCreate: () -> Unit = {},
     val onCancel: () -> Unit = {},
+    /** `wizard-audience-select` — `"private"` | `"public"` (Born public, ruling 1). */
+    val onSetAudience: (String) -> Unit = {},
+    /** The armed declassify confirm's answer — `confirmPublicCreate()`. */
+    val onConfirmPublic: () -> Unit = {},
+    /** Dismissing it — `cancelPublicCreate()`, nothing sent. */
+    val onCancelPublic: () -> Unit = {},
 )
 
 @Composable
@@ -573,6 +595,9 @@ fun FoldersContent(
     // Shared sets this device holds the machinery for — ordinary, read-only
     // `folder-row`s after the folder list.
     groupScopes: List<GroupScope> = emptyList(),
+    // Member rows whose device-local section is headed by
+    // `folder-access-revoked-warning`, already decided at the Screen.
+    accessRevoked: Set<OnDemandRowKey> = emptySet(),
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -647,7 +672,13 @@ fun FoldersContent(
                 // (folders.md § Sharing) — this Content just renders what it's given.
                 val onDemandRow = onDemand[OnDemandRowKey.of(folder)]
                 if (folder.role == "member") {
-                    MemberFolderRow(folder, actions, onDemandRow, folderLeaseStatuses[folder.name])
+                    MemberFolderRow(
+                        folder,
+                        actions,
+                        onDemandRow,
+                        folderLeaseStatuses[folder.name],
+                        accessRevoked = OnDemandRowKey.of(folder) in accessRevoked,
+                    )
                 } else {
                     FolderRow(
                         folder,
@@ -1155,35 +1186,12 @@ private fun FolderRow(
     // going private again protects only what is added afterwards). Nothing was
     // written on the arming pick, so a dismiss only closes the dialog.
     if (showAudienceConfirmDialog) {
-        AlertDialog(
-            onDismissRequest = { showAudienceConfirmDialog = false },
-            title = { Text(stringResource(R.string.devices_declassify_title)) },
-            text = {
-                Column {
-                    Text(
-                        stringResource(R.string.devices_declassify_body),
-                        modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_NAMES_WARNING),
-                    )
-                    Text(
-                        stringResource(R.string.devices_declassify_irreversible),
-                        modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_RESEAL_WARNING),
-                    )
-                }
+        DeclassifyDialog(
+            onConfirm = {
+                showAudienceConfirmDialog = false
+                actions.onSetAudience(folder.name, "public")
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showAudienceConfirmDialog = false
-                        actions.onSetAudience(folder.name, "public")
-                    },
-                    modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_CONFIRM),
-                ) { Text(stringResource(R.string.devices_declassify_confirm)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAudienceConfirmDialog = false }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            },
+            onDismiss = { showAudienceConfirmDialog = false },
         )
     }
 
@@ -1951,6 +1959,12 @@ private fun PendingShareRow(share: FfiPendingShare, actions: FoldersActions) {
  * ("Shared by ‹handle›", the precomputed `FolderSummary.ownerDisplay`), the
  * `folder-leave-button` and the hide-only `folder-on-demand-toggle` — the android
  * twin of apple's `memberFolderRow`.
+ *
+ * The documents provider is a writing seat for a writer member, so a demotion
+ * reaches it: while the provider holds the set parked the row's one
+ * device-local presence, the toggle, is headed by `folder-access-revoked-warning`
+ * (`file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+ * host*; the location-binding half above stays N/A).
  */
 @Composable
 private fun MemberFolderRow(
@@ -1958,6 +1972,7 @@ private fun MemberFolderRow(
     actions: FoldersActions,
     onDemand: OnDemandRow? = null,
     leaseStatus: LocalizedText? = null,
+    accessRevoked: Boolean = false,
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_ROW)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1971,7 +1986,13 @@ private fun MemberFolderRow(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    stringResourceFmt(R.string.devices_shared_by, folder.ownerDisplay),
+                    // A seat the folder rail marked forked reads the badge's third
+                    // text (owner changed; only their re-share heals it).
+                    stringResourceFmt(
+                        if (folder.seatForked) R.string.devices_shared_by_owner_changed
+                        else R.string.devices_shared_by,
+                        folder.ownerDisplay,
+                    ),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.testTag(Ids.FOLDER_SHARED_BADGE),
@@ -1987,6 +2008,16 @@ private fun MemberFolderRow(
             }
             // A reader has no body to expand and most needs to see the lock.
             LeaseStatusText(leaseStatus)
+            // A demotion is never silent: the member's own changes no longer leave
+            // this device, and what they saved stays where the picker shows it.
+            if (accessRevoked) {
+                Text(
+                    stringResource(R.string.devices_access_revoked_warning),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag(Ids.FOLDER_ACCESS_REVOKED_WARNING),
+                )
+            }
             // "Show in Files" on a folder shared with the account — hide-only: the
             // membership is the seat, so the flip writes no place
             // (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3).
@@ -2244,6 +2275,45 @@ private fun ConflictPolicySelect(
             }
         }
     }
+}
+
+/**
+ * The declassify dialog — `folder-audience-public-confirm` with its two
+ * consequence lines. ONE composable for both doors to public: the owner row's
+ * select and a Public wizard's Create (painted off `review.declassifyArmed`), so
+ * the copy and ids cannot drift between them (`ui/folders.md` § Audience and
+ * website serving → *Born public*, ruling 2: reused on the same page, never
+ * copied).
+ */
+@Composable
+internal fun DeclassifyDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.devices_declassify_title)) },
+        text = {
+            Column {
+                Text(
+                    stringResource(R.string.devices_declassify_body),
+                    modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_NAMES_WARNING),
+                )
+                Text(
+                    stringResource(R.string.devices_declassify_irreversible),
+                    modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_RESEAL_WARNING),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_CONFIRM),
+            ) { Text(stringResource(R.string.devices_declassify_confirm)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.common_cancel))
+            }
+        },
+    )
 }
 
 /**
@@ -2509,9 +2579,11 @@ private fun FolderWizardDialog(
         },
         confirmButton = {
             if (wizard.step == FolderWizardStep.REVIEW) {
+                // While the declassify confirm asks, Create stays painted but dim:
+                // answering the dialog is the gesture that creates.
                 Button(
                     onClick = actions.onCreate,
-                    enabled = wizard.review.createEnabled,
+                    enabled = wizard.review.createEnabled && !wizard.review.declassifyArmed,
                     modifier = Modifier.testTag(Ids.WIZARD_CREATE_BUTTON),
                 ) { Text(stringResource(R.string.devices_wizard_create)) }
             } else {
@@ -2535,6 +2607,12 @@ private fun FolderWizardDialog(
             }
         },
     )
+    // A Public wizard's Create armed the owner row's SAME declassify dialog; the
+    // shared machine owns the arm (`review.declassifyArmed`), the screen keeps no
+    // flag of its own (Born public, ruling 2).
+    if (wizard.step == FolderWizardStep.REVIEW && wizard.review.declassifyArmed) {
+        DeclassifyDialog(onConfirm = actions.onConfirmPublic, onDismiss = actions.onCancelPublic)
+    }
 }
 
 private fun wizardContinueEnabled(wizard: FolderWizardSnapshot): Boolean = when (wizard.step) {
@@ -2572,6 +2650,35 @@ private fun WizardName(wizard: FolderWizardSnapshot, actions: WizardActions) {
             stringResource(R.string.devices_wizard_name_required),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    // Who can see the new folder — a field of this step, never a step of its own
+    // (`ui/folders.md` § Audience and website serving → *Born public*, ruling 1).
+    // Absent on a seam that cannot attest a born-public create (a control that
+    // cannot work must not paint), and in the kids build, where web publishing is
+    // excised (`account-age-band.md`; the owner row's [AudienceSelect] withholds
+    // Public there for the same reason — with Public gone nothing is left to choose).
+    // A new folder is unbound, so the shared option set is exactly Private | Public.
+    // The select paints the user's choice: nothing exists yet to protect.
+    if (wizard.name.audienceOffered && !BuildConfig.KIDS) {
+        val current = wizard.name.audience
+        val options = remember(current) { com.fauna.ffi.audienceOptions(false, current) }
+        Text(
+            text = stringResource(R.string.devices_folder_audience),
+            style = MaterialTheme.typography.labelMedium,
+        )
+        TokenSelect(
+            testTagValue = Ids.WIZARD_AUDIENCE_SELECT,
+            selected = current,
+            options = options.map { it.value to (localized(it.label) ?: it.label.key) },
+            onSelect = { if (it != current) actions.onSetAudience(it) },
+            modifier = Modifier.fillMaxWidth(),
+            selectable = { token -> options.firstOrNull { it.value == token }?.selectable ?: false },
+        )
+        Text(
+            text = localized(com.fauna.ffi.audienceHint(false, current)) ?: "",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.WIZARD_AUDIENCE_HINT),
         )
     }
 }
@@ -2681,6 +2788,11 @@ private fun WizardDevicePlaces(wizard: FolderWizardSnapshot, actions: WizardActi
 private fun WizardReview(wizard: FolderWizardSnapshot) {
     val review = wizard.review
     LabeledRow(stringResource(R.string.devices_wizard_review_name), review.name)
+    // Who can see it — the Name step's choice, read-only like the name.
+    LabeledRow(
+        stringResource(R.string.devices_wizard_review_audience),
+        localized(com.fauna.ffi.audienceLabel(review.audience)) ?: review.audience,
+    )
     // No mode line, no retention line, no cadence line: a folder has no type
     // (phase 2 slice e), retention is the nest place's policy edited on the row
     // rather than chosen at create, and the scan cadence is a constant (phase 5).

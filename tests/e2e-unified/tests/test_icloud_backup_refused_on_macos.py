@@ -36,7 +36,11 @@ from tests.test_identity_key_stays_on_the_device import (
 )
 from tests.test_onboarding_launch_routing_smoke import smoke_handled_nest  # noqa: F401 (fixture)
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.macos]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.macos,
+    pytest.mark.feature("identity-in-your-cloud-keychain"),
+]
 
 #: The one copy a legacy-plane row rests as: no sync flag and no class, which the
 #: platform does not honour there.

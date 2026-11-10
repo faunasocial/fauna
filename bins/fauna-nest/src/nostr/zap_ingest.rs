@@ -523,6 +523,37 @@ pub async fn apply_zap_purchase(
                 ?applied,
                 "zap met a tier's asking price — purchase applied"
             );
+            // An unbound buyer's code reaches them as a DM when the receipt
+            // names a self-certified sender (`monetization.md` § The Nostr
+            // advertisement of a sold post → *Delivering the unlock to a
+            // stranger who paid*). `ClaimExists` delivers too: a crash replay
+            // finds the code minted and must still send it if nothing was sent
+            // — the delivery's own record, not the waist's, makes it once. A
+            // failure costs the message, never the purchase: the audit stays
+            // the buyer's recourse.
+            if let crate::payment_core::PaymentApplied::ClaimMinted { code }
+            | crate::payment_core::PaymentApplied::ClaimExists { code } = &applied
+            {
+                match crate::nostr::claim_delivery::deliver_claim_code(
+                    state,
+                    zap,
+                    &entitlement.payee.0,
+                    &subject.fauna_post_id,
+                    code,
+                )
+                .await
+                {
+                    Ok(outcome) => tracing::info!(
+                        zap_event_id = %zap.zap_event_id(),
+                        ?outcome,
+                        "unbound buyer's claim code delivery"
+                    ),
+                    Err(e) => tracing::warn!(
+                        zap_event_id = %zap.zap_event_id(),
+                        "unbound buyer's claim code not delivered: {e:#}"
+                    ),
+                }
+            }
             Some(tier.name)
         }
         Err(e) => {

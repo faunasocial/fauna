@@ -18,7 +18,10 @@
 //! envelope under. The nest's own registry is untouched: the relay never
 //! consults a registry on the read path.
 //!
-//! Consumer: `tests/e2e-unified/tests/test_region_content_policy.py`.
+//! Consumers: `tests/e2e-unified/tests/test_region_content_policy.py` (the app
+//! side) and `tests/e2e-unified/tests/api/test_region_rules_web_notice.py`,
+//! which also arms the same synthetic registry for the nest's public render
+//! (`/api/v1/test/region/publisher-registry`).
 //! Production never compiles this module.
 
 #![cfg(feature = "test-hooks")]
@@ -227,6 +230,68 @@ async fn retire_content_policy(
     }
 }
 
+/// `POST /api/v1/test/region/content-policy/log-silent` — record that the log
+/// last answered for `region`'s content policy `STALE_AFTER` + an hour ago,
+/// keeping the cached envelope: the app's next ask reads the document still in
+/// force and `stale` set, which drives its transparency surface's warning
+/// (`region-blocking.md` § Fail posture: staleness warns, never blocks and
+/// never relaxes) with no wait past the real bound. Returns
+/// `{"reached_at": <epoch secs>}`.
+async fn silence_content_policy_log(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RetireRequest>,
+) -> impl IntoResponse {
+    const MARGIN_SECS: i64 = 60 * 60;
+    let Ok(region) = RegionCode::parse(req.region) else {
+        return ApiError::bad_request("malformed region code").into_response();
+    };
+    let age = crate::region_tier::STALE_AFTER.as_secs() as i64 + MARGIN_SECS;
+    match state
+        .db
+        .test_age_relay_artifact(&region, PAYLOAD_KIND_CONTENT_POLICY, age)
+        .await
+    {
+        Ok(true) => Json(json!({"reached_at": crate::db::now_epoch_secs() - age})).into_response(),
+        Ok(false) => {
+            ApiError::bad_request("no relay row for that region; seed it first").into_response()
+        }
+        Err(e) => ApiError::internal(format!("{e:#}")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PublisherRegistryRequest {
+    /// The region to enrol the synthetic authority for — the situs the nest
+    /// declares; `null` disarms.
+    region: Option<String>,
+}
+
+/// `POST /api/v1/test/region/publisher-registry` — make the nest-as-publisher
+/// fold verify against the synthetic registry enrolling `region`, the one
+/// [`seed_content_policy`] signs under, so a seeded situs policy reaches the
+/// public pages (`region-blocking.md` § The nest-as-publisher leg). Only the
+/// render reads it: the refresh worker and every ingest keep the compiled-in
+/// registry, so no fetch to the real log is ever sent. Renders nothing itself —
+/// the next declaration (`fauna.admin.region.set`) or relay acceptance does.
+/// Consumer: `tests/e2e-unified/tests/api/test_region_rules_web_notice.py`.
+async fn arm_publisher_registry(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PublisherRegistryRequest>,
+) -> impl IntoResponse {
+    let registry = match req.region {
+        Some(code) => match RegionCode::parse(code) {
+            Ok(region) => Some(synthetic_registry(&region)),
+            Err(_) => return ApiError::bad_request("malformed region code").into_response(),
+        },
+        None => None,
+    };
+    let Some(service) = state.web_content_service.as_ref() else {
+        return ApiError::internal("this nest runs no web content service").into_response();
+    };
+    service.arm_region_registry_for_test(registry);
+    Json(json!({"ok": true, "authority_name": SYNTHETIC_AUTHORITY})).into_response()
+}
+
 /// Mount the `/api/v1/test/region/*` routes.
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -235,7 +300,15 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
             post(seed_content_policy),
         )
         .route(
+            "/api/v1/test/region/content-policy/log-silent",
+            post(silence_content_policy_log),
+        )
+        .route(
             "/api/v1/test/region/content-policy/retire",
             post(retire_content_policy),
+        )
+        .route(
+            "/api/v1/test/region/publisher-registry",
+            post(arm_publisher_registry),
         )
 }

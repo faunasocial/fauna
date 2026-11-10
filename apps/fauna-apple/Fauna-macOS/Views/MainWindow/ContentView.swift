@@ -485,6 +485,14 @@ struct MainWindowView: View {
         // retries the search local-index attach — the first attempt (inside
         // `configure`) can race the login-time `conversationsSession` build, so
         // a reconnect is the natural, already-wired second chance.
+        //
+        // The reporter-side hide list is a render source on every page, not one
+        // page's data, so it re-reads on every store-change notice wherever the
+        // user is: another device of this account may have reported or shown
+        // something again (tui's `AccountStoreChanged` arm, the same shape).
+        .onStoreChange {
+            await appState.contentPolicy.resyncReported()
+        }
         .onReconnect {
             await refreshAdminStatus(keepingLastAnswer: true)
             await appState.familyStatus.refresh(api: client?.api)

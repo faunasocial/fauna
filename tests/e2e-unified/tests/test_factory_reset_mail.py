@@ -29,6 +29,7 @@ import secrets
 
 import pytest
 
+from helpers.fixture_closure import MAIL_VENUE_BINARIES, resolves_lazily
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from clients.ws_rpc_anon_client import WsRpcAnonClient
 from common.nest import factory_reset_and_restart
@@ -41,6 +42,7 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.standalone_only]
 
 
 @pytest.fixture
+@resolves_lazily(*MAIL_VENUE_BINARIES)
 def reset_mail_venue(request, nest_mode, tmp_path_factory):
     """A claimed mail nest with its MTA serving, of this test's own: the admin
     holds a recipient seal key the harness registered, so role mail to

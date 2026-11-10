@@ -242,6 +242,29 @@ static class SelfTest
     /// <item>Where a sweep stops: <see cref="ScrollPolicy.ReachedBottom"/> reads the
     /// position, never whether it moved, because a scroll that has not landed yet does
     /// not move either.</item>
+    /// <item>7–12, bringing an element in WHOLE (<c>Actions.MakeWhole</c>), on the
+    /// 28 %-visible post-card UIA's clipped rect reported whole: the honest share is the
+    /// shown part over the true height; one reading proves wholeness only clear of both
+    /// edges; a move's percent walks the scrollable range; two readings classify an
+    /// element as whole, spanning the viewport, or unproven; an end of the range proves a
+    /// near-half reading whole; a small centring move is not read as landed before it
+    /// began.</item>
+    /// <item>13–18, reading "in view" WITHOUT moving the list (the <c>in-viewport</c>
+    /// attribute, <see cref="ScrollPolicy.ReadInViewport"/>), on the same geometry: the
+    /// 28 % sliver is Undecided, never in view from its clipped centre; a centred card, a
+    /// text whose neighbour reads past its edge, and a card flush with an edge at that end
+    /// of the range are whole and in view; nothing shown is out of view.</item>
+    /// <item>19–21, placing an element at a measured fraction above the bottom edge
+    /// (<c>Actions.ScrollToBottomFraction</c>), on the same geometry: the first move puts
+    /// the card's top a quarter-card above the container rect's bottom; a reading cut
+    /// short of the true height proves the real clip line a padding above it, and the
+    /// next move lands on it exactly; the answer is the shown part over the true
+    /// height.</item>
+    /// <item>22–24, the placement's edge walk for a card TALLER than its viewport (the
+    /// playing video card): each edge is proven its own one at a time, or at its end of the
+    /// range; two readings of the top calibrate the pixels a percent moves; the bottom a
+    /// bottom-seeking move brings in, with the top carried across, measures the true
+    /// height, and the placement shows exactly the asked share.</item>
     /// </list>
     ///
     /// <para>Run: <c>FauiBridge.exe --self-test-scroll-policy</c>; exit code = failures.</para>
@@ -310,8 +333,240 @@ static class SelfTest
         Check(ScrollPolicy.Landed(25.0, 25.0), "a position at its target has landed");
         Check(!ScrollPolicy.Landed(0.0, 25.0), "a position short of its target has not landed");
 
+        // 7–12. Bringing an element in WHOLE (Actions.MakeWhole), on the geometry measured
+        // 2026-11-04: a 189 px post-card whose top sat at 286.3 in a 338.5 px
+        // viewport — 28 % of it on screen, which UIA's clipped rect reported as a 52.2 px
+        // element wholly inside the viewport.
+        var band = new ScrollPolicy.Span(0, 338.5);
+        const double cardHeight = 189.0;
+        var sliver = new ScrollPolicy.Span(286.3, band.Bottom - 286.3);
+
+        // 7. The honest share is the shown part over the TRUE height; the clipped rect over
+        // itself (the pre-fix VisibleFraction) answered 1.0 for this sliver.
+        Check(Math.Abs(ScrollPolicy.VisibleShare(sliver.Height, cardHeight) - 0.276) < 0.005,
+            $"the measured sliver shows {ScrollPolicy.VisibleShare(sliver.Height, cardHeight):0.000} of the card, not {sliver.Height / sliver.Height:0.0}");
+        Check(ScrollPolicy.VisibleShare(cardHeight, cardHeight) == 1.0
+              && ScrollPolicy.VisibleShare(10, 0) == 0.0,
+            "a whole reading shows all of the card; no true height measures nothing");
+
+        // 8. One reading proves wholeness only clear of both edges: the sliver is flush with
+        // the bottom edge, and so is a whole card that merely touches it; a centred card is
+        // clear; an edge one ScrollViewer padding (24 px) inside the rect proves nothing.
+        Check(!ScrollPolicy.ClearOfEdges(sliver, band),
+            "a reading flush with the viewport's bottom edge does not prove the card whole");
+        var centred = new ScrollPolicy.Span(band.Centre - cardHeight / 2, cardHeight);
+        Check(ScrollPolicy.ClearOfEdges(centred, band), "a centred card is proven whole by one reading");
+        Check(!ScrollPolicy.ClearOfEdges(new ScrollPolicy.Span(band.Bottom - 24 - 60, 60), band),
+            "a reading whose edge sits one padding inside the container's rect does not prove the card whole");
+
+        // 9. A move's percent: one viewport of travel on a 25 % view size is a third of the
+        // range (the range is content minus viewport: three viewports), clamped at both ends.
+        var oneViewport = ScrollPolicy.PercentAfterMove(0, 25.0, 100.0, 100.0);
+        Check(Math.Abs(oneViewport - 100.0 / 3.0) < 1e-9,
+            $"moving one viewport down on a 25% view size lands at 33.3% (got {oneViewport:0.###})");
+        Check(ScrollPolicy.PercentAfterMove(10, 25.0, 100.0, -1000) == 0.0
+              && ScrollPolicy.PercentAfterMove(90, 25.0, 100.0, 1000) == 100.0,
+            "a move past either end of the range clamps to it");
+        Check(ScrollPolicy.PercentAfterMove(40, 0.0, 100.0, 50) == 40
+              && ScrollPolicy.PercentAfterMove(40, 100.0, 100.0, 50) == 40,
+            "an unreadable or non-scrolling view size moves nothing");
+
+        // 10. Two readings classify: the sliver, centred on what shows, grows (proves
+        // nothing yet); the card then keeps its height as it moves (whole); a reading that
+        // fills the band and does not move spans the viewport; a small one that does not
+        // move proves nothing.
+        var afterFirstMove = new ScrollPolicy.Span(band.Centre - sliver.Height / 2, cardHeight);
+        Check(ScrollPolicy.ClassifyMove(sliver, afterFirstMove, band) == ScrollPolicy.WholeVerdict.Unknown,
+            "a reading that grew as the list moved was clipped — nothing proven yet");
+        Check(ScrollPolicy.ClassifyMove(afterFirstMove, centred, band) == ScrollPolicy.WholeVerdict.Whole,
+            "a reading that kept its height as both edges moved is the whole card");
+        var fill = new ScrollPolicy.Span(band.Top + 16, band.Height - 32);
+        Check(ScrollPolicy.ClassifyMove(fill, fill, band) == ScrollPolicy.WholeVerdict.SpansViewport,
+            "a reading that fills the band and did not move spans the viewport");
+        Check(ScrollPolicy.ClassifyMove(centred, centred, band) == ScrollPolicy.WholeVerdict.Unknown,
+            "a small reading that did not move proves nothing");
+
+        // 11. At an end of the range the list cannot move toward centring: a reading in the
+        // upper half at the top, or the lower half at the bottom, cannot be clipped.
+        var upper = new ScrollPolicy.Span(10, 60);
+        var lower = new ScrollPolicy.Span(band.Bottom - 70, 60);
+        Check(ScrollPolicy.AtRangeEnd(upper, band, 0.0) == ScrollPolicy.WholeVerdict.Whole
+              && ScrollPolicy.AtRangeEnd(lower, band, 100.0) == ScrollPolicy.WholeVerdict.Whole,
+            "a reading on the near half at an end of the range is whole");
+        Check(ScrollPolicy.AtRangeEnd(sliver, band, 0.0) == ScrollPolicy.WholeVerdict.Unknown
+              && ScrollPolicy.AtRangeEnd(upper, band, 50.0) == ScrollPolicy.WholeVerdict.Unknown,
+            "a reading on the far half, or mid-range, proves nothing");
+
+        // 12. A centring move smaller than Landed's fixed half percent has not landed
+        // before it began.
+        Check(!ScrollPolicy.MoveLanded(40.0, 40.0, 40.26) && ScrollPolicy.MoveLanded(40.0, 40.25, 40.26),
+            "a 0.26% move reads landed only once the position has moved");
+
+        // 13–18. Reading "in view" WITHOUT moving the list (the `in-viewport` attribute), on the same measured geometry: the true centre answers only once both
+        // of the reading's edges are proven the element's own.
+        const ScrollPolicy.ViewportVerdict inView = ScrollPolicy.ViewportVerdict.InView;
+        const ScrollPolicy.ViewportVerdict outOfView = ScrollPolicy.ViewportVerdict.OutOfView;
+        const ScrollPolicy.ViewportVerdict undecided = ScrollPolicy.ViewportVerdict.Undecided;
+        // Mid-list on a 25 % view size: neither end of the range is near.
+        var midRange = ScrollPolicy.RangeOffsetsPx(40.0, 25.0, band.Height);
+
+        // 13. Where the list sits in its range, in pixels: nothing above it at 0 %, nothing
+        // below it at 100 %, both far mid-list; an unreadable view size knows nothing.
+        var atTop = ScrollPolicy.RangeOffsetsPx(0.0, 25.0, band.Height);
+        var atBottom = ScrollPolicy.RangeOffsetsPx(100.0, 25.0, band.Height);
+        Check(atTop is { FromTop: 0.0 } && atBottom is { FromBottom: 0.0 }
+              && midRange is { FromTop: > 100, FromBottom: > 100 },
+            $"the range offsets read 0 at each end and far mid-list (mid: {midRange})");
+        Check(ScrollPolicy.RangeOffsetsPx(40.0, 0.0, band.Height) is null
+              && ScrollPolicy.RangeOffsetsPx(40.0, 100.0, band.Height) is null
+              && ScrollPolicy.RangeOffsetsPx(double.NaN, 25.0, band.Height) is null,
+            "an unreadable view size or position, or a container that does not scroll, gives no range");
+
+        // 14. THE gap: the 28 % sliver flush with the bottom edge, mid-list, nothing reading
+        // below it. Its clipped rect's centre (312.4) lies inside the band, which is what read
+        // it in view; its true centre (380.8) lies below the band. One reading cannot tell the
+        // two cards apart, so the answer is Undecided — never InView.
+        var (sliverVerdict, sliverWhy) = ScrollPolicy.ReadInViewport(sliver, false, band, midRange, null, null);
+        Check(sliverVerdict == undecided && sliverWhy.Contains("bottom edge"),
+            $"the measured sliver is not read in view from its clipped centre (got {sliverVerdict}: {sliverWhy})");
+        var topSliver = new ScrollPolicy.Span(band.Top, sliver.Height);
+        Check(ScrollPolicy.ReadInViewport(topSliver, false, band, midRange, null, null).Verdict == undecided,
+            "a sliver flush with the top edge is Undecided too");
+        // Its clipped neighbours share its clip line, so they prove nothing.
+        Check(ScrollPolicy.ReadInViewport(sliver, false, band, midRange, 10.0, sliver.Bottom + 1.0).Verdict == undecided,
+            "a neighbour reading to the same clip line does not prove the edge");
+
+        // 15. A centred card is clear of both edges: whole, its centre in the band.
+        Check(ScrollPolicy.ReadInViewport(centred, false, band, midRange, null, null).Verdict == inView,
+            "a centred card reads in view with no evidence needed");
+
+        // 16. A message text a bring-into-view left near the bottom edge: within the edge
+        // allowance, but its own bubble's reply row reads below it, so the clip line is
+        // below it too — whole, in view. The same text with nothing read below it is not proven.
+        var text = new ScrollPolicy.Span(band.Bottom - 36 - 40, 40);
+        Check(ScrollPolicy.ReadInViewport(text, false, band, midRange, text.Top - 30, band.Bottom - 6).Verdict == inView,
+            "a text near the edge whose neighbour reads past it is whole and in view");
+        Check(ScrollPolicy.ReadInViewport(text, false, band, midRange, null, null).Verdict == undecided,
+            "the same text with no neighbour read past it is not proven whole");
+
+        // 17. At an end of the range the content ends inside the viewport: a whole card
+        // flush with the bottom at 100 %, or with the top at 0 %, is the whole card.
+        var flushBottom = new ScrollPolicy.Span(band.Bottom - cardHeight, cardHeight);
+        var flushTop = new ScrollPolicy.Span(band.Top, cardHeight);
+        Check(ScrollPolicy.ReadInViewport(flushBottom, false, band, atBottom, null, null).Verdict == inView
+              && ScrollPolicy.ReadInViewport(flushTop, false, band, atTop, null, null).Verdict == inView,
+            "a card flush with an edge at that end of the range reads in view");
+        Check(ScrollPolicy.ReadInViewport(flushBottom, false, band, atTop, null, null).Verdict == undecided,
+            "a card flush with the bottom edge at the TOP of the range is not proven whole");
+
+        // 18. Nothing shows: out of view, whatever else is known. One that fills the band
+        // mid-list may run past both edges.
+        Check(ScrollPolicy.ReadInViewport(centred, true, band, midRange, null, null).Verdict == outOfView
+              && ScrollPolicy.ReadInViewport(new ScrollPolicy.Span(0, 0), false, band, midRange, null, null).Verdict == outOfView
+              && ScrollPolicy.ReadInViewport(centred, false, new ScrollPolicy.Span(0, 0), midRange, null, null).Verdict == outOfView,
+            "an offscreen element, an empty reading or an empty band reads out of view");
+        var (fillVerdict, fillWhy) = ScrollPolicy.ReadInViewport(
+            new ScrollPolicy.Span(band.Top, band.Height), false, band, midRange, null, null);
+        Check(fillVerdict == undecided && fillWhy.Contains("top and bottom edges"),
+            $"a reading filling the band mid-list is Undecided at both edges (got {fillVerdict}: {fillWhy})");
+
+        // 19–21. Placing an element at a measured fraction above the bottom edge
+        // (Actions.ScrollToBottomFraction), on the same geometry: the centred 189 px card,
+        // asked to leave a quarter above the edge.
+        // 19. The first move aims at the container rect's bottom: the centred card's top
+        // must come down to 338.5 − 47.25, so the content moves DOWN (a negative delta).
+        var firstDelta = ScrollPolicy.BottomPlacementDelta(centred.Top, cardHeight, band.Bottom, 0.25);
+        var firstTop = centred.Top - firstDelta;
+        Check(firstDelta < 0 && Math.Abs(firstTop - (band.Bottom - 0.25 * cardHeight)) < 1e-9,
+            $"a centred card asked for a quarter moves down until its top is a quarter-card above the edge (delta {firstDelta:0.##}, top {firstTop:0.##})");
+        Check(ScrollPolicy.BottomPlacementDelta(centred.Top, cardHeight, band.Bottom, 1.7)
+              == ScrollPolicy.BottomPlacementDelta(centred.Top, cardHeight, band.Bottom, 1.0)
+              && ScrollPolicy.BottomPlacementDelta(centred.Top, cardHeight, band.Bottom, -0.3)
+              == ScrollPolicy.BottomPlacementDelta(centred.Top, cardHeight, band.Bottom, 0.0),
+            "an asked fraction outside 0–1 is clamped to it");
+
+        // 20. The real clip sits a ScrollViewer padding (24 px) above the rect's bottom, so
+        // that first move shows 24 px less than asked; the reading, cut short of the true
+        // height, ends at the clip line — and the next move, aimed at it, lands exactly.
+        const double padding = 24.0;
+        var clip = band.Bottom - padding;
+        var afterFirst = new ScrollPolicy.Span(firstTop, clip - firstTop);
+        Check(ScrollPolicy.ClipBottomOf(afterFirst, cardHeight) is double proven && Math.Abs(proven - clip) < 1e-9,
+            $"a reading cut short of the true height proves the clip line ({clip:0.#})");
+        Check(ScrollPolicy.ClipBottomOf(centred, cardHeight) is null
+              && ScrollPolicy.ClipBottomOf(new ScrollPolicy.Span(0, 0), cardHeight) is null,
+            "a whole reading, or an empty one, proves nothing about the clip line");
+        Check(!ScrollPolicy.PlacedAt(afterFirst.Height, cardHeight, 0.25),
+            $"the padding-short first move ({ScrollPolicy.VisibleShare(afterFirst.Height, cardHeight):0.000} shown) is not yet placed");
+        var secondTop = afterFirst.Top - ScrollPolicy.BottomPlacementDelta(afterFirst.Top, cardHeight, clip, 0.25);
+        var afterSecond = new ScrollPolicy.Span(secondTop, clip - secondTop);
+        Check(ScrollPolicy.PlacedAt(afterSecond.Height, cardHeight, 0.25)
+              && Math.Abs(ScrollPolicy.VisibleShare(afterSecond.Height, cardHeight) - 0.25) < 1e-9,
+            $"the move aimed at the measured clip line shows exactly a quarter (got {ScrollPolicy.VisibleShare(afterSecond.Height, cardHeight):0.000})");
+
+        // 21. The answer is the clipped reading over the TRUE height — the quarter, never
+        // the clipped rect over itself (1.0).
+        Check(ScrollPolicy.VisibleShare(afterSecond.Height, cardHeight) < 0.5
+              && ScrollPolicy.VisibleShare(afterSecond.Height, afterSecond.Height) == 1.0,
+            "a quarter-placed card answers its quarter (under the 50 % skip gate), where the clipped reading over itself would answer 1.0");
+
+        // 22–24. The edge walk, for a card TALLER than its viewport — the playing video card
+        // measured 2026-11-06 on the 600 × 600 window: the feed's band 245+339, the card's
+        // reading 345+239 growing to the band's full 339 px as MakeWhole centred it, so no
+        // reading ever showed it whole. Its true height here is 420 px; the content moves
+        // 14 px per scroll percent, mid-list.
+        var feed = new ScrollPolicy.Span(245, 339);
+        const double tallHeight = 420.0;
+        const double pxPerPct = 14.0;
+        var allowance = ScrollPolicy.EdgeAllowance(feed.Height);
+
+        // 22. Each edge is proven its own one at a time: the first reading's top is clear of
+        // the band's top edge, its bottom is cut at the clip; mid-list neither end of the
+        // range proves anything, at an end it does.
+        var first = new ScrollPolicy.Span(345, feed.Bottom - 345);
+        Check(ScrollPolicy.TopOwn(first, feed, 40.0) && !ScrollPolicy.BottomOwn(first, feed, 40.0),
+            "the tall card's first reading proves its top and not its bottom");
+        var cutTop = new ScrollPolicy.Span(feed.Top, 200);
+        Check(!ScrollPolicy.TopOwn(cutTop, feed, 40.0) && ScrollPolicy.TopOwn(cutTop, feed, 0.0)
+              && ScrollPolicy.BottomOwn(first, feed, 100.0) && !ScrollPolicy.TopOwn(new ScrollPolicy.Span(0, 0), feed, 0.0),
+            "a top flush with the band is proven only at the top of the range, a bottom at its bottom; an empty reading proves nothing");
+        Check(ScrollPolicy.WalkStepPx(feed.Height) == feed.Height - 2 * allowance
+              && ScrollPolicy.WalkStepPx(100.0) >= 100.0 / 3.0,
+            $"an edge-seeking move travels the band less an allowance at each end ({ScrollPolicy.WalkStepPx(feed.Height):0.#} px), never under a third of it");
+
+        // 23. Two readings of the proven top calibrate the pixels a percent moves; a move
+        // that did not happen, or an edge that moved the wrong way, calibrates nothing.
+        var calibrated = new ScrollPolicy.Span(feed.Top + allowance + 3, 0);
+        var movedPct = (first.Top - calibrated.Top) / pxPerPct;
+        Check(ScrollPolicy.PxPerPercent(first.Top, 40.0, calibrated.Top, 40.0 + movedPct) is double k
+              && Math.Abs(k - pxPerPct) < 1e-9,
+            "two readings of the top, one calibrating move apart, measure 14 px per percent");
+        Check(ScrollPolicy.PxPerPercent(first.Top, 40.0, calibrated.Top, 40.0) is null
+              && ScrollPolicy.PxPerPercent(first.Top, 40.0, first.Top + 10, 41.0) is null,
+            "no move, or an edge moving against the content, calibrates nothing");
+
+        // 24. A bottom-seeking move takes the top out of view; the bottom it brings in,
+        // with the top's reference carried across by the calibration, measures the true
+        // height — and the placement it then makes shows exactly the asked quarter.
+        var refPct = 40.0 + movedPct;
+        var bottomPct = refPct + ScrollPolicy.WalkStepPx(feed.Height) / pxPerPct;
+        var topThere = ScrollPolicy.EdgeAt(calibrated.Top, refPct, pxPerPct, bottomPct);
+        var bottomReading = new ScrollPolicy.Span(feed.Top, topThere + tallHeight - feed.Top);
+        Check(topThere < feed.Top && ScrollPolicy.BottomOwn(bottomReading, feed, bottomPct),
+            $"the bottom-seeking move takes the top out of view ({topThere:0.#}) and proves the bottom ({bottomReading.Bottom:0.#})");
+        var measured = bottomReading.Bottom - topThere;
+        Check(Math.Abs(measured - tallHeight) < 1e-9,
+            $"the bottom and the carried top measure the true height ({measured:0.#} px, taller than the {feed.Height:0.#} px band)");
+        var placeDelta = ScrollPolicy.BottomPlacementDelta(topThere, measured, feed.Bottom, 0.25);
+        var placedTop = topThere - placeDelta;
+        var placedReading = new ScrollPolicy.Span(placedTop, feed.Bottom - placedTop);
+        Check(ScrollPolicy.TopOwn(placedReading, feed, bottomPct)
+              && ScrollPolicy.PlacedAt(placedReading.Height, measured, 0.25)
+              && Math.Abs(ScrollPolicy.VisibleShare(placedReading.Height, measured) - 0.25) < 1e-9,
+            $"the placement leaves a quarter of the tall card above the edge, its top in view (top {placedTop:0.#})");
+
         Console.WriteLine(failures == 0
-            ? "[self-test] PASS — sweep step policy and container choice are gap-free and cheap."
+            ? "[self-test] PASS — sweep step policy and container choice are gap-free and cheap; an element is brought in whole from honest readings, and read in view only once proven whole."
             : $"[self-test] {failures} FAILURE(S)");
         return failures;
     }
@@ -617,8 +872,47 @@ static class SelfTest
         Check(notOffered.Id == "compose-gate-tier-select" && notOffered.Index == 0,
             "the not-offered refusal carries id/index so Program can answer the shared 409 body");
 
+        // 8. The structural refusal (InertGesture): a gesture on an element that
+        // carries none. Each verdict refuses ONLY the provably unreachable corner;
+        // every other input keeps today's drive, so one flipped operand reds here
+        // instead of refusing a click a real handler would have taken.
+        Check(InertGesture.ClickReachesNothing(
+                isText: true, keyboardFocusable: false, hasChildren: false, chainActivates: false),
+            "a bare text label nothing above can activate is refused (the critical-alert row)");
+        Check(!InertGesture.ClickReachesNothing(
+                isText: false, keyboardFocusable: false, hasChildren: false, chainActivates: false),
+            "a pattern-less NON-text element keeps its physical click — UIA cannot see a Tapped handler (dm-attachment-image)");
+        Check(!InertGesture.ClickReachesNothing(
+                isText: true, keyboardFocusable: false, hasChildren: false, chainActivates: true),
+            "a text inside an actuable or editable container keeps its physical click (a nav item's label)");
+        Check(!InertGesture.ClickReachesNothing(
+                isText: true, keyboardFocusable: true, hasChildren: false, chainActivates: false),
+            "a focusable text keeps its click");
+        Check(!InertGesture.ClickReachesNothing(
+                isText: true, keyboardFocusable: false, hasChildren: true, chainActivates: false),
+            "a text holding children (an inline Hyperlink) keeps its click");
+        Check(InertGesture.KeyReachesNothing(keyboardFocusable: false, hasChildren: false),
+            "a key on a non-focusable leaf is refused — it is on no key's route");
+        Check(!InertGesture.KeyReachesNothing(keyboardFocusable: true, hasChildren: false),
+            "a key on a focusable element is driven");
+        Check(!InertGesture.KeyReachesNothing(keyboardFocusable: false, hasChildren: true),
+            "a key on a non-focusable container is driven — focus inside it routes the key up to it (Escape on a dialog)");
+        // The wording is a journey-side contract: `helpers/inert_refusal.py`
+        // tolerates a refusal by the phrase "not actuable", the one tui and apple
+        // answer, so a reworded refusal would red every journey that probes an
+        // inert element — on windows alone.
+        var inert = new NotActuableException("click", "critical-alert", 0, InertGesture.ClickWhy);
+        Check(inert.Message.StartsWith("click: \"critical-alert\"[0] is not actuable — "),
+            $"the inert refusal names route, element and index, then the cross-app phrase (got: {inert.Message})");
+        Check(InertGesture.Phrase == "not actuable",
+            "the phrase is the one helpers/inert_refusal.py recognises");
+        Check(!inert.Message.Contains("element is disabled"),
+            $"the inert refusal never reads as the disabled one (got: {inert.Message})");
+        Check(inert.Id == "critical-alert" && inert.Index == 0 && inert.Route == "click",
+            "the inert refusal carries route/id/index so Program can answer the shared 409 body");
+
         Console.WriteLine(failures == 0
-            ? "[self-test] PASS — the actuation gate's verdict, flags, marker and both select refusals are pinned."
+            ? "[self-test] PASS — the actuation gate's verdict, flags, marker, both select refusals and the inert-gesture refusal are pinned."
             : $"[self-test] {failures} FAILURE(S)");
         return failures;
     }

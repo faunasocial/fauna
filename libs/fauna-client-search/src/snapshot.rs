@@ -93,6 +93,16 @@ pub enum SearchNav {
     /// than discovered a second time (`content-index.md`, the ruling's
     /// *resolver and the target* sub-bullet).
     File { folder_id: i64, path_hash: String },
+    /// A calendar event, by its `uid_hash` (hex-lowercase) — the target is the
+    /// Events page's `event_detail` surface for that event (`ui/search.md`
+    /// § State & data shape).
+    ///
+    /// The `uid_hash` rather than the server-assigned `event_id` for the reason
+    /// `Contact` carries one: it survives an in-place edit, is stable across
+    /// devices, and is both the index's doc identity and the CalDAV wire's dedup
+    /// key — so an app resolves it against the event rows it already loads,
+    /// whose row id IS the hex `uid_hash`.
+    Event { uid_hash: String },
 }
 
 /// One row of the merged, ordered, deduplicated result list — the manager's

@@ -79,6 +79,22 @@ pub struct FilesVersionsListRequest {
     /// `set-addressing.md` § The row form). Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<i64>,
+    /// Cross-nest relay (the shape of
+    /// [`crate::sync::SyncChangesListRequest::nest_url`]): when set (with
+    /// [`Self::channel_id`]), the caller's own nest relays the read to the
+    /// set's home nest via `fauna.federation.folder.versions.list` instead of
+    /// reading locally — a foreign shared set's history lives on its home
+    /// nest (`ui/media.md` § Cross-nest shared sets). Every set-addressing
+    /// field and both projection flags are ignored alongside it: the home nest
+    /// answers the claimed set's default projection. Additive: a nest without
+    /// the relay answers from its own tables, where a foreign set has no row,
+    /// so the reply is visibly empty — never another set's history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nest_url: Option<String>,
+    /// The foreign set's 32-byte `ChannelId` (hex). Required with
+    /// [`Self::nest_url`]; ignored without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -311,6 +327,20 @@ mod tests {
             include_pruned: None,
             ..Default::default()
         });
+        // The cross-nest relay form round-trips, and its absence is no bytes.
+        assert_round_trips(&FilesVersionsListRequest {
+            path_hash: ByteBuf::from(vec![0x11; 32]),
+            nest_url: Some("https://home.example".into()),
+            channel_id: Some("ab".repeat(32)),
+            ..Default::default()
+        });
+        let plain = encode_canonical(&FilesVersionsListRequest {
+            path_hash: ByteBuf::from(vec![0x11; 32]),
+            ..Default::default()
+        })
+        .unwrap();
+        let as_map: BTreeMap<String, Value> = decode(&plain).unwrap();
+        assert!(!as_map.contains_key("nest_url") && !as_map.contains_key("channel_id"));
         // Compat: a request without the additive folder field still decodes.
         assert_round_trips(&FilesVersionsListRequest {
             path_hash: ByteBuf::from(vec![0x11; 32]),

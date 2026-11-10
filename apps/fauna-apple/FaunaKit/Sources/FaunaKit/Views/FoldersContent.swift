@@ -61,8 +61,9 @@ public struct FoldersContent<BindingContent: View>: View {
     /// write grant mid-life) — the `parked` input to `bindingSection`, which
     /// keeps a demoted writer's binding and heads it with
     /// `folder-access-revoked-warning`. macOS reads
-    /// `LocationsModel.revokedFolders`; iOS (no binding surface, so nothing
-    /// to park) keeps the empty default.
+    /// `LocationsModel.revokedFolders`; iOS (no binding surface) keeps the
+    /// empty default. A File Provider domain's park is united with it by
+    /// the shared page itself (`isParked`), on both platforms.
     let revokedSets: () -> Set<String>
     /// A group set's review rows as last read, by the set's `FolderRef` wire
     /// form and its label on the page (`group-set.md` § Build design — the
@@ -155,6 +156,9 @@ public struct FoldersContent<BindingContent: View>: View {
         // appear, so this page re-reads it too (a local slot read, no network).
         .task { await vm.loadThisDeviceRow(ownDeviceId: client?.deviceId) }
         .modifier(FolderOSEnableRefresh(boundSets: boundSets))
+        // The domain parks re-read on the folder-list refresh (file-sync.md
+        // § Multi-writer shared sets → *Revocation on a capability host*).
+        .modifier(FolderParkRefresh(folders: vm.snapshot?.folders ?? [], boundSets: boundSets))
         // A `fauna://folder-share` route (Finder's / the Files app's Share action
         // on a set's root, `macos.md` § Sync → *Finder's Share entry*, link 4):
         // once the list is in, expand that owner row; its "Shared with" section
@@ -388,7 +392,7 @@ public struct FoldersContent<BindingContent: View>: View {
                         if folder.role == "member" {
                             let section = bindingSection(
                                 role: folder.role, access: folder.access,
-                                parked: revokedSets().contains(folder.name))
+                                parked: isParked(folder))
                             if section.shown {
                                 writerMemberFolderRow(folder, revokedWarning: section.revokedWarning)
                             } else {
@@ -532,7 +536,7 @@ public struct FoldersContent<BindingContent: View>: View {
                 // variants by context). `ownerDisplay` is the shared precomputed label
                 // (handle, else canonical short id — `value-formatting.md` § Account
                 // display label); non-empty on every member row.
-                automationText(Ids.folderSharedBadge, L.devices.sharedBy(who: folder.ownerDisplay))
+                automationText(Ids.folderSharedBadge, sharedByText(folder))
                     .font(.caption2)
                     .foregroundStyle(.tint)
 
@@ -603,7 +607,7 @@ public struct FoldersContent<BindingContent: View>: View {
                 Spacer()
 
                 // Same recipient `folder-shared-badge` variant as the reader row.
-                automationText(Ids.folderSharedBadge, L.devices.sharedBy(who: folder.ownerDisplay))
+                automationText(Ids.folderSharedBadge, sharedByText(folder))
                     .font(.caption2)
                     .foregroundStyle(.tint)
 
@@ -658,6 +662,21 @@ public struct FoldersContent<BindingContent: View>: View {
         #endif
     }
 
+    /// `binding_section`'s `parked` input: the agent's bound-location park
+    /// (`revokedSets`, macOS) united with the File Provider domain's park
+    /// (`FileProviderParks`, both apple platforms) — so iOS, and a macOS set
+    /// shown in Finder without a bound location, are covered (`file-sync.md`
+    /// § Multi-writer shared sets → *Revocation on a capability host*).
+    private func isParked(_ folder: FolderSummary) -> Bool {
+        if revokedSets().contains(folder.name) { return true }
+        #if canImport(FileProvider)
+            if let ref = folder.folderRef, FileProviderParks.shared.folderIds.contains(ref) {
+                return true
+            }
+        #endif
+        return false
+    }
+
     private func leave(_ groupIdHex: String) {
         Task { await vm.leaveFolder(groupIdHex: groupIdHex) }
     }
@@ -667,6 +686,15 @@ public struct FoldersContent<BindingContent: View>: View {
     /// The filter is shared Rust (`folderMemberActors`) — never re-derive it locally.
     private func memberActors(_ folder: FolderSummary) -> [FfiFolderActorMember] {
         folderMemberActors(actors: vm.folderActors[folder.name] ?? [])
+    }
+
+    /// The recipient badge's text: a seat the folder rail marked forked reads the
+    /// third reading (owner changed; only their re-share heals it) — shared Rust's
+    /// `FolderSummary.seatForked`.
+    private func sharedByText(_ folder: FolderSummary) -> String {
+        folder.seatForked
+            ? L.devices.sharedByOwnerChanged(who: folder.ownerDisplay)
+            : L.devices.sharedBy(who: folder.ownerDisplay)
     }
 
     /// `folder-shared-badge` — "Shared · N" for a shared set with ≥1 member; hidden
@@ -1784,37 +1812,14 @@ private struct FolderRowBody: View {
         } message: {
             Text(L.devices.deleteConfirmBody(name: folder.name))
         }
-        // `folder-audience-public-confirm` — present only while armed. A
-        // public folder rests UNSEALED, content and names/paths alike (they
-        // become the address of each file), which `principles.md` § The user
-        // always controls their data holds as the single exception to
-        // sealed-at-rest — so answering this alert is the one place the flip is
-        // committed. Both consequences are stated because each surprised
-        // readers on its own: the names go public too, and flipping back
-        // re-seals only FUTURE content.
-        .alert(L.devices.declassifyTitle, isPresented: $audienceArmed) {
-            Button(L.common.cancel, role: .cancel) {}
-            Button(L.devices.declassifyConfirm, role: .destructive) {
-                confirmPublicAudience()
-            }
-            .accessibilityIdentifier(Ids.folderAudiencePublicConfirm)
-            // Same mutation the alert's destructive Button runs, plus the
-            // dismissal SwiftUI performs for a real press — see
-            // `answerAlertViaAutomation`, which owns the ordering rule.
-            // Env-gated no-op.
-            .automationActivate(Ids.folderAudiencePublicConfirm) {
-                answerAlertViaAutomation($audienceArmed) {
-                    await vm.setFolderAudience(name: folder.name, audience: "public")
-                }
-            }
-        } message: {
-            // Two identifiable lines (not one joined `Text`): each consequence
-            // is its own automation id, as on the other six apps.
-            VStack {
-                automationText(Ids.folderAudiencePublicNamesWarning, L.devices.declassifyBody)
-                automationText(
-                    Ids.folderAudiencePublicResealWarning, L.devices.declassifyIrreversible)
-            }
+        // `folder-audience-public-confirm` — present only while armed: the ONE
+        // declassify dialog, shared with a Public folder wizard's Create
+        // (`DeclassifyConfirm`). Answering it is the one place the flip is
+        // committed. Keyless — a plain `fauna.folders.update`; each device's
+        // engine moves the back-catalogue at its next catch-up. The row is NOT
+        // collapsed: its select repaints off the refreshed snapshot.
+        .declassifyConfirm(isPresented: $audienceArmed) {
+            await vm.setFolderAudience(name: folder.name, audience: "public")
         }
         // `folder-residency-confirm` — present only while armed (the
         // `folder-audience-public-confirm` pattern, ui.yaml's own name for
@@ -1859,11 +1864,6 @@ private struct FolderRowBody: View {
         // carries the full rationale. Neither line is a product behaviour —
         // both are no-ops in production.
         .automationPresentation(ids: [Ids.folderDeleteConfirm], isPresented: showingDelete)
-        .automationPresentation(
-            ids: [
-                Ids.folderAudiencePublicConfirm, Ids.folderAudiencePublicNamesWarning,
-                Ids.folderAudiencePublicResealWarning,
-            ], isPresented: audienceArmed)
         .automationPresentation(
             ids: [Ids.folderResidencyConfirm], isPresented: residencyArmed)
     }
@@ -1917,16 +1917,6 @@ private struct FolderRowBody: View {
             await action()
             armed.wrappedValue = false
         }
-    }
-
-    /// Commit the declassify the select armed. Keyless — a plain
-    /// `fauna.folders.update`; the back-catalogue is moved by each device's own
-    /// engine at its next catch-up off the projected audience, never by the
-    /// caller (ui/folders.md § Audience and website serving → *Where the logic
-    /// lives*). The row is NOT collapsed: unlike a delete, the folder is still
-    /// there and its select repaints off the refreshed snapshot.
-    private func confirmPublicAudience() {
-        Task { await vm.setFolderAudience(name: folder.name, audience: "public") }
     }
 }
 

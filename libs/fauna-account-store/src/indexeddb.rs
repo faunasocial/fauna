@@ -1321,6 +1321,7 @@ fn outbox_intent(o: &JsValue) -> Result<OutboxIntent> {
         retry_count: num_of(o, "retries")? as u32,
         created_at: be_of(o, "created")?,
         last_attempt_at: opt_be_of(o, "last")?,
+        failure_reason: field(o, "reason")?.and_then(|v| v.as_string()),
     })
 }
 
@@ -2899,8 +2900,9 @@ impl StoreBackend for IndexedDbBackend {
         .await
     }
 
-    async fn outbox_mark_failed(&self, intent_id: &[u8; 16]) -> Result<bool> {
+    async fn outbox_mark_failed(&self, intent_id: &[u8; 16], reason: &str) -> Result<bool> {
         let intent_id = *intent_id;
+        let reason = reason.to_owned();
         self.write(&[OUTBOX], move |t| async move {
             let intent_id = &intent_id;
             let outbox = t.store(OUTBOX)?;
@@ -2912,7 +2914,52 @@ impl StoreBackend for IndexedDbBackend {
                 "status",
                 &JsValue::from_str(IntentStatus::Failed.as_str()),
             )?;
+            set_field(&o, "reason", &JsValue::from_str(&reason))?;
             put(&outbox, o.unchecked_ref()).await?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn outbox_retry(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        let intent_id = *intent_id;
+        self.write(&[OUTBOX], move |t| async move {
+            let intent_id = &intent_id;
+            let outbox = t.store(OUTBOX)?;
+            let Some(o) = get(&outbox, &bin(intent_id)).await? else {
+                return Ok(false);
+            };
+            if str_of(&o, "status")? != IntentStatus::Failed.as_str() {
+                return Ok(false);
+            }
+            set_field(
+                &o,
+                "status",
+                &JsValue::from_str(IntentStatus::Pending.as_str()),
+            )?;
+            set_field(&o, "retries", &JsValue::from_f64(0.0))?;
+            // `field` reads null as absent: the pending row's shape.
+            set_field(&o, "last", &JsValue::NULL)?;
+            set_field(&o, "reason", &JsValue::NULL)?;
+            put(&outbox, o.unchecked_ref()).await?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn outbox_discard(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        let intent_id = *intent_id;
+        self.write(&[OUTBOX], move |t| async move {
+            let intent_id = &intent_id;
+            let outbox = t.store(OUTBOX)?;
+            let k = bin(intent_id);
+            let Some(o) = get(&outbox, &k).await? else {
+                return Ok(false);
+            };
+            if str_of(&o, "status")? != IntentStatus::Failed.as_str() {
+                return Ok(false);
+            }
+            delete(&outbox, &k).await?;
             Ok(true)
         })
         .await

@@ -1,3 +1,7 @@
+#if !FAUNA_KIDS
+// Compiled out of the Fauna Kids build whole: monetization is excised there
+// (account-age-band.md § The account age band, D-K5), and its `subscription-*`
+// ids sit in the kids-gated `Ids` extension.
 import SwiftUI
 
 /// The consumer-side **subscription-settings** page (`monetization.md` § Pillar 1
@@ -160,3 +164,4 @@ private struct SubscriptionMineRow: View {
         }
     }
 }
+#endif // !FAUNA_KIDS

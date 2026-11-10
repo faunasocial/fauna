@@ -64,7 +64,7 @@ pub use switch_refusal::switch_refused_copy;
 /// header's display handle (`mail-primary-domain-rename.md` § Display-handle
 /// interaction), one resolution table for every app.
 mod self_address;
-pub use self_address::{display_handle, self_address};
+pub use self_address::{display_handle, identity_line, self_address};
 
 /// The sync device id's secret-store get-or-create (the 2026-09-20 derived
 /// named-row id, `sync-agent-credentials.md` § Credential model).
@@ -119,12 +119,26 @@ pub use sign_out_residue::{
     retry_sign_out_residue, settle_residue_retry,
 };
 
+/// The native finish of a sign-out: the one routine a seat's gesture tail, its
+/// launch and Remove Again run over the sign-out record and the residue record
+/// (`account-scoping.md` § Erasure follows scope → *The sign-out record is on
+/// all 7 apps*).
+#[cfg(not(target_arch = "wasm32"))]
+mod sign_out_finish;
 /// Web's sign-out record: the durable decision a browser sign-out (and a
 /// remove-account) is made behind, and what the next load finishes it from
 /// (`account-scoping.md` § Erasure follows scope, the web paragraph). Pure over
 /// [`SecretStore`], so it builds and is tested on every target.
 mod sign_out_record;
-pub use sign_out_record::{SIGN_OUT_RECORD_KEY, SignOutPlan, SignOutRecord};
+#[cfg(not(target_arch = "wasm32"))]
+pub use sign_out_finish::{
+    FinishHost, FinishSeat, SignOutFinish, finish_sign_out, finish_sign_out_with,
+};
+
+pub use sign_out_record::{
+    SIGN_OUT_RECORD_FILE, SIGN_OUT_RECORD_KEY, SignOutPlan, SignOutRecord, SignOutRecordFile,
+    SignOutRecordSlot,
+};
 
 /// The sealing [`SecretStore`] wrapper the web identity store sits behind
 /// (`apps/web.md` § Identity store at rest) — platform-neutral, so it is
@@ -1926,6 +1940,78 @@ impl AccountRegistry {
         }
     }
 
+    /// **The wipe** of a native sign-out: the index and every listed
+    /// account's slots in **this registry's own store** — and nothing in an
+    /// auxiliary namespace (`account-scoping.md` § Erasure follows scope →
+    /// *The sign-out record is on all 7 apps*, decision 2). Those slots (the
+    /// writer key, the principal bundles) are what a sibling app's live store
+    /// of the same account runs under, so they ride with the account's scopes
+    /// in [`Self::erase_account_aux_slots`], refused and retried with the
+    /// store, never taken with the index.
+    ///
+    /// Same order and read-back as [`Self::clear_all`]: the routing pointer
+    /// first, so a crash part-way lands signed out; the answer is what still
+    /// reads back from this store.
+    pub fn wipe_own(&self) -> CredentialSweep {
+        let _mutation = self.lock.acquire();
+        let idx = self
+            .store
+            .get(INDEX_KEY)
+            .and_then(|raw| serde_json::from_str::<AccountIndex>(&raw).ok())
+            .unwrap_or_default();
+        let doomed: Vec<String> = idx.accounts.iter().map(|e| e.actor_id.clone()).collect();
+        self.store.delete(INDEX_KEY);
+        for actor_id in &doomed {
+            for key in per_actor_keys(actor_id) {
+                self.store.delete(&key);
+            }
+        }
+        CredentialSweep {
+            survivors: credential_sweep::still_readable(
+                self.store.as_ref(),
+                &[],
+                std::iter::once(INDEX_KEY.to_string())
+                    .chain(doomed.iter().flat_map(|actor| per_actor_keys(actor))),
+            ),
+            wipe_failed: false,
+        }
+    }
+
+    /// [`Self::reverify`] over this registry's own store alone — the read-back
+    /// after a wholesale wipe of that store, which never reached an auxiliary
+    /// namespace and must not report what still lives there.
+    pub fn reverify_own(&self, sweep: CredentialSweep) -> CredentialSweep {
+        CredentialSweep {
+            survivors: credential_sweep::still_readable(self.store.as_ref(), &[], sweep.survivors),
+            wipe_failed: sweep.wipe_failed,
+        }
+    }
+
+    /// **One account's slots in the auxiliary account-scoped namespaces** —
+    /// the credential half of a recorded account's erase (decision 2 above):
+    /// every [`PER_ACTOR_KEY_BUILDERS`] key for `actor_id`, deleted from each
+    /// [`Self::aux_erase`] store and read back from them. Idempotent: an
+    /// account with no slot there erases cleanly. Reads no index, so it runs
+    /// after the wipe as well as before it.
+    pub fn erase_account_aux_slots(&self, actor_id: &str) -> CredentialSweep {
+        for aux in &self.aux_erase {
+            for key in per_actor_keys(actor_id) {
+                aux.delete(&key);
+            }
+        }
+        let mut survivors: Vec<String> = Vec::new();
+        for key in per_actor_keys(actor_id) {
+            if self.aux_erase.iter().any(|aux| aux.get(&key).is_some()) && !survivors.contains(&key)
+            {
+                survivors.push(key);
+            }
+        }
+        CredentialSweep {
+            survivors,
+            wipe_failed: false,
+        }
+    }
+
     /// Persist the predecessor identities a phrase-only restore recovered from
     /// the escrow blob's additive section (`identity-succession.md` § Seed
     /// escrow), each as `(seed_hex, actor_id_hex)` — the restore's half of the
@@ -2308,6 +2394,25 @@ impl AccountRegistry {
             }
             None => Some(bound),
         }
+    }
+
+    /// The launch surfaces' `launch-identity-label` — the cached
+    /// `handle@domain · tier` ([`identity_line`]) of the account the launch
+    /// binds: the [`Self::resolve_launch_binding`] account, else the active
+    /// one. `None` while that entry's cache holds no handle (a first launch,
+    /// an import) — the label is then absent (`onboarding.md` § App-launch
+    /// routing → *The cached identity on the launch surfaces*). One home for
+    /// the binding → entry → line read, so no app re-derives which account a
+    /// launch is trying.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn launch_identity_line(&self) -> Option<String> {
+        let actor_id = self.resolve_launch_binding().or_else(|| self.active())?;
+        let entry = self.list().into_iter().find(|a| a.actor_id == actor_id)?;
+        identity_line(
+            entry.handle.as_deref(),
+            entry.domain.as_deref(),
+            entry.tier.as_deref(),
+        )
     }
 
     /// The retired owner `BackupKey`s `actor_id`'s corpus may still be sealed
@@ -4343,6 +4448,39 @@ mod tests {
         reg.record_succession(&b, &c).unwrap();
         assert_eq!(reg.resolve_launch_binding().as_deref(), Some(c.as_str()));
         assert_eq!(reg.resolve_launch_binding().as_deref(), Some(c.as_str()));
+    }
+
+    /// `launch_identity_line` reads the bound account's cache — else the
+    /// active one's — and is absent while that entry holds no handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_launch_identity_line_is_the_bound_accounts_cached_identity() {
+        let _serial = instance_lock::SESSION_LAUNCH_BINDING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (reg, _s) = registry();
+        let a = reg.add_account(SECRET_A, None, None).unwrap();
+        let b = reg.add_account(SECRET_B, None, None).unwrap();
+        reg.set_active(&a).unwrap();
+        instance_lock::set_session_launch_binding_for_tests(Some(None));
+        // Nothing cached yet: absent.
+        assert_eq!(reg.launch_identity_line(), None);
+        reg.update_cache(&a, Some("alice"), Some("fauna.test"), Some("plus"))
+            .unwrap();
+        reg.update_cache(&b, Some("bob"), Some("fauna.test"), None)
+            .unwrap();
+        // Plain launch: the active account.
+        assert_eq!(
+            reg.launch_identity_line().as_deref(),
+            Some("alice@fauna.test \u{b7} plus")
+        );
+        // A bound launch: the bound account, whatever is active.
+        instance_lock::set_session_launch_binding_for_tests(Some(Some(b.clone())));
+        assert_eq!(
+            reg.launch_identity_line().as_deref(),
+            Some("bob@fauna.test")
+        );
+        instance_lock::set_session_launch_binding_for_tests(Some(None));
     }
 
     /// The unrelated-account guard, stated as a test because it is the whole

@@ -362,7 +362,7 @@ func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 // On accept, the validated address is stashed as the outbound envelope
 // sender (envelopeFrom) and recipientCount resets — a new MAIL FROM
 // begins a new transaction with a fresh per-message recipient cap.
-func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
+func (s *submissionSession) Mail(from string, opts *gosmtp.MailOptions) error {
 	// Graceful shutdown (mail-bridge-lifecycle.md § Shutting down step 2):
 	// refuse new submissions with 421 4.3.2 once the bridge is draining.
 	if s.backend != nil && s.backend.drain != nil && s.backend.drain.isDraining() {
@@ -391,6 +391,12 @@ func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
 			EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
 			Message:      "MAIL FROM identity does not match authenticated user",
 		}
+	}
+	// A declared size over the live cap is refused before the upload, the same
+	// permanent 552 5.3.4 the `Data` guard raises after one (go-smtp's own
+	// check here is only against its product-ceiling backstop).
+	if err := checkDeclaredSize(opts, s.backend.cfg.current().maxMessageBytes); err != nil {
+		return err
 	}
 	localPart, domain, err := splitRcptAddress(from)
 	if err != nil {
@@ -1209,6 +1215,12 @@ func (s *submissionSession) Data(r io.Reader) error {
 						EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
 						Message:      "Mail is turned off for this account; turn it back on in Fauna's mail settings to send",
 					}
+				case wsrpc.CodeAccountRevoked:
+					return &gosmtp.SMTPError{
+						Code:         550,
+						EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+						Message:      "This account is locked or suspended",
+					}
 				case wsrpc.CodeProtocolMalformed:
 					return &gosmtp.SMTPError{
 						Code:         554,
@@ -1442,7 +1454,6 @@ func runSubmissionListener(
 	kind submissionListenerKind,
 	tlsConfig *tls.Config,
 	domain string,
-	maxMessageBytes uint32,
 	grace time.Duration,
 	drain *drainTracker,
 	logger *slog.Logger,
@@ -1450,11 +1461,13 @@ func runSubmissionListener(
 	srv := gosmtp.NewServer(backend)
 	srv.Domain = domain
 	srv.MaxRecipients = 100
-	// EHLO `SIZE` — the effective ceiling, same rule and same boot-snapshot
-	// rationale as the inbound listener (server.go § runListenerWithBackend).
-	// A submitting MUA is exactly the client that benefits from an honest SIZE:
-	// it can refuse an over-large attachment locally instead of uploading it.
-	srv.MaxMessageBytes = int64(mailfauna.EffectiveMaxRawMessageBytes(maxMessageBytes))
+	// go-smtp's backstop and EHLO `SIZE` — the product ceiling, never the
+	// admin's cap, for the reason the inbound listener gives
+	// (server.go § runListenerWithBackend): the live cap is enforced by
+	// submissionSession.Mail on the declared SIZE and by the `Data` guard, so a
+	// raised cap applies with no restart. A MUA that declares its size is told
+	// 552 5.3.4 at MAIL FROM, before it uploads the attachment.
+	srv.MaxMessageBytes = int64(mailfauna.MaxMessageBytesCeiling())
 	srv.ReadTimeout = 5 * time.Minute
 	srv.WriteTimeout = 5 * time.Minute
 	srv.AllowInsecureAuth = false

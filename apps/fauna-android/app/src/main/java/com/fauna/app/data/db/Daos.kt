@@ -159,6 +159,10 @@ interface KnockDao {
     @Query("DELETE FROM knocks WHERE id = :id")
     suspend fun delete(id: Int)
 
+    /** Drop a sender's knock locally — a knock accept queued with no nest. */
+    @Query("DELETE FROM knocks WHERE sender = :sender")
+    suspend fun deleteBySender(sender: String)
+
     @Query("DELETE FROM knocks")
     suspend fun deleteAll()
 }

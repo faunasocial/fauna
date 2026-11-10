@@ -109,6 +109,23 @@ impl FfiContactsClient {
     fn client(&self) -> ContactsClient<Arc<NestClient>> {
         ContactsClient::new(Arc::clone(&self.nest))
     }
+
+    /// [`Self::knocks_accept_or_queue`] through an explicit queue.
+    async fn knocks_accept_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        peer_id: String,
+    ) -> Result<bool, FfiError> {
+        let composed = self
+            .client()
+            .knocks_accept_or_queue(queue, peer_id)
+            .await
+            .map_err(crate::family::compose_err)?;
+        Ok(matches!(
+            composed,
+            fauna_protocol::offline_intent::Composed::Queued(_)
+        ))
+    }
 }
 
 #[fauna_uniffi_async::export]
@@ -126,6 +143,18 @@ impl FfiContactsClient {
             .await
             .map_err(stringify)?;
         Ok(())
+    }
+
+    /// [`Self::knocks_accept`] sent now or queued with no nest (the
+    /// `OfflineQueued` composer, `account-offline-mutation.md` § The
+    /// offline-mutation contract), over the device outbox the first connection
+    /// word wired (`offline_outbox::DEVICE`). `true` = queued: the caller drops
+    /// the knock from its local list and adds no roster row (the nest's read
+    /// after the drain is the word); `false` = sent, and the caller re-reads
+    /// as after an accept.
+    pub async fn knocks_accept_or_queue(&self, peer_id: String) -> Result<bool, FfiError> {
+        let queue = crate::family::device_queue();
+        self.knocks_accept_through(queue.as_deref(), peer_id).await
     }
 
     /// `fauna.knocks.block` — block the knock sender `peer_id` (hex).
@@ -354,5 +383,41 @@ mod tests {
             assert!(o.label.key.starts_with("status.inbox_privacy."));
             assert!(o.desc.key.ends_with("_desc"));
         }
+    }
+}
+
+#[cfg(test)]
+mod offline_composer_tests {
+    use super::*;
+    use fauna_client_testkit::RecordingQueue;
+
+    fn accept(queue: &RecordingQueue) -> Result<bool, FfiError> {
+        let client = FfiContactsClient::from_nest(NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        ));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(client.knocks_accept_through(Some(queue), "ab".repeat(32)))
+    }
+
+    /// With no nest the door answers QUEUED and the accept rests in the outbox.
+    #[test]
+    fn a_knock_accept_with_no_nest_is_queued() {
+        let queue = RecordingQueue::new("disconnected");
+        assert!(accept(&queue).unwrap(), "no nest: queued");
+        let kinds: Vec<_> = queue.queued().into_iter().map(|q| q.0).collect();
+        assert_eq!(kinds, vec!["fauna.knocks.accept"]);
+    }
+
+    /// Connected, the accept is sent (to this dummy nest it fails on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn a_knock_accept_with_the_nest_connected_is_sent_not_queued() {
+        let queue = RecordingQueue::new("connected");
+        assert!(accept(&queue).is_err(), "the send was attempted");
+        assert!(queue.queued().is_empty());
     }
 }

@@ -20,10 +20,29 @@
 //! registry and reaches no linked nest. So the leg records what it read in
 //! this process's **linked readings** ([`record_linked_readings`], keyed by
 //! identity), and every sweep pass posts them beside the bound nest's reading
-//! ([`sync_linked_readings`]) — one shared hand-off, no per-app wiring, and a
-//! window found at a linked nest reaches the banner at the sweep pass after
-//! the leg read it. A nest the leg could not reach keeps its last reading
-//! (unreachable is not resolved); a nest no longer linked drops its reading.
+//! ([`sync_linked_readings`]) — one shared hand-off, no per-app wiring. And
+//! the hand-off wakes the sweep: the readings carry a per-identity generation
+//! that moves only when they change ([`linked_readings_generation`],
+//! [`LinkedReadingsChanged`]), and the sweep loop's wait between passes also
+//! ends on that change and posts the readings at once, with no nest read — so
+//! a window found at a linked nest reaches the banner the moment the leg has
+//! read it, not at the next pass of the 6 h clock (`critical-alerts.md`
+//! § Mechanism → *How often the detector runs*, ruled 2026-11-07). A nest the
+//! leg could not reach keeps its last reading (unreachable is not resolved); a
+//! nest no longer linked drops its reading.
+//!
+//! **The readings are read by Settings and settled by the veto.** The veto
+//! button renders only while a window is open *somewhere* — at the bound
+//! nest, or at a linked nest alone, which is the window a seed thief would
+//! open — so the Settings status reads the bound nest's answer **and** these
+//! readings, the soonest-landing window winning
+//! ([`earliest_linked_window`]; the read is
+//! `fauna_client_recovery::status::kit_status`). And a veto that reached a
+//! nest leaves no window there, so the gesture settles that nest's reading at
+//! once ([`settle_linked_readings`], a merge that keeps every nest it did not
+//! reach) and re-syncs the alert in the same call, instead of leaving the
+//! banner to outlive the windows until the leg's next pass and the sweep's
+//! next pass after it.
 //!
 //! **Why this crate.** The ceremonies' home is `fauna-client-recovery`, which
 //! re-exports all of this; it sits above the secondary leg
@@ -31,7 +50,10 @@
 //! module note explains.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 
 use fauna_client_alerts::CriticalAlerts;
 use fauna_core::identity::ActorId;
@@ -210,24 +232,107 @@ type LinkedWindows = BTreeMap<[u8; 32], BTreeMap<[u8; 32], PendingReplacement>>;
 /// docs). In-memory, like the alerts it feeds.
 static LINKED_WINDOWS: Mutex<LinkedWindows> = Mutex::new(BTreeMap::new());
 
+/// Per identity, the readings' generation and the wakers waiting on it. A
+/// write bumps it only when it CHANGED the readings, so a leg pass that
+/// re-reads the same windows (the 300 s backstop, every few minutes for the
+/// life of the session) moves nothing and wakes nobody. Taken after
+/// [`LINKED_WINDOWS`]'s lock is released, never under it.
+type Generations = BTreeMap<[u8; 32], (u64, Vec<Waker>)>;
+static GENERATION: Mutex<Generations> = Mutex::new(BTreeMap::new());
+
+/// The generation of `actor_id`'s linked readings: moves by one on every
+/// write that changed them ([`record_linked_readings`],
+/// [`settle_linked_readings`]). Read it, then wait on
+/// [`LinkedReadingsChanged::since`] it — a change between the two still
+/// resolves the wait.
+#[must_use]
+pub fn linked_readings_generation(actor_id: &ActorId) -> u64 {
+    GENERATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&actor_id.0)
+        .map_or(0, |(generation, _)| *generation)
+}
+
+/// Move `actor_id`'s generation and wake everyone waiting on it. The wakers
+/// are drained here, so a waiter registers again on its next poll and a
+/// dropped waiter's entry lives only until the next change.
+fn bump_generation(actor_id: &ActorId) {
+    let wakers = {
+        let mut all = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+        let (generation, wakers) = all.entry(actor_id.0).or_insert((0, Vec::new()));
+        *generation += 1;
+        std::mem::take(wakers)
+    };
+    for waker in wakers {
+        waker.wake();
+    }
+}
+
+/// Resolves, with the generation then current, once `actor_id`'s linked
+/// readings have changed since a generation read by
+/// [`linked_readings_generation`] — at once when the change came between that
+/// read and the first poll, so no change is lost to the gap. Runtime-free (a
+/// plain [`Waker`] list), so it is polled by whatever drives the sweep loop on
+/// each platform, and woken from the leg's own thread. One waker per task is
+/// kept: a task polling it again re-uses its entry.
+#[must_use = "a future does nothing until polled"]
+pub struct LinkedReadingsChanged {
+    actor: [u8; 32],
+    seen: u64,
+}
+
+impl LinkedReadingsChanged {
+    /// The change after `seen`, `actor_id`'s generation as the caller read it.
+    pub fn since(actor_id: &ActorId, seen: u64) -> Self {
+        Self {
+            actor: actor_id.0,
+            seen,
+        }
+    }
+}
+
+impl Future for LinkedReadingsChanged {
+    type Output = u64;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u64> {
+        let mut all = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+        let (generation, wakers) = all.entry(self.actor).or_insert((0, Vec::new()));
+        if *generation > self.seen {
+            return Poll::Ready(*generation);
+        }
+        if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+            wakers.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
 /// Record one leg run's readings for `actor_id`: `readings` names every
 /// linked nest the run visited, so a nest absent from it is no longer linked
 /// and its reading is dropped.
 pub fn record_linked_readings(actor_id: &ActorId, readings: &[([u8; 32], LinkedReading)]) {
-    let mut all = LINKED_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
-    let previous = all.remove(&actor_id.0).unwrap_or_default();
-    let mut windows = BTreeMap::new();
-    for (nest, reading) in readings {
-        let window = match reading {
-            LinkedReading::Read(window) => window.clone(),
-            LinkedReading::Unread => previous.get(nest).cloned(),
-        };
-        if let Some(window) = window {
-            windows.insert(*nest, window);
+    let changed = {
+        let mut all = LINKED_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = all.remove(&actor_id.0).unwrap_or_default();
+        let mut windows = BTreeMap::new();
+        for (nest, reading) in readings {
+            let window = match reading {
+                LinkedReading::Read(window) => window.clone(),
+                LinkedReading::Unread => previous.get(nest).cloned(),
+            };
+            if let Some(window) = window {
+                windows.insert(*nest, window);
+            }
         }
-    }
-    if !windows.is_empty() {
-        all.insert(actor_id.0, windows);
+        let changed = windows != previous;
+        if !windows.is_empty() {
+            all.insert(actor_id.0, windows);
+        }
+        changed
+    };
+    if changed {
+        bump_generation(actor_id);
     }
 }
 
@@ -240,6 +345,43 @@ pub fn linked_windows(actor_id: &ActorId) -> Vec<([u8; 32], PendingReplacement)>
         .get(&actor_id.0)
         .map(|w| w.iter().map(|(n, p)| (*n, p.clone())).collect())
         .unwrap_or_default()
+}
+
+/// Drop the readings of `settled` nests — the ones a veto reached, which
+/// hold no window afterwards — and keep every other nest's reading as it
+/// stands. A merge, unlike [`record_linked_readings`]'s replace-all: the veto
+/// visited only the nests it could dial, and an unreachable nest's window
+/// must stay loud until a veto reaches it.
+pub fn settle_linked_readings(actor_id: &ActorId, settled: &[[u8; 32]]) {
+    let changed = {
+        let mut all = LINKED_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(windows) = all.get_mut(&actor_id.0) else {
+            return;
+        };
+        let mut changed = false;
+        for nest in settled {
+            changed |= windows.remove(nest).is_some();
+        }
+        if windows.is_empty() {
+            all.remove(&actor_id.0);
+        }
+        changed
+    };
+    if changed {
+        bump_generation(actor_id);
+    }
+}
+
+/// The linked nest whose window lands first, with that window — what the
+/// Settings status shows beside the bound nest's own answer, so the countdown
+/// there and the banner's agree. `None` when no linked nest's last reading
+/// holds a window — on web, a tab whose account runtime has not run the leg
+/// has no readings, and reads the bound nest alone.
+#[must_use]
+pub fn earliest_linked_window(actor_id: &ActorId) -> Option<([u8; 32], PendingReplacement)> {
+    linked_windows(actor_id)
+        .into_iter()
+        .min_by_key(|(_, window)| window.lands_at)
 }
 
 /// Post the linked readings into `alerts` beside the bound nest's — each
@@ -340,6 +482,55 @@ mod tests {
         );
     }
 
+    /// The veto's settlement is a merge: the nests it reached lose their
+    /// reading, the nest it could not reach keeps its window.
+    #[test]
+    fn settling_drops_the_reached_nests_and_keeps_the_unreached() {
+        let actor = ActorId([0xa2; 32]);
+        let (reached, unreached) = ([0x11; 32], [0x22; 32]);
+        record_linked_readings(
+            &actor,
+            &[
+                (reached, LinkedReading::Read(Some(window(5_000)))),
+                (unreached, LinkedReading::Read(Some(window(9_000)))),
+            ],
+        );
+
+        settle_linked_readings(&actor, &[reached, [0x33; 32]]);
+
+        assert_eq!(
+            linked_windows(&actor),
+            vec![(unreached, window(9_000))],
+            "the unreached nest's window stands"
+        );
+        settle_linked_readings(&actor, &[unreached]);
+        assert!(linked_windows(&actor).is_empty());
+        // Settling an identity with no readings is a no-op, not a panic.
+        settle_linked_readings(&ActorId([0xa3; 32]), &[reached]);
+    }
+
+    /// Settings reads the soonest-landing linked window, and none when every
+    /// reading is clear — the same window the alert shows.
+    #[test]
+    fn the_earliest_linked_window_is_the_one_that_lands_first() {
+        let actor = ActorId([0xa4; 32]);
+        assert_eq!(earliest_linked_window(&actor), None);
+        let (late, soon) = ([0x11; 32], [0x22; 32]);
+        record_linked_readings(
+            &actor,
+            &[
+                (late, LinkedReading::Read(Some(window(30 * 86_400)))),
+                (soon, LinkedReading::Read(Some(window(2 * 86_400)))),
+            ],
+        );
+        assert_eq!(
+            earliest_linked_window(&actor),
+            Some((soon, window(2 * 86_400)))
+        );
+        record_linked_readings(&actor, &[]);
+        assert_eq!(earliest_linked_window(&actor), None);
+    }
+
     /// An unlinked nest's reading is dropped; the bound reading stays.
     #[test]
     fn retaining_drops_unlinked_nests_and_keeps_the_bound_reading() {
@@ -355,6 +546,97 @@ mod tests {
         assert_eq!(
             alerts.sources(&alert_key(&actor)),
             vec![BOUND_SOURCE.to_string()]
+        );
+    }
+
+    /// The generation moves only when the readings change: a leg pass that
+    /// re-reads the same windows — the backstop, every few minutes — wakes
+    /// nobody, so the sweep loop's wait is never spun by it.
+    #[test]
+    fn the_generation_moves_only_when_the_readings_change() {
+        let actor = ActorId([0xb1; 32]);
+        let nest = [0x41; 32];
+        let g0 = linked_readings_generation(&actor);
+
+        record_linked_readings(&actor, &[(nest, LinkedReading::Read(None))]);
+        assert_eq!(
+            linked_readings_generation(&actor),
+            g0,
+            "nothing pending read into nothing: no change"
+        );
+
+        record_linked_readings(&actor, &[(nest, LinkedReading::Read(Some(window(500))))]);
+        let g1 = linked_readings_generation(&actor);
+        assert!(g1 > g0, "a window appeared");
+
+        record_linked_readings(&actor, &[(nest, LinkedReading::Read(Some(window(500))))]);
+        assert_eq!(
+            linked_readings_generation(&actor),
+            g1,
+            "the same window again: no change"
+        );
+        record_linked_readings(&actor, &[(nest, LinkedReading::Unread)]);
+        assert_eq!(
+            linked_readings_generation(&actor),
+            g1,
+            "unread keeps the reading: no change"
+        );
+        settle_linked_readings(&actor, &[[0x42; 32]]);
+        assert_eq!(
+            linked_readings_generation(&actor),
+            g1,
+            "settling a nest with no reading: no change"
+        );
+
+        settle_linked_readings(&actor, &[nest]);
+        assert!(linked_readings_generation(&actor) > g1, "the window went");
+        assert_eq!(
+            linked_readings_generation(&ActorId([0xb3; 32])),
+            0,
+            "another identity's generation is its own"
+        );
+    }
+
+    /// A waiter is woken by the change, and a change that came between the
+    /// generation read and the first poll resolves the wait at once.
+    #[test]
+    fn a_change_wakes_the_waiter_and_a_change_already_made_resolves_at_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::Wake;
+
+        struct Flag(AtomicBool);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let actor = ActorId([0xb2; 32]);
+        let nest = [0x43; 32];
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+
+        let seen = linked_readings_generation(&actor);
+        let mut changed = std::pin::pin!(LinkedReadingsChanged::since(&actor, seen));
+        assert!(changed.as_mut().poll(&mut cx).is_pending());
+        assert!(
+            changed.as_mut().poll(&mut cx).is_pending(),
+            "polling again registers once"
+        );
+        assert!(!flag.0.load(Ordering::SeqCst));
+
+        record_linked_readings(&actor, &[(nest, LinkedReading::Read(Some(window(9))))]);
+        assert!(flag.0.load(Ordering::SeqCst), "the change woke the waiter");
+        assert!(matches!(changed.as_mut().poll(&mut cx), Poll::Ready(g) if g > seen));
+
+        let seen = linked_readings_generation(&actor);
+        settle_linked_readings(&actor, &[nest]);
+        let mut changed = std::pin::pin!(LinkedReadingsChanged::since(&actor, seen));
+        assert!(
+            changed.as_mut().poll(&mut cx).is_ready(),
+            "a change made before the first poll is not lost"
         );
     }
 }

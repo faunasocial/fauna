@@ -243,6 +243,39 @@ def launched(app: str | None = None) -> dict | None:
     return next(iter(_LAUNCHED.values())) if len(_LAUNCHED) == 1 else None
 
 
+#: The catalog the apps render from (the harness's `i18n.strings.S` is the
+#: tip's generation of it).
+STRINGS_PATH = "i18n/strings/en.yaml"
+
+
+def _show(commit: str, path: str) -> str | None:
+    out = _git(REPO, "show", f"{commit}:{path}")
+    return out.stdout if out.returncode == 0 else None
+
+
+def app_string(key: str, app: str | None = None, *, show=_show) -> str | None:
+    """The English string `key` (dotted, as in `S`: ``error.sync.x``) as the
+    launched release build renders it — read from that build's own commit's
+    catalog — or ``None`` when no release build was launched or the commit has
+    no such key. A classifier matching an app-rendered string against the
+    tip's `S` misreads a release app whose wording has moved since (0.1.5's
+    device-cap notice said "plan" where the tip says "tier": every resume of
+    a box at the cap timed out unrecognized, 2026-11-09)."""
+    rec = launched(app)
+    if not rec:
+        return None
+    text = show(rec["commit"], STRINGS_PATH)
+    if not text:
+        return None
+    import yaml
+    node = yaml.safe_load(text)
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node if isinstance(node, str) else None
+
+
 def prebuy_refusal(expected: Resolution, app: str | None = None) -> str | None:
     """Why the app this session launched is NOT `expected`'s commit, or None.
 

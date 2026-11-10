@@ -100,6 +100,7 @@ async fn unsubscribe(
         home_nest_url: None,
         intent: None,
         author_id: ActorId(author),
+        tier: None,
         extra: Default::default(),
     };
     let bytes = encode_canonical(&req).unwrap();

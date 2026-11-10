@@ -323,6 +323,16 @@ impl CriticalAlerts {
             })
             .collect()
     }
+
+    /// The keys of the standing alerts, in [`Self::active`]'s deterministic
+    /// order — the one shared derivation behind the e2e registry observable
+    /// (`fauna_e2e_agent::ALERT_REGISTRY_KEY`, `{"count", "keys"}`): an app
+    /// wraps it in JSON, none re-derives the keys. Rust-only (not in the UniFFI
+    /// block below), and returns plain data because this crate carries
+    /// `serde_json` on wasm alone.
+    pub fn active_keys(&self) -> Vec<String> {
+        self.active().into_iter().map(|r| r.key).collect()
+    }
 }
 
 /// The app-shell-facing synchronous surface — subscribe for repaints, read
@@ -477,6 +487,19 @@ mod tests {
         // Clearing an absent key is silent.
         reg.clear("atproto-custody:did:plc:abc");
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    /// The e2e registry observable's keys name the standing alerts and read
+    /// empty once everything is dropped.
+    #[test]
+    fn the_active_keys_name_standing_alerts() {
+        let reg = CriticalAlerts::new();
+        assert!(reg.active_keys().is_empty());
+        reg.post("a-key", vec![line("a")]);
+        reg.post("b-key", vec![line("b")]);
+        assert_eq!(reg.active_keys(), vec!["a-key", "b-key"]);
+        reg.clear_all();
+        assert!(reg.active_keys().is_empty());
     }
 
     /// A multi-source key stands while ANY source holds it: one source

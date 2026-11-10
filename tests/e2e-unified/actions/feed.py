@@ -979,6 +979,21 @@ class FeedActions:
             return posts[index].get("body", "") if index < len(posts) else ""
         return self.driver.get_text("feed-post-text", index=index)
 
+    def post_painted_lines(self, index: int) -> list[str]:
+        """The body of the post card at ``index`` AS PAINTED, one string per
+        painted line — a task item's box (``☑`` ticked, ``☐`` unticked) and a
+        nested item's leading indent kept.
+
+        :meth:`post_text` is the shared one-line plaintext every app reports,
+        which drops both the box state and the nesting, so it cannot witness
+        feed-read outcome 15 (task lists and nested lists, render-model.md
+        § D7). Each app answers from what holds the paint
+        (:func:`helpers.painted_lines.painted_lines`); an app that publishes no
+        such read is declared unbuilt there (convention 7)."""
+        from helpers.painted_lines import painted_lines
+
+        return painted_lines(self.driver, "feed-post-text", scope=f"post-card[{index}]")
+
     # ── Test-state injection (tier_2: feed_inject_posts) ──────────────────────
 
     def inject_posts(self, posts: list[dict]) -> None:
@@ -1028,22 +1043,39 @@ class FeedActions:
         ``FfiFeedManager.CueVerdictForTest``); web:
         ``WasmFeedManager.cueVerdictForTest``; macos/ios: FaunaKit's
         ``FeedCueVerdictTestCommand`` over ``FfiFeedManager.cueVerdictForTest``;
-        the other apps follow in the trickle-down. See
-        ``fauna_feed::FeedManager::cue_verdict_for_test``."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            raise NotImplementedError(
-                f"{type(self.driver).__name__} has no cue verdict read"
-            )
-        raw = self.driver.call_command("feed_cue_verdict_for_test", {"content_id": content_id})
+        android: the debug ``TestAgent`` arm over the same FFI face — every app
+        answers it. See ``fauna_feed::FeedManager::cue_verdict_for_test``."""
+        raw =self.driver.call_command("feed_cue_verdict_for_test", {"content_id": content_id})
         assert raw, "feed_cue_verdict_for_test returned nothing"
         return raw if isinstance(raw, dict) else json.loads(raw)
+
+    def set_cue_hydration_hold(self, held: bool) -> None:
+        """Set or clear the live feed manager's in-memory cue-hydration hold
+        (``fauna_feed::FeedManager::set_cue_hydration_hold_for_test``): set
+        before the feed page first mounts, the seat's rollup fetch parks until
+        it is cleared. The lever for an app no environment variable reaches —
+        web (wasm32 reads no env; ``WasmFeedManager.setCueHydrationHoldForTest``)
+        and macos/ios (FaunaKit's ``FeedCueHydrationHoldTestCommand`` over
+        ``FfiFeedManager.setCueHydrationHoldForTest``); tui and linux take the
+        ``FAUNA_E2E_CUE_HYDRATION_HOLD_FILE`` file at launch instead. android
+        needs neither: on an android run the held second device is the tui
+        seat ``alice_second_device`` launches beside the emulator, which takes
+        the file."""
+        if not self.has_in_memory_cue_hydration_hold():
+            raise NotImplementedError(
+                f"{type(self.driver).__name__} has no in-memory cue-hydration hold "
+                "command (tui/linux use the launch-time hold file)"
+            )
+        self.driver.call_command("feed_cue_hydration_hold", {"held": held})
+
+    def has_in_memory_cue_hydration_hold(self) -> bool:
+        """Whether this app arms the cue-hydration hold in memory
+        (:meth:`set_cue_hydration_hold`) rather than taking the launch-time
+        hold file — web and both apple apps. On each of them the capture's
+        sampling waits on the feed's hydrate (web's ``hydrateCuesOnce``,
+        FaunaKit's ``CueViewportObserver.run``), so a held seat measures
+        nothing at all, and leaving the feed is the save barrier."""
+        return self.driver.is_web() or self.driver.is_macos() or self.driver.is_ios()
 
     def inject_error_for_test(self, message: str, key: str = "feed.error_load") -> None:
         """Drive the feed page's ``error-message`` directly via ``feed_inject_error``.
@@ -1110,41 +1142,47 @@ class FeedActions:
         self.bring_post_into_dwell_view(index)
         self.accrue_dwell(index, seconds)
 
-    # fauna_core::scoring::cues::CUE_LONG_DWELL_VISIBLE_PM / 1000 — the share
-    # of a card that must show for its dwell to count toward watch-complete.
-    CUE_LONG_DWELL_VISIBLE = 0.75
-
     def bring_post_into_dwell_view(self, index: int) -> None:
         """Bring ``post-card[index]`` into view the way a reader settles on it:
-        whole where it fits, and at least at long-dwell visibility.
+        whole where it fits, and so at least at long-dwell visibility
+        (``fauna_core::scoring::cues::CUE_LONG_DWELL_VISIBLE_PM``) — the
+        base driver's ``scroll_to`` contract (centre, whole element), on every
+        app. A placement that falls short shows as the dwell crediting no
+        long-dwell time (:meth:`accrue_dwell` names the card and its probe)."""
+        self.driver.scroll_to("post-card", index=index)
 
-        Every app's ``scroll_to`` centres the element (the base driver's
-        contract). windows' stops as soon as UIA calls the card on screen,
-        which can be a sliver of it, and the bridge's measured sibling
-        (``scroll_to_visible_fraction``) reads UIA's bounding rect, which UIA
-        clips to the viewport — a card 28 % in view measured whole on
-        2026-11-04 and was never scrolled. So on windows the card is placed
-        through the app's own pixel step (``feed_cue_scroll_by``), from the
-        unclipped geometry its capture measured — the list is not
-        virtualized, so every card is in the probe — and the share that
-        shows is asserted from the step's own probe."""
-        if not self.driver.is_windows():
-            self.driver.scroll_to("post-card", index=index)
-            return
+    def post_card_visible_share(self, index: int) -> float:
+        """The share of ``post-card[index]``'s own height that shows in the
+        feed's viewport, from the app's own capture geometry — a fresh sample
+        of the laid-out list, nothing moved (every app but tui, whose step is
+        a focus stop). This is the app's measurement, never a driver's: on
+        windows the bridge reads UIA rects clipped to the viewport, which
+        cannot tell a sliver from a whole card, so a witness of a driver's
+        placement reads the share here."""
         post_id = self._post_id_of_card(index)
         _, probe = self._scroll_feed_by(0)  # a fresh measurement, nothing moved
+        return self._visible_share(probe, post_id)
+
+    def place_post_at_bottom_edge_by_pixel_step(self, index: int, fraction: float) -> float:
+        """Leave ``post-card[index]`` with about ``fraction`` of its height
+        above the feed's bottom edge through the app's own pixel step
+        (``feed_cue_scroll_by``; every app but tui), and return the share the
+        step's own sample measured. The driver-independent twin of
+        :meth:`place_post_at_bottom_edge` — a witness of the driver's own
+        scroll starts from a card it did not place."""
+        post_id = self._post_id_of_card(index)
+        _, probe = self._scroll_feed_by(0)
         card = self._probe_card(probe, post_id)
+        _, end = probe["band"]
+        _, probe = self._scroll_feed_by(card["top"] - (end - fraction * card["height"]))
+        return self._visible_share(probe, post_id)
+
+    @classmethod
+    def _visible_share(cls, probe: dict, post_id: str) -> float:
+        card = cls._probe_card(probe, post_id)
         start, end = probe["band"]
-        _, probe = self._scroll_feed_by(
-            (card["top"] + card["height"] / 2) - (start + end) / 2
-        )
-        card = self._probe_card(probe, post_id)
         shown = min(card["top"] + card["height"], end) - max(card["top"], start)
-        visible = max(0.0, shown) / card["height"]
-        assert visible >= self.CUE_LONG_DWELL_VISIBLE, (
-            f"centring post-card[{index}] ({post_id[:12]}) left it only "
-            f"{visible:.0%} visible — under the long-dwell gate: {probe!r}"
-        )
+        return max(0.0, shown) / card["height"]
 
     @staticmethod
     def _probe_card(probe: dict, post_id: str) -> dict:
@@ -1358,6 +1396,28 @@ class FeedActions:
             if e.get("actuable")
             and (e["id"] == "post-card" or (e.get("scope") or "").startswith("post-card["))
         ]
+
+    def loaded_post_bodies(self) -> list[str]:
+        """The ``body`` of every post the feed's window holds — loaded, whether
+        or not its card is composed on screen — off the shared
+        ``data.feed.posts`` state every app emits (ui.yaml's ``feed.state_fields``).
+        A virtualizing list (android's lazy column) composes only the cards in
+        view, so an element read cannot say how many pages have arrived."""
+        return [str(p.get("body") or "") for p in (self.driver.get_state("data.feed.posts") or [])]
+
+    def scroll_feed_to_bottom_edge(self) -> None:
+        """Bring the bottom of the post list as it stands now into view — the
+        reader reaching the end, which is what asks a paging feed for its next
+        page. tui moves the focus to the window's LAST stop (the agent's
+        scroll-into-view, which reaches its bottom-edge load-more); every other
+        app scrolls the list's own scroll position to its end
+        (``feed_cue_scroll_by``), the gesture its scroll-edge loader reads."""
+        if self.driver.is_tui():
+            stops = self.feed_focus_stops()
+            if stops:
+                self.driver.scroll_to(stops[-1][0], index=stops[-1][1])
+        else:
+            self._scroll_feed_by(1_000_000)
 
     def scroll_feed_to_top(self) -> int:
         """Bring the top of the post list into view; returns the scroll
@@ -1652,6 +1712,52 @@ class FeedActions:
                 return i
         return -1
 
+    def card_index_by_id(self, post_id: str, timeout: float = RPC_ROUNDTRIP_S) -> int:
+        """The index to aim a scoped card click at for the post ``post_id``:
+        :meth:`post_index_by_id`'s answer, but only once the RENDERED card at
+        that index carries ``post_id`` itself.
+
+        The state list agrees with the rendered cards only once the render has
+        caught up. On a fresh sign-in, a reload landing or a repost row joining
+        the window can shift the cards between the read and the tap, and a click
+        aimed by the state index alone then lands on the neighbouring card: the
+        windows archive-import interaction red, where a follower's like landed
+        on the gated post beside the target, no error anywhere. So the card's
+        own identity is read: linux's ``post`` attr, windows' HelpText, web's
+        ``data-post-id``. An app that exposes none answers the state's index
+        unchecked, as before. Fails, naming what the state and the card said,
+        when no rendered card shows the post within ``timeout``.
+        """
+        def card_identity(index: int) -> str | None:
+            for attr in ("post", "post-id"):
+                try:
+                    shown = self.driver.get_attr("post-card", attr, index=index)
+                except Exception:  # noqa: BLE001 — an app without the attr
+                    shown = None
+                if shown:
+                    return shown
+            return None
+
+        seen: list = []
+
+        def aligned():
+            index = self.post_index_by_id(post_id)
+            if index < 0:
+                seen[:] = [index, None]
+                return None
+            shown = card_identity(index)
+            seen[:] = [index, shown]
+            return (index,) if shown in (None, post_id) else None
+
+        found = wait_until(
+            aligned,
+            timeout,
+            diagnose=lambda: f"no rendered card shows post {post_id[:12]}: the state "
+            f"put it at card {seen[0] if seen else '?'}, which shows "
+            f"{(seen[1] or '')[:12]!r}",
+        )
+        return found[0]
+
     def like_landing_diagnosis(self, index: int, post_id: str) -> str:
         """Failure-path only (e2e rule 6): where a like aimed at card ``index``
         for ``post_id`` actually went.
@@ -1817,7 +1923,18 @@ class FeedActions:
     # ── Post detail (ui.yaml feed transition `click post-card → post_detail`) ──
 
     def open_post_detail(self, index: int = 0) -> None:
-        """Open the post-detail dialog for the post-card at `index`."""
+        """Open the post-detail dialog for the post-card at `index`.
+
+        On web the card opens on a click anywhere but an interactive child, and
+        a post picture IS one (it opens its lightbox, `C2paImage.svelte`): a
+        click at the centre of a card filled with media lands on a picture and
+        opens no detail. So web clicks the card's own text, the place a user
+        taps to read the post; a card with no text painted (a blocked or
+        placeholder card) still takes the whole-card click."""
+        scope = f"post-card[{index}]"
+        if self.driver.is_web() and self.driver.is_visible("feed-post-text", scope=scope):
+            self.driver.click("feed-post-text", scope=scope)
+            return
         self.driver.click("post-card", index=index)
 
     def open_compose_dialog(self) -> None:
@@ -2690,6 +2807,65 @@ class FeedActions:
         """Open post ``post_index``'s ⋯ menu and tap a training verb."""
         self.open_post_actions(index=post_index)
         self.click_train_verb(verb)
+
+    # ── Mark as spam (report-sharing.md § Report capture → *The post's
+    # mark-as-spam verb*) ────────────────────────────────────────────────
+
+    def spam_verb_state(self, timeout_s: float = 10.0) -> str:
+        """``"on"``/``"off"`` — ``feed-post-mark-as-spam-button``'s ``state``
+        in the currently-OPEN ⋯ menu (unscoped, the one open menu being the
+        only match — ``train_verb_state``'s read). ``""`` when the verb never
+        painted (an own post, or no menu open)."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            value = (
+                self.driver.get_attr("feed-post-mark-as-spam-button", "state") or ""
+            ).strip().lower()
+            if value:
+                return value
+            time.sleep(0.3)
+        return ""
+
+    def _press_spam_verb(self, post_index: int, want_state: str, timeout_s: float) -> None:
+        self.open_post_actions(index=post_index, timeout_s=timeout_s)
+        state = self.spam_verb_state(timeout_s=timeout_s)
+        if state != want_state:
+            raise AssertionError(
+                f"post-card[{post_index}]'s mark-as-spam verb reads state={state!r}, "
+                f"expected {want_state!r} before the press (gated !is_own — is the "
+                "post someone else's?). "
+                f"diagnose={self.driver.diagnose('feed-post-mark-as-spam-button')}"
+            )
+        self.driver.click("feed-post-mark-as-spam-button")
+
+    def mark_post_spam(self, post_index: int = 0, timeout_s: float = 10.0) -> None:
+        """Mark post ``post_index`` as spam: open ⋯ → press
+        ``feed-post-mark-as-spam-button`` while it reads ``off``. Mirrors
+        ``conversations.mark_message_spam``: one flyout hop, no confirm."""
+        self._press_spam_verb(post_index, "off", timeout_s)
+
+    def unmark_post_spam(self, post_index: int = 0, timeout_s: float = 10.0) -> None:
+        """Un-mark post ``post_index``: the same verb, pressed while it reads
+        ``on`` (a collapsed card carries no ⋯ — reveal it first)."""
+        self._press_spam_verb(post_index, "on", timeout_s)
+
+    def reveal_collapsed_post(self, post_index: int, timeout_s: float = 10.0) -> None:
+        """Press ``post-card[post_index]``'s
+        ``content-policy-collapsed-reveal-button`` — the collapse's own reveal."""
+        scope = f"post-card[{post_index}]"
+        self.driver.wait_for(
+            "content-policy-collapsed-reveal-button", scope=scope, timeout=timeout_s
+        )
+        self.driver.click("content-policy-collapsed-reveal-button", scope=scope)
+
+    def post_collapsed(self, post_index: int) -> bool:
+        """Whether ``post-card[post_index]`` paints the content-policy collapse
+        (``content-policy-blocked-notice`` in state ``collapsed``) and no body."""
+        scope = f"post-card[{post_index}]"
+        if not self.driver.is_visible("content-policy-blocked-notice", scope=scope):
+            return False
+        state = self.driver.get_attr("content-policy-blocked-notice", "state", scope=scope)
+        return state == "collapsed" and self.driver.count("feed-post-text", scope=scope) == 0
 
     # ── The factor-target sheet (no in-context factor; topic-factors.md
     # § Authoring surface & picker) ──────────────────────────────────────

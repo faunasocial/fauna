@@ -49,6 +49,9 @@ from helpers.waiting import wait_until
 pytestmark = pytest.mark.tier_3
 
 DOOR_DROPIN = "/etc/ssh/sshd_config.d/0-fauna-door.conf"
+# A door-less box switches sshd off in its final stage (`cloud_init.rs`, the
+# `sshd_off` fragment); a door box keeps it enabled, key-only.
+SSHD_OFF = "systemctl disable --now ssh.service ssh.socket"
 
 
 def _hands_key_over(drv) -> bool:
@@ -128,6 +131,7 @@ def _run_to_succeeded(app, fake_cloud, nest, *, door: bool, key_dir: str) -> Non
     )
 
 
+@pytest.mark.feature("set-up-a-nest-from-the-app")
 def test_the_door_on_reaches_the_cloud_init_and_the_key_lands_in_dot_ssh(
     app, fake_cloud, provision_target_nest, tmp_path
 ):
@@ -145,6 +149,9 @@ def test_the_door_on_reaches_the_cloud_init_and_the_key_lands_in_dot_ssh(
         None,
     )
     assert authorized, "the door box carries root's authorized key"
+    assert "PasswordAuthentication no" in user_data, "the door's sshd takes keys only"
+    assert "ssh_pwauth: false" in user_data, "the door box refuses password logins"
+    assert SSHD_OFF not in user_data, "the door box keeps sshd enabled, key-only"
 
     readout = drv.call_machine_method("ssh_door_readout")
     assert isinstance(readout, dict), f"no door readout after a door run: {readout!r}"
@@ -234,6 +241,7 @@ def _assert_the_key_is_handed_over(app, readout, user_data, authorized) -> None:
         assert derived[:2] == authorized.split()[:2], (derived, authorized)
 
 
+@pytest.mark.feature("set-up-a-nest-from-the-app")
 def test_the_door_off_renders_no_door_and_writes_nothing(
     app, fake_cloud, provision_target_nest, tmp_path
 ):
@@ -245,6 +253,8 @@ def test_the_door_off_renders_no_door_and_writes_nothing(
     assert DOOR_DROPIN not in user_data
     assert "ssh-ed25519" not in user_data
     assert "ssh_pwauth" not in user_data
+    assert SSHD_OFF in user_data, "a door-less box switches sshd off: no SSH at all"
+    assert "ufw deny 22/tcp" in user_data, "a door-less box keeps 22/tcp denied"
     assert drv.call_machine_method("ssh_door_readout") is None
     assert drv.count("provisioning-ssh-door-command") == 0
     assert drv.count("provisioning-ssh-door-save-key-button") == 0

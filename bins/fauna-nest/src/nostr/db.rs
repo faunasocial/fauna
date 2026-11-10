@@ -80,6 +80,21 @@ pub const CREATE_TABLES_SQL: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_nostr_zaps_target ON nostr_zaps(target_event_id);
 
+    -- One row per zap purchase whose claim code this box sent to its stranger
+    -- buyer as a NIP-17 DM (monetization.md § The Nostr advertisement of a
+    -- sold post -> Delivering the unlock to a stranger who paid). Written in
+    -- the same transaction as the family send that queues the DM, so the
+    -- record and the message exist together or not at all: the delivery's
+    -- idempotency key, which `nostr_zaps` cannot be -- the purchase is
+    -- applied BEFORE that row is recorded, so a crash replay reaches the
+    -- waist again (`ClaimExists`) and must still deliver if nothing was sent.
+    -- `message_id` is the Sent row's id in `bridge_conversation_messages`.
+    CREATE TABLE IF NOT EXISTS nostr_zap_claim_deliveries (
+        zap_event_id TEXT PRIMARY KEY,
+        message_id   INTEGER NOT NULL,
+        queued_at    INTEGER NOT NULL
+    );
+
     -- NIP-57 zap-receipt trust roots. One row per signer pubkey an actor has
     -- designated as allowed to speak for their money -- in practice their
     -- LNURL/wallet provider's `nostrPubkey`. A zap receipt is signed by the
@@ -983,6 +998,36 @@ pub fn get_zap_total(conn: &Connection, target_event_id: &str) -> Result<(i64, i
 pub fn has_zap(conn: &Connection, zap_event_id: &str) -> Result<bool> {
     let found: i64 = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM nostr_zaps WHERE zap_event_id = ?1)",
+        [zap_event_id],
+        |row| row.get(0),
+    )?;
+    Ok(found != 0)
+}
+
+/// Record that the claim code a zap bought was queued for its buyer as Sent
+/// row `message_id` — `false` when the zap already holds a delivery, so the
+/// caller's send rolls back (`CacheDb::send_bridged_message_once`).
+pub fn record_claim_delivery(
+    conn: &Connection,
+    zap_event_id: &str,
+    message_id: i64,
+) -> Result<bool> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO nostr_zap_claim_deliveries (zap_event_id, message_id, queued_at)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            zap_event_id,
+            message_id,
+            fauna_core::data::Timestamp::now_secs()
+        ],
+    )?;
+    Ok(n == 1)
+}
+
+/// Has the claim code this zap bought already been queued for its buyer?
+pub fn has_claim_delivery(conn: &Connection, zap_event_id: &str) -> Result<bool> {
+    let found: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM nostr_zap_claim_deliveries WHERE zap_event_id = ?1)",
         [zap_event_id],
         |row| row.get(0),
     )?;

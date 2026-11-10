@@ -24,7 +24,8 @@ const PLUGIN_WIT: &str = include_str!("../wit/plugin.wit");
 /// and `refused`; asks for `https://undeclared.example/` and stores the
 /// discriminant under `http`; stores the clock under `now` (8 bytes LE); logs
 /// one `info` line. On ingress: `/spin…` loops forever, `/grow…` asks for
-/// 128 MiB and answers 507 when refused (200 when admitted), `/whoami…`
+/// 128 MiB and answers 507 when refused (200 when admitted), `/t…` grows a
+/// table by 1 000 000 elements and answers the same way, `/whoami…`
 /// answers 200 with the asserted actor as the body or 401 when anonymous,
 /// `/h…` answers 200 with `Clear-Site-Data: "*"`, `Alt-Svc: h3=":443"` and
 /// `Content-Type: text/plain` (the nest's reply-header filter's probe);
@@ -58,6 +59,41 @@ pub fn build_component(core_wat: &str) -> anyhow::Result<Vec<u8>> {
 /// The hello plugin as a component.
 pub fn hello_plugin() -> anyhow::Result<Vec<u8>> {
     build_component(HELLO_PLUGIN_WAT)
+}
+
+/// The reason the refusing variant's `start` answers with.
+pub const REFUSING_PLUGIN_REASON: &str = "the fixture plugin refuses to start";
+
+/// The hello plugin's `start` result line — `ok` — which the refusing
+/// variant replaces.
+const START_OK: &str = "(i32.store8 (i32.const 2208) (i32.const 0))";
+
+/// The hello plugin's core module with one change: `start` does all its work
+/// and then answers `Err(`[`REFUSING_PLUGIN_REASON`]`)` — the plugin's own
+/// refusal, which the nest's runner lists `stopped` with that reason and
+/// never retries (`docs/goal/architecture/third-party.md` § Execution forms →
+/// *WASM components*). The reason sits at 1424, past the header list.
+pub fn refusing_plugin_wat() -> String {
+    assert!(
+        HELLO_PLUGIN_WAT.matches(START_OK).count() == 1,
+        "the hello plugin's start no longer ends on its one ok store"
+    );
+    let reason_len = REFUSING_PLUGIN_REASON.len();
+    let refuse = format!(
+        "(i32.store8 (i32.const 2208) (i32.const 1))\n    \
+         (i32.store (i32.const 2212) (i32.const 1424))\n    \
+         (i32.store (i32.const 2216) (i32.const {reason_len}))"
+    );
+    let data =
+        format!("(data (i32.const 1424) \"{REFUSING_PLUGIN_REASON}\")\n\n  (func $cabi_realloc");
+    HELLO_PLUGIN_WAT
+        .replacen(START_OK, &refuse, 1)
+        .replacen("(func $cabi_realloc", &data, 1)
+}
+
+/// The refusing variant ([`refusing_plugin_wat`]) as a component.
+pub fn refusing_plugin() -> anyhow::Result<Vec<u8>> {
+    build_component(&refusing_plugin_wat())
 }
 
 #[cfg(test)]

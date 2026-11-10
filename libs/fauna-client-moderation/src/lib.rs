@@ -34,6 +34,7 @@ use fauna_protocol::moderation::{
     ModerationAdminBlockRequest,
 };
 use fauna_protocol::moderation::{ModerationAppealReply, ModerationAppealRequest};
+use fauna_protocol::offline_intent::{ComposeError, Composed, OfflineIntentQueue, send_or_queue};
 
 pub use fauna_protocol::moderation;
 
@@ -80,7 +81,8 @@ pub use appeal::{AppealForm, AppealFormView, appeal_form_view, appeal_verdict, r
 pub mod report;
 pub use report::{
     LedgerRowView, ReportForm, ReportReasonOption, ReportSheetView, ReportTarget, ledger_row_view,
-    report_acknowledgement, report_request, report_sheet_view,
+    report_acknowledgement, report_block_not_sent, report_queued, report_request,
+    report_sheet_view,
 };
 
 /// Typed `fauna.moderation.*` call surface. Errors propagate as the transport's
@@ -366,6 +368,35 @@ impl<R: RpcRequester> ModerationClient<R> {
             .await
     }
 
+    /// [`abuse_report_submit`](Self::abuse_report_submit) through the
+    /// `OfflineQueued` composer (`fauna_protocol::offline_intent::send_or_queue`,
+    /// `account-offline-mutation.md` § The offline-mutation contract): sent now
+    /// while the app has a nest, or — when `queue` is wired and reports no nest
+    /// — appended to the device's outbox and drained once the nest is back,
+    /// the intent id its idempotency key (and the nest's open-report dedup
+    /// makes a replay on the same subject write nothing besides). A queued
+    /// report has no reply yet, so no `routed_to`: the app says so with
+    /// [`report::report_queued`]. The drain FIFO scope is the report's subject
+    /// (`moderation.abuse_report.submit:<id>`), so a refused report on one
+    /// subject never holds another's. The payload names the subject and its
+    /// author, never the writer (the nest takes the reporter from the
+    /// connection).
+    pub async fn abuse_report_submit_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        request: AbuseReportSubmitRequest,
+    ) -> Result<Composed<AbuseReportSubmitReply>, ComposeError<R::Error>> {
+        let scope = format!("moderation.abuse_report.submit:{}", request.subject.id());
+        send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.moderation.abuse_report.submit",
+            &scope,
+            request,
+        )
+        .await
+    }
+
     /// `fauna.moderation.abuse_report.mine` — the caller's own reports, newest
     /// first (the Moderation page's ledger; word rows via
     /// [`report::ledger_row_view`]).
@@ -624,6 +655,66 @@ mod tests {
             fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.content_id, "ab12");
         assert_eq!(req.signal, "skip");
+    }
+
+    fn abuse_report_or_queue_fixture() -> AbuseReportSubmitRequest {
+        use fauna_protocol::moderation::{AbuseReportReason, AbuseReportSubject};
+        let form = ReportForm {
+            reason: Some(AbuseReportReason::Spam),
+            note: String::new(),
+            include_text: false,
+            block_author: false,
+        };
+        let target = ReportTarget {
+            subject: AbuseReportSubject::Post {
+                cid: "ab".repeat(32),
+            },
+            sealed: false,
+            author: Some("ef".repeat(32)),
+            plaintext: None,
+        };
+        report_request(&target, &form).expect("sendable")
+    }
+
+    /// A report filed with no nest rests in the outbox — kind, the subject's
+    /// scope, the canonical request — and nothing is sent.
+    #[test]
+    fn a_report_with_no_nest_is_queued_scoped_to_its_subject() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = ModerationClient::new(rec.clone());
+        let queue = fauna_client_testkit::RecordingQueue::new("disconnected");
+        let out = block_on(
+            client.abuse_report_submit_or_queue(Some(&queue), abuse_report_or_queue_fixture()),
+        );
+        assert_eq!(out.unwrap(), Composed::Queued([7; 16]));
+        assert!(rec.last().is_none(), "no nest: nothing may be sent");
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        let (kind, scope, payload) = &queued[0];
+        assert_eq!(*kind, "fauna.moderation.abuse_report.submit");
+        assert_eq!(
+            *scope,
+            format!("moderation.abuse_report.submit:{}", "ab".repeat(32))
+        );
+        let req: AbuseReportSubmitRequest = fauna_protocol::decode_strict(payload).unwrap();
+        assert_eq!(req.subject.id(), "ab".repeat(32));
+    }
+
+    /// Connected, the same call is the plain send, the reply handed back whole.
+    #[test]
+    fn a_report_with_the_nest_connected_is_sent_not_queued() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = ModerationClient::new(rec.clone());
+        let queue = fauna_client_testkit::RecordingQueue::new("connected");
+        let out = block_on(
+            client.abuse_report_submit_or_queue(Some(&queue), abuse_report_or_queue_fixture()),
+        );
+        match out.unwrap() {
+            Composed::Sent(reply) => assert_eq!(reply.routed_to.len(), 2),
+            other => panic!("expected a send, got {other:?}"),
+        }
+        assert_eq!(rec.recorded().0, "fauna.moderation.abuse_report.submit");
+        assert!(queue.queued().is_empty());
     }
 
     #[test]

@@ -46,8 +46,22 @@ pub trait FolderNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// what already exists (`crate::photo_library`).
     async fn list_folder_rows(&self) -> Result<Vec<FolderRow>, FolderApiError>;
 
-    /// `fauna.folders.create` — create the folder.
-    async fn create_folder(&self, req: CreateFolderRequest) -> Result<(), FolderApiError>;
+    /// `fauna.folders.create` — create the folder; a born-public request is
+    /// attested by the same call, inside the shared create site
+    /// (`ui/folders.md` § Audience and website serving → *Born public*).
+    /// `Ok` means the folder exists ([`CreatedFolder`] says whether its
+    /// attestation landed too).
+    async fn create_folder(
+        &self,
+        req: CreateFolderRequest,
+    ) -> Result<CreatedFolder, FolderApiError>;
+
+    /// Whether this seam can attest a born-public create — it holds the
+    /// owner's identity key. A seam that cannot never offers the choice
+    /// (`NameSnapshot::audience_offered`).
+    fn can_attest_public(&self) -> bool {
+        false
+    }
 
     /// `fauna.folders.places.set` — put one device place into `folder`, stated
     /// as flags.

@@ -269,7 +269,7 @@ impl NostrSyncWorker {
                     // (the immediate path is the `expose_content` toggle in
                     // `NostrProvider::update_settings`; this is the safety net
                     // for posts authored while exposure was already on).
-                    self.materialize_exposed().await;
+                    self.materialize_exposed(&mut relay_connections).await;
                     // The Nostr DM leg's outbox (`bridge_leg::drain_outbox`):
                     // the family's `send` queues an item and nudges a drain at
                     // once; this is the safety net for an item that nudge
@@ -299,6 +299,28 @@ impl NostrSyncWorker {
                                 Ok(_) => {}
                                 Err(e) => {
                                     tracing::warn!("nostr sync: takedown reconcile failed: {e}");
+                                }
+                            }
+                        });
+                    }
+                    // The advertisement `r` tag reconcile (`monetization.md`
+                    // § The Nostr advertisement of a sold post → *Lifecycle*
+                    // (6)): a site-origin change no write path announces (a
+                    // custom domain's cert going active, the toggle, a handle
+                    // rename, the apex claimed) re-signs the note here.
+                    // Spawned for the same deadlock reason as above.
+                    if let Some(state) = self.state.clone() {
+                        let scope = state.clone();
+                        scope.spawn_scoped(async move {
+                            match crate::nostr::advertise::reconcile_advertised_urls(&state, None)
+                                .await
+                            {
+                                Ok(n) if n > 0 => tracing::info!(
+                                    "nostr sync: re-signed {n} advertisements for a moved URL"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!("nostr sync: advertisement URL reconcile: {e}");
                                 }
                             }
                         });
@@ -355,16 +377,36 @@ impl NostrSyncWorker {
     /// accounts into the relay event store (translated + signed once). The
     /// per-account nsec is decrypted only when that account actually has new
     /// posts to sign ([`store::materialize_all_exposed`]).
-    async fn materialize_exposed(&self) {
+    ///
+    /// An advertisement the sweep signs (one whose immediate kick a crash cut
+    /// short, or re-materialized after a price edit retracted the old note) is
+    /// published to its account's relays right here, through this worker's own
+    /// pool — never through `sync_tx`, which from inside the tick arm would
+    /// deadlock on a full channel.
+    async fn materialize_exposed(&self, relay_connections: &mut RelayPool) {
+        // The web apex the advertisements' `r` tags are built on; a worker
+        // without state (the degraded mode) carries no URL.
+        let serving_domain = self
+            .state
+            .as_ref()
+            .map(|s| s.web_serving_domain())
+            .unwrap_or_default();
         match store::materialize_all_exposed(
             &self.db,
             &self.post_segments,
             &self.nest_signing_key_bytes,
+            &serving_domain,
         )
         .await
         {
-            Ok(n) if n > 0 => tracing::info!("nostr sync: materialized {n} exposed posts"),
-            Ok(_) => {}
+            Ok(m) => {
+                if m.count > 0 {
+                    tracing::info!("nostr sync: materialized {} exposed posts", m.count);
+                }
+                for outbound in m.advertisements {
+                    self.handle_outbound(relay_connections, outbound).await;
+                }
+            }
             Err(e) => tracing::warn!("nostr sync: materialize sweep failed: {e}"),
         }
     }

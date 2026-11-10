@@ -588,6 +588,10 @@ pub fn start_conversations_session(
         g.oracle_door = oracle_door;
         g.archive_links = archive_links;
     }
+    // The device's offline outbox, lent to the manager so an MLS send made
+    // with no nest queues as a plaintext intent; whatever an earlier run left
+    // queued drains now (`devices.md` § Offline compose).
+    crate::offline_outbox::lend_to_conversations(&session.manager());
 
     // Owned captures for the launch-time folder removal recovery below: the login
     // task drops + re-upgrades the session across the restore await, so it rebuilds
@@ -905,6 +909,13 @@ fn e2e_runtime() -> Option<tokio::runtime::Handle> {
 /// after logout, in which case the invite falls back to email-only.
 pub fn active_session() -> Option<Arc<ConversationsSession>> {
     ACTIVE_SESSION.lock().unwrap().session.clone()
+}
+
+/// The active session together with the runtime it was started on — what the
+/// offline outbox's MLS drain spawns on (`crate::offline_outbox::spawn_mls_drain`).
+pub fn active_session_on_runtime() -> Option<(Arc<ConversationsSession>, tokio::runtime::Handle)> {
+    let g = ACTIVE_SESSION.lock().unwrap();
+    Some((g.session.clone()?, g.runtime.clone()?))
 }
 
 /// This login's archive links and the runtime to drive them on — `None`

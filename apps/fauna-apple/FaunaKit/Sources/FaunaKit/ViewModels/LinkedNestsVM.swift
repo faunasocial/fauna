@@ -163,14 +163,24 @@ public final class LinkedNestsVM: MachineBackedVM {
     }
 
     /// The store-change notice's re-read (account-runtime.md § Multi-instance
-    /// concurrency, the own-pump notice, part 4 — the Nests custody facet):
-    /// re-folds the facet and the escrow-holder set only. Unlike
-    /// ``loadCustody()`` it drives no ceremony pass (a notice is not a page
-    /// load, and the drive is itself a store writer), and it sets only what
-    /// differs; the pairing list is the nest's, not the store's, and is left
-    /// to the page's own refresh.
-    func resyncCustody() async {
+    /// concurrency, the own-pump notice, part 4 — the open Nests page): what a
+    /// fresh visit shows, minus the visit's ceremony drive — tui's
+    /// `Op::HydrateNests { reread: true }`. The machine re-reads the linked
+    /// rows and the trust grants (a nest linked or a grant minted on another
+    /// of the user's devices reaches this process as a store change after its
+    /// pass — `nests-and-trust` outcome 29), then the custody facet and the
+    /// escrow-holder set are re-folded. Unlike ``loadCustody()`` it drives no
+    /// ceremony pass (a notice is not a page load, and the drive is itself a
+    /// store writer); it sets only what differs, raises no banner (a re-read's
+    /// failure stays on the snapshot, never `error-message`) and is skipped
+    /// while a gesture is in flight, whose own answer repaints the page.
+    func resyncStore() async {
         guard let api = configuredApi else { return }
+        if let machine, !isWorking {
+            _ = try? await machine.hydrate()
+            let snap = machine.snapshot()
+            if snap != snapshot { snapshot = snap }
+        }
         if let facet = try? await api.loadCustodyFacet() {
             let rows = Self.nestAnchored(facet.rows)
             if rows != custodyNestRows { custodyNestRows = rows }

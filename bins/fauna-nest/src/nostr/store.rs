@@ -803,19 +803,40 @@ fn push_prefix_clause(
 /// re-materializes from scratch. Native events (`derived=0`) are untouched.
 /// Derived rows are recreatable (re-derived from the Fauna posts), so this is an
 /// allowed no-data-loss deletion — the shape `expose_content` toggle-off takes.
+///
+/// **An advertised sold post's event and its map row are spared**
+/// (`monetization.md` § The Nostr advertisement of a sold post → *Lifecycle*
+/// (5)): the advertisement is a per-post act with its own undo
+/// (`fauna.nostr.advertise.clear`), never withdrawn by an account toggle.
 pub fn delete_derived_for_pubkey(conn: &Connection, pubkey: &str) -> Result<usize> {
+    // The outbound map rows of this pubkey's currently advertised posts.
+    const ADVERTISED_EVENT_IDS: &str = "SELECT m.nostr_event_id FROM nostr_event_map m
+               JOIN content c ON lower(hex(c.id)) = m.fauna_post_id
+               JOIN content_meta cm ON cm.content_id = c.id
+              WHERE m.nostr_pubkey = ?1 AND m.direction = 'outbound'
+                AND cm.gated_tier IS NOT NULL
+                AND cm.nostr_advertised_at IS NOT NULL";
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "DELETE FROM nostr_event_tags WHERE event_id IN
-             (SELECT id FROM nostr_events WHERE pubkey = ?1 AND derived = 1)",
+        &format!(
+            "DELETE FROM nostr_event_tags WHERE event_id IN
+                 (SELECT id FROM nostr_events WHERE pubkey = ?1 AND derived = 1
+                     AND id NOT IN ({ADVERTISED_EVENT_IDS}))"
+        ),
         [pubkey],
     )?;
     let n = tx.execute(
-        "DELETE FROM nostr_events WHERE pubkey = ?1 AND derived = 1",
+        &format!(
+            "DELETE FROM nostr_events WHERE pubkey = ?1 AND derived = 1
+                 AND id NOT IN ({ADVERTISED_EVENT_IDS})"
+        ),
         [pubkey],
     )?;
     tx.execute(
-        "DELETE FROM nostr_event_map WHERE nostr_pubkey = ?1 AND direction = 'outbound'",
+        &format!(
+            "DELETE FROM nostr_event_map WHERE nostr_pubkey = ?1 AND direction = 'outbound'
+                 AND nostr_event_id NOT IN ({ADVERTISED_EVENT_IDS})"
+        ),
         [pubkey],
     )?;
     tx.commit()?;
@@ -918,29 +939,93 @@ pub fn public_post_from_payload(payload: &[u8]) -> Option<Post> {
     Some(post)
 }
 
-/// Materialize every not-yet-materialized exposed post for one account into the
-/// store: read the body **segment-first** (`segments::post::load_post_body`,
+/// Which of the two off-box classes (`db::public_servability`) a
+/// materialization pass may sign.
+///
+/// The **public** class is the account-level `expose_content` bulk
+/// materialization; the **advertised** class is the per-post act
+/// (`monetization.md` § The Nostr advertisement of a sold post). The two are
+/// independent in both directions: an account with exposure off still has its
+/// advertised posts materialized, and turning exposure on or off never
+/// publishes or withdraws an advertisement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializeClasses {
+    /// `expose_content` is on: both classes.
+    PublicAndAdvertised,
+    /// `expose_content` is off: the author's advertised posts only.
+    AdvertisedOnly,
+}
+
+impl MaterializeClasses {
+    /// The classes an account's `expose_content` setting admits.
+    pub fn for_exposure(expose_content: bool) -> Self {
+        if expose_content {
+            Self::PublicAndAdvertised
+        } else {
+            Self::AdvertisedOnly
+        }
+    }
+
+    fn includes_public(self) -> bool {
+        self == Self::PublicAndAdvertised
+    }
+}
+
+/// What one [`materialize_account`] pass signed.
+#[derive(Debug, Default)]
+pub struct Materialized {
+    /// Events newly signed and stored (both classes).
+    pub count: usize,
+    /// The advertisement events among them, each addressed to the account's
+    /// publish relays: the act is the publish intent, so the caller pushes
+    /// them whatever `auto_publish` says (§ The Nostr advertisement of a sold
+    /// post → *Reach*). A public-class event is never in here — it reaches
+    /// the network by the NIP-65 outbox model, as before.
+    pub advertisements: Vec<super::sync_worker::OutboundEvent>,
+}
+
+/// Materialize every not-yet-materialized off-box post for one account into
+/// the store: read the body **segment-first** (`segments::post::load_post_body`,
 /// falling back to the inline `content.payload` (an undecodable body) — the
 /// same read entry point `get_post_core` uses, `routes.rs` § segment-first
 /// serving), translate → sign (once, with the account's decrypted key) →
 /// store as a `derived` event, deduped via `nostr_event_map` (outbound).
-/// Returns the number newly materialized. Idempotent — a second call is a
-/// no-op.
+/// Idempotent — a second call is a no-op.
+///
+/// `classes` says whether the public class is in scope ([`MaterializeClasses`]);
+/// the advertised class always is. An advertised post is decoded like a public
+/// one but must be gated, and is translated with its selling tier's asking
+/// price ([`fauna_bridge_nostr::translate::fauna_advertisement_to_nostr`]); a
+/// post no tier sells at a price any more is skipped — the price tag is what
+/// makes the teaser publishable at all (`public_servability`'s consumer rule).
 ///
 /// `actor_id_hex` is the lowercase-hex actor id (the `nostr_accounts.actor_id`
 /// convention); the SQL lowercases SQLite's `hex()` to match.
+///
+/// `serving_domain` is the nest's web apex (`AppState::web_serving_domain()`,
+/// verbatim — empty on a box that serves no web content): an advertised post
+/// that is web-published carries its public page URL as the note's `r` tag
+/// ([`crate::web_content::public_url::public_post_url`], the rule the apps'
+/// *Copy web link* uses).
 pub async fn materialize_account(
     cache_db: &CacheDb,
     post_segments: &SegmentManager,
     actor_id_hex: &str,
     keypair: &Keypair,
-) -> Result<usize> {
+    classes: MaterializeClasses,
+    serving_domain: &str,
+) -> Result<Materialized> {
     let nostr_pubkey = keypair.public_key_hex();
     let pubkey_bytes = keypair.public_key_bytes();
+    let mut author = [0u8; 32];
+    hex::decode_to_slice(actor_id_hex, &mut author)
+        .map_err(|e| anyhow::anyhow!("nostr materialize: malformed actor id: {e}"))?;
 
-    let post_ids = unmaterialized_exposed_post_ids(cache_db, actor_id_hex).await?;
-    let mut count = 0usize;
-    for content_id_hex in post_ids {
+    let posts = unmaterialized_post_ids(cache_db, actor_id_hex, classes).await?;
+    let mut out = Materialized::default();
+    // The publish relays, read once and only if an advertisement is signed.
+    let mut relay_urls: Option<Vec<String>> = None;
+    for (content_id_hex, advertised) in posts {
         let mut post_id = [0u8; 32];
         if hex::decode_to_slice(&content_id_hex, &mut post_id).is_err() {
             tracing::warn!("nostr materialize: malformed content id {content_id_hex}");
@@ -951,8 +1036,16 @@ pub async fn materialize_account(
         else {
             continue;
         };
-        let Some(post) = public_post_from_payload(&body) else {
-            continue;
+        let post = if advertised {
+            match Post::decode_resolved_bytes(&body) {
+                Some(p) if p.gated.is_some() => p,
+                _ => continue,
+            }
+        } else {
+            let Some(p) = public_post_from_payload(&body) else {
+                continue;
+            };
+            p
         };
         // The create-side arm's own resolution, so a reply the sweep reaches
         // first still threads (`nostr.md` § Replying to and quoting a nostr note).
@@ -960,11 +1053,39 @@ pub async fn materialize_account(
             let conn = cache_db.conn().await;
             crate::nostr::publish::resolve_nostr_references(&conn, &post).unwrap_or_default()
         };
-        let unsigned = match fauna_bridge_nostr::translate::fauna_post_to_nostr(
-            &post,
-            &pubkey_bytes,
-            &resolved,
-        ) {
+        let translated = if advertised {
+            let Some(price) = cache_db
+                .get_tier_selling_post(&author, &content_id_hex)
+                .await?
+                .and_then(|tier| tier.asking_price())
+            else {
+                tracing::debug!(
+                    "nostr materialize: advertised post {content_id_hex} has no priced \
+                     selling tier; not published"
+                );
+                continue;
+            };
+            // The Pillar 2 teaser page, when the post is web-published and the
+            // author's content has a public origin.
+            let web_url = crate::web_content::public_url::public_post_url(
+                cache_db,
+                &author,
+                &post_id,
+                serving_domain,
+            )
+            .await?;
+            fauna_bridge_nostr::translate::fauna_advertisement_to_nostr(
+                &post,
+                &pubkey_bytes,
+                &resolved,
+                price.value,
+                &price.unit,
+                web_url.as_deref(),
+            )
+        } else {
+            fauna_bridge_nostr::translate::fauna_post_to_nostr(&post, &pubkey_bytes, &resolved)
+        };
+        let unsigned = match translated {
             Ok(u) => u,
             Err(e) => {
                 tracing::debug!("nostr materialize: skip post {content_id_hex}: {e}");
@@ -975,41 +1096,62 @@ pub async fn materialize_account(
         let conn = cache_db.conn().await;
         store_event(&conn, &event, true)?;
         db::insert_event_map(&conn, &content_id_hex, &event.id, &nostr_pubkey, "outbound")?;
+        if advertised && relay_urls.is_none() {
+            let account = db::get_account(&conn, actor_id_hex)?;
+            relay_urls = Some(super::relays::resolve_relay_urls(
+                account.as_ref().and_then(|a| a.relay_list.as_deref()),
+            ));
+        }
         drop(conn);
-        count += 1;
+        out.count += 1;
+        if advertised {
+            out.advertisements.push(super::sync_worker::OutboundEvent {
+                event,
+                relay_urls: relay_urls.clone().unwrap_or_default(),
+            });
+        }
     }
-    Ok(count)
+    Ok(out)
 }
 
-/// The lowercase-hex content ids of an account's `post/%` content that has no
-/// outbound `nostr_event_map` entry yet (i.e. not materialized). Body bytes
-/// are resolved separately by the caller, segment-first.
-async fn unmaterialized_exposed_post_ids(
+/// The lowercase-hex content ids of an account's posts in scope that have no
+/// outbound `nostr_event_map` entry yet (i.e. not materialized), each with
+/// whether it is the advertised class. Body bytes are resolved separately by
+/// the caller, segment-first.
+async fn unmaterialized_post_ids(
     cache_db: &CacheDb,
     actor_id_hex: &str,
-) -> Result<Vec<String>> {
+    classes: MaterializeClasses,
+) -> Result<Vec<(String, bool)>> {
     let conn = cache_db.conn().await;
     let mut stmt = conn.prepare(&unmaterialized_posts_sql())?;
-    let rows = stmt.query_map([actor_id_hex], |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map(
+        rusqlite::params![actor_id_hex, classes.includes_public() as i64],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+    )?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-/// The account's post rows eligible to be signed onto the public relay.
+/// The account's post rows eligible to be signed onto the public relay: the
+/// public class (when `?2` is 1) and the advertised class (always).
 ///
-/// Gated on [`crate::db::public_servability::PUBLIC_POST_SERVABLE`] — the single
-/// owner of "may this post be served to an anonymous, off-box audience", shared
-/// with the ActivityPub outbox and the ATProto projection stream. The relay is
-/// the same class of surface those two are (`moderation.md` § Legal takedown:
-/// publishing to a third-party public network, where "a takedown must stop them
-/// or it is silently defeated where it matters most"), and until 2026-08-04 it
-/// was the one such publisher that had never adopted the constant — so a
-/// legally compelled takedown, a quarantine and a suppression were all ignored
-/// here while being honoured everywhere else.
+/// Gated on [`crate::db::public_servability::PUBLIC_POST_SERVABLE`] and
+/// [`crate::db::public_servability::ADVERTISED_TEASER_SERVABLE`] — the single
+/// owner of "may this post be served to an anonymous, off-box audience", whose
+/// public class is shared with the ActivityPub outbox and the ATProto
+/// projection stream. The relay is the same class of surface those two are
+/// (`moderation.md` § Legal takedown: publishing to a third-party public
+/// network, where "a takedown must stop them or it is silently defeated where
+/// it matters most"), and until 2026-08-04 it was the one such publisher that
+/// had never adopted the constant — so a legally compelled takedown, a
+/// quarantine and a suppression were all ignored here while being honoured
+/// everywhere else. The advertised class composes the same moderation arms, so
+/// a sold post under takedown is never advertised either.
 ///
-/// The predicate's `gated_tier IS NULL` arm overlaps [`public_post_from_payload`]'s
-/// own gated check, deliberately: that one also rejects payloads that are not a
-/// decodable plaintext `Post` at all, so neither subsumes the other and both
-/// stay.
+/// The public predicate's `gated_tier IS NULL` arm overlaps
+/// [`public_post_from_payload`]'s own gated check, deliberately: that one also
+/// rejects payloads that are not a decodable plaintext `Post` at all, so
+/// neither subsumes the other and both stay.
 ///
 /// An event already signed and served is withdrawn by the kind-5 retraction
 /// leg (`crate::nostr::propagate_post_delete`, triggered by both self-service
@@ -1034,11 +1176,11 @@ async fn unmaterialized_exposed_post_ids(
 /// hosted author's post on Nostr for good.
 fn unmaterialized_posts_sql() -> String {
     format!(
-        "SELECT lower(hex(c.id))
+        "SELECT lower(hex(c.id)), (cm.gated_tier IS NOT NULL)
        FROM content c
        LEFT JOIN content_meta cm ON cm.content_id = c.id
       WHERE lower(hex(c.author)) = ?1
-        AND {servable}
+        AND ((?2 = 1 AND {public}) OR ({advertised}))
         AND NOT EXISTS (
             SELECT 1 FROM nostr_event_map m
              WHERE m.fauna_post_id = lower(hex(c.id))
@@ -1051,54 +1193,79 @@ fn unmaterialized_posts_sql() -> String {
                AND o.action_taken = {taken_down}
                AND o.issuer_nest_id IS NULL
         )",
-        servable = crate::db::public_servability::PUBLIC_POST_SERVABLE.as_str(),
+        public = crate::db::public_servability::PUBLIC_POST_SERVABLE.as_str(),
+        advertised = crate::db::public_servability::ADVERTISED_TEASER_SERVABLE.as_str(),
         taken_down = fauna_core::obligation::ObligationAction::TakenDown as u8,
     )
 }
 
-/// Whether an account has any exposed post not yet materialized. Cheap gate the
-/// periodic sweep checks *before* decrypting the nsec, so a steady-state box
-/// (nothing new to materialize) never touches secret key material.
-fn has_unmaterialized_posts(conn: &Connection, actor_id_hex: &str) -> Result<bool> {
+/// Whether an account has any in-scope post not yet materialized. Cheap gate
+/// the periodic sweep checks *before* decrypting the nsec, so a steady-state
+/// box (nothing new to materialize) never touches secret key material.
+fn has_unmaterialized_posts(
+    conn: &Connection,
+    actor_id_hex: &str,
+    classes: MaterializeClasses,
+) -> Result<bool> {
     let exists: bool = conn
         .prepare(&format!(
             "SELECT EXISTS({} LIMIT 1)",
             unmaterialized_posts_sql()
         ))?
-        .query_row([actor_id_hex], |r| r.get::<_, i64>(0))
+        .query_row(
+            rusqlite::params![actor_id_hex, classes.includes_public() as i64],
+            |r| r.get::<_, i64>(0),
+        )
         .map(|c| c > 0)?;
     Ok(exists)
 }
 
-/// Sweep every account that opted into `expose_content` and deposited an nsec,
-/// materializing any new exposed posts. Runs on the sync worker's periodic tick
-/// (the safety net catching posts created after `expose_content` was already
-/// on); the immediate path is [`materialize_account`] on expose-toggle / link.
-/// `nest_signing_key_bytes` decrypts each account's stored nsec.
+/// Sweep every account that deposited an nsec and either opted into
+/// `expose_content` or advertises a post, materializing any new in-scope posts
+/// — the public class only under the toggle. Runs on the sync worker's
+/// periodic tick (the safety net catching posts created after `expose_content`
+/// was already on, and an advertisement whose immediate kick a crash cut
+/// short); the immediate paths are [`materialize_account`] on expose-toggle /
+/// link and on `fauna.nostr.advertise.set`. `nest_signing_key_bytes` decrypts
+/// each account's stored nsec.
+///
+/// Returns the count and the advertisement events the caller pushes to their
+/// publish relays ([`Materialized::advertisements`]).
 pub async fn materialize_all_exposed(
     cache_db: &CacheDb,
     post_segments: &SegmentManager,
     nest_signing_key_bytes: &[u8; 32],
-) -> Result<usize> {
-    let accounts: Vec<(String, Vec<u8>)> = {
+    serving_domain: &str,
+) -> Result<Materialized> {
+    let accounts: Vec<(String, Vec<u8>, bool)> = {
         let conn = cache_db.conn().await;
         let mut stmt = conn.prepare(
-            "SELECT actor_id, encrypted_privkey
-               FROM nostr_accounts
-              WHERE expose_content = 1 AND encrypted_privkey IS NOT NULL",
+            "SELECT a.actor_id, a.encrypted_privkey, a.expose_content
+               FROM nostr_accounts a
+              WHERE a.encrypted_privkey IS NOT NULL
+                AND (a.expose_content = 1 OR EXISTS (
+                     SELECT 1 FROM content c
+                       JOIN content_meta cm ON cm.content_id = c.id
+                      WHERE lower(hex(c.author)) = a.actor_id
+                        AND cm.nostr_advertised_at IS NOT NULL))",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)? != 0,
+            ))
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
 
-    let mut total = 0usize;
-    for (actor_id, enc_key) in accounts {
+    let mut total = Materialized::default();
+    for (actor_id, enc_key, expose) in accounts {
+        let classes = MaterializeClasses::for_exposure(expose);
         // Skip the nsec decrypt entirely when there is nothing new to sign.
         let has_new = {
             let conn = cache_db.conn().await;
-            has_unmaterialized_posts(&conn, &actor_id)
+            has_unmaterialized_posts(&conn, &actor_id, classes)
         };
         match has_new {
             Ok(false) => continue,
@@ -1116,8 +1283,20 @@ pub async fn materialize_all_exposed(
         let Ok(keypair) = Keypair::from_secret_bytes(secret) else {
             continue;
         };
-        match materialize_account(cache_db, post_segments, &actor_id, &keypair).await {
-            Ok(n) => total += n,
+        match materialize_account(
+            cache_db,
+            post_segments,
+            &actor_id,
+            &keypair,
+            classes,
+            serving_domain,
+        )
+        .await
+        {
+            Ok(m) => {
+                total.count += m.count;
+                total.advertisements.extend(m.advertisements);
+            }
             Err(e) => tracing::warn!("nostr materialize: account {actor_id}: {e}"),
         }
     }
@@ -1510,9 +1689,7 @@ mod tests {
 
         // First run materializes the post as a signed, store-served event.
         assert_eq!(
-            materialize_account(&db, &post_segments, &actor_hex, &kp)
-                .await
-                .unwrap(),
+            materialize_public(&db, &post_segments, &actor_hex, &kp).await,
             1
         );
         let conn = db.conn().await;
@@ -1529,9 +1706,7 @@ mod tests {
         // Idempotent — a second run materializes nothing (deduped via the
         // outbound nostr_event_map).
         assert_eq!(
-            materialize_account(&db, &post_segments, &actor_hex, &kp)
-                .await
-                .unwrap(),
+            materialize_public(&db, &post_segments, &actor_hex, &kp).await,
             0
         );
         let conn = db.conn().await;
@@ -1543,96 +1718,352 @@ mod tests {
         );
     }
 
+    /// The public-class pass the expose-toggle path runs, as a count.
+    async fn materialize_public(
+        db: &CacheDb,
+        post_segments: &SegmentManager,
+        actor_hex: &str,
+        kp: &Keypair,
+    ) -> usize {
+        materialize_account(
+            db,
+            post_segments,
+            actor_hex,
+            kp,
+            MaterializeClasses::PublicAndAdvertised,
+            "",
+        )
+        .await
+        .unwrap()
+        .count
+    }
+
+    /// Store a post through the real write path (`segments::post::store_post`),
+    /// gated to `tier` when given — a sold post's body is its public teaser.
+    async fn store_sold_or_public(
+        db: &std::sync::Arc<CacheDb>,
+        post_segments: &SegmentManager,
+        author: [u8; 32],
+        content: &str,
+        tier: Option<&str>,
+    ) -> [u8; 32] {
+        use fauna_core::data::{ContentHash, Post, PostBody, Timestamp};
+        use fauna_core::identity::ActorId;
+        use fauna_core::subscription::types::{GatedInfo, KeyAccess};
+        let post = Post {
+            author: ActorId(author),
+            created_at: Timestamp(1_000_000_000_000),
+            body: PostBody::Text {
+                content: content.into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: tier.map(|t| GatedInfo {
+                encrypted_ref: ContentHash::from_digest_raw([9u8; 32]),
+                key_access: KeyAccess::Broadcast {
+                    key_blob_ref: ContentHash::from_digest_raw([8u8; 32]),
+                },
+                tier: t.into(),
+                tier_rank: 2,
+                seal_id: ContentHash::from_digest_raw([7u8; 32]),
+                attachment_refs: vec![],
+            }),
+            content_warning: None,
+            origin: None,
+        };
+        let payload = fauna_core::encoding::canonical_encode(&post).unwrap();
+        let id = *blake3::hash(&payload).as_bytes();
+        crate::segments::post::store_post(post_segments, db, &id, &payload, None)
+            .await
+            .unwrap();
+        id
+    }
+
+    /// Mint the degenerate single-post tier that sells `post`, optionally
+    /// priced — the production writer of both directions of the binding.
+    async fn sell(db: &CacheDb, author: [u8; 32], tier: &str, post: &[u8; 32], msats: Option<u64>) {
+        db.create_subscription_tier(
+            &author,
+            tier,
+            2,
+            None,
+            None,
+            None,
+            false,
+            Some(&hex::encode(post)),
+            msats
+                .map(fauna_protocol::subscriptions::TierAskingPrice::msats)
+                .as_ref(),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn advertise(db: &CacheDb, post: &[u8; 32]) {
+        db.conn()
+            .await
+            .execute(
+                "UPDATE content_meta SET nostr_advertised_at = 1 WHERE content_id = ?1",
+                [post.as_slice()],
+            )
+            .unwrap();
+    }
+
+    async fn is_mapped(db: &CacheDb, post: &[u8; 32]) -> bool {
+        db.conn()
+            .await
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM nostr_event_map \
+                  WHERE fauna_post_id = ?1 AND direction = 'outbound')",
+                [hex::encode(post)],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    }
+
     /// A **sold** post is a gated post (`monetization.md` § Per-post
     /// pay-to-unlock: "a sold post is therefore authored as a gated post from
-    /// the start"), and a gated post is never world-broadcast. Since
-    /// [`materialize_account`] is the only writer of an *outbound*
-    /// `nostr_event_map` row, and `resolve_zap_subject` resolves only outbound
-    /// rows, this is the fact that makes the zap purchase leg unreachable for
-    /// every real sale today — declared in `monetization.md` § Implementation
-    /// status today rather than left for a later session to rediscover.
+    /// the start"), and a gated post is never part of the public class. Unless
+    /// its author advertises it (`monetization.md` § The Nostr advertisement of
+    /// a sold post), it stays off the relay — even with a priced tier selling
+    /// it and `expose_content` on.
     ///
     /// The public post beside it is load-bearing, not scenery: without it a
     /// materializer that had simply stopped working would satisfy the gated
     /// assertion too, and the test would be a zero pin.
     #[tokio::test]
-    async fn a_sold_post_is_never_materialized_so_no_zap_can_name_it() {
-        use fauna_core::data::{ContentHash, Post, PostBody, Timestamp};
-        use fauna_core::identity::ActorId;
-        use fauna_core::subscription::types::{GatedInfo, KeyAccess};
-
+    async fn an_unadvertised_sold_post_is_never_materialized() {
         let db = std::sync::Arc::new(CacheDb::open_in_memory().unwrap());
         crate::nostr::init_db(&db).await.unwrap();
         let post_segments = test_post_segments();
         let kp = keypair(9);
-        let author_bytes = [11u8; 32];
-        let actor_hex = hex::encode(author_bytes);
+        let author = [11u8; 32];
+        let actor_hex = hex::encode(author);
 
-        let store = async |content: &str, gated: Option<GatedInfo>| {
-            let post = Post {
-                author: ActorId(author_bytes),
-                created_at: Timestamp(1_000_000_000_000),
-                body: PostBody::Text {
-                    content: content.into(),
-                    facets: vec![],
-                },
-                references: vec![],
-                expires_at: None,
-                gated,
-                content_warning: None,
-                origin: None,
-            };
-            let payload = fauna_core::encoding::canonical_encode(&post).unwrap();
-            let id = *blake3::hash(&payload).as_bytes();
-            crate::segments::post::store_post(&post_segments, &db, &id, &payload, None)
-                .await
-                .unwrap();
-            id
-        };
-
-        // The sold post: its body is the public teaser, the sealed half lives
-        // at `encrypted_ref`, and `unlocks_post` on the tier names this id.
-        let sold = store(
+        let sold = store_sold_or_public(
+            &db,
+            &post_segments,
+            author,
             "buy my post — teaser",
-            Some(GatedInfo {
-                encrypted_ref: ContentHash::from_digest_raw([9u8; 32]),
-                key_access: KeyAccess::Broadcast {
-                    key_blob_ref: ContentHash::from_digest_raw([8u8; 32]),
-                },
-                tier: "post-unlock-x".into(),
-                tier_rank: 2,
-                seal_id: ContentHash::from_digest_raw([7u8; 32]),
-                attachment_refs: vec![],
-            }),
+            Some("post-unlock-x"),
         )
         .await;
-        let public = store("an ordinary public post", None).await;
+        sell(&db, author, "post-unlock-x", &sold, Some(21_000)).await;
+        let public = store_sold_or_public(&db, &post_segments, author, "public", None).await;
 
         assert_eq!(
-            materialize_account(&db, &post_segments, &actor_hex, &kp)
-                .await
-                .unwrap(),
+            materialize_public(&db, &post_segments, &actor_hex, &kp).await,
             1,
             "exactly one of the two posts is world-broadcastable"
         );
+        assert!(
+            is_mapped(&db, &public).await,
+            "the public post is materialized"
+        );
+        assert!(
+            !is_mapped(&db, &sold).await,
+            "a sold post nobody advertised must never reach the public relay"
+        );
+    }
+
+    /// The advertised class: a sold post its author advertised is signed as a
+    /// kind-1 note carrying the tier's asking price verbatim, mapped
+    /// `outbound` (the row `resolve_zap_subject` needs, so a receipt naming
+    /// this event can buy the tier), and handed back for the push to the
+    /// publish relays. It is independent of `expose_content`: the
+    /// advertised-only pass signs it and leaves the public post alone. A
+    /// flagged post whose tier carries no price is never published — the price
+    /// tag is what makes the teaser publishable at all.
+    #[tokio::test]
+    async fn an_advertised_sold_post_is_materialized_with_its_price_and_mapped() {
+        let db = std::sync::Arc::new(CacheDb::open_in_memory().unwrap());
+        crate::nostr::init_db(&db).await.unwrap();
+        let post_segments = test_post_segments();
+        let kp = keypair(10);
+        let author = [12u8; 32];
+        let actor_hex = hex::encode(author);
+
+        let sold =
+            store_sold_or_public(&db, &post_segments, author, "the teaser", Some("unlock-a")).await;
+        sell(&db, author, "unlock-a", &sold, Some(21_000)).await;
+        advertise(&db, &sold).await;
+        let priceless =
+            store_sold_or_public(&db, &post_segments, author, "unpriced", Some("unlock-b")).await;
+        sell(&db, author, "unlock-b", &priceless, None).await;
+        advertise(&db, &priceless).await;
+        let public = store_sold_or_public(&db, &post_segments, author, "public", None).await;
+
+        let m = materialize_account(
+            &db,
+            &post_segments,
+            &actor_hex,
+            &kp,
+            MaterializeClasses::AdvertisedOnly,
+            "",
+        )
+        .await
+        .unwrap();
+        assert_eq!(m.count, 1, "only the priced advertisement is signed");
+        assert!(
+            is_mapped(&db, &sold).await,
+            "the advertisement is mapped outbound"
+        );
+        assert!(
+            !is_mapped(&db, &priceless).await,
+            "no price, no publication"
+        );
+        assert!(
+            !is_mapped(&db, &public).await,
+            "the advertised-only pass never publishes the public class"
+        );
+
+        assert_eq!(m.advertisements.len(), 1, "the advertisement is pushed");
+        let ad = &m.advertisements[0].event;
+        assert_eq!(ad.kind, 1);
+        assert_eq!(
+            ad.content, "the teaser",
+            "nothing added in the author's voice"
+        );
+        assert!(fauna_bridge_nostr::signing::verify_event(ad));
+        assert!(
+            ad.tags
+                .iter()
+                .any(|t| t.0 == vec!["price".to_string(), "21000".into(), "msat".into()]),
+            "the price tag carries the asking price verbatim: {:?}",
+            ad.tags
+        );
+        assert!(
+            !m.advertisements[0].relay_urls.is_empty(),
+            "an account with no relay list publishes to the default relays"
+        );
+        let conn = db.conn().await;
+        let served = query_events(
+            &conn,
+            &[Filter {
+                ids: Some(vec![ad.id.clone()]),
+                ..Default::default()
+            }],
+            10,
+        )
+        .unwrap();
+        assert_eq!(served.len(), 1, "the nest's relay serves the advertisement");
+    }
+
+    /// The `r` tag (§ *The event*): an advertised post that is web-published
+    /// carries its public page URL — the shared rule's answer, the one the
+    /// apps' *Copy web link* copies — beside its price tag; one that is not
+    /// web-published carries none.
+    #[tokio::test]
+    async fn a_web_published_advertisement_carries_its_page_url_as_the_r_tag() {
+        let db = std::sync::Arc::new(CacheDb::open_in_memory().unwrap());
+        crate::nostr::init_db(&db).await.unwrap();
+        let post_segments = test_post_segments();
+        let kp = keypair(11);
+        let author = [13u8; 32];
+        let actor_hex = hex::encode(author);
+        db.create_user_with_handle(&author, "free", "alice", None)
+            .await
+            .unwrap();
+        db.set_subdomain_enabled(&author).await.unwrap();
+
+        let published =
+            store_sold_or_public(&db, &post_segments, author, "on the web", Some("unlock-a")).await;
+        sell(&db, author, "unlock-a", &published, Some(21_000)).await;
+        advertise(&db, &published).await;
+        db.publish_web_post(&author, &published, "my-teaser")
+            .await
+            .unwrap();
+        let unpublished = store_sold_or_public(
+            &db,
+            &post_segments,
+            author,
+            "not on the web",
+            Some("unlock-b"),
+        )
+        .await;
+        sell(&db, author, "unlock-b", &unpublished, Some(5_000)).await;
+        advertise(&db, &unpublished).await;
+
+        let m = materialize_account(
+            &db,
+            &post_segments,
+            &actor_hex,
+            &kp,
+            MaterializeClasses::AdvertisedOnly,
+            "example.org",
+        )
+        .await
+        .unwrap();
+        assert_eq!(m.count, 2);
+        let r_of = |content: &str| {
+            let ad = m
+                .advertisements
+                .iter()
+                .find(|o| o.event.content == content)
+                .unwrap_or_else(|| panic!("no advertisement for {content}"));
+            ad.event
+                .tags
+                .iter()
+                .filter(|t| t.name() == Some("r"))
+                .map(|t| t.0.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            r_of("on the web"),
+            vec![vec![
+                "r".to_string(),
+                "https://alice.example.org/post/my-teaser.html".into()
+            ]],
+            "the page URL on the author's subdomain"
+        );
+        assert!(
+            r_of("not on the web").is_empty(),
+            "no web publication, no r tag"
+        );
+    }
+
+    /// `expose_content` off withdraws the public class but spares an
+    /// advertisement (§ *Lifecycle* (5)): a per-post act with its own undo is
+    /// never withdrawn by an account toggle.
+    #[tokio::test]
+    async fn expose_off_spares_an_advertised_post() {
+        let db = std::sync::Arc::new(CacheDb::open_in_memory().unwrap());
+        crate::nostr::init_db(&db).await.unwrap();
+        let post_segments = test_post_segments();
+        let kp = keypair(13);
+        let author = [14u8; 32];
+        let actor_hex = hex::encode(author);
+
+        let sold =
+            store_sold_or_public(&db, &post_segments, author, "teaser", Some("unlock-c")).await;
+        sell(&db, author, "unlock-c", &sold, Some(5_000)).await;
+        advertise(&db, &sold).await;
+        let public = store_sold_or_public(&db, &post_segments, author, "public", None).await;
+        assert_eq!(
+            materialize_public(&db, &post_segments, &actor_hex, &kp).await,
+            2
+        );
 
         let conn = db.conn().await;
-        let mapped = |id: &[u8; 32]| -> bool {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM nostr_event_map \
-                  WHERE fauna_post_id = ?1 AND direction = 'outbound')",
-                [hex::encode(id)],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-                > 0
-        };
-        assert!(mapped(&public), "the public post is materialized");
+        assert_eq!(
+            delete_derived_for_pubkey(&conn, &kp.public_key_hex()).unwrap(),
+            1,
+            "only the public event is withdrawn"
+        );
+        drop(conn);
         assert!(
-            !mapped(&sold),
-            "a sold post must never reach the public relay — and because this row \
-             is what `resolve_zap_subject` needs, its absence is exactly why a zap \
-             cannot buy a real sold post today"
+            is_mapped(&db, &sold).await,
+            "the advertisement keeps its map row"
+        );
+        assert!(!is_mapped(&db, &public).await);
+        let conn = db.conn().await;
+        assert_eq!(
+            query_events(&conn, &[Filter::default()], 10).unwrap().len(),
+            1,
+            "the advertisement is still served"
         );
     }
 
@@ -1693,9 +2124,7 @@ mod tests {
         db.set_post_suppressed(&suppressed, true).await.unwrap();
 
         assert_eq!(
-            materialize_account(&db, &post_segments, &actor_hex, &kp)
-                .await
-                .unwrap(),
+            materialize_public(&db, &post_segments, &actor_hex, &kp).await,
             1,
             "only the unflagged post may be signed onto the public relay"
         );
@@ -1796,9 +2225,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            materialize_account(&db, &post_segments, &actor_hex, &kp)
-                .await
-                .unwrap(),
+            materialize_public(&db, &post_segments, &actor_hex, &kp).await,
             1,
             "exactly the post only another nest took down is signed"
         );
@@ -1879,9 +2306,7 @@ mod tests {
         );
 
         assert_eq!(
-            materialize_account(&db, &post_segments, &actor_hex, &kp)
-                .await
-                .unwrap(),
+            materialize_public(&db, &post_segments, &actor_hex, &kp).await,
             1,
             "only the native post may be signed onto the public relay"
         );
@@ -1962,15 +2387,17 @@ mod tests {
         // The sweep decrypts the nsec, materializes the post, and is idempotent
         // (the second call short-circuits at `has_unmaterialized_posts`).
         assert_eq!(
-            materialize_all_exposed(&db, &post_segments, &nest_key)
+            materialize_all_exposed(&db, &post_segments, &nest_key, "")
                 .await
-                .unwrap(),
+                .unwrap()
+                .count,
             1
         );
         assert_eq!(
-            materialize_all_exposed(&db, &post_segments, &nest_key)
+            materialize_all_exposed(&db, &post_segments, &nest_key, "")
                 .await
-                .unwrap(),
+                .unwrap()
+                .count,
             0
         );
 

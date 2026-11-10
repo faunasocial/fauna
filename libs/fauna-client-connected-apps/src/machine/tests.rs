@@ -1695,3 +1695,55 @@ async fn a_depositor_the_loaded_roster_cannot_name_asks_for_one_more_read() {
         "a malformed key is no reason to read"
     );
 }
+
+// A step-down from full hosting revokes each OAuth app's session and keeps
+// its grant (`atproto-oauth-provider.md` § Detailed design, the OAuth-grant
+// suspension bullet): the nest still counts the grant live, so the roster
+// must not read the app connected. It reads paused — the roster's one
+// not-working-but-reversible state — names that cause, and states no
+// lasts-until; one fresh grant beside the suspended ones clears it.
+
+#[tokio::test]
+async fn a_principal_whose_every_grant_a_step_down_suspended_reads_paused() {
+    let (m, api, _) = machine();
+    let cid = "https://a.example/c.json";
+    api.set_principals(vec![principal(1, cid, Some("A"), 1)]);
+    let mut old = grant(1, cid, Some(9_000_000));
+    old.suspended = true;
+    let mut older = grant(2, cid, None);
+    older.suspended = true;
+    api.set_grants(vec![old, older, grant(3, "https://b.example/c.json", None)]);
+    m.refresh().await;
+    let r = &m.snapshot().principals[0];
+    assert!(r.paused, "suspended is paused: {r:?}");
+    assert!(r.suspended, "and names the step-down as its cause: {r:?}");
+    assert!(!r.connected, "a suspended app cannot act: {r:?}");
+    assert_eq!(
+        r.lasts_until_millis, None,
+        "nothing it holds runs to an end: {r:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_grant_beside_a_suspended_one_reads_connected() {
+    let (m, api, _) = machine();
+    let cid = "https://a.example/c.json";
+    api.set_principals(vec![principal(1, cid, Some("A"), 1)]);
+    let mut old = grant(1, cid, None);
+    old.suspended = true;
+    api.set_grants(vec![old, grant(2, cid, Some(9_000_000))]);
+    m.refresh().await;
+    let r = &m.snapshot().principals[0];
+    assert!(!r.paused && !r.suspended, "{r:?}");
+    assert!(r.connected, "a fresh sign-in clears the mark: {r:?}");
+    assert_eq!(r.lasts_until_millis, Some(9_000_000));
+}
+
+#[tokio::test]
+async fn a_principal_with_no_oauth_grant_is_never_suspended() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![principal(1, "https://a.example/c.json", Some("A"), 1)]);
+    m.refresh().await;
+    let r = &m.snapshot().principals[0];
+    assert!(!r.suspended && !r.paused && r.connected, "{r:?}");
+}

@@ -50,7 +50,17 @@ export function registerScreenTimeCommands(): void {
         `${action}: \`minutes\` must be a finite number, got ${JSON.stringify(raw)}`,
       );
     }
-    advanceTestClock(minutes * 60);
+    // `focused` (additive, default true): `false` advances the clock with the
+    // app out of front, which bills nothing — tui's and linux's arms are the
+    // twins (`family-client-enforcement.md` § Implementation status today).
+    const rawFocused = (payload as { focused?: unknown })?.focused ?? true;
+    if (typeof rawFocused !== 'boolean') {
+      throw new Error(
+        `${action}: \`focused\` must be a boolean, got ${JSON.stringify(rawFocused)}`,
+      );
+    }
+    const focused = rawFocused;
+    advanceTestClock(minutes * 60, focused);
     const secret = get(identity)?.secretHex;
     if (!secret) {
       // Loud, per convention 11 — the sibling arms (`silent_sign_in`,
@@ -64,7 +74,7 @@ export function registerScreenTimeCommands(): void {
           `meaningful on an authenticated session`,
       );
     }
-    await tickUsageHeartbeat(secret);
+    await tickUsageHeartbeat(secret, focused);
     return null;
   });
 }

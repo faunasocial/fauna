@@ -168,6 +168,7 @@ pub fn folder_key_custody() -> fauna_core::data::FoldersConfig {
             content_key_floor: None,
             ..Default::default()
         }],
+        ..Default::default()
     }
 }
 
@@ -866,6 +867,80 @@ pub async fn approve_with_mint(
     )
     .await?;
     Ok(decode(&reply).expect("decode approve reply"))
+}
+
+/// The author client's drain committing a queued removal, as
+/// `fauna-client-subscriptions`' `commit_unsubscribe` does: `subscribers.remove`
+/// with a `KeyBlob` minted over `remaining` (the roster without `subscriber`)
+/// under a fresh period key, then `requests.reject` of the `unsubscribe` queue
+/// row. Returns the remove reply's `key_version`. Panics when no removal is
+/// queued for `(subscriber, tier)`, so a test reads the queue row's presence
+/// from the helper succeeding.
+#[allow(clippy::too_many_arguments)] // mirrors [`approve_with_mint`]'s shape
+pub async fn drain_commits_removal(
+    router: &RpcRouter,
+    state: Arc<AppState>,
+    author_kp: &ActorKeypair,
+    subscriber: [u8; 32],
+    tier: &str,
+    remaining: &[ActorId],
+    period_key: &[u8; 32],
+    rotated_at: u64,
+) -> Result<u64, RpcError> {
+    use fauna_protocol::subscriptions::{
+        RejectRequestRequest, RemoveSubscriberReply, RemoveSubscriberRequest,
+    };
+    let author_id = author_kp.actor_id().0;
+    let request_id = state
+        .db
+        .list_subscribe_requests(&author_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.kind == "unsubscribe" && r.tier_name == tier && r.subscriber_id == subscriber)
+        .expect("a removal is queued for the author's drain")
+        .id;
+    let auth = encrypted_keyblob::make_device_authorization(
+        author_kp,
+        author_kp,
+        vec![Capability::ManageSubscribers],
+    );
+    let (_blob, upload) = encrypted_keyblob::mint_test_key_blob(
+        author_kp,
+        &auth,
+        tier,
+        Timestamp(rotated_at),
+        remaining,
+        period_key,
+    );
+    let req = RemoveSubscriberRequest {
+        tier_name: tier.into(),
+        subscriber_id: ActorId(subscriber),
+        encrypted_upload: Some(upload),
+        extra: Default::default(),
+    };
+    let reply = call_raw(
+        router,
+        state.clone(),
+        "fauna.subscriptions.subscribers.remove",
+        author_id,
+        Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+    )
+    .await?;
+    let removed: RemoveSubscriberReply = decode(&reply).expect("decode subscribers.remove reply");
+    let reject = RejectRequestRequest {
+        request_id,
+        extra: Default::default(),
+    };
+    call_raw(
+        router,
+        state,
+        "fauna.subscriptions.requests.reject",
+        author_id,
+        Bytes::from(encode_canonical(&reject).unwrap().to_vec()),
+    )
+    .await?;
+    Ok(removed.key_version)
 }
 
 /// Fetch `actor`'s INBOX via `fauna.email.inbox.fetch`, assert exactly one
@@ -2128,6 +2203,36 @@ pub mod zap {
             None,
             None,
             None,
+        )
+        .unwrap();
+        drop(conn);
+        kp
+    }
+
+    /// A payee whose nsec is **deposited** — the generated-key link, encrypted
+    /// under this nest's key exactly as the link handler stores it — with
+    /// `relay_list` as its publish relays (JSON, `None` = the defaults). The
+    /// shape every nest-signed act (the advertisement, a kind 5) needs.
+    pub async fn link_payee_with_nsec(
+        state: &AppState,
+        actor: [u8; 32],
+        relay_list: Option<&str>,
+    ) -> Keypair {
+        let kp = Keypair::generate();
+        let enc = fauna_nest::nostr::key_crypto::encrypt_nostr_privkey(
+            &state.nest_identity.signing_key.to_bytes(),
+            &kp.secret_bytes(),
+        )
+        .unwrap();
+        let conn = state.db.conn().await;
+        db::link_account(
+            &conn,
+            &hex::encode(actor),
+            &kp.public_key_hex(),
+            "generated",
+            Some(&enc),
+            None,
+            relay_list,
         )
         .unwrap();
         drop(conn);

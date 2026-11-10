@@ -159,6 +159,36 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
     — the honest drain names the member on the room's home and through the
     client seam, the spoof at another nest's domain is refused, a rename at
     the member's own domain lands, a malformed handle is ignored).
+  - **The folder roster — the same announce, applied to the owner's "Shared
+    with" list (ratified and built 2026-11-07).** A
+    cross-nest folder member is a `channel_foreign_members` row on the set's
+    home, so the owner's `members.list_actors` roster (`../ui/folders.md`
+    § Sharing a folder → *Member-list read*) names it from the same recorded
+    pair, and the owner's nest asks nothing. Two carriers, both the member's
+    own nest's word about its own user: the member's drains of the folder
+    channel carry the standing announce above; and — the one carrier the room
+    plane lacks, because the owner's roster row exists from the share and must
+    not read as hex until the member first polls — the member's nest also
+    volunteers the pair on its reply to the folder Welcome relay
+    (`FedWelcomeDeliverReply::recipient_handle` / `recipient_domain`, off its
+    own `users` row and `handle_domain_if_set()`, folder relays only, both or
+    neither), which the set's home records on the binding it writes at relay
+    time, only after the same domain-end binding, awaited inline as the owner
+    label's receiving half is (a failed binding records nothing; the standing
+    announce heals it on the member's first drain). On the wire the roster row
+    carries the pair split — `FolderActorMember.handle` plus the additive
+    `domain`, both empty/absent until an announce lands — and the federated
+    `folder.actors.fetch` blanks both (ids-only across nests); the apps join it
+    at display through `fauna_core::format::qualified_handle` into
+    `account_display_label`, so a cross-nest member reads `bob@other.test` and
+    never a bare `bob` (`../behavior/value-formatting.md` § Account display
+    label). Never an identity input, as above: the owner's remove gesture keys
+    on the actor id. Witness: `folder_handlers`' tests (the projection),
+    `conformance_cross_nest_conversations_client.rs`
+    (`a_cross_nest_folder_member_is_named_on_the_owners_roster_at_share_time`
+    — the reply's pair, the inline record on a real share) and, on tui,
+    `test_folder_cross_nest_member_reads.py` (the owner's roster reads
+    `<handle>@<member nest authority>`).
 - **The foreign-member binding is inviter-asserted (TOFU) — a named, accepted
   premise (analysis 2026-07-18).** The `channel_foreign_members` row's
   `home_nest_id` is resolved from the *inviter-client-supplied* `nest_url` at
@@ -377,7 +407,9 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   sweep does reach a succeeded owner's claimed channels); a legacy unstamped
   member seat stays on open commit processing as before; and a statement the
   witness refuses *for now* on a seat whose walk then meets the remove-old is
-  answered by the hold below, inside the bound it states. Build ledger:
+  answered by the hold below, inside the bound it states, and a seat the hold
+  still leaves forked is the subject of *A forked seat is final, says so, and
+  heals only by a fresh Welcome*. Build ledger:
   § Implementation status today.
 
   **The folder commit walk inherits the harvest wait (ratified 2026-09-28).**
@@ -459,8 +491,9 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   another nest (`fauna.profile.get` answers for same-nest identities only),
   resting delegated, or never having mirrored a head — settles at once with
   no anchor, and the walk resumes into the pre-hold residual; (3) a session
-  with no sweep never holds. The remedy for all three is unchanged: the owner
-  re-shares the set to the forked member. Pinned by `fauna-conversations`
+  with no sweep never holds. The remedy for all three is the owner's re-share — made real by *A forked
+  seat is final, says so, and heals only by a fresh Welcome*, below, since
+  on a still-rostered member the gesture delivers no Welcome. Pinned by `fauna-conversations`
   `a_witness_refused_statement_holds_the_remove_old_until_the_harvest_settles_it`,
   `a_forged_statement_holds_the_walk_only_until_the_harvest_settles_the_owner`,
   `without_an_armed_sweep_the_folder_walk_never_holds` and
@@ -504,6 +537,119 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   as past-epoch — note the L3 cache is per-connection and TTL'd, so append
   consumers rely on MLS-layer duplicate tolerance, never on nest-side
   exactly-once.
+
+  **A forked seat is final, says so, and heals only by a fresh Welcome (ratified
+  2026-11-07).** The
+  seat the hold's residuals leave behind — the successor's remove-old refused and
+  memoized against a marker still naming the predecessor, whether because the
+  harvest settled the owner with no anchor (an owner who minted their kit after
+  this seat's harvest, the `tui:4366` run; an owner homed on another nest, whose
+  profile the sweep cannot read; a session with no sweep) or because a thief's
+  kit signed the statement and this seat's anchor rightly refused it — is a seat
+  the group has moved past: every later commit on the channel is a future-epoch
+  hole, every later application envelope is sealed under an epoch it never
+  reached, and nothing it does alone can rejoin the chain. **Three facts decide
+  the ruling.** (1) **The memoized commit is never re-admitted**, not even once
+  a later session verifies the statement and re-points the marker: the refusal
+  was reached after the PrivateMessage decrypt, which consumed the committer's
+  sender-ratchet generation, and openMLS deletes a consumed key (forward
+  secrecy) — the bytes are undecryptable for good, which is what the memo
+  exists to say; holding the staged commit un-merged across passes to re-admit
+  it later was refused with the hold (a crash leaves a consumed generation and
+  no memo), and the in-session re-point the row imagined cannot occur anyway —
+  only a read-path seed re-stamps inside the session, and that is the TOFU
+  grade the thief's kit passes too. (2) **A later verification tells the honest
+  case from the thief's no better than the first refusal did:** when the owner
+  held no kit at this seat's harvest, the kit the next session's harvest seeds
+  is the first one — TOFU, entered knowingly (`identity-succession.md` § The
+  succession statement → *The residual grade*) — so the honest successor and a
+  seed thief's successor both verify there, and a heal keyed on that
+  verification would admit the thief exactly where the first refusal kept him
+  out. (3) **The only cryptographic re-entry is a fresh Welcome**, and the
+  owner's existing re-share already mints one — but **only off the roster**:
+  on a rostered member the share gesture is an access refresh and delivers no
+  Welcome (`../ui/folders.md` § Sharing → *Adding the 2nd..Nth member*), so the
+  remedy the residuals named, "the owner re-shares the set", was a no-op for a
+  forked member until this ruling. **The rule, in three parts, all member-side
+  shared Rust.** **(a) Detection is local and deterministic:** on the folder
+  rail a `Stalled { future_epoch: true }` outcome IS the fork — the folder
+  cursor is RAM-only and every session walks the log from seq 0, so the
+  bridging commit was in front of this walk and this seat refused or skipped
+  it; a walk the hold stopped (`held_commits`) is not that outcome. The seat is
+  marked forked, durably with the engine's other per-channel slots (derived,
+  recreatable: the next launch walk re-derives it), and the mark names the
+  cause the log holds — a policy-refused memo at the seat's current epoch, or
+  none. **(b) A forked seat unlists itself, once:** it drops its own roster
+  row on the set's home nest — the self-scoped `fauna.folders.leave`, relayed
+  cross-nest, the decline's nest half and nothing of the decline's local half
+  (`decline_folder_share`) — so the owner's "Shared with" list stops naming a
+  member who receives nothing (*"Shared with" tells the truth*, the same
+  section), the member's local bound folder, its files and every generation it
+  holds stay, and the owner's **ordinary** re-share now takes the ghost-heal
+  arm the roster drop was built to serve — evict the stale leaf through
+  rotate-on-removal, fresh KeyPackage, fresh Welcome — with no owner-side
+  change and no new gesture (`mls-group-key-material.md` § M2 *Admitting a
+  member*). The app says why: the recipient's `folder-shared-badge` carries a
+  third reading naming the owner's identity change and asking for a re-share
+  (`../ui/folders.md` § Sharing, the badge). In the thief's case the reading is
+  the same and still true — the owner the member knew did change identity, and
+  this seat could not confirm it — the old files stay readable (reader (c) of
+  `succession-cut.md`), and a re-share can come only from an identity the nest
+  still serves. **(c) A fresh Welcome replaces a seat that is no longer
+  current:** `join_folder_welcome`'s idempotency guard — any Welcome for a held
+  channel acks as a re-delivery — is wrong for a re-invite. A Welcome for a
+  held channel is read pre-decrypt by the key package it addresses, at no
+  init-key cost (`ensure_addressed_to_this_device` finds the ref; the Welcome's
+  epoch is sealed under the init key and is never peeked), and that package is
+  one of three things (the three-way reading ruled 2026-11-07; the first build read "spent" as "not held here" and so acked a
+  sibling's re-invite). **Spent** — a ref this account's engine consumed at a
+  join, recorded in the provider KV at that join, one key per ref and a
+  constant value (`fauna:spent_key_package:<ref>`; never a set under one key,
+  which two devices joining at once would both change, while two devices
+  consuming the same Welcome write the same bytes), so it rides the `__mls`
+  replica and the join's own flush — a sibling's join counts as spent here once
+  its flush lands — and is never pruned (32 bytes per join ever; nor dropped
+  with a seat, since the old original may still be re-delivered after the seat
+  is replaced): the **re-delivered original**, acked as today, on a held channel
+  or a left one alike. **Neither** — a package this device never held, which on
+  a two-device account is every package a sibling minted after this app's
+  launch (its in-memory pool predates the mint; the targeted mid-session import
+  carries groups, not packages): the Welcome is the sibling's to join and is
+  **retained un-acked** — the inbox ack is per account, one row for every
+  device, so an ack here would take it from the sibling for good, and with the
+  member re-rostered by the re-share no later share mints another — the
+  non-holder's reading on the conversation path
+  (`../behavior/devices.md` § Cross-device MLS group-state sync → *Who may
+  consume a Welcome*); the sibling's replacement seat reaches this device at
+  its next launch restore (the whole-KV swap), since the targeted import refuses
+  a group the engine holds. **Live** — a package this device still holds: a
+  re-invite. On a seat marked forked, or
+  held but inactive (this seat processed its own removal), it goes through the
+  arrival gate like a first share from its sender — Confirmed/Accepted contact
+  → auto, else a knock the member accepts or declines — and a join **replaces**
+  the seat whole: `forget_group` (which already drops the park, the memo, the
+  mark and every per-channel slot), then the join, the marker stamped from the
+  new Welcome's MLS-authenticated sender as at any first join, the cursor at 0;
+  on a seat still current it is **retained un-acked** (the owner's evict is
+  still ahead of this seat's walk; the next drain, after the removal folds,
+  joins it) — never acked and lost, which is what the old guard did to the
+  "unnecessary but safe" evict-and-re-admit of a healthy member whose roster
+  row the nest had dropped. **What this keeps.** The policy's refusal of a
+  non-owner roster change is untouched — the new seat's marker is the new
+  Welcome's sender, as at any join, and a thief's Welcome reaches the member
+  only through the arrival gate at a stranger's grade, from an identity the
+  nest still serves, never as a silent replacement; a forged statement still
+  costs one hold window and never a fork, since only a commit the group
+  actually moved past forks a seat, and only the owner's leaf (or the
+  successor's) can move it; the unlist is one nest write per fork, idempotent,
+  and false positives are excluded by (a)'s premise (a 0-seeded walk has no
+  cursor gap to mistake for a hole). **What this leaves, stated plainly:** the
+  fork is the seat's accepted end state until the owner shares again — there is
+  no member-to-owner "share this with me again" signal and none is declared,
+  the owner's list dropping the member and the member's own words are the
+  signal; an owner who never re-shares leaves the member a readable copy of
+  what it held and a `folder-leave-button`. Build: § Implementation status
+  today.
 - **`fauna.federation.channel.leave`** — self-scoped, idempotent delete of the
   requester's own `channel_foreign_members` row. The first mutating member-gated
   kind; deliberately generic (a cross-nest conversation participant's leave is the
@@ -513,6 +659,16 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   read plane: change-log rows (manifest refs, sizes, `content_key_version`,
   `author_actor_id`) and the sealed content-key envelope (opaque to both nests).
   The home nest resolves `channel_id → folders` row via `mls_group_id`.
+- **`fauna.federation.folder.versions.list`** (BUILT 2026-11-07) — the read
+  plane's version-history twin: one `path_hash`'s versions in the claimed set,
+  oldest→newest, through the same projection a same-nest
+  `fauna.files.versions.list` serves (default projection only — the recovery
+  browse and the snapshot licence read stay the owner's), with the
+  `signer_certs` side table and the `caller_access` stamp, under the same
+  structural member gate. The member's nest reaches it as the relay arm of
+  `fauna.files.versions.list { nest_url, channel_id }`, rows and certs relayed
+  verbatim; its one consumer is the member's Media detail
+  ([`../ui/media.md`](../ui/media.md) § Cross-nest shared sets). Additive.
 - **`fauna.federation.folder.changes.record` + `write_token.mint`** — the write
   plane: the record relay runs the same owner-pays metering + per-member-cap +
   version-floor transaction as a local record and nest-stamps
@@ -597,6 +753,17 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
     `caller_access` on every federated folder read reply and beside `access` on
     the Welcome relay, nest-authoritative on both as `access` is. Absent means
     *not stated* — never *full*.
+  - **The `reachable` stamp (ratified 2026-11-07; BUILT 2026-11-07, its Media consumer BUILT the same day — `ui/media.md` § Implementation status today, the foreign browse scope bullet).** The
+    folder's content-reachability verdict — the home nest's own
+    `chunk_relay::folder_content_reachable` of the row, the one verdict
+    [`../behavior/file-sync.md`](../behavior/file-sync.md) § Content reachability
+    defines — rides beside `residency` on the change-log fetch reply
+    (`fauna.federation.folder.changes.fetch`), always stated by a nest that has
+    it, and the member's nest relays it verbatim onto `fauna.sync.changes.list`'s
+    reply, interpreting nothing. Its one consumer is the member's Media page,
+    which paints it as a foreign set's `media-source-status`
+    ([`../ui/media.md`](../ui/media.md) § Cross-nest shared sets, which owns the
+    reading of an absent stamp). Additive, like every stamp here.
 - **Recipient-side access discovery (ratified 2026-07-20; seed + refresh wire
   BUILT 2026-07-22).**
   Two wire-additive deltas, no new kind:
@@ -961,13 +1128,36 @@ The entries below moved verbatim from [`federation.md`](federation.md) § Implem
   fifth latest-wins advisory pair (accept: `join_folder_welcome`; refresh:
   `custody::refresh_foreign_set_from_reply`); `fauna_core::format::
   qualified_handle` joins it for `FolderPendingShare.shared_by_display` and
-  `on_demand_presence::held_sets`. Pinned at tier 1 (the formatter, the merge,
+  `on_demand_presence::held_sets`, and (2026-11-07) for the accepted foreign
+  row's `FolderSummary.owner_display` — the Folders list's "Shared by" badge —
+  through `ForeignSetRow`'s `owner_handle`/`owner_domain` in
+  `DevicesMachine::foreign_rows`. Pinned at tier 1 (the formatter, the merge,
   the custody refresh, the pending-share label, `held_sets`, the relay's
   warm/cold/mismatch cases in `folder_handlers`' tests) and against two real
   nests in `conformance_cross_nest_conversations_client.rs` (an honest pair
   arrives, a domain resolving to another nest's key and a non-folder relay
   carry none; a production share records the pair and the relayed read
   forwards it).
+- **BUILT 2026-11-07 — the folder roster names a cross-nest member**
+  (§ Cross-nest shared folders + channel append, the id→handle bullet → *The
+  folder roster*): the recipient's nest stamps `recipient_handle` /
+  `recipient_domain` on `FedWelcomeDeliverReply` for a folder relay (the
+  `fauna.federation.welcome.deliver` handler, through
+  `federation_handlers::local_name_stamp`, the owner label's stamp
+  generalised); the set's home records the pair through
+  `federation_handlers::record_welcomed_member_name` —
+  `well_formed_asserted_name` → `bind_domain_to_origin`, awaited inline, then
+  `CacheDb::record_foreign_member_handle` — right after
+  `register_foreign_channel_member` in `welcome_deliver_core`'s relay branch;
+  `folder_handlers::actor_roster_for_channel` joins
+  `CacheDb::foreign_member_handle` into each `remote` row's `handle` and
+  additive `domain`, which `folder_actors_fetch_handler` blanks; tui, linux,
+  the FFI `display` and web (the wasm `qualifiedHandle` face) join through
+  `qualified_handle`. The standing `channel.fetch` announce needed nothing
+  new. Pinned in `folder_handlers`' tests (the projection), in
+  `conformance_cross_nest_conversations_client.rs` (the reply's pair; the
+  inline record on a real share) and on tui by
+  `test_folder_cross_nest_member_reads.py`.
 - **BUILT 2026-09-29 — the cross-nest writer roster read**
   (§ Cross-nest shared folders + channel append → *The cross-nest writer roster
   read*): `fauna.federation.folder.actors.fetch`
@@ -1051,6 +1241,7 @@ The entries below moved verbatim from [`federation.md`](federation.md) § Implem
   channel's slot, and a rested value that fails to decode as one is forgotten
   (a hold lost once, inside the 0.1.x compat-free window). Pinned by
   `fauna_mls_backend_tests.rs::the_rested_folder_park_holds_the_whole_set_across_a_relaunch`.
+- **Ratified 2026-11-07, parts (a), (b) and (c) BUILT and witnessed on tui — a forked seat is final, says so, and heals only by a fresh Welcome** (§ Cross-nest shared folders + channel append → *A forked seat is final, says so, and heals only by a fresh Welcome*). **Built (2026-11-07):** a `Stalled { future_epoch: true }` on the folder walk (`poll_inbound_folder`) marks the seat forked in the engine's per-channel slot `fauna:folder_seat_forked:<channel>` (`MlsEngine::mark_folder_seat_forked`, carrying whether a policy-refused memo stood at the seat's epoch; read back by `FaunaMlsBackend::folder_seat_forked`; dropped by `forget_group`), a walk the hold stopped marks nothing, and the first marking drops the member's own roster row through `FolderCustodySink::unlist_forked_seat` (the native sink's `FoldersClient::leave_with_home`, relayed to the recorded home), recorded in the mark once it lands and asked again on the next marking pass until then — nothing local is forgotten. The reading reaches the apps as `FolderSummary::seat_forked`, painted by `DevicesMachine` from `MlsQuery::is_forked_shared_set` (default `false`); tui answers it from its engine and renders the badge's third text; the other six apps answer it too (`SessionMlsQuery` for the UniFFI apps, `LinuxMlsQuery`, the web `foldersIsForked` bridge) and render the same text (built 2026-11-07). **Built (2026-11-07), part (c):** `join_folder_welcome` reads "held" from the engine's durable group (`MlsEngine::has_group`) as well as the RAM-only folder marker, so it decides the same after a relaunch, and asks `MlsEngine::classify_welcome_address` (the pre-decrypt `ensure_addressed_to_this_device`, then the spent record) before any join: `Spent` → ack, join nothing; `NotHeld` → `Err(BackendError::WelcomeNotAddressedHere)`, retained un-acked by the drain; a live one on a seat marked forked or inactive → `MlsEngine::drop_seat_for_reinvite` (the group deleted from the provider, which openMLS needs before it stages a Welcome for the same group id, then `forget_group`), the join, the owner marker from the new sender, and the next folder walk restarting its cursor at 0 (`FaunaMlsBackend::folder_cursor_resets`); a live one on a current seat → `Err`, retained un-acked by the drain until the walk folds the removal. Pinned by `fauna_mls_backend_tests.rs::a_re_delivered_folder_welcome_acks_and_joins_nothing_across_a_relaunch`, `…::a_fresh_folder_welcome_replaces_a_forked_seat_after_a_relaunch`, `…::a_fresh_folder_welcome_for_a_current_seat_is_retained_then_joins`, `…::a_fresh_folder_welcome_for_an_evicted_seat_joins` and `engine.rs::the_welcome_discriminator_reads_live_spent_and_not_held`. **Built (2026-11-07) — the spent-package record:** both join doors (`MlsEngine::join_from_welcome`, `join_from_welcome_bytes`) record the ref `ensure_addressed_to_this_device` found under `fauna:spent_key_package:<ref>` (one constant byte) in the same provider save as the group; `forget_group` and `drop_seat_for_reinvite` leave it, and the whole-KV launch swap keeps the union of both sides' records, so a join made after the restored snapshot was sealed stays recorded. `classify_welcome_address` answers `WelcomeAddress::{Live, Spent, NotHeld}` (the bool `welcome_addresses_live_key_package` is retired), and the folder path's own join maps the engine's `NotAddressedToThisDevice` to `WelcomeNotAddressedHere` as `ingest_welcome` does. Pinned by `engine.rs::a_consumed_key_package_ref_is_recorded_spent_and_survives_reload`, `fauna_mls_backend_tests.rs::a_folder_welcome_for_a_package_this_device_never_held_is_retained` and `…::a_re_delivered_original_acks_on_a_device_that_restored_the_siblings_join`. The conversation path's held-channel guard (`ingest_welcome`) still acks on a bound, active seat without asking the package; it may adopt the classification later. **Built (2026-11-08) — a forked same-nest seat keeps its row:** part (b)'s unlist drops the member's roster row, so the nest's folder list stops naming a same-nest set; `DevicesMachine::keep_forked_member_rows` remembers every member row the list returns and appends a remembered row the list stopped naming, painted `seat_forked`, while `MlsQuery` reads its seat joined and forked — a leave (not joined) or a fresh Welcome (not forked) lets it go and the re-invited roster row lists it from the nest again (a cross-nest set keeps its member-side `ForeignSetRow` and never needed this). Pinned by `devices_lifecycle.rs::a_forked_same_nest_seat_keeps_its_row_after_its_roster_row_is_dropped` and `…::a_healed_seat_lists_once_from_the_nest_again`. **Built (2026-11-08) — the kept row survives a relaunch:** the memory above is the in-process fast path; its durable twin is a member-side `ForkedFolderSeat` record in the member's folder-key custody (`FoldersConfig::forked_seats`, a `forked/<channel hex64>` row of `fauna.state.folder-keys`), written by the custody sink just before the same-nest self-unlist (`NestFolderCustodySink::do_unlist_forked_seat` reads the rendered member-visible list first and keeps the set name, owner handle and actor id and access it shows; a cross-nest set records none) and tombstoned by `FolderCustodySink::clear_forked_seat` — called on a leave (`FaunaMlsBackend::leave_folder`) and when a fresh Welcome replaces a forked seat (`join_folder_welcome`). `DevicesMachine::forked_seat_rows` unions the live records read through `ForeignSetsSource::forked_seats` (the shared `CustodyForeignSetsSource`, so every app wiring the foreign-set source gets it) as member rows painted `seat_forked` while `MlsQuery` reads the seat joined and forked, skipping any group the nest's list or the memory already carries. Pinned by `devices_lifecycle.rs::a_forked_same_nest_seat_keeps_its_row_across_a_relaunch_from_its_record`, `custody.rs::a_forked_seat_record_is_written_kept_cleared_and_revived`, `custody_ingest.rs::a_same_nest_forked_seat_unlist_records_its_row_first_and_the_clear_tombstones_it` and the clear assertion in `fauna_mls_backend_tests.rs::a_fresh_folder_welcome_replaces_a_forked_seat_after_a_relaunch`. **Built (2026-11-08) — witnessed on tui:** the e2e witness of the `tui:4366` fork healed by the owner's re-share, `test_folder_succession_member_reader.py::test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shared_and_catches_up`, passes on tui with no xfail (the fork, the badge's third text, the successor's list dropping M, the re-share, M's row back to "Shared by", the successor's later file arriving — no relaunch of M). Its earlier 2026-11-08 run passed step 4 (M keeps the row, the badge reads the third text, M's unlist lands `left=true`) and was red on the next: the successor's "Shared with" list still counted one member — the owner's RETIRED identity, whose seat on its own set the succession leaves (`actor_channels` is `Stay`) and the successor's own seating through `channel.send` never retired. **Fixed 2026-11-08:** the claimant's auto-register retires a seated local predecessor's row whether it seats a member's successor or itself (`writer-signed-change-records.md` ruling (8)(j)(2)), pinned by `folder_handlers.rs::a_succeeded_owner_whose_member_left_lists_no_member`; the strict xfail is removed.
 - **Cross-nest shared folders + channel append — NEST PLANE BUILT
   (2026-07-19, Phase 2 first slice; § Cross-nest shared folders + channel
   append above is no longer fully "unbuilt").** The four kinds serve with the

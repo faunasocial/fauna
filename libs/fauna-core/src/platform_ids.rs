@@ -263,7 +263,10 @@ pub fn sync_state_base() -> Option<PathBuf> {
     // back to the passwd database.
     #[cfg(target_os = "macos")]
     {
-        macos_sync_state_base(std::env::home_dir())
+        macos_sync_state_base(macos_install_home(
+            e2e_install_home_override(),
+            std::env::home_dir(),
+        ))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -286,6 +289,45 @@ pub fn sync_state_base() -> Option<PathBuf> {
 /// (`installers/macos.md` § Identifier domain, item 5).
 pub fn macos_sync_state_base(home: Option<PathBuf>) -> Option<PathBuf> {
     Some(apple_user_domain_home(home)?.join("Fauna").join("sync"))
+}
+
+/// The home the macOS **install-scoped** state hangs off: the e2e override
+/// when one is present and POSIX-absolute, else the user's home. Pure (both
+/// values passed in), so tests never mutate process env.
+///
+/// In production the override never exists ([`e2e_install_home_override`] is
+/// compiled to `None`), so this is the user's home and nothing changes.
+///
+/// The e2e override is the home CoreFoundation resolves `Application Support`
+/// from (`CFFIXED_USER_HOME`). FaunaKit's `AccountStateDir.base` (the MLS
+/// store, and the `state_base` the instance-lock and custodian calls are keyed
+/// on) already follows it, so Rust's state base following it too keeps the two
+/// siblings under one `Application Support`, as an erase sweeping both expects.
+/// It lets two e2e seats of one account on one OS user share a `HOME`, and with
+/// it the agent socket and the conversations door (`fauna_ipc`'s
+/// `default_socket_path`, which reads `HOME` and never this), while each keeps
+/// its own account store and its own locks. That is linux's shape, where two
+/// seats share `XDG_RUNTIME_DIR` (the sockets) but not `XDG_CONFIG_HOME` (the
+/// state): `conversations-oracle.md` § The custodian and the door.
+pub fn macos_install_home(e2e_override: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    e2e_override.filter(|h| is_posix_absolute(h)).or(home)
+}
+
+/// `CFFIXED_USER_HOME`, read only under `debug_assertions` or the
+/// `e2e-agent` feature: compile-gated outer, env inner (e2e convention 15). A
+/// release build never reads it, and an unset value means no override.
+#[cfg(target_os = "macos")]
+fn e2e_install_home_override() -> Option<PathBuf> {
+    #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+    {
+        std::env::var_os("CFFIXED_USER_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+    {
+        None
+    }
 }
 
 /// Pure XDG resolution of [`sync_state_base`] on linux and other unix (env
@@ -355,6 +397,44 @@ mod tests {
         for home in [None, Some("".into()), Some("rel".into())] {
             assert_eq!(macos_sync_state_base(home), None);
         }
+    }
+
+    #[test]
+    fn macos_install_home_takes_an_absolute_override_and_otherwise_the_home() {
+        let home = Some(PathBuf::from("/Users/alice"));
+        // No override (every production build): the user's home, unchanged.
+        assert_eq!(macos_install_home(None, home.clone()), home);
+        // An absolute override relocates the state base, and only that.
+        let seat = Some(PathBuf::from("/tmp/seat-2/home"));
+        assert_eq!(macos_install_home(seat.clone(), home.clone()), seat);
+        assert_eq!(
+            macos_sync_state_base(macos_install_home(seat, home.clone())).unwrap(),
+            Path::new("/tmp/seat-2/home/Library/Application Support/Fauna/sync")
+        );
+        // An empty or relative override is ignored: never a relative base.
+        for bad in [Some("".into()), Some("rel".into())] {
+            assert_eq!(macos_install_home(bad, home.clone()), home);
+        }
+    }
+
+    #[test]
+    fn two_seats_sharing_a_home_but_not_an_install_home_get_two_state_bases() {
+        // The second e2e seat of one account: HOME shared with the first (so the
+        // agent socket and the door, derived from HOME alone, are shared), the
+        // install home its own. The state bases, and every lock keyed under them,
+        // must differ, or the second seat would find the first one's instance
+        // lock held and never come up as a separate signed-in app.
+        let shared = Some(PathBuf::from("/tmp/seat-1/home"));
+        let first = macos_sync_state_base(macos_install_home(shared.clone(), shared.clone()));
+        let second = macos_sync_state_base(macos_install_home(
+            Some("/tmp/seat-2/home".into()),
+            shared.clone(),
+        ));
+        assert_ne!(first, second);
+        // The socket's dir is the shared home's, whichever seat asks.
+        let socket_dir = apple_user_domain_home(shared).unwrap().join("Fauna");
+        assert_eq!(first.unwrap().parent().unwrap(), socket_dir);
+        assert_ne!(second.unwrap().parent().unwrap(), socket_dir);
     }
 
     #[test]

@@ -4,6 +4,9 @@ title: Train your own topics
 section: family and personalization
 goal: docs/goal/behavior/topic-factors.md § Goal
 guide: docs/guides/app-tour.md § Personalization
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -16,14 +19,14 @@ subscribe to it can sort the posts they see according to it.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e5a7e5d758.
+Stamped 2026-11-07 at 925fa56976.
 
 1. [app] Training re-ranks the feed, and the example marker and model survive a reload — `docs/goal/behavior/topic-factors.md` § Training signals
    - `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload`
 2. [app] A trained topic publishes as a list labeler, or as a text model that generalizes — `docs/goal/behavior/topic-factors.md` § Publishing a trained factor
    - `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_pruned_list_labeler`
    - `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model`
-3. [app] A publish error is shown and clears on a fresh attempt — `docs/goal/behavior/topic-factors.md` § Publishing a trained factor
+3. [app] A publish error is shown, stays while the sheet is open through unrelated actions, and clears on a fresh attempt — `docs/goal/behavior/topic-factors.md` § Publishing a trained factor
    - `tests/e2e-unified/tests/test_trained_topics.py::test_publish_name_too_long_error_survives_unrelated_rerender`
    - `tests/e2e-unified/tests/test_trained_topics.py::test_publish_error_clears_on_fresh_sheet_reopen`
 4. [app] Your topics are listed with their names and how many examples each has learned from, and you create a new one by name — `docs/goal/behavior/topic-factors.md` § Authoring surface & picker
@@ -72,6 +75,14 @@ Stamped 2026-10-01 at e5a7e5d758.
    - `tests/e2e-unified/tests/api/test_personalization_sealed_at_rest.py::test_a_published_model_is_built_only_from_marked_public_posts`
 25. [app] Publishing a topic as a list tells you that a list covers only the posts you have seen — `docs/goal/behavior/topic-factors.md` § Publishing a trained factor
    - `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_pruned_list_labeler`
+26. [app] A topic trained on another of your devices shows on an open Personalization page without leaving it — `docs/goal/architecture/account-runtime.md` § Multi-instance concurrency
+   - `tests/e2e-unified/tests/test_trained_topics.py::test_a_topic_made_on_another_device_shows_on_an_open_personalization_page`
+27. [app] A feed ranked by a trained topic keeps loading older posts as you scroll, like the plain feed — `docs/goal/behavior/topic-factors.md` § Scoring — the client-side sealed-factor compose seam (feed)
+   - `tests/e2e-unified/tests/test_trained_topics.py::test_a_topic_ranked_feed_keeps_paging_past_its_first_page`
+28. [nest] The nest refuses a published text model that claims fewer than three documents or whose phrases could quote a whole sentence — `docs/goal/behavior/topic-factors.md` § Publishing a trained factor
+   - `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_the_nest_refuses_a_text_model_below_the_document_floor_or_quoting_a_sentence`
+29. [app] Publishing a topic as a text model shows how many public examples of your marked posts built it, and says the model is pseudonymous and reflects explicit examples only, never your activity — `docs/goal/behavior/topic-factors.md` § Publishing a trained factor
+   - `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model`
 
 ## Status
 
@@ -80,22 +91,24 @@ Stamped 2026-10-01 at e5a7e5d758.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| macos | ⚠ partial | 0.1.5-dev+17f01f46 standalone |
-| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| macos | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+cfe1a17b.dirty standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_pruned_list_labeler` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_publish_name_too_long_error_survives_unrelated_rerender` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_publish_error_clears_on_fresh_sheet_reopen` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_renaming_a_trained_topic_keeps_its_learning_and_a_deleted_topics_feed_keeps_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_renaming_a_trained_topic_keeps_its_learning_and_a_deleted_topics_feed_keeps_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_and_come_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_and_come_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -117,4 +130,8 @@ Stamped 2026-10-01 at e5a7e5d758.
 | 23 | nest | `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_publishing_a_listed_topic_again_as_a_model_keeps_the_labeler_and_its_subscribers` | nest (linux): passed, nest (macos): passed |
 | 24 | nest | `tests/e2e-unified/tests/api/test_personalization_sealed_at_rest.py::test_a_published_model_is_built_only_from_marked_public_posts` | nest (linux): passed, nest (macos): passed |
 | 25 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_pruned_list_labeler` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 26 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_a_topic_made_on_another_device_shows_on_an_open_personalization_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 27 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_a_topic_ranked_feed_keeps_paging_past_its_first_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 28 | nest | `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_the_nest_refuses_a_text_model_below_the_document_floor_or_quoting_a_sentence` | nest (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

@@ -1240,6 +1240,8 @@ pub async fn custodied_fleet_auth_core(
     nest_id_hex: &str,
 ) -> Result<TokenMint, AuthError> {
     let refused = || AuthError::NotRegistered("no held custody".into());
+    #[cfg(feature = "test-hooks")]
+    state.custodied_fleet_handshakes.asked();
 
     // 1. Parse identities; the blob must be addressed to THIS nest.
     let owner_bytes =
@@ -1329,6 +1331,8 @@ pub async fn custodied_fleet_auth_core(
         .token_store
         .insert_with_metadata(actor_id, TOKEN_TTL_SECS, None, Some(device_bytes))
         .await;
+    #[cfg(feature = "test-hooks")]
+    state.custodied_fleet_handshakes.admitted();
 
     let now_secs = now_ms / 1000;
     Ok(TokenMint {

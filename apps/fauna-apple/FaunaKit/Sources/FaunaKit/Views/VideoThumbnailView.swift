@@ -18,6 +18,10 @@ import SwiftUI
 public struct VideoThumbnailView: View {
     /// The element's text: a blob video's hash, or a bridged video's nest-relative path.
     public let text: String
+    /// The video's label (render-model.md § D6c → *Proxied video*, the `alt` paragraph): its
+    /// author's description or the shared fixed text, settled by ``documentMediaElements(_:)``.
+    /// Published as the element's `alt` attribute and spoken as its accessibility label.
+    public let alt: String?
     private let resolve: (() async -> VideoPlaybackMedia?)?
     /// Each position the player reports with its duration, in seconds — the feed card's
     /// hand-off to the engagement-cue capture (`FfiCueTracker.notePlayed`); absent off the feed.
@@ -28,10 +32,11 @@ public struct VideoThumbnailView: View {
 
     /// - Parameter resolve: what plays for this video, `nil` when nothing plays. Absent →
     ///   the thumbnail stays inert (no host wired the projection).
-    public init(hash: String, resolve: (() async -> VideoPlaybackMedia?)? = nil,
+    public init(hash: String, alt: String? = nil, resolve: (() async -> VideoPlaybackMedia?)? = nil,
                 onPlayed: ((Double, Double) -> Void)? = nil,
                 onPlaying: ((Bool) -> Void)? = nil) {
         self.text = hash
+        self.alt = alt
         self.resolve = resolve
         self.onPlayed = onPlayed
         self.onPlaying = onPlaying
@@ -41,10 +46,11 @@ public struct VideoThumbnailView: View {
     /// opaque nest-relative `path` as text, never parsed. A tap plays the ticketed `Url` the shared
     /// `playback_source` answers for it (§ D6c → *Inline playback*, answer 1) — `resolve` is the
     /// view model's turn of that answer into what the player opens; absent, the thumbnail stays inert.
-    public init(proxiedPath: String, resolve: (() async -> VideoPlaybackMedia?)? = nil,
+    public init(proxiedPath: String, alt: String? = nil, resolve: (() async -> VideoPlaybackMedia?)? = nil,
                 onPlayed: ((Double, Double) -> Void)? = nil,
                 onPlaying: ((Bool) -> Void)? = nil) {
         self.text = proxiedPath
+        self.alt = alt
         self.resolve = resolve
         self.onPlayed = onPlayed
         self.onPlaying = onPlaying
@@ -79,6 +85,7 @@ public struct VideoThumbnailView: View {
             }
         }
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(alt ?? "")
         .accessibilityIdentifier(Ids.videoThumbnail)
         .automationActivate(
             Ids.videoThumbnail,
@@ -87,6 +94,7 @@ public struct VideoThumbnailView: View {
                 ["state": playback.phase.rawValue,
                  "position": String(format: "%.3f", playback.position),
                  "source": playback.source ?? ""]
+                    .merging(alt.map { ["alt": $0] } ?? [:]) { current, _ in current }
             },
             perform: activate
         )

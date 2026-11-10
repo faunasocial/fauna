@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import secrets
 import struct
+import urllib.error
+import urllib.request
 import zlib
 from pathlib import Path
 
 import pytest
 
 from actions.media import MediaActions
-from common.auth import user_folders_list
+from common.auth import sync_changes_list, user_folders_list
 from helpers import budgets
 from helpers.set_names import find_set
 from helpers.waiting import (
@@ -49,7 +51,7 @@ def _png_chunk(kind: bytes, data: bytes) -> bytes:
 
 
 def a_real_png(path: Path, *, tag: str, metadata: bool = False,
-               pixel_from: str | None = None) -> Path:
+               pixel_from: str | None = None, exif: bytes | None = None) -> Path:
     """Write a genuine 1x1 PNG. Small, but a real decodable image — PhotoKit
     refuses to import bytes it cannot parse, so a fake payload would fail at
     `simctl addmedia` rather than at anything a test is about.
@@ -64,6 +66,11 @@ def a_real_png(path: Path, *, tag: str, metadata: bool = False,
     `process.rs:519`). That is what makes a strip observable at all: on
     metadata-free input a lossless strip is a no-op by definition, so a fixture
     with nothing to strip cannot tell a working stripper from a missing one.
+
+    ``exif`` (with ``metadata=True``) replaces the bare canary as the ``eXIf``
+    payload — :func:`a_camera_exif` builds the genuine TIFF a camera writes, with
+    a location and a camera make/model, for the witness whose outcome names
+    exactly those two kinds of metadata.
     """
     def chunk(kind: bytes, data: bytes) -> bytes:
         return _png_chunk(kind, data)
@@ -86,12 +93,90 @@ def a_real_png(path: Path, *, tag: str, metadata: bool = False,
     png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
     if metadata:
         # Between IHDR and IDAT, which is where a camera writes them.
-        png += chunk(b"eXIf", EXIF_CANARY)
+        png += chunk(b"eXIf", exif if exif is not None else EXIF_CANARY)
         png += chunk(b"tEXt", b"Comment\x00" + EXIF_CANARY)
     png += chunk(b"IDAT", idat) + chunk(b"IEND", b"")
     out = path / f"fauna-photo-{tag}.png"
     out.write_bytes(png)
     return out
+
+
+#: The EXIF tags :func:`a_camera_exif` writes, by the IFD that holds them
+#: (TIFF 6.0 / EXIF 2.32 tag numbers): the camera's make and model in IFD0, the
+#: pointer to the GPS IFD, and the GPS IFD's latitude and longitude.
+EXIF_MAKE, EXIF_MODEL, EXIF_GPS_IFD = 0x010F, 0x0110, 0x8825
+GPS_LATITUDE_REF, GPS_LATITUDE, GPS_LONGITUDE_REF, GPS_LONGITUDE = 1, 2, 3, 4
+
+
+def a_camera_exif() -> bytes:
+    """A genuine little-endian TIFF EXIF block such as a phone camera writes:
+    ``Make``/``Model`` in IFD0 (the camera — the model string is
+    :data:`EXIF_CANARY`, so the block stays findable) and a GPS IFD with a
+    latitude and a longitude (the location).
+
+    A real structure rather than an opaque payload, so the photo the library
+    holds is one any EXIF reader would report a location for — the thing
+    `docs/features/photo-backup.md` outcome 10 says must not leave the phone.
+    :func:`exif_tags` reads it back, which is how a test guards that the
+    fixture really carries what it claims.
+    """
+    ascii_t, long_t, rational_t = 2, 4, 5
+
+    def ifd(entries: list[tuple[int, int, int, bytes]], at: int) -> tuple[bytes, bytes]:
+        """``(directory, data area)`` for an IFD written at offset ``at``; a value
+        over four bytes goes to the data area right after the directory."""
+        data_at = at + 2 + 12 * len(entries) + 4
+        directory, data = struct.pack("<H", len(entries)), b""
+        for tag, kind, count, value in entries:
+            if len(value) <= 4:
+                field = value.ljust(4, b"\x00")
+            else:
+                field = struct.pack("<I", data_at + len(data))
+                data += value + (b"\x00" if len(value) % 2 else b"")
+            directory += struct.pack("<HHI", tag, kind, count) + field
+        return directory + struct.pack("<I", 0), data
+
+    def rationals(*pairs: tuple[int, int]) -> bytes:
+        return b"".join(struct.pack("<II", n, d) for n, d in pairs)
+
+    make, model = b"FaunaTestCam\x00", EXIF_CANARY + b"\x00"
+    gps_entries = [
+        (GPS_LATITUDE_REF, ascii_t, 2, b"N\x00"),
+        (GPS_LATITUDE, rational_t, 3, rationals((59, 1), (54, 1), (3021, 100))),
+        (GPS_LONGITUDE_REF, ascii_t, 2, b"E\x00"),
+        (GPS_LONGITUDE, rational_t, 3, rationals((10, 1), (45, 1), (1784, 100))),
+    ]
+    # IFD0's size does not depend on where the GPS IFD lands, so lay it out once
+    # with a placeholder pointer to learn where its data area ends.
+    ifd0_entries = [
+        (EXIF_MAKE, ascii_t, len(make), make),
+        (EXIF_MODEL, ascii_t, len(model), model),
+        (EXIF_GPS_IFD, long_t, 1, struct.pack("<I", 0)),
+    ]
+    directory, data = ifd(ifd0_entries, 8)
+    gps_at = 8 + len(directory) + len(data)
+    ifd0_entries[2] = (EXIF_GPS_IFD, long_t, 1, struct.pack("<I", gps_at))
+    directory, data = ifd(ifd0_entries, 8)
+    gps_directory, gps_data = ifd(gps_entries, gps_at)
+    return b"II*\x00" + struct.pack("<I", 8) + directory + data + gps_directory + gps_data
+
+
+def exif_tags(tiff: bytes) -> dict[str, set[int]]:
+    """The tag numbers of a little-endian TIFF EXIF block's IFD0 and GPS IFD —
+    the read-back that keeps :func:`a_camera_exif`'s claim honest."""
+    assert tiff[:4] == b"II*\x00", f"not a little-endian TIFF: {tiff[:4]!r}"
+
+    def tags_at(at: int) -> dict[int, int]:
+        (n,) = struct.unpack_from("<H", tiff, at)
+        out = {}
+        for i in range(n):
+            tag, _kind, _count, value = struct.unpack_from("<HHII", tiff, at + 2 + 12 * i)
+            out[tag] = value
+        return out
+
+    ifd0 = tags_at(struct.unpack_from("<I", tiff, 4)[0])
+    gps = tags_at(ifd0[EXIF_GPS_IFD]) if EXIF_GPS_IFD in ifd0 else {}
+    return {"ifd0": set(ifd0), "gps": set(gps)}
 
 
 def png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
@@ -345,6 +430,47 @@ def photo_library_set(port: int, secret_key: str) -> str:
     """
     rows = user_folders_list(port, secret_key=secret_key).get("folders", [])
     return PHOTO_LIBRARY_SET if find_set(rows, PHOTO_LIBRARY_SET) else ""
+
+
+#: Above any copy of the one-pixel fixtures and below every stock photo the
+#: simulator's library ships (megabytes): how a witness tells its own uploads
+#: from the rest of the library a pass backs up with them.
+FIXTURE_CEILING_B = 64 * 1024
+
+
+def fixture_creates(port: int, secret_key: str, folder: str) -> list[dict]:
+    """The photo-library set's recorded creates of fixture size, oldest first.
+
+    Picked out by size, not by path or a high-water mark: ``SyncChange.path``
+    travels sealed (``path_sealed``), and enabling backup starts a pass at once,
+    so there is no quiet moment before the uploads to measure from. A pass backs
+    up the WHOLE library, stock photos included, and those are megabytes.
+    """
+    changes = sync_changes_list(port, secret_key=secret_key, folder=folder).get("changes", [])
+    ours = [c for c in changes
+            if c.get("change_type") == "create"
+            and (c.get("size_bytes") or 0) < FIXTURE_CEILING_B]
+    return sorted(ours, key=lambda c: c.get("seq", 0))
+
+
+def rest_bytes(nest_url: str, route: str, hash_hex: str) -> bytes | None:
+    """What the nest serves for ``/api/v1/<route>/<hash>`` — the exact bytes the
+    phone uploaded — or ``None`` on a 404 (the nest holds nothing there).
+
+    Fetched with NO credentials over the raw bulk-binary plane, as anyone who
+    learned the hash would: what rests on the nest is the question, and a client
+    helper opening it with the owner's keys would answer a different one.
+    """
+    try:
+        with urllib.request.urlopen(
+            f"{nest_url.rstrip('/')}/api/v1/{route}/{hash_hex}",
+            timeout=budgets.RPC_ROUNDTRIP_S,
+        ) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
 
 
 def a_tag() -> str:

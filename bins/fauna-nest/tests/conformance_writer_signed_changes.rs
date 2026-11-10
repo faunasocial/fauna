@@ -1900,8 +1900,9 @@ async fn the_owner_row_carries_the_owners_succession_chain_oldest_first() {
         "which is what proves the predecessor to a reader"
     );
     assert!(
-        carried(&members, a0.actor_id().0).is_empty(),
-        "the retired id's stale seat is a reader-access row: it carries none"
+        seat(&members, a0.actor_id().0).is_none(),
+        "the successor's own registration retired the predecessor's seat \
+         (register_successor_carrying_seat): the chain rides the owner row alone: {members:?}"
     );
 
     // A second hop: both statements, oldest first.
@@ -2277,7 +2278,7 @@ async fn a_member_reader_admits_succeeded_writers_earlier_rows_and_refuses_a_str
             set_nonce: Some(NONCE),
             ..Default::default()
         });
-        r.install_roster(writer_roster(&members));
+        r.install_roster(writer_roster(&members, &[]));
         let hash = fauna_core::hex32::encode(&fauna_core::sync::path_hash("member.jpg"));
         let row = page.changes.iter().find(|c| c.path_hash == hash).unwrap();
         assert!(
@@ -2318,7 +2319,7 @@ async fn a_member_reader_admits_succeeded_writers_earlier_rows_and_refuses_a_str
             ..Default::default()
         });
         r.ingest_certs(&page.signer_certs);
-        r.install_roster(writer_roster(members));
+        r.install_roster(writer_roster(members, &[]));
         r
     };
 
@@ -3026,5 +3027,187 @@ async fn a_resolved_report_whose_winner_is_the_head_charges_only_the_loser() {
         used(&state, &owner).await,
         LOSER + S2,
         "the head's bytes are released once"
+    );
+}
+
+// ── Ruling (12): a writer's rows outlive the grant ─────────────────────────
+// The nest keeps the ever-a-writer bit and the roster read carries the former
+// writers apart from the membership (`writer-signed-change-records.md` ruling
+// (12)(c)).
+
+/// The whole actor-roster reply, as `caller`.
+async fn roster_reply(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    caller: &ActorKeypair,
+) -> ActorMembersListReply {
+    call(
+        router,
+        state,
+        caller.actor_id().0,
+        "fauna.folders.members.list_actors",
+        ActorMembersListRequest {
+            name: SET.into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("list_actors")
+}
+
+fn former_ids(reply: &ActorMembersListReply) -> Vec<String> {
+    reply
+        .former_writers
+        .iter()
+        .map(|f| f.actor_id.clone())
+        .collect()
+}
+
+async fn evict(router: &RpcRouter, state: &Arc<AppState>, owner: &ActorKeypair, who: [u8; 32]) {
+    let reply: fauna_protocol::folders::MemberEvictReply = call(
+        router,
+        state,
+        owner.actor_id().0,
+        "fauna.folders.members.evict",
+        fauna_protocol::folders::MemberEvictRequest {
+            name: SET.into(),
+            member: hex::encode(who),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("evict");
+    assert!(reply.evicted);
+}
+
+/// A demotion keeps the membership as it was — same rows, the member now a
+/// reader — and lists the member under `former_writers`; a re-grant leaves the
+/// bit, so the member is in both lists.
+#[tokio::test]
+async fn a_demoted_writer_is_a_former_writer_beside_an_unchanged_membership() {
+    let (router, state, owner) = nest().await;
+    create_set(&router, &state, &owner, SET, Some(NONCE)).await;
+    let channel = share_set(&router, &state, &owner).await;
+    let writer = member(&state).await;
+    welcome(&router, &state, &owner, &channel, &writer).await;
+    grant_writer(&router, &state, &owner, writer.actor_id().0).await;
+
+    let before = roster_reply(&router, &state, &owner).await;
+    assert!(before.former_writers.is_empty(), "nobody lost a grant yet");
+
+    set_access(&router, &state, &owner, writer.actor_id().0, "reader").await;
+    let after = roster_reply(&router, &state, &owner).await;
+    assert_eq!(former_ids(&after), vec![writer.actor_id().to_hex()]);
+    assert_eq!(after.members.len(), before.members.len());
+    let roles = |r: &ActorMembersListReply| -> Vec<(String, String)> {
+        r.members
+            .iter()
+            .map(|m| (m.actor_id.clone(), m.role.clone()))
+            .collect()
+    };
+    assert_eq!(roles(&after), roles(&before), "the membership is unchanged");
+    assert_eq!(
+        seat(&after.members, writer.actor_id().0)
+            .unwrap()
+            .access
+            .as_deref(),
+        Some("reader")
+    );
+
+    // The member's own read carries the list too (any member reads it).
+    assert_eq!(
+        former_ids(&roster_reply(&router, &state, &writer).await),
+        vec![writer.actor_id().to_hex()]
+    );
+
+    // A re-grant: a current writer again, and still a writer of record.
+    grant_writer(&router, &state, &owner, writer.actor_id().0).await;
+    let regranted = roster_reply(&router, &state, &owner).await;
+    assert_eq!(former_ids(&regranted), vec![writer.actor_id().to_hex()]);
+    assert_eq!(
+        seat(&regranted.members, writer.actor_id().0)
+            .unwrap()
+            .access
+            .as_deref(),
+        Some("writer"),
+        "listed in both"
+    );
+}
+
+/// An evicted writer and a departed one are former writers; an evicted reader
+/// that never held `writer` is not.
+#[tokio::test]
+async fn an_evicted_or_departed_writer_is_listed_and_a_never_writer_is_not() {
+    let (router, state, owner) = nest().await;
+    create_set(&router, &state, &owner, SET, Some(NONCE)).await;
+    let channel = share_set(&router, &state, &owner).await;
+    let evicted = member(&state).await;
+    let departed = member(&state).await;
+    let reader = member(&state).await;
+    for m in [&evicted, &departed, &reader] {
+        welcome(&router, &state, &owner, &channel, m).await;
+    }
+    grant_writer(&router, &state, &owner, evicted.actor_id().0).await;
+    grant_writer(&router, &state, &owner, departed.actor_id().0).await;
+    set_access(&router, &state, &owner, reader.actor_id().0, "reader").await;
+
+    evict(&router, &state, &owner, evicted.actor_id().0).await;
+    evict(&router, &state, &owner, reader.actor_id().0).await;
+    let left: fauna_protocol::folders::MemberLeaveReply = call(
+        &router,
+        &state,
+        departed.actor_id().0,
+        "fauna.folders.leave",
+        fauna_protocol::folders::MemberLeaveRequest {
+            group_id: hex::encode(GROUP),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("leave");
+    assert!(left.left);
+
+    let reply = roster_reply(&router, &state, &owner).await;
+    let mut expected = vec![evicted.actor_id().to_hex(), departed.actor_id().to_hex()];
+    expected.sort();
+    assert_eq!(former_ids(&reply), expected, "in id order");
+    for gone in [&evicted, &departed, &reader] {
+        assert!(
+            seat(&reply.members, gone.actor_id().0).is_none(),
+            "no former member is in the membership"
+        );
+    }
+}
+
+/// A former writer's own succession moves the bit in the ceremony
+/// (`folder_former_writers` is `Move(Plain)`): the successor is listed with
+/// the statement that ends at it, and the shared verifier proves the
+/// predecessor from it — so the predecessor's rows place, and the succession
+/// cut applies to them.
+#[tokio::test]
+async fn a_former_writers_succession_moves_the_bit_with_its_chain() {
+    let (router, state, owner) = nest().await;
+    create_set(&router, &state, &owner, SET, Some(NONCE)).await;
+    let channel = share_set(&router, &state, &owner).await;
+    let w0 = member(&state).await;
+    welcome(&router, &state, &owner, &channel, &w0).await;
+    grant_writer(&router, &state, &owner, w0.actor_id().0).await;
+    evict(&router, &state, &owner, w0.actor_id().0).await;
+
+    let (w1, statement) = succeed(&router, &state, &w0).await;
+    let reply = roster_reply(&router, &state, &owner).await;
+    assert_eq!(former_ids(&reply), vec![w1.actor_id().to_hex()]);
+    let entry = &reply.former_writers[0];
+    assert_eq!(
+        entry
+            .succession_statements
+            .iter()
+            .map(|s| s.to_vec())
+            .collect::<Vec<_>>(),
+        vec![statement]
+    );
+    assert_eq!(
+        proven_predecessors_carried(&w1.actor_id(), &entry.succession_statements),
+        vec![w0.actor_id()]
     );
 }

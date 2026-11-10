@@ -200,7 +200,8 @@ def test_an_explicit_download_dir_override_still_wins(driver, tmp_path):
 # `FAUNA_E2E_DATA_DIR` above closes only the app's OWN flat base. Shared Rust
 # never reads it: `fauna_account_store::root::production_base()` reads
 # `LOCALAPPDATA` and returns `%LOCALAPPDATA%\Fauna\sync`, the unified account-store
-# root that `AccountStateDir.Erase`/`EraseAll` sweep by passing
+# root that the remove-account gesture (`AccountStateDir.RemoveAccountGestureAsync`)
+# and `AccountStateDir.EraseAll` sweep by passing
 # `storeContainer: null` (→ `StoreRoot::platform()`). Until the driver relocated
 # the ancestor, a UI sign-out under e2e ran `remove_dir_all` over EVERY 64-hex
 # actor dir in the developer's real profile. These pin the DEFAULT, for the same

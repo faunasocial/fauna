@@ -7,6 +7,7 @@ struct SearchResultsView: View {
     @Environment(MacAppState.self) private var appState
     @Environment(FeedVM.self) private var feedVM
     @Environment(ConversationsVM.self) private var conversationsVM
+    @Environment(EventsVM.self) private var eventsVM
 
     /// Route a `search-result-item` activation by its typed `SearchNav`
     /// target — the three-part contract (`ui/search.md` § Where logic lives →
@@ -48,6 +49,13 @@ struct SearchResultsView: View {
         case .file(let folderId, let pathHash):
             appState.selectedSidebar = .media
             MediaFileLocate.shared.stage(folderId: folderId, pathHash: pathHash)
+        case .event(let uidHash):
+            // The Events page's `event_detail` for the event the hit names:
+            // the hex `uidHash` IS the Events rows' id, so the page opens it
+            // by `EventsVM.openPendingEvent()` with no locate read — tui's
+            // `open_result` shape (`ui/search.md` § State & data shape).
+            eventsVM.pendingEventOpen = uidHash
+            appState.selectedSidebar = .events
         }
     }
 

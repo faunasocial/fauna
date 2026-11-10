@@ -61,6 +61,8 @@ Stamped 2026-10-13 at 899b58ab1b.
 | ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

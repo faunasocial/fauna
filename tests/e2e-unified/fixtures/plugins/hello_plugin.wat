@@ -16,13 +16,15 @@
 ;;             (account = the first of nest-api.bindings(), or none)
 ;;   handle  → "/s…" spins until the fuel budget ends it
 ;;             "/g…" asks for 128 MiB: 507 when the cap refuses it, 200 when admitted
+;;             "/t…" grows a table by 1 000 000 elements: 507 when refused, 200 when admitted
 ;;             "/w…" 200 with the asserted actor as the body, 401 when anonymous
 ;;             "/h…" 200 answering Clear-Site-Data: "*", Alt-Svc: h3=":443" and
 ;;                   Content-Type: text/plain — the reply-header filter's probe
 ;;             else 404
 ;;
 ;; Memory map: data in page 0 (strings from 1024), scratch return areas at
-;; 2048–2560, the bump heap from page 1.
+;; 2048–2560 (2400 takes every `state.put` result, unread), the bump heap from
+;; page 1.
 (module
   (import "fauna:plugin/nest-api@0.1.0" "call"
     (func $call (param i32 i32 i32 i32 i32 i32 i32 i32)))
@@ -31,9 +33,9 @@
   (import "fauna:plugin/state@0.1.0" "get"
     (func $state_get (param i32 i32 i32)))
   (import "fauna:plugin/state@0.1.0" "put"
-    (func $state_put (param i32 i32 i32 i32)))
+    (func $state_put (param i32 i32 i32 i32 i32)))
   (import "fauna:plugin/state@0.1.0" "delete"
-    (func $state_delete (param i32 i32)))
+    (func $state_delete (param i32 i32 i32)))
   (import "fauna:plugin/holder@0.1.0" "public-key"
     (func $public_key (param i32)))
   (import "fauna:plugin/holder@0.1.0" "open-grant"
@@ -46,6 +48,9 @@
     (func $log (param i32 i32 i32)))
 
   (memory (export "memory") 2)
+  ;; A table no element ever fills: "/t…" asks it to grow past the sandbox's
+  ;; element cap.
+  (table $grown 1 funcref)
   (global $heap (mut i32) (i32.const 65536))
 
   (data (i32.const 1024) "fauna.capabilities.fetch")      ;; 24
@@ -98,7 +103,8 @@
     ;; holder.public-key → (ptr,len) at 2048
     (call $public_key (i32.const 2048))
     (call $state_put (i32.const 1160) (i32.const 3)
-                     (i32.load (i32.const 2048)) (i32.load (i32.const 2052)))
+                     (i32.load (i32.const 2048)) (i32.load (i32.const 2052))
+                     (i32.const 2400))
     ;; nest-api.bindings → (ptr,len) at 2064; take the first account if any
     (call $bindings (i32.const 2064))
     (if (i32.load (i32.const 2068))
@@ -111,20 +117,24 @@
     (call $call (local.get $acc_disc) (local.get $acc_ptr) (local.get $acc_len)
                 (i32.const 1024) (i32.const 24) (i32.const 1088) (i32.const 1)
                 (i32.const 2080))
-    (call $state_put (i32.const 1168) (i32.const 5) (i32.const 2080) (i32.const 1))
+    (call $state_put (i32.const 1168) (i32.const 5) (i32.const 2080) (i32.const 1)
+                     (i32.const 2400))
     ;; nest-api.call(account, "fauna.feed.posts", {}) → result at 2112
     (call $call (local.get $acc_disc) (local.get $acc_ptr) (local.get $acc_len)
                 (i32.const 1056) (i32.const 16) (i32.const 1088) (i32.const 1)
                 (i32.const 2112))
-    (call $state_put (i32.const 1176) (i32.const 7) (i32.const 2112) (i32.const 1))
+    (call $state_put (i32.const 1176) (i32.const 7) (i32.const 2112) (i32.const 1)
+                     (i32.const 2400))
     ;; http.fetch(GET https://undeclared.example/, no headers, no body) → 2144
     (call $fetch (i32.const 1152) (i32.const 3) (i32.const 1104) (i32.const 27)
                  (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
                  (i32.const 2144))
-    (call $state_put (i32.const 1184) (i32.const 4) (i32.const 2144) (i32.const 1))
+    (call $state_put (i32.const 1184) (i32.const 4) (i32.const 2144) (i32.const 1)
+                     (i32.const 2400))
     ;; clock.now-millis → 8 bytes LE at 2176
     (i64.store (i32.const 2176) (call $now_millis))
-    (call $state_put (i32.const 1192) (i32.const 3) (i32.const 2176) (i32.const 8))
+    (call $state_put (i32.const 1192) (i32.const 3) (i32.const 2176) (i32.const 8)
+                     (i32.const 2400))
     ;; log.log(info, …)
     (call $log (i32.const 1) (i32.const 1200) (i32.const 29))
     ;; result<_, string>: discriminant 0 = ok, at 2208
@@ -159,6 +169,13 @@
         (if (i32.eq (local.get $second) (i32.const 103))
           (then
             (if (i32.eq (memory.grow (i32.const 2048)) (i32.const -1))
+              (then (local.set $status (i32.const 507)))
+              (else (local.set $status (i32.const 200))))))
+        ;; "/t…": a table 1 000 000 elements long, past the element cap
+        (if (i32.eq (local.get $second) (i32.const 116))
+          (then
+            (if (i32.eq (table.grow $grown (ref.null func) (i32.const 1000000))
+                        (i32.const -1))
               (then (local.set $status (i32.const 507)))
               (else (local.set $status (i32.const 200))))))
         ;; "/w…": who am I

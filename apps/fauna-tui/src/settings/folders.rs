@@ -1346,11 +1346,16 @@ fn folder_row_elements(
         // NEVER re-derive the handle-else-short-id fallback locally — the label
         // is pre-computed once in the shared transcribe so the seven apps cannot
         // drift on it (`ui/folders.md:150`, value-formatting.md § Account
-        // display label).
-        els.push(
-            Element::label(ids::FOLDER_SHARED_BADGE, t::shared_by(&fs.owner_display))
-                .within(ids::FOLDER_ROW, i),
-        );
+        // display label). A seat the folder rail marked forked reads the
+        // badge's third text — the owner changed identity, only their re-share
+        // heals it (`ui/folders.md` § Sharing, the badge; the mark is shared
+        // Rust, `FolderSummary::seat_forked`).
+        let badge = if fs.seat_forked {
+            t::shared_by_owner_changed(&fs.owner_display)
+        } else {
+            t::shared_by(&fs.owner_display)
+        };
+        els.push(Element::label(ids::FOLDER_SHARED_BADGE, badge).within(ids::FOLDER_ROW, i));
         // No group id ⇒ nothing to address the leave by; withhold the affordance
         // rather than offer one that cannot work (a member row always carries
         // one, so this is belt-and-braces). The gesture carries only the row
@@ -1780,21 +1785,9 @@ fn folder_row_elements(
             // separately surprising: names and paths go public too (they are
             // URLs), and the flip back re-seals only FUTURE content.
             if ui.audience_public_pending {
-                body.push(Element::chrome(t::DECLASSIFY_TITLE));
-                body.push(Element::label(
-                    ids::FOLDER_AUDIENCE_PUBLIC_NAMES_WARNING,
-                    t::DECLASSIFY_BODY,
-                ));
-                body.push(Element::label(
-                    ids::FOLDER_AUDIENCE_PUBLIC_RESEAL_WARNING,
-                    t::DECLASSIFY_IRREVERSIBLE,
-                ));
-                body.push(Element::gesture_button(
-                    ids::FOLDER_AUDIENCE_PUBLIC_CONFIRM,
-                    t::DECLASSIFY_CONFIRM,
-                    true,
-                    Gesture::Settings(Action::ConfirmFolderPublic(i)),
-                ));
+                body.extend(declassify_dialog(Gesture::Settings(
+                    Action::ConfirmFolderPublic(i),
+                )));
             }
             // "Serve as your website" — the structural sibling of the WebDAV
             // toggle below. It is ALLOWED while the folder is neither public nor
@@ -2558,10 +2551,16 @@ fn shared_with_elements(fs: &FolderSummary, i: usize, ui: &FoldersUiState) -> Ve
         let mut item = vec![
             // The canonical handle-else-short_id rule, resolved by the shared
             // formatter — a local fallback here is what rendered raw 64-hex
-            // actor ids on linux before the lift (`ui/folders.md:251`).
+            // actor ids on linux before the lift (`ui/folders.md:251`). A
+            // cross-nest member's announced pair joins to `handle@domain` here
+            // and nowhere else (`value-formatting.md` § Account display label).
             Element::label(
                 ids::FOLDER_MEMBER_HANDLE,
-                fauna_core::format::account_display_label(Some(&m.handle), &m.actor_id),
+                fauna_core::format::account_display_label(
+                    fauna_core::format::qualified_handle(Some(&m.handle), m.domain.as_deref())
+                        .as_deref(),
+                    &m.actor_id,
+                ),
             ),
             // "Pending" is a future optimistic state: the nest roster reports
             // only actors the share actually reached (it cannot observe an MLS
@@ -2903,6 +2902,34 @@ fn conflict_elements(c: &ConflictSummary, resolve: Gesture) -> Vec<Element> {
     els
 }
 
+/// The declassify dialog — `folder-audience-public-confirm` with its two
+/// consequence lines. ONE builder for both doors to public: the owner row's
+/// select (`confirm` = [`Action::ConfirmFolderPublic`]) and a Public wizard's
+/// Create (`confirm` = [`Action::WizardConfirmPublic`]), so the copy and ids
+/// cannot drift between them (`ui/folders.md` § Audience and website serving →
+/// *Born public*, ruling 2: reused on the same page, never copied). tui has
+/// no modal dialogs, so it paints inline; the owner row dismisses it by
+/// picking another audience, the wizard by `wizard-back-button`.
+fn declassify_dialog(confirm: Gesture) -> Vec<Element> {
+    vec![
+        Element::chrome(t::DECLASSIFY_TITLE),
+        Element::label(
+            ids::FOLDER_AUDIENCE_PUBLIC_NAMES_WARNING,
+            t::DECLASSIFY_BODY,
+        ),
+        Element::label(
+            ids::FOLDER_AUDIENCE_PUBLIC_RESEAL_WARNING,
+            t::DECLASSIFY_IRREVERSIBLE,
+        ),
+        Element::gesture_button(
+            ids::FOLDER_AUDIENCE_PUBLIC_CONFIRM,
+            t::DECLASSIFY_CONFIRM,
+            true,
+            confirm,
+        ),
+    ]
+}
+
 /// The create wizard's elements for its current step. Mirrors linux
 /// `wizard.rs::render` (`back` hidden on `Name`; `next` shown through
 /// `Devices`, `create` only on `Review`).
@@ -2927,10 +2954,20 @@ fn wizard_elements(wizard: &FolderWizardSnapshot) -> Vec<Element> {
         ));
     }
     if wizard.step == FolderWizardStep::Review {
+        // A Public wizard's Create armed the declassify confirm: the machine
+        // owns the arm (`ReviewSnapshot.declassify_armed`), the page keeps no
+        // flag of its own. Create stays painted but dim while the dialog asks —
+        // answering the dialog is the gesture that creates.
+        let armed = wizard.review.declassify_armed;
+        if armed {
+            els.extend(declassify_dialog(Gesture::Settings(
+                Action::WizardConfirmPublic,
+            )));
+        }
         els.push(Element::gesture_button(
             ids::WIZARD_CREATE_BUTTON,
             t::wizard::CREATE,
-            wizard.review.create_enabled,
+            wizard.review.create_enabled && !armed,
             Gesture::Settings(Action::WizardCreate),
         ));
     } else {
@@ -2969,6 +3006,32 @@ fn name_elements(wizard: &FolderWizardSnapshot) -> Vec<Element> {
     // line, only while the gate is actually closed.
     if !nm.continue_enabled {
         els.push(Element::chrome(t::wizard::NAME_REQUIRED));
+    }
+    // Who can see the new folder — a field of this step, never a step of its
+    // own (`ui/folders.md` § Audience and website serving → *Born public*,
+    // ruling 1). Absent on a seam that cannot attest a born-public create: a
+    // control that cannot work must not paint. A new folder is unbound, so
+    // the shared option set is exactly Private | Public.
+    if nm.audience_offered {
+        let opts = fauna_folders_machine::audience_options(false, &nm.audience);
+        els.push(
+            Element::select(
+                ids::WIZARD_AUDIENCE_SELECT,
+                nm.audience.clone(),
+                SelectTarget::WizardAudience,
+                opts.iter().map(|o| o.value.clone()).collect(),
+            )
+            .labelled(t::FOLDER_AUDIENCE)
+            .display_value(
+                fauna_folders_machine::audience_label(&nm.audience)
+                    .resolve(fauna_i18n::strings::lookup),
+            ),
+        );
+        els.push(Element::label(
+            ids::WIZARD_AUDIENCE_HINT,
+            fauna_folders_machine::audience_hint(false, &nm.audience)
+                .resolve(fauna_i18n::strings::lookup),
+        ));
     }
     els
 }
@@ -3045,11 +3108,14 @@ fn review_elements(wizard: &FolderWizardSnapshot) -> Vec<Element> {
     // No mode line, no retention line, no cadence line: a folder has no
     // type, retention is the nest place's policy edited on the row (phase 2
     // slice e), and the scan cadence is a constant, not a choice (phase 5).
-    let mut els = vec![Element::chrome(format!(
-        "{}: {}",
-        t::wizard::REVIEW_NAME,
-        r.name
-    ))];
+    let mut els = vec![
+        Element::chrome(format!("{}: {}", t::wizard::REVIEW_NAME, r.name)),
+        Element::chrome(format!(
+            "{}: {}",
+            t::wizard::REVIEW_AUDIENCE,
+            fauna_folders_machine::audience_label(&r.audience).resolve(fauna_i18n::strings::lookup)
+        )),
+    ];
     // While `submit()` is in flight the Create button is DIM with no other
     // signal — a disabled control owes a visible reason (vocabulary rule 3),
     // and this line is it.
@@ -4886,6 +4952,8 @@ mod tests {
             name: NameSnapshot {
                 name: name.to_string(),
                 continue_enabled: !name.is_empty(),
+                audience: "private".into(),
+                audience_offered: false,
             },
             device_places: DevicePlacesSnapshot {
                 devices,
@@ -4900,6 +4968,8 @@ mod tests {
                 created: false,
                 failed_members: Vec::new(),
                 error: None,
+                audience: "private".into(),
+                declassify_armed: false,
             },
         }
     }
@@ -4941,6 +5011,101 @@ mod tests {
         assert!(el(&els, "wizard-back-button").is_none());
         let next = el(&els, "wizard-next-button").unwrap();
         assert!(!next.enabled);
+    }
+
+    /// Born public, ruling 1: the Name step carries who can see the folder —
+    /// `wizard-audience-select` (exactly Private | Public, a new folder being
+    /// unbound) and `wizard-audience-hint` — and paints neither on a seam
+    /// that cannot attest (`audience_offered` false).
+    #[test]
+    fn wizard_name_step_offers_the_audience_only_when_attestable() {
+        let mut state = empty_state();
+        let mut snapshot = snapshot_with_folders(vec![]);
+        snapshot.wizard = Some(wizard_fixture(FolderWizardStep::Name, "site", Vec::new()));
+        state.devices.snapshot = Some(snapshot);
+        let els = folders_elements(&state, &[]);
+        assert!(el(&els, "wizard-audience-select").is_none());
+        assert!(el(&els, "wizard-audience-hint").is_none());
+
+        let wizard = state
+            .devices
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .wizard
+            .as_mut()
+            .unwrap();
+        wizard.name.audience_offered = true;
+        wizard.name.audience = "public".into();
+        let els = folders_elements(&state, &[]);
+        let sel = el(&els, "wizard-audience-select").expect("offered ⇒ painted");
+        assert_eq!(
+            options(sel),
+            vec!["private".to_string(), "public".to_string()]
+        );
+        assert_eq!(sel.text, "public", "the select paints the user's choice");
+        let hint = el(&els, "wizard-audience-hint").expect("painted beside it");
+        assert_eq!(
+            hint.text,
+            fauna_folders_machine::audience_hint(false, "public")
+                .resolve(fauna_i18n::strings::lookup)
+        );
+        // Never a step of its own: Next is still the Name step's way on.
+        assert!(el(&els, "wizard-next-button").unwrap().enabled);
+    }
+
+    /// Born public, ruling 2: Review states the choice, and while the machine
+    /// holds the arm it paints the owner row's SAME declassify dialog, whose
+    /// confirm answers `confirm_public_create()` — never the owner row's
+    /// gesture — and Create goes dim while the dialog asks.
+    #[test]
+    fn wizard_review_paints_the_audience_and_the_armed_dialog() {
+        let mut state = empty_state();
+        let mut snapshot = snapshot_with_folders(vec![]);
+        let mut wizard = wizard_fixture(FolderWizardStep::Review, "site", Vec::new());
+        wizard.review.audience = "public".into();
+        snapshot.wizard = Some(wizard);
+        state.devices.snapshot = Some(snapshot);
+
+        let els = folders_elements(&state, &[]);
+        let texts: Vec<&str> = els.iter().map(|e| e.text.as_str()).collect();
+        let line = format!(
+            "{}: {}",
+            t::wizard::REVIEW_AUDIENCE,
+            fauna_folders_machine::audience_label("public").resolve(fauna_i18n::strings::lookup)
+        );
+        assert!(texts.contains(&line.as_str()), "{texts:?}");
+        assert!(
+            el(&els, "folder-audience-public-confirm").is_none(),
+            "unarmed"
+        );
+        assert!(el(&els, "wizard-create-button").unwrap().enabled);
+
+        let w = state
+            .devices
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .wizard
+            .as_mut()
+            .unwrap();
+        w.review.declassify_armed = true;
+        let els = folders_elements(&state, &[]);
+        for id in [
+            "folder-audience-public-names-warning",
+            "folder-audience-public-reseal-warning",
+        ] {
+            assert!(el(&els, id).is_some(), "{id} paints with the armed dialog");
+        }
+        let confirm = el(&els, "folder-audience-public-confirm").expect("armed ⇒ painted");
+        assert!(confirm.enabled);
+        assert!(matches!(
+            confirm.gesture(),
+            Some(Gesture::Settings(Action::WizardConfirmPublic))
+        ));
+        assert!(!el(&els, "wizard-create-button").unwrap().enabled);
+        // Back is the inline dialog's dismissal (the machine's `back()`).
+        assert!(el(&els, "wizard-back-button").unwrap().enabled);
     }
 
     /// Step 1's legibility contract (the 2026-08-03 comprehensibility audit's
@@ -5499,6 +5664,26 @@ mod tests {
         assert!(el(&els, "folder-leave-button").is_some());
         assert!(el(&els, "folder-share-button").is_none());
         assert!(el(&els, "folder-member-item").is_none());
+    }
+
+    /// The badge's THIRD reading (`ui/folders.md` § Sharing, the
+    /// `folder-shared-badge` bullet): a member row whose seat the folder rail
+    /// marked forked names the owner's identity change and asks for a
+    /// re-share — and keeps its leave affordance.
+    #[test]
+    fn a_forked_member_row_reads_the_owner_changed_badge() {
+        let mut fs = folder("theirs");
+        fs.role = Some("member".into());
+        fs.owner_display = "alice".into();
+        fs.mls_group_id = Some("beef".into());
+        fs.seat_forked = true;
+        let mut state = empty_state();
+        state.devices.snapshot = Some(snapshot_with_folders(vec![fs]));
+        let els = folders_elements(&state, &[]);
+        let badge = el(&els, "folder-shared-badge").unwrap();
+        assert_eq!(badge.text, t::shared_by_owner_changed("alice"));
+        assert!(badge.text.contains("owner changed"), "got {:?}", badge.text);
+        assert!(el(&els, "folder-leave-button").is_some());
     }
 
     #[test]

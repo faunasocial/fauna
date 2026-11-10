@@ -574,6 +574,167 @@ def test_other_profile_start_dm_opens_compose(logged_in_app, nest_instance, test
     )
 
 
+def _pump_until_status(author: dict, nest: dict, viewer: ApiActor, author_id: bytes, what: str, done):
+    """Run the headless author's pump tick (the shared ``reconcile_once`` every
+    app's author loop runs), then poll the viewer's ``status.get`` until
+    ``done`` — the deadline poll convention 14 asks for."""
+    import time
+
+    import fauna_ffi
+    from helpers.federated_follow import CROSSING_BUDGET_S
+
+    deadline = time.monotonic() + CROSSING_BUDGET_S
+    last = None
+    while time.monotonic() < deadline:
+        fauna_ffi.harness_author_reconcile(nest["url"], bytes(author["signing_key"]))
+        inner = time.monotonic() + 5
+        while time.monotonic() < min(inner, deadline):
+            last = viewer.subscription_status(author_id)
+            if done(last):
+                return last
+            time.sleep(0.25)  # sleep-ok: poll interval of a deadline loop
+    raise AssertionError(f"timed out waiting for {what}; last status: {last!r}")
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_profile_follow_toggle_unfollows_and_confirms_a_paid_leave(
+    logged_in_app, nest_instance, test_user
+):
+    """`profile-follow-button` is the Follow ⇄ Following toggle
+    (`subscriptions.md` § The free followers tier — follow and unfollow,
+    rule 4; `profile.md` § User actions).
+
+    Flow: the viewer opens a headless author's profile (the contact-row
+    tap-through) → *Follow* → `subscribe_across_nests(author, "followers")` →
+    the label reads *Following* while the follow is still pending (no pump has
+    run) → *Following* pressed in that pending window withdraws the request
+    (the leave door answers `Removed`): the label reads *Follow* with no error,
+    `status.get` names no tier and no `follow_pending`, and the author holds no
+    request → *Follow* again → the author's pump (``harness_author_reconcile``, the shared tick) approves
+    → *Following* pressed → `unsubscribe_across_nests(author, "followers")`
+    (the leave door's followers floor) → the label reads *Follow* at once
+    (optimistic: the leave is `Queued`) → the author's pump commits the leave →
+    `status.get` names no tier. Then the viewer holds the author's paid `gold`
+    tier (precondition seeding over the API, the pump approving it): the
+    profile reopens on *Following*; the first press only relabels the button
+    with the cost (`profile.unfollow_confirm`) and sends nothing — the status
+    still names `gold`; the second press leaves, and the pump's commit ends the
+    paid tier with the follow.
+    """
+    app = logged_in_app
+    from helpers.app_surface import require_surface
+    from helpers.other_profile import open_other_profile
+
+    require_surface(app.driver, "profile-follow-unfollow")
+    import fauna_ffi
+
+    nest = nest_instance
+    author = create_actor_and_register(
+        nest["port"], base_url=nest["url"], admin_signing_key=nest["admin"]["signing_key"],
+    )
+    author_id = bytes(author["actor_id_bytes"])
+    created = fauna_ffi.harness_author_create_tier(
+        nest["url"], bytes(author["signing_key"]), "gold", 1, auto_approve=True
+    )
+    assert created.get("created") is True, created
+    viewer = ApiActor(
+        nest["url"], test_user["token"], test_user["actor_id_hex"],
+        bytes(test_user["signing_key"]),
+    )
+    viewer.accept_knock(author["actor_id_hex"])
+
+    # ── A free follower: Follow, then Following pressed unfollows at once ──
+    open_other_profile(app, author["actor_id_hex"])
+    assert app.profile.wait_for_follow_label(S.profile.follow), (
+        f"a profile the viewer does not follow reads Follow; got "
+        f"{app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    app.profile.follow()
+    assert app.profile.wait_for_follow_label(S.profile.following), (
+        f"after the follow the toggle reads Following; got "
+        f"{app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    # ── The pending window: no pump has run, so the follow is only asked ──
+    assert viewer.subscription_status(author_id).get("follow_pending"), (
+        "before the author's pump runs the follow is pending"
+    )
+    author_api = ApiActor(
+        nest["url"], author["token"], author["actor_id_hex"], bytes(author["signing_key"]),
+    )
+    app.profile.follow()
+    assert app.profile.wait_for_follow_label(S.profile.follow), (
+        f"Following pressed on a pending follow withdraws it (label → Follow); "
+        f"got {app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    assert not app.profile.error_text(), (
+        f"the withdraw raises no error; got {app.profile.error_text()!r}"
+    )
+    status = viewer.subscription_status(author_id)
+    assert status.get("tier") is None and not status.get("follow_pending"), status
+    assert author_api.subscription_requests_list() == [], (
+        "the withdrawn follow leaves no request for the author to approve"
+    )
+    app.profile.follow()
+    assert app.profile.wait_for_follow_label(S.profile.following), (
+        f"Follow pressed again asks the follow anew; got "
+        f"{app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    _pump_until_status(
+        author, nest, viewer, author_id, "the follow approved by the author's pump",
+        lambda s: s.get("tier") == "followers",
+    )
+    app.profile.follow()
+    assert app.profile.wait_for_follow_label(S.profile.follow), (
+        f"Following pressed by a free follower unfollows at once (label → Follow); "
+        f"got {app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    _pump_until_status(
+        author, nest, viewer, author_id, "the unfollow committed by the author's pump",
+        lambda s: s.get("tier") is None and not s.get("follow_pending"),
+    )
+
+    # ── A paid holder: two presses, the first naming the cost ──
+    reply = viewer.subscribe(author_id, "gold")
+    assert reply.get("outcome") in ("queued", "approved"), reply
+    _pump_until_status(
+        author, nest, viewer, author_id, "the paid tier approved by the author's pump",
+        lambda s: s.get("tier") == "gold",
+    )
+    # The gold approval enqueues the follow its rank fan-out includes, which a
+    # later pump tick grants — the status already reads `gold` meanwhile, so the
+    # author's followers roster is what says the follow is held.
+    me = test_user["actor_id_hex"]
+    _pump_until_status(
+        author, nest, viewer, author_id, "the follow the paid tier fans out to, granted",
+        lambda _s: any(
+            bytes(e["subscriber_id"]).hex() == me
+            for e in author_api.subscription_subscribers_list("followers")
+        ),
+    )
+    open_other_profile(app, author["actor_id_hex"])
+    assert app.profile.wait_for_follow_label(S.profile.following), (
+        f"a paid subscriber's profile opens on Following (the open's status read); "
+        f"got {app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    app.profile.follow()
+    assert app.profile.wait_for_follow_label(S.profile.unfollow_confirm), (
+        f"the first press on a paid holder's Following relabels the button with the "
+        f"cost; got {app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    assert viewer.subscription_status(author_id).get("tier") == "gold", (
+        "the arming press sends nothing: the paid tier still stands"
+    )
+    app.profile.follow()
+    assert app.profile.wait_for_follow_label(S.profile.follow), (
+        f"the confirming press leaves (label → Follow); got "
+        f"{app.profile.follow_label()!r}, error={app.profile.error_text()!r}"
+    )
+    _pump_until_status(
+        author, nest, viewer, author_id, "the unfollow committed for the follow and the paid tier",
+        lambda s: s.get("tier") is None and not s.get("follow_pending"),
+    )
+
+
 @pytest.mark.feature("profile")
 def test_other_profile_block(logged_in_app, nest_instance, test_user):
     """`profile-block-button` (OTHER profile) is the Block⇄Unblock toggle whose

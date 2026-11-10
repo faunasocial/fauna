@@ -30,17 +30,20 @@ Owner = the box's admin, the one identity that may rotate it; the destination is
 the session's ``second_nest``, where this function-scoped box's fresh admin is a
 fresh owner, so the seat this journey leaves there is nobody else's.
 
-**tui leads** (`segment-backup-protocol.md` § Implementation status today names
-the apps this journey is proven on). The carry is shared Rust every audit host
-already runs (``fauna_client_backup::audit::run_audit_pass``, called by tui,
-linux, the FFI and the wasm SPA), so the other apps' arms are parity witnesses
-for their trickle-down queues, not new mechanism.
+**tui leads; linux, web, macos and ios follow** (`segment-backup-protocol.md` §
+Implementation status today names the apps this journey is proven on). The carry
+is shared Rust every audit host already runs
+(``fauna_client_backup::audit::run_audit_pass``, called by tui, linux, the FFI
+(macos and ios) and the wasm SPA), so the other apps' arms are parity witnesses,
+not new mechanism. Web rides the plain-HTTP ``rotatable_nest``
+behind ``rotatable_spa_url`` (as ``test_nest_rotation_admin_journey.py``).
 
 Latency-independent (convention 14): the sweep poke is a causal barrier, and
 every wait is a named generous budget + deadline poll on served or rendered
 state.
 """
 
+import contextlib
 import time
 
 import pytest
@@ -49,12 +52,71 @@ import requests
 from actions import ActionLayer
 from common.auth import register_user
 from common.launch_harness import make_launch_harness, reached_authenticated_app
-from conftest import _trust_seeder
+from conftest import _trust_seeder, get_available_apps
+from helpers.app_launch import app_launch_config
 from helpers.indexed_rows import row_present
 from i18n.strings import S
 from tests.test_backups import _backlog_count, _seed_one_mail_segment
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.windows,
+]
+
+# windows rides the native `rotatable_tls_nest` branch below; its Backups page
+# runs the same shared audit pass through the FFI (`BackupsViewModel`).
+_SUPPORTED_APPS = ("tui", "linux", "web", "macos", "ios", "windows")
+
+
+def _journey_clients():
+    available = get_available_apps()
+    return [c for c in _SUPPORTED_APPS if c in available]
+
+
+@pytest.fixture(params=_journey_clients())
+def journey_client(request):
+    return request.param
+
+
+class _JourneyEnv:
+    """The launch harness for one app plus the nest it drives.
+
+    ``node_url`` is what the driver/browser navigates to (the CORS proxy for
+    web, the nest itself for native); ``nest`` is the real source box (its url
+    serves this module's python-side calls, which never go through the proxy).
+    Same split as ``test_nest_rotation_admin_journey.py``'s ``journey_env``."""
+
+    def __init__(self, *, harness, node_url, nest):
+        self.harness = harness
+        self.node_url = node_url
+        self.nest = nest
+
+
+@pytest.fixture
+def journey_env(request, journey_client, tmp_path):
+    """Per-app launch harness + the function-scoped rotatable source box.
+
+    Native (tui/linux/macos/ios/windows) rides ``rotatable_tls_nest`` (real TLS); web rides the
+    plain-HTTP ``rotatable_nest`` behind ``rotatable_spa_url`` (a browser
+    cannot pin the self-signed floor cert; the carry itself needs no pin)."""
+    if journey_client == "web":
+        spa_url = request.getfixturevalue("rotatable_spa_url")
+        nest = request.getfixturevalue("rotatable_nest")
+        harness = make_launch_harness("web", spa_url=spa_url)
+        env = _JourneyEnv(harness=harness, node_url=spa_url, nest=nest)
+    else:
+        nest = request.getfixturevalue("rotatable_tls_nest")
+        harness = make_launch_harness(
+            journey_client, tmp_path=tmp_path,
+            **app_launch_config(journey_client, request),
+            seed_trust=_trust_seeder(request),
+        )
+        env = _JourneyEnv(harness=harness, node_url=nest["url"], nest=nest)
+    try:
+        yield env
+    finally:
+        with contextlib.suppress(Exception):
+            harness.teardown()
 
 # Element IDs (tests/e2e-unified/ui.yaml § admin_nest).
 ARM_BUTTON = "admin-nest-seed-rotate-button"
@@ -190,10 +252,10 @@ def _rotate_through_the_admin_page(driver, nest_url):
 
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_rotated_source_box_keeps_backing_up_with_no_gesture(
-    request, rotatable_tls_nest, second_nest, tmp_path, tui_app_path,
+    journey_env, journey_client, second_nest,
 ):
 
-    source = rotatable_tls_nest
+    source = journey_env.nest
     owner = _owner(source)
     # The owner must be registered at the destination for the enroll's
     # handshake (`require_registration` is the nest default) — the same
@@ -204,15 +266,17 @@ def test_a_rotated_source_box_keeps_backing_up_with_no_gesture(
         admin_signing_key=second_nest["admin"]["signing_key"],
     )
 
-    harness = make_launch_harness(
-        "tui", tmp_path=tmp_path, app_path=tui_app_path, seed_trust=_trust_seeder(request),
-    )
+    harness = journey_env.harness
     try:
         driver = harness.launch(
             secret_hex=bytes(owner["signing_key"]).hex(),
-            node_url=source["url"],
+            node_url=journey_env.node_url,
             trust=source,
         )
+        if journey_client == "web":
+            # `WebLaunchHarness.launch()` only seeds localStorage; `relaunch()`
+            # is the first real login (as `test_nest_rotation_admin_journey`).
+            harness.relaunch()
         reached_authenticated_app(driver, timeout=90)
         app = ActionLayer(driver)
 
@@ -285,4 +349,4 @@ def test_a_rotated_source_box_keeps_backing_up_with_no_gesture(
             f"error={app.error_text()!r}"
         )
     finally:
-        harness.teardown()
+        pass  # the `journey_env` fixture tears the harness down

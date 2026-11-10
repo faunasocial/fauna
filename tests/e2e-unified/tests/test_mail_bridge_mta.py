@@ -27,6 +27,7 @@ import urllib.request
 
 import pytest
 
+from helpers.fixture_closure import MAIL_VENUE_BINARIES, resolves_lazily
 from helpers.budgets import MAIL_BRIDGE_RECONNECT_S, MAIL_OUTBOUND_CYCLE_S, RPC_ROUNDTRIP_S
 from helpers.mail_wire import (
     _SmtpConn,
@@ -81,6 +82,7 @@ def _register_harness_seal_key(nest, actor_id: bytes) -> None:
 
 
 @pytest.fixture(scope="module")
+@resolves_lazily(*MAIL_VENUE_BINARIES)
 def role_address_venue(request, nest_mode, tmp_path_factory):
     """A claimed mail nest of this module's own, for the journeys whose mail is
     delivered to the deployment ADMIN — role addresses (`postmaster@`, …) route
@@ -3375,6 +3377,85 @@ def test_scheduled_flip_waits_for_publication(mail_bridge_mta, nest_instance):
     _assert_dkim_selector(received, rotate_domain, new_selector, minted_dns)
 
 
+#: `db/mail_domains.rs::DEFAULT_DKIM_ROTATION_DAYS` — the window a domain
+#: rotates on when nobody chose one.
+_DEFAULT_DKIM_ROTATION_DAYS = 90
+
+
+@pytest.mark.feature("mail-server")
+def test_a_domains_signing_key_rotates_by_itself_on_its_schedule(reclaimable_nest):
+    """With nothing chosen, a domain's DKIM key rotates on the default window
+    by itself (mail-multidomain.md § Rotation): once the window has passed the
+    nest mints the next month's selector pair, and once both records read
+    published and the peer-cache day has gone by it flips the domain onto it.
+    No admin call after the domain is added: no rotation-days override, no
+    forced rotation.
+
+    Neither the quarter nor DNS is real: ``POST /api/v1/test/outbound/clock``
+    sets the nest's one mail clock (``AppState::outbound_now``, which the due
+    check, the mint's label, the publication stamp and the flip all read) and
+    ``POST /api/v1/test/dns/record`` makes the records "published". A
+    DEDICATED nest (``reclaimable_nest``), because a clock a quarter ahead
+    makes every domain on the nest due: on the session nest it would mint a
+    pending pair on every other test's domain.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    nest = reclaimable_nest
+    nest_url = nest["url"]
+    admin = nest["admin"]
+    domain = "selfrotate.test"
+    day = 24 * 3600
+    ticks = 10.0  # several FAUNA_EXPIRY_INTERVAL_SECS ticks
+
+    def _admin_ws():
+        return WsRpcAdminClient(
+            nest_url,
+            actor_id=bytes(admin["signing_key"].verify_key),
+            signing_key=bytes(admin["signing_key"]),
+        )
+
+    def _active_selector():
+        with _admin_ws() as a:
+            reply = a.call("fauna.bridges.list_local_domains", {})
+        rows = [d for d in reply.get("active", []) if d.get("domain_name") == domain]
+        assert rows, f"{domain} must stay an active local domain; got {reply!r}"
+        return rows[0].get("dkim_selector") or "default"
+
+    with _admin_ws() as a:
+        a.call(
+            "fauna.bridges.add_local_domain",
+            {"domain": domain, "mta_sts_cert_mode": "per_host"},
+        )
+    assert _active_selector() == "default"
+
+    later = int(time.time()) + (_DEFAULT_DKIM_ROTATION_DAYS + 1) * day
+    label = time.strftime("%Y%m", time.gmtime(later))
+    _set_outbound_clock(nest_url, later)
+    try:
+        # The window has passed: the scheduled tick mints that month's pair
+        # with nothing chosen, and the old label keeps signing meanwhile.
+        minted = _wait_for_minted_selector(_admin_ws, domain, label)
+        assert _active_selector() == "default", (
+            "a freshly minted pair must not sign before its records are published"
+        )
+        rsa_selector, ed25519_selector = dkim_selector_pair(label)
+        for selector in (rsa_selector, ed25519_selector):
+            _seed_dns_record(
+                nest_url, f"{selector}._domainkey.{domain}", "TXT", [minted[selector]],
+            )
+        time.sleep(ticks)  # sleep-ok: let the tick stamp both sightings; the stamp has no wire surface to anchor on
+        _set_outbound_clock(nest_url, later + day + 3600)
+        flipped = wait_until(
+            lambda: _active_selector() == label,
+            45.0,
+            diagnose=lambda: f"active selector {_active_selector()!r}, want {label!r}",
+        )
+        assert flipped
+    finally:
+        _set_outbound_clock(nest_url, 0)
+
+
 @pytest.mark.feature("mail-server")
 def test_submission_multipart_dkim_verifies(mail_bridge_mta):
     """A multipart/mixed message with a base64 attachment is delivered and its
@@ -3786,6 +3867,21 @@ def _advance_outbound_clock(nest_url: str, advance_seconds: int) -> None:
     test cross the 4 h delay-warning mark without waiting hours.
     """
     body = json.dumps({"advance": advance_seconds}).encode()
+    req = urllib.request.Request(
+        f"{nest_url}/api/v1/test/outbound/clock",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        assert resp.status == 200, f"outbound clock hook returned {resp.status}"
+
+
+def _set_outbound_clock(nest_url: str, epoch_seconds: int) -> None:
+    """Freeze nest's outbound clock at ``epoch_seconds`` (``0`` = the real
+    clock again), through the same `POST /api/v1/test/outbound/clock` hook as
+    `_advance_outbound_clock`."""
+    body = json.dumps({"set": epoch_seconds}).encode()
     req = urllib.request.Request(
         f"{nest_url}/api/v1/test/outbound/clock",
         data=body,

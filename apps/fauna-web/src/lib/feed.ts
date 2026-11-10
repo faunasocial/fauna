@@ -20,7 +20,7 @@
 // contract.
 
 import { get, writable, type Writable } from 'svelte/store';
-import { identity } from './store';
+import { connectionStatus, identity } from './store';
 import { guardSingletonBuild } from './singleton-build';
 import { registerActorScopedReset, sameActorSince } from './actorScope';
 import { draftSaveDebounceMs, ensureWasm, logMessage } from './wasm';
@@ -152,6 +152,12 @@ export function getFeedManager(): Promise<WasmFeedManager> {
       },
       skipped: (why) => logMessage('warn', 'fauna_web::feed', `archive comments skipped — ${why}`),
     });
+    // The offline outbox (`account-offline-mutation.md` § The offline-mutation
+    // contract): the first connection word wires it, so a like tapped with no
+    // nest is queued in this tab's account store and drained by its runtime's
+    // full pass once the nest is back. The word is the one the offline gate
+    // reads; `connectionStatus`'s subscription below keeps it current.
+    built.setConnectionState(get(connectionStatus));
     return built;
   };
   // ⚠ A PROMISE MEMO CACHES A REJECTION AS DURABLY AS A VALUE. Without this
@@ -263,6 +269,11 @@ export function resetFeedManager(): void {
 // corollary). This module is only ever loaded when something actually uses the
 // feed, so a session that never opens it registers nothing and has nothing to drop.
 registerActorScopedReset(resetFeedManager);
+
+// The offline composer reads the same connection word as the offline gate, so a
+// control the gate keeps live is exactly a control whose gesture queues with no
+// nest. A no-op until `getFeedManager` wired the outbox.
+connectionStatus.subscribe((word) => manager?.setConnectionState(word));
 
 let feedRefreshQueued = false;
 

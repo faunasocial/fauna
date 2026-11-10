@@ -24,6 +24,11 @@
 //! expired-store GC (a month past a witness's expiry) read it, so a test
 //! reaches both without waiting — the register door refuses an already-expired
 //! witness, so no row can be planted past them.
+//!
+//! `GET .../handshakes` reads the custodied-fleet handshake tally — how often
+//! an owner's device asked this custodian nest for a session, and how often it
+//! was admitted — so a journey asserts *whether* this nest was asked at all
+//! (the custodian-NEST serve door's ruling 6) from the nest's own count.
 
 #![cfg(feature = "test-hooks")]
 
@@ -31,7 +36,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Json};
-use axum::routing::post;
+use axum::routing::{get, post};
 use serde_json::json;
 
 use crate::api_error::ApiError;
@@ -123,10 +128,64 @@ async fn handle_clock(
     Json(json!({ "ok": true, "offset_secs": body.offset_secs }))
 }
 
+/// The custodied-fleet handshake tally ([`AppState::custodied_fleet_handshakes`]):
+/// monotone counters, relaxed — a reader compares two readings, never orders
+/// them against anything else.
+#[derive(Debug, Default)]
+pub struct HandshakeTally {
+    asked: std::sync::atomic::AtomicU64,
+    admitted: std::sync::atomic::AtomicU64,
+}
+
+impl HandshakeTally {
+    /// A handshake request reached this nest — counted before any check, so a
+    /// refused or malformed one is still "asked".
+    pub(crate) fn asked(&self) {
+        self.asked
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// A handshake passed every check and minted a session.
+    pub(crate) fn admitted(&self) {
+        self.admitted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn read(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.asked.load(Relaxed), self.admitted.load(Relaxed))
+    }
+}
+
+/// `GET /api/v1/test/custody_hosting/handshakes` — the custodied-fleet
+/// handshake tally since this nest booted: `{"ok": true, "asked": N,
+/// "admitted": N}`.
+async fn handle_handshakes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (asked, admitted) = state.custodied_fleet_handshakes.read();
+    Json(json!({ "ok": true, "asked": asked, "admitted": admitted }))
+}
+
 /// Mount the `/api/v1/test/custody_hosting/*` routes.
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/v1/test/custody_hosting/run-now", post(handle_run_now))
         .route("/api/v1/test/custody_hosting/hold", post(handle_hold))
         .route("/api/v1/test/custody_hosting/clock", post(handle_clock))
+        .route(
+            "/api/v1/test/custody_hosting/handshakes",
+            get(handle_handshakes),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HandshakeTally;
+
+    #[test]
+    fn the_tally_counts_asked_and_admitted_apart() {
+        let tally = HandshakeTally::default();
+        assert_eq!(tally.read(), (0, 0));
+        tally.asked();
+        tally.asked();
+        tally.admitted();
+        assert_eq!(tally.read(), (2, 1));
+    }
 }

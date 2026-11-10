@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import pytest
 
+from helpers import budgets
+from helpers.app_surface import require_surface
+from helpers.waiting import wait_until
+
 pytestmark = pytest.mark.tier_2
 
 
@@ -243,4 +247,55 @@ def test_dns_config_contact_form_hidden_for_porkbun(app):
     # gates visibility.
     assert app.driver.is_absent("dns-contact-form"), (
         "dns-contact-form should be hidden in NotReady (no verify yet)"
+    )
+
+
+@pytest.mark.feature("set-up-a-nest-from-the-app")
+def test_dns_config_namecheap_refusal_names_the_address_to_allowlist(app, fake_cloud):
+    """Namecheap refuses a caller whose address is not on the account's API
+    allowlist, with HTTP 200 and error 1011150 echoing the address it saw
+    (``registry.md`` § Proxy boundary; ``namecheap_api.rs``). The wizard's
+    verify must surface that as an ``error-message`` naming the address, so
+    the user knows exactly what to allow at Namecheap before trying again.
+
+    The fake's Namecheap leg (``fakes/fake_cloud.py::NamecheapHandlers``)
+    refuses every call from ``observed_ip`` — the adapter's one self-heal
+    retry with the echoed address included — so the refusal reaches the UI.
+    The verify is a real ``dns-verify-button`` click against the ``dns``
+    override (every app the ``set-provider-base-urls`` gate admits)."""
+    require_surface(app.driver, "set-provider-base-urls")
+    drv = app.driver
+    nc = fake_cloud.namecheap
+    drv.set_provider_base_urls({"dns": nc.base_url()})
+    app.onboarding.go_to_dns_config()
+
+    # Namecheap is a registrar without VPS: the landing's same-provider
+    # default disables it, so the user turns that off first.
+    drv.click("dns-same-provider-checkbox")
+    wait_until(
+        lambda: drv.is_visible("dns-provider-row[namecheap]")
+        and not drv.is_disabled("dns-provider-row[namecheap]"),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: drv.diagnose("dns-provider-row[namecheap]"),
+    )
+    drv.click("dns-provider-row[namecheap]")
+    drv.wait_for("dns-credentials-form", timeout=10)
+    drv.type_text("dns-credentials-form-api-user", "e2e-user")
+    drv.type_text("dns-credentials-form-api-key", "e2e-key")
+    drv.wait_until_enabled("dns-verify-button", timeout=10)
+    drv.click("dns-verify-button")
+
+    wait_until(
+        lambda: nc.observed_ip in app.error_text(),
+        budgets.PROVIDER_VERIFY_S,
+        diagnose=lambda: (
+            f"no error naming {nc.observed_ip}: error={app.error_text()!r} "
+            f"| status={drv.get_text('dns-status-text')!r} "
+            f"| namecheap calls={nc.requests!r}"
+        ),
+    )
+    assert "allowlist" in app.error_text().lower(), app.error_text()
+    # The fake saw the placeholder, then the self-heal retry with the echo.
+    assert [r.get("ClientIp") for r in nc.requests[:2]] == ["192.0.2.1", nc.observed_ip], (
+        nc.requests
     )

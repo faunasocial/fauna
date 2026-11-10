@@ -109,40 +109,17 @@ import SwiftUI
 /// appears and whenever the app returns to the foreground, so the caption
 /// clears when the person comes back from the Files app or System Settings.
 struct FolderOSEnableRefresh: ViewModifier {
-    @Environment(FaunaClient.self) private var client: FaunaClient?
     let boundSets: () -> Set<String>
 
     func body(content: Content) -> some View {
         #if canImport(FileProvider)
-            content
-                .task { await refresh() }
-                .onReceive(NotificationCenter.default.publisher(for: Self.becameActive)) { _ in
-                    Task { await refresh() }
-                }
+            content.modifier(
+                FolderPresenceRefresh(key: "") { actorHex, sets in
+                    await FileProviderCoordinator.refreshOSEnableNotices(
+                        actorHex: actorHex, boundSets: boundSets(), sets: sets)
+                })
         #else
             content
         #endif
     }
-
-    #if canImport(FileProvider)
-        private static var becameActive: Notification.Name {
-            #if os(macOS)
-                NSApplication.didBecomeActiveNotification
-            #else
-                UIApplication.didBecomeActiveNotification
-            #endif
-        }
-
-        private func refresh() async {
-            guard let client, !client.deviceId.isEmpty,
-                let actorHex = FaunaClient.activeActorIdHex
-            else { return }
-            let (api, deviceId) = (client.api, client.deviceId)
-            await FileProviderCoordinator.refreshOSEnableNotices(
-                actorHex: actorHex, boundSets: boundSets()
-            ) {
-                try await api.folderPresenceSets(deviceIdHex: deviceId)
-            }
-        }
-    #endif
 }

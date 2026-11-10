@@ -513,6 +513,34 @@ impl crate::db::CacheDb {
         Ok(n > 0)
     }
 
+    /// Move one relay pair's stamps back by `secs` (`requested_at`,
+    /// `attempted_at`, `reached_at`, `accepted_at`), as if the log had last
+    /// answered `secs` earlier — the relay's [`crate::region_relay::reply_from`]
+    /// then reads it stale. Returns whether the pair had a row. Test-only: the
+    /// `region_relay_test_hook` seam, the app-side twin of
+    /// [`Self::test_age_region_refresh`].
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_age_relay_artifact(
+        &self,
+        region: &RegionCode,
+        payload_kind: &str,
+        secs: i64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE region_relay_cache SET
+                   requested_at = requested_at - ?1,
+                   attempted_at = attempted_at - ?1,
+                   reached_at = reached_at - ?1,
+                   accepted_at = accepted_at - ?1
+                 WHERE region = ?2 AND payload_kind = ?3",
+                rusqlite::params![secs, region.as_str(), payload_kind],
+            )
+            .context("test_age_relay_artifact")?;
+        Ok(n > 0)
+    }
+
     /// Drop one payload kind's refresh record, returning the nest to "never
     /// attempted". Test-only: the `region_status_test_hook` seam's `clear`.
     #[cfg(feature = "test-hooks")]

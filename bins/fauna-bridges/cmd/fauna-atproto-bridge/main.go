@@ -58,6 +58,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotoread"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotorepo"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/confinement"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/httpdrain"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/keypair"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logging"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logplane"
@@ -1003,9 +1004,16 @@ const (
 // arms a re-armable response-stall deadline on every route that is not
 // Route.LongLived (internal/xrpc), and the firehose bounds its own frame writes.
 // Setting them here would be a silent availability regression.
+//
+// The mux is wrapped in httpdrain.Handler, as every bridge listener is: a route
+// that answers without reading its body (refreshSession, deleteSession, every
+// refusal written ahead of a body) would otherwise close a `Connection: close`
+// client's socket with its bytes unread, which Windows turns into a reset that
+// discards the reply. The drain reads nothing from a bodiless request, so the
+// firehose's WebSocket upgrade is untouched.
 func newPDSServer(mux http.Handler) *http.Server {
 	return &http.Server{
-		Handler:           mux,
+		Handler:           httpdrain.Handler(mux),
 		ReadHeaderTimeout: pdsReadHeaderTimeout,
 		IdleTimeout:       pdsIdleTimeout,
 	}

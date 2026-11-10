@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using uniffi.fauna_media_machine;
@@ -26,8 +28,12 @@ public class FileVersionFormatTests
     // most of these tests are about the created_at UNIT.
     private static FileVersionSummary Summary(
         long createdAtMs, long sizeBytes = 2048L, long versionNum = 7L, string authorDisplay = "bob",
-        bool pruned = false) =>
-        new(versionNum, "0badc0de", sizeBytes, createdAtMs, null, authorDisplay, pruned, null);
+        bool pruned = false, string? depositedBy = null) =>
+        new(versionNum, "0badc0de", sizeBytes, createdAtMs, null, authorDisplay, pruned, null,
+            depositedBy: depositedBy);
+
+    // A connected app's hex writer key, as `FileVersionSummary.deposited_by` carries it.
+    private const string Depositor = "ab0000000000000000000000000000000000000000000000000000000000cd";
 
     [Fact]
     public void MapRow_PassesCreatedAtStraightThrough_BecauseItIsAlreadyEpochMillis()
@@ -88,6 +94,109 @@ public class FileVersionFormatTests
     {
         var row = FileVersionFormat.MapRow(Summary(NowMs, authorDisplay: "Alice"), NowMs);
         Assert.Equal(Strings.Format("media/version_author", "Alice"), row.Author);
+    }
+
+    // ── The deposited version's author line (folder-deposit.md ruling 3) ──────────
+    // The wording is composed once in shared Rust (`ConnectedAppsMachine::
+    // version_author`); the row only resolves what the machine returns, and with no
+    // machine falls back to the recorder alone or the generic depositor wording, as
+    // tui's `version_author` and linux's do.
+
+    [Fact]
+    public void MapRow_WithNoMachine_ADepositedVersionReadsTheGenericDepositorWording()
+    {
+        var row = FileVersionFormat.MapRow(
+            Summary(NowMs, authorDisplay: "Alice", depositedBy: Depositor), NowMs);
+        Assert.Equal(Strings.Format("media/version_author_deposited_unknown", "Alice"), row.Author);
+        Assert.NotEqual(Strings.Format("media/version_author", "Alice"), row.Author);
+    }
+
+    [Fact]
+    public void MapRow_WithNoMachine_AnOrdinaryVersionReadsTheRecorderAlone()
+    {
+        var row = FileVersionFormat.MapRow(Summary(NowMs, authorDisplay: "Alice"), NowMs, apps: null);
+        Assert.Equal(Strings.Format("media/version_author", "Alice"), row.Author);
+    }
+
+    [Fact]
+    public void MapRow_WithAMachine_PaintsTheLineTheSharedMachineComposes_NamingTheApp()
+    {
+        var apps = new FakeDepositorApps
+        {
+            Line = new uniffi.fauna_core.LocalizedText(
+                "media.version_author_deposited",
+                new Dictionary<string, string> { ["app"] = "Photo Sync", ["author"] = "Alice" }),
+        };
+        var row = FileVersionFormat.MapRow(
+            Summary(NowMs, authorDisplay: "Alice", depositedBy: Depositor), NowMs, apps);
+
+        Assert.Equal(Strings.Resolve(apps.Line), row.Author);
+        // The machine is handed the recorder and the writer key verbatim: no app
+        // matches a writer key itself.
+        Assert.Equal(("Alice", (string?)Depositor), apps.Asked);
+    }
+
+    [Fact]
+    public async Task ReadDepositorRoster_ReadsTheRosterOnlyWhenTheMachineWantsIt()
+    {
+        var versions = new[]
+        {
+            Summary(NowMs, versionNum: 1L),
+            Summary(NowMs, versionNum: 2L, depositedBy: Depositor),
+        };
+        var keys = FileVersionFormat.DepositorKeys(versions);
+        Assert.Equal(new[] { Depositor }, keys);
+
+        var wanting = new FakeDepositorApps { Wanted = true };
+        Assert.True(await FileVersionFormat.ReadDepositorRosterAsync(wanting, keys));
+        Assert.Equal(new[] { Depositor }, wanting.WantedAsked);
+        Assert.Equal(1, wanting.Refreshes);
+
+        var satisfied = new FakeDepositorApps { Wanted = false };
+        Assert.False(await FileVersionFormat.ReadDepositorRosterAsync(satisfied, keys));
+        Assert.Equal(0, satisfied.Refreshes);
+    }
+
+    [Fact]
+    public async Task ReadDepositorRoster_AsksNothingWhenNoVersionNamesADepositorOrThereIsNoMachine()
+    {
+        var keys = FileVersionFormat.DepositorKeys(new[] { Summary(NowMs) });
+        Assert.Empty(keys);
+
+        var apps = new FakeDepositorApps { Wanted = true };
+        Assert.False(await FileVersionFormat.ReadDepositorRosterAsync(apps, keys));
+        Assert.Null(apps.WantedAsked);
+        Assert.Equal(0, apps.Refreshes);
+
+        Assert.False(await FileVersionFormat.ReadDepositorRosterAsync(null, new[] { Depositor }));
+    }
+
+    private sealed class FakeDepositorApps : uniffi.fauna_client_connected_apps.ConnectedAppsMachineFakeBase
+    {
+        public uniffi.fauna_core.LocalizedText Line { get; init; } =
+            new("media.version_author", new Dictionary<string, string> { ["author"] = "?" });
+        public bool Wanted { get; init; }
+        public (string, string?)? Asked { get; private set; }
+        public string[]? WantedAsked { get; private set; }
+        public int Refreshes { get; private set; }
+
+        public override uniffi.fauna_core.LocalizedText VersionAuthor(string authorDisplay, string? depositedBy)
+        {
+            Asked = (authorDisplay, depositedBy);
+            return Line;
+        }
+
+        public override bool DepositorReadWanted(string[] depositedBy)
+        {
+            WantedAsked = depositedBy;
+            return Wanted;
+        }
+
+        public override Task Refresh()
+        {
+            Refreshes++;
+            return Task.CompletedTask;
+        }
     }
 
 

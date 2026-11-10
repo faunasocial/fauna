@@ -419,6 +419,45 @@ pub fn report_sheet_view(target: FfiReportTarget, form: FfiReportForm) -> FfiRep
     report::report_sheet_view(&target.subject, target.sealed, &form.into()).into()
 }
 
+/// The `report-status` line after a report was queued with no nest.
+#[uniffi::export]
+pub fn report_queued() -> LocalizedText {
+    report::report_queued()
+}
+
+/// The `error-message` line when a queued report asked to block its author:
+/// the block needs the nest, so it was not sent.
+#[uniffi::export]
+pub fn report_block_not_sent() -> LocalizedText {
+    report::report_block_not_sent()
+}
+
+impl FfiModerationClient {
+    /// [`Self::abuse_report_submit_or_queue`] through an explicit queue.
+    async fn abuse_report_submit_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        target: FfiReportTarget,
+        form: FfiReportForm,
+    ) -> Result<Option<FfiReportSent>, FfiError> {
+        let request = report::report_request(&target.into(), &form.into())
+            .ok_or_else(|| general_err("the report cannot be sent yet"))?;
+        let composed = self
+            .client()
+            .abuse_report_submit_or_queue(queue, request)
+            .await
+            .map_err(crate::family::compose_err)?;
+        Ok(match composed {
+            fauna_protocol::offline_intent::Composed::Sent(reply) => Some(FfiReportSent {
+                acknowledgement: report::report_acknowledgement(&reply.routed_to),
+                report_id: reply.report_id,
+                routed_to: reply.routed_to,
+            }),
+            fauna_protocol::offline_intent::Composed::Queued(_) => None,
+        })
+    }
+}
+
 /// The line a failed send paints on the page's `error-message`.
 #[uniffi::export]
 pub fn report_failed(error: String) -> LocalizedText {
@@ -481,6 +520,24 @@ impl FfiModerationClient {
             report_id: reply.report_id,
             routed_to: reply.routed_to,
         })
+    }
+
+    /// [`Self::abuse_report_submit`] sent now or queued with no nest (the
+    /// `OfflineQueued` composer, `account-offline-mutation.md` § The
+    /// offline-mutation contract), over the device outbox the first connection
+    /// word wired (`offline_outbox::DEVICE`). `None` = queued: no nest answered,
+    /// so the sheet closes on [`report_queued`]'s line, still lands the
+    /// reporter-side hide (local), and does not try a ticked block — it needs
+    /// the nest; [`report_block_not_sent`] says so on `error-message`.
+    /// `Some` = sent, exactly as [`Self::abuse_report_submit`].
+    pub async fn abuse_report_submit_or_queue(
+        &self,
+        target: FfiReportTarget,
+        form: FfiReportForm,
+    ) -> Result<Option<FfiReportSent>, FfiError> {
+        let queue = crate::family::device_queue();
+        self.abuse_report_submit_through(queue.as_deref(), target, form)
+            .await
     }
 
     /// `fauna.moderation.abuse_report.mine` — the ledger, newest first, worded.
@@ -585,6 +642,43 @@ mod tests {
             },
         );
         assert!(picked.can_submit && picked.blocked_reason.is_none());
+    }
+
+    fn submit(
+        queue: &fauna_client_testkit::RecordingQueue,
+    ) -> Result<Option<FfiReportSent>, FfiError> {
+        let client = FfiModerationClient::from_nest(fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        ));
+        let form = FfiReportForm {
+            reason: Some("spam".into()),
+            ..Default::default()
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(client.abuse_report_submit_through(Some(queue), message(), form))
+    }
+
+    /// With no nest the door answers `None` (queued) and the report rests in
+    /// the outbox.
+    #[test]
+    fn a_report_with_no_nest_is_queued() {
+        let queue = fauna_client_testkit::RecordingQueue::new("disconnected");
+        assert!(submit(&queue).unwrap().is_none(), "no nest: queued");
+        let kinds: Vec<_> = queue.queued().into_iter().map(|q| q.0).collect();
+        assert_eq!(kinds, vec!["fauna.moderation.abuse_report.submit"]);
+    }
+
+    /// Connected, the report is sent (to this dummy nest it fails on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn a_report_with_the_nest_connected_is_sent_not_queued() {
+        let queue = fauna_client_testkit::RecordingQueue::new("connected");
+        assert!(submit(&queue).is_err(), "the send was attempted");
+        assert!(queue.queued().is_empty());
     }
 
     #[test]

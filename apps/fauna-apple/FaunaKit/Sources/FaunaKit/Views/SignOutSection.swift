@@ -13,7 +13,9 @@ import SwiftUI
 /// Element IDs match `tests/e2e-unified/ui.yaml` settings (`sign-out-button`,
 /// `sign-out-confirm-button`) exactly.
 ///
-/// The shared credential wipe runs through `StatusVM.signOut`; the platform
+/// The sign-out record is written on the confirm's own turn
+/// (`StatusVM.recordSignOut`), and the routine that finishes it runs through
+/// `StatusVM.signOut`; the platform
 /// re-root to onboarding (`identity_choice`) and any platform side-effect (e.g.
 /// notifying a paired Apple Watch on iOS) is the caller's `onSignedOut` closure.
 ///
@@ -120,6 +122,12 @@ public struct SignOutSection: View {
             if StolenCeremonyHold.shared.admits(line) { error = line }
             return
         }
+        // The decision, durably, before anything awaits — the draft flush and
+        // the push drop below included: a window that dies anywhere after this
+        // line is signed out by the next launch (`account-scoping.md` § Erasure
+        // follows scope → *The sign-out record is on all 7 apps*, decision 1).
+        let recorded = statusVM.recordSignOut(sessionState: session)
+        let ownLock = ownLock
         Task { @MainActor in
             // Sign-out is a leave door: the erase below takes the session the
             // debounced save would ride, and a draft it never saved comes back
@@ -139,7 +147,7 @@ public struct SignOutSection: View {
             // `signOut` is async only because it must stop the account runtime
             // BEFORE erasing its store (see its doc) — the gesture itself is
             // unchanged, and `onSignedOut()` still runs after the wipe.
-            await statusVM.signOut(sessionState: session)
+            await statusVM.signOut(sessionState: session, recorded: recorded, ownLock: ownLock)
             onSignedOut()
         }
     }

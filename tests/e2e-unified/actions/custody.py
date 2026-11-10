@@ -106,8 +106,8 @@ class CustodyActions:
         CAS and a drive pass posts it to the channel.
 
         ``aliases`` are other labels the same thread paints under on an app
-        that resolves the peer's handle (apple paints ``<handle>@<domain>``
-        where the others paint the short id): each is tried, in order, only
+        that resolves the peer's handle (apple and tui paint
+        ``<handle>@<domain>`` where the others paint the id): each is tried, in order, only
         when the previous was not offered — the last refusal propagates, so a
         genuinely wrong label still fails loudly listing the painted options."""
         from drivers.http_bridge import SelectOptionNotOffered

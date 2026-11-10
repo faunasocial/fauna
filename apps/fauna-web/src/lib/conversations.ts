@@ -46,7 +46,13 @@
 
 import { get, writable, type Writable } from 'svelte/store';
 import type { LocalizedText } from './i18n/localized';
-import { identity, onSignedInActorChange, reconnectTick, signedInIdentity } from './store';
+import {
+  connectionStatus,
+  identity,
+  onSignedInActorChange,
+  reconnectTick,
+  signedInIdentity,
+} from './store';
 import { guardSingletonBuild } from './singleton-build';
 import { registerActorScopedReset, sameActorSince } from './actorScope';
 import { accountsList, accountsTabSessionMaterial } from './accounts';
@@ -432,6 +438,12 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
     // hold the conversations page back, and a failed start degrades to the
     // blob rail on its own.
     startAccountRuntimeFor(id.secretHex, id.actorId, built);
+    // The offline outbox (`devices.md` § Offline compose): the first
+    // connection word lends this tab's outbox to the manager, so a message
+    // sent on a bound MLS group with no nest is queued as a plaintext intent
+    // and drained — now, at the account store's ready edge and on every
+    // reconnect. `connectionStatus`'s subscription below keeps it current.
+    built.setConnectionState(get(connectionStatus));
     // ⚠ FROM HERE ON THE BUILD WORKS ON `built`, NEVER ON `manager`, AND
     // RE-CHECKS BOTH SEAMS BEFORE EACH PASS. Every pass below writes MLS state —
     // the restore re-seals the replica, the folder passes publish, the mint
@@ -670,6 +682,12 @@ export function resetConversationsManager(): void {
 // Self-registered, like the feed manager's — see `actorScope.ts` for why the
 // registration lives beside the state instead of in the switch handlers.
 registerActorScopedReset(resetConversationsManager);
+
+// The offline composer reads the same connection word as the offline gate, so
+// the send it keeps live is exactly the send that queues with no nest — and a
+// word turning back to online drains the queue. A no-op until a manager is
+// built.
+connectionStatus.subscribe((word) => manager?.setConnectionState(word));
 
 // Self-address self-heal — the web leg of `conversations.md` § State & data
 // shape → *Self-address: live, never baked*. The manager is built as soon as
@@ -945,6 +963,16 @@ export async function trainModerationCorrection(
   await settingsMachine.trainModerationCorrection(contentId, false); // "ham" — a false positive
 }
 
+/** The nest half (and the sealed model half) of the post's mark-as-spam verb
+ *  (`report-sharing.md` § Report capture → *The post's mark-as-spam verb*): the
+ *  same ONE shared flow as a queue correction, with `isSpam` the verb's new
+ *  state — `fauna.moderation.train {verdict:"spam"}` on a mark, `"ham"` on the
+ *  un-mark. Rejects for the caller to word on `error-message`. */
+export async function trainPostSpam(secretHex: string, postId: string, isSpam: boolean): Promise<void> {
+  if (!settingsMachine) settingsMachine = await mailSettingsMachine(secretHex);
+  await settingsMachine.trainModerationCorrection(postId, isSpam);
+}
+
 export function refreshConversations(): void {
   if (!manager) return;
   try {
@@ -1186,6 +1214,10 @@ async function drainFeed(
           // ingest projects it as `MessageSnapshot.warmup_hold`
           // (mail-deliverability.md § Enforcement at submission time).
           m.warmup_hold ?? null,
+          // The copy's scoring-bus rows: the scorer adds the community
+          // `report:spam` term on top of its own (report-sharing.md
+          // § Applying the aggregate).
+          m.scores ?? null,
         );
         // The cursor moves only once the record is behind us. A record that
         // does not open under the account's key set is NOT a throw: the wasm
@@ -1259,6 +1291,69 @@ async function pollOnce(secretHex: string): Promise<void> {
   // loop's mail sweep runs, after the drain so the first INBOX page has named
   // the change baseline. Never rejects.
   await manager!.syncMailReadState();
+  // The catch-up (mail-spam.md § Scoring placement → The app's catch-up):
+  // held INBOX copies without the watermark that this pass's scorer can score
+  // — every one once a model exists, a reported one before — scored, whole,
+  // newest first up to the MDA's cap, then the disposition flushed once more
+  // so a filed copy is watermarked and moved.
+  await rescoreHeldMail(secretHex);
+}
+
+/** The app's spam catch-up — the web twin of the shared driver's
+ *  `rescore_held_inbox_copies`, whose fetch cannot ride the seam here. The
+ *  manager takes from its held un-watermarked set what this pass's scorer can
+ *  score (`takeMailRescore`); JS only fetches, as `refillMailAttachments` does:
+ *  a `$NotJunk` copy is recorded without a fetch (`recordVetoedHeldInbound`),
+ *  every other one is opened and judged by the manager with the shared
+ *  `judge_held_inbox_copy`, a filed one leaving the view (`rescoreHeldInbound`).
+ *  A copy the mailbox no longer holds leaves the set; a fetch failure ends the
+ *  pass, the rest staying in the set for the next. Never rejects. */
+async function rescoreHeldMail(secretHex: string): Promise<void> {
+  const mgr = manager;
+  if (!mgr) return;
+  let candidates: { uid: number; vetoed: boolean }[];
+  try {
+    candidates = mgr.takeMailRescore() as { uid: number; vetoed: boolean }[];
+  } catch (e) {
+    logMessage('debug', 'fauna_web::conversations', `take mail re-score failed: ${e}`);
+    return;
+  }
+  if (candidates.length === 0) return;
+  let filed = 0;
+  for (const { uid, vetoed } of candidates) {
+    if (vetoed) {
+      mgr.recordVetoedHeldInbound(uid);
+      continue;
+    }
+    try {
+      const reply = await emailInboxFetch(secretHex, Math.max(0, uid - 1), 1);
+      const m = (reply?.messages ?? []).find((msg) => msg.uid === uid);
+      if (!m) {
+        mgr.forgetUnscoredHeldInbound(uid);
+        continue;
+      }
+      const sealedEnvelope = m.body_ref
+        ? await mgr.resolveMailBodyRef(
+            concatChunkHashes(m.body_ref.chunk_hashes),
+            m.body_ref.total_bytes,
+          )
+        : new Uint8Array(m.sealed_envelope);
+      if (
+        mgr.rescoreHeldInbound(uid, m.stored_at, sealedEnvelope, m.flags ?? [], m.scores ?? null)
+      ) {
+        filed += 1;
+      }
+    } catch (e) {
+      logMessage(
+        'debug',
+        'fauna_web::conversations',
+        `mail re-score (uid ${uid}) failed; retried on the next pass: ${e}`,
+      );
+      break;
+    }
+  }
+  if (filed > 0) refreshConversations();
+  await flushSpamScoring(secretHex);
 }
 
 /** The server-side mailbox a mail record's UID counts in — the shared
@@ -1326,13 +1421,15 @@ async function refillMailAttachments(secretHex: string): Promise<void> {
 }
 
 /** Enable/refresh the manager's on-device INBOX spam scorer for this poll, or
- *  disable it (cold start / mail off). Fetches the caller's sealed per-user
+ *  disable it (mail off). Fetches the caller's sealed per-user
  *  model + the admin-effective scoring policy; the manager unwraps the model in
  *  wasm (never in JS) and scores each INBOX message at ingest against the SAME
  *  effective threshold + knobs the MDA/nest use (mail-spam.md § Scoring
  *  placement). Best-effort: any failure disables scoring this pass rather than
- *  breaking the receive loop. An untrained actor (`fetchSpamModel` → null) is a
- *  cold start — no scorer, so no un-based watermarking. */
+ *  breaking the receive loop. An untrained actor (`fetchSpamModel` → null) gets
+ *  a report-only scorer: copies carrying a community `report:spam` row are
+ *  scored by that term alone, every other copy is left un-watermarked
+ *  (report-sharing.md § Applying the aggregate). */
 async function prepareSpamScoring(secretHex: string): Promise<void> {
   if (!manager) return;
   const id = get(identity);
@@ -1342,11 +1439,12 @@ async function prepareSpamScoring(secretHex: string): Promise<void> {
   }
   try {
     const fetched = await fetchSpamModel(secretHex, id.actorId);
+    const p = await getSpamScoringPolicy(secretHex);
     if (!fetched) {
-      manager.disableSpamScoring();
+      // Untrained: the community report term alone, on reported copies only.
+      manager.enableReportOnlySpamScoring(p.spam_folder_threshold);
       return;
     }
-    const p = await getSpamScoringPolicy(secretHex);
     manager.enableSpamScoring(
       fetched.blob,
       p.spam_folder_threshold,
@@ -1590,6 +1688,12 @@ function subscribeReceivePushes(): void {
       // A flag on an INBOX message changed elsewhere — the mail pass ends in
       // the flag-change drain (`ConvPushEvent::MailFlagsChanged`'s arm).
       case 'fauna.mail.flags_changed':
+      // The actor's spam model changed (a lesson here, on another device or
+      // through a mail client): the mail pass rebuilds its scorer and ends in
+      // the catch-up, so held copies the new model can score are filed now
+      // (`ConvPushEvent::MailSpamModelChanged`'s arm; mail-spam.md § Scoring
+      // placement → The app's catch-up).
+      case 'fauna.bridges.push.spam_model_updated':
       // A bridged room changed — a deposit, a room upsert, the user's own
       // send from another device (`ConvPushEvent::BridgedChanged`'s arm). The
       // bridged pass rides the mail rail's slot.
@@ -1771,6 +1875,7 @@ interface FeedTestSeams {
   injectErrorForTest(key: string, message: string): void;
   setCueRollupForTest(contentIds: string[]): Promise<void>;
   cueVerdictForTest(contentId: string): string;
+  setCueHydrationHoldForTest(held: boolean): void;
   holdNextReloadForTest(): void;
   releaseHeldReloadForTest(): void;
 }
@@ -2009,6 +2114,7 @@ const CONVERSATIONS_COMMANDS = [
   'feed_inject_error',
   'feed_seed_cue_rollup_for_test',
   'feed_cue_verdict_for_test',
+  'feed_cue_hydration_hold',
   'feed_hold_next_reload',
   'feed_release_held_reload',
   // WebDAV served-set fixture — here because it runs over this module's
@@ -2387,6 +2493,20 @@ async function handleConversationsCommand(action: string, p: any): Promise<unkno
           'WasmFeedManager',
         );
         return m.cueVerdictForTest((p.content_id as string | undefined) ?? '');
+      }
+      case 'feed_cue_hydration_hold': {
+        // Set or clear the e2e cue-hydration hold on the live manager — the
+        // browser twin of tui/linux's `FAUNA_E2E_CUE_HYDRATION_HOLD_FILE`,
+        // which wasm32 cannot read. Set before the feed page first mounts, it
+        // parks `hydrateCues` before its fetch (and so the capture, which starts
+        // only once hydrated); cleared, the parked hydrate goes on.
+        const m = testSeams<WasmFeedManager, FeedTestSeams>(
+          await getFeedManager(),
+          'setCueHydrationHoldForTest',
+          'WasmFeedManager',
+        );
+        m.setCueHydrationHoldForTest(Boolean(p.held));
+        return null;
       }
       case 'conv_receive_now': {
         // Convention 14's `run_now` for the receive rail — the web twin of

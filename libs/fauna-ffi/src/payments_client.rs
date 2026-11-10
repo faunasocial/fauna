@@ -40,6 +40,11 @@ pub struct FfiProviderItem {
     /// for the §4 status badge — never re-derive the branch per-app.
     pub last_verified_at: Option<u64>,
     pub last_rejected_at: Option<u64>,
+    /// The product the tier is sold as, in the provider's own reference
+    /// (Stripe: the Payment Link id) — `None` = every verified payment maps
+    /// to the tier (monetization.md § Pillar 3 → *Configuration*). Not a
+    /// secret: the §4 form pre-fills it from here.
+    pub product_ref: Option<String>,
 }
 
 impl From<ProviderItem> for FfiProviderItem {
@@ -50,6 +55,7 @@ impl From<ProviderItem> for FfiProviderItem {
             created_at: p.created_at.0,
             last_verified_at: p.last_verified_at,
             last_rejected_at: p.last_rejected_at,
+            product_ref: p.product_ref,
         }
     }
 }
@@ -191,16 +197,19 @@ impl FfiPaymentsClient {
 impl FfiPaymentsClient {
     /// `fauna.payments.providers.set` — upsert the calling author's config
     /// for one provider kind (kind + webhook-verification secret + entitled
-    /// tier). Returns whether the config was saved. Typed errors:
-    /// `fauna.payments.{unknown_provider,tier_not_found,malformed}`.
+    /// tier + the optional product the tier is sold as — `None` keeps the
+    /// saved product, an empty string clears it; a form that shows the field
+    /// passes what it shows). Returns whether the config was saved. Typed
+    /// errors: `fauna.payments.{unknown_provider,tier_not_found,malformed}`.
     pub async fn providers_set(
         &self,
         kind: String,
         webhook_secret: String,
         tier: String,
+        product_ref: Option<String>,
     ) -> Result<bool, FfiError> {
         self.client()
-            .providers_set(kind, webhook_secret, tier)
+            .providers_set(kind, webhook_secret, tier, product_ref)
             .await
             .map_err(stringify)
     }
@@ -236,6 +245,34 @@ impl FfiPaymentsClient {
             .await
             .map(FfiClaimRedeemReply::from)
             .map_err(stringify)
+    }
+
+    /// The redeem gesture across nests — the native twin of
+    /// [`fauna_client_payments::PaymentsClient::claims_redeem_across_nests`]
+    /// (the web SPA's twin is `fauna-wasm`'s `paymentsClaimsRedeemAcrossNests`):
+    /// [`Self::claims_redeem`] when `author_home_url` is `None` or blank, and
+    /// for a code minted by an author homed on another nest the redeem carrying
+    /// the home and the redeemer's own signed intent (`monetization.md`
+    /// § Pillar 3 → *Which nest an in-app redeem binds on*).
+    /// `redeemer_secret` is the caller's own 32-byte identity seed;
+    /// `author_id` is the 32-byte `ActorId` whose code it is.
+    pub async fn claims_redeem_across_nests(
+        &self,
+        code: String,
+        redeemer_secret: Vec<u8>,
+        author_id: Vec<u8>,
+        author_home_url: Option<String>,
+    ) -> Result<FfiClaimRedeemReply, FfiError> {
+        let redeemer = crate::keypair_from_bytes(&redeemer_secret)?;
+        let author = crate::bytes_to_actor_id(&author_id)?;
+        self.client()
+            .claims_redeem_across_nests(code, &redeemer, author, author_home_url)
+            .await
+            .map(FfiClaimRedeemReply::from)
+            .map_err(|e| match e {
+                fauna_protocol::CrossNestError::Nest(e) => stringify(e),
+                other => crate::general_err(other),
+            })
     }
 
     /// `fauna.payments.claims.mint` — the author mints a claim code manually,

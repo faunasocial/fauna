@@ -458,7 +458,7 @@ def test_sell_post_teaser_price_and_self_serve_buy(app, request, sell_nest):
         f"buyer's feed should hold this run's sold post; "
         f"error-message={app.error_text()!r}"
     )
-    card = feed.post_index_by_id(row["post_id"])
+    card = feed.card_index_by_id(row["post_id"])
     assert card >= 0, f"the sold post {row['post_id']} has no rendered card"
     other_buy_buttons = app.driver.count("gated-post-buy-button") - 1
     assert feed.wait_for_unlock_offer_price(card=card), (
@@ -540,7 +540,7 @@ def test_sell_post_teaser_price_and_self_serve_buy(app, request, sell_nest):
     )
     row = feed.wait_for_post_state_by_text(preview)
     assert row is not None, "buyer's feed should still hold this run's sold post"
-    feed.open_post_detail(feed.post_index_by_id(row["post_id"]))
+    feed.open_post_detail(feed.card_index_by_id(row["post_id"]))
     app.driver.wait_for("feed-post-detail-body")
     deadline = time.monotonic() + 15
     body = ""

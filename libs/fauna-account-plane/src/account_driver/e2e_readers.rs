@@ -104,12 +104,23 @@ fn device_set_record(row_value: &[u8]) -> DeviceSetStateView {
 }
 
 /// One fauna-native channel's read marker as the e2e assertion reads it —
-/// `{"found": false}`, or `{"found": true, "through": N}`.
+/// `{"found": false}`, or `{"found": true, "through": N}` — beside the
+/// channel's standing in this replica's departure state
+/// ([`crate::departure`]): `subscribed` when the subscription marker names its
+/// `conv` scope (a full pass derived it, so a later leave is concluded),
+/// `departed` when the departed list does (a pass concluded the leave). The
+/// two are the barriers a departure witness waits on — a join and a leave
+/// between two passes leave nothing to conclude.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReadMarkerStateView {
     pub found: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub through: Option<u64>,
+    /// Serialized only when set, so the bare marker shape reads unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub subscribed: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub departed: bool,
 }
 
 /// The account store's read marker for `channel_id_hex` — the e2e's durability
@@ -128,10 +139,38 @@ pub async fn read_marker_state(
     let Some(handle) = handle else {
         return ReadMarkerStateView::NOT_FOUND;
     };
-    let Ok(markers) = handle.read_markers().await else {
-        return ReadMarkerStateView::NOT_FOUND;
+    let mut view = match handle.read_markers().await {
+        Ok(markers) => read_marker_of(&markers, channel_id_hex),
+        Err(_) => ReadMarkerStateView::NOT_FOUND,
     };
-    read_marker_of(&markers, channel_id_hex)
+    if let Some(scope) = conv_scope_of(channel_id_hex) {
+        // The departure state's own `store_meta` lists, read through the
+        // handle's meta door — read-only: the departure step owns both keys.
+        let subscribed = handle.meta_get(crate::departure::META_SUBSCRIBED).await;
+        view.subscribed = scope_list_names(subscribed.ok().flatten().as_deref(), &scope);
+        let departed = handle.meta_get(crate::departure::META_DEPARTED).await;
+        view.departed = scope_list_names(departed.ok().flatten().as_deref(), &scope);
+    }
+    view
+}
+
+/// The `conv` member scope of `channel_id_hex` (any case), as the departure
+/// lists spell it; `None` for anything but 64 hex digits.
+fn conv_scope_of(channel_id_hex: &str) -> Option<String> {
+    let mut channel = [0u8; 32];
+    hex::decode_to_slice(channel_id_hex, &mut channel).ok()?;
+    fauna_protocol::scope::ContentScope::new(crate::scope_set::CONV_KIND, channel)
+        .ok()
+        .map(|scope| scope.to_string())
+}
+
+/// Does a newline-framed departure list ([`crate::departure`]) name `scope`?
+fn scope_list_names(raw: Option<&[u8]>, scope: &str) -> bool {
+    raw.is_some_and(|raw| {
+        String::from_utf8_lossy(raw)
+            .lines()
+            .any(|line| line == scope)
+    })
 }
 
 /// The pure lookup, split out so it is unit-testable without an assembled store.
@@ -143,6 +182,7 @@ fn read_marker_of(markers: &[(String, u64)], channel_id_hex: &str) -> ReadMarker
         Some((_, through)) => ReadMarkerStateView {
             found: true,
             through: Some(*through),
+            ..ReadMarkerStateView::NOT_FOUND
         },
         None => ReadMarkerStateView::NOT_FOUND,
     }
@@ -152,6 +192,8 @@ impl ReadMarkerStateView {
     const NOT_FOUND: Self = Self {
         found: false,
         through: None,
+        subscribed: false,
+        departed: false,
     };
 }
 
@@ -296,5 +338,17 @@ mod tests {
             device_set_record(b"not dag-cbor"),
             DeviceSetStateView::NOT_FOUND
         );
+    }
+
+    #[test]
+    fn the_departure_lists_name_a_channel_by_its_conv_scope() {
+        let channel = "AB".repeat(32);
+        let scope = conv_scope_of(&channel).expect("64 hex digits");
+        assert_eq!(scope, conv_scope_of(&channel.to_lowercase()).unwrap());
+        let list = format!("content:post:{}\n{scope}\n", "00".repeat(32));
+        assert!(scope_list_names(Some(list.as_bytes()), &scope));
+        assert!(!scope_list_names(Some(b"content:conv:zz"), &scope));
+        assert!(!scope_list_names(None, &scope));
+        assert_eq!(conv_scope_of("not-hex"), None);
     }
 }

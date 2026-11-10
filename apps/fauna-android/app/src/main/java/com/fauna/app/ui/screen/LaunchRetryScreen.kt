@@ -32,6 +32,9 @@ import social.fauna.generated.Ids
  */
 @Composable
 fun LaunchRetryScreen(
+    /** `launch-identity-label`: the bound account's cached identity
+     *  (`AppLaunchVM.launchIdentityLine`); null → absent. */
+    identityLine: String? = null,
     onRetry: () -> Unit,
     onUseDifferentNest: () -> Unit,
     /** The custodied boxes the device knows of; `launch-recover-button` shows iff non-empty. */
@@ -46,6 +49,10 @@ fun LaunchRetryScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
+        identityLine?.let {
+            LaunchIdentityLabel(it)
+            Spacer(Modifier.height(16.dp))
+        }
         Text(
             stringResource(R.string.launch_retry_title),
             style = MaterialTheme.typography.headlineSmall,
@@ -87,4 +94,33 @@ fun LaunchRetryScreen(
                 .testTag(Ids.LAUNCH_FALLTHROUGH_BUTTON),
         ) { Text(stringResource(R.string.launch_use_different_nest)) }
     }
+}
+
+/**
+ * `launch_progress` — the in-flight launch: blank but for
+ * `launch-identity-label`, the bound account's cached `handle@domain · tier`
+ * (`onboarding.md` § App-launch routing → *The cached identity on the launch
+ * surfaces*); nothing at all while the cache holds no handle.
+ */
+@Composable
+fun LaunchProgressScreen(identityLine: String?) {
+    if (identityLine == null) return
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        LaunchIdentityLabel(identityLine)
+    }
+}
+
+/** The bare identity line carrying `launch-identity-label`. */
+@Composable
+private fun LaunchIdentityLabel(line: String) {
+    Text(
+        line,
+        style = MaterialTheme.typography.bodyMedium,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.testTag(Ids.LAUNCH_IDENTITY_LABEL),
+    )
 }

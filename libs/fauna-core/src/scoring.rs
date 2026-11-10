@@ -713,6 +713,36 @@ pub fn validate_composition(entries: &[CompositionEntry]) -> Result<(), Composit
     Ok(())
 }
 
+/// The app's spam catch-up on held un-watermarked `INBOX` copies — the twin of
+/// the MDA's `SELECT` re-scan (`mail-spam.md` § Scoring placement → *The app's
+/// catch-up*). Here, not beside the scorer in `fauna-client-mail-settings`,
+/// because both the scorer (which reports its state) and the conversations
+/// store's held set (which filters by it, `fauna-conversations`, which does not
+/// depend on the scorer's crate) read these two items.
+pub mod inbox_catch_up {
+    /// What one pass's on-device scorer can score — the filter the held
+    /// un-watermarked set is taken through.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum SpamScorerState {
+        /// No scorer this pass (mail off, a failed fetch): nothing is taken.
+        #[default]
+        Absent,
+        /// A scorer without a say — no model, or one whose Bayesian term
+        /// could not reach the account's spam-folder tier (`mail-spam.md`
+        /// § Scoring placement → *The scorer's say*): only a copy carrying a
+        /// `report:spam` row is scored.
+        ReportOnly,
+        /// A model with a say: every un-watermarked copy is scored.
+        Trained,
+    }
+
+    /// The most held copies one app pass re-scores, highest UID first — pinned
+    /// equal to the MDA's `spamScorePerPassCap`
+    /// (`bins/fauna-bridges/internal/mda/imap/spam_score.go`), its twin: one
+    /// cap at both scoring positions. Internal latency tuning, never a knob.
+    pub const INBOX_SPAM_RESCORE_PER_PASS_CAP: usize = 100;
+}
+
 /// Distributed report sharing — the k-anonymity gate + score-from-count curve
 /// (`report-sharing.md` § The k-anonymity choke point + § The aggregate).
 /// Shared Rust so clients can render exactly the numbers a nest computes.
@@ -757,6 +787,18 @@ pub mod reports {
     /// would overwrite that factor's local row.
     pub fn is_exchanged_factor(factor: &str) -> bool {
         EXCHANGED_FACTORS.contains(&factor)
+    }
+
+    /// A copy's live `report:spam` score (per mille) read off its bus rows —
+    /// `0` when it carries none. The one reading every app position shares:
+    /// the on-device scorer's extra term and the flag-change feed's re-score
+    /// test (`report-sharing.md` § Applying the aggregate). The twin of the
+    /// MDA's `reportSpamPm`.
+    pub fn report_spam_pm(scores: &[super::ScoreEntry]) -> i64 {
+        scores
+            .iter()
+            .find(|e| e.factor == super::factor::REPORT_SPAM)
+            .map_or(0, |e| e.score)
     }
 
     /// THE k-anonymity choke point (`report-sharing.md` § The k-anonymity

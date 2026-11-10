@@ -95,6 +95,9 @@ public final class OnboardingVM {
         // statement is still true — going Back to identity_choice still owes the
         // user the line (`signOutResidue`'s doc).
         _observerTick &+= 1
+        // The pending-invite poll is armed from the machine's own ticks, never
+        // only from a render (`armInvitePollIfNeeded`).
+        armInvitePollIfNeeded()
     }
     private var _observerTick: UInt64 = 0
 
@@ -111,8 +114,8 @@ public final class OnboardingVM {
     ///
     /// Handed in by the app root — off `SessionState.signOutResidue`, in the
     /// same synchronous step that re-roots to onboarding after a sign-out or the
-    /// unreadable-index start-over — or set by `recheckSignOutResidueAtLaunch`
-    /// on the signed-out launch. Never cleared on display or by a machine
+    /// unreadable-index start-over — or set by the launch's sign-out finish
+    /// (`launchMayProceed`). Never cleared on display or by a machine
     /// transition: it is state the wizard's machine does not own (the line used
     /// to ride `errorMessage`, which the machine's own error re-reads on every
     /// tick), and until a re-sweep says otherwise the statement is still true.
@@ -139,41 +142,93 @@ public final class OnboardingVM {
     /// (`retrySignOutResidue`).
     private var signOutResidueRetries: Task<Void, Never>?
 
-    /// Remove Again (`sign-out-residue-retry-button`): re-sweep what the painted
-    /// residue recorded, off the main actor, and paint what is left — nothing,
-    /// when the device is now clean.
+    /// The one sign-out routine Remove Again and the launch run
+    /// (`SignOutResidueSurface.finish` with the agent dismissed and no lock of
+    /// this process's own — the view is only ever up signed out, and a launch
+    /// holds none yet). The seam a unit test replaces.
+    @ObservationIgnored
+    public var signOutFinish: @Sendable () -> SignOutFinishOutcome = {
+        SignOutResidueSurface.finish(dismissAgent: true, written: nil)
+    }
+
+    /// Where the launch's sign-out finish stands (`launchMayProceed`). Once per
+    /// `OnboardingVM` — and each app root holds exactly one for the process —
+    /// so a switch's, a teardown's or a start-over's re-entry into the launch
+    /// never runs it again: a remove-account's own erase may be in flight then,
+    /// over the record it joined.
+    private enum LaunchFinish { case notRun, running, failedClosed, done }
+    private var launchFinish = LaunchFinish.notRun
+
+    /// The launch was refused by its sign-out finish while the record still
+    /// owes its wipe (`launchMayProceed`): the root shows the wizard's
+    /// `identity_choice` painting the refusal line instead of starting its
+    /// launch machine, until Remove Again clears it.
+    public var launchFailedClosed: Bool { launchFinish == .failedClosed }
+
+    /// How the root re-enters its launch — handed in by `launchMayProceed`, and
+    /// called once the finish allows it (its first run done, or a Remove Again
+    /// that no longer fails closed).
+    @ObservationIgnored
+    private var relaunch: (@MainActor () -> Void)?
+
+    /// **The launch's gate on the sign-out record** — both app roots ask it
+    /// first thing in their launch, before anything reads the registry
+    /// (`account-scoping.md` § Erasure follows scope → *The sign-out record is
+    /// on all 7 apps*, decisions 3 and 4). `true`: the finish already ran and
+    /// allowed it — launch now. `false`: hold the launch. On the first ask the
+    /// finish runs, off the main actor — whatever a sign-out (or a
+    /// remove-account) cut short is finished: the sync agent dismissed, the
+    /// wipe, each recorded account's erase, the residue re-sweep — and then
+    /// `relaunch` is called, which asks again. A refused finish whose record
+    /// still owes its wipe FAILS CLOSED: every later ask answers `false` (the
+    /// root shows `identity_choice`, `launchFailedClosed`) until Remove Again
+    /// clears it and calls `relaunch`. Twin of android's `AppLaunchVM.start`.
+    public func launchMayProceed(relaunch: @escaping @MainActor () -> Void) -> Bool {
+        self.relaunch = relaunch
+        switch launchFinish {
+        case .done: return true
+        case .running, .failedClosed: return false
+        case .notRun:
+            launchFinish = .running
+            let finish = signOutFinish
+            Task { @MainActor in
+                let outcome = await Task.detached { finish() }.value
+                // A sign-out that landed while the finish ran recorded the
+                // newer statement; it wins.
+                if self.signOutResidue == nil { self.signOutResidue = outcome.residue }
+                self.launchFinish = outcome.failsClosed ? .failedClosed : .done
+                self.relaunch?()
+            }
+            return false
+        }
+    }
+
+    /// Remove Again (`sign-out-residue-retry-button`): the one routine again,
+    /// off the main actor — the sign-out record's work if any is still owed,
+    /// then the residue re-sweep — and paint what is left: nothing, when the
+    /// device is now clean. A launch that failed closed re-enters once the
+    /// finish no longer refuses.
     ///
     /// Presses are **serialized, never dropped**: a press that lands while a
-    /// re-sweep is running was made after whatever the user just fixed, so it
-    /// waits and then runs over what that re-sweep left. That is why the button
-    /// stays enabled rather than disabling itself in flight. Twin of windows'
-    /// `OnboardingViewModel.RetrySignOutResidueAsync`.
+    /// run is going was made after whatever the user just fixed, so it waits
+    /// and then runs over what that run left. That is why the button stays
+    /// enabled rather than disabling itself in flight. Twin of windows'
+    /// `OnboardingViewModel.RetrySignOutResidueAsync` and android's
+    /// `AppLaunchVM.retrySignOutResidue`.
     public func retrySignOutResidue() async {
         let previous = signOutResidueRetries
+        let finish = signOutFinish
         let press = Task { @MainActor in
             await previous?.value
-            guard let residue = self.signOutResidue else { return }
-            let left = await Task.detached { residue.retry() }.value
-            self.signOutResidue = left
+            let outcome = await Task.detached { finish() }.value
+            self.signOutResidue = outcome.residue
+            if self.launchFinish == .failedClosed && !outcome.failsClosed {
+                self.launchFinish = .done
+                self.relaunch?()
+            }
         }
         signOutResidueRetries = press
         await press.value
-    }
-
-    /// The signed-out launch's silent re-sweep (`launchRecheck` is the seam a
-    /// test replaces): a record a previous sign-out left is re-swept FIRST, off
-    /// the main actor, and the view paints only if something is still left.
-    /// Called by both app roots on the launch verdict that lands on
-    /// identity_choice with nothing in the store.
-    public func recheckSignOutResidueAtLaunch(
-        _ launchRecheck: @escaping @Sendable () -> (any SignOutResidueSurfacing)? = {
-            SignOutResidueSurface.recheckAtLaunch()
-        }
-    ) async {
-        let left = await Task.detached { launchRecheck() }.value
-        // A sign-out that landed while the re-check ran recorded the newer
-        // statement; it wins.
-        if signOutResidue == nil { signOutResidue = left }
     }
 
     /// The app shell's hook for "a pending-invite slot was just written" — the
@@ -597,31 +652,71 @@ public final class OnboardingVM {
         Task { _ = await recheckInviteStatus() }
     }
 
-    /// True while the invite-request snapshot is `PendingReview` — the predicate
-    /// the pending-invite poll loop below arms and disarms itself on. Submitting
-    /// the request or a relaunch hydration (`seed_pending_invite`) arms it; an
-    /// admin decision or a not-found refutation (`recheckInviteStatus` above)
-    /// disarms it. `onboarding.md` § The pending-invite surface.
-    public var isInvitePendingReview: Bool {
+    /// True while an invite request is pending — the predicate the pending-invite
+    /// poll loop below arms and disarms itself on. Submitting the request or a
+    /// relaunch hydration (`seed_pending_invite`) arms it; an admin decision or a
+    /// not-found refutation (`recheckInviteStatus` above) disarms it.
+    /// `onboarding.md` § The pending-invite surface.
+    ///
+    /// "Pending" is shared Rust's answer (`pendingInviteSlot()`): `PendingReview`,
+    /// or `Rechecking` from one — never the bare `PendingReview` case. The poll's
+    /// own recheck passes through `Rechecking`, so a predicate that read only
+    /// `PendingReview` flipped false and back on every tick; as the poll task's
+    /// `.task(id:)` key that cancelled and restarted the task from inside its own
+    /// work, and under load the churn could leave no task running at all — the
+    /// requester sat on `PendingReview` and never noticed the approval (macOS e2e,
+    /// `test_admin_approval_advances_the_requester_with_no_user_action`).
+    public var isInviteRequestPending: Bool {
         _ = _observerTick
-        if case .pendingReview = machine.inviteRequestSnapshot().state { return true }
-        return false
+        return machine.pendingInviteSlot() != nil
     }
 
-    /// Client-owned poll loop for the `invite_request` page's `PendingReview`
-    /// state (`onboarding.md` § The pending-invite surface — "First poll fires
+    /// Whether the pending-invite poll should run: a request is pending AND the
+    /// wizard is on the `invite_request` page (Back leaves the slot pending but
+    /// moves the step, which stops the poll — `onboarding.md` § The pending-invite
+    /// surface, "while the page is visible").
+    private var invitePollWanted: Bool {
+        guard case .inviteRequest = machine.step() else { return false }
+        return machine.pendingInviteSlot() != nil
+    }
+
+    /// The one running pending-invite poll, or nil.
+    private var invitePollTask: Task<Void, Never>?
+
+    /// Start the pending-invite poll if it is wanted and not already running.
+    /// Idempotent, so it is safe from every trigger: each machine tick
+    /// (`onMachineChanged`) arms it, which is what makes the poll independent
+    /// of SwiftUI rendering — the views' `.task(id: vm.isInviteRequestPending)`
+    /// arm is a second trigger only. Before this, the loop lived inside that
+    /// `.task` alone, so it ran only when a render observed the right key at the
+    /// right moment; on macOS under load it was measured not running at all
+    /// after an approval (the requester sat on `PendingReview` for 150 s with no
+    /// `invite_request.status` call, while a pressed Recheck admitted at once).
+    public func armInvitePollIfNeeded() {
+        guard invitePollTask == nil, invitePollWanted else { return }
+        invitePollTask = Task { @MainActor [weak self] in
+            await self?.pollPendingInviteWhileNeeded()
+            // No suspension between the loop's last check and this reset, and
+            // every tick arrives on the main actor, so a request that becomes
+            // pending again re-arms from its own tick.
+            self?.invitePollTask = nil
+        }
+    }
+
+    /// Client-owned poll loop for the `invite_request` page's pending request
+    /// (`onboarding.md` § The pending-invite surface — "First poll fires
     /// immediately… then on the interval while the page is visible"). Shared by
-    /// both apple views (priority #2): attach as `.task(id: vm.isInvitePendingReview)`
-    /// on the invite view so SwiftUI restarts this task the instant the page
-    /// enters `PendingReview` (submit or relaunch hydration) and tears it down
-    /// structurally — cancelled — when the page leaves that state or the view
-    /// disappears, the same shape as `AwaitingManualDnsView`'s DNS poll. The
-    /// cadence is read live from shared Rust (`inviteRecheckPollMs()`), never a
-    /// literal — read by all 7 apps, never seven hand-copied numbers.
-    public func pollPendingInviteWhileNeeded() async {
-        while !Task.isCancelled && isInvitePendingReview {
+    /// both apple apps (priority #2) and started only through
+    /// `armInvitePollIfNeeded`, so at most one runs. It ends when the request
+    /// resolves (an admission or a refutation) or the wizard leaves the page. A
+    /// tick that finds a recheck already in flight (the user pressed Recheck)
+    /// gets an immediate no-op from the machine and waits for the next interval.
+    /// The cadence is read live from shared Rust (`inviteRecheckPollMs()`),
+    /// never a literal — read by all 7 apps, never seven hand-copied numbers.
+    private func pollPendingInviteWhileNeeded() async {
+        while !Task.isCancelled && invitePollWanted {
             _ = await recheckInviteStatus()
-            guard !Task.isCancelled, isInvitePendingReview else { break }
+            guard !Task.isCancelled, invitePollWanted else { break }
             try? await Task.sleep(for: .milliseconds(inviteRecheckPollMs()))
         }
     }

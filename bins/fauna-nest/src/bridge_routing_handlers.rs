@@ -288,6 +288,74 @@ pub(crate) async fn ensure_actor_mail_enabled(
     Ok(())
 }
 
+/// The account lock and suspension reach the credentials a bridge resolves for
+/// the user (`transport-connection.md` § *Revocation teardown*, the bridge-held
+/// sessions paragraph; `login.md` § Silent Challenge, the lockout paragraph).
+///
+/// The dispatch gate (`caller_class_for_actor`) judges the *caller*, and on a
+/// bridge's connection the caller is the bridge — healthy whatever the user it
+/// serves has done. So every handler that resolves a USER's credential or
+/// serves a user's data to a mail, calendar, contacts, file or ATProto app
+/// through a bridge asks the same question of the *target*: does the account
+/// stand right now? A row that is suspended or carries a live lock does not
+/// (a lapsed lock is no revocation), and the handler refuses with
+/// [`account_revoked`] — the MUA AUTH (`fetch_wrapped_mls_blob`,
+/// `fetch_wrapped_submission_token`, the snapshot and WebDAV key reads), every
+/// IMAP / CalDAV / CardDAV / WebDAV serving call (so a session opened before
+/// the lock reads nothing after it), the submission door, the ATProto
+/// login and refresh, and the ATProto preferences read and write and blob
+/// attribution (an access token minted before the lock outlives it).
+///
+/// **An admin stands regardless**, the exemption the dispatch gate and
+/// `fauna.auth.verify` apply: a locked sole admin is the off-box brick
+/// `nest/common.md` § Client-state recoverability forbids, and the exemption
+/// lifts at every door together. **Inbound delivery never asks** — mail to a
+/// locked account still arrives, sealed (`validate_recipient`,
+/// `ingest_inbound_mail`, `place_inbound_invite` do not call this).
+pub(crate) async fn ensure_target_stands(
+    state: &AppState,
+    target: &[u8; 32],
+) -> Result<(), RpcError> {
+    if target_stands(state, target).await? {
+        Ok(())
+    } else {
+        Err(account_revoked())
+    }
+}
+
+/// The predicate under [`ensure_target_stands`], for the doors that answer a
+/// refusal in their own reply shape (the ATProto verifier read withholds the
+/// login DID rather than failing the call).
+pub(crate) async fn target_stands(state: &AppState, target: &[u8; 32]) -> Result<bool, RpcError> {
+    if state.db.is_admin(&target[..]).await.map_err(internal)? {
+        return Ok(true);
+    }
+    // No `users` row is no revocation to read: a deleted account's credentials
+    // and data go with it (the deletion purge walks every actor table,
+    // `db/actor_tables.rs`, `bridge_wrapped_mls_blobs` among them), so there is
+    // nothing left to serve and refusing would only add a second rule.
+    Ok(!state
+        .db
+        .actor_authority(&target[..])
+        .await
+        .map_err(internal)?
+        .is_some_and(|a| a.is_revoked_at(crate::db::now_epoch_secs())))
+}
+
+/// The target account does not stand: suspended or locked
+/// ([`ensure_target_stands`]). The submission MTA maps it to a permanent
+/// `550 5.7.1`, and the IMAP MDA ends the session with a `BYE`.
+pub(crate) fn account_revoked() -> RpcError {
+    let mut e = RpcError::new(
+        "fauna.bridges.account_revoked",
+        "error.bridges.account_revoked",
+    );
+    e.details = Some(Box::new(Value::String(
+        "this account is locked or suspended".into(),
+    )));
+    e
+}
+
 /// The actor has turned their mail off (`ensure_actor_mail_enabled`). Distinct
 /// from [`mail_serving_disabled`] (serve-here off: the user reads elsewhere).
 pub(crate) fn mail_disabled_by_user() -> RpcError {
@@ -326,6 +394,9 @@ pub(crate) async fn require_dav_caller_scope(
     }
     refuse_if_pure_backup(state, resource_kind, target, pure_backup_destination).await?;
     if class == CallerClass::BridgeMda {
+        // A locked or suspended account's calendar and contacts apps read
+        // nothing, the session already open included (`ensure_target_stands`).
+        ensure_target_stands(state, target).await?;
         ensure_actor_mail_serving_enabled(state, target).await?;
     }
     Ok(())
@@ -3863,6 +3934,49 @@ pub(crate) async fn notify_bridges_config_changed(state: &Arc<AppState>, reason:
     }
 }
 
+/// Fan a `fauna.bridges.account_revoked` push naming `actor_id` to every
+/// approved **MDA** bridge — the push half of the bridge-held session
+/// teardown (`transport-connection.md` § Revocation teardown, the bridge-held
+/// sessions paragraph; called by `AppState::end_bridge_held_sessions`). The
+/// MDA ends every IMAP session AUTH'd as the actor on it, an IDLE one with a
+/// `BYE`, so the session's unwrapped capability leaves the bridge's memory at
+/// the revocation rather than at the session's next command.
+///
+/// Only MDA bridges hold such sessions, so the MTA, content-processor and PDS
+/// bridges are not sent it. Best-effort like every bridge nudge: a bridge with
+/// no live connection holds no session to end, and a DB error listing bridges
+/// is logged — the next-command refusal (`ensure_target_stands`) stays the
+/// backstop.
+pub(crate) async fn notify_mda_bridges_account_revoked(state: &AppState, actor_id: &[u8; 32]) {
+    let bridges = match state.db.list_approved_bridge_service_users().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                target: "bridge_rpc",
+                actor = %hex::encode(actor_id),
+                error = %format!("{e:#}"),
+                "account_revoked: failed to list approved bridges; skipping push \
+                 (sessions end at their next command)"
+            );
+            return;
+        }
+    };
+    for bridge in bridges {
+        if bridge.role != crate::db::bridge_service_users::BridgeRole::Mda {
+            continue;
+        }
+        state.ws.notify_push(
+            &bridge.ed25519_pubkey,
+            fauna_protocol::PushEvent::BridgeAccountRevoked(
+                fauna_protocol::bridge_routing::BridgeAccountRevokedPush {
+                    actor_id: actor_id.to_vec(),
+                    ..Default::default()
+                },
+            ),
+        );
+    }
+}
+
 /// One scheduled DKIM-rotation pass (`mail-multidomain.md` § Rotation,
 /// "Scheduled rotation" → *The flip waits for publication*). For every domain
 /// whose active selector is **due** (`dkim_rotation_due_domains`): first one
@@ -3880,7 +3994,12 @@ pub(crate) async fn notify_bridges_config_changed(state: &Arc<AppState>, reason:
 /// reach the internal push helper. Best-effort: errors are logged, never fatal
 /// (the next tick retries; the flip is idempotent).
 pub async fn run_scheduled_dkim_autoflip(state: &Arc<AppState>) {
-    let due = match state.db.dkim_rotation_due_domains().await {
+    // The whole pass reads the outbound clock seam (epoch seconds, e2e-settable
+    // under `test-hooks`): the due check, the publication stamp and the flip
+    // alike, so a tier_3 test reaches the rotation window and the 24 h
+    // boundary without waiting.
+    let now_ms = state.outbound_now_ms();
+    let due = match state.db.dkim_rotation_due_domains(now_ms).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("DKIM rotation due-check error: {e}");
@@ -3897,10 +4016,6 @@ pub async fn run_scheduled_dkim_autoflip(state: &Arc<AppState>) {
             .map(|d| d.domain_name.as_str())
             .collect::<Vec<_>>()
     );
-    // The flip's clock is the outbound clock seam (epoch seconds, e2e-settable
-    // under `test-hooks`), so a tier_3 test reaches the 24 h boundary without
-    // waiting a day.
-    let now_ms = state.outbound_now().saturating_mul(1000);
     let mut flipped: Vec<String> = Vec::new();
     for row in &due {
         stamp_published_dkim_selectors(state, row, now_ms).await;
@@ -4016,7 +4131,11 @@ async fn stamp_published_dkim_selectors(
 /// (`admin-dns` renders `list_dkim_selectors`). Best-effort: errors are logged
 /// and never abort the pass; the next tick retries.
 pub async fn run_scheduled_dkim_rotation_mint(state: &Arc<AppState>) {
-    let due = match state.db.dkim_rotation_due_domains().await {
+    // One mail clock: the due check and the minted label read the outbound
+    // clock seam, as the auto-flip does, so a test clock moved past the window
+    // mints that month's label (`run_scheduled_dkim_autoflip`).
+    let now_ms = state.outbound_now_ms();
+    let due = match state.db.dkim_rotation_due_domains(now_ms).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("DKIM rotation-mint due-check error: {e}");
@@ -4027,7 +4146,7 @@ pub async fn run_scheduled_dkim_rotation_mint(state: &Arc<AppState>) {
         return;
     }
 
-    let selector = crate::db::mail_domains::dkim_rotation_selector(crate::db::now_epoch_millis());
+    let selector = crate::db::mail_domains::dkim_rotation_selector(now_ms);
     let mut minted: Vec<String> = Vec::new();
     for row in &due {
         let active = row
@@ -8904,6 +9023,9 @@ fn enqueue_outbound_mail_handler() -> RpcHandler {
             // prove the submitter, then hold the header to them. The MDA's
             // iMIP door carries no user signature and keeps the caller scope
             // above (the goal doc's accepted residual).
+            // A locked or suspended account sends nothing, through any door a
+            // bridge holds for it (`ensure_target_stands`).
+            ensure_target_stands(&state, &submitter).await?;
             if class != CallerClass::BridgeMda {
                 let token = req.submission_token.as_deref().ok_or_else(|| {
                     malformed("enqueue_outbound_mail requires submission_token from the MTA")
@@ -9887,12 +10009,16 @@ async fn gather_diagnostic_input(
         Ok(MtaStsLookup::Invalid) => Err("policy file invalid (RFC 8461 §3.2)".to_string()),
         Err(e) => Err(format!("policy fetch error: {e}")),
     };
+    // Re-run the resolver-path probe so the row shows the standing posture
+    // (`mail-deliverability.md` § Symptom diagnostics → *Checks*).
+    let dnssec_resolver_path_capable = state.dnssec_path.reprobe().await;
     Ok(Some(crate::mail_deliverability::DiagnosticInput {
         primary_domain,
         helo_name,
         outbound_ip,
         dkim_selectors,
         mta_sts_policy_fetch,
+        dnssec_resolver_path_capable,
     }))
 }
 
@@ -12273,6 +12399,70 @@ mod tests {
         reasons
     }
 
+    /// Drain a bridge WS receiver and collect the `actor_id` of every
+    /// `fauna.bridges.account_revoked` push currently queued.
+    fn drain_account_revoked_actors(
+        rx: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    ) -> Vec<Vec<u8>> {
+        let mut actors = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            if let Ok(fauna_protocol::Frame::Push(p)) = fauna_protocol::decode_frame(&bytes)
+                && p.kind == fauna_protocol::bridge_routing::PUSH_KIND_BRIDGE_ACCOUNT_REVOKED
+            {
+                let payload_bytes = encode_canonical(&p.payload).unwrap();
+                let push: fauna_protocol::bridge_routing::BridgeAccountRevokedPush =
+                    decode(&payload_bytes).unwrap();
+                actors.push(push.actor_id);
+            }
+        }
+        actors
+    }
+
+    /// The bridge-held teardown's push half (`transport-connection.md`
+    /// § Revocation teardown): `end_bridge_held_sessions` pushes
+    /// `fauna.bridges.account_revoked` naming the actor to every APPROVED
+    /// **MDA** bridge — the only role holding IMAP sessions — and to no MTA
+    /// and no merely pending bridge.
+    ///
+    /// Mutation pinned: dropping the `notify_mda_bridges_account_revoked`
+    /// call reds the MDA assertion; dropping its role filter reds the MTA
+    /// one; listing every bridge instead of the approved ones reds the
+    /// pending one.
+    #[tokio::test]
+    async fn end_bridge_held_sessions_pushes_account_revoked_to_approved_mda_bridges_only() {
+        let state = fixture_state().await;
+        let mda = [0x21u8; 32];
+        let mta = [0x22u8; 32];
+        let pending_mda = [0x23u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        state
+            .db
+            .create_pending_bridge_service_user(&pending_mda, BridgeRole::Mda, "pending-mda")
+            .await
+            .unwrap();
+        let (_cd, mut rx_mda) = state.ws.subscribe(mda);
+        let (_ct, mut rx_mta) = state.ws.subscribe(mta);
+        let (_cp, mut rx_pending) = state.ws.subscribe(pending_mda);
+
+        let user = [0x44u8; 32];
+        state.end_bridge_held_sessions(&user).await;
+
+        assert_eq!(
+            drain_account_revoked_actors(&mut rx_mda),
+            vec![user.to_vec()],
+            "the approved MDA is told the account no longer stands"
+        );
+        assert!(
+            drain_account_revoked_actors(&mut rx_mta).is_empty(),
+            "an MTA holds no IMAP session"
+        );
+        assert!(
+            drain_account_revoked_actors(&mut rx_pending).is_empty(),
+            "a pending bridge is not pushed"
+        );
+    }
+
     // ── config_changed hot-reload push ─────────
     // The fetch_config-surface admin mutations (local-domain edits + the
     // put_<substruct>_policy edits) emit a `fauna.bridges.config_changed`
@@ -14197,7 +14387,11 @@ mod tests {
         let reply: SetDkimRotationDaysReply = decode(&reply).unwrap();
         assert_eq!(reply.domain.dkim_rotation_days, Some(0));
         // The set override makes the domain due (the lever the rotation-mint reads).
-        let due = state.db.dkim_rotation_due_domains().await.unwrap();
+        let due = state
+            .db
+            .dkim_rotation_due_domains(crate::db::now_epoch_millis())
+            .await
+            .unwrap();
         assert!(due.iter().any(|d| d.domain_name == "rot.example"));
 
         // Clearing (None) restores inherit-default → no longer due under quarterly.
@@ -14214,7 +14408,11 @@ mod tests {
             .expect("clear ok");
         let reply: SetDkimRotationDaysReply = decode(&reply).unwrap();
         assert!(reply.domain.dkim_rotation_days.is_none());
-        let due = state.db.dkim_rotation_due_domains().await.unwrap();
+        let due = state
+            .db
+            .dkim_rotation_due_domains(crate::db::now_epoch_millis())
+            .await
+            .unwrap();
         assert!(!due.iter().any(|d| d.domain_name == "rot.example"));
     }
 
@@ -14310,6 +14508,64 @@ mod tests {
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
+    }
+
+    /// the lock and suspension stop the account's mail
+    /// apps, never its inbound mail. `validate_recipient` is delivery's resolve
+    /// as well as AUTH's first step, so it must keep resolving a locked or
+    /// suspended account — the AUTH half is refused at `fetch_wrapped_mls_blob`
+    /// (`ensure_target_stands`), and mail to the account still arrives, sealed.
+    #[tokio::test]
+    async fn validate_recipient_still_resolves_a_locked_or_suspended_account() {
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let actor = [45u8; 32];
+        state
+            .db
+            .create_user(&actor, "free", "locked recipient")
+            .await
+            .unwrap();
+        state.db.set_handle(&actor, "frozen").await.unwrap();
+        state
+            .db
+            .put_exact_alias(
+                "example.com",
+                "frozen",
+                crate::db::mail_aliases::ALIAS_KIND_EXACT,
+                &actor,
+            )
+            .await
+            .unwrap();
+        let resolve = async || {
+            let req = ValidateRecipientRequest {
+                local_part: "frozen".into(),
+                domain: "example.com".into(),
+            };
+            let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+            let reply: ValidateRecipientReply = decode(
+                &validate_recipient_handler()(state.clone(), mta, payload)
+                    .await
+                    .expect("delivery's resolve is never refused for a lock"),
+            )
+            .unwrap();
+            match reply {
+                ValidateRecipientReply::Resolved { actor_id, .. } => actor_id,
+                other => panic!("expected Resolved, got {other:?}"),
+            }
+        };
+        state
+            .db
+            .set_locked_until(&actor[..], Some(now_epoch_secs() + 3600))
+            .await
+            .unwrap();
+        assert_eq!(resolve().await, actor.to_vec());
+        state
+            .db
+            .suspend_user_now(&actor, "abuse", "abuse")
+            .await
+            .unwrap();
+        assert_eq!(resolve().await, actor.to_vec());
     }
 
     #[tokio::test]

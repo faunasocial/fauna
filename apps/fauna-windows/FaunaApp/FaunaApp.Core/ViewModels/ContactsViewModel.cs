@@ -235,23 +235,31 @@ public partial class ContactsViewModel : ViewModelBase
         };
     }
 
-    /// <summary>A handle-kind <paramref name="c"/> resolved to its actor id through the
-    /// shared find-user lookup (<see cref="FaunaFfiMethods.FindUser"/>, the one
+    /// <summary>A recipient the shared find-user lookup found: its actor id, and the URL of
+    /// the nest it lives on when that is a PEER nest — null for a home-nest user, whose
+    /// lookup reply carries an empty <c>nest_url</c>.</summary>
+    public sealed record FoundRecipient(string ActorId, string? NestUrl);
+
+    /// <summary>A handle-kind <paramref name="c"/> resolved through the shared find-user
+    /// lookup (<see cref="FaunaFfiMethods.FindUser"/>, the one
     /// <see cref="LookUpRecipientAsync"/>'s handle branch runs): the typed domain is
     /// forwarded as it is, so a bare localpart's EMPTY domain probes the home nest alone
     /// (contacts.md § Layout & flow region 3) and a qualified handle may resolve on a
-    /// peer nest. Returns slot 0 of <c>[actor_id, handle, domain, nest_url]</c>; a miss
-    /// throws, as the lookup does. The folder-share picker's handle leg
-    /// (<c>FoldersPage.ShareFolderAsync</c>) — never a second resolve chain.
+    /// peer nest. Returns slots 0 and 3 of <c>[actor_id, handle, domain, nest_url]</c>
+    /// (an empty nest URL → null); a miss throws, as the lookup does. The folder-share
+    /// picker's handle leg (<c>FoldersPage.ShareFolderAsync</c>), which passes the nest URL
+    /// on as the share's <c>member_nest_url</c> (folders.md § Sharing a folder, the
+    /// Cross-nest members bullet) — never a second resolve chain.
     /// <paramref name="findUser"/> is the unit-test seam (the lookup is a live network
     /// hop).</summary>
-    public static async Task<string> FindRecipientActorIdAsync(
+    public static async Task<FoundRecipient> FindRecipientAsync(
         string homeUrl,
         RecipientClassification c,
         Func<string, string, string?, Task<string[]>>? findUser = null)
     {
         var found = await (findUser ?? FaunaFfiMethods.FindUser)(homeUrl, c.User, c.Domain);
-        return found[0];
+        var nestUrl = found.Length > 3 && !string.IsNullOrEmpty(found[3]) ? found[3] : null;
+        return new FoundRecipient(found[0], nestUrl);
     }
 
     private readonly INestRpcClient _rpc;

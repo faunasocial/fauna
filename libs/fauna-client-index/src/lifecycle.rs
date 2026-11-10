@@ -170,6 +170,25 @@ impl DirectStager {
         noted
     }
 
+    /// Stage a whole calendar corpus as the `Calendar` kind's snapshot, stamp
+    /// the marker it was read at, and pulse — the mail/calendar-class twin of
+    /// [`Self::stage_contact_corpus`], with its three-in-one-call and
+    /// withheld-notes-nothing contracts unchanged.
+    pub fn stage_calendar_corpus(
+        &self,
+        events: &[crate::IndexableEvent],
+        marker: Vec<u8>,
+    ) -> Result<(), crate::IndexBuildError> {
+        if !self.builder.stage_calendar_corpus(events) {
+            return Ok(());
+        }
+        let noted = self
+            .builder
+            .note_corpus_marker(crate::ContentKind::Calendar, marker);
+        self.notify.notify_one();
+        noted
+    }
+
     /// Stage a posts reconcile walk's unseen rows, stamp the corpus marker the
     /// enumeration was read at, and pulse the flush driver — the append-shaped
     /// sibling of [`Self::stage_contact_corpus`], with the identical

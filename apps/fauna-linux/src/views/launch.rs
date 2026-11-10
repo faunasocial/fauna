@@ -6,10 +6,11 @@
 //!
 //! Two visual sub-states:
 //!
-//! - Launching: a spinner + status label "Signing you in…". No test ID
-//!   exposed — the launching phase is transient and other apps
-//!   (Windows / Android) don't expose one either; ui.yaml's
-//!   `onboarding.launch_retry` page only enumerates the retry-phase IDs.
+//! - Launching: a spinner + status label "Signing you in…" (no test ID on
+//!   either), led — like TransientRetry — by `launch-identity-label`, the
+//!   bound account's cached `handle@domain · tier`, absent while the cache
+//!   holds no handle (`onboarding.md` § App-launch routing → *The cached
+//!   identity on the launch surfaces*).
 //!
 //! - TransientRetry: title, error description (`launch-transient-error`),
 //!   Retry (`launch-retry-button`), "Use a different nest"
@@ -169,6 +170,17 @@ pub enum LaunchPhase {
 /// title()`). NeedsUpdate/IdentityChanged re-label rather than reuse
 /// `RETRY_TITLE`: the nest WAS reached in both, so "Couldn't reach your nest"
 /// would misstate what happened (copy-audit, 2026-08-04).
+/// Whether `phase` carries `launch-identity-label`: only `launch_progress`
+/// (Launching) and `launch_retry` (TransientRetry) — every other launch
+/// surface names its own problem (`onboarding.md` § App-launch routing → *The
+/// cached identity on the launch surfaces*).
+fn identity_shown(phase: &LaunchPhase) -> bool {
+    matches!(
+        phase,
+        LaunchPhase::Launching | LaunchPhase::TransientRetry { .. }
+    )
+}
+
 fn retry_title_text(phase: &LaunchPhase) -> &'static str {
     match phase {
         LaunchPhase::Launching | LaunchPhase::TransientRetry { .. } => i18n::launch::RETRY_TITLE,
@@ -306,6 +318,15 @@ where
     center.set_margin_start(48);
     center.set_margin_end(48);
     outer.append(&center);
+
+    // `launch-identity-label` (`launch_progress` + `launch_retry`): the bound
+    // account's cached identity, painted by `set_phase` on those two phases
+    // only, hidden (absent) on every other surface and while nothing is cached.
+    let identity_label = Label::new(None);
+    identity_label.add_css_class("dim-label");
+    identity_label.set_visible(false);
+    set_test_id(&identity_label, ids::LAUNCH_IDENTITY_LABEL);
+    center.append(&identity_label);
 
     // ── Launching sub-state ───────────────────────────────────────────
     let launching_box = gtk::Box::builder()
@@ -609,7 +630,13 @@ where
         let stolen_box = stolen_box.clone();
         let stolen_phrase = stolen_phrase.clone();
         let stolen_confirm = stolen_confirm.clone();
+        let identity_label = identity_label.clone();
         Rc::new(move |phase: LaunchPhase| {
+            let identity = identity_shown(&phase)
+                .then(|| crate::account_registry().launch_identity_line())
+                .flatten();
+            identity_label.set_text(identity.as_deref().unwrap_or(""));
+            identity_label.set_visible(identity.is_some());
             // The locked surface owns the whole centre: neither the spinner nor
             // the retry box (and so no retry and no fallthrough) shows with it.
             let locked = match &phase {
@@ -1037,6 +1064,20 @@ mod tests {
     /// Pins each arm's retry-box title (2026-08-05 copy audit — NeedsUpdate and
     /// IdentityChanged re-label rather than reuse RETRY_TITLE, since both mean
     /// the nest WAS reached).
+    #[test]
+    fn the_identity_label_rides_only_the_progress_and_retry_phases() {
+        assert!(identity_shown(&LaunchPhase::Launching));
+        assert!(identity_shown(&LaunchPhase::TransientRetry {
+            error: "timed out".into()
+        }));
+        assert!(!identity_shown(&LaunchPhase::NeedsUpdate {
+            error: "outdated".into()
+        }));
+        assert!(!identity_shown(&LaunchPhase::SignInRefused {
+            error: "refused".into()
+        }));
+    }
+
     #[test]
     fn retry_title_text_matches_the_reached_or_not_distinction() {
         assert_eq!(

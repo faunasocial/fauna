@@ -256,8 +256,7 @@ fn requests_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Element
 /// Section 2 — registration posture (`admin.md` § 2 → Section 2): the mode picker
 /// (wire values from the shared `registration_mode_options`), the free-tier ceiling,
 /// and one combined save. A posture this client doesn't recognize renders read-only
-/// (never coerced — a save would overwrite the nest's real posture). Not e2e-tested
-/// on tui (the posture test is deselected), but rendered for parity.
+/// (never coerced — a save would overwrite the nest's real posture).
 fn registration_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Element> {
     let mut els = vec![Element::label(
         ids::ADMIN_USERS_REGISTRATION_SECTION,

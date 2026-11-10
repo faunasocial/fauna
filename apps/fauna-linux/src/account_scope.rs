@@ -61,27 +61,9 @@ pub(crate) fn active_actor_id_hex() -> Option<String> {
     crate::account_registry().active()
 }
 
-/// Erase actor `actor_id_hex`'s account-scoped local state: the flat-`fauna/`
-/// account dir (MLS db, P2P DBs, spam model — all co-located
-/// there) plus its scoped subdirs under `sync/` and `backup/`. Best-effort —
-/// a missing dir is not an error, and a `dirs_config()` failure is a silent
-/// no-op (nothing to erase without a resolvable base). This is the *erasure*
-/// half of `account-scoping.md`'s isolation contract ("Erasure follows
-/// scope"): a plain switch or app quit must PRESERVE state (never call this),
-/// only sign-out ([`erase_all_known_accounts`]) and "remove account"
-/// ([`remove_account`], which asks first) do.
-///
-/// **Returns what survived** — the paths the sweep tried to remove and could
-/// not. An unresolvable base is not one of them: nothing was attempted, so
-/// nothing was left behind by this call.
-pub(crate) fn erase(actor_id_hex: &str) -> Vec<PathBuf> {
-    let Some(flat) = install_state_base() else {
-        return Vec::new();
-    };
-    erase_under(&flat, actor_id_hex)
-}
-
-/// The pure half of [`erase`], the flat `fauna/` base passed in — same
+/// Erase actor `actor_id_hex`'s account-scoped local state under the flat
+/// `fauna/` base passed in — the remove-account's erase; a sign-out's goes
+/// through [`finish`]. Same
 /// env-mutation-free testing reasoning as [`account_state_dir_under`]. The
 /// iterate-and-remove loop itself is [`fauna_sync_engine::db::erase_actor_state`]
 /// (the tui twin's identical copy) — this is only linux's own base list,
@@ -96,7 +78,7 @@ fn erase_under(fauna_base: &Path, actor_id_hex: &str) -> Vec<PathBuf> {
 /// about exactly what the erase will reach
 /// ([`all_accounts_erase_blocked_under`]): a base the erase sweeps and the
 /// question skips is an account erased under a live sibling.
-/// [`erase_all_scopes_under`] walks the same three.
+/// The shared finish (`fauna_client_accounts::finish_sign_out`) sweeps the same three.
 fn erase_bases(fauna_base: &Path) -> [PathBuf; 3] {
     [
         fauna_base.to_path_buf(),
@@ -235,7 +217,7 @@ fn all_accounts_erase_blocked(gesture: &str) -> Option<fauna_client_accounts::Er
 }
 
 /// The pure half of the all-accounts question, every base passed in. A `None`
-/// base is [`erase_all_known_accounts`]'s own no-op case — it erases no
+/// base is [`finish`]'s own no-base case — it erases no
 /// directory at all then — so only the registry is asked about.
 fn all_accounts_erase_blocked_under(
     registry: &fauna_client_accounts::AccountRegistry,
@@ -259,16 +241,22 @@ pub(crate) struct RemovalOwed {
     /// and assembles with. Zeroized when the last holder drops it.
     pub(crate) removed: std::sync::Arc<fauna_client_accounts::RemovedAccountCredentials>,
     /// The base the erase sweeps; `None` when the process has no config dir,
-    /// as [`erase_all_known_accounts`]'s no-op.
+    /// as [`finish`]'s no-base case.
     fauna_base: Option<PathBuf>,
 }
 
 impl RemovalOwed {
     /// Erase the removed account's scopes — the gesture's last step, run once
-    /// its nest half has finished (or found nothing to do).
+    /// its nest half has finished (or found nothing to do) — and settle the
+    /// account out of the sign-out record the removal joined.
     pub(crate) fn erase(self) {
         if let Some(fauna_base) = &self.fauna_base {
-            erase_under(fauna_base, self.removed.actor_id());
+            let actor = self.removed.actor_id();
+            erase_under(fauna_base, actor);
+            fauna_client_accounts::SignOutRecord::settle(
+                &fauna_client_accounts::SignOutRecordFile::under(fauna_base),
+                actor,
+            );
         }
     }
 }
@@ -331,8 +319,20 @@ fn remove_account_under(
         tracing::warn!("[settings/account] remove-account REFUSED ({blocked:?}) — {actor_id_hex}");
         return Err(blocked.copy().resolve(crate::i18n::strings::lookup));
     }
+    // The removal joins the sign-out record before its registry step, so the
+    // store that step's crash-safety argument leaves unreached is finished by
+    // the next launch (`account-scoping.md` § Erasure follows scope → *The
+    // sign-out record is on all 7 apps*, decision 1); settled after the erase
+    // ([`RemovalOwed::erase`]).
+    let slot = fauna_base.map(fauna_client_accounts::SignOutRecordFile::under);
+    if let Some(slot) = &slot {
+        fauna_client_accounts::SignOutRecord::record_removal(slot, actor_id_hex);
+    }
     let removed = registry.remove_with_snapshot(actor_id_hex).map_err(|e| {
         tracing::error!("[settings/account] remove account failed: {e:#}");
+        if let Some(slot) = &slot {
+            fauna_client_accounts::SignOutRecord::settle(slot, actor_id_hex);
+        }
         crate::i18n::strings::onboarding::session_error::remove_account(&e.to_string())
     })?;
     // Erasure follows scope (account-scoping.md § Serialized switching):
@@ -398,54 +398,254 @@ fn choosable_accounts_under(
     fauna_client_accounts::choosable_accounts(base, entries)
 }
 
-/// Erase every currently-registered account's scoped local state — the
-/// sign-out ("all-accounts erase") half of the same corollary. **Call BEFORE
-/// the credential namespace itself is wiped** (`client::delete_credentials`),
-/// since this reads the registry to know which actors existed; calling it
-/// after would find an already-empty registry and erase nothing.
+/// How long the launch's finish waits on the sync agent's dismissal of one
+/// recorded account (`account-scoping.md` § Erasure follows scope → *The
+/// sign-out record is on all 7 apps*, decision 5) — tui's budget. The exchange
+/// is two IPC round trips; an agent that answers neither in this long is left
+/// to meet the revoke at the nest, as an offline sign-out's agent is.
+const AGENT_DISMISS_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// **The sign-out's decision**, written by the sign-out handler before
+/// anything else — after the serving question passed at the confirm, before
+/// the teardown is counted and before the stop is spawned (`account-scoping.md`
+/// § Erasure follows scope → *The sign-out record is on all 7 apps*, decision
+/// 1): the native record (`fauna_client_accounts::SignOutRecordFile`, directly
+/// under linux's install base) names every account the registry lists plus the
+/// account this process serves — the holder's actor, which an unreadable index
+/// would not name — and owes the credential wipe. A process killed anywhere
+/// after this line is finished by the next launch ([`finish_at_launch`]). Twin
+/// of tui's `account_scope::record_sign_out`.
 ///
-/// **Returns what survived, folded across every account and every base.**
-/// Best-effort is not the same as silent: the shared sweeps name the paths they
-/// could not remove, so this no longer has to choose between completing the
-/// sign-out and telling the truth about it. A non-empty return means the
-/// signed-out user's data is still readable on this device, and the caller owes
-/// the user a line saying so — [`record_residue`] records and paints it.
-#[must_use = "a sign-out that drops this reports success over a device that may \
-              still hold the user's data - the defect this return exists to prevent"]
-pub(crate) fn erase_all_known_accounts() -> Vec<PathBuf> {
-    // Folded through the shared `EraseSweep`, NOT a plain `Vec::extend` — the
-    // two passes below deliberately overlap (the all-scopes sweep re-walks the
-    // same bases the per-actor loop just did), so an undeletable scope is found
-    // by both. `absorb` owns the rule that a survivor is a *location*, and
-    // `survivors.len()` is the number the user is shown: extending a Vec told
-    // them *"2 item(s)"* about one surviving directory until the sign-out
-    // journey e2e looked.
-    //
-    // `erased: 0` is honest rather than lossy: `erase` reports only what it
-    // could NOT remove, and this function's contract is the survivors.
-    let mut sweep = fauna_sync_engine::db::EraseSweep::default();
-    for entry in crate::account_registry().list() {
-        sweep.absorb(fauna_sync_engine::db::EraseSweep {
-            erased: 0,
-            survivors: erase(&entry.actor_id),
+/// Returns the record as written, which the gesture's tail hands to the
+/// finish: a record the install base refused (or no resolvable base at all)
+/// still finishes in this process.
+pub(crate) fn record_sign_out() -> fauna_client_accounts::SignOutRecord {
+    let reach: Vec<String> = crate::account_registry()
+        .list()
+        .into_iter()
+        .map(|entry| entry.actor_id)
+        .chain(fauna_client_accounts::process_session_account())
+        .collect();
+    let record = match install_state_base() {
+        Some(base) => fauna_client_accounts::SignOutRecord::record_sign_out(
+            &fauna_client_accounts::SignOutRecordFile::under(&base),
+            reach,
+        ),
+        None => {
+            let mut accounts: Vec<String> = Vec::new();
+            for actor in reach.into_iter().map(|a| a.to_ascii_lowercase()) {
+                if !accounts.contains(&actor) {
+                    accounts.push(actor);
+                }
+            }
+            fauna_client_accounts::SignOutRecord {
+                wipe_owed: true,
+                accounts,
+            }
+        }
+    };
+    tracing::info!(
+        "[sign-out] recorded for {} account(s)",
+        record.accounts.len()
+    );
+    record
+}
+
+/// **The one routine** the sign-out's tail, the launch and Remove Again run —
+/// the shared [`fauna_client_accounts::finish_sign_out_with`] over linux's
+/// install base, its three [`erase_bases`], the serving bases and its
+/// registry, with linux's own credential acts ([`LinuxFinishHost`]). Twin of
+/// tui's `account_scope::finish`.
+///
+/// `dismiss_agent` is false for the gesture, whose own stop already dismissed
+/// the sync agent (`account_runtime::teardown` awaits the un-provision);
+/// `written` is the gesture's own record (`None` elsewhere).
+///
+/// When the run wiped the credentials, the in-memory state deliberately built
+/// to survive an account SWITCH goes too — the account-cache mirror and the
+/// two succession cells (`settings::recovery_kit::{LANDED_SWEEP,
+/// SUCCESSION_KIT_OWED}`): an erase destroys every identity on the box, so
+/// there is no successor left to owe a kit to.
+pub(crate) fn finish(
+    dismiss_agent: bool,
+    written: Option<fauna_client_accounts::SignOutRecord>,
+) -> fauna_client_accounts::SignOutFinish {
+    let registry = crate::account_registry();
+    let namespace = crate::client::credential_namespace();
+    let outcome = match install_state_base() {
+        Some(base) => with_serving_bases(|serving| {
+            finish_under(
+                &registry,
+                &namespace,
+                &base,
+                serving,
+                dismiss_agent,
+                written,
+            )
+        }),
+        None => finish_without_base(&registry, &namespace, written),
+    };
+    if matches!(
+        outcome,
+        fauna_client_accounts::SignOutFinish::Finished {
+            credentials_wiped: true,
+            ..
+        }
+    ) {
+        crate::client::forget_account_cache();
+        crate::settings::recovery_kit::clear_succession_sweep();
+        crate::settings::recovery_kit::clear_succession_kit_debt();
+    }
+    outcome
+}
+
+/// No resolvable install base: no directory to sweep and nowhere to keep a
+/// record, so the gesture's tail wipes the credentials of the accounts it
+/// recorded in memory and nothing else — what a sign-out with no base always
+/// did. A launch has no record to finish.
+fn finish_without_base(
+    registry: &fauna_client_accounts::AccountRegistry,
+    namespace: &fauna_credential_store::CredentialStore,
+    written: Option<fauna_client_accounts::SignOutRecord>,
+) -> fauna_client_accounts::SignOutFinish {
+    use fauna_client_accounts::FinishHost as _;
+    let Some(record) = written else {
+        return fauna_client_accounts::SignOutFinish::NOTHING;
+    };
+    let mut host = LinuxFinishHost {
+        registry,
+        namespace,
+        dismiss_agent: false,
+    };
+    let mut credentials = host.wipe();
+    for actor in &record.accounts {
+        credentials
+            .survivors
+            .extend(host.erase_account_slots(actor).survivors);
+    }
+    fauna_client_accounts::log_residue(&[], &credentials);
+    fauna_client_accounts::SignOutFinish::Finished {
+        residue: None,
+        credentials_wiped: true,
+        found_record: true,
+    }
+}
+
+/// The pure half of [`finish`], every base and store passed in — same
+/// env-mutation-free reasoning as [`erase_under`].
+fn finish_under(
+    registry: &fauna_client_accounts::AccountRegistry,
+    namespace: &fauna_credential_store::CredentialStore,
+    fauna_base: &Path,
+    serving: fauna_client_accounts::ServingBases<'_>,
+    dismiss_agent: bool,
+    written: Option<fauna_client_accounts::SignOutRecord>,
+) -> fauna_client_accounts::SignOutFinish {
+    let swept = erase_bases(fauna_base);
+    let mut host = LinuxFinishHost {
+        registry,
+        namespace,
+        dismiss_agent,
+    };
+    fauna_client_accounts::finish_sign_out_with(
+        fauna_client_accounts::FinishSeat {
+            install_base: fauna_base,
+            swept_bases: &swept,
+            serving,
+            registry,
+        },
+        &mut host,
+        written,
+    )
+}
+
+/// linux's own acts inside the shared finish: the wipe is the app's own
+/// credential namespace (`fauna-desktop`: the index, the app's own per-actor
+/// slots, the wholesale `delete_namespace`); each account's slots in the
+/// shared `fauna-account-store` namespace ride with its scopes; the residue
+/// retry's credential half is the re-erase it has always been. Twin of tui's
+/// `TuiFinishHost`.
+struct LinuxFinishHost<'a> {
+    registry: &'a fauna_client_accounts::AccountRegistry,
+    namespace: &'a fauna_credential_store::CredentialStore,
+    dismiss_agent: bool,
+}
+
+impl fauna_client_accounts::FinishHost for LinuxFinishHost<'_> {
+    fn wipe(&mut self) -> fauna_client_accounts::CredentialSweep {
+        fauna_credential_store::wipe_own_credentials(self.registry, self.namespace)
+    }
+
+    fn erase_account_slots(
+        &mut self,
+        actor_id_hex: &str,
+    ) -> fauna_client_accounts::CredentialSweep {
+        fauna_credential_store::erase_account_credentials(self.registry, actor_id_hex)
+    }
+
+    fn dismiss_agent(&mut self, actor_id_hex: &str) {
+        if self.dismiss_agent {
+            dismiss_agent_from(actor_id_hex);
+        }
+    }
+
+    fn re_erase_credentials(
+        &mut self,
+        recorded: fauna_client_accounts::CredentialSweep,
+    ) -> fauna_client_accounts::CredentialSweep {
+        fauna_credential_store::re_erase_credentials(self.registry, self.namespace, recorded)
+    }
+}
+
+/// Dismiss the sync agent from a recorded account, awaited — the actor-matched
+/// exchange the wizard landing runs (`GetServiceStatus`, then
+/// `UnprovisionCapability` only when the agent's advertised principal is this
+/// account), over a marker built from the record rather than read from the
+/// provisioner's slot: a provisioner killed inside its stop never wrote one
+/// (decision 5). Its own thread and runtime, so the launch's synchronous call
+/// site — `main`, before any runtime or GApplication exists — can wait on it;
+/// bounded by [`AGENT_DISMISS_BUDGET`]. No agent reachable answers at once.
+fn dismiss_agent_from(actor_id_hex: &str) {
+    let Ok(actor) = fauna_core::hex32::decode(actor_id_hex) else {
+        return;
+    };
+    let Ok(endpoint) = fauna_ipc::endpoint::AgentEndpoint::default_for_user() else {
+        return;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let marker = fauna_ipc::sync::SignedOutMarker::new(actor.to_vec(), now_ms);
+    let label = actor_id_hex.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("sign-out-agent".into())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let exchange =
+                    fauna_client_sync::agent::signed_out_onboarding_reconcile_with_marker(
+                        &endpoint, &marker,
+                    );
+                if tokio::time::timeout(AGENT_DISMISS_BUDGET, exchange)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "[sign-out] the sync agent did not answer its dismissal from {label} \
+                         within {AGENT_DISMISS_BUDGET:?} — erasing all the same"
+                    );
+                }
+            });
         });
+    if let Ok(handle) = spawned {
+        let _ = handle.join();
     }
-    // The loop above only reaches the accounts the registry names. A scope the
-    // registry no longer names (an orphan) is still a signed-out user's data,
-    // so every actor scope under the three bases goes too.
-    if let Some(base) = install_state_base() {
-        sweep.absorb(erase_all_scopes_under(&base));
-    }
-    // The two pieces of in-memory state deliberately built to survive an
-    // account SWITCH — so they have to be dropped explicitly here, where the
-    // switch's `reset_actor_scoped_state` must not touch them
-    // (`settings::recovery_kit::{LANDED_SWEEP, SUCCESSION_KIT_OWED}`). An erase
-    // destroys every identity on the box, so there is no successor left to owe
-    // a kit to. (The ceremony's raise context is parked in the account
-    // registry, per successor, and erased with its row.)
-    crate::settings::recovery_kit::clear_succession_sweep();
-    crate::settings::recovery_kit::clear_succession_kit_debt();
-    sweep.survivors
 }
 
 /// The residue as the `sign-out-residue` view paints it — the one shared
@@ -453,11 +653,12 @@ pub(crate) fn erase_all_known_accounts() -> Vec<PathBuf> {
 pub(crate) use fauna_client_accounts::ResidueSurface;
 
 thread_local! {
-    /// What the last sign-out left, while it still owes work — read by
+    /// What the last finish left, while it still owes work — read by
     /// `identity_choice`'s `sign-out-residue` view on every tick. GTK main
-    /// thread only, like every other widget-facing cell here. Held OUTSIDE the
-    /// wizard because the wizard is rebuilt by every sign-out and does not own
-    /// the fact: the residue belongs to the device.
+    /// thread only, like every other widget-facing cell here (the launch's
+    /// finish runs on `main`'s thread, which becomes the GTK main thread).
+    /// Held OUTSIDE the wizard because the wizard is rebuilt by every sign-out
+    /// and does not own the fact: the residue belongs to the device.
     static SIGN_OUT_RESIDUE: std::cell::RefCell<Option<ResidueSurface>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -472,115 +673,44 @@ fn set_sign_out_residue(surface: Option<ResidueSurface>) {
 }
 
 /// A signed-in user is not the one a sign-out residue was reported to: the
-/// view goes, and the record stays on disk for the next signed-out launch to
-/// re-check ([`recheck_residue_at_launch`]).
+/// view goes, and the record stays on disk for the next signed-out launch's
+/// finish to re-sweep ([`finish_at_launch`]).
 pub(crate) fn forget_sign_out_residue_view() {
     set_sign_out_residue(None);
 }
 
-/// Turn what a sign-out's erase left behind into the reports it owes: the
-/// survivor **paths** to the log (the sweeps have already written theirs; this
-/// is the folded one, naming every base at once), the **record** to
-/// install-scoped state so it outlives this process, and the **count** to the
-/// user, as the `sign-out-residue` view `identity_choice` paints. Twin of tui's
-/// `account_scope::record_residue`.
-///
-/// A clean sweep paints nothing and leaves no record — *"0 items were left
-/// behind"* is reassurance by vacuity. Every word of the line is the shared
-/// projection's; linux only localizes it and declares that it paints the retry
-/// control.
-///
-/// ⚠ **Both halves of the erase, or it answers for half a sign-out.**
-/// `credentials` is what [`crate::client::delete_credentials`] left, so the
-/// caller can only record this after the credential wipe has run — which is
-/// the point: built beside the filesystem erase, it painted a clean line over a
-/// keyring that refused the wipe.
-pub(crate) fn record_residue(
-    survivors: &[PathBuf],
-    credentials: &fauna_client_accounts::CredentialSweep,
-) {
-    set_sign_out_residue(fauna_client_accounts::report_residue(
-        survivors,
-        credentials,
-        install_state_base().as_deref(),
-        fauna_i18n::strings::lookup,
-    ));
+/// Paint what a [`finish`] run answered as the `sign-out-residue` view: the
+/// residue line, the retry's refusal line, or nothing for a clean device.
+pub(crate) fn paint_finish(outcome: &fauna_client_accounts::SignOutFinish) {
+    set_sign_out_residue(outcome.surface(fauna_i18n::strings::lookup));
 }
 
-/// Remove Again (`sign-out-residue-retry-button`): re-sweep what the painted
-/// residue recorded and paint what is left — nothing, when the device is now
-/// clean.
+/// The launch's call, before the launch law reads the registry — ahead of
+/// `launch_collision_detected` in `main` (`account-scoping.md` § Erasure
+/// follows scope → *The sign-out record is on all 7 apps*, decision 3):
+/// whatever a sign-out cut short owes is finished first — the agent
+/// dismissed, the wipe, each recorded account's erase, the residue re-sweep —
+/// and what is left is kept for `identity_choice` to paint. Retires the
+/// post-routing `recheck_residue_at_launch`.
+///
+/// `true` means the launch **fails closed**: a refused finish whose record
+/// still owes its wipe — the launch must not route over the registry, so it
+/// lands on the fresh wizard painting the retry's refusal line, whose Remove
+/// Again re-runs the routine (decision 4).
+pub(crate) fn finish_at_launch() -> bool {
+    let outcome = finish(true, None);
+    paint_finish(&outcome);
+    outcome.fails_closed()
+}
+
+/// Remove Again (`sign-out-residue-retry-button`): the same routine, and paint
+/// what is left — nothing, when the device is now clean.
 pub(crate) fn retry_residue() {
-    let Some(surface) = sign_out_residue() else {
-        return;
-    };
-    set_sign_out_residue(run_residue_retry(surface.record));
-}
-
-/// The signed-out launch's silent re-check: a record a previous sign-out left
-/// is re-swept FIRST, and the view is painted only if something is still left
-/// (`account-scoping.md` § Erasure follows scope → *the residue surface*).
-///
-/// Only on a launch with no account in the registry — the fresh-wizard route a
-/// sign-out hands back. Its scope is the record and nothing more: it never
-/// re-lists the shared store root for actor scopes, which is how a signed-out
-/// launch once erased a running sibling's live store.
-pub(crate) fn recheck_residue_at_launch() {
-    let Some(base) = install_state_base() else {
-        return;
-    };
-    let Some(record) = fauna_client_accounts::SignOutResidue::load(&base) else {
-        return;
-    };
-    if !crate::account_registry().list().is_empty() {
+    if sign_out_residue().is_none() {
         return;
     }
-    set_sign_out_residue(run_residue_retry(record));
-}
-
-/// The one re-sweep both gestures run — the shared
-/// [`fauna_client_accounts::retry_sign_out_residue`], behind the sign-out's own
-/// serving-lock question and over the recorded paths only.
-fn run_residue_retry(record: fauna_client_accounts::SignOutResidue) -> Option<ResidueSurface> {
-    let outcome = with_serving_bases(|bases| {
-        fauna_client_accounts::retry_sign_out_residue(&record, bases, |recorded| {
-            crate::client::re_delete_credentials(recorded)
-        })
-    });
-    fauna_client_accounts::settle_residue_retry(
-        record,
-        outcome,
-        install_state_base().as_deref(),
-        fauna_i18n::strings::lookup,
-    )
-}
-
-/// Every actor scope under each of the three bases (`fauna_base` itself, its
-/// `sync/` and `backup/` subdirs) — the safety net [`erase_all_known_accounts`]
-/// runs beside its per-actor loop, for a scope the registry no longer names.
-/// Anything that is not an actor scope survives: install-scoped state, the lock
-/// files, the install device secret.
-///
-/// **Returns what survived**, folded across all three bases. A non-empty return
-/// means the signed-out user's data is still readable on this device.
-fn erase_all_scopes_under(fauna_base: &Path) -> fauna_sync_engine::db::EraseSweep {
-    let mut sweep = fauna_sync_engine::db::EraseSweep::default();
-    for base in erase_bases(fauna_base) {
-        sweep.absorb(fauna_sync_engine::db::erase_all_account_scopes(&base));
-    }
-    if !sweep.is_clean() {
-        tracing::warn!(
-            "sign-out: {} path(s) SURVIVED the erase and still hold this user's data: {}",
-            sweep.survivors.len(),
-            sweep
-                .survivors
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    sweep
+    let outcome = finish(true, None);
+    paint_finish(&outcome);
 }
 
 #[cfg(test)]
@@ -664,7 +794,7 @@ mod tests {
     // logic — linux now consumes the shared holder, so its behaviours are
     // pinned once for every native leg rather than per client.
 
-    /// The line [`record_residue`] paints, without its side effects (the log,
+    /// The line a [`finish`] paints, without its side effects (the log,
     /// the install-scoped record under the real config dir, the view cell).
     fn report_residue(
         survivors: &[PathBuf],
@@ -863,9 +993,40 @@ mod tests {
             .join(fauna_sync_engine::engine_lifecycle::INSTALL_DEVICE_SECRET_FILE);
         std::fs::write(&install_device_secret, [7u8; 32]).unwrap();
 
-        let sweep = erase_all_scopes_under(&fauna_base);
+        // A sign-out record naming nobody — the unreadable-index floor's
+        // start-over — finished by the one routine: its residual sweep is
+        // what reaches the orphan.
+        let credentials = tmp.path().join("credentials");
+        let registry = crate::account_registry_in(credentials.clone());
+        let namespace = fauna_credential_store::CredentialStore::with_file_backend(
+            "fauna-linux-test",
+            credentials,
+        );
+        let slot = fauna_client_accounts::SignOutRecordFile::under(&fauna_base);
+        fauna_client_accounts::SignOutRecord::record_sign_out(&slot, Vec::<String>::new());
+        let outcome = finish_under(
+            &registry,
+            &namespace,
+            &fauna_base,
+            fauna_client_accounts::ServingBases {
+                state_base: Some(&fauna_base),
+                store_root: Some(&fauna_base.join("sync")),
+            },
+            false,
+            None,
+        );
 
-        assert!(sweep.is_clean(), "{:?}", sweep.survivors);
+        assert!(
+            matches!(
+                outcome,
+                fauna_client_accounts::SignOutFinish::Finished { residue: None, .. }
+            ),
+            "{outcome:?}"
+        );
+        assert!(
+            fauna_client_accounts::SignOutRecord::load(&slot).is_none(),
+            "the record goes with its last account"
+        );
         for scope in &scopes {
             assert!(!scope.exists(), "{} must be swept", scope.display());
         }
@@ -880,6 +1041,191 @@ mod tests {
         assert!(registry_lock.exists());
         assert!(instance_lock.exists());
         assert!(install_device_secret.exists());
+    }
+
+    /// A finish with every base and store from `seats` — the one routine the
+    /// launch, the gesture's tail and Remove Again run ([`finish_under`]).
+    fn finish_seats(
+        seats: &Seats,
+        registry: &fauna_client_accounts::AccountRegistry,
+    ) -> fauna_client_accounts::SignOutFinish {
+        let namespace = fauna_credential_store::CredentialStore::with_file_backend(
+            "fauna-linux-test",
+            seats.tmp.path().join("credentials"),
+        );
+        finish_under(
+            registry,
+            &namespace,
+            &seats.fauna_base,
+            seats.linux(),
+            false,
+            None,
+        )
+    }
+
+    /// **The launch after the app died mid-sign-out** (`account-scoping.md`
+    /// § Erasure follows scope → *The sign-out record is on all 7 apps*,
+    /// decision 7): the record is on disk and nothing after it ran — the
+    /// registry still lists both accounts, their scopes are all there. The
+    /// launch's finish wipes the registry, erases every recorded account's
+    /// scopes and clears the record, so routing then finds nobody.
+    #[test]
+    fn a_launch_finish_over_a_recorded_sign_out_wipes_erases_and_clears_the_record() {
+        let seats = Seats::new();
+        let (registry, second) = seats.registry_with_two_accounts();
+        let first = "01".repeat(32);
+        let scopes: Vec<PathBuf> = seats
+            .scopes_for(&first)
+            .into_iter()
+            .chain(seats.scopes_for(&second))
+            .collect();
+        let slot = fauna_client_accounts::SignOutRecordFile::under(&seats.fauna_base);
+        fauna_client_accounts::SignOutRecord::record_sign_out(
+            &slot,
+            registry.list().into_iter().map(|e| e.actor_id),
+        );
+        assert!(slot.path().exists(), "the gesture's record is on disk");
+
+        let outcome = finish_seats(&seats, &registry);
+
+        assert!(
+            matches!(
+                outcome,
+                fauna_client_accounts::SignOutFinish::Finished {
+                    residue: None,
+                    credentials_wiped: true,
+                    found_record: true,
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(registry.list().is_empty(), "the wipe took the index");
+        assert!(registry.secrets(&first).is_none() && registry.secrets(&second).is_none());
+        for scope in &scopes {
+            assert!(!scope.exists(), "{} must be erased", scope.display());
+        }
+        assert!(
+            fauna_client_accounts::SignOutRecord::load(&slot).is_none(),
+            "the record goes with its last account"
+        );
+    }
+
+    /// **A refused finish wipes and erases nothing, and the launch fails
+    /// closed** (decision 4): a sibling still serves a recorded account, so the
+    /// record stands whole, the registry and every scope stay, and the outcome
+    /// says the launch must not route over the registry — painting the retry's
+    /// refusal line instead. Once the sibling is gone the same routine (Remove
+    /// Again) finishes it.
+    #[test]
+    fn a_finish_refuses_while_a_sibling_serves_a_recorded_account_and_fails_closed() {
+        let seats = Seats::new();
+        let (registry, _) = seats.registry_with_two_accounts();
+        // An actor of this test's own: the in-process sibling holders of the
+        // other tests here serve `02…`, and a probe in the same process sees
+        // them.
+        let actor = registry
+            .add_account(&"05".repeat(32), None, None)
+            .expect("a third account");
+        let scopes = seats.scopes_for(&actor);
+        let slot = fauna_client_accounts::SignOutRecordFile::under(&seats.fauna_base);
+        fauna_client_accounts::SignOutRecord::record_sign_out(
+            &slot,
+            registry.list().into_iter().map(|e| e.actor_id),
+        );
+
+        let tui = seats.tui_serving(&actor);
+        let outcome = finish_seats(&seats, &registry);
+
+        assert!(outcome.fails_closed(), "{outcome:?}");
+        assert_eq!(
+            outcome
+                .surface(fauna_i18n::strings::lookup)
+                .map(|surface| surface.line),
+            Some(
+                fauna_client_accounts::sign_out_residue_retry_blocked_copy()
+                    .resolve(fauna_i18n::strings::lookup)
+            ),
+            "the retry's refusal line is what identity_choice paints"
+        );
+        assert_eq!(registry.list().len(), 3, "nothing wiped");
+        for scope in &scopes {
+            assert!(
+                scope.join("data").exists(),
+                "{scope:?} erased under a live sibling"
+            );
+        }
+        let record = fauna_client_accounts::SignOutRecord::load(&slot).expect("record stands");
+        assert!(record.wipe_owed, "the record still owes its wipe");
+
+        drop(tui);
+        let outcome = finish_seats(&seats, &registry);
+        assert!(!outcome.fails_closed(), "{outcome:?}");
+        assert!(registry.list().is_empty());
+        for scope in &scopes {
+            assert!(
+                !scope.exists(),
+                "{} must go once the sibling is gone",
+                scope.display()
+            );
+        }
+        assert!(fauna_client_accounts::SignOutRecord::load(&slot).is_none());
+    }
+
+    /// **A remove-account joins the sign-out record before its registry step
+    /// and settles after its erase** (decision 1): a crash between the two
+    /// leaves the record naming the account, and the next launch's finish
+    /// erases the store the registry step's crash-safety left unreached —
+    /// owing no wipe, so the remaining account stays signed in.
+    #[test]
+    fn a_removal_joins_the_record_and_a_launch_finishes_its_unreached_store() {
+        let seats = Seats::new();
+        let (registry, _) = seats.registry_with_two_accounts();
+        // An actor of this test's own, never served by another test's sibling.
+        let removable = registry
+            .add_account(&"06".repeat(32), None, None)
+            .expect("a third account");
+        let scopes = seats.scopes_for(&removable);
+        let slot = fauna_client_accounts::SignOutRecordFile::under(&seats.fauna_base);
+
+        let owed = remove_account_under(
+            &registry,
+            None,
+            seats.linux(),
+            Some(&seats.fauna_base),
+            &removable,
+        )
+        .expect("the removal goes through");
+        let record = fauna_client_accounts::SignOutRecord::load(&slot).expect("joined");
+        assert!(!record.wipe_owed, "a removal owes no wipe");
+        assert_eq!(record.accounts, vec![removable.clone()]);
+
+        // The process dies before the erase: the launch's finish reaches it.
+        drop(owed);
+        let outcome = finish_seats(&seats, &registry);
+        assert!(!outcome.fails_closed(), "{outcome:?}");
+        for scope in &scopes {
+            assert!(!scope.exists(), "{} must be erased", scope.display());
+        }
+        assert_eq!(registry.list().len(), 2, "the other accounts are untouched");
+        assert!(fauna_client_accounts::SignOutRecord::load(&slot).is_none());
+
+        // The uninterrupted gesture settles its own entry after the erase.
+        let third = registry
+            .add_account(&"03".repeat(32), None, None)
+            .expect("a third account");
+        remove_account_under(
+            &registry,
+            None,
+            seats.linux(),
+            Some(&seats.fauna_base),
+            &third,
+        )
+        .expect("the removal goes through")
+        .erase();
+        assert!(
+            fauna_client_accounts::SignOutRecord::load(&slot).is_none(),
+            "settled after the erase"
+        );
     }
 
     /// linux and tui on one OS login, over temp dirs: linux's install base,

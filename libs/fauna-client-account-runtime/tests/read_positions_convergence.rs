@@ -212,6 +212,16 @@ fn endpoints_row(node_id: [u8; 32]) -> StateEntry {
 /// device is a verified fleet member (`account-sync-plane.md` § The peer leg
 /// → *Discovery*). `device`'s writer key must already be pre-minted.
 fn member_rows(base: &Path, device: &str) -> Vec<StateEntry> {
+    let enrollment = enrollment_row(base, device);
+    let id = fauna_core::hex32::decode(&enrollment.key).unwrap();
+    vec![enrollment, endpoints_row(id)]
+}
+
+/// `device`'s verified enrollment alone — what the SERVING sibling holds of
+/// its dialer, which admits only a verified member of its own fleet view
+/// (`account-sync-plane.md` § The admission seam → *Validity and
+/// severance*). `device`'s writer key must already be pre-minted.
+fn enrollment_row(base: &Path, device: &str) -> StateEntry {
     let key = resolve_writer_key_serialized(
         &store_root_for(base, device),
         &root().actor_id_hex(),
@@ -230,7 +240,7 @@ fn member_rows(base: &Path, device: &str) -> Vec<StateEntry> {
     let authorization =
         canonical_encode(&fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)).unwrap();
     let kind = fauna_protocol::merge_policy::KIND_DEVICE_SET;
-    let enrollment = StateEntry {
+    StateEntry {
         kind: kind.into(),
         key: fauna_core::hex32::encode(&id),
         scope: home_scope_for_kind(kind).unwrap().into(),
@@ -243,8 +253,7 @@ fn member_rows(base: &Path, device: &str) -> Vec<StateEntry> {
         merge_meta: None,
         entry_version: 0,
         tombstone: false,
-    };
-    vec![enrollment, endpoints_row(id)]
+    }
 }
 
 // ── The conversations side ───────────────────────────────────────────────────
@@ -253,6 +262,7 @@ fn member_rows(base: &Path, device: &str) -> Vec<StateEntry> {
 /// launch floor — so only a channel position can ever make it unread.
 fn peer_message(seq: u64) -> MessageSnapshot {
     MessageSnapshot {
+        queued_send: None,
         message_id: MessageId(format!("conv:{CHANNEL}:{seq}")),
         sender: TypedAddress::Email {
             email_address: "peer@host.test".into(),
@@ -272,6 +282,7 @@ fn peer_message(seq: u64) -> MessageSnapshot {
         labels: vec![],
         plane_ref: None,
         can_delete: false,
+        can_remove: false,
         undelivered: false,
         warmup_hold: None,
         scan_result_lines: Vec::new(),
@@ -336,6 +347,9 @@ async fn a_thread_read_on_one_device_is_read_on_the_other() {
 
     let a_pub = premint_and_stage(&base, "a", &[]).await;
     premint_and_stage(&base, "b", &member_rows(&base, "a")).await;
+    // …and A holds B's enrollment, so it admits B (both rows ride the
+    // fleet-only scope together in production).
+    premint_and_stage(&base, "a", &[enrollment_row(&base, "b")]).await;
     let a = AccountStoreRuntime::start(params(&base, "a", &net))
         .await
         .expect("start A");

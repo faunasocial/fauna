@@ -146,6 +146,36 @@ pub fn mint_option_label(o: JsValue) -> Result<JsValue, JsValue> {
     to_js(&fauna_client_pair::mint_option_label(&o))
 }
 
+/// `fauna_client_pair::mint_option_note` — the note the mint flow shows
+/// before the confirm for this option (the materialization option's honesty
+/// copy), or `null` when it carries none.
+#[wasm_bindgen(js_name = mintOptionNote)]
+pub fn mint_option_note(o: JsValue) -> Result<JsValue, JsValue> {
+    let o: fauna_client_pair::TrustMintOption = from_js(o)?;
+    to_js(&fauna_client_pair::mint_option_note(&o))
+}
+
+/// `fauna_client_pair::mint_option_default_duration` — the duration the mint
+/// flow pre-selects for this option, given the row's `mint_default_duration`.
+#[wasm_bindgen(js_name = mintOptionDefaultDuration)]
+pub fn mint_option_default_duration(o: JsValue, row_default: JsValue) -> Result<JsValue, JsValue> {
+    let o: fauna_client_pair::TrustMintOption = from_js(o)?;
+    let row_default: fauna_client_pair::TrustGrantDuration = from_js(row_default)?;
+    to_js(&fauna_client_pair::mint_option_default_duration(
+        &o,
+        row_default,
+    ))
+}
+
+/// `fauna_client_pair::grant_bound_note` — the honest-bound note a grant
+/// row renders (`nest-trust-grant-bound-note`): the materialization,
+/// bounded-mail or standing regime, picked in shared Rust.
+#[wasm_bindgen(js_name = grantBoundNote)]
+pub fn grant_bound_note(scope: JsValue) -> Result<JsValue, JsValue> {
+    let scope: Vec<fauna_client_pair::TrustScope> = from_js(scope)?;
+    to_js(&fauna_client_pair::grant_bound_note(scope))
+}
+
 #[wasm_bindgen]
 pub struct WasmLinkedNestsMachine {
     inner: Rc<LinkedNestsMachine>,

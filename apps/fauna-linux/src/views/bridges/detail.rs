@@ -226,6 +226,16 @@ pub fn build_bridge_detail(
         bridge_id, link_modes, linked, error, identity, settings, client,
     );
 
+    // The card's painted title (`bridge-card-name`): the glyph-headed
+    // composition the list row carries (`bridge_card_title`), inside the card
+    // so a scoped `bridge-card[i]` read finds it, as on tui/web/android.
+    let card_name = gtk::Label::new(Some(bridge_name));
+    card_name.set_halign(gtk::Align::Start);
+    card_name.set_xalign(0.0);
+    card_name.add_css_class("title-3");
+    crate::testid::set_test_id(&card_name, ids::BRIDGE_CARD_NAME);
+    scroll_content.prepend(&card_name);
+
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)

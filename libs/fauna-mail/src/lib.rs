@@ -316,7 +316,10 @@ pub use report_hash::report_hash;
 #[cfg(feature = "spam")]
 pub use spam::decide_spam_disposition;
 #[cfg(feature = "spam-classifier")]
-pub use spam::{SpamDisposition, SpamPolicy, combined_spam_score_milli};
+pub use spam::{
+    SpamDisposition, SpamPolicy, combined_spam_score_milli, effective_spam_score_milli,
+    report_spam_milli,
+};
 #[cfg(feature = "srs")]
 pub use srs::{
     DEFAULT_SRS_MAX_BOUNCE_AGE_DAYS, SrsDecoded, SrsError, TT_MODULUS_DAYS, srs_decode, srs_forward,

@@ -2341,14 +2341,31 @@ impl<B: StoreBackend> AccountStore<B> {
     }
 
     /// Park the intent as permanently failed — user-visible, never silently
-    /// dropped, never re-attempted without user action.
-    pub async fn outbox_mark_failed(&self, intent_id: &[u8; 16]) -> Result<bool> {
-        self.backend.outbox_mark_failed(intent_id).await
+    /// dropped, never re-attempted without user action. `reason` is the
+    /// stable code the unsent-changes surface renders, never free text.
+    pub async fn outbox_mark_failed(&self, intent_id: &[u8; 16], reason: &str) -> Result<bool> {
+        self.backend.outbox_mark_failed(intent_id, reason).await
     }
 
     /// Record an inconclusive drain attempt (the backoff pair).
     pub async fn outbox_record_attempt(&self, intent_id: &[u8; 16]) -> Result<bool> {
         self.backend.outbox_record_attempt(intent_id).await
+    }
+
+    /// The user's retry of a parked intent: back to pending at its own
+    /// `channel_seq`, counters and reason cleared. The scope's hold is
+    /// recomputed by the next drain pass from the `failed` rows, so retrying
+    /// the parked head releases the remainder in order. `false` = unknown or
+    /// already pending.
+    pub async fn outbox_retry(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        self.backend.outbox_retry(intent_id).await
+    }
+
+    /// The user's discard of a parked intent — the one sanctioned destroy of
+    /// an undrained intent, and only of a `failed` one. `false` = unknown or
+    /// pending (a pending intent may be in flight and is never deleted here).
+    pub async fn outbox_discard(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        self.backend.outbox_discard(intent_id).await
     }
 
     /// Rebuild `scope`'s record index from the segments this replica holds —

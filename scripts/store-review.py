@@ -10,7 +10,12 @@ The record's one writer (docs/goal/architecture/installers/store-review.md
 The first write of a (store, version) needs --track, --build, --flavour and
 --note; a later one replaces state, since, read and note in place. --since
 defaults to --read when the state changes, and stays put when it does not.
-Writes the file and stops: the commit is the session's own.
+In the same act it writes the submission's artifacts into the release table
+(docs/features/ledger/releases.json `artifacts`; release-table.md § Tag gate and
+release table, *The artifacts of a version*): in-review, approved or rejected →
+submitted, serving on the store's public track → live, withdrawn → withdrawn,
+built, uploaded or serving a testing track → built, superseded → nothing.
+Writes both files and stops: the commit is the session's own.
 """
 from __future__ import annotations
 
@@ -19,6 +24,11 @@ import datetime as _dt
 import sys
 
 import _store_review as sr
+
+try:  # The release table is the private tree's (its ledger never ships): absent, no artifact act.
+    import release_artifacts as ra
+except ImportError:
+    ra = None
 
 
 def _date(text: str) -> _dt.date:
@@ -60,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         subs, verb = sr.apply(
-            sr.load(),
+            sr.loads(text),
             store=args.store,
             version=args.version,
             state=args.state,
@@ -74,12 +84,28 @@ def main(argv: list[str] | None = None) -> int:
     except sr.RecordError as err:
         print(f"store-review: refused: {err}", file=sys.stderr)
         return 1
-    sr.RECORD.write_text(sr.render(subs))
     sub = next(s for s in subs if s["store"] == args.store and s["version"] == args.version)
+    # The release table's artifacts list, in the same act (release-table.md § Tag gate and
+    # release table, *The artifacts of a version*): both are computed before either is written.
+    acts: list[str] = []
+    if ra is not None:
+        try:
+            releases, artifacts = ra.load(ra.TABLE)
+            acts = ra.record_store_submission(artifacts, sub)
+        except (ra.Refused, ValueError) as err:
+            print(f"store-review: refused (the release table's artifacts): {err}", file=sys.stderr)
+            return 1
+    sr.RECORD.write_text(sr.render(subs))
+    if ra is not None:
+        ra.save(releases, artifacts, ra.TABLE)
     print(
         f"store-review: {verb} {sub['store']} {sub['version']} ({sub['track']}, build {sub['build']}): "
-        f"{sub['state']} since {sub['since']}, read {sub['read']}. Commit it."
+        f"{sub['state']} since {sub['since']}, read {sub['read']}."
     )
+    for act in acts:
+        print(f"store-review: artifacts: {act}")
+    written = [sr.RECORD.relative_to(sr.REPO)] + ([ra.TABLE.relative_to(ra.REPO)] if ra else [])
+    print(f"store-review: commit {' and '.join(map(str, written))} together.")
     return 0
 
 

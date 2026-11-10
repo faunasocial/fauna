@@ -414,8 +414,8 @@ enforcement**: `fauna.auth.verify` refuses a locked account with
 refusal. **Admins are exempt (user ruling 2026-10-01)**, mirroring the use-time
 exemption ([`../architecture/api-layers.md`](../architecture/api-layers.md)
 § Layer 1): a locked sole admin keeps the verify mint until a
-cannot-lock-the-last-admin guard exists, and the exemption lifts at both doors together. Since every app-held bearer (launch and refresh) is minted here, this
-is the only lockout gate any app passes, and it is what delivers the refusal to
+cannot-lock-the-last-admin guard exists, and the exemption lifts at every door together. Since every app-held bearer (launch and refresh) is minted here, this
+is the only lockout gate any *Fauna* app passes. **The lock also covers the credentials a bridge resolves for the account (2026-11-07):** a mail credential (IMAP, SMTP submission, CalDAV, CardDAV, WebDAV) and an ATProto app password sign nothing in and serve nothing while the account is locked or suspended, sessions already open included, with the same admin exemption — the mechanism, and the third door it adds to "every door", is owned by [`../architecture/transport-connection.md`](../architecture/transport-connection.md) § Revocation teardown, the bridge-held sessions paragraph. This gate is what delivers the refusal to
 the locked surface on every launch path ([`devices.md`](devices.md) § The locked
 state). *Implementation status: the mint-time gate is built — `auth_core::verify_core`
 reads `locked_until` (admins exempt), `SilentChallengeOutcome::Locked` carries it,

@@ -23,13 +23,16 @@ WS-RPC.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from nacl.signing import SigningKey
 
 from common.auth import create_actor_and_register
-from helpers.custody_hosting import UNANSWERED_OWNER_NEST_URL, Host
+from helpers.custody_hosting import UNANSWERED_OWNER_NEST_URL, Host, custody_hosting_hook, pump
 from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, wait_for_held_rpc
 from helpers.waiting import wait_until
+from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -300,3 +303,191 @@ def test_an_admin_lists_and_removes_a_copy_another_member_holds(
     # read-back no longer holds it.
     assert grant not in host.rows(), "the admin remove must drop the member's row on the nest"
     host.forget(grant)
+
+
+# ── What each held copy shows, on copies the pump really filled ─────────────
+#
+# Last in the module on purpose: its admin session is on `domainless_nest`, not
+# the shared nest the tests above read, so it must come after
+# `test_tui_names_no_count_while_the_registry_read_is_held`'s first visit.
+
+
+@pytest.fixture
+def custody_spa_url(spa_proxy_for, domainless_nest):
+    """The SPA proxy → ``domainless_nest``, for a web leg (resolved lazily by
+    `_login_admin_as`, only when the app is web)."""
+    return spa_proxy_for(domainless_nest["url"])
+
+
+@pytest.fixture
+def domainless_admin_app(request, app, domainless_nest):
+    """``admin_app`` pointed at ``domainless_nest`` — only the nest differs
+    (`_login_admin_as`). The pump must DIAL the owner's nest, and the shared
+    nest is public by identity, so it refuses the plaintext loopback URL this
+    rig hands it (``domainless_nest``'s docstring); copies with real held
+    bytes can only be filled here."""
+    from conftest import _login_admin_as
+
+    _login_admin_as(
+        app, request, domainless_nest,
+        spa_url_fixture="custody_spa_url", fixture_name="domainless_admin_app",
+    )
+    yield app
+
+
+@pytest.fixture
+def held_custody_pump(domainless_nest):
+    """``domainless_nest``'s periodic hosting pump held for one test, so the
+    only passes are the test's own ``run-now`` pokes (convention 14: state,
+    never a race with a scheduled pass)."""
+    url = domainless_nest["url"]
+    custody_hosting_hook(url, "hold", {"held": True})
+    yield domainless_nest
+    custody_hosting_hook(url, "hold", {"held": False})
+
+
+#: `fauna_core::format::byte_size`'s units (1024 steps, one decimal).
+_UNITS = {"B": 1, "KB": 1 << 10, "MB": 1 << 20, "GB": 1 << 30, "TB": 1 << 40}
+
+
+def _shows_bytes(text: str, expected: int) -> bool:
+    """Whether ``text`` — the shared byte-size rendering — shows ``expected``
+    bytes to its one decimal. Read back rather than re-derived, so the test
+    never carries a second copy of the format a client could share a mistake
+    with."""
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9])?) (B|KB|MB|GB|TB)", text)
+    assert m, f"not a shared-format byte size: {text!r}"
+    unit = _UNITS[m.group(2)]
+    return abs(float(m.group(1)) * unit - expected) <= unit * 0.05 + 1e-9
+
+
+def _bare_owner() -> dict:
+    """An owner who is only a key — for a copy that is listed, never pulled."""
+    key = SigningKey.generate()
+    return {"signing_key": bytes(key), "actor_id_hex": bytes(key.verify_key).hex()}
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("admin-held-custody")
+def test_each_held_copy_shows_its_budget_hold_stop_mark_and_freshness_heaviest_first(
+    domainless_admin_app, held_custody_pump
+):
+    """Each copy on the admin's held-custody page shows its budget, how much
+    it holds, whether it is paused and how fresh its last confirmation is, and
+    the heaviest hold is listed first.
+
+    docs/goal/architecture/account-data-plane.md § Implementation status today
+    (:2066–2078): the tui page renders host / owner / dialled URL / budget /
+    metered hold / stop mark / three-state receipt freshness, ordered by
+    `view_model::admin_hosting_rows` — heaviest hold first.
+
+    Three copies, each deposited by its own member, so no two share a
+    `(host, owner)` store: one the pump fills with no allowance of its own; one
+    the pump fills, then squeezes under the allowance set for it, and which its
+    member then pauses; one naming an owner nest nothing answers at, so it
+    holds nothing and was never confirmed. Every expected cell is read off the
+    nest's own row (convention 5), never assumed.
+
+    Marked tui, the lead app the goal doc's claim names, and web, linux,
+    android, macos and ios, whose pages read the same shared rows (macos and
+    ios through the one FaunaKit `AdminCustodyHostingView`); windows follows
+    in its trickle-down leg.
+    """
+    app = domainless_admin_app
+    nest = held_custody_pump
+    words = S.admin.custody_hosting
+
+    def _account() -> dict:
+        return create_actor_and_register(
+            nest["port"], admin_signing_key=nest["admin"]["signing_key"], base_url=nest["url"])
+
+    heavy_owner, light_owner = _account(), _account()
+    with (
+        Host(nest, _account()) as heavy,
+        Host(nest, _account()) as light,
+        Host(nest, _account(), owner_nest_url=UNANSWERED_OWNER_NEST_URL) as never,
+    ):
+        heavy_grant = heavy.custody(heavy_owner)
+        light_grant = light.custody(light_owner)
+        report = pump(nest)
+        assert report["pulled"] == 2 and report["failed"] == 0, (
+            f"both filled copies must pull: {report!r}")
+
+        # Squeeze the light copy under its own allowance (outcome 12's
+        # mechanism), so the two holds really differ, then pause it.
+        allowance = light.rows()[light_grant]["held_bytes"] // 2
+        assert allowance > 0, f"the light copy pulled nothing: {light.rows()!r}"
+        assert light.register(light_owner, light_grant, cap=allowance).get("ok") is True
+        report = pump(nest)
+        assert report["pulled"] == 2 and report["failed"] == 0, report
+        assert light.register(
+            light_owner, light_grant, cap=allowance, stopped=True).get("ok") is True
+
+        # Planted only after the passes, so no pass ever dials it.
+        never_grant = never.plant(_bare_owner())
+
+        # The nest's own rows — what the page must show.
+        truth = {
+            "heavy": heavy.rows()[heavy_grant],
+            "light": light.rows()[light_grant],
+            "never": never.rows()[never_grant],
+        }
+        holds = {k: r["held_bytes"] for k, r in truth.items()}
+        assert holds["heavy"] > holds["light"] > holds["never"] == 0, (
+            f"precondition: three distinct holds, the squeezed copy under the full one: {truth!r}")
+        assert truth["light"]["retained_bytes_cap"] == allowance, truth
+        assert truth["light"]["stopped"] is True and truth["heavy"]["stopped"] is False, truth
+        assert truth["heavy"]["last_receipt_at"] and not truth["never"]["last_receipt_at"], (
+            f"precondition: a pulled copy is confirmed, the never-dialled one is not: {truth!r}")
+        hosts = {"heavy": heavy, "light": light, "never": never}
+
+        # What the page last showed — an unanswered read, a list missing a
+        # copy, and an error are three different failures (convention 6).
+        seen: dict = {}
+
+        def _listed() -> dict[str, int | None] | None:
+            app.admin.reopen_custody_hosting()
+            answered = app.admin.hosting_registry_answered()
+            index = {k: app.admin.hosting_row_index(h.actor["actor_id_hex"])
+                     for k, h in hosts.items()} if answered else {}
+            seen.update(answered=answered, index=index, error=app.error_text())
+            return index if index and None not in index.values() else None
+
+        index = wait_until(
+            _listed,
+            _ANSWER_S,
+            diagnose=lambda: f"the page never listed all three copies; it last showed {seen}",
+        )
+        assert not seen["error"], f"unexpected error: {seen['error']!r}"
+
+        assert index["heavy"] < index["light"] < index["never"], (
+            f"the heaviest hold must be listed first: rows {index!r} for holds {holds!r}")
+
+        for k, row in truth.items():
+            i = index[k]
+            cells = {
+                "budget": app.admin.hosting_row_budget(i),
+                "held": app.admin.hosting_row_held(i),
+                "stopped": app.admin.hosting_row_stopped(i),
+                "receipt": app.admin.hosting_row_receipt(i),
+            }
+            what = f"the {k} copy (nest row {row!r}) shows {cells!r}"
+
+            cap = row["retained_bytes_cap"]
+            if cap == 0:
+                assert cells["budget"] == words.budget_default, (
+                    f"a copy with no allowance of its own reads as the default: {what}")
+            else:
+                assert _shows_bytes(cells["budget"], cap), f"the budget must read {cap} bytes: {what}"
+            assert _shows_bytes(cells["held"], row["held_bytes"]), (
+                f"the hold must read the {row['held_bytes']} bytes the pump metered: {what}")
+            assert cells["stopped"] == (words.stopped if row["stopped"] else words.active), (
+                f"the stop mark must follow the row: {what}")
+            assert cells["receipt"] == (
+                words.receipt_fresh if row["last_receipt_at"] else words.receipt_none), (
+                f"the confirmation's freshness must follow the row: {what}")

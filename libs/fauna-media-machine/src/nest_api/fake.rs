@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use fauna_client_media::{MediaFolder, MediaSnapshot};
 use fauna_client_share::share::{ShareCreateReply, ShareCreateRequest, ShareRecord};
 
-use super::{ListedVersion, MediaApiError, MediaNestApi};
+use super::{ForeignListing, ListedVersion, MediaApiError, MediaNestApi};
 use crate::snapshots::FileVersionSummary;
 
 /// The identity [`FakeMediaNestApi::set_predecessor_signed`] reports a marked
@@ -49,6 +49,23 @@ pub enum MediaNestCall {
         /// The sealed label the upload gesture computed — recorded so a test
         /// can assert the Media write plane seals its path
         /// (`docs/goal/behavior/file-sync.md` § Sealed names & paths).
+        path_sealed: Option<Vec<u8>>,
+    },
+    /// `record_foreign(channel, home_nest_url, folder, device_id, path,
+    /// manifest_hash, size_bytes, change_type, content_key_version,
+    /// thumbnail_hash, path_sealed)` — the cross-nest writer's relayed record
+    /// (an upload's `create`, a delete's tombstone).
+    RecordForeign {
+        channel: [u8; 32],
+        home_nest_url: String,
+        folder: String,
+        device_id: String,
+        path: String,
+        manifest_hash: Option<String>,
+        size_bytes: i64,
+        change_type: String,
+        content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
         path_sealed: Option<Vec<u8>>,
     },
     /// `delete_member(folder, folder_id, device_id, path, path_sealed)`.
@@ -103,6 +120,19 @@ pub enum MediaNestCall {
     },
     /// `share_list()`.
     ShareList,
+    /// `foreign_listing(channel, home_nest_url)` — the foreign browse
+    /// scope's relayed read.
+    ForeignListing {
+        channel: [u8; 32],
+        home_nest_url: String,
+    },
+    /// `foreign_versions(channel, home_nest_url, path)` — a foreign scope
+    /// item's relayed version history.
+    ForeignVersions {
+        channel: [u8; 32],
+        home_nest_url: String,
+        path: String,
+    },
     /// `share_revoke(token_id)`.
     ShareRevoke {
         token_id: String,
@@ -150,7 +180,16 @@ pub struct FakeMediaNestApi {
     /// How many more `list_folders()` reads fail transiently — the folder
     /// list lost in the same window.
     failed_folder_reads: Mutex<usize>,
+    /// What `foreign_listing` answers per channel; a channel with no fixture
+    /// is a transport fault (the seam reached no home nest).
+    foreign: Mutex<std::collections::HashMap<[u8; 32], Result<ForeignListing, MediaApiError>>>,
+    /// What `foreign_versions` answers per channel; a channel with no fixture
+    /// is a transport fault.
+    foreign_versions: Mutex<std::collections::HashMap<[u8; 32], ForeignVersionsFixture>>,
 }
+
+/// One channel's `foreign_versions` fixture.
+type ForeignVersionsFixture = Result<Vec<ListedVersion>, MediaApiError>;
 
 impl FakeMediaNestApi {
     pub fn new() -> Self {
@@ -246,6 +285,28 @@ impl FakeMediaNestApi {
         *self.failed_folder_reads.lock().unwrap() = reads;
     }
 
+    /// Fixture what the foreign browse scope's read of `channel` answers.
+    pub fn set_foreign_listing(
+        &self,
+        channel: [u8; 32],
+        listing: Result<ForeignListing, MediaApiError>,
+    ) {
+        self.foreign.lock().unwrap().insert(channel, listing);
+    }
+
+    /// Fixture what a foreign scope item's version history in `channel`
+    /// answers (every path alike).
+    pub fn set_foreign_versions(
+        &self,
+        channel: [u8; 32],
+        versions: Result<Vec<ListedVersion>, MediaApiError>,
+    ) {
+        self.foreign_versions
+            .lock()
+            .unwrap()
+            .insert(channel, versions);
+    }
+
     /// All recorded read calls, in order.
     pub fn calls(&self) -> Vec<MediaNestCall> {
         self.calls.lock().unwrap().clone()
@@ -309,6 +370,56 @@ impl MediaNestApi for FakeMediaNestApi {
         }
     }
 
+    async fn foreign_listing(
+        &self,
+        channel: [u8; 32],
+        home_nest_url: &str,
+    ) -> Result<ForeignListing, MediaApiError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MediaNestCall::ForeignListing {
+                channel,
+                home_nest_url: home_nest_url.to_string(),
+            });
+        self.foreign
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .cloned()
+            .unwrap_or_else(|| {
+                Err(MediaApiError::Transient {
+                    detail: "no home nest answered".into(),
+                })
+            })
+    }
+
+    async fn foreign_versions(
+        &self,
+        channel: [u8; 32],
+        home_nest_url: &str,
+        path: &str,
+    ) -> Result<Vec<ListedVersion>, MediaApiError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MediaNestCall::ForeignVersions {
+                channel,
+                home_nest_url: home_nest_url.to_string(),
+                path: path.to_string(),
+            });
+        self.foreign_versions
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .cloned()
+            .unwrap_or_else(|| {
+                Err(MediaApiError::Transient {
+                    detail: "no home nest answered".into(),
+                })
+            })
+    }
+
     async fn record_member(
         &self,
         folder: &str,
@@ -331,6 +442,42 @@ impl MediaNestApi for FakeMediaNestApi {
                 path: path.to_string(),
                 manifest_hash,
                 size_bytes,
+                content_key_version,
+                thumbnail_hash,
+                path_sealed,
+            });
+        match self.write_error.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    async fn record_foreign(
+        &self,
+        channel: [u8; 32],
+        home_nest_url: &str,
+        folder: &str,
+        device_id: &str,
+        path: &str,
+        manifest_hash: Option<String>,
+        size_bytes: i64,
+        change_type: &str,
+        content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
+        path_sealed: Option<Vec<u8>>,
+    ) -> Result<(), MediaApiError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MediaNestCall::RecordForeign {
+                channel,
+                home_nest_url: home_nest_url.to_string(),
+                folder: folder.to_string(),
+                device_id: device_id.to_string(),
+                path: path.to_string(),
+                manifest_hash,
+                size_bytes,
+                change_type: change_type.to_string(),
                 content_key_version,
                 thumbnail_hash,
                 path_sealed,

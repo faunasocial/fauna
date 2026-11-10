@@ -261,7 +261,8 @@ fn row_elements(
         item = item.attr("oracle_ops", oracle.ops_in_window.to_string());
     }
     // Every row reports whether it can act — `paused` (the account's
-    // external-apps switch is OFF), `connected`, or `not_connected` — as a
+    // external-apps switch is OFF, or a step-down suspended the app's
+    // grants), `connected`, or `not_connected` — as a
     // value a reader can count, beside the words.
     item = item.attr(
         "status",

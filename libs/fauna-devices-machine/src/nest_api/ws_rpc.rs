@@ -202,6 +202,13 @@ where
                     detail: format!("{e:#}"),
                 })
             }
+            // Create-only arms: a delete never reaches them.
+            Err(
+                fauna_client_folders::SetLifecycleError::Unattestable
+                | fauna_client_folders::SetLifecycleError::Unattested { .. },
+            ) => Err(DevicesApiError::BadRequest {
+                detail: "unexpected create outcome on a delete".into(),
+            }),
         }
     }
 
@@ -1235,6 +1242,9 @@ mod wasm {
         /// The owner's seal root, derived from the handed-in identity — the
         /// browser connection carries no keypair to read it off.
         owner_seal: Option<fauna_core::crypto::BackupKey>,
+        /// The same handed-in identity, which attests a born-public create
+        /// (`ui/folders.md` § Audience and website serving → *Born public*).
+        attestor: Option<Arc<ActorKeypair>>,
     }
 
     impl WizardFactory for WsRpcWizardFactory {
@@ -1247,6 +1257,7 @@ mod wasm {
                 self.nest.clone(),
                 self.custody.clone(),
                 self.owner_seal.clone(),
+                self.attestor.clone(),
                 observer,
                 available_devices,
             )
@@ -1268,6 +1279,9 @@ mod wasm {
         let owner_seal = identity
             .as_ref()
             .map(|kp| fauna_core::crypto::BackupKey::derive(kp.secret_bytes()));
+        let attestor = identity
+            .as_ref()
+            .map(|kp| Arc::new(ActorKeypair::from_secret(*kp.secret_bytes())));
         let api: Arc<dyn DevicesNestApi> = Arc::new(WsRpcDevicesNest::new(
             nest.clone(),
             identity,
@@ -1277,6 +1291,7 @@ mod wasm {
             nest,
             custody,
             owner_seal,
+            attestor,
         });
         DevicesMachine::new(observer, api, factory)
     }
@@ -1541,6 +1556,24 @@ impl crate::machine::ForeignSetsSource for CustodyForeignSetsSource {
                 home_nest_url: f.home_nest_url.clone(),
                 access: f.access.clone(),
                 metadata_only_residency: f.metadata_only_residency(),
+                owner_handle: f.owner_handle.clone(),
+                owner_domain: f.owner_domain.clone(),
+            })
+            .collect()
+    }
+
+    async fn forked_seats(&self) -> Vec<crate::machine::ForkedSeatRow> {
+        let Ok(custody) = self.custody.load().await else {
+            return Vec::new();
+        };
+        // A cleared record is a tombstone, never a row.
+        fauna_client_folders::custody::live_forked_seats(&custody)
+            .map(|f| crate::machine::ForkedSeatRow {
+                mls_group_id_hex: hex::encode(&f.mls_group_id),
+                set_name: f.set_name.clone(),
+                owner_handle: f.owner_handle.clone(),
+                owner_actor_id: f.owner_actor_id.clone(),
+                access: f.access.clone(),
             })
             .collect()
     }

@@ -3140,7 +3140,9 @@ impl MailSettingsMachine {
             .apply_spam_model_write(
                 ModelWriteOp::Train { text, label },
                 Some(HistoryWrite::Insert {
-                    message_id,
+                    // A mail-rail `Message-ID:` can exceed the nest's id cap;
+                    // send such an id as a digest so the train still lands.
+                    message_id: fauna_protocol::wrapped_blob::spam_history_message_id(message_id),
                     mailbox,
                     subject,
                     source: WireTrainingSource::ManualOther,

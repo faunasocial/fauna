@@ -360,6 +360,13 @@ where
         );
     }
 
+    // The channel-kind markers move with the seat, first and unconditionally:
+    // they describe the account's channels, not a leaf, and a community room
+    // has no group below for the loop to join — its marker is the only thing
+    // that lists it in the successor's snapshot (`MlsEngine::
+    // carry_channel_kind_markers_from`).
+    successor_engine.carry_channel_kind_markers_from(old_engine);
+
     // Encoded once, verbatim for every group: these are the bytes the
     // signatures cover, identical to what the nest stores and
     // `succession.lookup` serves.

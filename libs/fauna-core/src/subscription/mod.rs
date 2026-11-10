@@ -136,6 +136,64 @@ pub fn is_safe_payment_url(url: &str) -> bool {
     url.starts_with("https://")
 }
 
+/// The checkout hosts that honour a `client_reference_id` query parameter and
+/// hand it back on the payment webhook — Stripe's Payment Link and Checkout
+/// hosts. A buyer's actor id is handed to no other host.
+pub const CHECKOUT_REFERENCE_HOSTS: &[&str] = &["buy.stripe.com", "checkout.stripe.com"];
+
+/// The checkout URL a buyer's app opens for an author-supplied `payment_url` —
+/// the one shared rule behind Q4's primary binding (`monetization.md`
+/// § Pillar 3 → *Buyer↔actor binding (Q4)* → *A checkout-bound buyer homed on
+/// another nest*, rule (2)).
+///
+/// `None` when the URL fails [`is_safe_payment_url`] (nothing is opened). When
+/// its host is one of [`CHECKOUT_REFERENCE_HOSTS`] the URL comes back with
+/// `client_reference_id=<buyer hex>` added to its query (ahead of any
+/// fragment, after any existing parameters); any other host — or an authority
+/// carrying userinfo, which could make a lookalike read as a listed host —
+/// comes back untouched, so that payment stays on the claim code.
+pub fn checkout_url(payment_url: &str, buyer: &crate::identity::ActorId) -> Option<String> {
+    if !is_safe_payment_url(payment_url) {
+        return None;
+    }
+    let rest = &payment_url["https://".len()..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.contains('@') {
+        return Some(payment_url.to_string());
+    }
+    let host = authority.split(':').next().unwrap_or_default();
+    if !CHECKOUT_REFERENCE_HOSTS
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(host))
+    {
+        return Some(payment_url.to_string());
+    }
+    let (before_fragment, fragment) = match payment_url.find('#') {
+        Some(i) => payment_url.split_at(i),
+        None => (payment_url, ""),
+    };
+    let sep = if !before_fragment.contains('?') {
+        "?"
+    } else if before_fragment.ends_with('?') || before_fragment.ends_with('&') {
+        ""
+    } else {
+        "&"
+    };
+    Some(format!(
+        "{before_fragment}{sep}client_reference_id={}{fragment}",
+        buyer.to_hex()
+    ))
+}
+
+/// The foreign-language face of [`checkout_url`]: the buyer named by its
+/// 64-hex actor id; `None` for an unsafe URL or a malformed id.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn checkout_url_for_buyer(payment_url: &str, buyer_actor_hex: &str) -> Option<String> {
+    let buyer = crate::identity::ActorId::from_hex(buyer_actor_hex).ok()?;
+    checkout_url(payment_url, &buyer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +210,80 @@ mod tests {
         assert!(!is_safe_payment_url("data:text/html,<script>1</script>"));
         assert!(!is_safe_payment_url(""));
         assert!(!is_safe_payment_url("checkout.example.com"));
+    }
+
+    fn buyer() -> crate::identity::ActorId {
+        crate::identity::ActorId([0xab; 32])
+    }
+
+    fn reference() -> String {
+        format!("client_reference_id={}", "ab".repeat(32))
+    }
+
+    #[test]
+    fn checkout_url_refuses_an_unsafe_url() {
+        assert_eq!(checkout_url("http://buy.stripe.com/x", &buyer()), None);
+        assert_eq!(checkout_url("javascript:alert(1)", &buyer()), None);
+    }
+
+    #[test]
+    fn checkout_url_appends_the_reference_on_a_stripe_host() {
+        assert_eq!(
+            checkout_url("https://buy.stripe.com/test_abc", &buyer()).unwrap(),
+            format!("https://buy.stripe.com/test_abc?{}", reference())
+        );
+        assert_eq!(
+            checkout_url("https://CHECKOUT.stripe.com:443/c/pay", &buyer()).unwrap(),
+            format!("https://CHECKOUT.stripe.com:443/c/pay?{}", reference())
+        );
+    }
+
+    #[test]
+    fn checkout_url_keeps_an_existing_query_and_the_fragment() {
+        assert_eq!(
+            checkout_url("https://buy.stripe.com/abc?prefilled_email=x", &buyer()).unwrap(),
+            format!(
+                "https://buy.stripe.com/abc?prefilled_email=x&{}",
+                reference()
+            )
+        );
+        assert_eq!(
+            checkout_url("https://buy.stripe.com/abc#frag", &buyer()).unwrap(),
+            format!("https://buy.stripe.com/abc?{}#frag", reference())
+        );
+        assert_eq!(
+            checkout_url("https://buy.stripe.com/abc?a=1#frag", &buyer()).unwrap(),
+            format!("https://buy.stripe.com/abc?a=1&{}#frag", reference())
+        );
+        assert_eq!(
+            checkout_url("https://buy.stripe.com?", &buyer()).unwrap(),
+            format!("https://buy.stripe.com?{}", reference())
+        );
+    }
+
+    #[test]
+    fn checkout_url_leaves_any_other_host_untouched() {
+        for url in [
+            "https://ko-fi.com/author",
+            "https://buy.stripe.com.evil.test/abc",
+            "https://evil.test/buy.stripe.com",
+            "https://buy.stripe.com@evil.test/abc",
+            "https://stripe.com/pay",
+        ] {
+            assert_eq!(checkout_url(url, &buyer()).as_deref(), Some(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn checkout_url_for_buyer_reads_the_hex_id() {
+        assert_eq!(
+            checkout_url_for_buyer("https://buy.stripe.com/x", &"ab".repeat(32)).unwrap(),
+            format!("https://buy.stripe.com/x?{}", reference())
+        );
+        assert_eq!(
+            checkout_url_for_buyer("https://buy.stripe.com/x", "zz"),
+            None
+        );
     }
 
     #[test]

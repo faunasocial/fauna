@@ -88,31 +88,21 @@ pub fn mint_follow_intent(
     Ok(EmbedAsBytes::from_signed(bytes, envelope))
 }
 
-/// An app-supplied home nest URL as the wire carries it: trimmed, without a
-/// trailing slash, `None` when blank (blank means this nest).
-fn normalize_home_nest_url(home: Option<String>) -> Option<String> {
-    home.map(|u| u.trim().trim_end_matches('/').to_string())
-        .filter(|u| !u.is_empty())
-}
+use fauna_protocol::normalize_home_nest_url;
 
 /// Why a follow that may cross nests failed: the nest's own error, or an
-/// intent this client could not mint (its nest names no well-formed id).
-#[derive(Debug)]
-pub enum FollowError<E> {
-    Nest(E),
-    Intent(String),
-}
+/// intent this client could not mint (its nest names no well-formed id) —
+/// the one cross-nest error the claim redeem shares.
+pub type FollowError<E> = fauna_protocol::CrossNestError<E>;
 
-impl<E: std::fmt::Display> std::fmt::Display for FollowError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Nest(e) => e.fmt(f),
-            Self::Intent(why) => write!(f, "follow intent: {why}"),
-        }
-    }
+/// What [`SubscriptionsClient::subscribe_and_checkout`] hands the shell: the
+/// subscribe's own reply (the optimistic pending transient reads it) and the
+/// checkout URL to open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckoutOpen {
+    pub reply: SubscribeReply,
+    pub url: String,
 }
-
-impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for FollowError<E> {}
 
 pub mod custody;
 pub mod orchestration;
@@ -397,11 +387,46 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
             .map_err(FollowError::Nest)
     }
 
+    /// The payment-link gesture every app calls (`subscription-offer-payment-link`,
+    /// the feed's `gated-post-payment-link`) — `monetization.md` § Pillar 3 →
+    /// *Buyer↔actor binding (Q4)* → *A checkout-bound buyer homed on another
+    /// nest*, rules (1) and (2): the subscribe to the tier the link sells goes
+    /// FIRST, through [`Self::subscribe_across_nests`]'s dispatch (local for no
+    /// home, the follow twin at `home_nest_url` otherwise; `Approved` is a
+    /// renewal and proceeds like `Queued`), and only then is the checkout URL
+    /// composed by [`fauna_core::subscription::checkout_url`] for the shell to
+    /// open. So the buyer's intent reaches the author's nest ahead of the
+    /// payment and the two halves meet on one request row.
+    ///
+    /// `Ok(None)` — and no subscribe — for a `payment_url` the safety guard
+    /// refuses: there is nothing to open. A refused subscribe is the error and
+    /// opens nothing (a payment to a tier nobody can grant is the half-row the
+    /// ruling avoids).
+    pub async fn subscribe_and_checkout(
+        &self,
+        author_id: ActorId,
+        tier: impl Into<String>,
+        payment_url: &str,
+        buyer: &ActorKeypair,
+        home_nest_url: Option<String>,
+    ) -> Result<Option<CheckoutOpen>, FollowError<R::Error>> {
+        let Some(url) = fauna_core::subscription::checkout_url(payment_url, &buyer.actor_id())
+        else {
+            return Ok(None);
+        };
+        let reply = self
+            .subscribe_across_nests(author_id, tier, buyer, home_nest_url)
+            .await?;
+        Ok(Some(CheckoutOpen { reply, url }))
+    }
+
     /// The leave twin of [`Self::subscribe_across_nests`]: [`Self::unsubscribe`]
     /// for an author on this nest, the federated unsubscribe for one homed on
-    /// another. `tier` is the tier being left — the unsubscribe intent names it
-    /// and the home stamps its replay floor under it (the leave itself still
-    /// covers every paid tier, as the local door's does).
+    /// another. `tier` is the tier being left and the leave's floor
+    /// (`subscriptions.md` § The free followers tier — follow and unfollow,
+    /// rule 1): the leave ends it and every tier held above it, so
+    /// `"followers"` is the unfollow. The unsubscribe intent names it, and the
+    /// local door takes it as [`UnsubscribeRequest::tier`].
     pub async fn unsubscribe_across_nests(
         &self,
         author_id: ActorId,
@@ -409,16 +434,15 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
         subscriber: &ActorKeypair,
         home_nest_url: Option<String>,
     ) -> Result<UnsubscribeReply, FollowError<R::Error>> {
+        let tier = tier.into();
         let Some(home) = normalize_home_nest_url(home_nest_url) else {
-            return self.unsubscribe(author_id).await.map_err(FollowError::Nest);
+            return self
+                .unsubscribe(author_id, Some(tier))
+                .await
+                .map_err(FollowError::Nest);
         };
         let intent = self
-            .follow_intent(
-                subscriber,
-                author_id,
-                &tier.into(),
-                FollowIntentKind::Unsubscribe,
-            )
+            .follow_intent(subscriber, author_id, &tier, FollowIntentKind::Unsubscribe)
             .await?;
         self.nest
             .request(
@@ -427,6 +451,7 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
                     home_nest_url: Some(home),
                     intent: Some(intent),
                     author_id,
+                    tier: Some(tier),
                     extra: Default::default(),
                 },
             )
@@ -446,12 +471,7 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
         tier: &str,
         kind: FollowIntentKind,
     ) -> Result<EmbedAsBytes, FollowError<R::Error>> {
-        let info = fauna_protocol::read_nest_info(&self.nest)
-            .await
-            .map_err(FollowError::Nest)?;
-        let home_nest_id = fauna_core::hex32::decode(&info.nest_id).map_err(|e| {
-            FollowError::Intent(format!("this nest's id is not a 32-byte hex key: {e}"))
-        })?;
+        let home_nest_id = fauna_protocol::read_nest_id(&self.nest).await?;
         mint_follow_intent(
             subscriber,
             author,
@@ -496,10 +516,17 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
         Ok(capability::supports(&info.capabilities, token))
     }
 
-    /// `fauna.subscriptions.unsubscribe` — the calling actor drops its
-    /// subscription to `author_id`. Resolves to `Removed` (applied inline) or
-    /// `Queued` (author-confirmation required in encrypted mode).
-    pub async fn unsubscribe(&self, author_id: ActorId) -> Result<UnsubscribeReply, R::Error> {
+    /// `fauna.subscriptions.unsubscribe` — the calling actor leaves `tier` at
+    /// `author_id` and every tier it holds there at a higher rank (the leave's
+    /// floor — `subscriptions.md` § The free followers tier — follow and
+    /// unfollow, rule 1): `Some("followers")` is the unfollow, `None` leaves
+    /// every paid tier and keeps the follow. Resolves to `Queued`: the author's
+    /// client commits each tier's leave.
+    pub async fn unsubscribe(
+        &self,
+        author_id: ActorId,
+        tier: Option<String>,
+    ) -> Result<UnsubscribeReply, R::Error> {
         self.nest
             .request(
                 "fauna.subscriptions.unsubscribe",
@@ -507,6 +534,7 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
                     home_nest_url: None,
                     intent: None,
                     author_id,
+                    tier,
                     extra: Default::default(),
                 },
             )
@@ -1040,12 +1068,25 @@ mod tests {
     fn unsubscribe_composes_kind_and_payload() {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = SubscriptionsClient::new(rec.clone());
-        block_on(client.unsubscribe(actor())).expect("infallible mock");
+        block_on(client.unsubscribe(actor(), Some("followers".into()))).expect("infallible mock");
 
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.subscriptions.unsubscribe");
         let req: UnsubscribeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.author_id, actor());
+        assert_eq!(
+            req.tier.as_deref(),
+            Some("followers"),
+            "the leave's floor rides"
+        );
+
+        // No tier: the field is absent on the wire (the paid-tiers leave).
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        block_on(client.unsubscribe(actor(), None)).expect("infallible mock");
+        let req: UnsubscribeRequest =
+            fauna_protocol::decode_strict(&rec.recorded().1).expect("decodes");
+        assert_eq!(req.tier, None);
     }
 
     #[test]
@@ -1295,6 +1336,7 @@ mod tests {
         assert_eq!(kind, "fauna.subscriptions.unsubscribe");
         let req: UnsubscribeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.home_nest_url.as_deref(), Some("https://home.test"));
+        assert_eq!(req.tier.as_deref(), Some("followers"));
         let intent = verified_intent(req.intent.as_ref().expect("the intent rides"));
         assert_eq!(intent.kind, FollowIntentKind::Unsubscribe);
         assert_eq!(intent.tier, "followers");
@@ -1310,6 +1352,11 @@ mod tests {
         let req: UnsubscribeRequest =
             fauna_protocol::decode_strict(&rec.recorded().1).expect("decodes");
         assert!(req.intent.is_none() && req.home_nest_url.is_none());
+        assert_eq!(
+            req.tier.as_deref(),
+            Some("followers"),
+            "the local arm passes the tier as the leave's floor too"
+        );
     }
 
     /// The capability checks and the follow intent read `fauna.nest.info`
@@ -1370,5 +1417,104 @@ mod tests {
         .expect_err("no intent without this nest's id");
         assert!(matches!(err, FollowError::Intent(_)), "{err}");
         assert_eq!(rec.kinds(), vec!["fauna.nest.info"]);
+    }
+
+    // ── The payment-link gesture: subscribe first, then the checkout ───────
+
+    /// The local door: the subscribe goes out (and only it), and the URL
+    /// handed back carries the buyer's own actor id on a Stripe host.
+    #[test]
+    fn subscribe_and_checkout_subscribes_then_composes_the_reference() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        let open = block_on(client.subscribe_and_checkout(
+            actor(),
+            "gold",
+            "https://buy.stripe.com/test_abc",
+            &me,
+            None,
+        ))
+        .expect("infallible mock")
+        .expect("a safe URL opens");
+        assert_eq!(rec.kinds(), vec!["fauna.subscriptions.subscribe"]);
+        let (_, payload) = rec.recorded();
+        let req: SubscribeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.tier, "gold");
+        assert_eq!(req.home_nest_url, None);
+        assert_eq!(open.reply, SubscribeReply::Queued { request_id: 7 });
+        assert_eq!(
+            open.url,
+            format!(
+                "https://buy.stripe.com/test_abc?client_reference_id={}",
+                me.actor_id().to_hex()
+            )
+        );
+    }
+
+    /// The remote door: the follow twin at the page's home, the intent
+    /// signed by the buyer, before the checkout; a non-Stripe host opens
+    /// untouched.
+    #[test]
+    fn subscribe_and_checkout_takes_the_follow_twin_for_a_named_home() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        let open = block_on(client.subscribe_and_checkout(
+            actor(),
+            "gold",
+            "https://ko-fi.com/author",
+            &me,
+            Some("https://home.test".into()),
+        ))
+        .expect("infallible mock")
+        .expect("a safe URL opens");
+        assert_eq!(
+            rec.kinds(),
+            vec!["fauna.nest.info", "fauna.subscriptions.subscribe"]
+        );
+        let (_, payload) = rec.recorded();
+        let req: SubscribeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.home_nest_url.as_deref(), Some("https://home.test"));
+        let intent = verified_intent(req.intent.as_ref().expect("the intent rides"));
+        assert_eq!(intent.subscriber, me.actor_id());
+        assert_eq!(intent.tier, "gold");
+        assert_eq!(open.url, "https://ko-fi.com/author");
+    }
+
+    /// An unsafe link subscribes to nothing and opens nothing.
+    #[test]
+    fn subscribe_and_checkout_refuses_an_unsafe_url_before_any_request() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        let open = block_on(client.subscribe_and_checkout(
+            actor(),
+            "gold",
+            "http://buy.stripe.com/x",
+            &me,
+            None,
+        ))
+        .expect("infallible mock");
+        assert_eq!(open, None);
+        assert!(rec.kinds().is_empty(), "nothing sent: {:?}", rec.kinds());
+    }
+
+    /// A refused subscribe is the error: no checkout URL comes back.
+    #[test]
+    fn subscribe_and_checkout_opens_nothing_when_the_subscribe_is_refused() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(fauna_client_testkit::FailingRequester::new("refused"));
+        let client = SubscriptionsClient::new(rec.clone());
+        let err = block_on(client.subscribe_and_checkout(
+            actor(),
+            "gold",
+            "https://buy.stripe.com/x",
+            &me,
+            None,
+        ))
+        .expect_err("the subscribe failed");
+        assert!(matches!(err, FollowError::Nest(_)), "{err}");
+        assert_eq!(rec.kinds(), vec!["fauna.subscriptions.subscribe"]);
     }
 }

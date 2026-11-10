@@ -925,7 +925,9 @@ class HttpBridgeDriver(PlatformDriver):
     # root, which every driver publishes as `_resolved_store_root` AFTER the
     # carry begins (so the harvest reads the launch being replaced).
 
-    def _begin_principal_slot_carry(self, config: dict, env: dict) -> None:
+    def _begin_principal_slot_carry(
+        self, config: dict, env: dict, pinned_keys=None
+    ) -> None:
         """Start a launch's carry. Call from `launch()` after building the child
         env and BEFORE the `_resolved_*` store attrs move to the new launch: it
         harvests the launch being replaced, then decides whether the new one may
@@ -934,14 +936,46 @@ class HttpBridgeDriver(PlatformDriver):
         Never into a store the caller owns — a supplied `credential_dir` or
         `keyring_app` (including a `preserve_state_across_relaunch()` pin, whose
         store already holds its slot), `use_real_keyring`, or an empty
-        `FAUNA_E2E_CREDENTIAL_DIR` (tui's sealed `headless_store`)."""
+        `FAUNA_E2E_CREDENTIAL_DIR` (tui's sealed `headless_store`).
+
+        Two decisions, because a pin is shorter-lived than a launch:
+        `_principal_slot_carry_live` is THIS launch's (it gates the restore at
+        sign-in), and `_principal_slot_carry_unpinned` is the one it would have
+        made had no relaunch pin supplied its store. `reset()` drops a pin
+        mid-launch (`_clear_relaunch_pin`), and from then on the NEXT relaunch
+        carries again — which is what `_next_relaunch_carries` answers. Reading
+        the live flag for the next relaunch was the leak: a test that pinned and
+        relaunched left "no carry" behind for every later test of the module, so
+        `test_offline_preference_edits.py`'s first-sync witness found nothing to
+        withhold. `pinned_keys` names the config keys a pin supplied (default:
+        `_preserve_pinned_keys`, the linux/tui/windows/android vocabulary; the
+        apple drivers pass their own)."""
         self._relaunch_principal_slot_carry()
-        self._principal_slot_carry_live = bool(
+        if pinned_keys is None:
+            pinned_keys = getattr(self, "_preserve_pinned_keys", None) or ()
+        pinned_keys = set(pinned_keys)
+        caller = {k: v for k, v in config.items() if k not in pinned_keys}
+        self._principal_slot_carry_unpinned = bool(
             env.get("FAUNA_E2E_CREDENTIAL_DIR")
-            and not config.get("credential_dir")
-            and not config.get("keyring_app")
-            and not config.get("use_real_keyring")
+            and not caller.get("credential_dir")
+            and not caller.get("keyring_app")
+            and not caller.get("use_real_keyring")
         )
+        self._principal_slot_carry_live = self._principal_slot_carry_unpinned and not (
+            config.get("credential_dir") or config.get("keyring_app")
+        )
+
+    def _next_relaunch_carries(self) -> bool:
+        """True when the NEXT relaunch of this machine will carry its principal
+        slots and replicas: this launch's store is the driver's own once any
+        relaunch pin is set aside, and no pin is in force now. Unlike
+        `_principal_slot_carry_live` (this launch's decision), it follows a pin
+        `reset()` dropped after the launch began."""
+        unpinned = getattr(self, "_principal_slot_carry_unpinned", None)
+        if unpinned is None:
+            # A driver (or a seam test) that set only the live flag.
+            unpinned = bool(getattr(self, "_principal_slot_carry_live", False))
+        return bool(unpinned) and not self._relaunch_pinned()
 
     def _relaunch_principal_slot_carry(self) -> None:
         """Restart the carry for one relaunch, keeping the launch's decision about
@@ -1074,11 +1108,33 @@ class HttpBridgeDriver(PlatformDriver):
         shutil.copytree(src, dst)
         self.__dict__.setdefault("_replica_vault", {})[actor] = dst
 
+    def wipe_replica_at_next_relaunch(self, actor_id_hex: str) -> bool:
+        """Make the next relaunch a machine whose local account store was wiped:
+        `actor_id_hex`'s writer key crosses as always, but its replica does not,
+        so the relaunched app holds a replica that has never listed the account
+        (the engine's ``…_and_a_wiped_one_does_not`` case seen from the app;
+        `account-client-lifecycle.md` § The first listing). Consumed by that
+        relaunch's one restore. Returns False on a driver whose relaunch carries
+        no replica (nothing to withhold), so a caller can skip rather than pass
+        vacuously — and reads the next relaunch's decision
+        (`_next_relaunch_carries`), never the running launch's, which an earlier
+        test's since-dropped pin may have set to "no carry"."""
+        if not self._next_relaunch_carries():
+            return False
+        self.__dict__.setdefault("_replica_wipes", set()).add(actor_id_hex)
+        return True
+
     def _restore_replica(self, actor: str) -> None:
         """Lay `actor`'s harvested replica down under THIS launch's store root,
         beside the slot just restored — never over one the launch already
         holds. Called from the slot restore only, on the branch that wrote the
         slot: the replica travels with its key or not at all."""
+        wipes = self.__dict__.get("_replica_wipes", set())
+        if actor in wipes:
+            # `wipe_replica_at_next_relaunch`: this one restore lays down no
+            # replica, the slot alone crosses.
+            wipes.discard(actor)
+            return
         src = getattr(self, "_replica_vault", {}).get(actor)
         dst = self._replica_dir(getattr(self, "_resolved_store_root", None), actor)
         if not src or not dst or os.path.exists(dst):
@@ -1234,8 +1290,10 @@ class HttpBridgeDriver(PlatformDriver):
 
     def _discards_machine_at_teardown(self) -> bool:
         """True when this driver's teardown throws its machine away: the store
-        is the driver's own (the carry is live) and no relaunch pin keeps it."""
-        return bool(getattr(self, "_principal_slot_carry_live", False)) and not self._relaunch_pinned()
+        is the driver's own (a relaunch would carry it) and no relaunch pin
+        keeps it — a pin an earlier test set and `reset()` dropped no longer
+        does (`_next_relaunch_carries`)."""
+        return self._next_relaunch_carries()
 
     def _current_slots(self) -> dict[str, dict] | None:
         """This launch's per-actor slots (`_read_principal_slots`). A driver
@@ -1574,7 +1632,7 @@ class HttpBridgeDriver(PlatformDriver):
     #: ``hard_reload`` falls back to the unpinned contract's login replay.
     AUTO_RELOGIN_CEILING_S = 30.0
 
-    def hard_reload(self) -> None:
+    def hard_reload(self, *, replay_login: bool = True) -> None:
         """Force-quit + relaunch the app, preserving the injected identity — the
         native-client equivalent of the web driver's full page reload (which
         overrides this with ``location.reload``).
@@ -1606,6 +1664,11 @@ class HttpBridgeDriver(PlatformDriver):
         ``AUTO_RELOGIN_CEILING_S``), and only fall back to the replay if it
         never lands — the unpinned contract, for a store whose credentials
         genuinely did not survive.
+
+        **``replay_login=False``:** relaunch and return — no auto-login wait, no
+        replay. For a journey whose nest is DOWN at the restart (the launch
+        surface is what it asserts): there the auto-login can never land, and
+        the replay's ``nav`` push would carry the app off ``launch_retry``.
         """
         if not self.recover():
             raise RuntimeError(
@@ -1613,7 +1676,7 @@ class HttpBridgeDriver(PlatformDriver):
                 "(no launch config, or the relaunch failed)"
             )
         session = getattr(self, "_last_session", None)
-        if session is None:
+        if session is None or not replay_login:
             return
         if self._relaunch_pinned():
             want = session.get("actor_id")

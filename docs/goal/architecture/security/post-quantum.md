@@ -352,7 +352,7 @@ decrypt-side keeps both keys for grace windows exactly as MSEK rotation does tod
   token. Every current build can do the hybrid suite; a client publishes its ML-KEM ek
   unconditionally and seals hybrid whenever the recipient/subscriber has published a
   post-quantum key. The `mail-epoch-schedule` token and its absent-token `None` degrade
-  ([`../encryption-at-rest.md`](../encryption-at-rest.md) § Capability tiering →
+  ([`../capability-grants.md`](../capability-grants.md) § Capability tiering →
   Content-sealing epochs) fell under the same ruling, being the same shape. A FUTURE
   suite gets its own capability token again — the advert shape is the upgrade mechanism
   the sweep kept; only these two consumer-less tokens went. **Implementation status:**

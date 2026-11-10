@@ -39,7 +39,7 @@ import javax.inject.Inject
  * shared `decode_profile`), falling back to — SELF: the cached handle → own
  * actor_id; OTHER: the target actor_id ([refreshHeader], on mount; mirrors linux
  * `refresh_header_name`). On an OTHER profile the primary action is
- * [follow] = subscribe to the free "followers" tier.
+ * [follow] = the Follow ⇄ Following toggle over the free "followers" tier.
  */
 @HiltViewModel
 class ProfileVM @Inject constructor(
@@ -120,9 +120,34 @@ class ProfileVM @Inject constructor(
      *  refetches both) never paints over a newer profile's. */
     private var pictureEpoch = 0
 
-    /** True once the viewer has followed this actor (OTHER only) — flips the button label. */
+    /** Whether the viewer follows this actor (OTHER only) — the Follow ⇄ Following
+     *  toggle's state (`subscriptions.md` § The free followers tier — follow and
+     *  unfollow, rule 4): the optimistic [followFlip] a press's reply set outranks
+     *  the open-time [followStatus] read, which is folded through the shared
+     *  `value_format::is_following` (mirrors tui's `ProfileState::is_following`). */
     private val _following = MutableStateFlow(false)
     val following: StateFlow<Boolean> = _following.asStateFlow()
+
+    /** The viewer's `status.get` reply for this actor; `null` until read (a failed
+     *  read keeps the last one, so a failure never reads as "not following"). */
+    private var followStatus: com.fauna.ffi.FfiSubscriptionStatus? = null
+
+    /** The optimistic flip a follow/unfollow reply set (tui's `follow_flip`); a
+     *  queued leave reads *Follow* at once. */
+    private var followFlip: Boolean? = null
+
+    /** The paid-tier confirm (tui's `unfollow_armed`): the first press on a paid
+     *  holder's *Following* only relabels the button with the cost
+     *  (`profile.unfollow_confirm`); the second leaves. A fresh open, another
+     *  profile gesture or the reply disarms it. */
+    private val _unfollowArmed = MutableStateFlow(false)
+    val unfollowArmed: StateFlow<Boolean> = _unfollowArmed.asStateFlow()
+
+    private fun repaintFollowing() {
+        _following.value = followFlip
+            ?: followStatus?.let { com.fauna.ffi.isFollowing(it.tier, it.followPending) }
+            ?: false
+    }
 
     /** True while a [follow] round-trip is in flight (disables the follow button). */
     private val _followWorking = MutableStateFlow(false)
@@ -301,23 +326,56 @@ class ProfileVM @Inject constructor(
     }
 
     /**
-     * Follow = subscribe to the free "followers" tier (OTHER only; `profile.md`
-     * § Where logic lives → *Follow / unfollow*). On success the button flips to
-     * "Following". Mirrors linux `mod.rs::follow`.
+     * The open-time follow-status read (OTHER only): `status.get(author)` → the
+     * toggle's label. A press's reply keeps its flip, which outranks the status
+     * anyway. Mirrors tui's `fetch_follow_status` at the open.
+     */
+    fun refreshFollowStatus() {
+        val hex = targetActorId ?: return
+        viewModelScope.launch {
+            val status = runCatching { api.subscriptionStatus(hex) }.getOrNull() ?: return@launch
+            followStatus = status
+            repaintFollowing()
+        }
+    }
+
+    /**
+     * The Follow ⇄ Following toggle (OTHER only; `subscriptions.md` § The free
+     * followers tier — follow and unfollow, rule 4; `profile.md` § Where logic
+     * lives → *Follow / unfollow*; lifts tui's `Action::Follow`): *Follow*
+     * subscribes to the free "followers" tier; *Following* leaves it — at once for
+     * a free follower, behind a second press when the status names a paid tier
+     * (`value_format::unfollow_ends_paid_tier`), which the leave ends too; the
+     * first press only relabels the button with the cost.
      *
-     * The follow carries the page's actor-home slot: an author homed on another
-     * nest is followed across nests (`federated-follow.md` § Decision 2), and a
-     * `null` slot is today's local follow. Mirrors tui's follow.
+     * Both carry the page's actor-home slot: an author homed on another nest is
+     * followed / left across nests (`federated-follow.md` § Decision 2), and a
+     * `null` slot is the local call.
      */
     fun follow() {
         val hex = targetActorId ?: return
         val home = _actorHomeSlot.value
+        val leaving = _following.value
+        if (leaving && com.fauna.ffi.unfollowEndsPaidTier(followStatus?.tier) && !_unfollowArmed.value) {
+            _unfollowArmed.value = true
+            return
+        }
+        _unfollowArmed.value = false
         viewModelScope.launch {
             errorMessage.value = null
             _followWorking.value = true
             try {
-                api.subscriptionSubscribe(hex, ProfileOffersVM.FOLLOWERS_TIER, home)
-                _following.value = true
+                if (leaving) {
+                    api.subscriptionUnsubscribe(
+                        HexUtil.hexToBytes(hex), ProfileOffersVM.FOLLOWERS_TIER, home)
+                } else {
+                    api.subscriptionSubscribe(hex, ProfileOffersVM.FOLLOWERS_TIER, home)
+                }
+                followFlip = !leaving
+                runCatching { api.subscriptionStatus(hex) }.getOrNull()?.let { followStatus = it }
+                repaintFollowing()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"
             } finally {

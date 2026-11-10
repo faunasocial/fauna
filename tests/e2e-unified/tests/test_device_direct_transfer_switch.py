@@ -20,9 +20,9 @@ drives a sync agent, the platform's own GUI app (``native``) on linux, windows
 and macos — the same pairs ``test_device_to_device_file_transfer.py`` runs,
 through the one ``make_seat`` seam. The phones' leg is the ``tui+phone`` pair,
 a test function of its own: the device asked to stop is the phone
-(``sync_seats.DeviceSeatDriver``), the sibling asking is tui. A phone holds no
-same-account peer leg and syncs no folder through an agent, so the two
-assertions that belong to that leg — no sibling leg after the brake, and the
+(``sync_seats.DeviceSeatDriver``), the sibling asking is tui. A phone syncs no
+folder through an agent and gives no agent reading of its peer leg, so the two
+assertions that read that agent's plane — no sibling leg after the brake, and the
 file still arriving through the nest — are left out on a seat whose
 ``carries_peer_leg`` is False (outcomes 10 and 11, absent by design on the
 phones); the request, its landing, the card and the restart (12–15) run

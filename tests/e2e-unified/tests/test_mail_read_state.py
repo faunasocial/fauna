@@ -15,6 +15,11 @@ the real shared receive loop, the real nest flag write:
   wake reaches the second, whose cursored ``flag_changes`` drain clears it —
   without a relaunch. The second device then restarts and the mail is still
   read, because the flag is on the nest, not in either app.
+* **Read in the app, read in a mail client — and back.** Opening the mail in
+  the app sets ``\\Seen``, which a scripted IMAP mail client then reads; the
+  mail client's mark-unread and mark-read (``STORE ∓FLAGS (\\Seen)``) each move
+  the running app's mark through the same wake — the flag is the truth in both
+  directions.
 
 Both assert state (``unread_count`` off the published thread rows) under a named
 budget, never a timing (convention 14). Threads are found by a per-test nonce in
@@ -173,3 +178,163 @@ def test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read(
     wait_for_thread_with_nonce(device_b, nonce, what="device B after its restart",
                                budget_s=MLS_HANDSHAKE_S, bridge_log=log)
     _wait_unread(device_b, nonce, 0, what="device B after its restart", bridge_log=log)
+
+
+# The PLAIN password the app mints when it enables mail, and the mail client
+# signs in with.
+_MAIL_CLIENT_PASSWORD = "read-state-mail-client-pw-1"
+
+
+class _MailClient:
+    """A scripted IMAP mail client on the account's own mailbox: IMAPS, AUTH
+    PLAIN with the password the app minted, ``INBOX`` selected. It reads flags
+    with ``FETCH (FLAGS)`` only — never ``BODY[]``, whose implicit ``\\Seen``
+    would be the client marking the mail read behind the test's back."""
+
+    def __init__(self, handle, addr: str, password: str):
+        from helpers.mail_wire import _imap_auth_plain, _imaps_connect
+
+        self._deadline = time.monotonic() + 120.0
+        self._sock, self._buf = _imaps_connect(handle, self._deadline)
+        self._n = 0
+        status = _imap_auth_plain(self._sock, self._buf, self._tag(), addr, password,
+                                  self._deadline)
+        assert status == "OK", (
+            f"the mail client must sign in with the password the app minted; got {status}"
+        )
+
+    def _tag(self) -> str:
+        self._n += 1
+        return f"rs{self._n}"
+
+    def cmd(self, command: str) -> str:
+        from helpers.mail_wire import _imap_cmd
+
+        status, text = _imap_cmd(self._sock, self._buf, self._tag(), command, self._deadline)
+        assert status == "OK", f"IMAP {command!r} must succeed; got {status}: {text!r}"
+        return text
+
+    def inbox_count(self) -> int:
+        """A fresh ``SELECT INBOX``'s ``EXISTS`` — re-selecting is also what
+        makes every later ``FETCH`` read the mailbox as it is now."""
+        for line in self.cmd("SELECT INBOX").split("\n"):
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] == "*" and parts[2].upper() == "EXISTS":
+                return int(parts[1])
+        raise AssertionError("SELECT INBOX reported no EXISTS line")
+
+    def seen(self, seq: int) -> bool:
+        self.inbox_count()
+        text = self.cmd(f"FETCH {seq} (FLAGS)")
+        line = next((l for l in text.split("\n") if f"* {seq} FETCH" in l), "")
+        assert "FLAGS" in line, f"FETCH {seq} (FLAGS) returned no flags: {text!r}"
+        return "\\Seen" in line
+
+    def close(self) -> None:
+        try:
+            self._sock.sendall(b"rs99 LOGOUT\r\n")
+        finally:
+            self._sock.close()
+
+
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.feature("email-in-conversations")
+def test_a_mail_read_in_the_app_reads_in_a_mail_client_and_the_mail_client_moves_it_back(
+    app, dedicated_mail_nest, request
+):
+    """Outcome 20 (`conversation-read-state.md` § Mail: `\\Seen` is the marker):
+    the app and a third-party mail client share ONE read flag.
+
+    * Opening the mail in the app sets `\\Seen`, and the mail client reads it.
+    * The mail client's "mark as unread" (`STORE -FLAGS (\\Seen)`) re-enters
+      the mail into the running app's unread set, and its "mark as read" takes it
+      out again — each through the nest's `flags_changed` wake, with no relaunch.
+
+    While the mail client moves the flag, the app has ANOTHER thread open: the
+    thread a user has open is read by definition (`conversations.md` § *When a
+    thread is read*), so marking the open thread unread would be re-read at once
+    and witness nothing.
+
+    The account is the dedicated nest's admin with a client-minted PLAIN
+    password — the realistic single-user deployment, and the one credential a
+    scripted mail client can sign in with (`test_mail_sent_feed.py`'s preamble).
+    """
+    from helpers.mail_client_ui import deliver_inbound, plain_message
+    from helpers.mail_dedicated_nest import (
+        alias_admin_to_address,
+        dedicated_node_url,
+        login_as_nest_admin,
+    )
+
+    handle = dedicated_mail_nest
+    handle.assert_mta_running()
+    nest = handle.nest
+    domain = handle.domain
+
+    login_as_nest_admin(app, nest, dedicated_node_url(app, handle, request))
+    admin_addr = alias_admin_to_address(nest, domain)
+    app.mail_settings.navigate()
+    app.mail_settings.enable_mail_plain(_MAIL_CLIENT_PASSWORD)
+    assert app.mail_settings.wait_for_credential_count_at_least(
+        1, timeout=app.mail_settings.ENABLE_SETTLE_S
+    ), f"enabling mail must mint the first credential; error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
+        f"mail must report enabled; status={app.mail_settings.status_text()!r}, "
+        f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    # The enable opened the deployment gates; the binaries venue has no s6, so
+    # play supervisor (the sibling MUA tests' step).
+    handle.rebind_after_enable()
+
+    stamp = int(time.time() * 1000)
+    target = f"mailclientread{stamp}qx"
+    parked = f"mailclientpark{stamp}qx"
+    # The target first, so it is the mailbox's message 1: the fresh admin
+    # mailbox holds exactly these two, and the 250 on each `.` follows its
+    # ingest, so the order is the delivery order.
+    for sender, nonce in ((SENDER, target), ("parked@external.test", parked)):
+        deliver_inbound(handle.mx_port, domain, sender, admin_addr,
+                        plain_message(sender, admin_addr, nonce), time.monotonic() + 40.0)
+    log = handle.bridge_log_hint()
+
+    for nonce in (target, parked):
+        wait_for_thread_with_nonce(app, nonce, what="arrived", budget_s=MLS_HANDSHAKE_S,
+                                   bridge_log=log)
+    _wait_unread(app, target, 1, what="before any read", bridge_log=log)
+
+    client = _MailClient(handle, admin_addr, _MAIL_CLIENT_PASSWORD)
+    try:
+        assert client.inbox_count() == 2, "the fresh mailbox holds the two delivered mails"
+        assert not client.seen(1), "nobody has read the mail yet, so it carries no \\Seen"
+
+        # ── The app reads it → the mail client sees `\Seen`.
+        app.conversations.open_thread_by_id(thread_with_nonce(app, target).thread_id)
+        _wait_unread(app, target, 0, what="after opening it in the app", bridge_log=log)
+        wait_until(
+            lambda: client.seen(1),
+            MLS_HANDSHAKE_S,
+            diagnose=lambda: "the app read the mail, but the mail client still sees "
+            f"it without \\Seen; {log}",
+        )
+
+        # Leave the target: open the other mail, so the target is not the thread
+        # being read while the mail client moves its flag.
+        app.conversations.open_thread_by_id(thread_with_nonce(app, parked).thread_id)
+        _wait_unread(app, parked, 0, what="the other mail, opened", bridge_log=log)
+        _wait_unread(app, target, 0, what="the target, after leaving it", bridge_log=log)
+
+        # ── The mail client marks it unread → the running app shows it unread.
+        client.cmd("STORE 1 -FLAGS (\\Seen)")
+        assert not client.seen(1), "the mail client's own mark-unread must hold on the nest"
+        _wait_unread(app, target, 1,
+                     what="after the mail client marked it unread (no relaunch)",
+                     bridge_log=log)
+
+        # ── The mail client marks it read again → the running app follows.
+        client.cmd("STORE 1 +FLAGS (\\Seen)")
+        _wait_unread(app, target, 0,
+                     what="after the mail client marked it read again (no relaunch)",
+                     bridge_log=log)
+    finally:
+        client.close()

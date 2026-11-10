@@ -682,6 +682,14 @@ public struct AtprotoSettingsView: View {
                     Task { await vm.revealSecret(credentialId: cred.credentialId) }
                 }
                 .disabled(revealed != nil)
+                // Rule 2 of `security.md` § On-screen secret exposure. This
+                // control is always on screen — its own label BECOMES the app
+                // password once revealed — so it holds only while `revealed`
+                // is populated, rather than for the lifetime of the row.
+                // Innermost, with the id registered outside it: on macOS the
+                // (disabled) Button is hosted again in the reveal window, and
+                // the id must register once.
+                .suppressScreenCapture(isActive: revealed != nil)
                 .accessibilityIdentifier(Ids.atprotoAppCredentialReveal)
                 .automationActivate(
                     Ids.atprotoAppCredentialReveal,
@@ -690,11 +698,6 @@ public struct AtprotoSettingsView: View {
                 ) {
                     Task { await vm.revealSecret(credentialId: cred.credentialId) }
                 }
-                // Rule 2 of `security.md` § On-screen secret exposure. This
-                // control is always on screen — its own label BECOMES the app
-                // password once revealed — so it holds only while `revealed`
-                // is populated, rather than for the lifetime of the row.
-                .suppressScreenCapture(isActive: revealed != nil)
             }
             Button(L.atprotoSettings.revokeButton, role: .destructive) {
                 Task { await vm.revoke(credentialId: cred.credentialId) }

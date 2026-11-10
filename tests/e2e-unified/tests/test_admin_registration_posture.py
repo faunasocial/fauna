@@ -134,6 +134,94 @@ def test_admin_reads_back_the_posture_the_nest_is_running(registration_posture_a
     )
 
 
+_KNOWN_MODES = ("open", "invite_required", "closed")
+
+# A save control of the section: the app must render none of them while it cannot
+# name the nest's posture. The age toggle rides the same one Save, so it goes too.
+_SECTION_WRITE_CONTROLS = (
+    "admin-users-registration-save-button",
+    "admin-users-max-free-users-input",
+    "admin-users-registration-age-verification-toggle",
+)
+
+
+def _await_unnamed_reading(app, deadline_s: float = 30.0) -> str:
+    """Re-open the Users page until the mode control shows a reading that names no
+    known mode, and return it — a state predicate (convention 14): the page
+    re-reads `fauna.setup.status` on every navigation, and the first paint after
+    the hook armed may still be the previous reply's."""
+    import time
+
+    end = time.monotonic() + deadline_s
+    reading = ""
+    while time.monotonic() < end:
+        app.admin.navigate_users()
+        app.driver.wait_for("admin-users-registration-mode-select", timeout=30)
+        reading = app.admin.registration_mode()
+        if reading not in _KNOWN_MODES:
+            return reading
+    raise AssertionError(
+        "the mode control kept naming a known mode while the nest reported one this "
+        f"app cannot name: {reading!r}. error: {app.admin.users_action_error_text()!r}"
+    )
+
+
+@pytest.mark.feature("admin-users")
+def test_an_unnamed_registration_mode_is_shown_read_only_and_never_saved_over(
+    registration_posture_admin_app,
+):
+    """A posture the app cannot name — a newer nest's mode, or no field from an
+    older one — is shown read-only, never coerced to a known mode a save would
+    write over the nest's real posture (`public-mode.md` § Registration Modes,
+    *the posture read-back is the raw wire string on purpose*;
+    `version-compatibility.md` § Dimension 3).
+
+    The `test-hooks` seam `registration-mode/report` rewrites only the field
+    `fauna.setup.status` reports; the nest keeps running its seeded `open` posture
+    underneath, so once it clears the app must read `open` back and a stranger
+    still registers — nothing the app did while blind reached the nest.
+    """
+    from helpers.admin_wire import post_nest_hook
+
+    app = registration_posture_admin_app
+    nest = app.registration_posture_nest
+
+    # Positive control: under a posture the app can name, every write control is
+    # in the tree — so their absence below is the read-only branch, not a page
+    # that never rendered the section.
+    app.admin.navigate_users()
+    app.driver.wait_for("admin-users-registration-mode-select", timeout=30)
+    assert app.admin.registration_mode() == "open"
+    for control_id in _SECTION_WRITE_CONTROLS[:2]:
+        assert app.driver.count(control_id) > 0, (
+            f"{control_id} must render under a named posture (the control)"
+        )
+
+    newer_mode = "referral_only_from_a_newer_nest"
+    for arm, what in (({"mode": newer_mode}, "a newer nest's mode"), ({"absent": True}, "no mode")):
+        post_nest_hook(nest, "registration-mode/report", arm)
+        reading = _await_unnamed_reading(app)
+        if "mode" in arm:
+            assert newer_mode in reading, (
+                f"the read-only reading should name the raw mode the nest reported, got {reading!r}"
+            )
+        rendered = [c for c in _SECTION_WRITE_CONTROLS if app.driver.count(c) > 0]
+        assert not rendered, (
+            f"with {what} reported the section must be read-only, yet it renders "
+            f"{rendered} — a save would overwrite the nest's real posture with a guess. "
+            f"reading: {reading!r}"
+        )
+
+    post_nest_hook(nest, "registration-mode/report/clear", {})
+    app.admin.navigate_users()
+    app.driver.wait_for("admin-users-registration-mode-select", timeout=30)
+    assert app.admin.registration_mode() == "open", (
+        "the nest's real posture must read back unchanged once the report clears: "
+        f"{app.admin.registration_mode()!r}"
+    )
+    _register_stranger(nest)
+
+
 @pytest.mark.feature("admin-users")
 def test_admin_closes_registration_from_their_client_and_a_stranger_is_refused(
     registration_posture_admin_app,

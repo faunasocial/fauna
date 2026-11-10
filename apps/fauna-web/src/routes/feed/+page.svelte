@@ -24,7 +24,7 @@
   import { syncFeedRoomPosts } from '#lib/conversations';
   import { ensureWasm, processAndSealPublicPost, sealComposeAttachment, logMessage, markdownToDocument, classifySources, type BridgeIdentity, parseWeightPermille, formatWeightPermille, ruleTypeOptions, builtinFactorOptions, ruleSummaryLabel, ruleRequiredLabel, canAddRule, legalTakedownTombstone, adminBlockNotice, type RuleTypeOption } from '#lib/wasm';
   import { consumePendingSearchNav } from '#lib/search';
-  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, mediaImageHash, proxiedPostImage } from '#lib/document';
+  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock } from '#lib/document';
   import { readProvenanceFromBytes } from '#lib/c2pa';
   import { uploadBlobMultipart } from '#lib/api';
   import { trainedTopicsList, sharedRpcPort } from '#lib/rpc';
@@ -38,11 +38,11 @@
   import FeedPostCard from '#lib/components/FeedPostCard.svelte';
   import FeedReplyDialog from '#lib/components/FeedReplyDialog.svelte';
   import FeedTrainSheet from '#lib/components/FeedTrainSheet.svelte';
-  import { createFeedPostHost, authorName, contentLabelFor } from '#lib/feed-post-host.svelte';
+  import { createFeedPostHost, authorName, blobUrl, contentLabelFor } from '#lib/feed-post-host.svelte';
   import ContentLabelBadge from '#lib/components/ContentLabelBadge.svelte';
   import ReportHost from '#lib/components/ReportHost.svelte';
   import { type ReportTarget } from '#lib/wasm';
-  import ProxiedImage from '#lib/components/ProxiedImage.svelte';
+  import PostMedia from '#lib/components/PostMedia.svelte';
   import ReactionPills from '#lib/components/ReactionPills.svelte';
   import QuotedPost from '#lib/components/QuotedPost.svelte';
   import TipSurface from '#lib/components/payments/TipSurface.svelte';
@@ -596,9 +596,6 @@
   let detailRegion = $derived(detailPost ? regionPlaceholderFor(detailPost) : null);
   // The detail's folded embeds, read from `detailPost.document` (render-model.md § D6).
   let detailQuotedBlock = $derived(detailPost ? quotedPostBlock(detailPost.document) : null);
-  let detailMediaHash = $derived(detailPost ? mediaImageHash(detailPost.document) : null);
-  // A bridged post's own picture takes the detail's `post-image` when it has no blob image.
-  let detailProxiedImage = $derived(detailPost ? proxiedPostImage(detailPost.document) : null);
   // The detail body — structured (article/community/…) title+content, else the
   // full decoded body, falling back to the snapshot preview.
   let detailText = $derived.by(() => {
@@ -2015,28 +2012,21 @@
             {/each}
           </div>
         {/if}
-        {#if detailMediaHash}
-          <!-- The detail is where a gated post is unlocked, so it is the first
-               place a sealed item's bytes become openable: `mediaUrl` answers
-               `null` for the tick between the unlock and the opened object URL,
-               and the card paints nothing rather than a broken image. A public
-               post's hash resolves synchronously, exactly as before. -->
-          {@const detailMediaSrc = mediaUrl(detailMediaHash, detailPost)}
-          {#if detailMediaSrc}
-            <div class="post-media">
-              <img data-testid={IDS.POST_IMAGE} data-blob-hash={detailMediaHash} src={detailMediaSrc} alt="post media" class="detail-media-img" />
-            </div>
-          {/if}
-        {:else if detailProxiedImage}
-          <div class="post-media">
-            <ProxiedImage
-              path={detailProxiedImage.path}
-              alt={detailProxiedImage.alt}
-              src={proxiedMediaUrl(detailProxiedImage.path)}
-              class="detail-media-img"
-            />
-          </div>
-        {/if}
+        <!-- Every media block, in body order — the one component the list card paints
+             (render-model.md § D6b). The detail is where a gated post is unlocked, so it is
+             the first place a sealed item's bytes become openable: `mediaUrl` answers `null`
+             for the tick between the unlock and the opened object URL, and the image
+             paints nothing rather than a broken image. -->
+        <PostMedia
+          document={detailPost.document}
+          post={detailPost}
+          {blobUrl}
+          {mediaUrl}
+          {proxiedMediaUrl}
+          playbackUrl={host.playbackUrl}
+          postId={detailPost.post_id}
+          imageClass="detail-media-img"
+        />
         {#if detailQuotedBlock}
           <!-- The detail pane reuses the shared `QuotedPost` card (priority #4 — was
                a hand-rolled near-duplicate), so the Slice 2b `unverified-source-badge`
@@ -2442,8 +2432,7 @@
     background: var(--bg-surface);
     color: var(--accent);
   }
-  .post-media { margin-top: 0.5rem; }
-  .detail-media-img { max-width: 100%; border-radius: 4px; }
+  :global(.detail-media-img) { max-width: 100%; border-radius: 4px; }
   /* The tip surface's styles moved with its markup into
      `payments/TipSurface.svelte` (see PostCard's matching note). */
   /* The detail-pane quoted-post card now reuses the shared `QuotedPost` component

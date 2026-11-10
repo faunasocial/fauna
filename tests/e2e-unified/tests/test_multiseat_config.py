@@ -412,7 +412,7 @@ def test_no_seed_anywhere_is_none(_seed_home):
 
 
 def test_without_a_url_the_default_live_nest_is_the_host(_seed_home, monkeypatch):
-    """The multiseat test calls `load_secret()` bare: its box is `nest_url()`."""
+    """A bare `load_secret()` resolves for `nest_url()`'s box."""
     _write_box(_seed_home, "box.example")
     monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://box.example")
     assert cfg.load_secret() == _BOX_SEED
@@ -421,3 +421,60 @@ def test_without_a_url_the_default_live_nest_is_the_host(_seed_home, monkeypatch
 def test_a_live_url_with_a_port_resolves_by_host(_seed_home):
     _write_box(_seed_home, "dev.fauna.build")
     assert cfg.load_secret("https://dev.fauna.build:8443/") == _BOX_SEED
+
+
+# --- The round's SEAT seed is the non-admin `multiseat-seat` account's file and
+# nothing else (`resolve_seat_secret`): the box's admin seed, ~/.fauna-id and the
+# env var are never a seat. Before 2026-11-08 the module signed its seats in with
+# the admin resolver, so the Linux seat was the box's admin and the other two were
+# ~/.fauna-id, which the box answered `not_registered`.
+
+_SEAT_SEED = "55" * 32
+
+
+def _write_seat(home, domain="dev.fauna.build", body=None):
+    import json
+
+    d = home / ".config" / "fauna" / "staging-box" / domain / "accounts"
+    d.mkdir(parents=True, exist_ok=True)
+    if body is None:
+        body = json.dumps({"domain": domain, "localpart": "multiseat-seat", "secret_hex": _SEAT_SEED})
+    path = d / "multiseat-seat.json"
+    path.write_text(body)
+    return path
+
+
+def test_the_seat_seed_is_the_seat_file(_seed_home):
+    path = _write_seat(_seed_home)
+    assert cfg.resolve_seat_secret("https://dev.fauna.build") == (_SEAT_SEED, str(path))
+
+
+def test_the_seat_never_falls_back_to_the_admin_seed_the_env_or_the_home_seed(_seed_home, monkeypatch):
+    _write_box(_seed_home, "dev.fauna.build")
+    (_seed_home / ".fauna-id").write_text(_HOME_SEED)
+    monkeypatch.setenv("FAUNA_LIVE_SECRET_HEX", _ENV_SEED)
+    seed, where = cfg.resolve_seat_secret("https://dev.fauna.build")
+    assert seed is None
+    assert where == str(
+        _seed_home / ".config" / "fauna" / "staging-box" / "dev.fauna.build" / "accounts" / "multiseat-seat.json"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"domain": "dev.fauna.build", "localpart": "multiseat-seat"}',
+        '{"domain": "dev.fauna.build", "localpart": "tester", "secret_hex": "' + "55" * 32 + '"}',
+        "{not json",
+        '["x"]',
+    ],
+)
+def test_a_seat_file_that_is_not_the_seat_account_gives_no_seed(_seed_home, body):
+    path = _write_seat(_seed_home, body=body)
+    assert cfg.resolve_seat_secret("https://dev.fauna.build") == (None, str(path))
+
+
+def test_the_seat_file_follows_the_live_host(_seed_home):
+    _write_seat(_seed_home, domain="other.example.net")
+    assert cfg.resolve_seat_secret("https://dev.fauna.build")[0] is None
+    assert cfg.resolve_seat_secret("https://other.example.net")[0] == _SEAT_SEED

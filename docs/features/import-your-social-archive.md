@@ -4,6 +4,9 @@ title: Bring your posts from Facebook
 section: bridges and other networks
 goal: docs/goal/behavior/archive-import.md § Goal
 guide: docs/guides/import-your-social-archive.md § 2. Import it
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -19,7 +22,7 @@ the person who wrote it.
 
 ## Coverage contract
 
-Stamped 2026-10-21 at 77c610862e.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] Run the import from start to finish and your own posts appear in your feed at the dates you first posted them, each marked with the service it came from — `docs/goal/behavior/archive-import.md` § Goal
    - `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates`
@@ -142,19 +145,28 @@ Stamped 2026-10-21 at 77c610862e.
     - `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts`
 57. [app] From the finished import you can open a view of just the posts you imported, review what was skipped, and go to the archive's folder — `docs/goal/behavior/archive-import.md` § The wizard and its machine
     - `tests/e2e-unified/tests/test_archive_import.py::test_view_imported_lists_only_the_imported_posts_and_the_done_links_lead_on`
+58. [app] The Done step says how many items were claimed by linking to an existing account, how many stayed unmatched, and how many comments could not be placed under a post — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
+   - `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_no_post_places_is_counted_on_the_done_step`
+   - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
+59. [app] An imported event names you as its organizer only when you hosted it; no organizer is invented for the rest — `docs/goal/behavior/archive-import.md` § What each category becomes
+   - `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_an_imported_event_names_the_owner_organizer_only_when_they_hosted_it`
+60. [app] Resuming an import with a different archive than the one it started from is refused — `docs/goal/behavior/archive-import.md` § Storage — the archive folder
+   - `tests/e2e-unified/tests/test_archive_import.py::test_a_resume_refuses_an_archive_that_is_not_the_one_the_import_started_from`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| macos | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| web | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| linux | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| windows | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| macos | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| ios | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
 | android | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
-| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| tui | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -177,8 +189,8 @@ Stamped 2026-10-21 at 77c610862e.
 | 12 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archived_profile_is_offered_at_done_and_applied_only_on_the_tap` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 14 | app | `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 15 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone` — requires `post-archive-comments` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 16 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_archive_thread_is_listed_read_only_on_the_archive_rail_for_its_owner_alone` — requires `conversations-archive-rail` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone` — requires `post-archive-comments` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_archive_thread_is_listed_read_only_on_the_archive_rail_for_its_owner_alone` — requires `conversations-archive-rail` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_an_imported_post_is_never_sent_on_or_shown_to_anonymous_outside_visitors` | nest (linux): passed |
 | 18 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
 | 19 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
@@ -210,7 +222,7 @@ Stamped 2026-10-21 at 77c610862e.
 | 43 | app | `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 44 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_the_nest_holds_the_archive_and_what_the_app_worked_out_only_sealed` | nest (linux): passed |
 | 45 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_an_imported_post_carries_nothing_that_identifies_it_on_the_other_service` | nest (linux): passed |
-| 46 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_others` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 46 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_others` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 47 | nest | `tests/e2e-unified/tests/api/test_only_me_tier_never_offered.py::test_the_only_you_audience_is_never_offered_and_cannot_be_subscribed` | nest (linux): passed |
 | 48 | nest | `tests/e2e-unified/tests/api/test_only_me_tier_never_offered.py::test_a_subscriber_to_the_highest_tier_never_opens_an_only_you_import` | nest (linux): passed |
 | 49 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_nobody_can_look_the_importer_up_by_their_identity_on_the_other_service` | nest (linux): passed |
@@ -222,4 +234,8 @@ Stamped 2026-10-21 at 77c610862e.
 | 55 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
 | 56 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 57 | app | `tests/e2e-unified/tests/test_archive_import.py::test_view_imported_lists_only_the_imported_posts_and_the_done_links_lead_on` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 58 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_no_post_places_is_counted_on_the_done_step` | tui (linux): passed |
+| 58 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 59 | app | `tests/e2e-unified/tests/test_caldav_client_seal_to_mua.py::test_an_imported_event_names_the_owner_organizer_only_when_they_hosted_it` | web (linux): passed, tui (linux): passed, tui (windows): passed |
+| 60 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_resume_refuses_an_archive_that_is_not_the_one_the_import_started_from` — requires `archive-import-resume-handback` (not built: web, linux, windows, macos, ios, android, tui, android-kids, ios-kids) | tui (linux): skipped |
 <!-- features-render:end -->

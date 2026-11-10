@@ -10,7 +10,9 @@
 //! in `feed-factor-select` like any bus factor"), then the two Layer-B signals
 //! `signal:watch-complete` and `signal:skip` (the k-anonymized aggregates of who
 //! watched a public post to the end or skipped it,
-//! `docs/goal/behavior/engagement-cues.md` § Layer B). The value each option carries
+//! `docs/goal/behavior/engagement-cues.md` § Layer B), then `report:spam` (the
+//! k-anonymized count of opt-in users who marked the post as spam,
+//! `docs/goal/behavior/report-sharing.md` § Applying the aggregate). The value each option carries
 //! is the factor key the nest composes on, taken from
 //! [`fauna_core::scoring::factor`] so it cannot drift from the scorer's own name.
 
@@ -36,8 +38,10 @@ pub struct FactorOption {
 /// picker shipped; the two Layer-B signals follow — the k-anonymized
 /// watch-to-the-end and skip aggregates the nest writes for public posts,
 /// which compose through each user's own weights
-/// (`docs/goal/behavior/engagement-cues.md` § Layer B → *Composition*).
-const BUILTIN_FACTORS: [(&str, &str); 4] = [
+/// (`docs/goal/behavior/engagement-cues.md` § Layer B → *Composition*); then
+/// the shared `report:spam` aggregate, the sort verb of the community spam
+/// reports (`docs/goal/behavior/report-sharing.md` § Applying the aggregate).
+const BUILTIN_FACTORS: [(&str, &str); 5] = [
     (factor::ENGAGEMENT, "feed.create.factor_engagement"),
     (factor::TRENDING, "feed.create.factor_trending"),
     (
@@ -45,6 +49,7 @@ const BUILTIN_FACTORS: [(&str, &str); 4] = [
         "feed.create.factor_watch_complete",
     ),
     (factor::SIGNAL_SKIP, "feed.create.factor_skip"),
+    (factor::REPORT_SPAM, "feed.create.factor_reported_spam"),
 ];
 
 /// The built-in head of every app's `feed-factor-select` list. An app offers
@@ -76,7 +81,7 @@ mod tests {
     /// Pinned as a literal so a reorder or rename fails here rather than
     /// silently changing every app's picker.
     #[test]
-    fn builtin_factor_options_are_engagement_trending_then_the_two_signals() {
+    fn builtin_factor_options_are_engagement_trending_the_two_signals_then_reports() {
         let values: Vec<String> = builtin_factor_options()
             .into_iter()
             .map(|o| o.value)
@@ -87,7 +92,8 @@ mod tests {
                 "engagement",
                 "trending",
                 "signal:watch-complete",
-                "signal:skip"
+                "signal:skip",
+                "report:spam"
             ]
         );
     }
@@ -101,6 +107,15 @@ mod tests {
         assert_eq!(watched.label.key, "feed.create.factor_watch_complete");
         let skipped = builtin_factor_option(factor::SIGNAL_SKIP).expect("offered");
         assert_eq!(skipped.label.key, "feed.create.factor_skip");
+    }
+
+    /// `report-sharing.md` § Applying the aggregate: the shared spam-report
+    /// aggregate is offered as a sort verb under the aggregate writer's key.
+    #[test]
+    fn the_spam_report_aggregate_is_offered_under_the_writer_s_key() {
+        let reported = builtin_factor_option(factor::REPORT_SPAM).expect("offered");
+        assert_eq!(reported.value, "report:spam");
+        assert_eq!(reported.label.key, "feed.create.factor_reported_spam");
     }
 
     /// `trending.md` § The Trending feed: the trend factor is offered like any

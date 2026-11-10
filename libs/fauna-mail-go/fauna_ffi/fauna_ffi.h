@@ -896,6 +896,11 @@ uint64_t uniffi_fauna_ffi_fn_method_fficontactsclient_inbox_mode_set(uint64_t pt
 uint64_t uniffi_fauna_ffi_fn_method_fficontactsclient_knocks_accept(uint64_t ptr, RustBuffer peer_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFICONTACTSCLIENT_KNOCKS_ACCEPT_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFICONTACTSCLIENT_KNOCKS_ACCEPT_OR_QUEUE
+uint64_t uniffi_fauna_ffi_fn_method_fficontactsclient_knocks_accept_or_queue(uint64_t ptr, RustBuffer peer_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFICONTACTSCLIENT_KNOCKS_BLOCK
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFICONTACTSCLIENT_KNOCKS_BLOCK
 uint64_t uniffi_fauna_ffi_fn_method_fficontactsclient_knocks_block(uint64_t ptr, RustBuffer peer_id
@@ -1001,6 +1006,11 @@ void uniffi_fauna_ffi_fn_free_ffiemailclient(uint64_t handle, RustCallStatus *ou
 uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_create(uint64_t ptr, RustBuffer name, RustBuffer rules, RustBuffer combination, RustBuffer action, int32_t priority, int8_t continue_on_match
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_CREATE_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_CREATE_OR_QUEUE
+uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_create_or_queue(uint64_t ptr, RustBuffer name, RustBuffer rules, RustBuffer combination, RustBuffer action, int32_t priority, int8_t continue_on_match
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_DELETE
 uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_delete(uint64_t ptr, int64_t id
@@ -1041,9 +1051,19 @@ void uniffi_fauna_ffi_fn_free_ffifamilyclient(uint64_t handle, RustCallStatus *o
 uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_allow_blocked_peer(uint64_t ptr, RustBuffer supervised_actor_id, RustBuffer peer
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_ALLOW_BLOCKED_PEER_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_ALLOW_BLOCKED_PEER_OR_QUEUE
+uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_allow_blocked_peer_or_queue(uint64_t ptr, RustBuffer supervised_actor_id, RustBuffer peer
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE
 uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_approvals_decide(uint64_t ptr, RustBuffer supervised_actor_id, RustBuffer kind, RustBuffer peer_actor_id, RustBuffer message_id, RustBuffer bridge_id, RustBuffer operation, RustBuffer target, RustBuffer peer_address, int8_t approve
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE_OR_QUEUE
+uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_approvals_decide_or_queue(uint64_t ptr, RustBuffer entry, int8_t approve
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_APPROVALS_LIST
@@ -1054,6 +1074,11 @@ uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_approvals_list(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_CONTACT_ADD
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_CONTACT_ADD
 uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_contact_add(uint64_t ptr, RustBuffer supervised_actor_id, RustBuffer peer_actor_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_CONTACT_ADD_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_CONTACT_ADD_OR_QUEUE
+uint64_t uniffi_fauna_ffi_fn_method_ffifamilyclient_contact_add_or_queue(uint64_t ptr, RustBuffer supervised_actor_id, RustBuffer peer_actor_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIFAMILYCLIENT_CONTACT_REQUEST
@@ -1913,7 +1938,7 @@ uint64_t uniffi_fauna_ffi_fn_method_ffisubscriptionsclient_tiers_update(uint64_t
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFISUBSCRIPTIONSCLIENT_UNSUBSCRIBE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFISUBSCRIPTIONSCLIENT_UNSUBSCRIBE
-uint64_t uniffi_fauna_ffi_fn_method_ffisubscriptionsclient_unsubscribe(uint64_t ptr, RustBuffer author_id
+uint64_t uniffi_fauna_ffi_fn_method_ffisubscriptionsclient_unsubscribe(uint64_t ptr, RustBuffer author_id, RustBuffer tier
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_CLONE_FFISYNCCLIENT
@@ -1954,6 +1979,11 @@ uint64_t uniffi_fauna_ffi_fn_method_ffisyncclient_status(uint64_t ptr, RustBuffe
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DESCRIBE_PENDING_ACTION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DESCRIBE_PENDING_ACTION
 RustBuffer uniffi_fauna_ffi_fn_func_describe_pending_action(RustBuffer action_type, RustBuffer target, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DESCRIBE_PENDING_ACTION_WITH_FOLDER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DESCRIBE_PENDING_ACTION_WITH_FOLDER
+RustBuffer uniffi_fauna_ffi_fn_func_describe_pending_action_with_folder(RustBuffer action_type, RustBuffer target, RustBuffer folder_name, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ADMIN_PICKER_OPTION
@@ -2039,6 +2069,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_sign_message(RustBuffer secret, RustBuffer m
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SILENT_CHALLENGE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SILENT_CHALLENGE
 uint64_t uniffi_fauna_ffi_fn_func_silent_challenge(RustBuffer nest_url, RustBuffer secret
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BRIDGE_CARD_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BRIDGE_CARD_TITLE
+RustBuffer uniffi_fauna_ffi_fn_func_bridge_card_title(RustBuffer name, RustBuffer glyph, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BRIDGE_LINK_BLOCK
@@ -2267,6 +2302,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_age_band_from_age_range(RustBuffer lower, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_APPROVAL_DISPLAY_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_APPROVAL_DISPLAY_TEXT
 RustBuffer uniffi_fauna_ffi_fn_func_approval_display_text(RustBuffer entry, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_APPROVALS_AFTER_QUEUED_DECISION
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_APPROVALS_AFTER_QUEUED_DECISION
+RustBuffer uniffi_fauna_ffi_fn_func_approvals_after_queued_decision(RustBuffer approvals, RustBuffer decided, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FEED_SOURCE_OPERATION_WIRE
@@ -2653,6 +2693,12 @@ RustBuffer uniffi_fauna_ffi_fn_func_strip_media_metadata(RustBuffer raw, RustCal
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_VERIFY_BLOB_UPLOAD_ECHO
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_VERIFY_BLOB_UPLOAD_ECHO
 RustBuffer uniffi_fauna_ffi_fn_func_verify_blob_upload_echo(RustBuffer echoed, RustBuffer bytes, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KNOCK_TOAST_REPLACE_ID
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_KNOCK_TOAST_REPLACE_ID
+uint32_t uniffi_fauna_ffi_fn_func_knock_toast_replace_id(RustCallStatus *out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_RELAY_LIST_APPENDING
@@ -3155,6 +3201,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_describe_pending_action(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DESCRIBE_PENDING_ACTION_WITH_FOLDER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DESCRIBE_PENDING_ACTION_WITH_FOLDER
+uint16_t uniffi_fauna_ffi_checksum_func_describe_pending_action_with_folder(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ADMIN_PICKER_OPTION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ADMIN_PICKER_OPTION
 uint16_t uniffi_fauna_ffi_checksum_func_admin_picker_option(void
@@ -3254,6 +3306,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_sign_message(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SILENT_CHALLENGE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SILENT_CHALLENGE
 uint16_t uniffi_fauna_ffi_checksum_func_silent_challenge(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_BRIDGE_CARD_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_BRIDGE_CARD_TITLE
+uint16_t uniffi_fauna_ffi_checksum_func_bridge_card_title(void
     
 );
 #endif
@@ -3524,6 +3582,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_age_band_from_age_range(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_APPROVAL_DISPLAY_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_APPROVAL_DISPLAY_TEXT
 uint16_t uniffi_fauna_ffi_checksum_func_approval_display_text(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_APPROVALS_AFTER_QUEUED_DECISION
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_APPROVALS_AFTER_QUEUED_DECISION
+uint16_t uniffi_fauna_ffi_checksum_func_approvals_after_queued_decision(void
     
 );
 #endif
@@ -3980,6 +4044,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_strip_media_metadata(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_VERIFY_BLOB_UPLOAD_ECHO
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_VERIFY_BLOB_UPLOAD_ECHO
 uint16_t uniffi_fauna_ffi_checksum_func_verify_blob_upload_echo(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KNOCK_TOAST_REPLACE_ID
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_KNOCK_TOAST_REPLACE_ID
+uint16_t uniffi_fauna_ffi_checksum_func_knock_toast_replace_id(void
     
 );
 #endif
@@ -4727,6 +4797,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_fficontactsclient_knocks_accept(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICONTACTSCLIENT_KNOCKS_ACCEPT_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICONTACTSCLIENT_KNOCKS_ACCEPT_OR_QUEUE
+uint16_t uniffi_fauna_ffi_checksum_method_fficontactsclient_knocks_accept_or_queue(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICONTACTSCLIENT_KNOCKS_BLOCK
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFICONTACTSCLIENT_KNOCKS_BLOCK
 uint16_t uniffi_fauna_ffi_checksum_method_fficontactsclient_knocks_block(void
@@ -4799,6 +4875,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffiemailclient_filters_create(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIEMAILCLIENT_FILTERS_CREATE_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIEMAILCLIENT_FILTERS_CREATE_OR_QUEUE
+uint16_t uniffi_fauna_ffi_checksum_method_ffiemailclient_filters_create_or_queue(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIEMAILCLIENT_FILTERS_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIEMAILCLIENT_FILTERS_DELETE
 uint16_t uniffi_fauna_ffi_checksum_method_ffiemailclient_filters_delete(void
@@ -4835,9 +4917,21 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_allow_blocked_peer(voi
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_ALLOW_BLOCKED_PEER_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_ALLOW_BLOCKED_PEER_OR_QUEUE
+uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_allow_blocked_peer_or_queue(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE
 uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_approvals_decide(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_APPROVALS_DECIDE_OR_QUEUE
+uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_approvals_decide_or_queue(void
     
 );
 #endif
@@ -4850,6 +4944,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_approvals_list(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_CONTACT_ADD
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_CONTACT_ADD
 uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_contact_add(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_CONTACT_ADD_OR_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIFAMILYCLIENT_CONTACT_ADD_OR_QUEUE
+uint16_t uniffi_fauna_ffi_checksum_method_ffifamilyclient_contact_add_or_queue(void
     
 );
 #endif

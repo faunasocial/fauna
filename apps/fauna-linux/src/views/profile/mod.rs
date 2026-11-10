@@ -623,23 +623,29 @@ fn build_header(
         header.append(&edit_btn);
         Some(edit_btn)
     } else {
-        // The follow-toggle label decision (`is_following` → "Following", else
-        // "Follow") lives in shared Rust (`fauna_core::format::follow_toggle_label`);
-        // this header has no cached follow status, so it starts from the
-        // not-following arm and `follow()` flips it on success (optimistic).
+        // `profile-follow-button` is the Follow ⇄ Following toggle
+        // (`subscriptions.md` § The free followers tier — follow and unfollow,
+        // rule 4). It reads *Follow* until the open-time status read answers;
+        // every decision (following, confirm-gated, the label) is shared Rust
+        // (`fauna_core::format`), the state is [`FollowToggle`].
         let follow_btn = gtk::Button::with_label(
             &fauna_core::format::follow_toggle_label(false).resolve(crate::i18n::strings::lookup),
         );
         follow_btn.set_valign(gtk::Align::Center);
         set_test_id(&follow_btn, ids::PROFILE_FOLLOW_BUTTON);
         crate::offline_gate::declare_wire_kind(&follow_btn, "fauna.subscriptions.subscribe");
+        let toggle = Rc::new(FollowToggle::new(&follow_btn));
+        if let Ok(author) = ActorId::from_hex(actor_id) {
+            toggle.read_status(client, author);
+        }
         {
             let client = Rc::clone(client);
             let actor_id = actor_id.to_string();
             let actor_home = Rc::clone(actor_home);
-            follow_btn.connect_clicked(move |btn| {
+            let toggle = Rc::clone(&toggle);
+            follow_btn.connect_clicked(move |_| {
                 let home = actor_home.borrow().clone();
-                follow(&client, &actor_id, home, btn)
+                toggle.press(&client, &actor_id, home)
             });
         }
         header.append(&follow_btn);
@@ -737,41 +743,201 @@ fn picture_home(
     relayed_from.map(|url| fauna_client::ForeignHome::new(url, home_nest_actor_id))
 }
 
-/// Follow = subscribe to the free "followers" tier (`profile.md` § Where logic
-/// lives → *Follow / unfollow*). On success the button label flips to "Following".
-/// `home` is the page's actor-home slot as it reads at the press: the shared
-/// `SubscriptionsClient::subscribe_across_nests` mints the subscriber's signed
-/// follow intent when another nest is the author's home, and is the plain local
-/// follow for `None` (`federated-follow.md` § Decision 2).
-fn follow(client: &Rc<FaunaClient>, actor_id: &str, home: Option<String>, btn: &gtk::Button) {
-    let Ok(author) = ActorId::from_hex(actor_id) else {
-        return;
-    };
-    btn.set_sensitive(false);
-    let nest = client.nest_rpc().clone();
-    // The follower's own identity seed → the subscriber keypair whose ML-KEM ek
-    // gets published unconditionally (surface B, S4b).
-    let subscriber_secret = client.secret_bytes();
-    let btn = btn.clone();
-    spawn_with_snapshot(
-        &client.runtime_handle(),
-        move || async move {
-            let subs = SubscriptionsClient::new(nest);
-            let subscriber = fauna_core::identity::ActorKeypair::from_secret(subscriber_secret);
-            subs.subscribe_across_nests(author, FOLLOWERS_TIER, &subscriber, home)
-                .await
-                .is_ok()
-        },
-        move |ok| {
-            btn.set_sensitive(true);
-            if ok {
-                btn.set_label(
-                    &fauna_core::format::follow_toggle_label(true)
-                        .resolve(crate::i18n::strings::lookup),
-                );
-            }
-        },
-    );
+/// The two fields of the viewer's `fauna.subscriptions.status.get` reply the
+/// follow toggle reads (tui's `FollowStatus`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FollowStatus {
+    tier: Option<String>,
+    follow_pending: bool,
+}
+
+/// What a press on `profile-follow-button` does, from the toggle's state
+/// (`subscriptions.md` § The free followers tier — follow and unfollow, rule 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowPress {
+    /// Not following: subscribe to the free `followers` tier.
+    Follow,
+    /// A paid holder's first press on *Following*: relabel with the cost,
+    /// send nothing.
+    Arm,
+    /// *Following* pressed by a free follower, or the confirming press.
+    Unfollow,
+}
+
+/// The Follow ⇄ Following toggle's state, mirroring tui's `ProfileState`
+/// fields (`status`, `follow_flip`, `unfollow_armed`): the open-time status
+/// read, an optimistic flip set by a press's reply that outranks the status
+/// for the label (a queued leave reads *Follow* at once), and the armed
+/// confirm. The header is rebuilt on every profile open, so a fresh open
+/// starts disarmed with no flip.
+#[derive(Debug, Default)]
+struct FollowState {
+    status: Option<FollowStatus>,
+    flip: Option<bool>,
+    armed: bool,
+}
+
+impl FollowState {
+    fn status_tier(&self) -> Option<&str> {
+        self.status.as_ref().and_then(|s| s.tier.as_deref())
+    }
+
+    /// The flip outranks the status read (`format::is_following`); *Follow*
+    /// until either says otherwise.
+    fn is_following(&self) -> bool {
+        self.flip.unwrap_or_else(|| {
+            self.status.as_ref().is_some_and(|s| {
+                fauna_core::format::is_following(s.tier.as_deref(), s.follow_pending)
+            })
+        })
+    }
+
+    /// Decide a press, arming or disarming the confirm as it goes.
+    fn press(&mut self) -> FollowPress {
+        if !self.is_following() {
+            self.armed = false;
+            return FollowPress::Follow;
+        }
+        if fauna_core::format::unfollow_ends_paid_tier(self.status_tier()) && !self.armed {
+            self.armed = true;
+            return FollowPress::Arm;
+        }
+        self.armed = false;
+        FollowPress::Unfollow
+    }
+
+    /// The button's label: the cost while armed, else the shared map.
+    fn label(&self) -> String {
+        if self.armed {
+            p::UNFOLLOW_CONFIRM.to_string()
+        } else {
+            fauna_core::format::follow_toggle_label(self.is_following())
+                .resolve(crate::i18n::strings::lookup)
+        }
+    }
+
+    /// A press's reply: the flip it authored, plus the status read after it
+    /// (kept as it was when that read failed).
+    fn replied(&mut self, followed: bool, status: Option<FollowStatus>) {
+        self.flip = Some(followed);
+        self.armed = false;
+        if status.is_some() {
+            self.status = status;
+        }
+    }
+}
+
+/// `status.get(author)` folded to [`FollowStatus`]; `None` when the read fails,
+/// so a failure never reads as "not following".
+async fn fetch_follow_status(
+    subs: &SubscriptionsClient<std::sync::Arc<fauna_client::NestClient>>,
+    author: ActorId,
+) -> Option<FollowStatus> {
+    let reply = subs.status_get(author).await.ok()?;
+    Some(FollowStatus {
+        tier: reply.tier,
+        follow_pending: reply.follow_pending,
+    })
+}
+
+/// The OTHER-profile follow toggle: its button and state.
+struct FollowToggle {
+    btn: gtk::glib::WeakRef<gtk::Button>,
+    state: RefCell<FollowState>,
+}
+
+impl FollowToggle {
+    fn new(btn: &gtk::Button) -> Self {
+        Self {
+            btn: btn.downgrade(),
+            state: RefCell::new(FollowState::default()),
+        }
+    }
+
+    fn repaint(&self) {
+        if let Some(btn) = self.btn.upgrade() {
+            btn.set_label(&self.state.borrow().label());
+        }
+    }
+
+    /// The open-time status read; a press's reply that came first wins (its
+    /// flip outranks the status for the label anyway).
+    fn read_status(self: &Rc<Self>, client: &Rc<FaunaClient>, author: ActorId) {
+        let nest = client.nest_rpc().clone();
+        let this = Rc::clone(self);
+        spawn_with_snapshot(
+            &client.runtime_handle(),
+            move || async move { fetch_follow_status(&SubscriptionsClient::new(nest), author).await },
+            move |status| {
+                if status.is_some() {
+                    let mut st = this.state.borrow_mut();
+                    if st.flip.is_none() {
+                        st.status = status;
+                    }
+                }
+                this.repaint();
+            },
+        );
+    }
+
+    /// A press on the toggle (`profile.md` § Where logic lives → *Follow /
+    /// unfollow*): *Follow* subscribes to the free `followers` tier, *Following*
+    /// leaves it — at once for a free follower, behind a second press when a
+    /// paid tier is held, which the leave ends too. `home` is the page's
+    /// actor-home slot as it reads at the press: the shared
+    /// `SubscriptionsClient::{subscribe,unsubscribe}_across_nests` mints the
+    /// signed intent when another nest is the author's home, and is the plain
+    /// local call for `None` (`federated-follow.md` § Decision 2).
+    fn press(self: &Rc<Self>, client: &Rc<FaunaClient>, actor_id: &str, home: Option<String>) {
+        let Ok(author) = ActorId::from_hex(actor_id) else {
+            return;
+        };
+        let action = self.state.borrow_mut().press();
+        if action == FollowPress::Arm {
+            self.repaint();
+            return;
+        }
+        let follow = action == FollowPress::Follow;
+        if let Some(btn) = self.btn.upgrade() {
+            btn.set_sensitive(false);
+        }
+        let nest = client.nest_rpc().clone();
+        // The follower's own identity seed → the subscriber keypair whose ML-KEM
+        // ek gets published unconditionally (surface B, S4b).
+        let subscriber_secret = client.secret_bytes();
+        let this = Rc::clone(self);
+        spawn_with_snapshot(
+            &client.runtime_handle(),
+            move || async move {
+                let subs = SubscriptionsClient::new(nest);
+                let subscriber = fauna_core::identity::ActorKeypair::from_secret(subscriber_secret);
+                let ok = if follow {
+                    subs.subscribe_across_nests(author, FOLLOWERS_TIER, &subscriber, home)
+                        .await
+                        .is_ok()
+                } else {
+                    subs.unsubscribe_across_nests(author, FOLLOWERS_TIER, &subscriber, home)
+                        .await
+                        .is_ok()
+                };
+                let status = if ok {
+                    fetch_follow_status(&subs, author).await
+                } else {
+                    None
+                };
+                (ok, status)
+            },
+            move |(ok, status)| {
+                if let Some(btn) = this.btn.upgrade() {
+                    btn.set_sensitive(true);
+                }
+                if ok {
+                    this.state.borrow_mut().replied(follow, status);
+                }
+                this.repaint();
+            },
+        );
+    }
 }
 
 /// Start DM (`profile.md` § Where logic lives → Start DM action): seed the
@@ -1153,7 +1319,9 @@ fn wire_request_contact(
 /// (rule (b)); any other failure re-enables and offers nothing (rule (a)).
 fn apply_knock_outcome(btn: &gtk::Button, ask: &GuardianAsk, outcome: KnockSend) -> Option<String> {
     match outcome {
-        KnockSend::Sent => {
+        // `Queued` folds as a sent knock (the identity drain sends it); linux
+        // lends no outbox to its knock send yet, so it never reaches here.
+        KnockSend::Sent | KnockSend::Queued => {
             btn.set_label(p::REQUEST_CONTACT_SENT);
             btn.set_sensitive(false);
             None
@@ -1469,5 +1637,47 @@ mod tests {
             Some(fauna_client::ForeignHome::new("https://home.test", None)),
             "an unstamped relay keeps the WebPKI floor"
         );
+    }
+}
+
+#[cfg(test)]
+mod follow_toggle_tests {
+    use super::{FollowPress, FollowState, FollowStatus, p};
+
+    fn holding(tier: Option<&str>) -> FollowState {
+        FollowState {
+            status: Some(FollowStatus {
+                tier: tier.map(str::to_string),
+                follow_pending: false,
+            }),
+            ..FollowState::default()
+        }
+    }
+
+    #[test]
+    fn a_paid_holder_reads_following_and_needs_two_presses() {
+        // The bug the shared derivation closes: a paid (`gold`) holder follows.
+        let mut st = holding(Some("gold"));
+        assert_eq!(st.label(), p::FOLLOWING);
+        assert_eq!(st.press(), FollowPress::Arm);
+        assert_eq!(st.label(), p::UNFOLLOW_CONFIRM);
+        assert_eq!(st.press(), FollowPress::Unfollow);
+        st.replied(false, holding(Some("gold")).status);
+        // The optimistic flip outranks a status read still naming the tier.
+        assert_eq!(st.label(), p::FOLLOW);
+        assert!(!st.armed);
+    }
+
+    #[test]
+    fn a_free_follower_unfollows_at_once_and_a_stranger_follows() {
+        let mut st = holding(Some("followers"));
+        assert_eq!(st.press(), FollowPress::Unfollow);
+        let mut stranger = holding(None);
+        assert_eq!(stranger.label(), p::FOLLOW);
+        assert_eq!(stranger.press(), FollowPress::Follow);
+        stranger.replied(true, None);
+        assert_eq!(stranger.label(), p::FOLLOWING);
+        // No status read yet → Follow.
+        assert_eq!(FollowState::default().label(), p::FOLLOW);
     }
 }

@@ -131,7 +131,11 @@ note; T2 still carries the clause):
   answer diffed against a durable record of what it last subscribed to — never
   from the absence of a scope in a derivation (a still-loading membership
   source, or an app that wires none at all, both derive no member scopes while
-  having said nothing about membership). The seen-set entry for a departed
+  having said nothing about membership). On a desktop whose sync agent pumps, the
+  answer is the co-located app's membership record —
+  [`account-runtime-roles.md`](account-runtime-roles.md) § Multi-instance
+  concurrency → *The membership record* owns who writes it, who reads it and its
+  lease (ruled 2026-11-07). The seen-set entry for a departed
   scope survives the drop, per transition (4) below. **What the replica remembers of a departure (ruled 2026-10-01; built 2026-10-03, `departure::departed_scopes`):** it keeps the scope in a device-local *departed* list, from the pass that concludes the departure until an affirmative answer names the scope again. The list is local for the reason the subscription marker is: each device concludes from its own membership state, and a synced list would let one device's stale view act for another. The entry survives in the store, and what leaves with the departure is the entry's row at a nest: [`delegable-scope-reclamation.md`](delegable-scope-reclamation.md) § Delegable-scope reclamation, parts (6) and (7), owns which rows a departed scope's replica retires and who may write them back, and reads this list to do it. (4) The **seen-set itself is grow-only as a
   *set*, compactable as *bytes*** (amended 2026-08-11, greenfield finding
   A4): grow-only union stays the merge law — membership never shrinks —
@@ -1028,7 +1032,7 @@ not shipped; frozen).
   membership ([`../behavior/p2p.md`](../behavior/p2p.md) § Cross-user
   shared-set transfer), and custodians by an owner-minted **custody
   grant** — a *keyless* capability naming scopes (grant primitive:
-  [`encryption-at-rest.md`](encryption-at-rest.md) § Capability tiering;
+  [`capability-grants.md`](capability-grants.md) § Capability tiering;
   keyless-scope shape:
   [`key-material-hierarchy.md`](key-material-hierarchy.md)). Custody is
   two-sided consent: the owner mints, the host accepts. Shape + ceremony:
@@ -1865,11 +1869,12 @@ to ≈289 µs per read in a release build (≈0.7 µs per row opened).
 (2026-10-11).** The `outbox` seals: an `Mls` intent's payload is the opened
 compose by contract, sealed only at drain
 (`libs/fauna-account-store/src/types.rs:548`), and the `OfflineQueued`
-kinds include mail and channel sends. It is empty today only because
-`enqueue_intent` has no production caller
-(`libs/fauna-account-plane/src/succession_tail.rs:83`), so the seal is
-already in place for the first caller, which still owes that file's
-re-author duty. `blocks` rests as it is: a class-1 record's block bytes are
+kinds include mail and channel sends. The seal was in place before the
+first production caller — the feed's queued like, 2026-11-07
+([`account-offline-mutation.md`](account-offline-mutation.md)
+§ Implementation status today) — which discharged that file's re-author
+duty by carrying no writer in its payload
+(`libs/fauna-account-plane/src/succession_tail.rs`). `blocks` rests as it is: a class-1 record's block bytes are
 its canonical sealed bytes, byte-identical to nest and wire, with the CID
 computed over them ([`account-data-plane.md`](account-data-plane.md)
 § Store logical schema, the block plane), and the block plane is the one a

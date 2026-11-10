@@ -89,7 +89,10 @@ pub fn update_bridge_list(
         .filter(|b| fauna_client_bridges::is_unified_bridges_page_bridge(&b.id));
 
     for bridge in bridges {
-        let row = build_bridge_list_row(&bridge.id, &bridge.name, bridge.linked, bridge.available);
+        // The title through the shared composition: a consented bridge app's
+        // declared glyph heads it (bridges.md § Coverage contract, outcome 11).
+        let title = fauna_client_bridges::bridge_card_title(bridge);
+        let row = build_bridge_list_row(&bridge.id, &title, bridge.linked, bridge.available);
         list_box.append(&row);
     }
 }

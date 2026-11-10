@@ -4,6 +4,9 @@ title: Retire a nest
 section: your nest
 goal: docs/goal/behavior/nest-retirement.md § Goal
 guide: docs/guides/retire-a-nest.md
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -107,7 +110,9 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | macos | ✅ full | |
 | ios | ✅ full | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| tui | ✅ full | 0.1.6-dev+94702c5c standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

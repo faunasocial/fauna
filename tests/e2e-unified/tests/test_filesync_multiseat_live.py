@@ -190,8 +190,13 @@ path (testing.md § point 8).
 
 Zero-config (the operator sets NO environment variables -- helpers/
 multiseat_config.py supplies every default; each is still env-overridable):
-  seed       ~/.fauna-id (the account's ed25519 32-byte seed hex), else
-             FAUNA_LIVE_SECRET_HEX. Absent everywhere -> the test skips.
+  seed       the seat account's file and nothing else
+             (cfg.resolve_seat_secret): ~/.config/fauna/staging-box/
+             dev.fauna.build/accounts/multiseat-seat.json, the non-admin
+             account the staging-box provisioning drive mints on the dev host and
+             admits by public key; the owner places a copy on each other seat
+             machine once. Never the box's admin seed, never ~/.fauna-id.
+             Absent -> the test skips, naming the file's path.
   handle     FAUNA_LIVE_MAIL_ADDRESS, else a probe localpart on the nest URL's
              own domain (mail is not touched; the client discovers the nest by
              DoH from this handle's DOMAIN, and the nest replaces the localpart
@@ -228,17 +233,19 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
 from helpers import multiseat_config as cfg
+from helpers.app_surface import skip_environment
 from helpers.waiting import wait_until
 
 # Zero-config: no operator ever sets an env var (helpers/multiseat_config.py owns
 # every default). The seat run's id is computed by the announce reader and passed
 # in via FAUNA_MULTISEAT_RUN_ID; it is empty during the announce (which computes
 # its own) and required (fail-fast) in the seat run.
-SECRET = cfg.load_secret()
+SECRET, SEAT_FILE = cfg.resolve_seat_secret()
 ADDRESS = cfg.address()
 RUN_ID = os.environ.get("FAUNA_MULTISEAT_RUN_ID", "")
 WINDOW = cfg.window_secs()
@@ -377,10 +384,11 @@ pytestmark = [
     pytest.mark.timeout(max(1200, int(2 * ASSEMBLY_WINDOW + 5 * WINDOW + 300))),
     pytest.mark.skipif(
         SECRET is None,
-        reason="three-machine live filesync test: no account seed found. Put the "
-        "32-byte ed25519 seed hex in ~/.fauna-id (or set FAUNA_LIVE_SECRET_HEX). "
-        "Opt-in; started as `next` on the Linux+macOS+Windows sessions and run as "
-        "the reader-then-seat handshake described in this module's docstring.",
+        reason=f"three-machine live filesync test: this machine holds no seat "
+        f"account at {SEAT_FILE}. Every seat signs in as the non-admin "
+        f"`multiseat-seat` account the staging-box provisioning drive mints on the dev host; "
+        f"the owner places that one file here once. Opt-in; run as the reader-then-seat "
+        f"handshake described in this module's docstring.",
     ),
 ]
 
@@ -1183,6 +1191,52 @@ def _nest_listing(app) -> tuple[set[str] | None, bool]:
     return set(names), len(names) >= rows
 
 
+def _nest_has_set() -> bool | None:
+    """Does :data:`SET_NAME` exist on the live nest for the seat account? The
+    NEST's own answer, read with no app involved: a read-only
+    ``fauna.folders.list`` signed by the account seed every seat imports,
+    matched by name hash (:func:`helpers.set_names.find_set` — a sealed set
+    rests no plaintext name). ``None`` when the read itself failed, which
+    settles nothing.
+
+    The one witness that tells an ABSENT set from an invisible one: the Media
+    read (:func:`_nest_listing`) succeeds on an absent set (``set_filter``
+    falls back to the all-media view), so it cannot.
+
+    It is also the one witness that tells a seed the box does not know from a
+    client that cannot sign in: a ``fauna.auth.not_registered`` answer here
+    comes from the nest with no app involved, so it is a fact about the box
+    and this machine's seed — the live preflight's rule
+    (``live_box_door.box_not_ready``; `testing.md` § Default app and nest
+    mode → *Live mode*) — and skips as environment, naming where the seed
+    came from. Measured on Windows 2026-11-08: the seed from ``~/.fauna-id``
+    is not the account this box holds, and the UI sign-in spent 150 s before
+    failing with an empty error element."""
+    from common.auth import user_folders_list
+    from helpers import live_box_door
+    from helpers.set_names import find_set
+
+    url = cfg.nest_url()
+    port = urlparse(url).port or (443 if url.startswith("https") else 80)
+    try:
+        rows = user_folders_list(port, secret_key=SECRET, base_url=url).get("folders", [])
+    except Exception as exc:  # noqa: BLE001 — a failed witness settles nothing
+        not_ready = live_box_door.box_not_ready(exc)
+        if not_ready:
+            skip_environment(
+                f"probing {url} with the seat account's seed from {SEAT_FILE}: {not_ready}. "
+                f"Every seat signs in as the one non-admin `multiseat-seat` "
+                f"account, admitted by public key by the staging-box provisioning "
+                f"drive; the seed in {SEAT_FILE} is not an account this box holds "
+                f"— rerun the drive on the machine that provisioned the box to "
+                f"admit it, or have the owner replace this machine's copy of the "
+                f"file (testing.md § Default app and nest mode → Live mode)"
+            )
+        print(f"[preflight] nest folder-list read failed: {exc!r}")
+        return None
+    return find_set(rows, SET_NAME) is not None
+
+
 def _folder_index(b, set_name: str | None = None) -> int | None:
     wanted = SET_NAME if set_name is None else set_name
     # `folder_index` reads the list through the one bounded reader, which starts
@@ -1688,11 +1742,46 @@ def test_preflight_this_seat_sees_the_shared_set(app):
     to discover.
 
     Not a substitute for a round: it proves this client can SEE the set, never
-    that sync converges."""
+    that sync converges.
+
+    **"No set yet" is not "cannot see the set".** The set is created by the
+    CREATOR seat at its round (`_adopt_or_create_set`), so on a box where no
+    round has run yet — or after a box reset — there is nothing for any client
+    to render, and a red here would read as a client defect that does not
+    exist. So the preflight first asks the NEST, through
+    a second observer independent of every app (:func:`_nest_has_set`, a
+    read-only `fauna.folders.list` signed by the same account seed — convention
+    5; no write of any kind): set absent → the creator seat passes with a
+    stated "the creator will create it at the round" line, a non-creator seat
+    is a declared environment skip; set present → this client must render it,
+    and a missing row stays a red (the real client defect); the nest refuses
+    the seed as not registered → a declared environment skip naming the seed's
+    source, before any UI step (the box holds no account for this machine's
+    seed, so no client can be observed); nest read failed otherwise → the
+    client check still runs and a red still diagnoses itself."""
     seat = _seat_of(app.driver)
-    print(f"[preflight] seat={seat} set={SET_NAME!r} — sign-in, then the Folders row list")
+    print(f"[preflight] seat={seat} set={SET_NAME!r} — nest witness, sign-in, then the Folders row list")
+    # The witness first: it needs no handle and mutates nothing, and a seed the
+    # box does not know is a skip it states in one round trip — after the UI
+    # sign-in the same fact cost a 150 s wait and an empty error element.
+    on_nest = _nest_has_set()
+    print(f"[preflight] {seat}: nest witness (fauna.folders.list): {on_nest}")
     _sign_in(app, seat)
     _wait_connected(app, seat)
+
+    if on_nest is False:
+        if seat == CREATOR:
+            print(
+                f"[preflight] {seat}: set absent — {SET_NAME!r} does not exist on "
+                f"{cfg.nest_url()} yet; this is the CREATOR seat, which creates it "
+                f"at the round. PASS (signed in and connected; nothing to render yet)"
+            )
+            return
+        skip_environment(
+            f"no shared set on the box yet — {SET_NAME!r} does not exist on "
+            f"{cfg.nest_url()} (read from the nest's own folder list); run the "
+            f"creator's ({CREATOR}) round first, then re-run this preflight"
+        )
 
     b = app.backups
 

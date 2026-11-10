@@ -4,6 +4,9 @@ title: Mailing lists
 section: mail, calendar and contacts
 goal: docs/goal/behavior/mail-mass-mailing.md § Goal
 guide: docs/guides/own-your-mail.md § Newsletters and mailing lists
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,9 +18,9 @@ capped so one list cannot burn your domain's reputation.
 
 ## Coverage contract
 
-Stamped 2026-09-23 at 039e9619ca.
+Stamped 2026-11-07 at b844c771f6.
 
-1. [app] Make a list, open its members, add and unsubscribe members one at a time or by pasting many, and delete the list — `docs/goal/behavior/mail-mass-mailing.md` § `mail-lists` page UX
+1. [app] Make a list, open its members — with no list chosen, the members page opens your first list — add and unsubscribe members one at a time or by pasting many, and delete the list — `docs/goal/behavior/mail-mass-mailing.md` § `mail-lists` page UX
    - `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_page_reachable`
    - `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_add_via_sheet_lands_on_the_nest`
    - `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_open_members_scopes_the_page`
@@ -96,17 +99,19 @@ Stamped 2026-09-23 at 039e9619ca.
 | ios | ✅ full | 0.1.5-dev+b7384d11 standalone |
 | android | 🚧 unbuilt | 0.1.5-dev+b7384d11 standalone |
 | tui | ✅ full | 0.1.5-dev+b7384d11 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_page_reachable` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_add_via_sheet_lands_on_the_nest` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_open_members_scopes_the_page` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_batch_import_lands_every_valid_address` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_delete_cascades_on_the_nest` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_page_reachable` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_nothing_selected_falls_back_to_first_list` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_page_reachable` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_add_via_sheet_lands_on_the_nest` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_open_members_scopes_the_page` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_batch_import_lands_every_valid_address` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_delete_cascades_on_the_nest` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_page_reachable` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_nothing_selected_falls_back_to_first_list` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_send_stamps_rfc8058_headers` | nest (linux): passed, nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_unsubscribed_member_excluded_from_send` | nest (linux): passed, nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_one_click_unsubscribe_via_https` | nest (linux): passed, nest (macos): passed |
@@ -119,7 +124,7 @@ Stamped 2026-09-23 at 039e9619ca.
 | 4 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_edit_sheet_changes_a_lists_details` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_add_sheet_sets_description_links_and_per_send_cap` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_delete_confirm_says_the_members_go_too` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` — requires `mail-lists` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_resubscribe_from_the_members_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_import_tally_says_how_many_were_skipped` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

@@ -803,6 +803,363 @@ def test_mail_your_device_filed_as_junk_never_turns_up_in_search(
         reset_search_page(app)
 
 
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_mail_indexed_before_a_mail_key_rotation_is_still_found_after_it(
+    app, request, mail_bridge_mta, nest_instance
+):
+    """`private-search-index` outcome 11 — `owner-key-material.md`
+    § Implementation status today, the mail/calendar index-segment key: the
+    client leg opens the mail/calendar class through the `[current] ++
+    [grace…]` key ring, so a segment sealed before "Rotate mail keys" still
+    opens after it.
+
+    A mail is delivered and found; the keys are rotated through the Settings →
+    Mail page's confirm form; the app is relaunched COLD and the same mail is
+    found again. The relaunch is what makes this a witness of the ring: a
+    running process may still hold the index it opened before the rotation,
+    while a fresh one can only reopen the pre-rotation `manifest-mailcal.idx`
+    from the rail, and only through a prior generation's key. A miss there is
+    surfaced, never rebuilt (`content-index.md` § Encryption posture, *a blob
+    that will not open … is a STATE*: the mail/calendar arm does not attach), so
+    the mail goes unfound and this test fails rather than passing on a re-index.
+
+    Mail only: calendar events share the class, its manifest and its key, and
+    are witnessed by outcome 12's test below.
+
+    A dedicated actor, as `test_mail_credentials.py::
+    test_calendar_written_before_a_key_rotation_still_opens` uses, so the
+    rotation cannot move the shared ``test_user``'s keys under a later test."""
+    from conftest import _login_app_as, _make_user
+    from tests.test_search_local_index import SENDER_DOMAIN, _deliver_inbound
+
+    from helpers.budgets import ORCHESTRATION_STEP_S
+
+    user = _make_user(nest_instance)
+    _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+
+    domain = mail_bridge_mta.domain
+    tag = uuid.uuid4().hex[:10]
+    recipient = add_exact_alias(
+        nest_instance["url"], user["signing_key"], domain, f"rotsearch{tag}"
+    )
+    needle = f"prerot{tag}qx"
+    raw = "\r\n".join([
+        f"From: External Sender <sender@{SENDER_DOMAIN}>",
+        f"To: {recipient}",
+        f"Subject: Before the rotation {needle}",
+        f"Message-ID: <{needle}@{SENDER_DOMAIN}>",
+        "Date: Mon, 25 May 2026 12:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        f"The {needle} minutes from the planning meeting.",
+    ]) + "\r\n"
+    _deliver_inbound(
+        mail_bridge_mta.mx_port, domain, recipient, raw.encode(),
+        time.monotonic() + 40.0,
+    )
+    email = S.search_page.badge_email
+
+    app.search.navigate()
+    try:
+        wait_until(
+            lambda: found(app, needle, email),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"sanity: the mail carrying {needle!r} was never found BEFORE "
+                f"the rotation — the index never took it in; rows={rows(app)} "
+                f"error={app.error_text()!r} bridge log: {mail_bridge_mta.log_file}"
+            ),
+        )
+    finally:
+        reset_search_page(app)
+
+    app.mail_settings.navigate()
+    app.mail_settings.rotate_keys()
+    # Settled on the page's own state (convention 14): the confirm form closes
+    # when the rotation's dispatch returns, then the status reads up to date
+    # once the re-wrapped snapshot settles.
+    assert app.mail_settings.wait_for_rotation_to_finish(ORCHESTRATION_STEP_S), (
+        "rotate-keys never finished: the confirm form is still open; "
+        f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    err = app.mail_settings.page_error_text(timeout=2.0)
+    assert not err, f"rotate-keys should complete without error; got {err!r}"
+    assert app.mail_settings.wait_for_enabled_status(timeout=ORCHESTRATION_STEP_S), (
+        "rotate-keys must settle to up to date; "
+        f"status={app.mail_settings.status_text()!r}"
+    )
+
+    # Cold: nothing the process opened survives, so the ring can only come from
+    # the custody the rotation wrote.
+    assert app.driver.recover(), "client process relaunch (driver.recover()) failed"
+    _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+
+    app.search.navigate()
+    try:
+        wait_until(
+            lambda: found(app, needle, email),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the mail carrying {needle!r}, found before the rotation, is not "
+                "found after it — the relaunched app did not reopen the "
+                "pre-rotation mail/calendar manifest through the grace key ring "
+                f"(fauna_client_index::MailcalKeyRing); rows={rows(app)} "
+                f"error={app.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(app)
+
+
+def _open_event_result_and_see_its_detail(app, needle, summary):
+    """Activate the event row that `needle` found and assert it opens THAT
+    event's `event_detail` (`SearchNav::Event`, `ui/search.md` § State & data
+    shape), then leave the detail the way the app does."""
+    event = S.search_page.badge_event
+    index = next(
+        i for i, t in enumerate(app.search.result_texts())
+        if needle in t and kinds_in(t) == {event}
+    )
+    app.search.open_result(index)
+    app.driver.wait_for("event-detail-summary")
+    shown = app.driver.get_text("event-detail-summary")
+    assert shown.strip() == summary, (
+        f"the event row must open that event's detail; it shows {shown!r}, "
+        f"error={app.error_text()!r}"
+    )
+    app.events.leave_detail()
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_an_event_on_your_calendar_is_found_by_search_and_still_after_a_mail_key_rotation(
+    app, request, nest_instance
+):
+    """`private-search-index` outcome 12 — `content-index-ingest.md` § Ingest
+    triggers, v1 → *The calendar arm is BUILT*: the client builder's calendar
+    walk stages the actor's events into the mail/calendar segment class, the
+    class resolver turns a hit into an event row, and the class's grace key
+    ring reopens it after "Rotate mail keys".
+
+    An event is made through the Events page and found by a word of its title;
+    the keys are rotated through the Settings → Mail confirm form; the app is
+    relaunched COLD and the event is found again — the relaunch is what proves
+    the ring, as outcome 11's mail witness above does. On tui and macos the row
+    also opens the event's own `event_detail` (`SearchNav::Event`, `ui/search.md`
+    § State & data shape); the phone's shape is the twin below.
+
+    A dedicated actor, so the rotation cannot move the shared ``test_user``'s
+    keys under a later test."""
+    from datetime import datetime, timedelta
+
+    from conftest import _login_app_as, _make_user
+
+    from helpers.budgets import ORCHESTRATION_STEP_S
+
+    user = _make_user(nest_instance)
+    _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+
+    tag = uuid.uuid4().hex[:10]
+    needle = f"calidx{tag}qx"
+    summary = f"Planning {needle}"
+    start = (datetime.now() + timedelta(days=2)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    ev = app.events
+    ev.navigate()
+    ev.create_calendar(f"idx-cal-{tag}")
+    ev.select_calendar(f"idx-cal-{tag}")
+    ev.create_event(
+        summary=summary,
+        start=start.strftime("%Y-%m-%dT%H:%M"),
+        end=(start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M"),
+    )
+    assert summary in ev.event_summaries(), (
+        f"sanity: the event must render on the Events page; error: {app.error_text()!r}"
+    )
+    event = S.search_page.badge_event
+
+    app.search.navigate()
+    try:
+        wait_until(
+            lambda: found(app, needle, event),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the event titled {summary!r} was never found by search — the "
+                "calendar walk did not stage it, or the resolver dropped it; "
+                f"rows={rows(app)} error={app.error_text()!r}"
+            ),
+        )
+        if app.driver.is_tui() or app.driver.is_macos():
+            _open_event_result_and_see_its_detail(app, needle, summary)
+            app.search.navigate()
+    finally:
+        reset_search_page(app)
+
+    app.mail_settings.navigate()
+    app.mail_settings.rotate_keys()
+    # Settled on the page's own state (convention 14), as outcome 11's test does.
+    assert app.mail_settings.wait_for_rotation_to_finish(ORCHESTRATION_STEP_S), (
+        "rotate-keys never finished: the confirm form is still open; "
+        f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    err = app.mail_settings.page_error_text(timeout=2.0)
+    assert not err, f"rotate-keys should complete without error; got {err!r}"
+    assert app.mail_settings.wait_for_enabled_status(timeout=ORCHESTRATION_STEP_S), (
+        "rotate-keys must settle to up to date; "
+        f"status={app.mail_settings.status_text()!r}"
+    )
+
+    # Cold: the ring can only come from the custody the rotation wrote.
+    assert app.driver.recover(), "client process relaunch (driver.recover()) failed"
+    _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+
+    app.search.navigate()
+    try:
+        wait_until(
+            lambda: found(app, needle, event),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the event titled {summary!r}, found before the rotation, is not "
+                "found after it — the relaunched app did not reopen the "
+                "mail/calendar class through the grace key ring, or the walk "
+                f"could not read the calendar with it; rows={rows(app)} "
+                f"error={app.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(app)
+
+
+@pytest.mark.ios
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_a_phone_finds_and_opens_an_event_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation(
+    app, request, nest_instance, alice_builder_seats
+):
+    """`private-search-index` outcome 12 on a phone — the twin of the desktop
+    witness above in the phone's real shape (`content-index.md` § Build vs.
+    query: "phones receive the segments and query the synced copy"). The
+    phone makes the event through its Events page; a DESKTOP seat of the same
+    account, launched after it, walks the calendar (`content-index-ingest.md`
+    § Ingest triggers, v1 → *The calendar arm is BUILT*) and publishes; the
+    phone finds the event in the synced index and the row opens that event's
+    own `event_detail` (`SearchNav::Event`, `ui/search.md` § State & data
+    shape). The keys are then rotated from the phone's Settings → Mail and
+    the phone, relaunched COLD, finds the event again.
+
+    A dedicated actor, so the rotation cannot move the shared ``test_user``'s
+    keys under a later test; the seat is launched as that actor. android
+    joins with its own Events-page arm."""
+    from datetime import datetime, timedelta
+
+    from conftest import _login_app_as, _make_user
+
+    from helpers.budgets import ORCHESTRATION_STEP_S
+
+    phone = app
+    user = _make_user(nest_instance)
+    _login_app_as(phone, request, nest_instance, user, verify_live_actor=True)
+    phone.mail_settings.navigate()
+    phone.mail_settings.ensure_mail_enabled()
+
+    tag = uuid.uuid4().hex[:10]
+    needle = f"calphone{tag}qx"
+    summary = f"Planning {needle}"
+    start = (datetime.now() + timedelta(days=2)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    ev = phone.events
+    ev.navigate()
+    ev.create_calendar(f"idx-cal-{tag}")
+    ev.select_calendar(f"idx-cal-{tag}")
+    ev.create_event(
+        summary=summary,
+        start=start.strftime("%Y-%m-%dT%H:%M"),
+        end=(start + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M"),
+    )
+    assert summary in ev.event_summaries(), (
+        f"sanity: the event must render on the Events page; error: {phone.error_text()!r}"
+    )
+    event = S.search_page.badge_event
+
+    # The event rests in the nest's CalDAV store once created, so the desktop
+    # seat's calendar walk at its launch reads it — no upload gate is owed.
+    desktop, _ = alice_builder_seats.launch(user=user, nest=nest_instance)
+    desktop.search.navigate()
+    try:
+        wait_until(
+            lambda: found(desktop, needle, event),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the desktop seat never indexed the event {summary!r} — its "
+                f"calendar walk did not stage it; rows={rows(desktop)} "
+                f"error={desktop.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(desktop)
+
+    phone.search.navigate()
+    try:
+        wait_until(
+            lambda: found(phone, needle, event),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the phone never found the event {summary!r} in the index the "
+                f"desktop published; rows={rows(phone)} error={phone.error_text()!r}"
+            ),
+        )
+        _open_event_result_and_see_its_detail(phone, needle, summary)
+    finally:
+        phone.search.navigate()
+        reset_search_page(phone)
+
+    phone.mail_settings.navigate()
+    phone.mail_settings.rotate_keys()
+    assert phone.mail_settings.wait_for_rotation_to_finish(ORCHESTRATION_STEP_S), (
+        "rotate-keys never finished: the confirm form is still open; "
+        f"error: {phone.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    err = phone.mail_settings.page_error_text(timeout=2.0)
+    assert not err, f"rotate-keys should complete without error; got {err!r}"
+    assert phone.mail_settings.wait_for_enabled_status(timeout=ORCHESTRATION_STEP_S), (
+        "rotate-keys must settle to up to date; "
+        f"status={phone.mail_settings.status_text()!r}"
+    )
+
+    # Cold: the ring the phone reads the synced class with can only come from
+    # the custody the rotation wrote.
+    assert phone.driver.recover(), "client process relaunch (driver.recover()) failed"
+    _login_app_as(phone, request, nest_instance, user, verify_live_actor=True)
+
+    phone.search.navigate()
+    try:
+        wait_until(
+            lambda: found(phone, needle, event),
+            LOCAL_INDEX_S,
+            diagnose=lambda: (
+                f"the event titled {summary!r}, found before the rotation, is not "
+                "found after it — the relaunched phone did not reopen the synced "
+                "mail/calendar class through the grace key ring; "
+                f"rows={rows(phone)} error={phone.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(phone)
+
+
 @pytest.mark.ios
 @pytest.mark.android
 @pytest.mark.real_conversations

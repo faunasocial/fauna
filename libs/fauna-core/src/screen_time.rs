@@ -750,6 +750,18 @@ impl ScreenLockCore {
     /// not merely slow. Compiled out of release artifacts (convention 15).
     #[cfg(any(debug_assertions, feature = "e2e-agent"))]
     pub fn advance_test_clock(&mut self, secs: i64) {
+        self.advance_test_clock_focused(secs, true);
+    }
+
+    /// [`Self::advance_test_clock`] with the ward's attention stated: with
+    /// `focused == false` the clock moves while the app is not in front (or
+    /// the device is locked or asleep), so the engine is ticked inactive and
+    /// the advanced time bills nothing — the e2e face of decision (b) in
+    /// `family-client-enforcement.md` § Implementation status today. The gap
+    /// before the first step still accrues at the engine's previous state,
+    /// exactly as a real focus change does.
+    #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+    pub fn advance_test_clock_focused(&mut self, secs: i64, focused: bool) {
         let step = MAX_ACCRUAL_STEP_SECS;
         // Prime the engine's reference point before advancing. It accrues
         // from the GAP between calls, so with no prior call the first step
@@ -757,7 +769,7 @@ impl ScreenLockCore {
         // than it was asked for. (Production primes this on the eager first
         // report.)
         let now = self.now_secs();
-        self.heartbeat.set_active(true, now);
+        self.heartbeat.set_active(focused, now);
         let mut remaining = secs.max(0);
         while remaining > 0 {
             let bump = remaining.min(step);
@@ -766,7 +778,7 @@ impl ScreenLockCore {
             // Tick the engine at each step, exactly as the one-minute timer
             // would.
             let now = self.now_secs();
-            self.heartbeat.set_active(true, now);
+            self.heartbeat.set_active(focused, now);
         }
     }
 
@@ -1615,6 +1627,34 @@ mod screen_lock_core_tests {
         assert!(
             lock.lock_message(lookup).is_some(),
             "and the lock is still up — nothing lifted it"
+        );
+    }
+
+    /// The e2e poke's unfocused face bills nothing: time advanced with the
+    /// app out of front (or the device locked or asleep) leaves the ward's
+    /// figure where it was, and focused time after it still bills in full —
+    /// the seam the tier_3 billing witness drives.
+    #[test]
+    fn an_unfocused_test_clock_advance_bills_nothing() {
+        let mut lock = ward(
+            ScreenTimePolicy {
+                daily_minutes: Some(120),
+                ..Default::default()
+            },
+            Some(0),
+        );
+        lock.advance_test_clock_focused(30 * 60, false);
+        assert_eq!(
+            lock.take_due_report(false).map(|(m, _)| m),
+            Some(0),
+            "thirty minutes out of front report as a read, never as use"
+        );
+        lock.report_succeeded(0, 0);
+        lock.advance_test_clock_focused(6 * 60, true);
+        assert_eq!(
+            lock.take_due_report(true).map(|(m, _)| m),
+            Some(6),
+            "the focused minutes after it bill in full"
         );
     }
 

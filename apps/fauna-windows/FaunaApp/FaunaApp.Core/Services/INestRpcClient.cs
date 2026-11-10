@@ -955,6 +955,11 @@ internal interface INestRpcClient
     /// (<c>null</c> keeps its stored value), then re-read.</summary>
     Task<MailSwitches> MailSwitchesSetAsync(bool? receiveEnabled, bool? sendEnabled);
 
+    /// <summary><c>fauna.bridges.set_mail_switches</c> carrying only the scan-result-row
+    /// switch (mail-content-scanning.md § Per-account opt-out for visible scan details),
+    /// then re-read — the shared <c>set_scan_result_visible_and_reload</c>.</summary>
+    Task<MailSwitches> MailScanResultVisibleSetAsync(bool scanResultVisible);
+
     /// <summary><c>fauna.bridges.get_mail_quotas</c> — the caller's mailbox quota and
     /// daily sending allowance (imap-server.md § Composition with submission
     /// quota).</summary>
@@ -1694,14 +1699,14 @@ internal interface INestRpcClient
     /// <c>LocalizedText</c>, or <c>null</c> when nothing is owed.</summary>
     Task<uniffi.fauna_core.LocalizedText?> SelfHealDeploymentSeedCustodyAsync();
 
-    /// <summary>One critical-alert sweep pass (critical-alerts.md § Mechanism →
-    /// <i>Who runs the detector</i>) over this session's connection.</summary>
-    Task RunCriticalAlertSweepAsync();
-
-    /// <summary>The critical-alert re-sweep LOOP (critical-alerts.md § Mechanism →
-    /// <i>How often the detector runs</i>) over this session's connection; returns
-    /// once the identity is torn down.</summary>
-    Task RunCriticalAlertSweepLoopAsync();
+    /// <summary>The post-auth hook's critical-alert sweep (critical-alerts.md
+    /// § Mechanism → <i>Who runs the detector</i> / <i>How often the detector
+    /// runs</i>) over this session's connection: the shared split decides whether
+    /// this hook starts the re-sweep loop or runs one pass, and runs it. Completes
+    /// after the one pass, or when the loop ends (the identity torn down, or this
+    /// connection). <paramref name="nestUrl"/> is the nest's literal URL, which
+    /// keys the identity.</summary>
+    Task StartCriticalAlertSweepAsync(string nestUrl);
 
     /// <summary>The ONE shared post-claim serving-enablement step (onboarding.md
     /// § 3b <i>Mechanism</i>) over this session's connection.

@@ -74,7 +74,6 @@ import pytest
 from common.nest import start_nest_in_place, stop_nest
 from helpers.app_surface import (
     app_name,
-    declared_absence,
     require_surface,
     surface_built,
 )
@@ -102,6 +101,11 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.windows,
+    # On a macOS host a bound location is always-resident by design
+    # (on-demand-files.md § The free-up-space gesture where the OS offers none:
+    # "macOS renders neither"), so no leg is owed there — tui's included
+    # (feature-catalog.md § The ledger, *Stale records*, ruling (i)).
+    pytest.mark.host_platform("linux", "windows"),
 ]
 
 # A ceiling, not an expectation: the agent mounts after it has answered the
@@ -123,26 +127,10 @@ _PIN_REACTION_SECS = 150.0
 _FREE_SPACE = "folder-location-free-space-button"
 
 
-def _require_leg(app) -> None:
-    """Skip, with its declared class, every host whose on-demand root is not
-    built: on macOS a bound location is always-resident by design."""
-    if sys.platform == "darwin":
-        declared_absence(
-            app.driver,
-            capability="Free up space on a bound location on a macOS host (always-resident)",
-            doc=(
-                "docs/goal/behavior/on-demand-files.md § The free-up-space gesture where the "
-                "OS offers none — \"macOS renders neither (a bound location is always-resident "
-                "there)\""
-            ),
-        )
-
-
 def _require_sweep(app) -> None:
     """Outcomes 4 and 5 press the app's verb, so they need it built in the app;
     the host's agent sweeps the location on linux and windows alike."""
     require_surface(app.driver, _FREE_SPACE)
-    _require_leg(app)
 
 
 def _run(app, folder, *argv: str):
@@ -601,7 +589,6 @@ def test_several_on_demand_folders_each_switch_leaves_the_others_working(
     the app's verb frees — a linux host. On a windows host Explorer's verb
     frees (`_free_to_placeholder`)."""
     app = logged_in_app
-    _require_leg(app)
     first = _on_demand_location(app, request, tmp_path, "multi-first")
     _close_row(app, first.set_name)
     second = _bound_location(app, request, tmp_path, "multi-second")
@@ -675,7 +662,6 @@ def test_turning_on_demand_off_keeps_an_unsent_change(
 ):
     """Outcome 8: switching on-demand off never destroys a change not yet uploaded."""
     app = logged_in_app
-    _require_leg(app)
     loc = app.sync_locations
     location = _on_demand_location(app, request, tmp_path, "off-kept")
     folder, name = location.folder, location.name

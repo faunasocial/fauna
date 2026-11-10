@@ -566,7 +566,7 @@ async fn serve_user_file(
             // Compelled removal is disclosed, not hidden behind the 404 below:
             // a file whose manifest or any chunk is withheld answers 451, the
             // same shape the routes onto the blob store give.
-            Err(super::file_bytes::FileOpenError::Withheld) => withheld_response(),
+            Err(super::file_bytes::FileOpenError::Withheld(ground)) => withheld_response(ground),
             // A plaintext row that turns out to be sealed at the manifest level
             // (`stored_hashes`) has no key here and MUST NOT emit ciphertext.
             Err(e) => {
@@ -651,7 +651,9 @@ async fn serve_user_file(
                 // a paywall teaser: the entitled visitor is told the content is
                 // gone for legal reasons, exactly as an unentitled one would be
                 // at the plaintext arm above.
-                Err(super::file_bytes::FileOpenError::Withheld) => return withheld_response(),
+                Err(super::file_bytes::FileOpenError::Withheld(ground)) => {
+                    return withheld_response(ground);
+                }
                 Err(e) => {
                     // Held a key but could not open — a revoked-and-rotated
                     // generation, a missing chunk, a corrupt manifest. Still
@@ -955,15 +957,17 @@ fn not_found_response(body: Vec<u8>, content_type: &str) -> Response<Body> {
     build_response(StatusCode::NOT_FOUND, body, content_type, false)
 }
 
-/// The compelled-removal refusal: **451, no body, never cached**
-/// (`moderation.md` § Legal takedown → *The blob-serve door*).
+/// The withheld-file refusal: **the ground's status (451 for a legal
+/// takedown, 403 for an admin block — `blob_routes::withheld_status`), no
+/// body, never cached** (`takedown-and-block.md` § Legal takedown → *The
+/// blob-serve door*).
 ///
 /// Not [`build_response`], deliberately: that stamps a day of `max-age`, and a
-/// takedown is reversible — `restore=true` re-serves the very same bytes — so
-/// a cached refusal would outlive the order it carried out.
-fn withheld_response() -> Response<Body> {
+/// withhold is reversible — a restore or an unblock re-serves the very same
+/// bytes — so a cached refusal would outlive the decision it carried out.
+fn withheld_response(ground: crate::db::blob_withhold::WithholdGround) -> Response<Body> {
     Response::builder()
-        .status(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+        .status(crate::blob_routes::withheld_status(ground))
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::empty())

@@ -483,7 +483,12 @@ def drift(sites: list[Site], registry: dict) -> list[str]:
             problems.append(f"{s.rel}:{s.line}: surface {s.surface!r} maps to {key!r}, "
                             "which the registry does not declare")
             continue
-        extra = set(entry.built) - s.built
+        # A kids channel (`features_catalog.COLUMN_PARENT`) is its parent's build with
+        # planes removed: a site that still gates the parent gates it too.
+        from features_catalog import COLUMN_PARENT
+        site_built = set(s.built) | {kids for kids, parent in COLUMN_PARENT.items()
+                                     if parent in s.built}
+        extra = set(entry.built) - site_built
         if extra:
             problems.append(f"{s.rel}:{s.line}: the registry declares {key!r} built on "
                             f"{', '.join(sorted(extra))}, where this site still gates it")

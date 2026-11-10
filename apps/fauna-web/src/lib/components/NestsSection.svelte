@@ -147,7 +147,13 @@
     // carries no timestamp on the wire — that leaf renders empty.
     since: number | null;
   }
-  type TrustMintUseCase = 'Mail' | 'Calendar' | 'PaywalledPosts';
+  type TrustMintUseCase =
+    | 'Mail'
+    | 'Calendar'
+    | 'PaywalledPosts'
+    | 'MaterializeMail'
+    | 'MaterializeCalendar'
+    | 'MaterializeCard';
   interface TrustMintOption {
     use_case: TrustMintUseCase;
     tier: string | null;

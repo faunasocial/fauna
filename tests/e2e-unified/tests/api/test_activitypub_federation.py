@@ -688,6 +688,78 @@ class TestActivityPubFederation:
         )
         assert status == 200 and served["id"] == note["id"], "the note id dereferences"
 
+    @pytest.mark.feature("atproto")
+    def test_a_taken_down_post_is_never_published_to_the_fediverse(self, ap_nests):
+        """A legal takedown withholds the post from the fediverse doors
+        (`takedown-and-block.md` § Legal takedown → the off-box publish
+        surfaces; `atproto-pds-bridge.md` § Projection & backfill names the
+        outbox among the predicate's consumers): the pull outbox stops counting
+        and serving it and its note id stops dereferencing, while the post
+        beside it stays. Delivered Notes cannot be recalled — the inherent limit
+        that rule records — so what binds here is that nothing serves it from
+        the takedown on. The hosted Bluesky account's half is
+        `tests/test_atproto_hosted_account.py`'s.
+        """
+        nest_a = ap_nests["a"]
+        user = create_actor_and_register(
+            nest_a["port"], admin_signing_key=nest_a["admin"]["signing_key"]
+        )
+        now = int(time.time() * 1_000_000)
+        kept_text = "a public post that stays on the fediverse"
+        doomed_text = "a public post a court orders taken down"
+        kept_id = ws_api.create_post(
+            nest_a["port"], user, sign_and_encode_post(user["signing_key"], now, kept_text)
+        )
+        doomed_id = ws_api.create_post(
+            nest_a["port"], user, sign_and_encode_post(user["signing_key"], now + 1, doomed_text)
+        )
+        username, actor_url = enable_ap(nest_a, user)
+        ws_api.bridge_set_settings(nest_a["port"], user, AP_BRIDGE_ID, {"backfill": True})
+
+        def outbox() -> tuple[dict, list[dict]]:
+            status, root = api_get(
+                nest_a["url"], f"/ap/users/{username}/outbox", accept="application/activity+json"
+            )
+            assert status == 200, root
+            if not root.get("totalItems"):
+                return root, []
+            status, page = api_get(
+                nest_a["url"], f"/ap/users/{username}/outbox?page=0",
+                accept="application/activity+json",
+            )
+            assert status == 200, page
+            return root, [i["object"] for i in page["orderedItems"]]
+
+        root, notes = outbox()
+        assert root["totalItems"] == 2, f"both posts must be served before the takedown: {root}"
+        assert {n["id"] for n in notes} == {
+            f"{actor_url}/notes/{kept_id}", f"{actor_url}/notes/{doomed_id}"
+        }, notes
+
+        admin_sk = nest_a["admin"]["signing_key"]
+        taken = ws_api.moderation_legal_takedown(
+            nest_a["port"],
+            {"actor_id_bytes": bytes(admin_sk.verify_key), "signing_key": admin_sk},
+            doomed_id,
+            legal_reference="EU-DSA-2026/0059",
+        )
+        assert taken.get("status") == "taken_down", taken
+
+        root, notes = outbox()
+        assert root["totalItems"] == 1, f"the outbox still counts the taken-down post: {root}"
+        assert [n["id"] for n in notes] == [f"{actor_url}/notes/{kept_id}"], notes
+        assert not any(doomed_text in (n.get("content") or "") for n in notes), notes
+        status, served = api_get(
+            nest_a["url"], f"/ap/users/{username}/notes/{doomed_id}",
+            accept="application/activity+json",
+        )
+        assert status != 200, f"the taken-down note still dereferences: {status} {served}"
+        status, _ = api_get(
+            nest_a["url"], f"/ap/users/{username}/notes/{kept_id}",
+            accept="application/activity+json",
+        )
+        assert status == 200, "the post beside it must stay served"
+
 
 class TestActivityPubFollowerDelivery:
     """The produce direction, against a fediverse server that really receives.
@@ -2125,3 +2197,150 @@ class TestActivityPubInboundIngest:
         assert any("from someone I follow" in b for b in bodies)
         assert any("said to you" in b for b in bodies)
         assert not any("from a stranger" in b for b in bodies)
+
+    # ── only the owning server deletes or changes a post ──────────────────
+    #
+    # `activitypub.md` § Security posture → *Object ownership*: an object verb
+    # (`Delete`, `Update{Note}`) is admitted only from the object's own host,
+    # and nothing that arrives in an inbox destroys or rewrites a local
+    # account's own post. The outside-observed twins of `inbox_routes::tests`'
+    # ownership pins. Every inbox POST is processed before its 202, so each
+    # "changes nothing" read follows a barrier, and the owner's own verb,
+    # sent last, is the positive control that the door itself works.
+
+    def _delete(self, peer, inbox, object_id):
+        code = peer.post_signed(
+            inbox,
+            {
+                "@context": "https://www.w3.org/ns/activitystreams",
+                "type": "Delete",
+                "id": f"{peer.actor_uri}/activities/delete-{uuid.uuid4().hex[:8]}",
+                "actor": peer.actor_uri,
+                "object": object_id,
+            },
+        )
+        assert code == 202, f"inbox did not accept the Delete: HTTP {code}"
+
+    def _update_note(self, peer, inbox, note_id, attributed_to, text):
+        code = peer.post_signed(
+            inbox,
+            {
+                "@context": "https://www.w3.org/ns/activitystreams",
+                "type": "Update",
+                "id": f"{peer.actor_uri}/activities/update-{uuid.uuid4().hex[:8]}",
+                "actor": peer.actor_uri,
+                "to": [AS_PUBLIC],
+                "object": {
+                    "type": "Note",
+                    "id": note_id,
+                    "attributedTo": attributed_to,
+                    "content": f"<p>{text}</p>",
+                    "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "to": [AS_PUBLIC],
+                },
+            },
+        )
+        assert code == 202, f"inbox did not accept the Update: HTTP {code}"
+
+    @pytest.mark.feature("fediverse")
+    def test_a_delete_or_update_from_another_server_changes_nothing(
+        self, ap_nests, fake_follower
+    ):
+        """A signed `Delete` or `Update{Note}` of a fediverse post, sent by an
+        actor on ANOTHER server than the post's, leaves the post as it was in
+        your feed; the post's own author's `Update` and `Delete` then land.
+
+        Flow: bob's note ingested (`deliver_note`) → mallory on `127.0.0.2`
+        (another host to `inbox_routes::same_origin`, which ignores ports)
+        signs a `Delete`, then an `Update{Note}` claiming bob's authorship →
+        the by-id read still answers bob's words and the feed lists them once
+        → bob's own `Update` replaces the words → bob's own `Delete` removes
+        the post.
+        """
+        nest_a = ap_nests["a"]
+        user, username, actor_url = self._user(nest_a)
+        inbox = f"{nest_a['url']}/ap/users/{username}/inbox"
+        original = f"bobs own words {uuid.uuid4().hex[:6]}"
+        note_id = deliver_note(nest_a, fake_follower, username, actor_url, original)
+        post_id = ap_post_map_row(nest_a, note_id)["fauna_post_id"]
+        assert any(original in b for b in feed_bodies(nest_a, user)), "precondition"
+
+        forged = "words bob never wrote"
+        with FakeFollower(find_free_port(), username="mallory", host="127.0.0.2") as mallory:
+            self._delete(mallory, inbox, note_id)
+            self._update_note(mallory, inbox, note_id, fake_follower.actor_uri, forged)
+
+        bodies = feed_bodies(nest_a, user)
+        assert sum(original in b for b in bodies) == 1, (
+            f"another server's Delete or Update moved bob's post: {bodies!r}"
+        )
+        assert not any(forged in b for b in bodies), (
+            f"another server's Update rewrote bob's post: {bodies!r}"
+        )
+        assert ap_post_map_row(nest_a, note_id)["fauna_post_id"] == post_id, (
+            "the note still maps to the post bob's own Create stored"
+        )
+        assert original.encode() in ws_api.get_post(nest_a["port"], user, post_id)
+
+        # ── The owner's own verbs land: the door works, only its gate refused.
+        edited = f"bobs edit {uuid.uuid4().hex[:6]}"
+        self._update_note(fake_follower, inbox, note_id, fake_follower.actor_uri, edited)
+        bodies = feed_bodies(nest_a, user)
+        assert sum(edited in b for b in bodies) == 1, bodies
+        assert not any(original in b for b in bodies), bodies
+        self._delete(fake_follower, inbox, note_id)
+        assert not any(edited in b for b in feed_bodies(nest_a, user)), (
+            "the author's own Delete should remove the post"
+        )
+
+    @pytest.mark.feature("fediverse")
+    def test_a_delete_or_update_aimed_at_your_own_post_changes_nothing(
+        self, ap_nests, fake_follower
+    ):
+        """A signed `Delete` or `Update{Note}` naming the note your nest
+        pushed for your own post changes nothing: the post keeps its words,
+        in your feed and by id. The sender sits on the nest's own host
+        (`127.0.0.1`, ports aside), so the same-origin gate passes and the
+        local-post guard alone stands between it and your post — the
+        residual `activitypub.md` § Security posture names.
+
+        Flow: bob follows you → your post pushed → its note URL read off
+        bob's received `Create` → bob signs a `Delete` of it, then an
+        `Update{Note}` of it → `fauna.posts.get` still answers your words and
+        your feed lists them once.
+        """
+        nest_a = ap_nests["a"]
+        user, username, actor_url = self._user(nest_a)
+        inbox = f"{nest_a['url']}/ap/users/{username}/inbox"
+        code = fake_follower.post_signed(
+            inbox,
+            {
+                "@context": "https://www.w3.org/ns/activitystreams",
+                "type": "Follow",
+                "id": f"{fake_follower.actor_uri}/activities/follow-own",
+                "actor": fake_follower.actor_uri,
+                "object": actor_url,
+            },
+        )
+        assert code == 202
+        fake_follower.wait_for("Accept")
+        mine = f"my own post {uuid.uuid4().hex[:6]}"
+        post_id = ws_api.create_post(
+            nest_a["port"],
+            user,
+            sign_and_encode_post(user["signing_key"], int(time.time() * 1_000_000), mine),
+        )
+        note_url = fake_follower.wait_for("Create")["activity"]["object"]["id"]
+
+        self._delete(fake_follower, inbox, note_url)
+        hijack = "a takeover of your words"
+        self._update_note(fake_follower, inbox, note_url, actor_url, hijack)
+
+        assert mine.encode() in ws_api.get_post(nest_a["port"], user, post_id), (
+            "an inbound Delete or Update destroyed or rewrote your own post"
+        )
+        bodies = feed_bodies(nest_a, user)
+        assert sum(mine in b for b in bodies) == 1, bodies
+        assert not any(hijack in b for b in bodies), (
+            f"an inbound Update rewrote your own post: {bodies!r}"
+        )

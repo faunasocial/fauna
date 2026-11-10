@@ -21,6 +21,7 @@
 // (`refreshFeed`, the page's own re-read), and a user action refused on a null
 // manager says so on the page's error surface.
 
+import { untrack } from 'svelte';
 import { get } from 'svelte/store';
 import { identity } from './store';
 import { postBlobGet } from './rpc';
@@ -41,14 +42,15 @@ import {
 } from './wasm';
 import { paintableDecodedPost } from './feed-utils';
 import { quotedPostBlock, resolvingLinkPreviewUrls } from './document';
-import { contentRender, guardianReasonOf } from './contentPolicy.svelte';
-import { trainedTopicsList, webPaywallMintToken, webPublishSet, webPublishUnset, type TrainedTopicRow } from './rpc';
+import { contentRender, guardianReasonOf, setSpamMarked, showAgain, showAgainFor, spamMarkedIds } from './contentPolicy.svelte';
+import type { ShowAgain } from './wasm';
+import { markSpam, trainedTopicsList, unmarkSpam, webPaywallMintToken, webPublishSet, webPublishUnset, type TrainedTopicRow } from './rpc';
 import { bestEffortCopyToClipboard, siteLink } from './web-publish';
 import { hexToBytes } from './hex';
 import { toArrayBufferView } from './bytes';
 import { isSafeNavUrl } from './safe-url';
 import { verbErrorCopy as verbErrorCopyOf } from './feed-verb-error';
-import { contactOverlays } from './conversations';
+import { contactOverlays, trainPostSpam } from './conversations';
 import { t } from './i18n/strings';
 import type { WasmFeedManager } from '../../static/fauna_wasm.js';
 
@@ -302,13 +304,38 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
   // the region and the family collapse).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function postRender(post: any): ContentRender {
-    return contentRender(post.labels, {
+    return contentRender(post.labels, postItem(post));
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function postItem(post: any) {
+    return {
       contentIdHex: post.post_id,
       authorHex: post.author,
       text: post.body ?? '',
       hashtags: post.tags ?? [],
       hasMedia: !!post.has_media,
-    });
+    };
+  }
+  // The reporter's show-again (`moderation.md` § Corollary — the reporter's
+  // hide is theirs to undo): `content-policy-show-again-button` beside the
+  // reported placeholder, its ids and label from the shared fold over the same
+  // keys the render matched; `null` on any other placeholder.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function showAgainForPost(post: any): ShowAgain | null {
+    return postRender(post).reported === true ? showAgainFor(postItem(post)) : null;
+  }
+  /** The show-again press — the un-hide per matched id; a failure goes to
+   *  `error-message`, and the report itself is never withdrawn. */
+  async function showAgainPost(ids: string[]): Promise<void> {
+    const id = get(identity);
+    if (!id) { deps.setError(t.common.still_loading); return; }
+    try {
+      await showAgain(id.secretHex, ids);
+      if (!deps.destroyed()) deps.setError('');
+    } catch (e) {
+      if (deps.destroyed()) return;
+      deps.setError(e instanceof Error ? e.message : String(e));
+    }
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function regionPlaceholderFor(post: any): RegionPlaceholderValue | null {
@@ -413,6 +440,76 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     } finally {
       refreshFeed();
     }
+  }
+
+  // ── The post's mark-as-spam verb (`report-sharing.md` § Report capture →
+  //    *The post's mark-as-spam verb*). The list rides the sealed
+  //    `fauna.state.moderation` record (`#lib/contentPolicy`'s `spamMarked`,
+  //    loaded beside the hide list); the shared manager folds `spam`@1000 into
+  //    each marked post's labels on its next `snapshot()`, so the render verdict
+  //    every card already runs collapses it — nothing decides here. ──
+
+  // Hand the manager the list whenever it changes, or the manager this host
+  // reads is (re)built — the snapshot landing is the only reactive signal a
+  // fresh manager gives. The pair last applied guards the re-read below from
+  // looping.
+  let spamAppliedTo: WasmFeedManager | null = null;
+  let spamAppliedList: string[] | null = null;
+  function applySpamMarked(list: string[]): void {
+    const manager = deps.manager();
+    if (!manager || (manager === spamAppliedTo && list === spamAppliedList)) return; // manager-gate-ok: an effect-driven hand-off, re-run when the snapshot lands
+    spamAppliedTo = manager;
+    spamAppliedList = list;
+    manager.setSpamMarked(list);
+    refreshFeed();
+  }
+  $effect(() => {
+    const list = spamMarkedIds();
+    void deps.posts();
+    untrack(() => applySpamMarked(list));
+  });
+
+  /** The verb's `state`: whether the reader marked this post. */
+  function isSpamMarked(postId: string): boolean {
+    return deps.manager()?.isSpamMarked(postId) ?? false;
+  }
+
+  /** `feed-post-mark-as-spam-button` — a toggle. The plane write lands first and
+   *  collapses the post for the marker at once; then the shared façade runs with
+   *  the verb's new state (`fauna.moderation.train`, spam or ham). A failure of
+   *  either goes to `error-message` and never undoes the other. */
+  async function markPostSpam(postId: string): Promise<void> {
+    const id = get(identity);
+    const manager = deps.manager();
+    if (!id || !manager) { deps.setError(t.common.still_loading); return; }
+    const isSpam = !manager.isSpamMarked(postId);
+    let failure: string | null = null;
+    try {
+      const stored = isSpam ? await markSpam(id.secretHex, postId) : await unmarkSpam(id.secretHex, postId);
+      setSpamMarked(stored);
+      applySpamMarked(stored);
+    } catch (e) {
+      failure = e instanceof Error ? e.message : String(e);
+    }
+    try {
+      await trainPostSpam(id.secretHex, postId, isSpam);
+      // The façade moved the nest's shared count for this post, so its served
+      // labels may have changed (`report:spam` → `spam` at k). This tab's own
+      // plane write raises no store-change notice (`#lib/store-change`: the
+      // gesture repaints from its answer), so re-pull the current source here —
+      // tui and linux reload off their store-change notice for the same write.
+      await manager.refreshCurrentFeed();
+    } catch (e) {
+      failure ??= e instanceof Error ? e.message : String(e);
+    }
+    if (deps.destroyed()) return;
+    if (failure !== null) {
+      logMessage('warn', LOG, `mark-as-spam failed: ${failure}`);
+      deps.setError(t.feed.error_mark_spam({ message: failure }));
+    } else {
+      deps.setError('');
+    }
+    refreshFeed();
   }
 
   // ── Reply compose dialog (feed.md § Implementation status today: reply is
@@ -858,12 +955,16 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     isContentBlocked,
     guardianReasonFor,
     isContentReported,
+    showAgainForPost,
+    showAgainPost,
     isContentCollapsed,
     reportTargetFor,
     trainTargetFactor,
     trainMarkerFor,
     trainPost,
     trainInto,
+    isSpamMarked,
+    markPostSpam,
     replyTarget,
     closeReplyDialog,
     submitReply,

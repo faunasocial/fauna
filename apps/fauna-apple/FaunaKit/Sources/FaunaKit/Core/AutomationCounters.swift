@@ -118,3 +118,36 @@ public enum ReopensHandled {
         count &+= 1
     }
 }
+
+/// Delivered **launch verdicts** — apple's leg of the counters
+/// `fauna_e2e_agent::LAUNCH_VERDICTS_KEY` owns (`{"routed","superseded"}`), the
+/// barrier `test_launch_superseded_verdict.py` rests on (`onboarding.md`
+/// § App-launch routing → *A verdict renders only while its own launch is still
+/// the current one*; multiple-accounts outcome 17).
+///
+/// Bumped only by ``LaunchMachineBox/deliver(_:)``, the one seam every apple
+/// verdict passes before it is rendered or dropped — the cold launch's
+/// `machine.start()`, and the Trust and Retry re-sends on the held machine —
+/// so a delivery path added later counts itself. Not `#if DEBUG` for the reason
+/// the counters above are not: the writer is production launch code.
+///
+/// Counts DELIVERED verdicts only, as tui's and linux's do: a macOS launch
+/// retired while its binding was still resolving (`LaunchMachineBox.isCurrent`)
+/// never built a machine, so it never had a verdict to count.
+@MainActor
+public enum LaunchVerdicts {
+    /// Verdicts rendered because their launch was still the held one.
+    public private(set) static var routed: Int = 0
+    /// Verdicts dropped because a newer session had retired their launch.
+    public private(set) static var superseded: Int = 0
+
+    /// Count one delivered verdict, before it is rendered or dropped.
+    public static func record(current: Bool) {
+        if current { routed &+= 1 } else { superseded &+= 1 }
+    }
+
+    /// `state.launch_verdicts`'s value.
+    public static var observable: [String: Int] {
+        ["routed": routed, "superseded": superseded]
+    }
+}

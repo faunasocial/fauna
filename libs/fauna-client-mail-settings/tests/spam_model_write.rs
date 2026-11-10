@@ -623,6 +623,39 @@ async fn train_mail_facade_seals_an_insert_history_row() {
 }
 
 #[tokio::test]
+async fn train_mail_facade_sends_an_overlong_message_id_as_a_digest_within_the_nest_cap() {
+    // A mail-rail `Message-ID:` header may be up to 998 octets; the nest refuses a
+    // history `message_id` over its cap, which would silently drop the train.
+    let (machine, nest, _cfg) = build(&[SPAM_MODEL_SEALED_AT_REST], true);
+    let long_id = vec![b'a'; 900];
+    machine
+        .train_spam_model_client_mail(
+            "buy cheap pills now".into(),
+            true,
+            long_id.clone(),
+            "INBOX".into(),
+            "Cheap".into(),
+        )
+        .await
+        .expect("mail train");
+    let Some(SpamHistoryOp::Insert { message_id, .. }) = nest
+        .state()
+        .put_spam_model_history_op
+        .clone()
+        .expect("history op recorded")
+    else {
+        panic!("expected Insert");
+    };
+    assert!(
+        !message_id.is_empty()
+            && message_id.len() <= fauna_protocol::wrapped_blob::SPAM_HISTORY_MESSAGE_ID_MAX_BYTES,
+        "id of {} bytes would be refused by the nest",
+        message_id.len()
+    );
+    assert_ne!(message_id, long_id);
+}
+
+#[tokio::test]
 async fn train_mail_facade_reports_a_duplicate_as_sealed_with_the_count_on_record() {
     // The nest's one-lesson rule (`mail-spam.md` § 3) rejects the whole write:
     // the façade must report the SEALED path (no server-train fallback) with the

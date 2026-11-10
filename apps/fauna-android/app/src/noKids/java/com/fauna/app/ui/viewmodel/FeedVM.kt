@@ -115,6 +115,7 @@ class FeedVM @Inject constructor(
             }
         })
         window = w
+        w.setSpamMarked(host.spamMarked())
         _windowSnapshot.value = w.snapshot()
         contentPolicyStore.refresh()
         viewModelScope.launch { w.refreshCurrentFeed() }
@@ -135,9 +136,69 @@ class FeedVM @Inject constructor(
      */
     val contentPolicyInputs: StateFlow<ContentPolicyInputs> get() = contentPolicyStore.inputs
 
+    init {
+        // The spam marks the shared store loads beside the hide list reach the
+        // manager(s) this VM paints off (`report-sharing.md` § Report capture →
+        // *The post's mark-as-spam verb*).
+        viewModelScope.launch {
+            contentPolicyStore.spamMarked.collect { ids ->
+                host.setSpamMarked(ids)
+                window?.setSpamMarked(ids)
+            }
+        }
+    }
+
+    /** The mark-as-spam verb's `state`: whether the reader marked [postId]. */
+    fun isSpamMarked(postId: String): Boolean = manager()?.isSpamMarked(postId) ?: false
+
+    /**
+     * Mark-as-spam failures (`feed-post-mark-as-spam-button`) — a separate
+     * channel like [trainError]: a failure mutates no page state, and it MUST
+     * reach `error-message` (testing.md § Cross-app e2e conventions, point 11).
+     * Carries the raw message; the screen wraps it in `feed_error_mark_spam`.
+     */
+    private val _markSpamError = MutableStateFlow<String?>(null)
+    val markSpamError: StateFlow<String?> = _markSpamError.asStateFlow()
+
+    /**
+     * `feed-post-mark-as-spam-button` — the toggle (`report-sharing.md` § Report
+     * capture → *The post's mark-as-spam verb*). The plane write lands first and
+     * its stored list goes to the manager (the post collapses for the marker at
+     * once); then the shared façade runs with the verb's new state
+     * (`train_moderation_correction`, or the nest half alone with no mail
+     * machine). A failure of either reaches [markSpamError] and never undoes the
+     * other.
+     */
+    fun markPostSpam(postId: String) {
+        val m = manager() ?: return
+        val isSpam = !m.isSpamMarked(postId)
+        viewModelScope.launch {
+            var failure: String? = null
+            try {
+                val stored = if (isSpam) api.markSpam(postId) else api.unmarkSpam(postId)
+                m.setSpamMarked(stored)
+                contentPolicyStore.setSpamMarked(stored)
+            } catch (e: Exception) {
+                failure = e.message ?: "mark failed"
+            }
+            try {
+                api.trainModerationCorrection(postId, isSpam)
+            } catch (e: Exception) {
+                if (failure == null) failure = e.message ?: "train failed"
+            }
+            _markSpamError.value = failure
+        }
+    }
+
     /** `feed-post-report-button` — open the shared report sheet on [target]
      *  (moderation.md § User-initiated reporting; the shell's ReportHost paints it). */
     fun openReport(target: com.fauna.ffi.FfiReportTarget) = contentPolicyStore.report.open(target)
+
+    /** `content-policy-show-again-button` — un-hide what the viewer's own report
+     *  hid (moderation.md § Corollary — the reporter's hide is theirs to undo). */
+    fun showAgain(ids: List<String>) {
+        viewModelScope.launch { contentPolicyStore.report.showAgain(ids) }
+    }
 
     /** Count a rendered post's guardian-rule enforcement for **Guardian Notify**
      *  (family-safety.md § Guardian Notify) — a no-op unless the ward's

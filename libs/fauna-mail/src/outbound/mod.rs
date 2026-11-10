@@ -19,6 +19,8 @@ pub mod dane;
 pub mod dkim;
 #[cfg(feature = "dmarc-report")]
 pub mod dmarc;
+#[cfg(feature = "outbound-net")]
+pub mod dnssec_path;
 pub mod dsn;
 pub mod metrics;
 pub mod mta_sts;

@@ -757,7 +757,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // does this file live", which after a search jump is the question.
             // By the item's own value, never its name: a shared set named like
             // one of the caller's own would land the browse in the wrong one.
-            m.set_filter(Some(item.filter_value.clone()));
+            Arc::clone(&m).set_filter(Some(item.filter_value.clone()));
             open_detail_for(app, &m, item)
         }
         Action::CloseDetail => {

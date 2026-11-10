@@ -82,7 +82,7 @@ def test_a_link_the_nest_cannot_preview_stays_a_plain_link(logged_in_app):
         diagnose=lambda: f"link_previews={previews()!r} error={app.error_text()!r}",
     )
 
-    at = feed.post_index_by_id(post_id)
+    at = feed.card_index_by_id(post_id)
     scope = f"post-card[{at}]"
     assert d.count("link-preview-card", scope=scope) == 0, (
         "a link the nest could not preview must paint no link-preview-card"

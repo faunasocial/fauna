@@ -118,8 +118,9 @@ company's servers. Nothing stays with us.
 
 **Your nest.** The nest is the server program that you, or the admin of the
 nest you joined, run — on a rented machine, on a computer at home, or as the
-optional nest service in the Windows and Mac installers. It talks only to the
-kinds of place named below, and it never reports to us.
+optional nest service in the Windows installer (and in the Mac installer, once
+it is published). It talks only to the kinds of place named below, and it never
+reports to us.
 
 To other Fauna nests, only for what its users and its admin do there and for
 the upkeep between nests — among them these, over a connection it signs with

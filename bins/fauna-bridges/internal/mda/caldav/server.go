@@ -13,6 +13,7 @@ import (
 
 	"github.com/emersion/go-webdav/caldav"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/authlock"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/httpdrain"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/dav"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/davauth"
@@ -58,8 +59,12 @@ const (
 // One instance per listening address; the same Server is used by
 // both implicit-TLS (`:443`) listeners.
 type Server struct {
-	inner  *http.Server
-	logger *slog.Logger
+	inner *http.Server
+	// handler is the mux inner serves, WITHOUT inner's httpdrain wrap: Handler()
+	// hands it to the shared-443 server, which wraps its own mux once (carddav's
+	// shape). Returning inner.Handler instead would drain a mounted request twice.
+	handler http.Handler
+	logger  *slog.Logger
 	// lockout is the per-(credential, source-IP) AUTH-failure brake shared
 	// with the auth middleware. ApplyConfig hot-swaps the pointed-to
 	// instance on a `config_changed` re-fetch; the middleware Loads it per
@@ -243,7 +248,10 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 	mux.Handle("/", accessLogMiddleware(davauth.NewMiddleware(caldavRealm, w1Mitigations(ifMatchMiddleware(newPropPatchInterceptor(newMkcalendarInterceptor(newMoveCopyInterceptor(newSyncCollectionInterceptor(newSchedulingInterceptor(dav.QuotaBody(handler), logger, cfg.CardDAVEnabled), logger), logger), logger), logger))), client, logger, lockout, primaryDomain), logger))
 
 	inner := &http.Server{
-		Handler:           mux,
+		// The drain discards (never buffers) what a refused request left of its
+		// body — davauth's anonymous 401 comes before any body byte is read — so
+		// a Connection: close client gets the 401 rather than a reset.
+		Handler:           httpdrain.Handler(mux),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
@@ -253,6 +261,7 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 	}
 	return &Server{
 		inner:         inner,
+		handler:       mux,
 		logger:        logger,
 		lockout:       lockout,
 		primaryDomain: primaryDomain,
@@ -274,7 +283,7 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 // middleware chain and ApplyConfig are unchanged, so CalDAV serving is
 // byte-identical whether reached standalone or under the shared mux.
 func (s *Server) Handler() http.Handler {
-	return s.inner.Handler
+	return s.handler
 }
 
 // ApplyConfig hot-swaps the AUTH-failure ceiling from a freshly fetched

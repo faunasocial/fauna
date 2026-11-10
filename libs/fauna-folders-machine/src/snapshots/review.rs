@@ -34,4 +34,16 @@ pub struct ReviewSnapshot {
     pub failed_members: Vec<String>,
     /// Structured submit error, `None` until a failure.
     pub error: Option<LocalizedText>,
+    /// The create-time audience, for Review's read-only "Who can see it" line
+    /// (`devices.wizard.review_audience`): `private` or `public`.
+    #[cfg_attr(feature = "uniffi", uniffi(default = "private"))]
+    #[serde(default = "super::name::default_audience")]
+    pub audience: String,
+    /// A Public wizard's Create armed the declassify confirm — every app paints
+    /// `folder-audience-public-confirm` off this, and answers it with
+    /// `confirm_public_create()` / `cancel_public_create()`
+    /// (`ui/folders.md` § Audience and website serving → *Born public*).
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub declassify_armed: bool,
 }

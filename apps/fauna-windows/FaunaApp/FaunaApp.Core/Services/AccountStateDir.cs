@@ -119,65 +119,48 @@ public static class AccountStateDir
     }
 
     /// <summary>
-    /// Erase ONE account's scoped stores — the "remove this account from this
-    /// install" half of § Erasure follows scope.
+    /// The remove-account gesture, whole — windows' one call to the shared
+    /// <c>remove_account_gesture</c> export (<c>account-scoping.md</c> § Erasure follows
+    /// scope → <i>Removing an account retires this machine from it, as a sign-out does</i>):
+    /// the remove door, the snapshot-and-remove, this machine's retirement on the removed
+    /// account's nest, and the erase. <c>null</c> = removed; a refusal = paint the case's
+    /// <c>line</c>, nothing changed; a throw = the registry refused, nothing else ran.
+    ///
+    /// <para><b>Behind every account-runtime stop still in flight, first.</b> The account
+    /// being removed is never the one this window serves, but it can be the one it served a
+    /// moment ago: a switch starts the outgoing account's stop without waiting for it, and
+    /// both the nest half (which assembles over the same account store) and the erase meet a
+    /// store that stop has yet to close (<c>os error 32</c> on windows). So the wait comes
+    /// before the whole call, not just its erase — bounded by
+    /// <see cref="AccountRuntimeStops.StopBudget"/>, going on anyway on a lapse (logged by the
+    /// barrier). Nothing has changed during the wait, so a crash inside it leaves the account
+    /// listed with no partial state.</para>
+    ///
+    /// <para>The arguments are this seat's: <see cref="Base"/> is the one base — the install
+    /// base a sibling instance declares itself in, where the remove door asks and the
+    /// sign-out record (<c>sign-out-record.json</c>) is written — and the <c>null</c> store
+    /// container is the shared per-user store root, where this seat's account store lives
+    /// (<c>NestRpcClient.StartAccountRuntimeAsync</c> passes the same <c>null</c>: a desktop
+    /// has no container to name, matching macOS). The root is load-bearing: an erase that
+    /// skips it strands the account store, which then refuses every later sign-in ("belongs
+    /// to a different writer" — <c>account_state_erase_all_scopes</c>' doc comment).
+    /// <c>ownLock</c> and <c>servingHere</c> are <c>null</c> on purpose: windows serves through
+    /// the process-global holder (<see cref="SessionInstance"/>), so the door puts this
+    /// process's own locks down itself and reads the served account from that holder.</para>
+    ///
+    /// <para><paramref name="newRegistry"/> is the app's one registry builder
+    /// (<c>CredentialStore.Registry</c>, which Core cannot reach). The registry is built for
+    /// this call and disposed after it, never borrowed from the page: the page disposes its
+    /// own on navigation, and a press followed by leaving the page during the wait would
+    /// otherwise lose the removal.</para>
     /// </summary>
-    public static void Erase(string actorIdHex)
-    {
-        // `null` container dir = the shared per-user root (`StoreRoot::platform()`
-        // in shared Rust), which is where this seat's W3 (account-data-plane.md § Workstreams) account store lives
-        // (`NestRpcClient.StartAccountRuntimeAsync` passes the same `null`
-        // storeContainer — a desktop `NotApplicable` cloud-backup posture, no
-        // container to name, matching macOS). Android passes an explicit dir
-        // instead only because its app-private files root is not the platform
-        // default. Passing the root is load-bearing, not optional: an erase
-        // that skips it strands the account store, which then refuses every
-        // later sign-in ("belongs to a different writer") — see
-        // `account_state_erase_all_scopes`' doc comment for the measured failure.
-        try { FaunaFfiMethods.AccountStateEraseScope(Base, actorIdHex, null); }
-        catch (Exception ex) { ShellLog.Warn("AccountStateDir", $"erase scope failed: {ex.Message}"); }
-    }
-
-    /// <summary>
-    /// <see cref="Erase"/>, behind every account-runtime stop still in flight — the
-    /// remove-account erase's own order (<c>account-scoping.md</c> § Erasure follows scope:
-    /// stop, then erase). The account being removed is never the one this window serves,
-    /// but it can be the one it served a moment ago: a switch starts the outgoing
-    /// account's stop without waiting for it, and windows cannot delete the store that
-    /// stop has yet to close (<c>os error 32</c>). Bounded by
-    /// <see cref="AccountRuntimeStops.StopBudget"/>; on a lapse it erases anyway, and the
-    /// failure is logged by both the barrier and the erase.
-    /// </summary>
-    public static async Task EraseWhenStoppedAsync(string actorIdHex)
+    internal static async Task<FfiEraseRemoveBlocked?> RemoveAccountGestureAsync(
+        Func<FfiAccountRegistry> newRegistry, string actorIdHex)
     {
         await AccountRuntimeStops.Process.BarrierAsync("remove-account").ConfigureAwait(false);
-        Erase(actorIdHex);
-    }
-
-    /// <summary>
-    /// <b>May remove-account erase <paramref name="actorIdHex"/>?</b> The shared door
-    /// (<c>fauna-ffi</c>'s <c>remove_account_blocked</c>) asked about exactly the two bases
-    /// <see cref="Erase"/> sweeps — <see cref="Base"/> and the shared store root
-    /// (<c>null</c> container, same reasoning as there). <c>null</c> = proceed; otherwise
-    /// paint the case's <c>line</c> and remove nothing (<c>account-scoping.md</c> § Concurrent
-    /// instances → <i>An erase refuses while a sibling serves the account</i>).
-    ///
-    /// <para><c>ownLock</c> and <c>servingHere</c> are <c>null</c> on purpose: windows serves
-    /// through the process-global holder (<see cref="SessionInstance"/>), so the door puts
-    /// this process's own locks down itself and reads the served account from that holder.
-    /// Ask BEFORE the registry removal, which drops the account's secret slots.</para>
-    ///
-    /// <para>A door that throws degrades open (<c>null</c>), like every reader of these
-    /// locks: the alternative is an account its owner can never remove.</para>
-    /// </summary>
-    internal static FfiEraseRemoveBlocked? RemoveAccountBlocked(string actorIdHex)
-    {
-        try { return FaunaFfiMethods.RemoveAccountBlocked(Base, actorIdHex, null, null, null); }
-        catch (Exception ex)
-        {
-            ShellLog.Warn("AccountStateDir", $"remove-account probe failed, proceeding: {ex.Message}");
-            return null;
-        }
+        using var registry = newRegistry();
+        return await FaunaFfiMethods.RemoveAccountGesture(
+            registry, actorIdHex, new[] { Base }, null, null, null).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -218,7 +201,7 @@ public static class AccountStateDir
     /// at all.</para></remarks>
     internal static FfiEraseSweep? EraseAll()
     {
-        // `null` container dir — same reasoning as Erase() above. This is the
+        // `null` container dir — same reasoning as RemoveAccountGestureAsync above. This is the
         // sign-out/factory-reset path, i.e. exactly the one whose omission the
         // shared doc calls "worse than stale bytes".
         //

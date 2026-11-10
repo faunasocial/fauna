@@ -114,6 +114,27 @@ pub trait ContactCorpusRead: Send + Sync {
     async fn read_corpus(&self) -> Result<Vec<LocatedContact>, String>;
 }
 
+/// One resolved calendar event: the current text to render, keyed by the
+/// identity the index holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedEvent {
+    /// The event's `uid_hash`, hex-lowercase — matches the indexed `content_id`.
+    pub uid_hash: String,
+    /// The event's **current** display text (its summary), which the snippet
+    /// renders from.
+    pub body: String,
+}
+
+/// Reads the live calendar corpus at query time — the calendar arm's class
+/// resolver, the mail/calendar-class twin of [`ContactCorpusRead`]: one read
+/// per query for the whole result set, taken only when the set holds an event
+/// hit, and a failed read yields no event rows rather than an error row.
+#[async_trait::async_trait]
+pub trait CalendarCorpusRead: Send + Sync {
+    /// Every event in every one of the actor's calendars.
+    async fn read_events(&self) -> Result<Vec<LocatedEvent>, String>;
+}
+
 /// One resolved draft: the current body to render, and where to open it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocatedDraft {
@@ -228,6 +249,10 @@ pub struct MailLocalSearch {
     keys: MailcalKeyRing,
     publisher: Arc<IndexRailPublisher>,
     lookup: Arc<dyn MailContentLookup>,
+    /// The calendar arm's class resolver, when the launcher attached one. `None`
+    /// ⇒ this reader does not claim the Calendar kind at all (see
+    /// [`mail_kinds`]): every event hit would be dropped at projection.
+    calendar: Option<Arc<dyn CalendarCorpusRead>>,
     /// The reader opened at some past query, kept so a query whose index has not
     /// moved pays one `list()` instead of refetching and unsealing every live
     /// segment. See [`Self::reader`] for why the manifest hash is the right
@@ -248,8 +273,16 @@ impl MailLocalSearch {
             keys,
             publisher,
             lookup,
+            calendar: None,
             cached: Mutex::new(None),
         }
+    }
+
+    /// Attach the calendar arm's query-time resolver — what lets this reader
+    /// answer for the Calendar kind (`content-index.md` § Where queries run).
+    pub fn with_calendar(mut self, calendar: Arc<dyn CalendarCorpusRead>) -> Self {
+        self.calendar = Some(calendar);
+        self
     }
 
     /// The reader to answer this query with — the cached one if the published
@@ -295,7 +328,7 @@ impl LocalSearchIndex for MailLocalSearch {
         kinds: &[SearchKindClass],
         limit: usize,
     ) -> Result<Vec<LocalSearchHit>, String> {
-        let selected = local_kinds(kinds);
+        let selected = mail_kinds(kinds, self.calendar.is_some());
         if selected.is_empty() {
             // The manager already skips the arm when the filter selects no local
             // class; this covers a filter that selects only classes another
@@ -315,11 +348,52 @@ impl LocalSearchIndex for MailLocalSearch {
                 .map_err(|e| format!("local index query panicked: {e}"))?
                 .map_err(|e| e.to_string())?;
 
+        // One calendar read for every event hit in the set, taken only when the
+        // set holds one — the calendar arm's class resolver, the contacts
+        // resolver's shape. A failed read is an unresolvable hit: no event
+        // rows, never an error row.
+        let events = match self.calendar.as_ref() {
+            Some(calendar) if hits.iter().any(|h| h.kind == ContentKind::Calendar) => {
+                match calendar.read_events().await {
+                    Ok(events) => events
+                        .into_iter()
+                        .map(|e| (e.uid_hash, e.body))
+                        .collect::<std::collections::HashMap<_, _>>(),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "index: calendar resolve failed, dropping event rows");
+                        std::collections::HashMap::new()
+                    }
+                }
+            }
+            _ => std::collections::HashMap::new(),
+        };
+
         Ok(hits
             .iter()
-            .filter_map(|hit| project_hit(hit, self.lookup.as_ref()))
+            .filter_map(|hit| match hit.kind {
+                ContentKind::Calendar => project_event_hit(hit, &events),
+                _ => project_hit(hit, self.lookup.as_ref()),
+            })
             .collect())
     }
+}
+
+fn project_event_hit(
+    hit: &QueryHit,
+    events: &std::collections::HashMap<String, String>,
+) -> Option<LocalSearchHit> {
+    let uid_hash = String::from_utf8(hit.content_id.0.clone()).ok()?;
+    let body = events.get(&uid_hash)?.clone();
+    Some(LocalSearchHit {
+        content_type: content_type_for(hit.kind).to_string(),
+        snippet: body,
+        timestamp: hit.timestamp_ns / 1_000_000,
+        score: hit.score,
+        navigation: Some(SearchNav::Event {
+            uid_hash: uid_hash.clone(),
+        }),
+        content_id: uid_hash,
+    })
 }
 
 /// The **master-class** slice of backend 2 — the counterpart of
@@ -629,6 +703,16 @@ fn project_file_hit(
 /// The caller's classes, narrowed to the ones this key class actually serves.
 fn local_kinds(kinds: &[SearchKindClass]) -> Vec<ContentKind> {
     kinds.iter().filter_map(content_kind).collect()
+}
+
+/// The kinds the mail/calendar reader asks the engine for: [`local_kinds`],
+/// minus Calendar when no calendar resolver is attached — the
+/// claim-nothing-you-cannot-project rule [`master_kinds`] applies to contacts.
+fn mail_kinds(kinds: &[SearchKindClass], calendar_resolver: bool) -> Vec<ContentKind> {
+    local_kinds(kinds)
+        .into_iter()
+        .filter(|kind| calendar_resolver || *kind != ContentKind::Calendar)
+        .collect()
 }
 
 /// The master reader's half of the same narrowing.
@@ -980,6 +1064,39 @@ mod tests {
         );
         assert_eq!(
             local_kinds(&[SearchKindClass::Mail, SearchKindClass::Calendar]),
+            vec![ContentKind::Mail, ContentKind::Calendar]
+        );
+    }
+
+    /// An event hit resolves through the calendar read and navigates to the
+    /// event by its `uid_hash`; a hit the read no longer holds is dropped.
+    #[test]
+    fn an_event_hit_projects_from_the_calendar_read_or_is_dropped() {
+        let mut h = hit("ab12");
+        h.kind = ContentKind::Calendar;
+        let mut events = HashMap::new();
+        events.insert("ab12".to_string(), "Harbour picnic".to_string());
+
+        let row = project_event_hit(&h, &events).expect("the event resolves");
+        assert_eq!(row.content_type, "calendar");
+        assert_eq!(row.snippet, "Harbour picnic");
+        assert_eq!(
+            row.navigation,
+            Some(SearchNav::Event {
+                uid_hash: "ab12".into()
+            })
+        );
+        assert_eq!(project_event_hit(&h, &HashMap::new()), None);
+    }
+
+    /// Without a calendar resolver the mail reader does not claim Calendar —
+    /// every event hit would be dropped at projection.
+    #[test]
+    fn the_mail_reader_claims_calendar_only_with_its_resolver() {
+        let both = [SearchKindClass::Mail, SearchKindClass::Calendar];
+        assert_eq!(mail_kinds(&both, false), vec![ContentKind::Mail]);
+        assert_eq!(
+            mail_kinds(&both, true),
             vec![ContentKind::Mail, ContentKind::Calendar]
         );
     }

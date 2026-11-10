@@ -66,6 +66,9 @@ struct WelcomeCall {
 struct MockNest {
     /// `channel_hex → ordered envelopes`; the server sequence is `index + 1`.
     channels: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    /// `(channel_hex, idempotency key)` of every keyed append (the MLS
+    /// outbox drain's send), in order; the envelope lands in `channels` too.
+    keyed_sends: Mutex<Vec<(String, [u8; 16])>>,
     /// `channel_hex → per-send plaintext `attachment_refs``, parallel to
     /// `channels` — what the real nest records beside each mirror row (the
     /// conversation kind's blob-reachability floor, `encryption-at-rest.md`
@@ -395,6 +398,21 @@ impl MockNest {
 
 #[async_trait]
 impl ConversationsRpc for MockNest {
+    async fn channel_send_keyed(
+        &self,
+        channel_id_hex: String,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<i64, ConvRpcError> {
+        self.keyed_sends
+            .lock()
+            .unwrap()
+            .push((channel_id_hex.clone(), idempotency_key));
+        self.channel_send(channel_id_hex, envelope, None, attachment_refs)
+            .await
+    }
+
     async fn channel_send_remote(
         &self,
         _channel_id_hex: String,
@@ -2466,6 +2484,216 @@ async fn welcome_then_inbound_end_to_end() {
     );
 }
 
+/// **A Welcome that re-admits a removed member is joined, not swallowed as a
+/// re-delivery** (`delegable-scope-reclamation.md` § Delegable-scope
+/// reclamation, part (7): a re-joined conversation resumes where the device
+/// kept it). A left conversation stays bound to its thread, so an idempotency
+/// guard keyed on "bound" alone acked the re-admission and never joined it:
+/// the evicted group then refused every later commit and the channel's walk
+/// stalled for good. Bob joins, processes the commit removing him, takes the
+/// second Welcome, and reads a message sealed in the re-joined epoch — in the
+/// same thread.
+#[tokio::test]
+async fn a_welcome_re_admitting_a_removed_member_is_joined_into_the_same_thread() {
+    use fauna_mls::types::{ChannelEnvelope, ChannelMessage, ChannelMessageBody};
+
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob_actor = bob.identity_actor_id();
+    let mut kps = bob.generate_key_packages_bytes(2).unwrap();
+    let second_kp = kps.pop().unwrap();
+    let first_kp = alice.key_package_from_bytes(&kps.pop().unwrap()).unwrap();
+
+    let nest = Arc::new(MockNest::default());
+    let (channel, welcome) = alice.create_group(&[first_kp]).unwrap();
+    let channel_hex = channel.to_string();
+    let post = |envelope: Vec<u8>| {
+        nest.channels
+            .lock()
+            .unwrap()
+            .entry(channel_hex.clone())
+            .or_default()
+            .push(envelope);
+    };
+    let say = |sequence: u64, body: &str| {
+        alice
+            .encrypt_to_envelope(
+                &channel,
+                &ChannelMessage {
+                    sender: alice_actor,
+                    sequence,
+                    channel_epoch: 0,
+                    body: ChannelMessageBody::Text(body.into()),
+                    timestamp: fauna_core::data::Timestamp::now(),
+                },
+            )
+            .unwrap()
+    };
+
+    let bob_manager = ConversationsManager::new();
+    let bob_backend = Arc::new(FaunaMlsBackend::new(
+        bob.clone(),
+        nest.clone(),
+        "bob",
+        bob_actor,
+    ));
+    bob_manager.register_backend(bob_backend.clone());
+    let thread_id = ingest_welcome(
+        &bob_backend,
+        &bob_manager,
+        &channel_hex,
+        &welcome.to_bytes().unwrap(),
+        "",
+        None,
+    )
+    .await
+    .expect("first join");
+
+    // Removed: bob's walk processes the commit and his seat is evicted.
+    let mut after_seq = 0i64;
+    post(say(1, "before"));
+    let leaf = alice.find_leaf_by_identity(&channel, &bob_actor).unwrap();
+    let remove = alice.remove_member(&channel, leaf).unwrap();
+    post(fauna_cbor::encode_canonical(&ChannelEnvelope::Commit(remove)).unwrap());
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel, &mut after_seq, 0)
+        .await
+        .expect("poll the removal");
+    assert!(
+        bob.has_group(&channel) && !bob.is_group_active(&channel),
+        "bob is evicted"
+    );
+
+    // Re-admitted: the second Welcome is joined, into the same thread.
+    let (add, second_welcome) = alice.add_member_from_bytes(&channel, &second_kp).unwrap();
+    post(fauna_cbor::encode_canonical(&ChannelEnvelope::Commit(add)).unwrap());
+    let rejoined = ingest_welcome(
+        &bob_backend,
+        &bob_manager,
+        &channel_hex,
+        &second_welcome,
+        "",
+        None,
+    )
+    .await
+    .expect("re-admission join");
+    assert_eq!(
+        rejoined, thread_id,
+        "the re-joined channel keeps its thread"
+    );
+    assert!(bob.is_group_active(&channel), "the Welcome re-seated bob");
+
+    // The walk passes the commit it already holds the result of, and reads on.
+    post(say(2, "after"));
+    for _ in 0..3 {
+        poll_inbound_conv(&bob_backend, &bob_manager, &channel, &mut after_seq, 0)
+            .await
+            .expect("poll after the re-join");
+    }
+    let detail = bob_manager.thread_detail(thread_id).expect("thread");
+    assert!(
+        detail.messages.iter().any(|m| m.body == "after"),
+        "the message sealed in the re-joined epoch reaches the thread: {:?}",
+        detail.messages.iter().map(|m| &m.body).collect::<Vec<_>>()
+    );
+}
+
+/// **A member removed by another member stops naming the channel in its
+/// membership answer, and names it again once re-admitted**
+/// (`account-replica-posture.md` § T2 — eviction, transition (3) *Scope
+/// departure*: "membership revoked" is a departure, concluded, never
+/// inferred; `delegable-scope-reclamation.md` part (6): the device retires its
+/// own rows when it concludes the departure, part (7): a re-join writes them
+/// back). The left conversation stays bound to its thread and the evicted
+/// group stays in the engine, so an answer built from the binding and the
+/// engine's group list alone kept naming the channel after the Remove commit
+/// was folded — the departure was never concluded, and a device enrolled
+/// later read the removed device's stale read marker. The evicted seat is the
+/// affirmative signal: a channel never joined, or bound before its group is,
+/// holds no seat and is left in the answer.
+#[tokio::test]
+async fn a_member_removed_by_another_leaves_the_membership_answer_until_re_admitted() {
+    use fauna_mls::types::ChannelEnvelope;
+
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob_actor = bob.identity_actor_id();
+    let mut kps = bob.generate_key_packages_bytes(2).unwrap();
+    let second_kp = kps.pop().unwrap();
+    let first_kp = alice.key_package_from_bytes(&kps.pop().unwrap()).unwrap();
+
+    let nest = Arc::new(MockNest::default());
+    let (channel, welcome) = alice.create_group(&[first_kp]).unwrap();
+    let channel_hex = channel.to_string();
+    let post = |envelope: Vec<u8>| {
+        nest.channels
+            .lock()
+            .unwrap()
+            .entry(channel_hex.clone())
+            .or_default()
+            .push(envelope);
+    };
+
+    let bob_manager = ConversationsManager::new();
+    let bob_backend = Arc::new(FaunaMlsBackend::new(
+        bob.clone(),
+        nest.clone(),
+        "bob",
+        bob_actor,
+    ));
+    bob_manager.register_backend(bob_backend.clone());
+    ingest_welcome(
+        &bob_backend,
+        &bob_manager,
+        &channel_hex,
+        &welcome.to_bytes().unwrap(),
+        "",
+        None,
+    )
+    .await
+    .expect("first join");
+    assert_eq!(bob_backend.conv_channels(), vec![channel], "joined");
+
+    let mut after_seq = 0i64;
+    let leaf = alice.find_leaf_by_identity(&channel, &bob_actor).unwrap();
+    let remove = alice.remove_member(&channel, leaf).unwrap();
+    post(fauna_cbor::encode_canonical(&ChannelEnvelope::Commit(remove)).unwrap());
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel, &mut after_seq, 0)
+        .await
+        .expect("poll the removal");
+    assert!(
+        bob.has_group(&channel) && !bob.is_group_active(&channel),
+        "bob is evicted"
+    );
+    assert!(
+        bob_backend.thread_for_channel(&channel).is_some(),
+        "the left conversation stays bound to its thread, for the re-join"
+    );
+    assert_eq!(
+        bob_backend.conv_channels(),
+        Vec::new(),
+        "an evicted seat is a concluded departure: the answer no longer names the channel"
+    );
+
+    let (add, second_welcome) = alice.add_member_from_bytes(&channel, &second_kp).unwrap();
+    post(fauna_cbor::encode_canonical(&ChannelEnvelope::Commit(add)).unwrap());
+    ingest_welcome(
+        &bob_backend,
+        &bob_manager,
+        &channel_hex,
+        &second_welcome,
+        "",
+        None,
+    )
+    .await
+    .expect("re-admission join");
+    assert_eq!(
+        bob_backend.conv_channels(),
+        vec![channel],
+        "re-admitted: the channel re-enters the answer, which writes the marker back"
+    );
+}
+
 /// Parse a channel hex string back into a `ChannelId` for the driver call.
 fn channel_id_from_hex(hex_str: &str) -> fauna_mls::types::ChannelId {
     fauna_mls::types::ChannelId::from_hex(hex_str).expect("valid channel hex")
@@ -2854,6 +3082,394 @@ async fn attachment_c2pa_detected_on_inbound_for_signed_image() {
 /// member. After the add, an application message Alice sends decrypts for both
 /// the pre-existing member (who processed the commit) and the new member (who
 /// joined from the Welcome).
+/// A queued MLS intent drains sealed at the channel's **then-current** epoch,
+/// not the one it was composed in, under its intent id as the append's
+/// idempotency key (`devices.md` § Offline compose → *Drain*, *Idempotency*).
+/// The proof of the epoch: Carol joins only after the epoch moved on (an add
+/// commit lands between compose and drain), and still decrypts the drained
+/// message — a seal at the compose epoch is one she holds no secret for.
+#[tokio::test]
+async fn a_queued_intent_drains_sealed_at_the_then_current_epoch_under_its_intent_id() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let carol = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let (channel_id, welcome) = alice
+        .create_group(&bob.generate_key_packages(1).unwrap())
+        .unwrap();
+    bob.join_from_welcome(welcome).unwrap();
+
+    let nest = Arc::new(MockNest::default());
+    let carol_actor = carol.identity_actor_id();
+    nest.seed_keypackage(
+        &hex::encode(carol_actor.0),
+        carol.generate_key_packages_bytes(1).unwrap()[0].clone(),
+    );
+    let backend = FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice.identity_actor_id(),
+    );
+    let thread_id = ThreadId("q-1".into());
+    backend.bind_channel(thread_id.clone(), channel_id);
+    assert!(
+        backend.queueable_channel(&thread_id).is_some(),
+        "a bound group this device holds is a queueable channel"
+    );
+    assert!(
+        backend
+            .queueable_channel(&ThreadId("unbound".into()))
+            .is_none(),
+        "a first send bootstraps a group: membership, online-only"
+    );
+
+    // Composed (and queued) at e0 — the epoch then moves on before the drain.
+    let compose_epoch = alice.current_epoch(&channel_id).unwrap();
+    backend
+        .add_participant(thread_id.clone(), fauna_addr("carol", carol_actor))
+        .await
+        .expect("add ok");
+    let drain_epoch = alice.current_epoch(&channel_id).unwrap();
+    assert!(drain_epoch > compose_epoch);
+    carol
+        .join_from_welcome_bytes(&nest.welcomes()[0].welcome_bytes)
+        .expect("carol joins at the new epoch");
+
+    let key = [7u8; 16];
+    let compose = ComposeState {
+        body_draft: "typed with no nest".into(),
+        ..Default::default()
+    };
+    let outcome = backend
+        .send_queued(&fauna_mls_thread(thread_id, vec![]), &compose, &[], key)
+        .await
+        .expect("drained");
+
+    assert_eq!(
+        nest.keyed_sends.lock().unwrap().clone(),
+        vec![(channel_id.to_string(), key)],
+        "the append carries the intent id as its idempotency key"
+    );
+    let envelopes = nest.sent_envelopes(&channel_id.to_string());
+    let ChannelEnvelope::Application(sealed) =
+        ChannelEnvelope::from_bytes(envelopes.last().unwrap()).unwrap()
+    else {
+        panic!("the drained intent is an application message");
+    };
+    match carol
+        .decrypt(&channel_id, &sealed)
+        .expect("sealed at the drain epoch")
+        .body
+    {
+        ChannelMessageBody::Text(t) => assert_eq!(t, "typed with no nest"),
+        other => panic!("expected Text body, got {other:?}"),
+    }
+    assert_eq!(
+        outcome.message_id,
+        MessageId(format!("conv:{channel_id}:{}", envelopes.len()))
+    );
+}
+
+/// The app's outbox as the composer sees it: a connection word and the MLS
+/// door, recording what was queued.
+struct RecordingOutbox {
+    word: Mutex<String>,
+    queued: Mutex<Vec<(String, Vec<u8>)>>,
+    /// The stored failure code of the one queued intent, once the test parks
+    /// it — the outbox's `Failed` row.
+    parked: Mutex<Option<String>>,
+    /// Each settle the manager asked for: `("retry" | "discard", intent)`.
+    settled: Mutex<Vec<(&'static str, [u8; 16])>>,
+}
+
+impl RecordingOutbox {
+    fn new(word: &str) -> Arc<Self> {
+        Arc::new(Self {
+            word: Mutex::new(word.into()),
+            queued: Mutex::new(Vec::new()),
+            parked: Mutex::new(None),
+            settled: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl fauna_core::offline_intent::OfflineIntentQueue for RecordingOutbox {
+    fn connection_state(&self) -> String {
+        self.word.lock().unwrap().clone()
+    }
+    async fn enqueue(&self, kind: &'static str, _: String, _: Vec<u8>) -> Result<[u8; 16], String> {
+        Err(format!(
+            "a conversations send never takes the generic door ({kind})"
+        ))
+    }
+    async fn enqueue_mls(&self, scope: String, payload: Vec<u8>) -> Result<[u8; 16], String> {
+        self.queued.lock().unwrap().push((scope, payload));
+        Ok([5; 16])
+    }
+    async fn unsent_changes(
+        &self,
+    ) -> Result<Vec<fauna_core::offline_intent::UnsentChange>, String> {
+        use fauna_core::offline_intent::{MLS_INTENT_KIND, UnsentChange, UnsentState};
+        let parked = self.parked.lock().unwrap().clone();
+        Ok(self
+            .queued
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(scope, payload)| UnsentChange {
+                intent_id: "05".repeat(16),
+                kind: MLS_INTENT_KIND.into(),
+                scope: scope.clone(),
+                state: match &parked {
+                    Some(code) => UnsentState::Unsent {
+                        reason_code: code.clone(),
+                    },
+                    None => UnsentState::Waiting,
+                },
+                created_at: 0,
+                attempts: 0,
+                description: fauna_protocol::offline_describe::describe_intent(
+                    MLS_INTENT_KIND,
+                    payload,
+                ),
+            })
+            .collect())
+    }
+    async fn retry_intent(&self, intent_id: [u8; 16]) -> Result<bool, String> {
+        self.settled.lock().unwrap().push(("retry", intent_id));
+        Ok(self.parked.lock().unwrap().take().is_some())
+    }
+    async fn discard_intent(&self, intent_id: [u8; 16]) -> Result<bool, String> {
+        self.settled.lock().unwrap().push(("discard", intent_id));
+        if self.parked.lock().unwrap().take().is_none() {
+            return Ok(false);
+        }
+        self.queued.lock().unwrap().clear();
+        Ok(true)
+    }
+}
+
+/// The composer arm end to end over the manager: with no nest, a send on a
+/// bound group queues a plaintext intent (nothing reaches the nest, the own
+/// copy shows under its queued id, the draft clears); the drain then sends it
+/// keyed and the queued copy gives way to the nest-assigned one; and with the
+/// nest back a send goes out as ever, never queued.
+#[tokio::test]
+async fn an_offline_send_on_a_bound_group_queues_a_plaintext_intent_then_drains() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let (channel_id, welcome) = alice
+        .create_group(&bob.generate_key_packages(1).unwrap())
+        .unwrap();
+    bob.join_from_welcome(welcome).unwrap();
+    let nest = Arc::new(MockNest::default());
+    let manager = ConversationsManager::new();
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    manager.register_backend(backend.clone());
+    let bob_actor = bob.identity_actor_id();
+    manager
+        .ingest_inbound(RailInboundMessage {
+            rail: Rail::FaunaMls,
+            sender: fauna_addr("bob", bob_actor),
+            recipients: vec![fauna_addr("alice", alice_actor)],
+            subject: None,
+            body: "<<setup>>".into(),
+            body_format: BodyFormat::PlainText,
+            timestamp_ms: 1,
+            message_id: MessageId("setup".into()),
+            in_reply_to: None,
+            attachments: vec![],
+            badges: MessageBadges::default(),
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            plane_ref: None,
+        })
+        .expect("setup ingest");
+    let thread_id = manager.snapshot().threads[0].thread_id.clone();
+    backend.bind_channel(thread_id.clone(), channel_id);
+    let outbox = RecordingOutbox::new("disconnected");
+    manager.set_offline_queue(Some(outbox.clone()));
+
+    manager.set_compose_body(thread_id.clone(), "typed with no nest".into());
+    manager
+        .send(thread_id.clone())
+        .await
+        .expect("queued, not failed");
+
+    assert_eq!(nest.total_sends(), 0, "no nest: nothing may be sent");
+    let queued = outbox.queued.lock().unwrap().clone();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(
+        queued[0].0,
+        format!("conv:{channel_id}"),
+        "channel FIFO scope"
+    );
+    let intent = fauna_conversations::offline_compose::MlsSendIntent::decode(&queued[0].1)
+        .expect("plaintext intent");
+    assert_eq!(intent.channel_id, channel_id.to_string());
+    assert_eq!(intent.body, "typed with no nest");
+    let queued_id = MessageId(format!("queued:{}", "05".repeat(16)));
+    let detail = manager.thread_detail(thread_id.clone()).unwrap();
+    assert!(
+        detail
+            .messages
+            .iter()
+            .any(|m| m.message_id == queued_id && m.is_own),
+        "the own copy shows under its queued id"
+    );
+    assert!(detail.compose.body_draft.is_empty(), "the draft clears");
+
+    // The nest is back: the drain sends the intent keyed by its id.
+    *outbox.word.lock().unwrap() = "connected".into();
+    let sent = manager
+        .send_queued_intent([5; 16], &intent, thread_id.clone())
+        .await
+        .expect("drained");
+    assert_eq!(
+        nest.keyed_sends.lock().unwrap().clone(),
+        vec![(channel_id.to_string(), [5; 16])]
+    );
+    let detail = manager.thread_detail(thread_id.clone()).unwrap();
+    assert!(
+        !detail.messages.iter().any(|m| m.message_id == queued_id),
+        "the queued copy gives way"
+    );
+    assert!(detail.messages.iter().any(|m| m.message_id == sent));
+    let ChannelEnvelope::Application(sealed) =
+        ChannelEnvelope::from_bytes(&nest.sent_envelopes(&channel_id.to_string())[0]).unwrap()
+    else {
+        panic!("an application message");
+    };
+    match bob
+        .decrypt(&channel_id, &sealed)
+        .expect("peer decrypts")
+        .body
+    {
+        ChannelMessageBody::Text(t) => assert_eq!(t, "typed with no nest"),
+        other => panic!("expected Text body, got {other:?}"),
+    }
+
+    // Online: an ordinary send, nothing queued.
+    manager.set_compose_body(thread_id.clone(), "online now".into());
+    manager.send(thread_id).await.expect("sent");
+    assert_eq!(outbox.queued.lock().unwrap().len(), 1, "nothing new queued");
+    assert_eq!(
+        nest.keyed_sends.lock().unwrap().len(),
+        1,
+        "an online send is unkeyed"
+    );
+    assert_eq!(nest.total_sends(), 2);
+}
+
+/// The queued own copy's state (`account-offline-mutation.md` § The
+/// offline-mutation contract → *The unsent-changes surface*, point 2;
+/// `devices.md` § Offline compose): the `queued:<intent>` copy reads
+/// `Queued`; once the outbox parks its intent it reads `Unsent` with the
+/// reason in words; retry re-arms it (queued again, still in the thread);
+/// discard deletes the parked intent and the copy leaves the thread. Neither
+/// door acts on a copy whose intent is not parked, nor on an ordinary message.
+#[tokio::test]
+async fn a_queued_own_copy_reads_its_outbox_state_and_retries_or_discards() {
+    use fauna_conversations::QueuedSendState;
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let (channel_id, welcome) = alice
+        .create_group(&bob.generate_key_packages(1).unwrap())
+        .unwrap();
+    bob.join_from_welcome(welcome).unwrap();
+    let nest = Arc::new(MockNest::default());
+    let manager = ConversationsManager::new();
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    manager.register_backend(backend.clone());
+    manager
+        .ingest_inbound(RailInboundMessage {
+            rail: Rail::FaunaMls,
+            sender: fauna_addr("bob", bob.identity_actor_id()),
+            recipients: vec![fauna_addr("alice", alice_actor)],
+            subject: None,
+            body: "<<setup>>".into(),
+            body_format: BodyFormat::PlainText,
+            timestamp_ms: 1,
+            message_id: MessageId("setup".into()),
+            in_reply_to: None,
+            attachments: vec![],
+            badges: MessageBadges::default(),
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            plane_ref: None,
+        })
+        .expect("setup ingest");
+    let thread_id = manager.snapshot().threads[0].thread_id.clone();
+    backend.bind_channel(thread_id.clone(), channel_id);
+    let outbox = RecordingOutbox::new("disconnected");
+    manager.set_offline_queue(Some(outbox.clone()));
+    manager.set_compose_body(thread_id.clone(), "typed with no nest".into());
+    manager.send(thread_id.clone()).await.expect("queued");
+
+    let queued_id = MessageId(format!("queued:{}", "05".repeat(16)));
+    let state_of = |id: &MessageId| {
+        manager
+            .thread_detail(thread_id.clone())
+            .unwrap()
+            .messages
+            .into_iter()
+            .find(|m| &m.message_id == id)
+            .map(|m| m.queued_send)
+    };
+    assert_eq!(state_of(&queued_id), Some(Some(QueuedSendState::Queued)));
+    assert_eq!(
+        state_of(&MessageId("setup".into())),
+        Some(None),
+        "an ordinary message carries no queued state"
+    );
+    assert!(
+        !manager.retry_queued_send(queued_id.clone()).await,
+        "a waiting copy is not retried"
+    );
+    assert!(
+        !manager.discard_queued_send(MessageId("setup".into())).await,
+        "an ordinary message is no queued copy"
+    );
+
+    let code = fauna_core::offline_intent::park_code::MLS_NOT_A_MEMBER;
+    *outbox.parked.lock().unwrap() = Some(code.into());
+    manager.refresh_unsent_sends().await;
+    assert_eq!(
+        state_of(&queued_id),
+        Some(Some(QueuedSendState::Unsent {
+            reason_code: code.into(),
+            reason: fauna_protocol::offline_describe::reason_text(code),
+        }))
+    );
+
+    assert!(manager.retry_queued_send(queued_id.clone()).await);
+    assert_eq!(state_of(&queued_id), Some(Some(QueuedSendState::Queued)));
+
+    *outbox.parked.lock().unwrap() = Some(code.into());
+    manager.refresh_unsent_sends().await;
+    assert!(manager.discard_queued_send(queued_id.clone()).await);
+    assert_eq!(state_of(&queued_id), None, "the discarded copy leaves");
+    assert_eq!(
+        *outbox.settled.lock().unwrap(),
+        vec![("retry", [5; 16]), ("retry", [5; 16]), ("discard", [5; 16]),],
+        "the ordinary message never reached the outbox"
+    );
+    assert_eq!(nest.total_sends(), 0, "nothing was sent: the outbox drains");
+}
+
 #[tokio::test]
 async fn add_participant_commits_and_welcomes_new_group_member() {
     // Alice forms a 2-person group with Bob (the create_group path).
@@ -3189,14 +3805,23 @@ async fn add_participant_refuses_to_guess_when_the_roster_is_unreadable() {
         .await
         .expect_err("an unverifiable duplicate add must not silently proceed");
 
-    let msg = err.to_string();
+    // A product refusal, never a diagnostic: `Internal` renders as the
+    // generic sentence (`conversations.md` § Errors & edge cases), which would
+    // drop the "specific, actionable error" the arm exists to say
+    // (`mls-group-key-material.md` § M2). The page reads `user_detail()`.
     assert!(
-        msg.contains(&carol_hex) && msg.contains("remove them from the group"),
-        "the error names who and what to do, actionably: {msg}"
+        matches!(err, BackendError::Refusal(_)),
+        "the refusal must reach the page as a product statement: {err:?}"
+    );
+    let msg = err.user_detail();
+    assert_eq!(
+        msg,
+        fauna_i18n::strings::conversations::unified::ERROR_ADD_PARTICIPANT_UNCONFIRMED,
+        "the page says what to do, in the localized sentence"
     );
     assert!(
-        !msg.contains("DuplicateSignatureKey"),
-        "never MLS's raw duplicate-credential string: {msg}"
+        !msg.contains(&carol_hex) && !msg.contains("DuplicateSignatureKey"),
+        "never a raw actor hex or MLS's duplicate-credential string: {msg}"
     );
     assert_eq!(
         alice.current_epoch(&channel_id).unwrap(),
@@ -3303,14 +3928,23 @@ async fn add_participant_on_a_foreign_homed_channel_refuses_under_version_skew()
         .add_participant(thread_id, fauna_addr("bob", bob_actor))
         .await
         .expect_err("an unreadable roster refuses; it never evicts on a guess");
-    let msg = err.to_string();
+    // A product refusal, never a diagnostic: `Internal` renders as the
+    // generic sentence (`conversations.md` § Errors & edge cases), which would
+    // drop the "specific, actionable error" the arm exists to say
+    // (`mls-group-key-material.md` § M2). The page reads `user_detail()`.
     assert!(
-        msg.contains(&bob_hex) && msg.contains("remove them from the group"),
-        "the error names who and what to do, actionably: {msg}"
+        matches!(err, BackendError::Refusal(_)),
+        "the refusal must reach the page as a product statement: {err:?}"
+    );
+    let msg = err.user_detail();
+    assert_eq!(
+        msg,
+        fauna_i18n::strings::conversations::unified::ERROR_ADD_PARTICIPANT_UNCONFIRMED,
+        "the page says what to do, in the localized sentence"
     );
     assert!(
-        !msg.contains("DuplicateSignatureKey"),
-        "never MLS's raw duplicate-credential string: {msg}"
+        !msg.contains(&bob_hex) && !msg.contains("DuplicateSignatureKey"),
+        "never a raw actor hex or MLS's duplicate-credential string: {msg}"
     );
     assert_eq!(
         alice.current_epoch(&channel_id).unwrap(),
@@ -6232,8 +6866,11 @@ async fn resolve_address_last_resort_only_peer_resolves() {
 }
 
 /// A 64-hex actor id whose actor has published key packages resolves to a
-/// `TypedAddress::Fauna` (rail = FaunaMls), carrying the typed hex as the handle
-/// and the decoded 32 bytes as the `ActorId`.
+/// `TypedAddress::Fauna` (rail = FaunaMls) carrying the decoded 32 bytes as the
+/// `ActorId` and NO handle: the typed hex is not a handle, so the participant
+/// is named by the roster, the id-keyed handle read or the short id — never by
+/// the raw 64-hex (`value-formatting.md` § Implementation status today, *Peer
+/// display label — the roster handle*).
 #[tokio::test]
 async fn resolve_address_actor_id_hex_with_keypackages_resolves() {
     let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
@@ -6254,7 +6891,7 @@ async fn resolve_address_actor_id_hex_with_keypackages_resolves() {
     match backend.resolve_address(&bob_hex).await {
         ResolveResult::Resolved(TypedAddress::Fauna { handle, actor_id }) => {
             assert_eq!(actor_id, bob_actor, "decoded the 32-byte key from the hex");
-            assert_eq!(handle, bob_hex, "the typed hex stands in as the handle");
+            assert_eq!(handle, "", "the typed hex is never stored as a handle");
         }
         other => panic!("expected Resolved(Fauna), got {other:?}"),
     }
@@ -8502,8 +9139,9 @@ async fn set_self_address_heals_a_session_built_before_identity_resolved() {
 /// conversations.md § Self-address: live, never baked — the FaunaMls data plane
 /// compares a peer's handle domain against OURS to route same-nest vs.
 /// federation relay. A session built before identity resolution has an empty
-/// self-domain, so every domain-carrying same-nest peer mis-routes as foreign;
-/// once the address lands in the live cell, the next bootstrap routes same-nest.
+/// self-domain and routes every peer same-nest (it cannot tell foreign from
+/// local); once the address lands in the live cell, the same domain still
+/// routes same-nest because it now equals ours.
 #[tokio::test]
 async fn set_self_address_heals_mls_same_nest_routing() {
     let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
@@ -8520,8 +9158,9 @@ async fn set_self_address_heals_mls_same_nest_routing() {
     let backend =
         FaunaMlsBackend::new_shared(alice.clone(), nest.clone(), Arc::clone(&cell), alice_actor);
 
-    // Race window: empty self-domain → bob@nest-a.test looks foreign and the
-    // Welcome mis-routes through the federation relay.
+    // Race window: empty self-domain → we cannot tell bob@nest-a.test from a
+    // foreign peer, and dialing his domain would relay to this very nest by
+    // name; the data plane routes same-nest until our domain resolves.
     let compose = ComposeState {
         body_draft: "ping".into(),
         ..Default::default()
@@ -8533,8 +9172,8 @@ async fn set_self_address_heals_mls_same_nest_routing() {
     backend.send(&thread, &compose, &[]).await.expect("send ok");
     assert_eq!(
         nest.welcomes()[0].peer_domain,
-        Some("nest-a.test".to_string()),
-        "unresolved self-domain mis-routes a same-nest peer as foreign — the gap"
+        None,
+        "an unresolved self-domain routes a domained peer same-nest, never foreign"
     );
 
     // The address lands → a new bootstrap routes the SAME domain same-nest.
@@ -8619,6 +9258,7 @@ async fn session_poll_mail_ingests_inbox_and_sent_feeds() {
             rfc5322: raw.into_bytes(),
             mailbox: fauna_conversations::backend::MailFeed::Inbox,
             suppress_from_view: false,
+            spam: Default::default(),
             has_seen_flag: false,
             warmup_hold: None,
         }
@@ -8756,7 +9396,7 @@ async fn session_receive_loop_reacts_to_mail_push() {
             message_id: b"in-1".to_vec(),
             internal_date_ms: 1000,
             rfc5322: b"From: bob@example.com\r\nTo: alice@fauna.test\r\nSubject: ping\r\n\r\nping body\r\n".to_vec(),
-            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false, warmup_hold: None,
+            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false, warmup_hold: None, spam: Default::default(),
         },
     });
     session.register_mail_receive(inbox.clone(), Arc::new(EmptyMail));
@@ -8897,7 +9537,7 @@ async fn session_receive_loop_sweeps_every_rail_on_reconnect() {
             message_id: b"reconnect-1".to_vec(),
             internal_date_ms: 1000,
             rfc5322: b"From: bob@example.com\r\nTo: alice@fauna.test\r\nSubject: while-you-were-out\r\n\r\nbody\r\n".to_vec(),
-            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false, warmup_hold: None,
+            mailbox: fauna_conversations::backend::MailFeed::Inbox, suppress_from_view: false, has_seen_flag: false, warmup_hold: None, spam: Default::default(),
         },
     });
     session.register_mail_receive(inbox.clone(), Arc::new(EmptyMail));
@@ -10059,6 +10699,630 @@ async fn the_hold_behind_a_parked_folder_statement_survives_a_relaunch() {
         bob.parked_folder_succession(&channel).is_none(),
         "the settle forgot the rested copy"
     );
+}
+
+/// A custody-sink double for the forked seat's self-unlist
+/// ([`FolderCustodySink::unlist_forked_seat`]): records every call and fails
+/// the first `fail_first` of them — and every forked-seat record clear
+/// ([`FolderCustodySink::clear_forked_seat`]).
+#[derive(Default)]
+struct UnlistRecorder {
+    calls: Mutex<Vec<(String, Option<String>)>>,
+    fail_first: Mutex<usize>,
+    clears: Mutex<Vec<[u8; 32]>>,
+}
+
+impl UnlistRecorder {
+    fn failing_first(n: usize) -> Self {
+        Self {
+            fail_first: Mutex::new(n),
+            ..Default::default()
+        }
+    }
+    fn calls(&self) -> Vec<(String, Option<String>)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl FolderCustodySink for UnlistRecorder {
+    async fn fetch_sealed_envelope(
+        &self,
+        _channel_id_hex: &str,
+    ) -> Option<fauna_conversations::backend::FetchedEnvelope> {
+        None
+    }
+    async fn merge_and_persist(
+        &self,
+        _channel_id: &[u8; 32],
+        _payload: fauna_core::folder_keys::ContentKeyEnvelopePayload,
+        _may_move: bool,
+    ) -> bool {
+        true
+    }
+    async fn unlist_forked_seat(
+        &self,
+        group_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> bool {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((group_id_hex, home_nest_url));
+        let mut fail = self.fail_first.lock().unwrap();
+        if *fail > 0 {
+            *fail -= 1;
+            return false;
+        }
+        true
+    }
+    async fn clear_forked_seat(&self, channel_id: &[u8; 32]) -> bool {
+        self.clears.lock().unwrap().push(*channel_id);
+        true
+    }
+}
+
+/// Lay the `tui:4366` fork on bob's seat: a session with no sweep and no
+/// witness refuses the successor's remove-old against a marker still naming
+/// alice (and memoizes it), and the successor's next commit — a self-update
+/// at the epoch bob never reached — is the future-epoch hole every later walk
+/// stalls on.
+async fn lay_the_succession_fork(s: &FolderSuccessionSetup) {
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    post_statement(&s.alice, &s.channel, &s.nest, &s.signed).await;
+    run_remove_old(&s.successor_engine, &s.channel, &s.nest, &s.alice_actor).await;
+    let update = s
+        .successor_engine
+        .self_update(&s.channel)
+        .expect("the successor rekeys at the post-remove-old epoch");
+    s.successor_engine
+        .merge_pending_commit(&s.channel)
+        .expect("the successor merges its own update");
+    let envelope = ChannelEnvelope::Commit(update).to_bytes().unwrap();
+    s.nest
+        .channel_send(s.channel.to_string(), envelope, None, vec![])
+        .await
+        .expect("the self-update goes on the log");
+}
+
+/// A forked seat is marked and unlists itself ONCE
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel append
+/// → *A forked seat is final, says so, and heals only by a fresh Welcome*,
+/// parts (a) and (b)). The future-epoch stall on the folder rail marks the
+/// seat forked, naming the policy-refused memo as the cause; the first
+/// marking pass asks the sink to drop bob's own roster row (here it fails),
+/// the next pass asks again and lands it, and neither a third pass nor a
+/// relaunch's fresh walk asks a third time — the mark records the drop
+/// durably. Nothing local is forgotten: the group stays held.
+#[tokio::test]
+async fn a_future_epoch_stall_marks_the_folder_seat_forked_and_unlists_it_once() {
+    let bob_secret = [44u8; 32];
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let s = folder_succession_setup_with(Arc::new(
+        MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap(),
+    ));
+    let sink = Arc::new(UnlistRecorder::failing_first(1));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    lay_the_succession_fork(&s).await;
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+
+    let mut cursor = 0;
+    let first = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(first.stalled, "the future-epoch hole stalls the walk");
+    let fork = s
+        .bob_backend
+        .folder_seat_forked(&s.channel)
+        .expect("the future-epoch stall marks the seat forked");
+    assert!(
+        fork.policy_refused,
+        "the refused remove-old's memo is the cause"
+    );
+    assert!(!fork.unlisted, "the first drop failed: still owed");
+    let group_hex = hex::encode(s.bob.group_id_bytes(&s.channel).unwrap());
+    assert_eq!(sink.calls(), vec![(group_hex.clone(), None)]);
+
+    let second = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(second.stalled);
+    assert!(
+        s.bob_backend
+            .folder_seat_forked(&s.channel)
+            .unwrap()
+            .unlisted
+    );
+    assert_eq!(
+        sink.calls().len(),
+        2,
+        "the owed drop is asked again, and lands"
+    );
+
+    let third = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(third.stalled);
+    assert_eq!(sink.calls().len(), 2, "a landed drop is never asked again");
+    assert!(s.bob.has_group(&s.channel), "nothing local is forgotten");
+
+    // The relaunch: a fresh backend and sink over the same engine store, a
+    // folder cursor seeded to 0. The walk re-derives the stall; the mark,
+    // drop recorded, survived.
+    let FolderSuccessionSetup {
+        bob,
+        bob_backend,
+        channel,
+        nest,
+        ..
+    } = s;
+    bob.save_state()
+        .expect("the session persisted what it walked");
+    drop(bob_backend);
+    drop(bob);
+    let bob = Arc::new(MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap());
+    let backend = FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob.identity_actor_id());
+    let sink = Arc::new(UnlistRecorder::default());
+    backend.set_folder_custody_sink(sink.clone());
+    let mut cursor = 0;
+    let relaunched = poll_inbound_folder(&backend, &channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(relaunched.stalled, "the fork is final at the seat");
+    let fork = backend
+        .folder_seat_forked(&channel)
+        .expect("the mark survived");
+    assert!(fork.unlisted && fork.policy_refused);
+    assert!(
+        sink.calls().is_empty(),
+        "the drop rode the relaunch: never re-asked"
+    );
+}
+
+/// A walk the hold stopped is NOT the fork: the remove-old behind a parked
+/// statement is held before any decrypt, so the stall it reports marks
+/// nothing and drops no roster row (part (a)'s premise —
+/// `redrive_parked_folder_in_channel`'s `held_commits` arm).
+#[tokio::test]
+async fn a_walk_held_behind_a_parked_statement_marks_no_fork() {
+    let s = folder_succession_setup();
+    let witness = Arc::new(SwitchWitness::default());
+    s.bob_backend.set_succession_witness(
+        Arc::clone(&witness) as Arc<dyn fauna_conversations::backend::SuccessionWitness>
+    );
+    s.bob_backend.arm_succession_harvest_wait().await;
+    let sink = Arc::new(UnlistRecorder::default());
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    lay_the_succession_fork(&s).await;
+
+    let mut cursor = 0;
+    for _ in 0..2 {
+        let outcome = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+            .await
+            .expect("the folder poll walks");
+        assert!(outcome.stalled, "held behind the parked statement");
+    }
+    assert_eq!(
+        s.bob_backend.succession_statement_counts().held_commits,
+        2,
+        "both stalls were the hold"
+    );
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+    assert!(sink.calls().is_empty(), "a held walk unlists nothing");
+}
+
+/// The forked mark goes with the seat: `forget_group` (the leave, and part
+/// (c)'s replacement of a forked seat by a fresh Welcome) drops it.
+#[tokio::test]
+async fn forget_group_drops_the_forked_seat_mark() {
+    let s = folder_succession_setup();
+    lay_the_succession_fork(&s).await;
+    let mut cursor = 0;
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(s.bob_backend.folder_seat_forked(&s.channel).is_some());
+
+    s.bob.forget_group(&s.channel).unwrap();
+    assert_eq!(
+        s.bob_backend.folder_seat_forked(&s.channel),
+        None,
+        "the mark goes with the group"
+    );
+}
+
+/// Part (c)'s re-invite fixture: `owner` evicts bob's stale leaf and admits a
+/// fresh key package of bob's, both commits on the log — the owner side's
+/// ghost-heal arm (`share_set_add`'s evict-and-re-admit). Returns the fresh
+/// Welcome's bytes.
+async fn evict_and_readmit_bob(
+    owner: &MlsEngine,
+    bob: &MlsEngine,
+    channel: &ChannelId,
+    nest: &MockNest,
+) -> Vec<u8> {
+    let leaf = owner
+        .find_leaf_by_identity(channel, &bob.identity_actor_id())
+        .expect("bob's stale leaf is still in the owner's tree");
+    let remove = owner
+        .remove_member(channel, leaf)
+        .expect("the owner evicts the stale leaf");
+    post_folder_commit(nest, channel, remove).await;
+    let key_package = bob
+        .generate_key_packages(1)
+        .expect("bob's pool holds a fresh key package")
+        .remove(0);
+    let (add, welcome) = owner
+        .add_member(channel, &key_package)
+        .expect("the owner admits the fresh key package");
+    post_folder_commit(nest, channel, add).await;
+    welcome.to_bytes().unwrap()
+}
+
+async fn post_folder_commit(nest: &MockNest, channel: &ChannelId, commit: Vec<u8>) {
+    let envelope = ChannelEnvelope::Commit(commit).to_bytes().unwrap();
+    nest.channel_send(channel.to_string(), envelope, None, vec![])
+        .await
+        .expect("the commit goes on the log");
+}
+
+/// A post-Add commit by `owner` — what the replaced seat's next walk must
+/// apply.
+async fn post_owner_self_update(owner: &MlsEngine, channel: &ChannelId, nest: &MockNest) {
+    let update = owner.self_update(channel).expect("the owner rekeys");
+    owner
+        .merge_pending_commit(channel)
+        .expect("the owner merges its own update");
+    post_folder_commit(nest, channel, update).await;
+}
+
+/// Part (c), the re-delivered original: a Welcome whose key package this
+/// device already spent acks and joins nothing — after a relaunch too, where
+/// the RAM-only folder marker is gone and only the engine's durable group says
+/// the channel is held.
+#[tokio::test]
+async fn a_re_delivered_folder_welcome_acks_and_joins_nothing_across_a_relaunch() {
+    let bob_secret = [45u8; 32];
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap());
+    let nest = Arc::new(MockNest::default());
+    let bob_kps = bob.generate_key_packages(1).unwrap();
+    let (channel, welcome) = alice.create_group(&bob_kps).unwrap();
+    let welcome_bytes = welcome.to_bytes().unwrap();
+    let backend = FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob.identity_actor_id());
+    join_folder_welcome(
+        &backend,
+        &channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("the first join");
+    let epoch = bob.current_epoch(&channel).unwrap();
+    bob.save_state().expect("the join persisted");
+    drop(backend);
+    drop(bob);
+
+    let bob = Arc::new(MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap());
+    let backend = FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob.identity_actor_id());
+    assert!(
+        !backend.is_folder_channel(&channel),
+        "the marker is RAM-only"
+    );
+    let again = join_folder_welcome(
+        &backend,
+        &channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("a re-delivered Welcome acks");
+    assert_eq!(again, channel);
+    assert!(bob.is_group_active(&channel), "the seat is untouched");
+    assert_eq!(bob.current_epoch(&channel).unwrap(), epoch);
+}
+
+/// Part (c), the re-invite of a forked seat: after the `tui:4366` fork and a
+/// relaunch (the RAM-only folder marker gone), the owner's re-share Welcome —
+/// addressing a live key package — replaces the seat whole: the forked mark is
+/// gone, the owner marker names the Welcome's sender, the folder cursor
+/// restarts at 0 (a stale cursor past the whole log still re-walks it), and
+/// the walk applies the post-Add commit.
+#[tokio::test]
+async fn a_fresh_folder_welcome_replaces_a_forked_seat_after_a_relaunch() {
+    let bob_secret = [46u8; 32];
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let s = folder_succession_setup_with(Arc::new(
+        MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap(),
+    ));
+    lay_the_succession_fork(&s).await;
+    let mut cursor = 0;
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(s.bob_backend.folder_seat_forked(&s.channel).is_some());
+
+    let FolderSuccessionSetup {
+        bob,
+        bob_backend,
+        channel,
+        nest,
+        successor_engine,
+        successor,
+        ..
+    } = s;
+    bob.save_state().expect("the session persisted the mark");
+    drop(bob_backend);
+    drop(bob);
+    let bob = Arc::new(MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap());
+    let backend = FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob.identity_actor_id());
+    assert!(
+        backend.folder_seat_forked(&channel).is_some(),
+        "the mark is durable"
+    );
+    assert!(
+        !backend.is_folder_channel(&channel),
+        "the marker is RAM-only"
+    );
+
+    let sink = Arc::new(UnlistRecorder::default());
+    backend.set_folder_custody_sink(sink.clone());
+    let welcome_bytes = evict_and_readmit_bob(&successor_engine, &bob, &channel, &nest).await;
+    let joined = join_folder_welcome(
+        &backend,
+        &channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("the re-invite replaces the forked seat");
+    assert_eq!(joined, channel);
+    assert_eq!(
+        backend.folder_seat_forked(&channel),
+        None,
+        "the old mark is gone"
+    );
+    assert_eq!(
+        sink.clears.lock().unwrap().clone(),
+        vec![channel.0],
+        "the forked seat's durable Folders row is cleared once"
+    );
+    assert!(bob.is_group_active(&channel));
+    assert_eq!(
+        bob.current_epoch(&channel).unwrap(),
+        successor_engine.current_epoch(&channel).unwrap(),
+        "the seat holds the post-Add epoch"
+    );
+    assert_eq!(
+        bob.folder_channel_owner(&channel),
+        Some(successor),
+        "the marker names the new Welcome's sender"
+    );
+
+    post_owner_self_update(&successor_engine, &channel, &nest).await;
+    let mut stale_cursor = 1_000;
+    let walked = poll_inbound_folder(&backend, &channel, &mut stale_cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(!walked.stalled, "the replaced seat is current");
+    assert_eq!(
+        walked.applied, 1,
+        "the walk restarted at 0 and applied the post-Add commit"
+    );
+    assert_eq!(
+        bob.current_epoch(&channel).unwrap(),
+        successor_engine.current_epoch(&channel).unwrap()
+    );
+    assert_eq!(backend.folder_seat_forked(&channel), None);
+}
+
+/// Part (c), the healthy member whose roster row the nest lost: the owner's
+/// evict-and-re-admit Welcome reaches a seat still current — it is retained
+/// un-acked (the evict is still ahead of this seat's walk), and once the walk
+/// has folded the removal the next drain joins it. Never acked and lost.
+#[tokio::test]
+async fn a_fresh_folder_welcome_for_a_current_seat_is_retained_then_joins() {
+    let s = folder_succession_setup();
+    let welcome_bytes = evict_and_readmit_bob(&s.alice, &s.bob, &s.channel, &s.nest).await;
+    let epoch = s.bob.current_epoch(&s.channel).unwrap();
+
+    let retained = join_folder_welcome(
+        &s.bob_backend,
+        &s.channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await;
+    assert!(
+        retained.is_err(),
+        "a current seat retains the re-invite un-acked"
+    );
+    assert!(s.bob.is_group_active(&s.channel), "the seat is untouched");
+    assert_eq!(s.bob.current_epoch(&s.channel).unwrap(), epoch);
+
+    let mut cursor = 0;
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(
+        !s.bob.is_group_active(&s.channel),
+        "the walk folded bob's removal"
+    );
+
+    let joined = join_folder_welcome(
+        &s.bob_backend,
+        &s.channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("the next drain joins");
+    assert_eq!(joined, s.channel);
+    assert!(s.bob.is_group_active(&s.channel));
+    assert_eq!(
+        s.bob.current_epoch(&s.channel).unwrap(),
+        s.alice.current_epoch(&s.channel).unwrap()
+    );
+}
+
+/// Part (c), the inactive seat: a seat that processed its own removal (the
+/// owner's revoke) and is later shared again joins the fresh Welcome — the
+/// evicted group is replaced, not acked as a re-delivery.
+#[tokio::test]
+async fn a_fresh_folder_welcome_for_an_evicted_seat_joins() {
+    let s = folder_succession_setup();
+    let leaf = s
+        .alice
+        .find_leaf_by_identity(&s.channel, &s.bob.identity_actor_id())
+        .unwrap();
+    let remove = s.alice.remove_member(&s.channel, leaf).unwrap();
+    post_folder_commit(&s.nest, &s.channel, remove).await;
+    let mut cursor = 0;
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(s.bob.has_group(&s.channel) && !s.bob.is_group_active(&s.channel));
+
+    let key_package = s.bob.generate_key_packages(1).unwrap().remove(0);
+    let (add, welcome) = s.alice.add_member(&s.channel, &key_package).unwrap();
+    post_folder_commit(&s.nest, &s.channel, add).await;
+    let joined = join_folder_welcome(
+        &s.bob_backend,
+        &s.channel.to_string(),
+        &welcome.to_bytes().unwrap(),
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("the evicted seat takes the re-invite");
+    assert_eq!(joined, s.channel);
+    assert!(s.bob.is_group_active(&s.channel));
+    assert_eq!(
+        s.bob.current_epoch(&s.channel).unwrap(),
+        s.alice.current_epoch(&s.channel).unwrap()
+    );
+}
+
+/// Part (c), the sibling's re-invite: on a two-device account the long-open
+/// device A holds the channel, and the owner's evict-and-re-admit Welcome
+/// addresses a key package device B minted after A's launch — one A never
+/// held and never spent. A retains it un-acked
+/// (`WelcomeNotAddressedHere`, the conversation path's variant): the durable
+/// ack is per account, so acking here would drain B's only heal. A's seat is
+/// untouched and nothing is joined.
+#[tokio::test]
+async fn a_folder_welcome_for_a_package_this_device_never_held_is_retained() {
+    let bob_secret = [47u8; 32];
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let device_a =
+        Arc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(bob_secret)).unwrap());
+    let nest = Arc::new(MockNest::default());
+    let a_kps = device_a.generate_key_packages(1).unwrap();
+    let (channel, welcome) = alice.create_group(&a_kps).unwrap();
+    let backend = FaunaMlsBackend::new(
+        device_a.clone(),
+        nest.clone(),
+        "bob",
+        device_a.identity_actor_id(),
+    );
+    join_folder_welcome(
+        &backend,
+        &channel.to_string(),
+        &welcome.to_bytes().unwrap(),
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("device A joins");
+    let epoch = device_a.current_epoch(&channel).unwrap();
+
+    // Device B — the same identity — mints its package after A's launch.
+    let device_b = MlsEngine::new_in_memory(ActorKeypair::from_secret(bob_secret)).unwrap();
+    let welcome_bytes = evict_and_readmit_bob(&alice, &device_b, &channel, &nest).await;
+
+    let retained = join_folder_welcome(
+        &backend,
+        &channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await;
+    assert!(
+        matches!(retained, Err(BackendError::WelcomeNotAddressedHere)),
+        "a sibling's re-invite is retained un-acked, never acked as a re-delivery: {retained:?}"
+    );
+    assert!(device_a.is_group_active(&channel), "A's seat is untouched");
+    assert_eq!(device_a.current_epoch(&channel).unwrap(), epoch);
+    assert!(
+        device_b.join_from_welcome_bytes(&welcome_bytes).is_ok(),
+        "the retained Welcome is still the sibling's to join"
+    );
+}
+
+/// Part (c), the original re-delivered to a device that never joined it
+/// itself: device B joins with its own key package, and device A restores B's
+/// replica (the launch restore). The spent record rides the replica, so the
+/// original Welcome reaching A reads as spent — acked, nothing joined — not as
+/// a sibling's package to retain.
+#[tokio::test]
+async fn a_re_delivered_original_acks_on_a_device_that_restored_the_siblings_join() {
+    let bob_secret = [48u8; 32];
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let device_b =
+        Arc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(bob_secret)).unwrap());
+    let nest = Arc::new(MockNest::default());
+    let b_kps = device_b.generate_key_packages(1).unwrap();
+    let (channel, welcome) = alice.create_group(&b_kps).unwrap();
+    let welcome_bytes = welcome.to_bytes().unwrap();
+    let b_backend = FaunaMlsBackend::new(
+        device_b.clone(),
+        nest.clone(),
+        "bob",
+        device_b.identity_actor_id(),
+    );
+    join_folder_welcome(
+        &b_backend,
+        &channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("device B joins");
+
+    let device_a =
+        Arc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(bob_secret)).unwrap());
+    let verdict = fauna_mls::state_replica::ProviderReplica::from_engine(&device_b)
+        .restore_into(&device_a)
+        .expect("device A restores B's replica");
+    assert!(verdict.is_clean(), "the replica seats the account");
+    assert!(device_a.has_group(&channel));
+    let epoch = device_a.current_epoch(&channel).unwrap();
+    let a_backend = FaunaMlsBackend::new(
+        device_a.clone(),
+        nest.clone(),
+        "bob",
+        device_a.identity_actor_id(),
+    );
+    let again = join_folder_welcome(
+        &a_backend,
+        &channel.to_string(),
+        &welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("the re-delivered original acks");
+    assert_eq!(again, channel);
+    assert!(device_a.is_group_active(&channel), "the seat is untouched");
+    assert_eq!(device_a.current_epoch(&channel).unwrap(), epoch);
 }
 
 /// The folder rail parks under the same replacement policy as the
@@ -13616,6 +14880,7 @@ impl RoomRosterReader for ScriptedReader {
                 policy_version: self.policy_version,
                 policy: self.policy.lock().unwrap().clone(),
                 labelers: None,
+                severance_owed: None,
             }),
             // A dry queue behaves as `new`'s own `None` always has: a
             // confirmed-empty floor, not a failure.
@@ -16104,10 +17369,19 @@ struct ScriptedCeremony {
     answer_uncovered_tip: Mutex<Option<[u8; 32]>>,
     /// Whether `room.set_reception_key` reports a rotation.
     answer_rotated: Mutex<bool>,
+    /// When set, the nest refuses — whole, recording the attempt first — any
+    /// `room.backfill_generations` batch carrying more than this many
+    /// records: the shape a `full` bundle meets once the room has said `none`
+    /// under the reader.
+    refuse_backfill_over: Mutex<Option<usize>>,
     /// What this nest DOES to its floor when a wrap target is bound —
     /// `(room id hex, the key)` — so the mint that follows reads a floor that
     /// carries it, as the real floor would.
     on_set_key: Mutex<Option<KeyEffect>>,
+    /// Every call to the three relayed-twin-bearing doors, IN ORDER — the
+    /// door (`remove`, `publish_generation`, `backfill_generations`) and the
+    /// room home it was routed to (`None` = the same-nest door).
+    homes: Mutex<Vec<(&'static str, Option<String>)>>,
 }
 
 /// What a fake nest does to its own floor when it admits a membership write —
@@ -16149,6 +17423,8 @@ impl ScriptedCeremony {
             answer_uncovered_tip: Mutex::new(None),
             answer_rotated: Mutex::new(false),
             on_set_key: Mutex::new(None),
+            homes: Mutex::new(Vec::new()),
+            refuse_backfill_over: Mutex::new(None),
         })
     }
     /// A nest that answers this room id whatever birth record it is handed.
@@ -16188,6 +17464,8 @@ impl ScriptedCeremony {
             answer_uncovered_tip: Mutex::new(None),
             answer_rotated: Mutex::new(false),
             on_set_key: Mutex::new(None),
+            homes: Mutex::new(Vec::new()),
+            refuse_backfill_over: Mutex::new(None),
         })
     }
     fn creates(&self) -> usize {
@@ -16264,7 +17542,12 @@ impl RoomCeremonyRpc for ScriptedCeremony {
         &self,
         _room_id_hex: String,
         mint: Vec<u8>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError> {
+        self.homes
+            .lock()
+            .unwrap()
+            .push(("publish_generation", home_nest_url));
         if self.refuse_publish {
             return Err(ConvRpcError::Rejected {
                 message: "only an owner or admin mints a room generation".to_string(),
@@ -16333,15 +17616,31 @@ impl RoomCeremonyRpc for ScriptedCeremony {
         room_id_hex: String,
         target_actor_id_hex: String,
         wraps: Vec<Vec<u8>>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError> {
+        self.homes
+            .lock()
+            .unwrap()
+            .push(("backfill_generations", home_nest_url));
         let records = wraps
             .iter()
             .map(|b| fauna_core::encoding::canonical_decode(b).expect("the top-up decodes"))
-            .collect();
+            .collect::<Vec<GroupTopupRecord>>();
+        let count = records.len();
         self.backfills
             .lock()
             .unwrap()
             .push((room_id_hex, target_actor_id_hex, records));
+        if self
+            .refuse_backfill_over
+            .lock()
+            .unwrap()
+            .is_some_and(|cap| count > cap)
+        {
+            return Err(ConvRpcError::Rejected {
+                message: "a generation the history policy does not authorize".into(),
+            });
+        }
         Ok(())
     }
 
@@ -16355,6 +17654,7 @@ impl RoomCeremonyRpc for ScriptedCeremony {
                 id: *id,
                 signed_invite: signed_invite.clone(),
                 room_node: None,
+                home_nest_actor_id: None,
             })
             .collect())
     }
@@ -16397,7 +17697,9 @@ impl RoomCeremonyRpc for ScriptedCeremony {
         &self,
         room_id_hex: String,
         principal_hex: String,
+        home_nest_url: Option<String>,
     ) -> Result<u32, ConvRpcError> {
+        self.homes.lock().unwrap().push(("remove", home_nest_url));
         if let Some(message) = self.refuse_remove.lock().unwrap().clone() {
             return Err(ConvRpcError::Rejected { message });
         }
@@ -16631,6 +17933,11 @@ async fn a_founded_room_is_keyed_and_its_home_nest_can_read_the_founders_send() 
         founder.backend.channel_is_same_nest(&channel),
         "and the marker is EXPLICIT rather than merely absent — recorded before the mint, so a \
          re-delivered Welcome's pre-guard cannot re-home a room this device founded"
+    );
+    assert!(
+        founder.backend.engine().is_channel_community(&channel),
+        "founding stamps the community marker — the one key that lists a group-less room in \
+         the replica, and so brings it back after a relaunch"
     );
     assert_eq!(
         wraps.len(),
@@ -17156,6 +18463,7 @@ async fn a_second_seat_is_invited_accepts_is_keyed_in_and_reads_the_room() {
             bob.thread.clone(),
             invitation.room_id,
             invitation.room_node.clone(),
+            invitation.home_nest_actor_id.clone(),
         )
         .await
         .expect("bob accepts his own pending invitation");
@@ -17174,6 +18482,11 @@ async fn a_second_seat_is_invited_accepts_is_keyed_in_and_reads_the_room() {
     assert!(
         bob.backend.channel_is_same_nest(&channel),
         "the joiner marks the room's home explicitly, like the founder"
+    );
+    assert!(
+        bob.backend.engine().is_channel_community(&channel),
+        "the joiner stamps the community marker too: it is the only thing that lists a \
+         group-less room in the replica, so without it the room is gone after a relaunch"
     );
     // Settling is what consumes a delivered invitation — an accepted one must
     // stop standing, or bob's app would offer him a room he is already seated
@@ -17212,9 +18525,8 @@ async fn a_second_seat_is_invited_accepts_is_keyed_in_and_reads_the_room() {
         assert_eq!(
             records.len(),
             1,
-            "the TIP alone: no client can read a room's history policy, and a batch naming one \
-             unauthorized generation is refused WHOLE — which would leave the newcomer with \
-             nothing rather than with less"
+            "the TIP alone: this room holds one generation, and no policy this device can stand \
+             behind says `full` — a batch naming one unauthorized generation is refused WHOLE"
         );
         let GroupTopupRecord::Wrap {
             generation_id: g,
@@ -17262,7 +18574,17 @@ async fn a_second_seat_is_invited_accepts_is_keyed_in_and_reads_the_room() {
         .await
         .expect("alice sends");
 
+    // The accept left the room waiting for its key-in, so the first walk after
+    // it meets the key-in's one-shot stop (`ConvPollOutcome::keyed_in`) before
+    // the backlog it opens; the pass after reads it.
     let mut after_seq = 0i64;
+    let outcome = poll_inbound_conv(&bob.backend, &bob.manager, &channel, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    assert!(
+        outcome.keyed_in,
+        "the wait ends as its own answer: {outcome:?}"
+    );
     assert_eq!(bob.poll(&channel, &mut after_seq).await, 1);
     let detail = bob
         .manager
@@ -17302,6 +18624,8 @@ struct LiveFloor {
     run_cap: Mutex<Option<usize>>,
     /// How many versioned reads (single or run) the backend has made.
     versioned_reads: std::sync::atomic::AtomicUsize,
+    /// The nest's `severance_owed` answer, served on every read.
+    severance_owed: Mutex<Option<bool>>,
 }
 
 impl LiveFloor {
@@ -17314,6 +18638,7 @@ impl LiveFloor {
             salt: Mutex::new(None),
             run_cap: Mutex::new(None),
             versioned_reads: std::sync::atomic::AtomicUsize::new(0),
+            severance_owed: Mutex::new(None),
         })
     }
     /// Serve runs of up to `cap` retained versions per versioned read.
@@ -17410,6 +18735,7 @@ impl RoomRosterReader for LiveFloor {
             policy_version: Some(1),
             policy: self.policy.lock().unwrap().clone(),
             labelers: self.labelers.lock().unwrap().clone(),
+            severance_owed: *self.severance_owed.lock().unwrap(),
         })
     }
 
@@ -17596,8 +18922,11 @@ async fn a_removal_unseats_and_rotates_the_room_key_without_the_removed_member()
 ///
 /// The residue is deliberately not rolled back by re-seating the target:
 /// re-admission returns a member on a **fresh** roster entry, so an undo would
-/// not restore the state that was there. `rotate_room_key` is the retry
-/// instead, runnable by any owner or admin from any device.
+/// not restore the state that was there. The retry is the next owner's or
+/// admin's tend pass, which reads the floor's `severance_owed` and mints
+/// (`community-rooms.md` § Implementation status today → *A removal severs*,
+/// the retry paragraph) — and the residue is its own error kind, never the
+/// generic `Internal`.
 #[tokio::test]
 async fn a_removal_whose_rotation_fails_names_the_unsevered_residue() {
     let nest = Arc::new(MockNest::default());
@@ -17625,6 +18954,10 @@ async fn a_removal_whose_rotation_fails_names_the_unsevered_residue() {
         .await
         .expect_err("a removal whose rotation cannot be built is not a success");
 
+    assert!(
+        matches!(err, BackendError::RemovalUnsevered { .. }),
+        "the residue is its own kind, not the generic Internal: {err:?}"
+    );
     let err = format!("{err}");
     assert!(
         err.contains(&hex::encode(bob.0)),
@@ -17635,7 +18968,7 @@ async fn a_removal_whose_rotation_fails_names_the_unsevered_residue() {
         "and says the key was not rotated, rather than reading as a failed removal: {err}"
     );
     assert!(
-        err.contains("rotate again"),
+        err.contains("tend pass"),
         "and names the retry that completes it: {err}"
     );
     assert_eq!(
@@ -17647,6 +18980,297 @@ async fn a_removal_whose_rotation_fails_names_the_unsevered_residue() {
         ceremony.mints.lock().unwrap().is_empty(),
         "and nothing was minted"
     );
+}
+
+/// **A residue keeps the member chip gone, and says what is owed** — the
+/// manager half of the residue (`community-rooms.md` § Implementation status
+/// today → *A removal severs*, the retry paragraph). A failed removal puts
+/// the chip back because the member is still in the group; on the residue
+/// the member is NOT — the unseat landed — so restoring the chip would report
+/// a severance as not having happened. The page error is the residue's own
+/// sentence, never "Could not remove them".
+#[tokio::test]
+async fn a_removal_residue_keeps_the_chip_gone_and_names_what_is_owed() {
+    let nest = Arc::new(MockNest::default());
+    let alice_engine = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice_engine.identity_actor_id();
+    let alice_reception = GroupReceptionKeyRecord::mint(1_700_000_000_001);
+    let bob = ActorId([0xB0; 32]);
+    let bob_reception = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+    // A community room: a channel with no MLS group behind it.
+    let channel = ChannelId([0x5B; 32]);
+    let manager = ConversationsManager::new();
+    let tid = manager.materialize_conv_thread(channel.to_string(), vec![fauna_addr("bob", bob)]);
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice_engine,
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    backend.bind_channel(tid.clone(), channel);
+    manager.register_backend(backend.clone());
+    let ceremony = ScriptedCeremony::new();
+    let floor = LiveFloor::holding(vec![
+        room_row(alice_actor, RoomPrincipalKind::User, 0xA1, &alice_reception),
+        room_row(bob, RoomPrincipalKind::User, 0xB1, &bob_reception),
+    ]);
+    backend.set_room_ceremony(ceremony.clone());
+    backend.set_room_roster_reader(floor.clone());
+    backend.set_group_reception_keys(HeldReceptionKeys::holding(vec![alice_reception]));
+    {
+        let floor = floor.clone();
+        ceremony.on_remove(Box::new(move |_room, principal| {
+            floor.unseat(ActorId(
+                <[u8; 32]>::try_from(hex::decode(principal).unwrap().as_slice()).unwrap(),
+            ));
+        }));
+    }
+    // No generation reader: the rotation cannot name its parent, so the
+    // unseat lands and the mint does not.
+
+    manager
+        .remove_participant(tid.clone(), fauna_addr("bob", bob))
+        .await;
+
+    assert_eq!(
+        ceremony.removes.lock().unwrap().len(),
+        1,
+        "the unseat landed"
+    );
+    assert!(
+        ceremony.mints.lock().unwrap().is_empty(),
+        "the mint did not"
+    );
+    let detail = manager.thread_detail(tid).expect("the thread stands");
+    assert!(
+        !detail
+            .participants
+            .iter()
+            .any(|p| p.same_participant(&fauna_addr("bob", bob))),
+        "bob's chip stays gone — he IS off the floor: {:?}",
+        detail.participants
+    );
+    let error = manager
+        .snapshot()
+        .error
+        .expect("the residue surfaces on the page's error-message");
+    assert_eq!(
+        error.key, "conversations.unified.error_remove_participant_unsevered",
+        "its own sentence, not \"Could not remove them\""
+    );
+    assert_eq!(
+        error.args.get("name"),
+        Some(&fauna_addr("bob", bob).display()),
+        "naming the member as the thread renders them"
+    );
+}
+
+/// **A community room's member-chip removal is the `room.remove` door** —
+/// the unseat, then the rotation, reached through the one membership gesture
+/// every app already calls (`ConversationBackend::remove_participant`).
+///
+/// A community seat is keyed in by generation wraps, never an MLS add, so the
+/// room has no MLS group and no leaf to find: routing the chip through the
+/// end-to-end class's Remove commit answered "is not a member of this group"
+/// for a member plainly seated (`community-rooms.md` § Implementation status
+/// today → *A removal severs, because the client rotates*: "the membership
+/// doors reach a client"). The two classes remove by different ceremonies,
+/// complementary and never cumulative (`conversation-rooms.md`
+/// § Implementation status today → *A removal severs on the end-to-end class
+/// too*), so the class is read here, in shared Rust, and the apps never learn
+/// it — the same signature the policy edit branches on.
+#[tokio::test]
+async fn a_community_rooms_chip_removal_unseats_and_rotates() {
+    let nest = Arc::new(MockNest::default());
+    let alice = founder_seat(&nest, "alice");
+    let bob = ActorId([0xB0; 32]);
+    let bob_reception = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+    let ceremony = ScriptedCeremony::new();
+    let floor = LiveFloor::holding(vec![
+        room_row(alice.actor, RoomPrincipalKind::User, 0xA1, &alice.reception),
+        room_row(bob, RoomPrincipalKind::User, 0xB1, &bob_reception),
+    ]);
+    alice.backend.set_room_ceremony(ceremony.clone());
+    alice.backend.set_room_roster_reader(floor.clone());
+    alice
+        .backend
+        .set_group_reception_keys(HeldReceptionKeys::holding(vec![alice.reception.clone()]));
+    let founding_generation = [0x6F; 32];
+    alice.backend.set_room_generation_reader(Arc::new(TipOnly {
+        generation_id: founding_generation,
+    }));
+    {
+        let floor = floor.clone();
+        ceremony.on_remove(Box::new(move |_room, principal| {
+            floor.unseat(ActorId(
+                <[u8; 32]>::try_from(hex::decode(principal).unwrap().as_slice()).unwrap(),
+            ));
+        }));
+    }
+    // A community room: bound to a thread, but no MLS group behind it.
+    let channel = ChannelId([0x5A; 32]);
+    let thread_id = ThreadId("room-1".into());
+    alice.backend.bind_channel(thread_id.clone(), channel);
+
+    alice
+        .backend
+        .remove_participant(thread_id, fauna_addr("bob", bob))
+        .await
+        .expect("an owner's chip removal in a community room unseats the member");
+
+    {
+        let removes = ceremony.removes.lock().unwrap();
+        assert_eq!(removes.len(), 1, "the chip reached the room.remove door");
+        assert_eq!(removes[0].0, channel.to_string());
+        assert_eq!(removes[0].1, hex::encode(bob.0));
+    }
+    assert_eq!(floor.seats(), vec![alice.actor], "bob is off the floor");
+    let mints = ceremony.mints.lock().unwrap();
+    assert_eq!(mints.len(), 1, "and the room's key was rotated");
+    let GroupGenerationMintRecord::Minted { wraps, .. } = &mints[0] else {
+        panic!("a room generation is published as a Minted record");
+    };
+    assert!(
+        !wraps.iter().any(|w| w.entry_id == [0xB1; 32]),
+        "without the removed member in the new wrap set"
+    );
+    assert!(
+        nest.sent_envelopes(&channel.to_string()).is_empty(),
+        "and no MLS commit was posted — a community room has no group to commit to"
+    );
+}
+
+/// **A foreign admin's chip removal rides the relayed twins, in order** — the
+/// remote unseat, THEN the remote severance mint, each carrying the room's
+/// recorded home (`../architecture/federation.md` § Federation residue
+/// surface, the *Conversation room remove* and *Conversation room generation
+/// publish and backfill* rows). Before the twins existed the chip refused a
+/// foreign-homed room outright, because the same-nest doors aimed at this
+/// account's own nest answer "no such room"; an unseat with no rotation behind
+/// it would be the door the community class refuses to ship.
+#[tokio::test]
+async fn a_community_chip_removal_on_a_foreign_homed_room_unseats_then_rotates_through_the_home() {
+    let nest = Arc::new(MockNest::default());
+    let alice = founder_seat(&nest, "alice");
+    let bob = ActorId([0xB0; 32]);
+    let bob_reception = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+    let ceremony = ScriptedCeremony::new();
+    let floor = LiveFloor::holding(vec![
+        room_row(alice.actor, RoomPrincipalKind::User, 0xA1, &alice.reception),
+        room_row(bob, RoomPrincipalKind::User, 0xB1, &bob_reception),
+    ]);
+    alice.backend.set_room_ceremony(ceremony.clone());
+    alice.backend.set_room_roster_reader(floor.clone());
+    alice
+        .backend
+        .set_group_reception_keys(HeldReceptionKeys::holding(vec![alice.reception.clone()]));
+    alice.backend.set_room_generation_reader(Arc::new(TipOnly {
+        generation_id: [0x6F; 32],
+    }));
+    {
+        let floor = floor.clone();
+        ceremony.on_remove(Box::new(move |_room, principal| {
+            floor.unseat(ActorId(
+                <[u8; 32]>::try_from(hex::decode(principal).unwrap().as_slice()).unwrap(),
+            ));
+        }));
+    }
+    let channel = ChannelId([0x5A; 32]);
+    let thread_id = ThreadId("room-1".into());
+    alice.backend.bind_channel(thread_id.clone(), channel);
+    alice
+        .backend
+        .record_channel_home(channel, "https://home.example");
+
+    alice
+        .backend
+        .remove_participant(thread_id, fauna_addr("bob", bob))
+        .await
+        .expect("a foreign admin's chip removal unseats and rotates through the room's home");
+
+    let home = Some("https://home.example".to_string());
+    assert_eq!(
+        ceremony.homes.lock().unwrap().as_slice(),
+        &[("remove", home.clone()), ("publish_generation", home)],
+        "the remote unseat THEN the remote mint, each naming the room's recorded home"
+    );
+    assert_eq!(floor.seats(), vec![alice.actor], "bob is off the floor");
+    let mints = ceremony.mints.lock().unwrap();
+    let GroupGenerationMintRecord::Minted { wraps, .. } = &mints[0] else {
+        panic!("a room generation is published as a Minted record");
+    };
+    assert!(
+        !wraps.iter().any(|w| w.entry_id == [0xB1; 32]),
+        "and the severance mint leaves the removed member out"
+    );
+}
+
+/// **A foreign admin keys a newcomer in through the room's home** — the tend
+/// pass's `key_in_room_member` rides `room.backfill_generations_remote` for a
+/// foreign-homed room, where it used to reach its own nest's "no such room"
+/// (`../architecture/federation.md` § Federation residue surface, the
+/// *Conversation room generation publish and backfill* row).
+#[tokio::test]
+async fn a_foreign_homed_key_in_rides_the_remote_backfill() {
+    let nest = Arc::new(MockNest::default());
+    let alice = founder_seat(&nest, "alice");
+    let bob = ActorId([0xB0; 32]);
+    let bob_reception = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+    let ceremony = ScriptedCeremony::new();
+    let alice_row = room_row(alice.actor, RoomPrincipalKind::User, 0xA1, &alice.reception);
+    let bob_row = room_row(bob, RoomPrincipalKind::User, 0xB1, &bob_reception);
+    let roster = Arc::new(ScriptedReader::new(vec![
+        Some(vec![alice_row.clone()]),  // the founding mint
+        Some(vec![alice_row, bob_row]), // the key-in, after bob was seated
+    ]));
+    alice.backend.set_room_ceremony(ceremony.clone());
+    alice.backend.set_room_roster_reader(roster);
+    alice
+        .backend
+        .set_group_reception_keys(HeldReceptionKeys::holding(vec![alice.reception.clone()]));
+    let channel = alice
+        .backend
+        .found_community_room(alice.thread.clone(), Some("the commons".into()))
+        .await
+        .expect("alice founds the room");
+    let (generation_id, wraps, commitment, _) = ceremony.published();
+    let alice_wrap = wraps
+        .iter()
+        .find(|w| w.entry_id == [0xA1; 32])
+        .expect("alice's own wrap");
+    alice
+        .backend
+        .set_room_generation_reader(Arc::new(ScriptedGenerations::new(vec![
+            RoomGenerationWrap {
+                generation_id,
+                key_commitment: commitment,
+                wrap: alice_wrap.wrap.clone(),
+                entry_id: [0xA1; 32],
+                is_tip: true,
+            },
+        ])));
+    // The routing datum alone decides the door — the room now reads as homed
+    // on another nest, as a foreign admin's device records it.
+    alice
+        .backend
+        .record_channel_home(channel, "https://home.example");
+    ceremony.homes.lock().unwrap().clear();
+
+    alice
+        .backend
+        .key_in_room_member(&channel, bob)
+        .await
+        .expect("a foreign admin covers a newcomer");
+
+    assert_eq!(
+        ceremony.homes.lock().unwrap().as_slice(),
+        &[(
+            "backfill_generations",
+            Some("https://home.example".to_string())
+        )],
+        "the backfill rides the relay to the room's recorded home"
+    );
+    assert_eq!(ceremony.backfills.lock().unwrap().len(), 1);
 }
 
 /// **Leaving unseats and does NOT rotate** — an absence with a reason, not an
@@ -18072,6 +19696,129 @@ async fn a_policy_edit_changes_only_what_it_names_and_bumps_the_version_by_one()
     assert_eq!(
         signed.policy.owner, seat.actor,
         "ownership is not settable here; it moves through its own door"
+    );
+}
+
+/// Key a newcomer into a policy seat's room stored under `history` — the
+/// owner holding three openable generations (two retained, then the tip) and
+/// one more it holds no key for — and answer the generation ids of every
+/// `room.backfill_generations` batch the key-in sent, in order. `refuse_over`
+/// arms the nest to refuse any batch longer than that, whole.
+async fn key_in_batches(
+    history: fauna_mls::room_policy::HistoryPolicy,
+    refuse_over: Option<usize>,
+) -> (Vec<Vec<[u8; 32]>>, [[u8; 32]; 3]) {
+    let nest = Arc::new(MockNest::default());
+    let (seat, ceremony, floor) = policy_seat(&nest, "owner");
+    let mut stored =
+        fauna_mls::room_policy::RoomPolicy::initial(seat.actor, Some("the commons".into()));
+    stored.version = 2;
+    stored.history_policy = history;
+    let channel = floor.holding_chain_to(&seat, &stored);
+    let newcomer = ActorId([0xB0; 32]);
+    floor.members.lock().unwrap().push(room_row(
+        newcomer,
+        RoomPrincipalKind::User,
+        0xB1,
+        &GroupReceptionKeyRecord::mint(1_700_000_000_000),
+    ));
+    let own = [0xA1; 32];
+    let wrap_to = |seed: u8, reception: &GroupReceptionKeyRecord, is_tip: bool| {
+        let key = GenerationKey::from_bytes([seed; 32]);
+        let generation_id = [seed; 32];
+        RoomGenerationWrap {
+            generation_id,
+            key_commitment: group_generation_key_commitment(&key),
+            wrap: seal_group_generation_key_to_entry(
+                &key,
+                &reception.reception_pubkey().unwrap(),
+                &generation_id,
+                &own,
+            )
+            .expect("seals"),
+            entry_id: own,
+            is_tip,
+        }
+    };
+    // The oldest generation predates this device's seat: its wrap was sealed
+    // to a reception key this account never held.
+    let foreign = GroupReceptionKeyRecord::mint(1_600_000_000_000);
+    seat.backend
+        .set_room_generation_reader(Arc::new(ScriptedGenerations::new(vec![
+            wrap_to(0x10, &foreign, false),
+            wrap_to(0x11, &seat.reception, false),
+            wrap_to(0x12, &seat.reception, false),
+            wrap_to(0x13, &seat.reception, true),
+        ])));
+    seat.backend
+        .set_group_reception_keys(HeldReceptionKeys::holding(vec![seat.reception.clone()]));
+    *ceremony.refuse_backfill_over.lock().unwrap() = refuse_over;
+    seat.backend
+        .key_in_room_member(&channel, newcomer)
+        .await
+        .expect("the owner keys the newcomer in");
+    let batches = ceremony
+        .backfills
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(room, target, records)| {
+            assert_eq!(room, &channel.to_string());
+            assert_eq!(target, &hex::encode(newcomer.0));
+            records
+                .iter()
+                .map(|r| {
+                    let GroupTopupRecord::Wrap {
+                        generation_id,
+                        target_entry,
+                        ..
+                    } = r;
+                    assert_eq!(*target_entry, [0xB1; 32], "bound to the newcomer's entry");
+                    *generation_id
+                })
+                .collect()
+        })
+        .collect();
+    (batches, [[0x11; 32], [0x12; 32], [0x13; 32]])
+}
+
+/// **A `full`-history room hands a newcomer the whole retained history; a
+/// `none` room the tip alone** (`community-rooms.md` § The three classes →
+/// *The add's backfill lands, and `history_policy` becomes enforceable*:
+/// "`full` authorizes the whole retained bundle; `none` … the tip alone").
+///
+/// The key-in reads the room's anchored policy off the floor it wraps to, and
+/// under `full` names every generation this device can open, oldest first —
+/// never one it cannot (it cannot hand out what it cannot read). Under `none`
+/// it names the tip alone, because the door refuses a batch WHOLE over one
+/// unauthorized generation. And a `full` batch the nest refuses — the room
+/// said `none` under the read — is retried as the tip alone, so a policy race
+/// leaves the newcomer with less, never with nothing.
+#[tokio::test]
+async fn a_key_in_backfills_what_the_rooms_history_policy_authorizes() {
+    use fauna_mls::room_policy::HistoryPolicy as Stored;
+
+    let (batches, [g1, g2, tip]) = key_in_batches(Stored::Full, None).await;
+    assert_eq!(
+        batches,
+        vec![vec![g1, g2, tip]],
+        "under `full`: ONE batch, every retained generation this device holds a key for, tip \
+         included, and not the generation it cannot open"
+    );
+
+    let (batches, [_, _, tip]) = key_in_batches(Stored::None, None).await;
+    assert_eq!(
+        batches,
+        vec![vec![tip]],
+        "under `none`: the tip alone — the one generation every policy authorizes"
+    );
+
+    let (batches, [g1, g2, tip]) = key_in_batches(Stored::Full, Some(1)).await;
+    assert_eq!(
+        batches,
+        vec![vec![g1, g2, tip], vec![tip]],
+        "a refused `full` bundle is retried as the tip alone, so the newcomer can still read \
+         the room from now on"
     );
 }
 
@@ -19393,6 +21140,184 @@ async fn a_re_invitation_after_a_removal_is_offered_not_settled() {
     );
 }
 
+/// **A re-invitation after this device's own LEAVE is offered, not settled**
+/// (group-conversations outcome 41: "a member on another nest can leave a
+/// community room and be invited back"). The leaver keeps the thread binding
+/// (it keeps its bubbles), so `room_invitations` read any invitation into the
+/// room as spent unless a floor read had confirmed the unseating — and for a
+/// room homed on another nest that read was refused by a door whose code was
+/// not read as a confirmation, so the re-invitation was destroyed. A device
+/// that just left KNOWS it is off the floor: the successful leave marks the
+/// room unseated at once, before any floor read, and a refused leave does not.
+///
+/// Mutation: drop the mark in `leave_room_by_ceremony` and the first half reds
+/// (the invitation is settled); mark before the ceremony answers and the
+/// second half reds (a refused leave would offer a spent invitation).
+#[tokio::test]
+async fn a_re_invitation_after_a_leave_is_offered_not_settled() {
+    let nest = Arc::new(MockNest::default());
+    let inviter = ActorKeypair::generate();
+    let invitation_into = |channel: ChannelId, invitee: ActorId| {
+        let invite = fauna_mls::room_policy::RoomInvite {
+            room_id: channel.0.to_vec(),
+            invitee,
+            role: fauna_mls::room_policy::RoomRole::Member,
+            policy_version: 1,
+        }
+        .sign(&inviter)
+        .expect("the inviter signs the invitation");
+        fauna_core::encoding::canonical_encode(&invite).unwrap()
+    };
+
+    // The leave lands: the re-invitation is offered.
+    let channel = ChannelId([0x7Eu8; 32]);
+    let alice = room_seat(&nest, channel, "alice", 0xA3);
+    let ceremony = ScriptedCeremony::new();
+    alice.backend.set_room_ceremony(ceremony.clone());
+    alice
+        .backend
+        .leave_room_by_ceremony(&channel)
+        .await
+        .expect("the leave lands");
+    ceremony
+        .deliveries
+        .lock()
+        .unwrap()
+        .push((1, invitation_into(channel, alice.actor)));
+    let standing = alice
+        .backend
+        .room_invitations()
+        .await
+        .expect("room_invitations ok");
+    assert_eq!(
+        standing.len(),
+        1,
+        "a re-invitation after this device's own leave must be offered, not swallowed"
+    );
+    assert!(
+        ceremony
+            .deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == 1),
+        "and not settled out from under the user before they ever see it"
+    );
+
+    // The leave is refused: still seated, so a standing invitation is spent.
+    let channel = ChannelId([0x7Fu8; 32]);
+    let bob = room_seat(&nest, channel, "bob", 0xB3);
+    let ceremony = ScriptedCeremony::new();
+    *ceremony.refuse_leave.lock().unwrap() = Some("the owner transfers first".to_string());
+    bob.backend.set_room_ceremony(ceremony.clone());
+    assert!(bob.backend.leave_room_by_ceremony(&channel).await.is_err());
+    ceremony
+        .deliveries
+        .lock()
+        .unwrap()
+        .push((1, invitation_into(channel, bob.actor)));
+    let standing = bob
+        .backend
+        .room_invitations()
+        .await
+        .expect("room_invitations ok");
+    assert!(
+        standing.is_empty(),
+        "a refused leave leaves the device seated: the invitation stays spent"
+    );
+}
+
+/// **A re-invitation that arrives before any floor read has noticed the
+/// removal is still offered** (group-conversations outcome 41, the removal
+/// leg). A removed member learns of its removal only from a floor read, and
+/// the tend pass reads on a cadence — so the founder's re-invitation can reach
+/// the device first, while it still presumes itself seated. Settling there is
+/// irreversible (the envelope is destroyed), so `room_invitations` reads the
+/// floor itself before settling: a confirmed refusal offers the invitation,
+/// and a read that did not land neither settles nor offers — the invitation
+/// waits for a later pass.
+///
+/// Mutation: settle on the thread-bound presumption without the fresh read
+/// and the first half reds; treat `Unavailable` as seated and the second half
+/// reds (the invitation is destroyed on a transient blip).
+#[tokio::test]
+async fn a_re_invitation_before_the_removal_is_tended_is_offered_not_settled() {
+    let nest = Arc::new(MockNest::default());
+    let inviter = ActorKeypair::generate();
+    let invitation_into = |channel: ChannelId, invitee: ActorId| {
+        let invite = fauna_mls::room_policy::RoomInvite {
+            room_id: channel.0.to_vec(),
+            invitee,
+            role: fauna_mls::room_policy::RoomRole::Member,
+            policy_version: 1,
+        }
+        .sign(&inviter)
+        .expect("the inviter signs the invitation");
+        fauna_core::encoding::canonical_encode(&invite).unwrap()
+    };
+
+    // Never tended; the floor read the invitation pass makes is refused.
+    let channel = ChannelId([0x80u8; 32]);
+    let alice = room_seat(&nest, channel, "alice", 0xA4);
+    let ceremony = ScriptedCeremony::new();
+    alice.backend.set_room_ceremony(ceremony.clone());
+    let reader = Arc::new(ScriptedReader::new(vec![None]));
+    alice.backend.set_room_roster_reader(reader.clone());
+    ceremony
+        .deliveries
+        .lock()
+        .unwrap()
+        .push((1, invitation_into(channel, alice.actor)));
+    let standing = alice
+        .backend
+        .room_invitations()
+        .await
+        .expect("room_invitations ok");
+    assert_eq!(
+        standing.len(),
+        1,
+        "a removal no floor read has noticed yet must not swallow the re-invitation"
+    );
+    assert_eq!(
+        reader.calls(),
+        1,
+        "the invitation pass asked the floor itself"
+    );
+
+    // The read does not land: neither settled nor offered.
+    let channel = ChannelId([0x81u8; 32]);
+    let bob = room_seat(&nest, channel, "bob", 0xB4);
+    let ceremony = ScriptedCeremony::new();
+    bob.backend.set_room_ceremony(ceremony.clone());
+    bob.backend
+        .set_room_roster_reader(Arc::new(ScriptedReader::new_scripted(vec![
+            ScriptedRosterAnswer::Unavailable,
+        ])));
+    ceremony
+        .deliveries
+        .lock()
+        .unwrap()
+        .push((1, invitation_into(channel, bob.actor)));
+    let standing = bob
+        .backend
+        .room_invitations()
+        .await
+        .expect("room_invitations ok");
+    assert!(
+        standing.is_empty(),
+        "an unconfirmed seat offers nothing yet"
+    );
+    assert!(
+        ceremony
+            .deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == 1),
+        "and destroys nothing on a read that did not land"
+    );
+}
+
 /// **The common path this fix must not touch: a standing invitation into a
 /// room this device is still LIVE in is still spent.** The settle-quietly
 /// behavior predates  and covers the ordinary case — an accept whose
@@ -19906,6 +21831,7 @@ impl RoomRosterReader for VersionedFloor {
                 .last()
                 .map(|signed| fauna_core::encoding::canonical_encode(signed).unwrap()),
             labelers: None,
+            severance_owed: None,
         })
     }
 
@@ -22314,6 +24240,164 @@ async fn a_newcomer_not_yet_keyed_in_waits_before_the_record_instead_of_skipping
     );
 }
 
+/// **A foreign-homed room's accept records the home's identity the knock
+/// carried** (`conversation-rooms.md` § The home nest → *Attachment bytes*). A
+/// community room is joined by a knock and an accept, never a Welcome, so the
+/// knock's `home_nest_actor_id` — stamped by the member's own nest from the
+/// delivering peer's verified handshake — is the only source of the identity
+/// the room's attachment legs pin a self-signed home by. Reddens if the accept
+/// records the URL alone (the pre-fix `record_channel_home`): the identity
+/// read below comes back `None` and the byte plane has nothing to pin.
+#[tokio::test]
+async fn a_foreign_room_accept_records_the_knocks_home_identity() {
+    let nest = Arc::new(MockNest::default());
+    let channel = ChannelId([0x4bu8; 32]);
+    let bob = room_seat(&nest, channel, "bob", 2);
+    bob.backend
+        .set_group_reception_keys(HeldReceptionKeys::holding(vec![bob.reception.clone()]));
+    bob.backend.set_room_ceremony(ScriptedCeremony::new());
+    let home = "https://home.example:8443";
+    let home_id = "cd".repeat(32);
+
+    bob.backend
+        .accept_room_invite(
+            bob.thread.clone(),
+            channel.0,
+            Some(home.to_string()),
+            Some(home_id.clone()),
+        )
+        .await
+        .expect("bob accepts the foreign-homed invitation");
+
+    assert_eq!(
+        bob.backend.channel_home_url(&channel).as_deref(),
+        Some(home),
+        "the acceptance's next hop is the room's recorded home"
+    );
+    assert_eq!(
+        bob.backend.channel_home_actor_id(&channel),
+        Some(home_id),
+        "the knock's verified identity rides with the home, as a Welcome's does"
+    );
+}
+
+/// **A newly accepted room reads as waiting from the accept, and a send in the
+/// window says why.** Before, a room entered its wait only when its walk first
+/// stopped at a sealed record it could not open, so between the accept and
+/// that stop it read as keyed — no notice — and a send failed with the generic
+/// "Something went wrong" (`community-rooms.md` § Implementation status today,
+/// *A waiting room says so*). A room nobody has written in since the seating
+/// gives the walk nothing to stop at, so its wait must also end without one:
+/// a complete walk probes the tip once the key-in has landed.
+///
+/// Mutations this reddens under: dropping the seed at the accept (the first
+/// assertion), refusing the send as `Internal` (the refusal's sentence), and
+/// dropping the complete walk's tip probe (the notice would stay up).
+#[tokio::test]
+async fn a_newly_accepted_room_waits_from_the_accept_and_a_send_says_so() {
+    let nest = Arc::new(MockNest::default());
+    let channel = ChannelId([0x4au8; 32]);
+    let alice = room_seat(&nest, channel, "alice", 1);
+    let bob = room_seat(&nest, channel, "bob", 2);
+    let gen_key = GenerationKey::mint();
+    let generation_id = [0x6cu8; 32];
+    alice.hold(&gen_key, generation_id);
+    let bob_generations = Arc::new(ScriptedGenerations::new(vec![]));
+    bob.backend
+        .set_room_generation_reader(bob_generations.clone());
+    bob.backend
+        .set_group_reception_keys(HeldReceptionKeys::holding(vec![bob.reception.clone()]));
+    bob.backend.set_room_ceremony(ScriptedCeremony::new());
+
+    bob.backend
+        .accept_room_invite(bob.thread.clone(), channel.0, None, None)
+        .await
+        .expect("bob accepts");
+    let awaiting = |seat: &RoomSeat| {
+        seat.manager
+            .thread_detail(seat.thread.clone())
+            .expect("thread")
+            .room
+            .expect("a room")
+            .awaiting_key
+    };
+    assert!(
+        awaiting(&bob),
+        "straight after the accept, before any walk, the room says it is waiting for its key-in"
+    );
+
+    let err = bob
+        .backend
+        .send(
+            &fauna_mls_thread(bob.thread.clone(), vec![]),
+            &ComposeState {
+                body_draft: "too early".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .expect_err("nothing can be sealed before the key-in");
+    assert!(
+        matches!(err, BackendError::Refusal(_)),
+        "a product refusal, not a diagnostic: {err:?}"
+    );
+    assert_eq!(
+        err.user_detail(),
+        fauna_i18n::strings::error::send::ROOM_AWAITING_KEY,
+        "the composer says WHY, never the generic failure"
+    );
+    assert!(awaiting(&bob), "and the room still says it is waiting");
+
+    // A quiet room: a walk with nothing sealed to meet keeps waiting while
+    // the key-in has not landed…
+    let mut after_seq = 0i64;
+    assert_eq!(bob.poll(&channel, &mut after_seq).await, 0);
+    assert!(awaiting(&bob), "no key-in yet, still waiting");
+
+    // …and stops once it has, though no record ever asked for a key.
+    bob_generations
+        .wraps
+        .lock()
+        .unwrap()
+        .push(RoomGenerationWrap {
+            generation_id,
+            key_commitment: group_generation_key_commitment(&gen_key),
+            wrap: seal_group_generation_key_to_entry(
+                &gen_key,
+                &bob.reception.reception_pubkey().unwrap(),
+                &generation_id,
+                &bob.entry_id,
+            )
+            .expect("the key-in seals a wrap to bob's reception key"),
+            entry_id: bob.entry_id,
+            is_tip: true,
+        });
+    let outcome = poll_inbound_conv(&bob.backend, &bob.manager, &channel, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    assert!(
+        !outcome.stalled && !outcome.awaiting_key && !outcome.keyed_in,
+        "a complete walk, no backlog behind it: {outcome:?}"
+    );
+    assert!(
+        !awaiting(&bob),
+        "the complete walk's tip probe ends the wait of a room nobody wrote in"
+    );
+
+    bob.backend
+        .send(
+            &fauna_mls_thread(bob.thread.clone(), vec![]),
+            &ComposeState {
+                body_draft: "keyed in now".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .expect("bob sends once keyed in");
+}
+
 /// The index seam's log, for the room-boundary test below.
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum IndexEvent {
@@ -22977,6 +25061,108 @@ async fn a_current_seat_costs_nothing_unless_it_governs_and_is_known_uncovered()
     );
     let (_, _, _, parents) = ceremony.published();
     assert_eq!(parents, vec![tip], "and mints on its answer");
+}
+
+/// **A governing seat that reads `severance_owed` mints once, and the pass
+/// after that writes nothing** (`community-rooms.md` § Implementation status
+/// today → *A removal severs*, the retry paragraph). The home nest answers
+/// the debt — the tip still wraps to an unseated entry — and whichever
+/// owner's or admin's device reads it next pays it with the same mint a
+/// removal makes, parented on the tip it can see. Once the nest answers
+/// `false` (any mint past the unseated entry), the next pass mints nothing.
+#[tokio::test]
+async fn a_governing_seat_that_reads_severance_owed_mints_once() {
+    let nest = Arc::new(MockNest::default());
+    let channel = ChannelId([0x3Au8; 32]);
+    let alice = room_seat(&nest, channel, "alice", 0xA1);
+    let ceremony = ScriptedCeremony::new();
+    alice.backend.set_room_ceremony(ceremony.clone());
+    let tip = [0x6Au8; 32];
+    alice.hold(&GenerationKey::mint(), tip);
+    let floor = LiveFloor::holding(vec![
+        own_row(
+            &alice,
+            Some(&alice.reception),
+            fauna_conversations::room::RoomRole::Owner,
+            Some(true),
+        ),
+        nest_row(),
+    ]);
+    *floor.severance_owed.lock().unwrap() = Some(true);
+    alice.backend.set_room_roster_reader(floor.clone());
+
+    alice
+        .backend
+        .tend_community_room(&alice.manager, &channel)
+        .await;
+
+    assert!(
+        ceremony.set_keys.lock().unwrap().is_empty(),
+        "a current, covered seat needs no door"
+    );
+    assert_eq!(
+        ceremony.mints.lock().unwrap().len(),
+        1,
+        "the owed severance is minted on this pass"
+    );
+    let (_, wraps, _, parents) = ceremony.published();
+    assert_eq!(parents, vec![tip], "parented on the tip this seat can see");
+    assert!(
+        wraps.iter().any(|w| w.entry_id == alice.entry_id),
+        "wrapped to the seats on the floor"
+    );
+    assert!(
+        wraps.iter().any(|w| w.entry_id == [0xB2; 32]),
+        "the home nest's read kept"
+    );
+
+    // The nest's answer after the mint: nothing owed. The mint scheduled the
+    // floor for the very next poll; that pass writes nothing.
+    *floor.severance_owed.lock().unwrap() = Some(false);
+    alice
+        .backend
+        .tend_community_room(&alice.manager, &channel)
+        .await;
+    assert_eq!(
+        ceremony.mints.lock().unwrap().len(),
+        1,
+        "a paid debt mints nothing more"
+    );
+}
+
+/// **A plain member's seat reads `severance_owed` and writes nothing** — key
+/// authority is the owner's and the admins', so a member's pass leaves the
+/// debt for a governing device's, as on every other mint trigger.
+#[tokio::test]
+async fn a_plain_member_that_reads_severance_owed_writes_nothing() {
+    let nest = Arc::new(MockNest::default());
+    let channel = ChannelId([0x3Bu8; 32]);
+    let alice = room_seat(&nest, channel, "alice", 0xA1);
+    let ceremony = ScriptedCeremony::new();
+    alice.backend.set_room_ceremony(ceremony.clone());
+    alice.hold(&GenerationKey::mint(), [0x6Bu8; 32]);
+    let floor = LiveFloor::holding(vec![
+        own_row(
+            &alice,
+            Some(&alice.reception),
+            fauna_conversations::room::RoomRole::Member,
+            Some(true),
+        ),
+        nest_row(),
+    ]);
+    *floor.severance_owed.lock().unwrap() = Some(true);
+    alice.backend.set_room_roster_reader(floor);
+
+    alice
+        .backend
+        .tend_community_room(&alice.manager, &channel)
+        .await;
+
+    assert!(ceremony.set_keys.lock().unwrap().is_empty());
+    assert!(
+        ceremony.mints.lock().unwrap().is_empty(),
+        "a plain member holds no key authority"
+    );
 }
 
 /// **A rotated governing seat re-binds its current key and rotates the room.**

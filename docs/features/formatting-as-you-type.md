@@ -38,6 +38,8 @@ Stamped 2026-09-26 at 175da50d99.
 | ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
 | tui | — absent | |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

@@ -55,67 +55,11 @@ pub fn now_hm() -> (u32, u32) {
 
 // ── Formatting ────────────────────────────────────────────────────────────────
 
-/// Format label for the header bar: "March 2026".
-pub fn format_month_label(year: i32, month: u32) -> String {
-    format!("{} {}", month_name(month), year)
-}
-
-/// Format label for the header bar: "Mar 16 – 22, 2026".
-///
-/// Takes `week_start` rather than probing it: this label hardcoded Monday while
-/// `week_grid`/`month_grid` beside it already read `locale_week_start()`, so on
-/// any Sunday- or Saturday-start locale the header named a different week than
-/// the grid underneath it painted. The param makes that disagreement
-/// unrepresentable — the caller probes once and hands the same answer to both.
-pub fn format_week_label(year: i32, month: u32, day: u32, week_start: u32) -> String {
-    let start = week_start_date(year, month, day, week_start);
-    let end = add_days(start.0, start.1, start.2, 6);
-
-    if start.0 == end.0 {
-        // Same year.
-        if start.1 == end.1 {
-            // Same month.
-            format!(
-                "{} {} \u{2013} {}, {}",
-                month_name_short(start.1),
-                start.2,
-                end.2,
-                start.0
-            )
-        } else {
-            format!(
-                "{} {} \u{2013} {} {}, {}",
-                month_name_short(start.1),
-                start.2,
-                month_name_short(end.1),
-                end.2,
-                start.0
-            )
-        }
-    } else {
-        format!(
-            "{} {}, {} \u{2013} {} {}, {}",
-            month_name_short(start.1),
-            start.2,
-            start.0,
-            month_name_short(end.1),
-            end.2,
-            end.0
-        )
-    }
-}
-
-/// Format label for the header bar: "Wednesday, Mar 18, 2026".
-pub fn format_day_label(year: i32, month: u32, day: u32) -> String {
-    let dow = day_of_week(year, month, day);
-    format!(
-        "{}, {} {}, {}",
-        weekday_name(dow),
-        month_name_short(month),
-        day,
-        year
-    )
-}
+// The month/week/day label formatters live in
+// `fauna_client_features::calendar_labels` (shared with tui).
+pub use fauna_client_features::calendar_labels::{
+    format_day_label, format_month_label, format_week_label,
+};
 
 // ── Name tables ──────────────────────────────────────────────────────────────
 //
@@ -129,7 +73,7 @@ pub fn format_day_label(year: i32, month: u32, day: u32) -> String {
 // Re-exported here so this module's `time_utils::{month_name, …}` call-site path
 // — and the formatters above, which are its only consumers besides the views —
 // are unchanged.
-pub use fauna_i18n::time::{month_name, month_name_short, weekday_name, weekday_short};
+pub use fauna_i18n::time::{month_name, weekday_name, weekday_short};
 
 #[cfg(test)]
 mod tests {

@@ -166,10 +166,15 @@ export interface ConnectedAppRow {
   last_used_at_millis: number | null;
   lasts_until_millis: number | null;
   connected: boolean;
-  /** The account's external-apps switch is OFF and this row is on the plane it
-   *  pauses (a principal or an ATProto app-password session): listed and
-   *  revocable, not connected, works again once the switch is back ON. */
+  /** The row is on the external-app plane and held back reversibly: the
+   *  account's external-apps switch is OFF (a principal or an ATProto
+   *  app-password session), or a step-down suspended every OAuth grant a
+   *  principal holds (`suspended`). Listed and revocable, not connected. */
   paused: boolean;
+  /** A principal whose every OAuth grant a step-down suspended: the cause of
+   *  `paused` when the switch is ON; no lasts-until; a fresh sign-in clears
+   *  it. The shared composition words it. */
+  suspended: boolean;
   /** Set on a mail app-password row only: the MUA login (only `{handle}` left
    *  for the renderer — `resolveMuaUsername`), the kind label, and whether the
    *  identity-succession burn killed it. */

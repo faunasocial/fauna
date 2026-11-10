@@ -300,8 +300,8 @@ ones back to the kernel before the work and reads which are present after it.
   location's offers. linux escaped only because it awaits the refresh itself.
   The remedy differs from `custody_drive`'s because no caller awaits the work:
   the setter stays synchronous (a picker binding), and its result arrives
-  through the observer. So `fauna_onboarding_machine::background::spawn_background`
-  always spawns on the crate's own process-lived current-thread runtime,
+  through the observer. So `fauna_sleep::spawn_background` (lifted from the onboarding machine 2026-11-07, when Media's `set_filter` needed it too)
+  always spawns on the process's own process-lived current-thread runtime,
   driven by one thread with the default ~2 MB stack — never the caller's,
   even when it has one: linux calls the machine from a runtime built for that
   one call and dropped on return (`async_helper::run_on_tokio`), which cancelled
@@ -309,7 +309,7 @@ ones back to the kernel before the work and reads which are present after it.
   runtime lives for the whole process, so the
   machine's shared HTTP client never pools a connection whose runtime has
   gone. Pinned by `vps_offers_follow_location::a_location_change_re_lists_for_a_caller_with_no_runtime`
-  and `background::tests::work_outlives_a_callers_short_lived_runtime`.
+  and `fauna_sleep::background::tests::work_outlives_a_callers_short_lived_runtime`.
   Witnessed through the picker on macOS and iOS (2026-10-24) and windows
   (2026-11-04, with no C# change) by `test_vps_config.py::test_vps_server_types_follow_the_location`
   and the OVH journey; android has not run them yet.

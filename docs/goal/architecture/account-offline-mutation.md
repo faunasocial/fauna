@@ -4,7 +4,7 @@ Owns: account-offline-mutation
 Status: ratified — all four W4 phases are code (the per-kind classification 2026-08-10, the outbox and the `OfflineSafe`/`OfflineQueued` split 2026-08-13, UI desensitizing the same day) and the per-app fan-out of the desensitizing rule is still trickling down; split verbatim out of `account-data-plane.md` on 2026-09-06
 Authority: **what an app may do while it cannot reach a nest, and how the UI says so** — the offline-mutation contract (the outbox, idempotency and reconnect-with-resume, the per-kind offline classification criteria) and the shared desensitizing rule `affordance(kind, connection_state)` with the whole per-app build-out that consumes it. **NOT owned here** — the plane a queued mutation drains onto → [`account-sync-plane.md`](account-sync-plane.md); the store that holds the outbox → [`account-data-plane.md`](account-data-plane.md) § The account store (W1); which process owns the engine while offline → [`account-runtime.md`](account-runtime.md); the per-app UI surfaces themselves → their own `ui/` docs; the charter and the cross-cutting status → [`account-data-plane.md`](account-data-plane.md). On conflict in those domains, raise it.
 
-Last verified: 2026-09-06 (split verbatim; this is the fastest-growing of the five plane docs — the per-app desensitizing fan-out — and its growth decays as the last apps land)
+Last verified: 2026-11-09 (the identity drainer and the knock-send composer built on tui — § Implementation status today, the 2026-11-09 built entry) | 2026-11-09 (identity-bound intents compose at drain ruled — § The offline-mutation contract (W4) → *Identity-bound intents compose at drain*; the knock send's hold-out resolved, nothing built) | 2026-11-08 (the unsent-changes surface ruled — § The offline-mutation contract (W4) → *The unsent-changes surface*, the phase-4 failed-sends surface designed now that two composers can park; its ids proposed under rule A, nothing built) | 2026-09-06 (split verbatim; this is the fastest-growing of the five plane docs — the per-app desensitizing fan-out — and its growth decays as the last apps land)
 
 Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-09-06 — that doc had reached **686,434 B**, 2.62× the 262,144 B whole-file read ceiling, and no single seam could clear it (moving its status ledger alone left both halves breached, re-verified at three successive sizes). Its own `Authority:` line already enumerated the five concepts it owned; this is that list made structural, each concept taking its rule sections **and** its status-ledger entries together. A routing stub remains at each original location; prior history: `git log --follow docs/goal/architecture/account-data-plane.md`. The `W<n>` workstream labels and `R<n>` decision labels used throughout are defined in [`account-data-plane.md`](account-data-plane.md) § Workstreams and § The ratified decisions.
 
@@ -167,6 +167,84 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   app-only drain carve-out, per-channel FIFO + loud permanent failure, and
   the application-messages-only scope — resolved 2026-08-10 (T6), owner
   [`../behavior/devices.md`](../behavior/devices.md) § Offline compose.
+- **Identity-bound intents compose at drain (ruled 2026-11-09 — the MLS rule above generalized; a session ruling, refutable by the user).** An `OfflineQueued` kind is **identity-bound** when its wire request carries bytes bound to the identity seed or to a key or target derived from it: a signature by the actor key (`fauna.inbox.send`'s `(ContactRequest, Post)` tuple, built by `fauna_client_core::email::build_knock_payload`; `fauna.labelers.publish`'s `AlgorithmLabeler.signature`), or a wrap sealed to the identity's escrow target under its `identity/<actor>` key (`fauna.generation.escrow.put`). Such an intent queued before an identity succession ([`../behavior/identity-succession.md`](../behavior/identity-succession.md)) and drained after it is refused — the home nest refuses new content authored by a superseded key (`deliver_inbox_payload_core`, pinned by `conformance_succession.rs`) — and would park for good. So an identity-bound kind **queues its inputs, never the signed bytes**: a per-kind intent type in canonical CBOR (the knock's: the recipient actor id and the optional recipient nest url — the sender's key and node url are the session's, read at drain), and a shared-Rust composer builds and signs the wire request from the inputs and the **then-current** identity at each attempt, under the intent id as the idempotency key. The signature is to a knock what the epoch is to an MLS message — a binding to a state the send may not happen in — so it is made at send, and `created_at` is honestly the send time (the ordinary semantics of a message that arrives late). **The drainer.** A third `IntentDrainer` beside `Rpc` and `Mls`, the identity drainer: it drains only from a process holding the identity seed — an app, never the bearer-only sync agent, whose bundle never carries the seed ([`account-replica-posture.md`](account-replica-posture.md) § The store device principal) — and the generic drain lists such intents and never sends them, as it does MLS ones; the app seats it with its actor keypair and node url and runs it in the one shared app loop beside the MLS drain: per-scope FIFO, a rejection parking the scope's remainder under the nest's code, a transport fault stopping the pass. **The drain rule, amended:** the generic drainer replays the stored payload verbatim; the MLS and identity drainers compose at drain from stored inputs; all three carry the intent id. **Idempotency across a succession:** the nest's table is keyed `(actor, key)` and MOVES with the account at the ceremony (ruled 2026-11-09 with the outbox carry — [`../behavior/succession-repoint-axis.md`](../behavior/succession-repoint-axis.md) § The declared re-point axis, the 2026-11-09 blockquote), so an intent first sent as the predecessor with its ack lost and replayed as the successor is served its recorded reply once; the second knock this sentence accepted when first ruled is retired with it. **Rejected.** *Re-signing in `succession_tail.rs`'s tail re-author pass:* "writer" there is the store's device writer (`WriterId`, the device principal), a different key rotated on a different event (a device delete), in a store-only wasm-capable crate that holds no seed; no queued kind names the store writer, and that anchor's duty is re-stated as this test — identity-bound → the identity drainer, never a tail hook. *Reclassifying the knock send online-only:* the criteria name knocks as the class-2 archetype (a knock has no identity until the nest assigns one), and the class turns on who arbitrates the effect, not on how the payload is signed. **The test every composer entry applies** (replacing "names no writer"): does the request carry bytes bound to the identity? Classified so far — identity-bound: `fauna.inbox.send`, `fauna.labelers.publish`, `fauna.generation.escrow.put`; generic: every kind built so far (`fauna.posts.interact`, the family pair, `fauna.email.filters.create`, the bridges follows, `fauna.knocks.accept`, `fauna.moderation.abuse_report.submit`), `fauna.email.send` (raw RFC 5322; the From handle is checked against the connection's actor) and `nostr.events.publish_signed` (signed by the linked extension key, not the identity; the link row's fate is the re-point axis's); the rest are classified by their composer's author, in their entry. **What a succession does to the retired identity's undrained outbox is not this rule's:** the successor is adopted as a new account with its own store ([`../behavior/devices.md`](../behavior/devices.md) § The locked state), and the retired account's connection never mints again, so its outbox never drains on its own — it is CARRIED into the successor's outbox verbatim, the identity drainer composing the carried identity-bound rows under the successor ([`../behavior/succession-aftermath.md`](../behavior/succession-aftermath.md) § Re-key scope → *Adjudicating what the aftermath carries across*, the device-local outbox row, ruled 2026-11-09). Status: § Implementation status today → the 2026-11-09 built entry.
+- **The unsent-changes surface (ruled 2026-11-08 — the W4 phase-4
+  "failed-sends surfaces" named above, designed once two composers could
+  park: the feed's interactions and MLS sends).** The user's words are
+  **unsent changes**: a change this app holds that has not reached the nest
+  yet. Every undrained intent is one, in one of three states — *waiting*
+  (`Pending`, its scope free), *held* (`Pending` behind its scope's parked
+  head) and *not sent* (`Failed`, parked by the drain). Three surfaces, one
+  shared read model, two store doors:
+  1. **The list — a standing section on the account page**, the sibling of
+     [`../ui/settings.md`](../ui/settings.md) § Pending actions and its
+     shape (always present, empty when nothing is queued: a conditional
+     render would hide the affordance exactly when a user goes looking for a
+     change that never showed up). It is the ONE place every unsent change
+     is listed, which discriminator 4 above requires: a departed channel's
+     intents have no post and no thread left to carry a mark. One row per
+     intent, scope order then compose order; a row says the kind in user
+     words with its target (*Like on a post*; *Message in <conversation>:
+     <excerpt>*), its state, and on a not-sent row why — the stored
+     `failure_reason`, rendered through a shared `LocalizedText` keyed by
+     the code, falling back to *"Your nest refused this change (<code>)"*.
+     **Retry** and **discard** are offered on a not-sent row only: retry
+     re-arms that intent; discard deletes it behind a confirm — the one
+     user-initiated deletion of a pending write, the
+     `dm-message-delete-confirm-button` shape. Proposed ids (rule A,
+     awaiting the owner): `unsent-changes-section`, `unsent-change-item[i]`,
+     `unsent-change-description`, `unsent-change-status`,
+     `unsent-change-retry-button`, `unsent-change-discard-button`,
+     `unsent-change-discard-confirm-button`.
+  2. **A mark on the affordance** wherever the target still renders — R11's
+     per-affordance rule, never a banner. The like: `feed-like-button`'s
+     `state` attribute gains the words `queued` and `unsent` beside
+     `on | off` (the `thread-room-notice` precedent: a new state word, no new
+     id); activating an `unsent` heart RETRIES — an off heart's gesture is
+     the intent itself — and discard lives in the list; a `queued` heart
+     toggles as today, the compensating intent queueing behind. The MLS own
+     copy: the `queued:<intent>` copy carries `dm-message-queued` (*Waiting
+     to send*), a parked one `dm-message-unsent` (*Not sent — <reason>*),
+     both the `dm-message-undelivered` shape with the body in view, and its
+     `dm-message-actions-menu` offers `dm-message-retry-button`,
+     `dm-message-discard-button` and `dm-message-discard-confirm-button` on
+     an unsent own copy only — "resurfaced as drafts" means exactly this;
+     [`../behavior/devices.md`](../behavior/devices.md) § Offline compose
+     owns the MLS detail.
+  3. **The doors.** `fauna-account-store` gains `outbox_retry(id)` — a
+     `Failed` row returns to `Pending`, `retry_count` and `last_attempt_at`
+     reset, its `channel_seq` kept so it drains first; `false` on an
+     unknown or `Pending` row — and `outbox_discard(id)` — deletes a
+     `Failed` row and nothing else, the one sanctioned destroy (`OutboxIntent`'s
+     "no store operation may destroy one" is amended to say so), so a write
+     the drain may be sending is never deleted under it; and
+     `outbox_mark_failed` records `failure_reason`, an additive column
+     holding a stable code (the nest's error code, or the MLS outcome's
+     kind), never free text. **The scope follows its head by construction:**
+     the hold is recomputed each pass from the scope's `Failed` rows, so
+     retrying or discarding the parked head releases the channel's whole
+     remainder — retry re-arms it in order, discard lets the next intent
+     try, and that one parks loudly in its turn if the cause stands.
+     Discard is deliberately per intent: a scope-wide discard would destroy
+     writes the user never saw fail — discriminator 4's "never silently
+     dropped", by the user's own hand. A scope with several `Failed` rows
+     stays held until each is retried or discarded. Conformance (all three
+     backends): a retried intent returns to pending with its seq and reset
+     counters; retrying an unknown or pending intent is a no-op; a discarded
+     intent is gone and a double discard is a no-op; discard refuses a
+     pending intent; discarding the parked head leaves its scope remainder
+     pending in order; and, over the drain, retry and discard each release
+     the scope hold on the next pass.
+  4. **One read model in shared Rust, never per app.** `AccountStoreHandle`
+     lists unsent changes, retries and discards over the handle; the
+     `AccountOutbox` every app already lends carries the three, exported over
+     UniFFI and wasm. The kind-in-user-words comes from a per-kind describer
+     registered beside the offline class (an unregistered kind describes as
+     its kind string — a dull row, never a missing one, the inventory's own
+     polarity); the like's state word and the MLS copy's state are derived in
+     the feed and conversations managers from the same model, so no app
+     decides them. Trickle-down: tui first, the other six batched.
+  Status: § Implementation status today → the 2026-11-08 entry.
 
 
 ## Implementation status today
@@ -205,7 +283,7 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   `transfer_queue` backoff pair, completion-is-deletion — and the table is
   deliberately OUTSIDE every scope-keyed plane, so `drop_scope` (T2
   transition 3) structurally cannot reach an undrained intent. The policy
-  half is `fauna_sync_engine::outbox`: `enqueue_intent` refuses any kind
+  half is `fauna_account_plane::outbox` (re-exported as `fauna_sync_engine::outbox`): `enqueue_intent` refuses any kind
   that is not `OfflineQueued` (the phase-0 boundary at the door) and mints
   the id; `drain_outbox` runs in every full pump pass right after
   `publish_pending` (the two push-our-writes-out legs; nudge passes stay
@@ -235,8 +313,125 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   stated:** ~~delivery is at-least-once until phase 3~~ (**phase 3 landed
   2026-08-13** — the *Built — W4 phase 3* entry below; replays now collapse
   to exactly-once with no client-side change, exactly as this entry
-  predicted); the MLS drainer; the failed-sends surfaces (phase 4's UI
-  desensitizing landed — the entry below).
+  predicted); ~~the MLS drainer~~ (**built 2026-11-07** — `devices.md`
+  § Implementation status today owns the entry); the failed-sends surfaces (phase 4's UI
+  desensitizing landed — the entry below; the surface itself designed
+  2026-11-08 — the *Designed* entry below). **The first composer is BUILT —
+  the next entry.**
+
+- **Built (2026-11-07): the first `OfflineQueued` composer — the feed's
+  interactions, tui first.** One decision point for every app:
+  `fauna_protocol::offline_intent::send_or_queue` sends now, or — when the
+  app's `OfflineIntentQueue` (`fauna_core::offline_intent`) reports a known
+  offline connection word, read with the gate's own `is_online` polarity —
+  canonically encodes the request and appends it to the outbox, answering
+  `Composed::Queued(intent_id)`. It queues only when the app already knows it
+  has no nest: a request that fails in flight is returned as an error, never
+  re-queued under a fresh key. The queue is ONE type for every app,
+  `fauna_account_plane::account_driver::offline_outbox::AccountOutbox`
+  (re-exported as `fauna_sync_engine::offline_intent_queue`): the runtime's
+  `enqueue_intent` with the generic RPC drainer, plus the connection word the
+  app feeds it; it holds a fixed handle (`new`, tui's store-ready build) or
+  reads the seat's handle source at each enqueue (`over_source`, failing with
+  `RUNTIME_ABSENT` when no runtime runs), so a host whose manager is built
+  before the store, or outlives one runtime, wires it once with no store-ready
+  edge. The first kind is `fauna.posts.interact`:
+  `FeedManager::interact` composes through
+  `PostsClient::posts_interact_or_queue`, FIFO scope
+  `posts.interact:<post_id>`; a queued act folds no counters (the nest's to
+  assign) while the like toggle still lights, and the referencing compose's
+  eligibility ack is always sent, never queued; a profile's author window
+  shares its parent manager's queue. tui builds the `AccountOutbox`
+  at the store-ready edge, feeds it every connection change and lends it to
+  the feed manager. **Built (2026-11-07, the linux/android/web batch):** the
+  other hosts take one call each — the connection word, at the manager's build
+  and on every change, the first word wiring a source-backed outbox: the
+  UniFFI door `FfiFeedManager::set_connection_state` (android's
+  `FeedManagerHost` feeds it `connectionStateWord` from `ApiClient`'s
+  connection flow), linux's `feed::host::set_connection_state` beside its
+  offline gate in `update_connection_indicator`, and web's
+  `WasmFeedManager::setConnectionState` fed from the SPA's `connectionStatus`
+  store, its queue reading the tab's account runtime, whose shared driver
+  drains the outbox like a native one. The payload carries no writer, so
+  `succession_tail.rs`'s re-author duty needs no hook. Proven: the composer's
+  three tier_1 cases (`offline_intent.rs`), the feed manager's queued and
+  connected likes (`a_like_with_no_nest_is_queued_in_the_outbox_and_lights_the_toggle`,
+  `a_like_with_the_nest_connected_is_sent_not_queued`), the runtime case
+  `a_like_composed_offline_survives_a_restart_and_drains_with_its_key` (the
+  intent at rest in the store between two runtime lives, drained once under
+  its composer-issued id), the queue's own no-runtime case
+  (`a_queue_with_no_runtime_refuses_as_absent_and_tracks_the_word`), the
+  UniFFI door's wiring
+  (`the_first_connection_word_wires_one_outbox_that_later_words_follow`),
+  and the tier_3 `test_offline_queued_like.py` on tui, web and linux (web
+  witnessed green by the verify queue; linux green on 2026-11-08 once its
+  session client stopped abandoning a first sign-in the dead nest refused —
+  `FaunaClient::authenticate` re-runs the silent challenge on the shared
+  reconnect curve while the launch machine sits in `Offline { transient: true }`,
+  so a shell built with the nest down connects and drains when it is back;
+  android's e2e stays behind the host emulator). macos and ios joined 2026-11-08: FaunaKit's
+  `FeedVM` follows `ConnectionWordFeed` (the word `FaunaClient`'s connection
+  observer publishes, the one the offline gate reads) from the manager's
+  build, the test carrying both markers. **Not built, stated:** the composer
+  on windows (the UniFFI door is there for it: one `set_connection_state`
+  call from its connection flow); every other
+  `OfflineQueued` kind's gesture (the family kinds excepted — the next entry); ~~the MLS drainer~~ (built 2026-11-07, tui
+  first: an MLS send with no nest queues as a plaintext intent and drains sealed
+  at the then-current epoch — `devices.md` § Implementation status today); and
+  the failed-sends surface — designed 2026-11-08 as the unsent-changes
+  surface (the next entry), its ids awaiting the owner, so a parked like
+  stays durable but is not yet shown to the user.
+
+- **Designed (2026-11-08): the unsent-changes surface — the
+  phase-4 failed-sends surface, ruled in § The offline-mutation contract (W4)
+  → *The unsent-changes surface*.** Point 3, the doors, is BUILT
+  (2026-11-08): `outbox_retry`, `outbox_discard` and the
+  `failure_reason` column on all three backends, with the conformance and
+  drain tests; the drain's own park codes live in
+  `fauna_core::offline_intent::park_code`, and `MlsIntentOutcome::Park`
+  carries one. `AccountStoreHandle` exposes `outbox_rows`, `outbox_retry` and
+  `outbox_discard`. The shared read model (point 4) and point 2's two
+  derivations are BUILT (2026-11-08). The types sit beside the
+  composer seam, in `fauna_core::offline_intent` (`UnsentChange`, `UnsentState`,
+  `IntentDescription`, `IntentTarget`, and the pure `derive_unsent_states`, which
+  is the drain's own hold rule), so the feed and conversations managers can read
+  them through the `OfflineIntentQueue` they already hold. That trait gains
+  `unsent_changes`, `retry_intent` and `discard_intent`, with inert defaults for
+  test doubles. `AccountStoreHandle::unsent_changes` lists over `outbox_rows`.
+  `AccountOutbox` carries the three; a settle starts the drain that owns the
+  scope: a full pass (`AccountStoreHandle::wake_outbox_drain`) for an RPC
+  intent, and for an MLS or identity intent the host's wake registered through
+  `set_drain_wake` (wired on tui, linux, the UniFFI seat and web). The
+  describer is `fauna_protocol::offline_describe`: one entry per kind that has a
+  composer today (the like/interaction, the MLS send, the family decide and the
+  contact pre-approval, held to that set by a bijection test). Its labels,
+  state words and reason map are the `settings.unsent_changes.*` strings. The
+  feed manager folds `PostSummary::like_state` (`on | off | queued | unsent`)
+  at every snapshot from `refresh_unsent_likes`, and an `unsent` heart retries.
+  The conversations manager projects `MessageSnapshot::queued_send` (`Queued |
+  Unsent { reason_code, reason }`) on every `thread_detail` from
+  `refresh_unsent_sends`, with `retry_queued_send` and `discard_queued_send`
+  (the discard also takes the copy out of the thread). Exports: UniFFI
+  `unsent_changes` / `retry_unsent_change` / `discard_unsent_change` and
+  `FfiFeedManager::refresh_unsent_likes`; wasm `unsentChanges` /
+  `retryUnsentChange` / `discardUnsentChange`, `refreshUnsentLikes` and
+  `refreshUnsentSends` / `retryQueuedSend` / `discardQueuedSend`; linux reaches
+  the three through its `offline_outbox::queue`. No app surface renders any of
+  it yet, and no app calls the refreshes on its edges yet: that is the tui
+  surface row's work. Its twelve ids and the two
+  `feed-like-button` state words are PROPOSED under rule A and await the
+  owner; the store doors with the
+  `failure_reason` column and the shared read model, which need no id, are
+  handed down first and the
+  tui surface follows the approval, the other six batched after it. Until
+  then a parked like or MLS message stays durable but unseen (the clause
+  above).
+
+- **Built (2026-11-08): the family composer — `fauna.family.approvals.decide` and `fauna.family.contact.add`, on tui, linux, android, web, macos and ios.** `fauna_client_family::FamilyClient` carries the `_or_queue` forms beside the plain calls: `approvals_decide_or_queue` (taking the queue entry's own `FamilyApprovalDecideRequest`, every item key verbatim, plus the verdict), `allow_blocked_dm_peer_or_queue` (the un-deny, the same approving `dm_hold` decide) and `contact_add_or_queue`. The FIFO scope of a decision is its ONE item (`approval_item_scope`: the ward plus every key the request can name its item by, never the verdict, so an approve and a later deny of one item drain in order while a refused decision parks only itself); a pre-approval's is the (ward, peer) pair. Neither payload names a writer (the ward, the peer or held item, the verdict), so `succession_tail.rs` needs no hook. Replay rides the nest's durable idempotency table under the intent id like every queued kind. What the UI shows: a queued decision takes its item out of the local approvals queue (the guardian's verdict is recorded; the read after the drain is the nest's word — the like toggle's rule), a queued pre-approval or un-deny folds nothing, and nothing is re-read while there is no nest. The fold is shared: `decide_request_for` builds a decision's request from the list entry whole, and `approvals_after_queued_decision` drops the decided item from the list by its item key (`approval_item_scope`), never by display fields. tui's family page lends the device's outbox (`App::account_outbox`) to the three gestures; linux's lends its process outbox (`offline_outbox::queue`); the UniFFI apps reach the composer through `FfiFamilyClient`'s `approvals_decide_or_queue` (the entry whole), `allow_blocked_peer_or_queue` and `contact_add_or_queue`, which read the device outbox the first connection word wired (`offline_outbox::DEVICE`) and answer `true` when they queued, beside the exported fold `approvals_after_queued_decision` (android's `FamilyVM` and FaunaKit's shared `FamilyVM` for macos and ios route through them; FaunaKit settles a decision's outcome in `settleDecision`); web's WASM client carries the same three as `familyApprovalsDecideOrQueue`, `familyAllowBlockedDmPeerOrQueue` and `familyContactAddOrQueue` over the tab's outbox, and its `rpc.ts` doors wait for the socket only while the connection word reads `connected`. The plain sends stay beside the `_or_queue` forms on the FFI for the apps not yet moved. Proven: the family crate's tier_1 cases (queued with no nest per item / per peer, sent when connected, the per-item scope, the fold) and each app's — tui's and linux's (`a_decision_with_no_nest_is_queued_and_leaves_the_local_queue`, `a_decision_with_the_nest_connected_is_sent_not_queued`, `a_pre_approval_and_an_un_deny_with_no_nest_are_queued`), the FFI doors' (`offline_composer_tests`), android's `FamilyVMTest`, FaunaKit's `FamilyVMTests` (`aQueuedDecisionLeavesTheLocalListWithoutAReRead`, `aSentDecisionReReadsAndFoldsNothing`) and web's `family-approvals.test.ts`. **Not built, stated:** the family composer on windows (its family call sites still call the plain sends); the remaining `OfflineQueued` kinds' gestures (knock accept, inbox send, the bridges follows, abuse reports, folder create, and the rest of the 38; the email filter create and the bridges follows are the next entries).
+- **Built (2026-11-08): the email filter-create composer — `fauna.email.filters.create`, on tui, linux, android and web.** `fauna_client_email::EmailClient::filters_create_or_queue` sits beside `filters_create` and answers `Composed::Sent(<row id>)` or `Composed::Queued`. Its FIFO scope is the rule's name (`email.filters.create:<name>`), so a refused create of one rule never holds another's. The payload (name, conditions, combination, action, priority, continue flag) names no writer, so `succession_tail.rs` needs no hook; replay rides the nest's idempotency table under the intent id. What the UI shows: a queued create resets the add form and lists nothing, because the rule has no server id until the drain and the nest's list afterwards is the word; the unsent-changes surface names it (`offline_describe`'s `kind_email_filter_create`, the rule's name, no target). tui's Privacy filter form lends the device's outbox (`App::account_outbox`) to `Op::CreateFilter` and folds `Outcome::FilterQueued`. linux's filter group lends its process outbox (`offline_outbox::queue`) and settles a queued create by closing the form with no re-read; the UniFFI apps reach the composer through `FfiEmailClient::filters_create_or_queue`, which reads the device outbox the first connection word wired (`offline_outbox::DEVICE`) and answers `true` when it queued (android's `PrivacySettingsVM.createFilter` then skips the re-list); web's WASM client carries it as `emailFiltersCreateOrQueue` over the tab's outbox, reached through the `rpc.ts` door that waits for the socket only while connected, and the settings page routes through the wasm-free `createFilter` (`email-filter-create.ts`). The plain `filters_create` stays on the FFI and WASM for the apps not yet moved. Proven: the email crate's `a_filter_create_with_no_nest_is_queued_scoped_to_its_name` and `a_filter_create_with_the_nest_connected_is_sent_not_queued`, tui's and linux's `a_filter_create_with_no_nest_is_queued_and_lists_nothing` and `a_filter_create_with_the_nest_connected_is_sent_not_queued`, the FFI door's (`email_client.rs`'s `offline_composer_tests`), android's `PrivacySettingsVMFilterCreateTest`, web's `email-filter-create.test.ts`, and the describer's `a_filter_create_describes_with_its_rule_name`. **Not built, stated:** the filter-create composer on windows, macos and ios (their filter forms still call the plain create); the auto-respond facade's create (`fauna_client_email::autorespond`, a list-then-create-or-update) still sends plainly.
+- **Built (2026-11-09): the bridges follow composer — `fauna.bridges.add_follow` and `fauna.bridges.remove_follow`, on tui.** `fauna_client_bridges::BridgesClient` carries `add_follow_or_queue` and `remove_follow_or_queue` beside the plain calls, each answering `Composed::Sent(())` or `Composed::Queued`. Both share one FIFO scope per followed account (`follow_scope`: `bridges.follow:<bridge>:<account>`), so a follow and a later unfollow of one account drain in order while a refused follow never holds another account's. Neither payload names a writer (the bridge, the account, a petname), so `succession_tail.rs` needs no hook; replay rides the nest's idempotency table under the intent id, so a re-drained follow never sends a second Follow activity (the kind's `forbid_replay` governs only the transport's key-less auto-retry). What the UI shows: the bridges pages paint only what the nest persisted, so a queued follow or unfollow clears the page error and changes no list — the nest's list after the drain is the word; the unsent-changes surface names it (`offline_describe`'s `kind_bridge_follow_add`, the petname or else the account, and `kind_bridge_follow_remove`, the account; no target). tui's unified bridges page and its Nostr page lend the device's outbox (`App::account_outbox`) to `Op::AddFollow` / `Op::RemoveFollow` and fold `Outcome::FollowQueued`. Proven: the bridges crate's `a_follow_added_with_no_nest_is_queued_scoped_to_the_account`, `a_follow_removed_with_no_nest_is_queued_under_the_add_scope` and `follows_with_the_nest_connected_are_sent_not_queued`, tui's `follows_with_no_nest_are_queued_and_list_nothing`, `follows_with_the_nest_connected_are_sent_not_queued`, `nostr_follows_with_no_nest_are_queued_in_one_scope` and `nostr_follows_with_the_nest_connected_are_sent_not_queued`, and the describer's `a_follow_describes_with_its_petname_or_account_and_an_unfollow_with_its_account`. **Not built, stated:** the follow composer on the other six apps (their follow controls still call the plain sends).
+- **Built (2026-11-09): the knock-accept and abuse-report composers — `fauna.knocks.accept` and `fauna.moderation.abuse_report.submit`, on tui, linux, android and web.** `fauna_client_contacts::ContactsClient::knocks_accept_or_queue` (scope `knocks.accept:<sender>`, answering `Composed::Sent(())` or `Composed::Queued`) and `fauna_client_moderation::ModerationClient::abuse_report_submit_or_queue` (scope `moderation.abuse_report.submit:<subject id>`, answering `Composed::Sent(<reply>)` or `Composed::Queued`) sit beside the plain calls. Neither payload names a writer (the knock's sender; the subject, its author, the reason and note), so `succession_tail.rs` needs no hook; replay rides the nest's idempotency table under the intent id, and the report handler's open-report dedup makes a replay on the same subject write nothing besides. What the UI shows: a queued accept takes the knock out of the local knock list (the family decision's rule) and adds no roster row — the read after the drain is the nest's word; a queued report closes the sheet on `report::report_queued` (`moderation.report.queued`, naming no nest, because none answered), still lands the reporter-side hide (local), and does not try a ticked block, which needs the nest — `report::report_block_not_sent` says so on the page's error line. The unsent-changes surface names them (`offline_describe`'s `kind_knock_accept` and `kind_abuse_report`, no target: the sender is a bare id and the reported content is hidden). tui lends the device's outbox (`App::account_outbox`) to the contacts page's accept (`Op::KnockAction`, folding `Outcome::KnockQueued`) and to the report sheet's submit (`Op::Submit`, folding `Outcome::Queued`). linux lends its process outbox (`offline_outbox::queue`) to the knock accept (`FaunaClient::accept_knock`, settling a queued accept as `DataMessage::KnockAcceptQueued`, which drops the knock from the held list) and to the report sheet (`report.rs`'s `run_submit`); the UniFFI apps reach the composers through `FfiContactsClient::knocks_accept_or_queue` (`true` when queued) and `FfiModerationClient::abuse_report_submit_or_queue` (`None` when queued), both over the device outbox (`offline_outbox::DEVICE`), with the two lines exported as `report_queued` / `report_block_not_sent` — android's `ContactsVM.acceptKnock` drops the queued knock from its local table (`KnockDao.deleteBySender`) and `ReportSheetStore.submit` paints the queued line and the block notice; web's WASM client carries `knocksAcceptOrQueue` and `moderationAbuseReportSubmitOrQueue` (`null` when queued) over the tab's outbox, reached through `rpc.ts`'s `callOrQueue`, the contacts page routing through the wasm-free `acceptKnock` (`knock-accept.ts`) and `ReportHost.svelte` through `submitReport` (`report-submit.ts`). Proven: the contacts crate's `a_knock_accept_with_no_nest_is_queued_scoped_to_its_sender` and `a_knock_accept_with_the_nest_connected_is_sent_not_queued`, the moderation crate's `a_report_with_no_nest_is_queued_scoped_to_its_subject` and `a_report_with_the_nest_connected_is_sent_not_queued`, tui's `a_knock_accept_with_no_nest_is_queued_and_leaves_the_local_list`, `a_knock_accept_with_the_nest_connected_is_sent_not_queued`, `a_report_with_no_nest_is_queued_and_says_so` and `a_report_with_the_nest_connected_is_sent_not_queued`, the describer's `a_knock_accept_and_a_report_describe_by_their_labels`; linux's `knock_accept_composer_tests` and `report.rs`'s `a_report_with_no_nest_is_queued_and_says_so` / `a_report_with_the_nest_connected_is_sent_not_queued`, the FFI doors' (`contacts_client.rs`'s `offline_composer_tests`, `abuse_report.rs`'s `a_report_with_no_nest_is_queued` / `a_report_with_the_nest_connected_is_sent_not_queued`), android's `ContactsVMKnockAcceptTest` and `ReportSheetStoreTest`'s queued pair, and web's `knock-accept.test.ts` and `report-submit.test.ts`. **Not built, stated:** both composers on windows, macos and ios (they stay on the plain send); `fauna.inbox.send` (the knock send) is identity-bound — composed and signed at drain (§ The offline-mutation contract (W4) → *Identity-bound intents compose at drain*; built on tui, the next entry); `fauna.folders.create`, `fauna.bridges.resolve_follow_request`, `fauna.bridges.feeds.create` and the rest of the 38 remain.
+- **Built (2026-11-09): identity-bound intents compose at drain — the identity drainer and the knock-send composer, on tui (§ The offline-mutation contract (W4) → *Identity-bound intents compose at drain*).** The store carries a third drainer, `IntentDrainer::Identity` (`"identity"`). The generic drain (`outbox::drain_outbox`) lists it and never sends it, counted in `DrainReport::held_for_identity` beside `held_for_mls`. The app's half is `fauna_core::offline_intent::IdentityIntentSender` (`send_identity_intent(intent_id, kind, inputs)` → `IdentityIntentOutcome::Sent | Retry | Park { code }`, the code the nest's own), reached through the queue's identity door `OfflineIntentQueue::enqueue_identity`; `AccountStoreHandle::drain_identity_outbox` drains it with the MLS drain's one policy (`drain_app_leg`: per-scope FIFO, a park parks the scope's remainder, a retry counts an attempt and stops the pass). The one shared app loop is now `AccountOutbox::drain_until_settled(mls)` — the MLS leg when the app hands in its conversations engine, then the identity leg through the composer seated with `AccountOutbox::set_identity_sender` — and a retry or discard of either kind rings the host's `set_drain_wake`; tui, linux, the UniFFI seat and web all run it, so each gains the identity leg by seating a composer. The knock: `fauna_protocol::contacts::KnockSendIntent` (the recipient actor id and the optional recipient nest url, canonical CBOR, scope `inbox.send:<recipient>`); `fauna_client_contacts::knock::send_knock_or_queue` answers `KnockSend::Sent | RefusedByGuardian | Queued | Failed`, queuing only on a known offline word (a request that fails in flight is never re-queued); `knock::KnockComposer` (the seated sender: the session's identity, node url and nest) builds and signs the tuple at each attempt through `compose_and_send_knock` and sends `fauna.inbox.send` under the intent id, a nest refusal — the guardian gate included — parking with the nest's code. What the UI shows (tui): a queued knock folds as a sent one on the contacts page (`Outcome::KnockSendQueued`) and the profile page (`KnockSend::Queued`) — the contact reads as requested, and the guardian ask is never offered, since the gate is learned only at drain, where it parks; the unsent-changes describer names it (`kind_knock_send`, *Contact request: {recipient}*, no target). tui seats the composer in `session::lend_offline_outbox` (at the store-ready edge and every sign-in edge, the contacts page's identity included) and drains both legs from `session::spawn_outbox_drain`, conversations session or not. Proven: `an_identity_intent_is_held_not_sent`, `identity_intents_drain_through_the_composer_fifo_and_park_the_remainder` and `the_shared_app_loop_drains_both_drainers_in_one_pass` (`libs/fauna-sync-engine/src/account_runtime.rs`); the contacts crate's `a_knock_send_with_no_nest_is_queued_scoped_to_its_recipient`, `a_knock_send_with_the_nest_connected_is_sent_not_queued`, `a_queued_knock_is_composed_and_signed_at_drain_by_the_then_current_key` (queued under one key, drained under another: the sent tuple's sender is the second) and `a_refused_drain_parks_with_the_nests_code_and_a_fault_retries`; tui's `a_knock_send_with_no_nest_is_queued_and_reads_as_requested` and `a_knock_send_with_the_nest_connected_is_sent_not_queued` (contacts and profile); the describer's `a_knock_send_describes_with_its_recipient`. **Not built, stated:** the knock-send composer on linux, windows, macos, ios, android and web (linux folds `KnockSend::Queued` but lends no outbox to its knock send; none seats an identity composer, so their knock sends stay on the plain send); composers for `fauna.labelers.publish` and `fauna.generation.escrow.put` (identity-bound, classified in the class table's comments; when one lands, `KnockComposer`'s kind dispatch moves to a crate both reach); the carry of the retired identity's undrained outbox, ruled 2026-11-09 ([`../behavior/succession-aftermath.md`](../behavior/succession-aftermath.md) § Re-key scope → *Adjudicating what the aftermath carries across*, the device-local outbox row) — the identity drainer is what lets the carry compose them under the successor. An older build reading a store that holds an `identity` row fails to list the outbox (`IntentDrainer::parse`) — owed nothing in the 0.1.x compat-free window.
 
 - **Built — W4 phase 3: the
   nest-side durable idempotency table.** The record lives in § The
@@ -259,8 +454,8 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   module's § Verification status records the three criteria rulings made in
   the pass (convergent value-derived external publishes do not disqualify
   OfflineSafe; nest-side refusals never drive class; nest-arbitrated
-  namespaces queue). Current split: 234 read / 60 offline-safe / 37
-  offline-queued / 265 online-only. The four `fauna.spaces.*` entries are
+  namespaces queue). Current split (2026-11-08): 278 read / 62 offline-safe / 38
+  offline-queued / 361 online-only. The four `fauna.spaces.*` entries are
   the recorded exception (no handler surface exists — re-verify at Slice
   2). Two handler bugs found by the pass were nest-captured and are **FIXED
   2026-08-13**: the Bluesky write-through now

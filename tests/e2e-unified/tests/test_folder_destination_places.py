@@ -114,7 +114,7 @@ def test_folder_destination_place_attach_and_detach(
 
     # The section repaints from the nest's answer: the attached row appears.
     wait_until(
-        lambda: app.driver.is_visible("folder-destination-row"),
+        lambda: app.driver.is_visible_scrolled("folder-destination-row"),
         15.0,
         diagnose=lambda: (
             f"the attach of {name!r} to destination {destination_id} painted no "
@@ -154,10 +154,11 @@ def test_folder_destination_place_attach_and_detach(
     # OPEN either way — after a real collapse + re-expand where it was open.
     b.open_folder(name)
     wait_until(
-        lambda: app.driver.is_visible("folder-destination-row"),
+        lambda: app.driver.is_visible_scrolled("folder-destination-row"),
         15.0,
         diagnose=lambda: (
-            f"the re-expanded {name!r} painted no folder-destination-row; "
+            f"the re-expanded {name!r} painted no folder-destination-row "
+            f"(in the tree: {app.driver.count('folder-destination-row')}); "
             f"error={app.error_text()!r}"
         ),
     )

@@ -417,6 +417,13 @@ mod manager {
         /// `save_if_changed(drafts_snapshot_bytes())`. Keeping it in Rust is what
         /// stops JS ever handling the sealed blob (priority #2).
         drafts_sync: Rc<DraftsSync<WsRpcClient>>,
+        /// The device's offline outbox, once the first `setConnectionState`
+        /// wired it — kept so later calls feed it the SPA's connection word.
+        outbox: std::cell::RefCell<
+            Option<
+                std::sync::Arc<fauna_account_plane::account_driver::offline_outbox::AccountOutbox>,
+            >,
+        >,
     }
 
     impl WasmFeedManager {
@@ -453,6 +460,7 @@ mod manager {
             Ok(Self {
                 manager: Rc::new(manager),
                 drafts_sync,
+                outbox: std::cell::RefCell::new(None),
             })
         }
     }
@@ -697,6 +705,23 @@ mod manager {
             })
         }
 
+        /// Re-read the like and unlike intents resting in this tab's outbox
+        /// onto each post's `like_state` (`"queued"` / `"unsent"` beside
+        /// `"on"` / `"off"`) — `account-offline-mutation.md` § The
+        /// unsent-changes surface, point 2. Call it on opening the feed and
+        /// on reconnect; a like toggle and a retry re-read it themselves.
+        /// Resolves `undefined`; a failed read rejects with the reason.
+        #[wasm_bindgen(js_name = refreshUnsentLikes, unchecked_return_type = "Promise<void>")]
+        pub fn refresh_unsent_likes(&self) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                m.refresh_unsent_likes()
+                    .await
+                    .map_err(|e| JsValue::from_str(&e))?;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
         #[wasm_bindgen(js_name = refreshFeeds)]
         pub fn refresh_feeds(&self) -> js_sys::Promise {
             let m = self.manager.clone();
@@ -775,6 +800,34 @@ mod manager {
             WasmFeedManager {
                 manager: Rc::new(self.manager.author_window(actor_id)),
                 drafts_sync: self.drafts_sync.clone(),
+                outbox: std::cell::RefCell::new(self.outbox.borrow().clone()),
+            }
+        }
+
+        /// The SPA's connection word — `"connected"`, `"connecting"`,
+        /// `"disconnected"`, `"unreachable"`, the word its offline gate
+        /// reads. Call once when this manager is built and again on every
+        /// change; the twin of the native `FfiFeedManager::set_connection_state`.
+        ///
+        /// The first call wires the device's offline outbox: the queue the
+        /// shared `OfflineQueued` composer puts a gesture in while the SPA has
+        /// no nest, so a like tapped offline is kept in this tab's account
+        /// store and sent by its runtime's full pass when the nest is back
+        /// (`account-offline-mutation.md` § The offline-mutation contract).
+        /// The queue is this tab's one outbox (`crate::offline_outbox`),
+        /// shared with the conversations manager's MLS sends and built by
+        /// whichever manager reports a word first — the same queue type every
+        /// native app builds, reading this tab's account runtime when it
+        /// enqueues, so it needs no store-ready call. Until the first call
+        /// every gesture is sent.
+        #[wasm_bindgen(js_name = setConnectionState)]
+        pub fn set_connection_state(&self, connection_state: String) {
+            let outbox = crate::offline_outbox::set_connection_state(&connection_state);
+            let mut slot = self.outbox.borrow_mut();
+            if slot.is_none() {
+                self.manager
+                    .set_offline_intent_queue(std::sync::Arc::clone(&outbox) as _);
+                *slot = Some(outbox);
             }
         }
 
@@ -1290,6 +1343,30 @@ mod manager {
             })
         }
 
+        /// The feed's payment-link gesture — the web
+        /// twin of `FfiFeedManager::pay_unlock_offer`
+        /// (`FeedManager::pay_unlock_offer`, the Q13 ruling): subscribe to the
+        /// offer's tier (at the post's home nest when remote), then resolve the
+        /// checkout URL to open. Resolves `null` when the post isn't loaded, its
+        /// offer isn't resolved, or it carries no safe payment link; rejects with
+        /// the error string when the subscribe is refused (open nothing).
+        // `payments`-gated doc line — see `update_compose_sell` above.
+        #[cfg_attr(
+            feature = "payments",
+            doc = " The affordance is `gated-post-payment-link`."
+        )]
+        #[wasm_bindgen(js_name = payUnlockOffer)]
+        pub fn pay_unlock_offer(&self, post_id: String) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                match m.pay_unlock_offer(post_id).await {
+                    Some(Ok(url)) => Ok(JsValue::from_str(&url)),
+                    Some(Err(e)) => Err(JsValue::from_str(&e)),
+                    None => Ok(JsValue::NULL),
+                }
+            })
+        }
+
         /// Resolve a loaded gated post's sealed-blob hash (hex `encrypted_ref`) for
         /// the SPA to fetch (`GET /api/v1/blob/{hash}` — browser bulk plane),
         /// caching the decoded gate info for [`unlockGatedPost`](Self::unlock_gated_post).
@@ -1409,6 +1486,21 @@ mod manager {
         #[wasm_bindgen(js_name = revealRemoteImages)]
         pub fn reveal_remote_images(&self, post_id: String) {
             self.manager.reveal_remote_images(post_id);
+        }
+
+        /// Hand the manager the reader's spam marks (`loadSpamMarked` /
+        /// `markSpam` / `unmarkSpam`); the next `snapshot()` folds `spam`@1000
+        /// into each marked post's labels (`report-sharing.md` § Report
+        /// capture → *The post's mark-as-spam verb*).
+        #[wasm_bindgen(js_name = setSpamMarked)]
+        pub fn set_spam_marked(&self, ids: Vec<String>) {
+            self.manager.set_spam_marked(ids);
+        }
+
+        /// Whether the reader marked this post as spam — the verb's `state`.
+        #[wasm_bindgen(js_name = isSpamMarked)]
+        pub fn is_spam_marked(&self, post_id: String) -> bool {
+            self.manager.is_spam_marked(&post_id)
         }
 
         /// Re-query the **currently selected** feed source, whatever it is.
@@ -1975,6 +2067,16 @@ mod manager {
         pub fn cue_verdict_for_test(&self, content_id: String) -> String {
             let (hydrated, verdict) = self.manager.cue_verdict_for_test(&content_id);
             serde_json::json!({ "hydrated": hydrated, "verdict": verdict }).to_string()
+        }
+
+        /// Set or clear the e2e cue-hydration hold (`feed_cue_hydration_hold`):
+        /// the browser's lever for what tui and linux reach through an env file,
+        /// which wasm32 cannot read. See
+        /// `fauna_feed::FeedManager::set_cue_hydration_hold_for_test`.
+        #[cfg(feature = "test-helpers")]
+        #[wasm_bindgen(js_name = setCueHydrationHoldForTest)]
+        pub fn set_cue_hydration_hold_for_test(&self, held: bool) {
+            self.manager.set_cue_hydration_hold_for_test(held);
         }
 
         /// Arm the one-shot hold on the NEXT reload (`feed_hold_next_reload`).

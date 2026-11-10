@@ -14,14 +14,18 @@
 //! compiled ceiling, exactly as for a remote principal.
 //!
 //! **Caps.** Fuel bounds CPU per call ([`PLUGIN_FUEL_PER_CALL`]) and a store
-//! limiter bounds linear memory ([`PLUGIN_MAX_MEMORY_BYTES`]) — the labeler
+//! limiter bounds the instance's linear memory ([`PLUGIN_MAX_MEMORY_BYTES`],
+//! every memory together) and table elements ([`PLUGIN_MAX_TABLE_ELEMENTS`]) — the labeler
 //! runtime's two caps (`fauna_labeler`), applied here per instance. An
 //! exhausted budget terminates the call as [`PluginFault::OutOfFuel`] and
 //! poisons the instance; the host survives, and the embedder decides whether
 //! to re-instantiate. A call yields to the async executor every
 //! [`PLUGIN_FUEL_YIELD_INTERVAL`] units of fuel, so a runaway call holds no
-//! worker thread for its whole budget. A refused memory growth is observed by the plugin as a
-//! failed `memory.grow`, never as a host fault.
+//! worker thread for its whole budget. A refused memory or table growth is observed by the plugin
+//! as a failed `memory.grow` / `table.grow`, never as a host fault. A `log`
+//! line is cut at [`PLUGIN_LOG_LINE_MAX_BYTES`]; the embedder bounds the state
+//! scope ([`PLUGIN_STATE_MAX_BYTES`]) and each call's wall-clock time, since
+//! fuel is not spent while the host awaits an import.
 //!
 //! **The holder key never enters the sandbox.** [`HolderKey`] is minted by the
 //! host at install and kept in the principal's state scope on the host side;
@@ -51,11 +55,25 @@ pub use services::{
     BoxFut, HostServices, HttpRequest, HttpResponse, LogLevel, OutboundPolicy, RpcRefusal,
 };
 
-/// Ceiling on one instance's linear memory, in bytes — the labeler runtime's
-/// host ceiling (`fauna_labeler::LABELER_HOST_MAX_MEMORY_BYTES`), applied to
-/// a plugin instance. A constant, never a knob (`principles.md` § One
-/// configuration surface).
+/// Ceiling on one instance's linear memory, in bytes, summed over every
+/// memory its core instances create — the labeler runtime's host ceiling
+/// (`fauna_labeler::LABELER_HOST_MAX_MEMORY_BYTES`), applied to a plugin
+/// instance. A constant, never a knob (`principles.md` § One configuration
+/// surface).
 pub const PLUGIN_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Ceiling on one instance's table elements, summed over every table — far
+/// above the function table a compiled plugin carries and a few megabytes of
+/// host memory at most, so `table.grow` cannot allocate in the nest past it.
+pub const PLUGIN_MAX_TABLE_ELEMENTS: usize = 100_000;
+
+/// Ceiling on one `log` line, in bytes: a longer one is cut and marked.
+pub const PLUGIN_LOG_LINE_MAX_BYTES: usize = 4096;
+
+/// Ceiling on one plugin's state scope, in bytes of keys plus values — what
+/// the embedder's `state.put` refuses past. Each bound account's settings
+/// rest outside it.
+pub const PLUGIN_STATE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// Fuel budget for one export call (`start`, `stop`, one ingress request) —
 /// roughly one instruction per unit, so about a second of CPU, the labeler

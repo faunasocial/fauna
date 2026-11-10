@@ -164,7 +164,7 @@ class CliMcpSession:
 
     def http_exchange(
         self, body: str, host: str | None = "", origin: str | None = None, method: str = "POST",
-        path: str = "/mcp",
+        path: str = "/mcp", content_type: str = "application/json",
     ) -> tuple[int, str]:
         """One raw HTTP exchange with the listener: ``(status, body)``. ``host``
         ``""`` is the listener's own loopback name, ``None`` omits the header."""
@@ -175,7 +175,7 @@ class CliMcpSession:
                 conn.putheader("Host", host or f"127.0.0.1:{self.http_port}")
             if origin is not None:
                 conn.putheader("Origin", origin)
-            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Type", content_type)
             conn.putheader("Accept", "application/json, text/event-stream")
             conn.putheader("Content-Length", str(len(body.encode())))
             conn.endheaders(body.encode())

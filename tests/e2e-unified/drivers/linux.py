@@ -10,7 +10,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from .base import rolling_log_text
+from .base import rolling_log_sizes, rolling_log_text
 from .http_bridge import HttpBridgeDriver
 from .local_launch import (
     descendant_named,
@@ -177,12 +177,20 @@ def build_launch_env(config: dict, port: int, tmp: str) -> dict:
     # machine-global leak class; same shape as the D-Bus bus fix). The
     # app direct-spawns the agent as a child under e2e, so both ends
     # inherit this private dir and the socket is per-launch by
-    # construction. Unlike `XDG_DATA_HOME`/`XDG_CONFIG_HOME` above, there
-    # is deliberately no caller-environment carve-out here (tui's twin has
-    # one for the external-media handoff base; linux has no such caller
-    # today, and adding one is out of this lift's scope — mechanical only,
-    # no behaviour change).
-    xdg_runtime = _xdg_runtime_dir(xdg_base)
+    # construction.
+    #
+    # **A caller-passed `XDG_RUNTIME_DIR` OWNS it** — tui's twin carve-out
+    # (`drivers/tui.py`), and the shape `DBUS_SESSION_BUS_ADDRESS` already takes
+    # below. The account's conversations door sits beside the agent socket in
+    # this dir (`conversations-oracle.md` § The custodian and the door), so a
+    # second linux seat that must find the first one's door
+    # (`test_cli_conversations_door.py`) names the first launch's dir. A caller
+    # passes a PRIVATE dir (another launch's, or a `tmp_path` subdir); passing
+    # the box's real runtime dir would re-open the machine-global agent-socket
+    # leak this default closes — don't.
+    xdg_runtime = config.get("environment", {}).get("XDG_RUNTIME_DIR") or _xdg_runtime_dir(
+        xdg_base
+    )
     os.makedirs(xdg_runtime, mode=0o700, exist_ok=True)
     env["XDG_RUNTIME_DIR"] = xdg_runtime
 
@@ -468,10 +476,10 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         `build_launch_env` made (`fauna_ipc::unix_transport::linux_socket_path`;
         the app direct-spawns the agent under e2e, so it inherits that dir) —
         `None` before launch. tui's twin is `drivers/tui.py`'s."""
-        base = getattr(self, "_resolved_xdg_base", None)
-        if not base:
+        runtime = getattr(self, "_xdg_runtime", None)
+        if not runtime:
             return None
-        return os.path.join(_xdg_runtime_dir(base), "fauna", "sync-agent.sock")
+        return os.path.join(runtime, "fauna", "sync-agent.sock")
 
     @property
     def config_home(self) -> str:
@@ -549,6 +557,10 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         # The per-launch `XDG_CONFIG_HOME` this instance was isolated into —
         # the device-local state dir the `config_home` property exposes.
         self._xdg_config = env["XDG_CONFIG_HOME"]
+        # The runtime dir this launch's agent socket (and the conversations
+        # door) derive from — caller-owned or the private default; see
+        # `sync_agent_socket`.
+        self._xdg_runtime = env["XDG_RUNTIME_DIR"]
         # The unified account-store root THIS launch resolved — shared Rust's
         # `production_base()` on linux is `<XDG_CONFIG_HOME>/fauna/sync`
         # (`fauna_account_store::root`) — published after the carry began, so
@@ -721,6 +733,12 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         failure report wants."""
         cfg = getattr(self, "_xdg_config", None)
         return rolling_log_text(os.path.join(cfg, "fauna")) if cfg else ""
+
+    def on_device_log_sizes(self) -> dict[str, int]:
+        """Each on-device `fauna.log.*` file's size by name — the sizes half of
+        `on_device_log_text()`, read from the same directory."""
+        cfg = getattr(self, "_xdg_config", None)
+        return rolling_log_sizes(os.path.join(cfg, "fauna")) if cfg else {}
 
     def inherited_agent_log_text(self) -> str:
         """The child sync agent's own rolling log (`<config>/fauna/sync/logs`):

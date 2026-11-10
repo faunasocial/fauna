@@ -93,6 +93,13 @@ class InProcessAgentDriver(HttpBridgeDriver):
 
         return rolling_log_text(self.app_support_dir())
 
+    def on_device_log_sizes(self) -> dict[str, int]:
+        """Each on-device `fauna.log.*` file's size by name — the sizes half of
+        `on_device_log_text()`, read from the same directory."""
+        from .base import rolling_log_sizes
+
+        return rolling_log_sizes(self.app_support_dir())
+
     def _resolve_credential_store(self, config: dict, tmp: str) -> str:
         """The store half of `launch()`, identical on macOS and iOS: resolve this
         launch's credential dir, publish it, seed it, and return it.
@@ -129,6 +136,11 @@ class InProcessAgentDriver(HttpBridgeDriver):
         self._begin_principal_slot_carry(
             {"credential_dir": config.get("credential_dir") or self._preserved_cred_dir},
             {"FAUNA_E2E_CREDENTIAL_DIR": cred_dir},
+            pinned_keys=(
+                ("credential_dir",)
+                if self._preserved_cred_dir and not config.get("credential_dir")
+                else ()
+            ),
         )
         # The generic cross-driver contract `_resolved_credential_dir` /
         # `_resolved_keyring_app` (linux/tui/windows) — some journey helpers poll

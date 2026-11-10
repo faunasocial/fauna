@@ -65,8 +65,27 @@ use crate::state::SyncServiceState;
 use crate::versions::{list_file_versions, restore_file_version};
 use fauna_client_sync::row_judge::ReaderSeat;
 
-/// The dispatching actor. Non-zero so it can hold a `CallerClass` once seeded.
-const ACTOR: [u8; 32] = [11u8; 32];
+/// The dispatching actor's identity key. A real keypair, not bare bytes: every
+/// change record the nest accepts is writer-signed (`writer-signed-change-records.md`),
+/// so the actor id must be the public half of a key that can sign.
+fn actor() -> fauna_core::identity::ActorKeypair {
+    fauna_core::identity::ActorKeypair::from_secret([11u8; 32])
+}
+
+/// The dispatching actor's id — [`actor`]'s public half.
+fn actor_id() -> [u8; 32] {
+    actor().actor_id().0
+}
+
+/// The set's nonce, fixed at create time: every record binds to it, and the
+/// reader seat judges history under it.
+const SET_NONCE: [u8; 32] = [0x5e; 32];
+
+/// A stand-in `path_sealed`. The nest rests no plaintext path (the S9 flip), so
+/// a record must carry a seal; it treats the seal as opaque, and minting a real
+/// one (`pipe_server::handle_restore_file_version`) is not what this harness
+/// covers.
+const SYNTHETIC_SEAL: &[u8] = b"tier3-synthetic-seal";
 const FOLDER: &str = "docs";
 /// The bound set's identity: the agent keys its engine and state DB by it.
 const FOLDER_REF: fauna_core::folder_keys::FolderRef = fauna_core::folder_keys::FolderRef::Local(1);
@@ -174,10 +193,16 @@ impl NestHarness {
         // through `fauna.account.register` or the auth handshake's auto-provision
         // arm; a direct-dispatch test runs neither, and the central authority
         // gate resolves an actor with no `users` row to no `CallerClass` at all.
-        if state.db.get_user(&ACTOR).await.expect("get_user").is_none() {
+        if state
+            .db
+            .get_user(&actor_id())
+            .await
+            .expect("get_user")
+            .is_none()
+        {
             state
                 .db
-                .create_user(&ACTOR, "free", "tier3-seeded")
+                .create_user(&actor_id(), "free", "tier3-seeded")
                 .await
                 .expect("seed users row");
         }
@@ -205,6 +230,7 @@ impl NestHarness {
                 &FolderCreateRequest {
                     name: FOLDER.into(),
                     retention_policy: None,
+                    set_nonce: Some(fauna_protocol::ByteBuf::from(SET_NONCE.to_vec())),
                     ..Default::default()
                 },
             )
@@ -226,14 +252,15 @@ impl NestHarness {
     {
         let payload = fauna_protocol::encode_canonical(req).expect("encode request");
         let meta = self.router.kind_meta(kind).expect("kind registered");
-        let reply = (meta.handler)(Arc::clone(&self.state), ACTOR, payload)
+        let reply = (meta.handler)(Arc::clone(&self.state), actor_id(), payload)
             .await
             .unwrap_or_else(|e| panic!("handler {kind} rejected: {}", e.code));
         fauna_protocol::decode_strict(&reply).expect("decode reply")
     }
 
     /// Record a change over the real `fauna.sync.changes.record` handler — an
-    /// upload's nest-facing effect — and return its `seq` (= the version_num the
+    /// upload's nest-facing effect, sealed and signed under the set nonce as a
+    /// writer engine sends it — and return its `seq` (= the version_num the
     /// projection exposes).
     async fn record(
         &self,
@@ -242,35 +269,56 @@ impl NestHarness {
         change_type: &str,
         ckv: Option<u64>,
     ) -> i64 {
-        let reply: SyncChangeRecordReply = self
-            .dispatch(
-                "fauna.sync.changes.record",
-                &SyncChangeRecordRequest {
-                    nest_url: None,
-                    channel_id: None,
-                    folder: FOLDER.into(),
-                    device_id: self.device_id.clone(),
-                    path: REL.into(),
-                    manifest_hash: Some(hex::encode(manifest)),
-                    size_bytes: size,
-                    change_type: change_type.into(),
-                    content_key_version: ckv,
-                    thumbnail_hash: None,
-                    ..Default::default()
-                },
-            )
-            .await;
+        let mut req = SyncChangeRecordRequest {
+            path_sealed: Some(fauna_protocol::ByteBuf::from(SYNTHETIC_SEAL.to_vec())),
+            nest_url: None,
+            channel_id: None,
+            folder: FOLDER.into(),
+            device_id: self.device_id.clone(),
+            path: REL.into(),
+            manifest_hash: Some(hex::encode(manifest)),
+            size_bytes: size,
+            change_type: change_type.into(),
+            content_key_version: ckv,
+            thumbnail_hash: None,
+            ..Default::default()
+        };
+        // Sign LAST: every covered field already holds its final value.
+        fauna_protocol::sync_writer_sig::ChangeSigner::direct(&actor())
+            .sign_record(&mut req, SET_NONCE)
+            .expect("the fixture record signs");
+        let reply: SyncChangeRecordReply = self.dispatch("fauna.sync.changes.record", &req).await;
         reply.seq
     }
 
     /// A `SyncClient` over this nest — the exact generic surface the shell
-    /// extension's Version-history verbs drive in production.
+    /// extension's Version-history verbs drive in production, signing every
+    /// record it sends (the restore's head) as the agent's does.
     fn sync(&self) -> SyncClient<InProcessNest> {
         SyncClient::new(InProcessNest {
             router: Arc::clone(&self.router),
             state: Arc::clone(&self.state),
-            actor: ACTOR,
+            actor: actor_id(),
         })
+        .with_record_signing(fauna_client_sync::RecordSigning {
+            signer: Arc::new(fauna_protocol::sync_writer_sig::ChangeSigner::direct(
+                &actor(),
+            )),
+            set_nonce: fauna_client_sync::SetNonceSource::Fixed(SET_NONCE),
+        })
+    }
+
+    /// The agent's reader seat: its own account, and the set's nonce from its
+    /// custody — so the projection's rows verify, and a version this actor
+    /// signed reads as signed by the current identity (no re-seal owed).
+    fn seat() -> ReaderSeat {
+        ReaderSeat {
+            own: Some(actor_id()),
+            nonces: Some(fauna_client_sync::SetNonceSource::by_folder(
+                [(FOLDER.to_string(), SET_NONCE)].into_iter().collect(),
+            )),
+            ..Default::default()
+        }
     }
 }
 
@@ -291,7 +339,7 @@ async fn list_file_versions_against_a_real_nest_returns_recorded_versions() {
         FOLDER,
         FOLDER_REF,
         REL,
-        &ReaderSeat::default(),
+        &NestHarness::seat(),
     )
     .await
     .expect("list versions against a real nest");
@@ -336,7 +384,7 @@ async fn restore_end_to_end_against_a_real_nest() {
             FOLDER,
             FOLDER_REF,
             REL,
-            &ReaderSeat::default()
+            &NestHarness::seat()
         )
         .await
         .unwrap()
@@ -347,9 +395,10 @@ async fn restore_end_to_end_against_a_real_nest() {
     );
 
     // ── Act: the service restores v1 through its real RPC path. ──
-    // `path_sealed: None` — this harness exercises the RPC path, not the
+    // A synthetic `path_sealed` — this harness exercises the RPC path, not the
     // capability-derived mint (`pipe_server::handle_restore_file_version`),
-    // which is where production mints the seal (S8 D2).
+    // which is where production mints the seal (S8 D2); the nest refuses a
+    // sealless record (the S9 flip), so the seal is carried, not minted.
     let restored = restore_file_version(
         &sync,
         FOLDER,
@@ -357,8 +406,8 @@ async fn restore_end_to_end_against_a_real_nest() {
         &h.device_id,
         REL,
         seq1,
-        None,
-        &ReaderSeat::default(),
+        Some(SYNTHETIC_SEAL.to_vec()),
+        &NestHarness::seat(),
         &crate::versions::NeverReseals,
         &|_| Ok(()),
     )
@@ -384,7 +433,7 @@ async fn restore_end_to_end_against_a_real_nest() {
         FOLDER,
         FOLDER_REF,
         REL,
-        &ReaderSeat::default(),
+        &NestHarness::seat(),
     )
     .await
     .unwrap();
@@ -451,7 +500,7 @@ async fn restore_end_to_end_against_a_real_nest() {
         FOLDER_REF,
         REL,
         &restored,
-        Some(ACTOR),
+        Some(actor_id()),
         fauna_core::data::Timestamp::now_secs_or_zero(),
     )
     .await

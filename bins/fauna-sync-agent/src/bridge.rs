@@ -2802,8 +2802,9 @@ async fn set_pin<H: HydrationHost, I: PlaceholderInvalidator>(
 /// in-process reference does (linux's `run_engine_loop` drives `pull_remote_changes`
 /// on `rescan_tick`) — the cadence is a timer, set from the shared reconcile
 /// constant ([`HydrationHost::rescan_interval`]).
-/// A **reconnect** re-pulls immediately on top of that: changes recorded while the
-/// socket was down would otherwise wait out a full tick.
+/// A **reconnect** re-pulls immediately on top of that, then converges: changes
+/// recorded while the socket was down, and local writes whose upload or record
+/// failed meanwhile, would otherwise wait out a full tick (`file-sync.md` § 5).
 ///
 /// This is the body of one engine's future on the shared
 /// [`EngineHost`](fauna_sync_engine::engine_host::EngineHost)'s driving thread —
@@ -3257,6 +3258,14 @@ async fn drive_hydration_root<H, I, C, G>(
                     repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "reconnect").await;
                     hydrator.pull_siblings(&folder).await;
                     adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+                    // Then upload what waited (`file-sync.md` § 5, Offline Catch-Up
+                    // step 3 — apply, then upload): a record or upload that failed
+                    // while the socket was down is re-driven only by a converge,
+                    // which until 2026-11-07 ran only on the rescan tick. Flipped
+                    // ✅ in the tick's order.
+                    let recorded = hydrator.converge(&folder).await;
+                    flip_recorded_in_sync(hydrator, &invalidator, &sync_root, &recorded).await;
+                    flip_clean_ancestor_dirs(hydrator, &invalidator, &sync_root, &recorded).await;
                 }).await,
                 Err(_) => watch_reconnects = false,
             },
@@ -8116,6 +8125,72 @@ mod tests {
             vec![abs.clone(), abs],
             "startup AND the rescan tick each flip converge's recorded rels in-sync; a \
              count of one means one of the two call sites dropped converge's return"
+        );
+    }
+
+    /// **The reconnect edge uploads what waited while the socket was down** —
+    /// `file-sync.md` § 5, Offline Catch-Up step 3: apply the nest's changes, then
+    /// upload the queued local ones. A write whose record or upload failed while
+    /// the socket was down is re-driven only by a converge; before this arm ran
+    /// one, it waited out the rescan tick (300 s). The tick here is an hour away,
+    /// so startup's converge and the reconnect's are the only two: a healthy loop
+    /// flips the recorded rel in-sync twice, and the reconnect's converge comes
+    /// after its re-pull (the last `pull_siblings` precedes the last `converge`).
+    #[test]
+    fn a_reconnect_converges_and_flips_its_recorded_uploads_after_the_repull() {
+        let (_cmd_tx, rx) = mpsc::unbounded_channel::<HydrationCommand>();
+        let (evt_tx, _evt_rx) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let root = PathBuf::from(r"C:\Root");
+        let abs = root.join("edited.txt").to_string_lossy().to_string();
+        let invalidator = FakeInvalidator::default();
+        let inv = &invalidator;
+
+        // The socket came back before the loop subscribed: `changed()` fires at once.
+        let reconnect = Arc::new(watch::channel(0u64));
+        reconnect.0.send(1).unwrap();
+
+        let hydrator = FakeHydrator {
+            interval: Some(Duration::from_secs(3600)),
+            reconnect,
+            stop_after_repulls: Some((1, cancel.clone())),
+            converge_records: vec!["edited.txt".to_string()],
+            dehydration_safe: ["edited.txt".to_string()].into(),
+            ..Default::default()
+        };
+        let converges = hydrator.converges.clone();
+        let boot_log = hydrator.boot_log.clone();
+
+        loop_runtime().block_on(run_hydration_loop(
+            hydrator,
+            inv,
+            rx,
+            Some(evt_tx),
+            root,
+            "docs".to_string(),
+            cancel,
+            None,
+            None,
+        ));
+
+        assert_eq!(
+            *converges.lock().unwrap(),
+            2,
+            "startup and the reconnect edge each converge; one means the reconnect \
+             arm left the queued local writes to the rescan tick"
+        );
+        assert_eq!(
+            *invalidator.in_synced.lock().unwrap(),
+            vec![abs.clone(), abs],
+            "the reconnect's converge flips its recorded rels in-sync, as the tick's does"
+        );
+        let log = boot_log.lock().unwrap().clone();
+        let last_converge = log.iter().rposition(|e| *e == "converge");
+        let last_pull = log.iter().rposition(|e| *e == "pull_siblings");
+        assert!(
+            last_pull < last_converge,
+            "§ 5's order is apply, then upload: the reconnect's converge follows its \
+             re-pull (log: {log:?})"
         );
     }
 

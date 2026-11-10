@@ -461,9 +461,16 @@ fn build_member_folder_row(
     } else {
         fs.owner_display.clone()
     };
+    // A seat the folder rail marked forked reads the badge's third text (the
+    // owner changed identity; only their re-share heals it — `ui/folders.md`
+    // § Sharing, the badge). The mark is shared Rust: `FolderSummary::seat_forked`.
     let shared_badge = gtk::Label::builder()
         .css_classes(["accent", "caption"])
-        .label(strings::devices::shared_by(&who))
+        .label(if fs.seat_forked {
+            strings::devices::shared_by_owner_changed(&who)
+        } else {
+            strings::devices::shared_by(&who)
+        })
         .build();
     set_test_id(&shared_badge, SHARED_BADGE_ID);
     row.add_suffix(&shared_badge);
@@ -533,9 +540,16 @@ fn build_writer_member_folder_row(
     } else {
         fs.owner_display.clone()
     };
+    // A seat the folder rail marked forked reads the badge's third text (the
+    // owner changed identity; only their re-share heals it — `ui/folders.md`
+    // § Sharing, the badge). The mark is shared Rust: `FolderSummary::seat_forked`.
     let shared_badge = gtk::Label::builder()
         .css_classes(["accent", "caption"])
-        .label(strings::devices::shared_by(&who))
+        .label(if fs.seat_forked {
+            strings::devices::shared_by_owner_changed(&who)
+        } else {
+            strings::devices::shared_by(&who)
+        })
         .build();
     set_test_id(&shared_badge, SHARED_BADGE_ID);
     row.add_suffix(&shared_badge);
@@ -1706,6 +1720,43 @@ fn confirm_public_audience(
     let machine = Arc::clone(machine);
     let fauna_client = Rc::clone(fauna_client);
     let name_owned = name.to_string();
+    present_declassify_confirm(
+        dropdown,
+        move || {
+            // Both outcomes self-correct through the machine's `on_changed()`:
+            // a successful write refreshes and the row repaints as Public, a
+            // failed one leaves the snapshot (and so the select) where it was
+            // and surfaces the nest's own refusal text — which names the repair
+            // ("turn off WebDAV serving first" and kin) and is the actionable
+            // half.
+            fauna_client.set_folder_audience(
+                Arc::clone(&machine),
+                &name_owned,
+                fauna_folders_machine::AUDIENCE_PUBLIC,
+            );
+        },
+        None,
+        "fauna.folders.update",
+    );
+}
+
+/// The declassify dialog itself — `folder-audience-public-confirm` with its two
+/// consequence lines. ONE builder for both doors to public: the owner row's
+/// select ([`confirm_public_audience`]) and a Public wizard's Create (the
+/// wizard view, off `ReviewSnapshot.declassify_armed`), so the copy and ids
+/// cannot drift between them (`ui/folders.md` § Audience and website serving →
+/// *Born public*, ruling 2: reused on the same page, never copied).
+/// `on_declined` runs on cancel / Escape / close — the wizard's arm lives in
+/// the shared machine, which the decline must disarm; the owner row's arm is
+/// the dialog itself, so it passes `None`. `wire_kind` is the write the
+/// confirm binds (the offline gate's ceremony): the row's flip is a
+/// `fauna.folders.update`, the wizard's confirm a `fauna.folders.create`.
+pub(super) fn present_declassify_confirm(
+    anchor: &impl IsA<gtk::Widget>,
+    on_confirm: impl Fn() + 'static,
+    on_declined: Option<Box<dyn Fn()>>,
+    wire_kind: &'static str,
+) {
     // The two consequences are separate lines so each carries its own id: they
     // exist exactly while the confirm does.
     let consequences = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -1725,31 +1776,19 @@ fn confirm_public_audience(
         set_test_id(&line, id);
         consequences.append(&line);
     }
-    crate::confirm_dialog::present_confirm(
-        dropdown,
-        crate::confirm_dialog::ConfirmSpec::new(
-            strings::devices::DECLASSIFY_TITLE,
-            crate::confirm_dialog::ConfirmBody::Child(consequences.upcast_ref::<gtk::Widget>()),
-            "confirm",
-            strings::devices::DECLASSIFY_CONFIRM,
-            crate::confirm_dialog::CANCEL,
-        )
-        .with_confirm_id(ids::FOLDER_AUDIENCE_PUBLIC_CONFIRM)
-        .with_wire_kind("fauna.folders.update"),
-        move || {
-            // Both outcomes self-correct through the machine's `on_changed()`:
-            // a successful write refreshes and the row repaints as Public, a
-            // failed one leaves the snapshot (and so the select) where it was
-            // and surfaces the nest's own refusal text — which names the repair
-            // ("turn off WebDAV serving first" and kin) and is the actionable
-            // half.
-            fauna_client.set_folder_audience(
-                Arc::clone(&machine),
-                &name_owned,
-                fauna_folders_machine::AUDIENCE_PUBLIC,
-            );
-        },
-    );
+    let mut spec = crate::confirm_dialog::ConfirmSpec::new(
+        strings::devices::DECLASSIFY_TITLE,
+        crate::confirm_dialog::ConfirmBody::Child(consequences.upcast_ref::<gtk::Widget>()),
+        "confirm",
+        strings::devices::DECLASSIFY_CONFIRM,
+        crate::confirm_dialog::CANCEL,
+    )
+    .with_confirm_id(ids::FOLDER_AUDIENCE_PUBLIC_CONFIRM)
+    .with_wire_kind(wire_kind);
+    if let Some(declined) = on_declined {
+        spec = spec.with_declined(declined);
+    }
+    crate::confirm_dialog::present_confirm(anchor, spec, on_confirm);
 }
 
 /// Present the destructive content-residency confirmation (file-sync.md §
@@ -2592,8 +2631,13 @@ pub fn populate_folder_actors(
 
         // The canonical handle-else-`short_id` rule (`value-formatting.md`
         // § Account display label) — never re-derive it here: the local
-        // fallback this replaces rendered the raw 64-hex actor id.
-        let display = fauna_core::format::account_display_label(Some(&m.handle), &m.actor_id);
+        // fallback this replaces rendered the raw 64-hex actor id. A
+        // cross-nest member's announced pair joins to `handle@domain` through
+        // the shared formatter, nowhere else.
+        let display = fauna_core::format::account_display_label(
+            fauna_core::format::qualified_handle(Some(&m.handle), m.domain.as_deref()).as_deref(),
+            &m.actor_id,
+        );
         let handle_lbl = gtk::Label::builder()
             .label(&display)
             .halign(gtk::Align::Start)

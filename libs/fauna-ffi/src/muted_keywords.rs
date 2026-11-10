@@ -258,6 +258,63 @@ pub async fn unhide_reported(id: String) -> Result<Vec<String>, FfiError> {
         .map_err(general_err)
 }
 
+/// The show-again control on a reported placeholder (`moderation.md`
+/// § Corollary — the reporter's hide is theirs to undo): the hidden ids one
+/// press of `content-policy-show-again-button` removes (each one
+/// [`unhide_reported`] call) and the button's label, naming the scope.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiShowAgain {
+    pub ids: Vec<String>,
+    pub label: fauna_core::localized::LocalizedText,
+}
+
+/// `obligation::show_again_for_item` — `None` when no hidden id matched the
+/// item, so the placeholder is not the viewer's own report.
+#[uniffi::export]
+pub fn reported_show_again(
+    hidden_content: Vec<String>,
+    item_id: String,
+    author_id: Option<String>,
+) -> Option<FfiShowAgain> {
+    fauna_core::obligation::show_again_for_item(&hidden_content, &item_id, author_id.as_deref())
+        .map(|s| FfiShowAgain {
+            ids: s.ids,
+            label: s.label,
+        })
+}
+
+// ── The post's mark-as-spam verb (`report-sharing.md` § Report capture) ──
+//
+// The same sealed record again: the `preference_surfaces` spam deltas. The
+// list feeds the `FeedManager`'s spam fold and the verb's `state`.
+
+/// The post ids the owner marked as spam.
+#[fauna_uniffi_async::export]
+pub async fn load_spam_marked() -> Result<Vec<String>, FfiError> {
+    preference_surfaces::load_spam_marked(&crate::account_runtime::handle_source())
+        .await
+        .map_err(preference_surfaces::plane_failure)
+        .map_err(general_err)
+}
+
+/// Mark a post as spam for the owner; returns the stored list.
+#[fauna_uniffi_async::export]
+pub async fn mark_spam(id: String) -> Result<Vec<String>, FfiError> {
+    preference_surfaces::mark_spam(&crate::account_runtime::handle_source(), &id)
+        .await
+        .map_err(preference_surfaces::plane_failure)
+        .map_err(general_err)
+}
+
+/// Un-mark a post; returns the stored list.
+#[fauna_uniffi_async::export]
+pub async fn unmark_spam(id: String) -> Result<Vec<String>, FfiError> {
+    preference_surfaces::unmark_spam(&crate::account_runtime::handle_source(), &id)
+        .await
+        .map_err(preference_surfaces::plane_failure)
+        .map_err(general_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

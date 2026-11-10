@@ -20,8 +20,8 @@
 //! activation is the door a search result uses: the feed page's `post_detail`
 //! over the timeline manager's `resolve_post` (`feed.md` § The read model →
 //! *Opening a post the timeline never loaded*), handed in by `app.rs` as
-//! `open_post`. The load-more gesture is the feed's own (its unnamed "Load
-//! more" button).
+//! `open_post`. The load-more gesture is the feed's own: the list's end
+//! scrolling into view (`crate::feed::scroll_edge`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -32,7 +32,6 @@ use fauna_ui_ids as ids;
 
 use crate::client::FaunaClient;
 use crate::feed::host::LinuxFeedManager;
-use crate::i18n::strings::common;
 use crate::i18n::strings::profile as p;
 use crate::testid::set_test_id;
 
@@ -70,12 +69,6 @@ pub(super) fn build(
     list.set_margin_end(12);
     section.append(&list);
 
-    // The feed's load-more gesture, shown while the window holds more.
-    let load_more = gtk::Button::with_label(common::LOAD_MORE);
-    load_more.set_halign(gtk::Align::Center);
-    load_more.set_visible(false);
-    section.append(&load_more);
-
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -104,10 +97,12 @@ pub(super) fn build(
             }
         });
     }
+    // The feed's own paging gesture — the list's end scrolling into view (no
+    // load-more element; the feed has none).
     {
         let window = Rc::clone(&window);
         let rt = client.runtime_handle();
-        load_more.connect_clicked(move |_| {
+        crate::feed::scroll_edge::wire(&scrolled, move || {
             if let Some(w) = window.borrow().clone() {
                 rt.spawn(async move { w.load_more().await });
             }
@@ -133,20 +128,9 @@ pub(super) fn build(
                 let client = Rc::clone(&client);
                 let list = list.clone();
                 let empty = empty.clone();
-                let load_more = load_more.clone();
                 let error_label = error_label.clone();
                 let showed_error = Rc::new(Cell::new(false));
-                move || {
-                    paint(
-                        &w,
-                        &client,
-                        &list,
-                        &empty,
-                        &load_more,
-                        &error_label,
-                        &showed_error,
-                    )
-                }
+                move || paint(&w, &client, &list, &empty, &error_label, &showed_error)
             };
             render();
 
@@ -187,7 +171,6 @@ fn paint(
     client: &Rc<FaunaClient>,
     list: &gtk::ListBox,
     empty: &gtk::Label,
-    load_more: &gtk::Button,
     error_label: &gtk::Label,
     showed_error: &Cell<bool>,
 ) {
@@ -195,7 +178,6 @@ fn paint(
     // The `feed-empty-state` rule through the same shared decision; the window
     // carries no search, so its one empty arm is "no posts".
     empty.set_visible(snap.empty_state().is_some());
-    load_more.set_visible(snap.has_more && !snap.posts.is_empty());
     // The read's failure on the page's `error-message`; cleared only if this
     // tab put it there (the label is shared with the rest of the page).
     match &snap.error {

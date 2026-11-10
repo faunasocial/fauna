@@ -287,7 +287,18 @@ where
     let reachable =
         crate::acme_http01::reachable_mail_domains(app_state, apex, &mail_domain_names).await;
     let apex_sans = crate::acme_http01::apex_sans_for_cycle(app_state, apex).await;
-    let domains = crate::acme_http01::desired_san_domains(apex, &reachable, &infra, apex_sans);
+    // An in-flight primary-domain rename's MX hosts, from the one builder the
+    // issuer and `desired_sans` share, under the issuer's gate like every other
+    // name here — so a mobile-only admin is reminded that the cert the rename
+    // waits on lacks `mail.<new>` (`mail-primary-domain-rename.md`
+    // § *Issuer-independence — the rename driver*, rule 1).
+    let rename = crate::acme_http01::rename_sans_for_cycle(
+        app_state,
+        crate::acme_http01::RenameSanGate::Reachable,
+    )
+    .await;
+    let domains =
+        crate::acme_http01::desired_san_domains(apex, &reachable, &infra, apex_sans, &rename);
     let facts: Vec<(String, Option<ServedCertFacts>)> = domains
         .into_iter()
         .map(|d| {
@@ -451,6 +462,47 @@ mod tests {
         fn served_cert_spki_sha256(&self, _sni: &str) -> Option<[u8; 32]> {
             None
         }
+    }
+
+    /// A pre-flip primary-domain rename whose served cert lacks `mail.<new>`:
+    /// the nudge's set is the issuer's, rename hosts included, so the admin is
+    /// reminded of the host the rename waits on (`mail-primary-domain-rename.md`
+    /// § *Issuer-independence — the rename driver*, rule 1).
+    #[tokio::test]
+    async fn at_risk_names_a_pre_flip_renames_uncovered_mail_host() {
+        use crate::dns_verifier::LookupOutcome;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StdArc::new(crate::db::CacheDb::open_in_memory().expect("db"));
+        // Every name resolves to the nest/mail address, so `mail.<new>` passes
+        // the issuer's strong gate.
+        let st = crate::acme_http01::tests::rename_test_state(
+            &db,
+            LookupOutcome::Records(vec!["203.0.113.7".into()]),
+        )
+        .await;
+        let now = crate::acme_http01::now_unix() as i64;
+        let lacking = ServedCertFacts {
+            covers: false,
+            ..trusted_facts(now)
+        };
+        let resolver = FixedSpki {
+            facts: HashMap::from([
+                ("nest.example.com".to_string(), trusted_facts(now)),
+                ("mail.nest.example.com".to_string(), trusted_facts(now)),
+                ("new.example.com".to_string(), trusted_facts(now)),
+                // The served (apex) cert answers for the new MX host but does
+                // not name it.
+                ("mail.new.example.com".to_string(), lacking),
+            ]),
+        };
+        let (_pushes, push) = recorder();
+
+        let outcome = nudge_tick(&st, "nest.example.com", &resolver, dir.path(), &push, now).await;
+        assert_eq!(
+            outcome.at_risk,
+            vec!["mail.new.example.com".to_string()],
+            "the rename's new MX host is in the nudge's set and the served cert lacks it"
+        );
     }
 
     type Pushes = StdArc<StdMutex<Vec<(Vec<u8>, Vec<String>)>>>;

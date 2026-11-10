@@ -202,13 +202,35 @@ impl Http01Config {
 /// `FAUNA_ACME_STAGING`); a nest never does.
 pub const LETS_ENCRYPT_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 
+/// The directory a test-capable build orders against when nothing overrides it:
+/// a closed loopback port, so every order fails before a connection and no test
+/// nest ever reaches the public CA (`nest/tls-certificates.md` § ACME settings —
+/// constants, not choices; the nest's `test-hooks` forwards this crate's
+/// `e2e-dark-ca`, which nothing else names). Port 9 is the discard port, which nothing on a dev box
+/// serves — the release-check twin's `UNREACHABLE_FEED_ORIGIN` uses it too.
+#[cfg(feature = "e2e-dark-ca")]
+pub const E2E_DARK_DIRECTORY_URL: &str = "https://127.0.0.1:9/directory";
+
+/// The CA an order goes to when no `[acme].directory_url` names one: Let's
+/// Encrypt production in every shipped build; the dark loopback directory in a
+/// test-capable one.
+fn default_directory_url() -> &'static str {
+    #[cfg(feature = "e2e-dark-ca")]
+    {
+        E2E_DARK_DIRECTORY_URL
+    }
+    #[cfg(not(feature = "e2e-dark-ca"))]
+    {
+        instant_acme::LetsEncrypt::Production.url()
+    }
+}
+
 /// Resolve the ACME directory URL the HTTP-01 client orders against: the explicit
 /// `[acme].directory_url` override (a private/internal ACME CA, or the in-network
-/// `pebble` the tier_4 acceptance uses), else Let's Encrypt production. Pure (no
+/// `pebble` the tier_4 acceptance uses), else [`default_directory_url`]. Pure (no
 /// I/O) so it is unit-tested without a live CA.
 fn acme_directory_url(directory_url: Option<&str>) -> &str {
-    use instant_acme::LetsEncrypt;
-    directory_url.unwrap_or_else(|| LetsEncrypt::Production.url())
+    directory_url.unwrap_or_else(|| default_directory_url())
 }
 
 /// Which hosts the port-80 fallback may redirect to — the caller's answer to
@@ -488,6 +510,10 @@ async fn obtain_certificate_inner(
         .context("create acme account directory")?;
 
     let server_url = acme_directory_url(config.directory_url.as_deref());
+    // Names the CA every order goes to, so a log reader (and the e2e witness
+    // that a test nest reaches no public CA) sees where it went, not just that
+    // it failed.
+    tracing::info!("ACME directory: {server_url}");
 
     // Step 1: Load or create ACME account (shared account_dir, which may differ
     // from the per-domain cert output dir).
@@ -1416,6 +1442,7 @@ mod tests {
     /// Let's Encrypt production — never staging, which only a caller naming
     /// [`LETS_ENCRYPT_STAGING_URL`] reaches.
     #[test]
+    #[cfg(not(feature = "e2e-dark-ca"))]
     fn directory_url_override_else_lets_encrypt_production() {
         use instant_acme::LetsEncrypt;
         assert_eq!(acme_directory_url(None), LetsEncrypt::Production.url());
@@ -1426,6 +1453,18 @@ mod tests {
             LetsEncrypt::Staging.url(),
             "the exported staging constant must be the CA's own staging directory"
         );
+    }
+
+    /// A test-capable build never falls back to the public CA: absent an
+    /// override, the order goes to the closed loopback directory, so it fails
+    /// before a connection; an override (pebble) still wins.
+    #[test]
+    #[cfg(feature = "e2e-dark-ca")]
+    fn test_build_falls_back_to_the_dark_loopback_directory() {
+        assert_eq!(acme_directory_url(None), E2E_DARK_DIRECTORY_URL);
+        assert!(E2E_DARK_DIRECTORY_URL.starts_with("https://127.0.0.1:"));
+        let pebble = "https://pebble:14000/dir";
+        assert_eq!(acme_directory_url(Some(pebble)), pebble);
     }
 
     #[tokio::test]

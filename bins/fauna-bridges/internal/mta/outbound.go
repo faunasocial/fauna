@@ -62,7 +62,10 @@ type MXResolver interface {
 // The zero value is the fail-safe one: an answer whose provenance nobody
 // established is not DANE-capable. Secure=false narrows the posture to
 // MTA-STS/opportunistic — it never fails delivery, exactly as an Insecure
-// *TLSA* answer already behaves.
+// *TLSA* answer already behaves. A Bogus or Indeterminate MX answer on a
+// DNSSEC-capable resolver path is NOT Secure=false: nest's resolve_mx
+// returns it as a lookup error, which deliverOne tempfails (RFC 7672
+// §2.1.1/§2.1.2; smtp-server.md § MX resolution item 1).
 type MXAnswer struct {
 	Hosts  []MXHost
 	Secure bool
@@ -501,6 +504,8 @@ func (w *OutboundWorker) deliverOne(ctx context.Context, u wsrpc.OutboundUnit) e
 		// reliably distinguish on the wire — treat any resolution
 		// failure as temporary; a domain that doesn't exist will
 		// continue failing and eventually hit the retry budget bounce.
+		// This is also where a DNSSEC validation failure of the MX RRset
+		// lands (RFC 7672 §2.1.2: an MX lookup failure MUST delay delivery).
 		return &TemporaryError{msg: fmt.Sprintf("mx lookup %s: %v", domain, err)}
 	}
 	hosts := mxAnswer.Hosts
@@ -556,6 +561,11 @@ func (w *OutboundWorker) deliverOne(ctx context.Context, u wsrpc.OutboundUnit) e
 	}
 	var lastErr error
 	var enforceSkipped bool
+	// daneSkipped: at least one host was skipped because its TLSA lookup
+	// failed (RFC 7672 §2.1.2); lastDaneErr keeps the cause for the
+	// temporary failure reported when no host is left.
+	var daneSkipped bool
+	var lastDaneErr error
 	for _, h := range hosts {
 		_, bareHost := mxDialTarget(h.Hostname)
 		tlsPolicy := TLSPolicy{Mode: TLSOpportunistic}
@@ -603,10 +613,19 @@ func (w *OutboundWorker) deliverOne(ctx context.Context, u wsrpc.OutboundUnit) e
 		// we pin the handshake against the returned records. Applied AFTER
 		// the MTA-STS refusal gate (smtp-server.md:451) so a refused host
 		// costs no TLSA fetch. DANE > MTA-STS (smtp-server.md:449): secure
-		// TLSA records override the WebPKI-required posture. A fetch RPC
-		// error must NOT block delivery — log and proceed with the
-		// MTA-STS/opportunistic posture (a TLSA fetch failure is not a
-		// delivery failure).
+		// TLSA records override the WebPKI-required posture.
+		//
+		// ⚠ A fetch error — the RPC failing, or nest's DNSSEC-validating
+		// lookup failing (a Bogus / Indeterminate answer, SERVFAIL, a
+		// timeout) — makes THIS HOST UNREACHABLE for the attempt: RFC 7672
+		// §2.1.2 says the SMTP client MUST NOT deliver via it. Proceeding
+		// without pinning would let a DNS spoofer who corrupts a signed TLSA
+		// answer strip DANE from the session. So the host is skipped, the
+		// next MX host is tried, and delivery is delayed when none is left;
+		// the skip is reported to TLSRPT as RFC 8460 §4.3 `dnssec-invalid`.
+		// (nest answers no records without looking on a resolver path that
+		// does not carry DNSSEC, so a stripping resolver never lands here —
+		// smtp-server.md § MX resolution item 1, the resolver-path paragraph.)
 		//
 		// ⚠ Gated on the MX RRset's DNSSEC provenance (RFC 7672 §2.2): an
 		// SMTP client whose MX RRset was not validated MUST NOT treat the
@@ -622,8 +641,12 @@ func (w *OutboundWorker) deliverOne(ctx context.Context, u wsrpc.OutboundUnit) e
 			w.logger.Info("mx rrset not DNSSEC-validated; delivering without DANE",
 				"domain", domain, "mx", bareHost)
 		} else if tlsaReply, tlsaErr := wsrpc.FetchTlsa(ctx, w.client, bareHost); tlsaErr != nil {
-			w.logger.Warn("tlsa fetch failed; proceeding without DANE pinning",
+			daneSkipped = true
+			lastDaneErr = tlsaErr
+			w.logger.Warn("tlsa lookup failed; host unreachable for this attempt (RFC 7672 §2.1.2), trying the next MX",
 				"mx", bareHost, "err", tlsaErr)
+			w.reportTLSAttempt(ctx, domain, bareHost, strptr("dnssec-invalid"), stsOutcome, stsPolicy, nil)
+			continue
 		} else if len(tlsaReply.Records) > 0 {
 			tlsaRecords = tlsaReply.Records
 			tlsPolicy = TLSPolicy{Mode: TLSDanePinned, DaneRecords: tlsaReply.Records}
@@ -664,6 +687,12 @@ func (w *OutboundWorker) deliverOne(ctx context.Context, u wsrpc.OutboundUnit) e
 		w.logger.Info("outbound MX attempt failed; trying next", "mx", h.Hostname, "err", err)
 	}
 	if lastErr == nil {
+		if daneSkipped {
+			// Every attempted host was unreachable for a failed TLSA lookup
+			// (or enforce-refused): delay delivery — nest reschedules on the
+			// retry curve. Never a permanent bounce, never a send unpinned.
+			return &TemporaryError{msg: fmt.Sprintf("dane: tlsa lookup failed for every candidate MX host of %s: %v", domain, lastDaneErr)}
+		}
 		if enforceSkipped {
 			// Every candidate host was enforce-refused; none was attempted.
 			// Temporary so nest reschedules (the policy or MX set may

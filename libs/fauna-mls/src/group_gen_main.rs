@@ -41,6 +41,13 @@
 //! the e2e harness builds it that way; any other build refuses the argument.
 //! Used by `test_conversations_unknown_message_kind.py`.
 //!
+//! A body given as [`BACKDATED_PREFIX`]`<text>` (`--backdated:<text>`) seals
+//! `<text>` with a sender timestamp one day in the past — a sender whose clock
+//! (or intent) backdates the message. The nest still assigns its channel `seq`
+//! at arrival, which is all a recipient's unread rule may read
+//! (`conversation-read-state.md` § How the carriers meet the in-memory set).
+//! Used by `test_conversations_unread_by_nest_position.py`.
+//!
 //! Scheduling mode: `mls-group-gen --scheduling <secret_hex> <keypackage_hex>
 //! <imip_hex>` seals the raw RFC 5322 iMIP `imip_hex` as a one-off *scheduling*
 //! delivery through [`MlsEngine::build_scheduling_delivery`] — the one builder
@@ -49,6 +56,18 @@
 //! `welcome.deliver` (kind `scheduling`) + `channel.send`. Used by the tier_3
 //! inbound-scheduling authorization journeys (`test_caldav_autoschedule_mailbox_less.py`)
 //! to deliver, as a second actor, a message byte-identical to the organizer's.
+//!
+//! Re-join mode: `mls-group-gen --rejoin <secret_hex> <keypackage_hex>
+//! <second_keypackage_hex> <before_body...> -- <after_body...>` mints, in one
+//! engine, the whole stream of a recipient who is removed from the group and
+//! brought back in: the group and its Welcome (lines 1–3 as above), one
+//! `Application` envelope per `before_body`, the `Commit` envelope removing the
+//! recipient, the `Commit` envelope re-adding them from their second key package,
+//! the second Welcome (hex), then one `Application` envelope per `after_body`,
+//! sealed in the re-joined epoch. A one-shot engine's state is gone on exit, so
+//! the removal and the re-add can only be minted alongside the group; the proof
+//! posts each piece at its own moment. Used by
+//! `test_conversations_rejoin_read_position.py`.
 
 use fauna_core::data::Timestamp;
 use fauna_core::identity::ActorKeypair;
@@ -58,6 +77,13 @@ use fauna_mls::types::{ChannelMessage, ChannelMessageBody};
 /// The message-list argument that seals a later build's message kind instead
 /// of a text body — see the module docs.
 const FUTURE_BODY_ARG: &str = "--future-body";
+
+/// The message-list prefix that seals the rest of the argument as a text body
+/// stamped one day before now — see the module docs.
+const BACKDATED_PREFIX: &str = "--backdated:";
+
+/// How far a [`BACKDATED_PREFIX`] body's sender stamp lies in the past.
+const BACKDATE_MICROS: u64 = 24 * 60 * 60 * 1_000_000;
 
 /// Seal one application message of a kind a LATER build sends: the same wire
 /// shape as [`ChannelMessage`] (canonical CBOR sorts the map keys, and external
@@ -141,11 +167,112 @@ fn scheduling(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The separator between the before- and after-bodies in `--rejoin` mode.
+const REJOIN_SPLIT: &str = "--";
+
+/// `--rejoin <secret_hex> <keypackage_hex> <second_keypackage_hex>
+/// <before_body...> -- <after_body...>` — see the module docs.
+fn rejoin(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    use fauna_mls::types::ChannelEnvelope;
+    const USAGE: &str = "usage: mls-group-gen --rejoin <secret_hex> <keypackage_hex> \
+         <second_keypackage_hex> <before_body...> -- <after_body...>";
+    let mut next = || args.next().ok_or_else(|| anyhow::anyhow!(USAGE));
+    let secret: [u8; 32] = hex::decode(next()?.trim())?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("secret must be 32 bytes"))?;
+    let first_kp = hex::decode(next()?.trim())?;
+    let second_kp = hex::decode(next()?.trim())?;
+    let rest: Vec<String> = args.collect();
+    let split = rest
+        .iter()
+        .position(|a| a == REJOIN_SPLIT)
+        .ok_or_else(|| anyhow::anyhow!(USAGE))?;
+    let (before, after) = (&rest[..split], &rest[split + 1..]);
+
+    let keypair = ActorKeypair::from_secret(secret);
+    let sender = keypair.actor_id();
+    let engine =
+        MlsEngine::new_in_memory(keypair).map_err(|e| anyhow::anyhow!("engine init: {e:?}"))?;
+    let key_package = engine
+        .key_package_from_bytes(&first_kp)
+        .map_err(|e| anyhow::anyhow!("parse key package: {e:?}"))?;
+    let (channel_id, welcome) = engine
+        .create_group(&[key_package])
+        .map_err(|e| anyhow::anyhow!("create group: {e:?}"))?;
+    let raw_group_id = engine
+        .group_id_bytes(&channel_id)
+        .ok_or_else(|| anyhow::anyhow!("group id missing for freshly-created group"))?;
+    println!("{channel_id}");
+    println!(
+        "{}",
+        hex::encode(
+            welcome
+                .to_bytes()
+                .map_err(|e| anyhow::anyhow!("serialize welcome: {e:?}"))?
+        )
+    );
+    println!("{}", hex::encode(raw_group_id));
+
+    let mut sequence = 0u64;
+    let mut seal = |body: &str| -> anyhow::Result<()> {
+        sequence += 1;
+        let message = ChannelMessage {
+            sender,
+            sequence,
+            channel_epoch: 0,
+            body: ChannelMessageBody::Text(body.to_owned()),
+            timestamp: Timestamp::now(),
+        };
+        let envelope = engine
+            .encrypt_to_envelope(&channel_id, &message)
+            .map_err(|e| anyhow::anyhow!("encrypt application message: {e:?}"))?;
+        println!("{}", hex::encode(envelope));
+        Ok(())
+    };
+    for body in before {
+        seal(body)?;
+    }
+
+    let recipient = engine
+        .group_members(&channel_id)
+        .into_iter()
+        .find(|m| *m != sender)
+        .ok_or_else(|| anyhow::anyhow!("the group holds no recipient"))?;
+    let leaf = engine
+        .find_leaf_by_identity(&channel_id, &recipient)
+        .ok_or_else(|| anyhow::anyhow!("the recipient holds no leaf"))?;
+    let remove = engine
+        .remove_member(&channel_id, leaf)
+        .map_err(|e| anyhow::anyhow!("remove the recipient: {e:?}"))?;
+    println!(
+        "{}",
+        hex::encode(fauna_cbor::encode_canonical(&ChannelEnvelope::Commit(
+            remove
+        ))?)
+    );
+    let (add, second_welcome) = engine
+        .add_member_from_bytes(&channel_id, &second_kp)
+        .map_err(|e| anyhow::anyhow!("re-add the recipient: {e:?}"))?;
+    println!(
+        "{}",
+        hex::encode(fauna_cbor::encode_canonical(&ChannelEnvelope::Commit(add))?)
+    );
+    println!("{}", hex::encode(second_welcome));
+    for body in after {
+        seal(body)?;
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1).peekable();
     if args.peek().map(String::as_str) == Some("--scheduling") {
         args.next();
         return scheduling(args);
+    }
+    if args.peek().map(String::as_str) == Some("--rejoin") {
+        args.next();
+        return rejoin(args);
     }
     let secret_hex = args.next().ok_or_else(|| {
         anyhow::anyhow!("usage: mls-group-gen <secret_hex> <keypackage_hex> [message_body...]")
@@ -201,12 +328,19 @@ fn main() -> anyhow::Result<()> {
             println!("{}", hex::encode(envelope));
             continue;
         }
+        let (body, timestamp) = match body.strip_prefix(BACKDATED_PREFIX) {
+            Some(text) => (
+                text.to_owned(),
+                Timestamp(Timestamp::now().0.saturating_sub(BACKDATE_MICROS)),
+            ),
+            None => (body, Timestamp::now()),
+        };
         let message = ChannelMessage {
             sender: self_actor,
             sequence,
             channel_epoch: 0,
             body: ChannelMessageBody::Text(body),
-            timestamp: Timestamp::now(),
+            timestamp,
         };
         let envelope = engine
             .encrypt_to_envelope(&channel_id, &message)

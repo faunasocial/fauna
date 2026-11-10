@@ -2597,7 +2597,11 @@ async fn a_first_invitation_over_quota_is_refused_and_delivers_nothing() {
     )
     .await
     .expect_err("a tier with no inbox headroom refuses even a first invitation");
-    assert_eq!(err.code, "fauna.conversations.forbidden");
+    assert_eq!(
+        err.code,
+        fauna_protocol::error::RpcError::CODE_CONVERSATIONS_INVITEE_INBOX_FULL,
+        "a full inbox has its own code, not the reach-policy `forbidden`"
+    );
 
     assert!(
         state
@@ -6817,6 +6821,100 @@ async fn the_roster_read_says_which_principals_hold_a_wrap_for_the_tip() {
         revoked[&nest_hex],
         Some(false),
         "every member — not only the one that minted — can see the nest no longer reads"
+    );
+}
+
+/// The roster reply's `severance_owed`, as `reader` reads it.
+async fn roster_severance_owed(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    reader: &ActorKeypair,
+    room_hex: &str,
+) -> Option<bool> {
+    let bytes = dispatch(
+        router,
+        state.clone(),
+        reader.actor_id().0,
+        "fauna.conversations.room.list_roster",
+        Bytes::from(
+            encode_canonical(&RoomListRosterRequest {
+                room_id: room_hex.into(),
+                at_policy_version: None,
+                policy_version_span: None,
+                extra: std::collections::BTreeMap::new(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+    )
+    .await
+    .expect("a live member reads the floor");
+    let reply: RoomListRosterReply = decode(&bytes).unwrap();
+    reply.severance_owed
+}
+
+/// **A removal whose mint never lands leaves the roster answering
+/// `severance_owed`, until any mint does** (`community-rooms.md`
+/// § Implementation status today → *A removal severs*, the retry paragraph).
+/// A removal is two acts, and the nest never mints: when the client's
+/// rotation after `room.remove` fails, the tip still wraps to the unseated
+/// member's entry, so the removed member reads new traffic until an owner's
+/// or admin's device mints. The nest states that debt as a fact of its floor
+/// — the recipient-set scheme's trigger (1) is a fact about merged state — so
+/// any governing device's tend pass can pay it, the one that met the failure
+/// or another. Served to every live member, not only the governing ones.
+#[tokio::test]
+async fn a_removal_whose_mint_never_lands_leaves_the_roster_owing_a_severance() {
+    let (router, state) = router_with_reader_nest().await;
+    let owner = ActorKeypair::generate();
+    let member = ActorKeypair::generate();
+    let other = ActorKeypair::generate();
+    let (reply, _owner_recv) = create_keyed_room(&router, &state, &owner, birth_salt(0x1c)).await;
+    let room_id = room_id_of(&reply.room_id);
+
+    assert_eq!(
+        roster_severance_owed(&router, &state, &owner, &reply.room_id).await,
+        None,
+        "a room never keyed has no tip to owe anything on"
+    );
+    for who in [&member, &other] {
+        seat_keyed_member(&router, &state, &owner, &reply.room_id, &room_id, who).await;
+    }
+    // Key both members in: the tip now wraps to every live entry.
+    publish_generation(&router, &state, &reply.room_id, &room_id, &owner).await;
+    assert_eq!(
+        roster_severance_owed(&router, &state, &owner, &reply.room_id).await,
+        Some(false),
+        "a keyed room with nobody unseated owes nothing"
+    );
+
+    // The unseat lands; the rotation that should follow it does not.
+    dispatch(
+        &router,
+        state.clone(),
+        owner.actor_id().0,
+        "fauna.conversations.room.remove",
+        remove_payload(&reply.room_id, &member),
+    )
+    .await
+    .expect("the owner removes the member");
+    assert_eq!(
+        roster_severance_owed(&router, &state, &owner, &reply.room_id).await,
+        Some(true),
+        "the tip still wraps to the removed entry — the severance is owed"
+    );
+    assert_eq!(
+        roster_severance_owed(&router, &state, &other, &reply.room_id).await,
+        Some(true),
+        "and every live member reads the same fact, a plain member included"
+    );
+
+    // Any mint past the unseated entry pays it.
+    publish_generation(&router, &state, &reply.room_id, &room_id, &owner).await;
+    assert_eq!(
+        roster_severance_owed(&router, &state, &other, &reply.room_id).await,
+        Some(false),
+        "once a mint lands that no longer wraps to the removed entry, nothing is owed"
     );
 }
 

@@ -394,3 +394,156 @@ def test_html_mail_scripts_never_run_and_active_links_are_removed(
             f"{banned!r} reached the bubble — the HTML→markdown perimeter let "
             f"active content through: {body!r}"
         )
+
+
+def _assert_rendered_structure(app, index: int, nonce: str, what: str) -> None:
+    """The bubble at ``index`` renders the formatted body — the quote, the
+    numbered list and the bold-italic span — with ``keep_snake_case_<nonce>``
+    literal.
+
+    Every app answers the one-line plaintext (``get_text``): no raw tag, no
+    markdown marker, no escape backslash, the code-like name intact. An app with
+    the painted read (tui, web — `helpers/painted_lines.py`) also answers the
+    body AS PAINTED (``message_painted_lines``), which is what
+    shows the structure a plaintext folds away: the quote's ``│`` bar and the
+    list's ``1.``/``2.`` numbering. The painted read has no style channel, so
+    bold-italic is witnessed by its ``***`` markers being consumed as emphasis
+    rather than painted as text — the same observable the bold/italic witness
+    above uses."""
+    text = app.driver.get_text("dm-message-text", index=index) or ""
+    for word in (f"quoted-{nonce}", f"first-{nonce}", f"second-{nonce}", f"both-{nonce}"):
+        assert word in text, f"{what}: {word!r} is missing from the bubble: {text!r}"
+    for raw in ("<", ">", "*", "\\"):
+        assert raw not in text, (
+            f"{what}: {raw!r} reached the bubble — a tag, a quote marker, an "
+            f"emphasis marker or an escape was painted as text: {text!r}"
+        )
+    snake = f"keep_snake_case_{nonce}"
+    assert snake in text, (
+        f"{what}: {snake!r} must stay literal (CommonMark's intraword guard), "
+        f"not lose its underscores to italics: {text!r}"
+    )
+
+    from helpers.painted_lines import painted_read_built
+
+    if not painted_read_built(app.driver):
+        return  # the plaintext half above is this app's whole witness for now
+    lines = app.conversations.message_painted_lines(index)
+    stripped = [line.strip() for line in lines]
+    assert f"│ quoted-{nonce}" in stripped, (
+        f"{what}: the quote must paint behind its bar: {lines!r}"
+    )
+    first = stripped.index(f"1. first-{nonce}") if f"1. first-{nonce}" in stripped else -1
+    assert first >= 0 and stripped[first + 1:first + 2] == [f"2. second-{nonce}"], (
+        f"{what}: the list must paint numbered 1., 2. on consecutive lines: {lines!r}"
+    )
+    assert any(f"both-{nonce} and {snake}" in line for line in stripped), (
+        f"{what}: the bold-italic span and the literal name paint as one line of "
+        f"words, markers consumed: {lines!r}"
+    )
+
+
+def _bubble_index(app, word: str) -> tuple[int] | None:
+    """``(index,)`` of the first bubble carrying ``word`` — a tuple, so bubble 0
+    is truthy for ``wait_until`` — or ``None``."""
+    for i, text in enumerate(app.driver.get_texts("dm-message-text")):
+        if word in (text or ""):
+            return (i,)
+    return None
+
+
+@pytest.mark.feature("email-in-conversations")
+def test_html_mail_keeps_quotes_lists_and_bold_italic_and_the_sent_copy_renders_formatted(
+    app, unclaimed_mail_nest_ui
+):
+    """Outcome 22 (`docs/goal/behavior/html-mail.md` § Rendering, and the
+    shared parser's `> ` blockquote, `N.` ordered list and `***bold-italic***`
+    the same section records): a received HTML mail keeps its quote, its
+    numbered list and its bold-italic; the user's own Sent copy of a markdown
+    message renders formatted too, never as its raw source; and a name written
+    like code (`keep_snake_case_…`) stays literal in both.
+
+    The received half is a REAL inbound `text/html` delivery (the module
+    docstring says why not the inject seam); the Sent half is a real send from
+    the app, and its relayed `text/html` alternative is read too, so the copy
+    the user sees and the mail that left agree."""
+    require_surface(app.driver, "html-mail-markdown-roundtrip")
+
+    nest = unclaimed_mail_nest_ui
+    ctx = claim_enable_and_ready(app, nest, credential_kind="oauthbearer")
+    domain = ctx["domain"]
+    handle = ctx["handle"]
+
+    # ── RECEIVED: quote, numbered list, bold-italic, a code-like name ──────────
+    rin = f"htmlrich{int(time.time() * 1000)}qx"
+    inbound = (
+        "\r\n".join([
+            f"From: Frank <frank@{EXTERNAL_DOMAIN}>",
+            f"To: {handle}",
+            f"Subject: HTML rich {rin}",
+            f"Message-ID: <{rin}@{EXTERNAL_DOMAIN}>",
+            "Date: Mon, 08 Jun 2026 12:00:00 +0000",
+            "MIME-Version: 1.0",
+            "Content-Type: text/html; charset=utf-8",
+            "",
+            f"<blockquote><p>quoted-{rin}</p></blockquote>"
+            f"<ol><li>first-{rin}</li><li>second-{rin}</li></ol>"
+            f"<p><strong><em>both-{rin}</em></strong> and keep_snake_case_{rin}</p>",
+        ]) + "\r\n"
+    ).encode()
+    deliver_inbound(
+        nest.mx_port, domain, f"frank@{EXTERNAL_DOMAIN}", handle, inbound,
+        time.monotonic() + 40.0,
+    )
+    wait_until(
+        lambda: any(
+            rin in (t.label or "") or rin in (t.snippet or "")
+            for t in app.conversations.list_threads()
+        ),
+        60.0,
+        diagnose=lambda: f"the inbound text/html email {rin!r} never surfaced; "
+        f"threads: {[(t.label, t.snippet) for t in app.conversations.list_threads()]}; "
+        f"error: {app.error_text()!r}; {nest.bridge_log_hint()}",
+    )
+    app.conversations.open_thread_for_sender(rin)
+    index = wait_until(
+        lambda: _bubble_index(app, f"first-{rin}"),
+        UI_SETTLE_S,
+        diagnose=lambda: f"no bubble carries the received mail's text; bubbles: "
+        f"{app.driver.get_texts('dm-message-text')!r}; error: {app.error_text()!r}",
+    )[0]
+    _assert_rendered_structure(app, index, rin, "the received HTML mail")
+
+    # ── SENT: the same shapes, written as markdown in the app ──────────────────
+    out = f"htmlsent{int(time.time() * 1000)}qx"
+    body = (
+        f"> quoted-{out}\n\n"
+        f"1. first-{out}\n2. second-{out}\n\n"
+        f"***both-{out}*** and keep_snake_case_{out}\n"
+    )
+    app.conversations.start_new_conversation(
+        f"grace@{EXTERNAL_DOMAIN}", subject=f"HTML sent {out}", body=body,
+        body_via_fill=True,
+    )
+    relayed = wait_until(
+        lambda: next((raw for raw in nest.stub_mx.messages() if out.encode() in raw), None),
+        90.0,
+        diagnose=lambda: f"the stub external MX never received {out!r}; "
+        f"error: {app.error_text()!r}; {nest.bridge_log_hint()}",
+    ).decode("utf-8", "replace")
+    for tag in ("<blockquote>", "<ol>"):
+        assert tag in relayed, f"the relayed text/html alternative lacks {tag}: {relayed}"
+    assert "<em>snake" not in relayed and f"keep_snake_case_{out}" in relayed, (
+        f"the code-like name must leave literal, not italicized: {relayed}"
+    )
+
+    # The user's own copy, in the thread the send opened.
+    app.conversations.navigate()
+    app.conversations.open_thread_for_sender(out)
+    index = wait_until(
+        lambda: _bubble_index(app, f"first-{out}"),
+        UI_SETTLE_S,
+        diagnose=lambda: f"no bubble carries the sent copy's text; bubbles: "
+        f"{app.driver.get_texts('dm-message-text')!r}; error: {app.error_text()!r}",
+    )[0]
+    _assert_rendered_structure(app, index, out, "your own Sent copy")

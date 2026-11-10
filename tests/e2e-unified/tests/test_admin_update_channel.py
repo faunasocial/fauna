@@ -245,6 +245,14 @@ def test_a_pinned_box_follows_no_channel_until_one_is_chosen(
     _choose(app, nest, "test",
             S.admin.nest_page.update_channel_status_following_test(version=version))
 
+    # Stable's head is unknown too, so the box follows Stable — and the status
+    # says new releases are picked up within the hour, Stable's check interval
+    # (the about-a-minute sentence on Test and Dev is asserted above and in the
+    # channel test). `channel_nest` cannot witness this: its Stable head is
+    # behind every build, which reads the Hold sentence instead.
+    _choose(app, nest, "stable",
+            S.admin.nest_page.update_channel_status_following_stable(version=version))
+
 
 @pytest.mark.feature("admin-nest")
 def test_a_nest_the_image_does_not_run_says_so_and_its_controls_are_inert(

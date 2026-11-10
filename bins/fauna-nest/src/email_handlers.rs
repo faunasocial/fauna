@@ -1499,6 +1499,17 @@ fn mailbox_fetch_handler(mailbox: &'static str, permission: &'static str) -> Rpc
             } else {
                 Default::default()
             };
+            // The copies' live bus rows, one query for the page: the app's
+            // on-device scorer reads the `report:spam` entry
+            // (`report-sharing.md` § Applying the aggregate).
+            let mut page_scores = {
+                let ids: Vec<[u8; 32]> = rows.iter().map(|r| r.message_id).collect();
+                state
+                    .db
+                    .get_content_scores_many(&ids)
+                    .await
+                    .map_err(internal)?
+            };
             let mut page_bytes: usize = 0;
             let mut messages: Vec<InboxMessage> = Vec::with_capacity(rows.len());
             for (row, env) in rows.into_iter().zip(envelopes) {
@@ -1617,6 +1628,9 @@ fn mailbox_fetch_handler(mailbox: &'static str, permission: &'static str) -> Rpc
                         // ≤ the budget (over-budget ones became references above) and
                         // a reference's cost is tiny, so `page_bytes` (0 on the first
                         // message) never trips this on entry.
+                        let scores = page_scores.remove(&row.message_id).unwrap_or_default();
+                        // A bus row is a short factor name + three integers.
+                        let wire_cost = wire_cost + scores.len() * 48;
                         if page_bytes + wire_cost > frame_budget {
                             more = true;
                             break;
@@ -1645,6 +1659,7 @@ fn mailbox_fetch_handler(mailbox: &'static str, permission: &'static str) -> Rpc
                                     extra: Default::default(),
                                 }
                             }),
+                            scores,
                             extra: Default::default(),
                         });
                     }
@@ -1917,12 +1932,25 @@ fn flag_changes_handler() -> RpcHandler {
                 .list_bridge_imap_flag_changes(&actor_id, "INBOX", since, req.after_uid, limit)
                 .await
                 .map_err(internal)?;
+            // The copy's scores ride beside its flags, one read per page —
+            // exactly as `inbox.fetch` fills `InboxMessage.scores`
+            // (`report-sharing.md` § Applying the aggregate → *The re-open is
+            // a metadata change, not a flag change*).
+            let mut page_scores = {
+                let ids: Vec<[u8; 32]> = rows.iter().map(|r| r.3).collect();
+                state
+                    .db
+                    .get_content_scores_many(&ids)
+                    .await
+                    .map_err(internal)?
+            };
             let changes = rows
                 .into_iter()
-                .map(|(uid, flags, modseq)| FlagChange {
+                .map(|(uid, flags, modseq, message_id)| FlagChange {
                     uid,
                     flags: flags.split_whitespace().map(String::from).collect(),
                     modseq: modseq.max(0) as u64,
+                    scores: page_scores.remove(&message_id).unwrap_or_default(),
                     extra: Default::default(),
                 })
                 .collect();

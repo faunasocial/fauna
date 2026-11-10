@@ -1260,6 +1260,25 @@ impl KindRegistry {
         self.add("fauna.nostr.zap_signers.remove", light);
     }
 
+    /// Register `fauna.nostr.advertise.{set,clear}` — the Nostr advertisement
+    /// of a sold post, the zap purchase leg's ingress
+    /// (`docs/goal/behavior/monetization.md` § The Nostr advertisement of a
+    /// sold post). Both are row writes plus a kick of the materializer or a
+    /// kind-5 enqueue (5 s) and replay-safe: `set` keeps the first act's time
+    /// and `clear` of a cleared post is a no-op.
+    ///
+    /// `set` is gated with the `zaps` plane (its STRING must not survive an
+    /// excised artifact — the zap-signer reason above); `clear` is
+    /// de-escalation and compiled always, so an excised nest can still
+    /// withdraw an advertisement a full build published.
+    pub fn register_nostr_advertise_kinds(&mut self) {
+        use std::time::Duration;
+        let light = RpcKindMeta::new(false, Duration::from_secs(5));
+        #[cfg(feature = "zaps")]
+        self.add("fauna.nostr.advertise.set", light);
+        self.add("fauna.nostr.advertise.clear", light);
+    }
+
     /// Register the protocol-native Nostr content kinds
     /// (`nostr.{zaps.total,badges.list,events.publish_signed}`) — the WS-RPC
     /// successors to the deleted `/api/v1/nostr/{zaps,badges,publish-signed}`
@@ -1502,6 +1521,17 @@ impl KindRegistry {
             "fauna.conversations.room.accept_invite_remote",
             RpcKindMeta::new(false, Duration::from_secs(30)),
         );
+        // The REMOVAL's relayed twin, for an owner or admin homed on another
+        // nest — `leave_remote`'s posture and for its reason: the removal is
+        // the first act of a two-act ceremony whose severance mint is built
+        // only once this ack is in hand, so the room home's federated remove
+        // answers a target it already unseated with the live count, and a
+        // §4.D re-send reports the unseat that landed. The same-nest
+        // `room.remove` below keeps its `true` and its refusal.
+        self.add(
+            "fauna.conversations.room.remove_remote",
+            RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
         // The membership doors — all forbid replay, each being externally
         // visible: `invite` notifies the invitee, `accept_invite` seats a
         // member, and `remove`/`leave` change who the room fans out to.
@@ -1539,6 +1569,12 @@ impl KindRegistry {
         for kind in [
             "fauna.conversations.room.publish_generation",
             "fauna.conversations.room.backfill_generations",
+            // Their relayed twins, for an owner or admin homed on another
+            // nest: they inherit the doors' flag (`invite_remote`'s precedent,
+            // NOT `leave_remote`'s) — the keying acts claim no idempotence,
+            // and the retry is a fresh mint.
+            "fauna.conversations.room.publish_generation_remote",
+            "fauna.conversations.room.backfill_generations_remote",
         ] {
             self.add(kind, RpcKindMeta::new(true, Duration::from_secs(30)));
         }
@@ -4303,6 +4339,7 @@ impl KindRegistry {
         self.register_bridged_conversation_kinds();
         #[cfg(feature = "zaps")]
         self.register_nostr_zap_signer_kinds();
+        self.register_nostr_advertise_kinds();
         self.register_nostr_content_kinds();
         self.register_conversations_channel_kinds();
         self.register_conversations_keypackage_kinds();
@@ -4593,6 +4630,25 @@ mod tests {
             assert!(!m.forbid_replay, "{kind} is replay-safe (upsert/delete)");
             assert_eq!(m.default_deadline, Duration::from_secs(5));
         }
+    }
+
+    /// `set` rides the `zaps` plane; `clear` is de-escalation and registers in
+    /// every build, so an excised nest can still withdraw an advertisement.
+    #[test]
+    fn nostr_advertise_kinds_register_set_with_zaps_and_clear_always() {
+        use std::time::Duration;
+        let mut r = KindRegistry::new();
+        r.register_nostr_advertise_kinds();
+        let clear = r
+            .meta("fauna.nostr.advertise.clear")
+            .expect("clear registers in every build");
+        assert!(!clear.forbid_replay);
+        assert_eq!(clear.default_deadline, Duration::from_secs(5));
+        assert_eq!(
+            r.meta("fauna.nostr.advertise.set").is_some(),
+            cfg!(feature = "zaps"),
+            "set exists exactly when the zaps plane is compiled"
+        );
     }
 
     #[test]
@@ -5828,12 +5884,16 @@ mod tests {
             // replay anyway; the backfill's would land the same rows again,
             // which is harmless but not a claim worth making.)
             "fauna.conversations.room.backfill_generations",
+            // Its relayed twin inherits the flag (`invite_remote`'s precedent).
+            "fauna.conversations.room.backfill_generations_remote",
             "fauna.conversations.room.invite",
             // Inherits `invite`'s flag: the room home's federated issue door
             // delivers a knock per call (`register_conversations_room_kinds`).
             "fauna.conversations.room.invite_remote",
             "fauna.conversations.room.leave",
             "fauna.conversations.room.publish_generation",
+            // Its relayed twin inherits the flag (`invite_remote`'s precedent).
+            "fauna.conversations.room.publish_generation_remote",
             "fauna.conversations.room.remove",
             "fauna.conversations.room.revoke_invite",
             // The governance doors (`register_conversations_room_kinds`): a

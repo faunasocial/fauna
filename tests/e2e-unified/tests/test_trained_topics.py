@@ -29,6 +29,7 @@ from helpers import budgets
 from helpers.waiting import wait_until
 from i18n.strings import S
 from tests.api import ws_api
+from tests.api.bare import sign_and_encode_post
 
 pytestmark = pytest.mark.tier_3
 
@@ -1078,9 +1079,24 @@ def test_trained_factor_publishes_as_a_scrubbed_text_model(
     assert "anonym" in note or "without your name" in note, (
         f"copy must state pseudonymity; got {note!r}"
     )
-    assert str(len(MODEL_CORPUS)) in note, (
-        f"the corpus-size line must state how many public examples the "
-        f"vocabulary was built from; got {note!r}"
+    # The corpus-size line, whole (trained-topics outcome 29): every marked
+    # post is public, so all of them are examples — a count read off any
+    # other number in the copy would pass the substring check below by luck.
+    marked = str(len(MODEL_CORPUS))
+    raw_note = app.personalization.publish_limitation_text()
+    assert S.personalization.publish_corpus_size(
+        included=marked, marked=marked
+    ) in raw_note, (
+        f"the corpus-size line must say the vocabulary was built from "
+        f"{marked} public examples of {marked} marked posts; got {raw_note!r}"
+    )
+    # The third disclosure — pseudonymous, built only from explicit examples,
+    # never from what the publisher merely read — is a sentence of the one
+    # Model limitation string, so the whole string must stand on the sheet.
+    assert S.personalization.publish_limitation_note_model in raw_note, (
+        f"the Model sheet must carry the whole mandated disclosure (it is "
+        f"pseudonymous and built only from posts marked by hand); got "
+        f"{raw_note!r}"
     )
 
     # Every survivor carries the three facts the review is made of, and every
@@ -2012,3 +2028,241 @@ def test_a_topic_trained_on_one_device_follows_you_to_your_other_device(
         app.personalization.navigate()
         app.personalization.delete_topic(0)
     assert app.personalization.wait_for_topic_count(0) == 0
+
+
+#: More than one display page: the feed shows 50 posts and loads the next 50
+#: only when the reader reaches the bottom edge, so a corpus of 60 puts ten of
+#: them on page 2 and nowhere else.
+PAGING_SEED = 60
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("trained-topics")
+def test_a_topic_ranked_feed_keeps_paging_past_its_first_page(
+    logged_in_app, nest_instance, test_user
+):
+    """A feed ranked by a trained topic loads older posts as you scroll, like
+    the plain feed (`topic-factors.md` § Scoring — the client-side
+    sealed-factor compose seam (feed); its § Implementation status today).
+
+    A composition of only sealed factors keys EVERY post at 0 nest-side, so
+    the score order is one long tie and pagination rides on the keyset
+    cursor's tie-break alone. The fixed bug class: an `order=score` cursor that
+    could not step through a tie dead-ended after one page, and a ranked feed
+    simply stopped growing at 50 posts. The training here is the journey's one
+    UI mutation (convention 8); the 60 posts are setup, signed and created
+    through the nest API so the corpus is larger than a page without 60 trips
+    through the composer.
+
+    tui led (`testing.md` § Default app and nest mode); web, android and linux
+    joined in the trickle-down. The scroll is ``FeedActions.scroll_feed_to_bottom_edge``
+    — on tui the agent's `/element/scroll-into-view` onto the last focus stop,
+    which reaches the feed's bottom-edge load-more since the automation
+    focus-move fix; elsewhere the list's own scroll position
+    driven to its end, which each app's scroll-edge loader reads. What has
+    loaded is read off the window's state (``loaded_post_bodies``), since a
+    virtualizing list composes only the cards in view.
+    """
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    app.personalization.navigate()
+    topic_name = _unique("PagingTopic")
+    app.personalization.create_sole_topic(topic_name)
+    factor_key = app.personalization.topic_factor_key()
+
+    try:
+        # ── Setup: 60 posts newer than anything the session actor already
+        # has, so all 60 are the head of the feed — 50 on page 1, 10 on
+        # page 2 — whatever earlier tests left behind. One shared phrase plus
+        # a per-post marker, so each is identifiable by text alone.
+        tag = _unique("pg")
+        markers = [f"{tag}-{i:02d}" for i in range(PAGING_SEED)]
+        base_us = int(time.time() * 1_000_000)
+        for i, marker in enumerate(markers):
+            ws_api.create_post(
+                port,
+                test_user,
+                sign_and_encode_post(
+                    test_user["signing_key"],
+                    base_us + i,
+                    f"lighthouse keeper logbook entry {marker}",
+                ),
+            )
+
+        # ── Compose a feed of the topic alone and open it.
+        app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        feed_name = _unique("paging-feed")
+        app.feed.create_feed_with_factor(
+            name=feed_name, factor_label=factor_key, weight="5.0",
+        )
+        app.feed.open_feed(feed_name)
+
+        def seeded_present() -> set:
+            texts = app.feed.loaded_post_bodies()
+            return {m for m in markers if any(m in t for t in texts)}
+
+        # Page 1 is in: it holds 50 of the 60, never all of them — otherwise
+        # nothing below would prove a second page was fetched.
+        first_page = wait_until(
+            lambda: (lambda s: s if len(s) >= 50 else None)(seeded_present()),
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: (
+                f"page 1 of the ranked feed holds {len(seeded_present())} of the "
+                f"{PAGING_SEED} seeded posts; posts={len(app.feed.loaded_post_bodies())} "
+                f"error={app.error_text()!r}"
+            ),
+        )
+        assert len(first_page) < PAGING_SEED, (
+            f"all {PAGING_SEED} seeded posts are on screen before any scroll — "
+            f"the display page is no longer 50 posts, so this test no longer "
+            f"crosses a page boundary (posts={len(app.feed.loaded_post_bodies())})"
+        )
+
+        # ── Train: *more like this* on the top post (train-in-context — the
+        # composition's single topic factor). The model now scores the seeded
+        # vocabulary, but the nest still keys every post at 0: the sealed
+        # contribution re-ranks only what the client holds.
+        app.feed.open_post_actions(index=0)
+        app.feed.click_train_verb("more")
+        trained = _wait_sample_count(port, test_user, factor_key, 1)
+        assert trained["sample_count"] == 1 and trained.get("sealed_blob"), trained
+
+        # ── Scroll to the bottom edge until page 2 arrives. Each pass moves
+        # the focus to the LAST stop of the window as it stands now; reaching
+        # it is what asks for the next page.
+        def scrolled_to_all() -> bool:
+            app.feed.scroll_feed_to_bottom_edge()
+            return len(seeded_present()) == PAGING_SEED
+
+        wait_until(
+            scrolled_to_all,
+            budgets.RPC_ROUNDTRIP_S * 2,
+            diagnose=lambda: (
+                f"the ranked feed stopped at {len(app.feed.loaded_post_bodies())} posts; "
+                f"seeded posts loaded {len(seeded_present())}/{PAGING_SEED}, "
+                f"missing {sorted(set(markers) - seeded_present())[:5]} — a "
+                f"score-ordered page that never advances past the tie; "
+                f"error={app.error_text()!r}"
+            ),
+        )
+        loaded = len(app.feed.loaded_post_bodies())
+        assert loaded > 50, f"page 2 reached the window but it holds {loaded} posts"
+    finally:
+        app.personalization.navigate()
+        app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0
+
+
+# ── trained-topics outcome 26 ───────────────────────────────────────────────
+
+#: Seat B's publish, the nest's relay, seat A's walk, then the notice and the
+#: open page's reload (`test_store_change_notice.py`'s budget).
+_CONVERGE_S = 240.0
+
+
+@pytest.fixture
+def sibling_seats(request, nest_instance):
+    """Second enrolled seats on the session nest (`helpers.fleet.SiblingSeats`)."""
+    from helpers.fleet import SiblingSeats
+
+    seats = SiblingSeats(request, nest_instance)
+    try:
+        yield seats
+    finally:
+        seats.teardown()
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("trained-topics")
+def test_a_topic_made_on_another_device_shows_on_an_open_personalization_page(
+    app, request, nest_instance, sibling_seats
+):
+    """Outcome 26 — *a topic trained on another of your devices shows on an
+    open Personalization page without leaving it* (`account-runtime.md`
+    § Multi-instance concurrency → *A runtime's own pump is a source of
+    the notice too*: an open store-backed surface shows what a fresh visit
+    would show, whichever process applied the change; the trained-topic list
+    is one of those surfaces — the registry rides the account-state plane,
+    `topic-factors.md` § Wire & registry).
+
+    Two seats of one FRESH account on this machine (convention 16): seat A the
+    app under test, seat B the fleet's tui sibling. A opens Personalization
+    ONCE and never leaves it; B creates a topic on its own page. The topic must
+    list on A's open page. A fresh account, never the session actor, so the
+    registry starts empty and nothing leaks into the module's other journeys.
+    The failure message re-opens A's page, so a red tells "never reached A"
+    apart from "reached A and the open page was never re-driven".
+
+    What this does NOT claim: the row's example count, which comes from the
+    topic's sealed model blob fetched at page open (`topic-factors.md`
+    § Placement), not from the registry — outcome 11's
+    `test_a_topic_trained_on_one_device_follows_you_to_your_other_device`
+    owns the learning following you."""
+    from conftest import _make_user
+    from helpers import enrollment
+    from helpers.fleet import poked_pass
+    from helpers.waiting import account_pump_role
+
+    url = nest_instance["url"]
+    user = _make_user(nest_instance)
+    enrollment.sign_in(app, request, nest_instance, user)
+    enrollment.await_enrollment(app, url, user)
+    seat_b = sibling_seats.launch(user=user)
+    enrollment.await_enrollment(seat_b, url, user)
+
+    topic = _unique("Cats")
+
+    # Seat A opens the page once, and stays.
+    app.personalization.navigate()
+    assert app.personalization.wait_for_topic_count(0) == 0, (
+        f"precondition: a fresh account lists no topics; got "
+        f"{app.personalization.topic_names()!r}"
+    )
+
+    seat_b.personalization.navigate()
+    seat_b.personalization.create_topic(topic)
+    wait_until(
+        lambda: any(topic in n for n in seat_b.personalization.topic_names()),
+        budgets.ACCOUNT_RUNTIME_ASSEMBLY_S,
+        diagnose=lambda: (
+            f"seat B's own create never listed {topic!r}: "
+            f"{seat_b.personalization.topic_names()!r}; error={seat_b.error_text()!r}"
+        ),
+    )
+
+    def a_shows_it():
+        poked_pass(seat_b.driver, what="seat B's publish")
+        poked_pass(app.driver, what="seat A's walk")
+        try:
+            return any(topic in n for n in app.personalization.topic_names())
+        except LookupError:
+            return False  # a row the list rebuilt away between the count and the read
+
+    def reopened() -> list:
+        app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        app.personalization.navigate()
+        app.personalization.wait_for_topic_count(1, timeout=5.0)
+        return app.personalization.topic_names()
+
+    wait_until(
+        a_shows_it, _CONVERGE_S, interval=1.0,
+        diagnose=lambda: (
+            f"seat A's OPEN Personalization page lists "
+            f"{app.personalization.topic_names()!r} — {topic!r}, made on the same "
+            f"account's other device, never painted without a re-visit; seat A's "
+            f"pump role = {account_pump_role(app.driver)}; a re-open now lists "
+            f"{reopened()!r} (if it lists the topic, the change reached A and the "
+            f"open page was never re-driven); error={app.error_text()!r}"
+        ),
+    )

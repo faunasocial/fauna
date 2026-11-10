@@ -82,9 +82,19 @@ public final class SubscriptionsVM {
     /// identifier, not user-facing copy) — populated once at `configure`.
     public private(set) var providerKinds: [String] = []
     public var showProviderForm = false
-    public var formProviderKind = ""
+    /// Picking a kind pre-fills its saved product (`formProviderProduct`).
+    public var formProviderKind = "" {
+        didSet { if formProviderKind != oldValue { formProviderProduct = savedProduct(kind: formProviderKind) } }
+    }
     public var formProviderTier = ""
     public var formProviderSecret = ""
+    /// `subscription-provider-form-product` — the optional product the tier is
+    /// sold as (`monetization.md` § Pillar 3 → *Configuration*; on Stripe the
+    /// Payment Link id). Not a secret: one config per kind, so picking a
+    /// configured kind pre-fills its saved product, a kind with no config starts
+    /// empty, and the field is sent as shown on save — an emptied field clears
+    /// the mapping (tui's `ProviderForm::product`).
+    public var formProviderProduct = ""
 
     // ── §5 Manual claim codes ───────────────────────────────────────────
     public private(set) var claims: [FfiClaimItem] = []
@@ -152,6 +162,7 @@ public final class SubscriptionsVM {
         formProviderKind = ""
         formProviderTier = ""
         formProviderSecret = ""
+        formProviderProduct = ""
         claims = []
         selectedClaimTier = ""
         mintingClaim = false
@@ -408,10 +419,17 @@ public final class SubscriptionsVM {
     /// not an edit-in-place; the nest has no read-back to prefill from).
     public func openProviderForm() {
         formProviderKind = providerKinds.first ?? ""
+        formProviderProduct = savedProduct(kind: formProviderKind)
         formProviderTier = tierNames.first ?? ""
         formProviderSecret = ""
         errorMessage = nil
         showProviderForm = true
+    }
+
+    /// The saved product of the listed provider of `kind`, or empty when the
+    /// kind has no config (or no product).
+    func savedProduct(kind: String) -> String {
+        providers.first(where: { $0.kind == kind })?.productRef ?? ""
     }
 
     public func cancelProviderForm() {
@@ -427,9 +445,11 @@ public final class SubscriptionsVM {
         let kind = formProviderKind
         let tier = formProviderTier
         let secret = formProviderSecret
+        let product = formProviderProduct
         guard !kind.isEmpty, !tier.isEmpty, !secret.isEmpty else { return }
         do {
-            _ = try await api.setPaymentProvider(kind: kind, webhookSecret: secret, tier: tier)
+            _ = try await api.setPaymentProvider(kind: kind, webhookSecret: secret, tier: tier,
+                                                 productRef: product)
             errorMessage = nil
             showProviderForm = false
             formProviderSecret = ""

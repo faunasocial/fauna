@@ -42,7 +42,6 @@ have.
 
 import pytest
 
-from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.oauth_client import (
     BC_AUTHORIZE_PATH,
@@ -52,6 +51,7 @@ from helpers.oauth_client import (
     GRANT_TYPE_HANDOFF,
     OAuthClient,
 )
+from helpers.typed_code_consent import approve_typed_code, pending_consents, user_session
 from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_nest_env/consent_bridge are pytest fixtures adopted by import
     HANDLE_DOMAIN,
     consent_bridge,
@@ -81,17 +81,11 @@ def _client(consent_nest, port):
 
 
 def _alice(consent_nest):
-    alice = consent_nest["user"]
-    return WsRpcAdminClient(
-        consent_nest["url"],
-        actor_id=alice["actor_id_bytes"],
-        signing_key=bytes(alice["signing_key"]),
-    )
+    return user_session(consent_nest, consent_nest["user"])
 
 
 def _pending(ws, client_id):
-    rows = ws.call("fauna.bridges.atproto.list_pending_consents", {})["consents"]
-    return [row for row in rows if row["client_id"] == client_id]
+    return pending_consents(ws, client_id)
 
 
 def _start_device(client):
@@ -104,24 +98,12 @@ def _poll_device(client, device_code):
     return client.poll_token(GRANT_TYPE_DEVICE_CODE, "device_code", device_code)
 
 
-def _approve_typed_code(ws, user_code):
-    looked_up = ws.call("fauna.oauth.consent.lookup_code", {"user_code": user_code})
-    consent = looked_up.get("consent")
-    assert consent, f"the typed code {user_code!r} found no request: {looked_up!r}"
-    resolved = ws.call(
-        "fauna.bridges.atproto.resolve_consent",
-        {"consent_id": consent["consent_id"], "approved": True},
-    )
-    assert resolved["resolved"], f"the looked-up request did not resolve: {resolved!r}"
-    return consent
-
-
 def _grant_by_typed_code(consent_nest, client):
     """Run a whole typed-code ceremony for `client` and return its tokens — how
     a test gives alice a PRIOR approval of a client."""
     started = _start_device(client)
     with _alice(consent_nest) as ws:
-        _approve_typed_code(ws, started["user_code"])
+        approve_typed_code(ws, started["user_code"])
     status, tokens = _poll_device(client, started["device_code"])
     assert status == 200, f"an approved typed code must redeem: {status} {tokens!r}"
     return tokens
@@ -152,7 +134,7 @@ def test_a_typed_code_reaches_the_card_and_its_poll_turns_into_tokens(
         ], "an unclaimed typed-code request must not be on anyone's card list"
 
         # Typed the way a person types: lower case, no hyphen.
-        consent = _approve_typed_code(ws, user_code.replace("-", "").lower())
+        consent = approve_typed_code(ws, user_code.replace("-", "").lower())
         assert consent["code"] == user_code, (
             "the card must show the code the device displayed", consent, user_code
         )

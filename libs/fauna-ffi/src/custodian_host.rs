@@ -155,6 +155,88 @@ impl FfiCustodianHost {
     }
 }
 
+/// What one poked custodian pull pass did — the FFI twin of the desktop agent's
+/// `fauna_ipc::sync::CustodianPassReport`, field-for-field. **Test-only**, and
+/// one record for both hosts: the desktop agent's reply
+/// (`FfiSyncAgentProvisioner::custodian_run_pass_now`) and the in-app host's
+/// ([`FfiCustodianHost::run_all_kinds_at_offset`], android and iOS), so the
+/// `custodian_pull_run_now` TestAgent arms read one shape. A shipped build
+/// carries neither the record nor either call that fills it (convention 15).
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(uniffi::Record)]
+pub struct FfiCustodianPassReport {
+    /// Whether this process was hosting a custodian replica at all. `false` is
+    /// a meaningful negative, not an error — the device is not enrolled, or the
+    /// host loop has not yet re-read the registry.
+    pub hosting: bool,
+    /// How many backed-up kinds the pass drove.
+    pub kinds_run: u32,
+    /// Bytes this device holds after the pass, as reported to the nest.
+    pub held_bytes: u64,
+    /// The pass's own cap verdict (`CAP_STATE_OK` / `CAP_STATE_REACHED`).
+    pub cap_state: Option<String>,
+    /// The store's standing self-audit verdict after the pass — what its
+    /// check-in carried. `None` is *never audited yet*, never a failed audit.
+    pub audit_state: Option<String>,
+    /// Whether the pass's check-in reached the source nest.
+    pub checked_in: bool,
+}
+
+/// **Test-only.** The in-app host's twin of the desktop agent's
+/// `CustodianRunPassNow`: one [`FfiCustodianHost::run_all_kinds`] pass at a
+/// shifted clock. Own impl block, own gate — the scheduled task's entry point
+/// takes no clock, and a shipped build exports nothing else.
+#[cfg(any(test, feature = "test-helpers"))]
+#[fauna_uniffi_async::export]
+impl FfiCustodianHost {
+    /// Run exactly the pass [`Self::run_all_kinds`] runs, with its `now` shifted
+    /// by `now_offset_secs` (`0` = the real clock), and report it whole.
+    ///
+    /// The offset exists for the slowest cadence a pass contains — the
+    /// self-audit's 24-hour debounce (`AUDIT_MIN_INTERVAL_SECS`) — so a test can
+    /// reach a store's *second* audit, the first able to see rot that appeared
+    /// after enrollment (convention 14's fake clock, never a sleep). It is
+    /// applied to the pass's own `now` parameter, the one the scheduler already
+    /// supplies, so an offset pass runs the identical code; nothing is stored,
+    /// and the next pass is back at the real clock. Saturating, as the agent's
+    /// twin is, so a nonsense offset lands at a clock extreme rather than
+    /// wrapping into a plausible timestamp.
+    pub async fn run_all_kinds_at_offset(&self, now_offset_secs: i64) -> FfiCustodianPassReport {
+        let _active = ActivityGuard::pass();
+        let reports = self
+            .host
+            .run_all_kinds(now_secs().saturating_add(now_offset_secs))
+            .await;
+        let audit = self.host.audit_verdict().await;
+        pass_report(&reports, audit)
+    }
+}
+
+/// Fold one pass into [`FfiCustodianPassReport`] — the desktop agent's
+/// `fold_pass_report` rules: the freshest `held_bytes`, the cap read from the
+/// verdict (never `held >= cap`), an absent audit left absent, and a kind that
+/// reached `reports` at all having checked in.
+#[cfg(any(test, feature = "test-helpers"))]
+fn pass_report(
+    reports: &[PullReport],
+    audit: Option<fauna_client_backup::custodian::SelfAudit>,
+) -> FfiCustodianPassReport {
+    FfiCustodianPassReport {
+        hosting: true,
+        kinds_run: reports.len() as u32,
+        held_bytes: reports.last().map(|r| r.held_bytes).unwrap_or(0),
+        cap_state: if reports.is_empty() {
+            None
+        } else if reports.iter().any(|r| r.cap_state == CapState::Reached) {
+            Some(CapState::Reached.as_wire().to_string())
+        } else {
+            Some(CapState::Ok.as_wire().to_string())
+        },
+        audit_state: audit.map(|a| a.state().as_wire().to_string()),
+        checked_in: !reports.is_empty(),
+    }
+}
+
 /// Build this device's custodian host, or `Ok(None)` when this device is **not**
 /// an enrolled custodian.
 ///
@@ -846,6 +928,44 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-app host's offset pass answers what the desktop agent's
+    /// `fold_pass_report` answers — the store-rot witness reads one shape on
+    /// every app, so the two folds must agree on the rules that can lie.
+    #[test]
+    fn the_in_app_pass_report_folds_as_the_agents_does() {
+        use fauna_client_backup::custodian::{AuditState, SelfAudit};
+
+        let empty = pass_report(&[], None);
+        assert!(empty.hosting, "a host that ran a pass is hosting");
+        assert_eq!(empty.cap_state, None, "no kind ran, so no cap verdict");
+        assert!(
+            !empty.checked_in,
+            "no kind reached reports, so none checked in"
+        );
+        assert_eq!(empty.audit_state, None, "never audited is not a pass");
+
+        let report = |held: u64, cap: CapState| PullReport {
+            held_bytes: held,
+            cap_state: cap,
+            ..PullReport::default()
+        };
+        let folded = pass_report(
+            &[report(10, CapState::Ok), report(7, CapState::Reached)],
+            Some(SelfAudit::failed(Some(1_000))),
+        );
+        assert_eq!(folded.kinds_run, 2);
+        assert_eq!(folded.held_bytes, 7, "the freshest figure, never a sum");
+        assert_eq!(
+            folded.cap_state.as_deref(),
+            Some(CapState::Reached.as_wire())
+        );
+        assert_eq!(
+            folded.audit_state.as_deref(),
+            Some(AuditState::Failed.as_wire())
+        );
+        assert!(folded.checked_in);
+    }
 
     /// A 32-byte owner secret that is not all-zero (the actor derivation is
     /// real, so the bytes must be a usable scalar seed).

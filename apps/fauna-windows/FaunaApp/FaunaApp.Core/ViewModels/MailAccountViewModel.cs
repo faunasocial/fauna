@@ -7,11 +7,12 @@ using uniffi.fauna_ffi;
 namespace FaunaApp.Core.ViewModels;
 
 /// <summary>
-/// The account controls of the mail-settings page: the receive and send switches
-/// (mail-policy-config.md § Tier 3 — per-account), the automatic reply
+/// The account controls of the mail-settings page: the receive, send and scan-result-row
+/// switches (mail-policy-config.md § Tier 3 — per-account), the automatic reply
 /// (email-filters.md § The auto-respond setting) and the quota readouts
 /// (imap-server.md § Composition with submission quota); ui ids
 /// <c>mail-settings-receive-toggle</c> / <c>-send-toggle</c> /
+/// <c>-scan-result-visible-toggle</c> /
 /// <c>-autorespond-toggle</c> / <c>-autorespond-message-input</c> /
 /// <c>-mailbox-quota</c> / <c>-submission-quota</c> / <c>-over-quota-notice</c>. A dumb
 /// projection over the shared draft check and quota wording and the
@@ -30,6 +31,12 @@ internal sealed class MailAccountViewModel
 
     /// <summary>The send switch as the nest kept it; null until read.</summary>
     public bool? SendEnabled { get; private set; }
+
+    /// <summary>Whether received messages show the scan-result row, as the nest kept it;
+    /// null until read. Only the switch lives here — the shared conversations projection
+    /// does the hiding (mail-content-scanning.md § Per-account opt-out for visible scan
+    /// details).</summary>
+    public bool? ScanResultVisible { get; private set; }
 
     /// <summary>Whether the automatic reply is on; null until read.</summary>
     public bool? AutorespondEnabled { get; private set; }
@@ -79,6 +86,15 @@ internal sealed class MailAccountViewModel
         catch (Exception ex) { Error = Strings.Error(ex); }
     }
 
+    /// <summary>Set the scan-result-row switch alone; inert until the first read.</summary>
+    public async Task SetScanResultVisibleAsync(bool on)
+    {
+        if (ScanResultVisible is null) return;
+        Error = null;
+        try { ApplySwitches(await _rpc.MailScanResultVisibleSetAsync(on)); }
+        catch (Exception ex) { Error = Strings.Error(ex); }
+    }
+
     /// <summary>The reply's toggle: off clears it, on commits <paramref name="draft"/>
     /// (which turns it on); inert until the first read.</summary>
     public async Task SetAutorespondAsync(bool on, string draft)
@@ -122,6 +138,7 @@ internal sealed class MailAccountViewModel
     {
         ReceiveEnabled = switches.receiveEnabled;
         SendEnabled = switches.sendEnabled;
+        ScanResultVisible = switches.scanResultVisible;
     }
 
     private void ApplyAutorespond(FfiAutoRespond reply)

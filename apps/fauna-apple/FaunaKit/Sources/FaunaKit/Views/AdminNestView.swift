@@ -157,9 +157,11 @@ public struct AdminNestView: View {
                 // ── Nest rules (nest-rules.md § The shared rule editor;
                 //    admin.md § N. Nest → *Nest rules*) — the shared rule
                 //    editor, directly after the reports queue ──
+                #if !FAUNA_KIDS  // the shared rule editor is excised from the kids build
                 if let client, let region {
                     AdminNestRulesSection(api: client.api, nestRules: region.nestRules)
                 }
+                #endif
 
                 // ── Retire this server — between the reports section and
                 //    Factory reset (nest-retirement.md § Layout & flow) ──

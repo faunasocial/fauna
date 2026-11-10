@@ -21,7 +21,11 @@
 //! lost: the secondary leg sends the owed seed-alone link once the bound nest
 //! lands it (`fauna_client_core::recovery_chain`, the `Owed` answer). An
 //! unreachable nest at veto time keeps its window loud on the banner (the
-//! leg's linked readings) until the next veto reaches it.
+//! leg's linked readings) until the next veto reaches it — and every nest the
+//! veto DID reach is settled in the gesture itself: [`veto_everywhere`]
+//! clears those nests' readings and re-syncs the alert
+//! (`crate::alerts::sync_alert_after_veto`), so the banner follows the
+//! windows at once rather than at the leg's next pass.
 //!
 //! Wasm-clean: the dial is the host's. Native hosts (tui, linux, the FFI)
 //! take [`native::NativeLinkedNestDial`]; web implements its own over its
@@ -299,14 +303,24 @@ where
 }
 
 /// The veto at the bound nest and every linked nest — the composition
-/// [`crate::status::veto_with_status`] runs. Returns the bound nest's answer
-/// (whether anything was pending there) beside the linked nests' report; the
-/// linked nests are asked whatever the bound nest answered.
+/// [`crate::status::veto_with_status`] and the FFI's veto door run. Returns
+/// the bound nest's answer (whether anything was pending there) beside the
+/// linked nests' report; the linked nests are asked whatever the bound nest
+/// answered.
+///
+/// The gesture then settles the device's own picture from the answers
+/// (`crate::alerts::sync_alert_after_veto`): every nest that answered holds
+/// no window now, so its reading in `alerts` — the bound source, each
+/// answering linked nest's — clears here, and the readings of the nests it
+/// could not reach stay posted. `now` is unix seconds, for the lines the
+/// re-post renders; the caller owns the clock, as everywhere in this crate.
 pub async fn veto_everywhere<R, D>(
     client: &RecoveryClient<R>,
     kit: &ParsedKit,
     actor_id: ActorId,
     dial: &D,
+    alerts: &fauna_client_alerts::CriticalAlerts,
+    now: i64,
 ) -> (Result<bool>, LinkedFanOut<bool>)
 where
     R: RpcRequester,
@@ -316,6 +330,13 @@ where
 {
     let bound = veto_pending_replacement(client, kit, Some(actor_id)).await;
     let linked = veto_at_linked_nests(client, kit, actor_id, dial).await;
+    let answered: Vec<[u8; 32]> = linked
+        .nests
+        .iter()
+        .filter(|n| matches!(n.outcome, LinkedNestOutcome::Answered(_)))
+        .map(|n| n.nest_id)
+        .collect();
+    crate::alerts::sync_alert_after_veto(alerts, &actor_id, bound.is_ok(), &answered, now);
     (bound, linked)
 }
 

@@ -339,7 +339,13 @@ func (s *Session) finishAuth(
 	s.actorIndexKey = indexKey
 	s.recordOpener = recordOpener
 	s.indexSession = indexSession
+	live := s.live
 	s.mu.Unlock()
+	if live != nil {
+		// From here an `account_revoked` push for this actor ends the
+		// session at once (revocation_teardown.go).
+		live.add(actorID, s)
+	}
 	// The one auth-success point lifts the pre-auth connection deadline
 	// (smtp-server.md § Connection-time limits); nil-safe for unit tests.
 	if s.conn != nil {

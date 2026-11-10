@@ -5042,7 +5042,7 @@ pub struct ListMailboxesRequest {
 }
 
 /// Per-mailbox metadata returned by `list_mailboxes`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MailboxEntry {
     pub name: String,
     pub uid_validity: u32,
@@ -5052,6 +5052,12 @@ pub struct MailboxEntry {
     pub exists: u32,
     /// Number of messages whose flag set lacks `\Seen`.
     pub unseen: u32,
+    /// The RFC 6154 SPECIAL-USE attributes IMAP LIST shows for this mailbox
+    /// (`crate::email::special_use_attrs`): one for each standard mailbox but
+    /// INBOX, empty otherwise. The nest fills it from that shared table; the
+    /// MDA writes these verbatim. `#[serde(default)]`: additive.
+    #[serde(default)]
+    pub attrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -5128,6 +5134,14 @@ pub struct MessageMeta {
     /// Additive; `#[serde(default)]` for fixture/decode hygiene.
     #[serde(default)]
     pub seq_num: u32,
+    /// The copy's live `content_scores` rows — every factor, the uniform bus
+    /// shape (`content-scoring.md` § The scoring-metadata bus). The MDA's
+    /// `scoreSelectedInbox` reads the `report:spam` entry as one more term on
+    /// top of the classifier combination (`report-sharing.md` § Applying the
+    /// aggregate). Additive (`#[serde(default, skip_serializing_if =
+    /// "Vec::is_empty")]`): an unscored copy encodes with no `scores` key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scores: Vec<fauna_core::scoring::ScoreEntry>,
 }
 
 /// Request for `fauna.bridges.list_messages`.
@@ -5859,6 +5873,25 @@ pub struct BridgeImportCompletePush {
     pub errored_count: u64,
 }
 
+/// `fauna.bridges.push.import_session_changed` — an import session was
+/// cancelled or discarded, the two moves no other import event announces
+/// (`mailbox-migration.md` § A failed import is a record the wizard shows
+/// until the user moves on). A bare nudge: an open Import page re-reads its
+/// listing, and nothing but the session id rides along.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeImportSessionChangedPush {
+    pub session_id: String,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4). This kind is APP-callable,
+    /// so it is client↔nest wire and rule 4's in-image `strict` opt-out
+    /// does not reach it: within a major, an older peer must tolerate a
+    /// newer one's added field in BOTH directions
+    /// (version-compatibility.md § I2).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ── Mailbox-export types (`mail-export.md` § Wire shapes) ────────────
 //
 // The export surface is the read-out twin of the import block above: ten
@@ -6461,6 +6494,25 @@ pub struct BridgeExportCompletePush {
     pub session_id: String,
     pub download_url: String,
     pub blob_bytes: u64,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4). This kind is APP-callable,
+    /// so it is client↔nest wire and rule 4's in-image `strict` opt-out
+    /// does not reach it: within a major, an older peer must tolerate a
+    /// newer one's added field in BOTH directions
+    /// (version-compatibility.md § I2).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.bridges.push.export_session_changed` — an export session was
+/// cancelled or discarded, the two moves no other export event announces
+/// (`mail-export.md` § A failed export is a record the wizard shows until the
+/// user moves on). A bare nudge: an open Export page re-reads its listing, and
+/// nothing but the session id rides along.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeExportSessionChangedPush {
+    pub session_id: String,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4). This kind is APP-callable,
@@ -7454,6 +7506,34 @@ pub struct BridgeRescoreReadyPush {
 /// Push `kind` string for [`BridgeRescoreReadyPush`]. Matches
 /// `PushEvent::BridgeRescoreReady`'s `kind()` mapping.
 pub const PUSH_KIND_BRIDGE_RESCORE_READY: &str = "fauna.bridges.rescore_ready";
+
+// ── account_revoked push (bridge-held session teardown) ──────────────────────
+
+/// Push frame body emitted by nest to every approved **MDA** bridge when a
+/// user account stops standing — locked, suspended, evicted or deleted
+/// (`transport-connection.md` § Revocation teardown, the bridge-held sessions
+/// paragraph). Wrapped by `Frame::Push` with
+/// `kind = "fauna.bridges.account_revoked"`.
+///
+/// The nest already refuses every serving call for such an account, so a
+/// session reads nothing from its next command on; this push is what ends
+/// the sessions that make no call — an IMAP session in IDLE, or one sitting
+/// between commands — at the revocation itself: the MDA ends every IMAP
+/// session AUTH'd as `actor_id` (a `BYE` to one in IDLE) and drops the
+/// unwrapped MLS capability it held. Best-effort by design: a missed push
+/// leaves the next-command refusal as the backstop.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BridgeAccountRevokedPush {
+    /// The 32-byte actor id of the account that no longer stands.
+    #[serde(with = "serde_bytes")]
+    pub actor_id: Vec<u8>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Push `kind` string for [`BridgeAccountRevokedPush`]. Matches
+/// `PushEvent::BridgeAccountRevoked`'s `kind()` mapping.
+pub const PUSH_KIND_BRIDGE_ACCOUNT_REVOKED: &str = "fauna.bridges.account_revoked";
 
 // ── spam_baseline_publish push (holder-pull baseline drain nudge) ─────────────
 
@@ -11411,6 +11491,7 @@ mod tests {
                     highestmodseq: 2,
                     exists: 2,
                     unseen: 1,
+                    attrs: vec![],
                 },
                 MailboxEntry {
                     name: "Sent".into(),
@@ -11419,6 +11500,7 @@ mod tests {
                     highestmodseq: 1,
                     exists: 0,
                     unseen: 0,
+                    attrs: vec!["\\Sent".into()],
                 },
             ],
         };
@@ -11485,6 +11567,7 @@ mod tests {
             internal_date: 1_700_000_000 + uid as i64,
             ciphertext_size: 512 + uid,
             seq_num: uid,
+            scores: vec![],
         }
     }
 

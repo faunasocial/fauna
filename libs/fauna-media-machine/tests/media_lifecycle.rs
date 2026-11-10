@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use fauna_core::crypto::BackupKey;
-use fauna_media_machine::nest_api::MediaApiError;
 use fauna_media_machine::nest_api::fake::FAKE_PREDECESSOR_ID;
+use fauna_media_machine::nest_api::{ForeignListing, MediaApiError};
 use fauna_media_machine::observer::CountingObserver;
 use fauna_media_machine::{
     FakeMediaBlobUploader, FakeMediaNestApi, FolderKeyResolver, MediaBlobUploader, MediaFolder,
@@ -114,7 +114,7 @@ async fn view_state_setters_re_derive_the_page() {
     machine.refresh(None).await;
 
     // Filter to one set.
-    machine.set_filter(Some("photos".into()));
+    machine.clone().set_filter(Some("photos".into()));
     let snap = machine.snapshot();
     assert_eq!(snap.items.len(), 2);
     assert!(snap.items.iter().all(|i| i.folder == "photos"));
@@ -480,6 +480,34 @@ async fn an_upload_whose_folders_never_load_is_not_refused_as_no_folder() {
         "an incomplete read cannot say the user has no folder"
     );
     assert_eq!(err.key, "media.error_refresh");
+}
+
+/// A press's answer (`report_error` — linux's "choose a file first") must
+/// survive the page's own re-reads: a sync push re-reads a showing Media page,
+/// and that read landing a beat after the press used to wipe the answer before
+/// anyone read it. The next gesture drops it.
+#[tokio::test]
+async fn a_reported_press_error_survives_a_successful_re_read_until_the_next_gesture() {
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    let machine = MediaMachine::new(observer, api, None, None, None);
+    machine.refresh(None).await;
+
+    let answer = fauna_core::localized::LocalizedText::key("media.file_required");
+    machine.report_error(answer.clone());
+    machine.refresh(None).await;
+    assert_eq!(
+        machine.snapshot().error,
+        Some(answer),
+        "a background re-read must not wipe the press's answer"
+    );
+
+    machine.clone().set_filter(None);
+    assert!(
+        machine.snapshot().error.is_none(),
+        "the next gesture drops the held answer"
+    );
 }
 
 #[tokio::test]
@@ -1217,7 +1245,7 @@ async fn upload_selected_targets_the_filter_set() {
         None,
     );
     machine.refresh(None).await; // populate raw so folders() == [docs, photos]
-    machine.set_filter(Some("photos".into()));
+    machine.clone().set_filter(Some("photos".into()));
 
     machine
         .upload_selected(
@@ -2253,6 +2281,203 @@ async fn a_genuinely_foreign_set_downloads_through_the_foreign_fetchers() {
     );
 }
 
+/// A factory that answers the **member** door — the fetcher a cross-nest
+/// member reads its home nest through, under the byte-plane read token its own
+/// nest mints (`relay-serving.md` § Relay serving → *A member on another
+/// nest*, step (5)) — recording the channel each download asked for, and
+/// refusing the plain door so a download can't sneak past the token.
+struct MemberDoorFactory {
+    served: FakeDownloadFetcher,
+    asked: std::sync::Mutex<Vec<(String, [u8; 32])>>,
+}
+
+impl fauna_media_machine::folder_keys::ForeignBlobFetcherFactory for MemberDoorFactory {
+    fn fetcher_for(
+        &self,
+        base_url: &str,
+        _home_nest_actor_id: Option<&str>,
+    ) -> Arc<dyn fauna_core::file_download::BlobFetcher> {
+        panic!("the bearer-less door was used for {base_url} — a member reads under its token");
+    }
+
+    fn member_fetcher_for(
+        &self,
+        home: &fauna_core::folder_keys::ForeignHome,
+        channel_id: [u8; 32],
+    ) -> Arc<dyn fauna_core::file_download::BlobFetcher> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((home.nest_url.clone(), channel_id));
+        Arc::new(self.served.clone())
+    }
+}
+
+/// A fetcher whose every folder read is refused the way the member door
+/// refuses after a removal: the home nest will not mint this member a token.
+struct RemovedMemberFetcher(FakeDownloadFetcher);
+
+#[async_trait::async_trait]
+impl fauna_core::file_download::BlobFetcher for RemovedMemberFetcher {
+    async fn fetch_manifest(
+        &self,
+        hash: &fauna_core::data::ContentHash,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.0.fetch_manifest(hash).await
+    }
+
+    async fn fetch_chunks(
+        &self,
+        _store_keys: &[fauna_core::data::ContentHash],
+        path: &str,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        anyhow::bail!("an unhinted read of {path} — the foreign arm must read for its folder")
+    }
+
+    async fn fetch_folder_chunks(
+        &self,
+        _store_keys: &[fauna_core::data::ContentHash],
+        path: &str,
+        _folder: &fauna_core::file_download::FolderHint,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        Err(
+            anyhow::Error::new(fauna_core::file_download::MembershipRefused)
+                .context(format!("read token for {path}")),
+        )
+    }
+}
+
+/// The member door, refusing as the home nest does once the member is off the
+/// roster.
+struct RefusingMemberDoor(FakeDownloadFetcher);
+
+impl fauna_media_machine::folder_keys::ForeignBlobFetcherFactory for RefusingMemberDoor {
+    fn fetcher_for(
+        &self,
+        base_url: &str,
+        _home_nest_actor_id: Option<&str>,
+    ) -> Arc<dyn fauna_core::file_download::BlobFetcher> {
+        panic!("the bearer-less door was used for {base_url} — a member reads under its token");
+    }
+
+    fn member_fetcher_for(
+        &self,
+        _home: &fauna_core::folder_keys::ForeignHome,
+        _channel_id: [u8; 32],
+    ) -> Arc<dyn fauna_core::file_download::BlobFetcher> {
+        Arc::new(RemovedMemberFetcher(self.0.clone()))
+    }
+}
+
+/// `relay-serving.md` § Relay serving → *A member on another nest*, step (5):
+/// a foreign set's download goes through the factory's MEMBER door for that
+/// set's channel, and every chunk batch is read for the folder by its
+/// `foreign:<channel>` ref — the hint the home nest's store-miss arm resolves
+/// against the cross-nest roster, so a metadata-only folder's chunk is relayed
+/// from a seat instead of missing.
+#[tokio::test]
+async fn a_foreign_sets_download_reads_through_the_member_door_hinted_by_its_channel() {
+    use fauna_core::folder_keys::FolderRef;
+
+    let content_key = [0x42u8; 32];
+    let (fetcher, manifest_hex, expected) =
+        seal_shared_file(&[b"metadata-only ", b"foreign bytes"], content_key);
+    let refs = Arc::clone(&fetcher.refs);
+    let resolver = Arc::new(FakeFolderKeyResolver {
+        folder: "their-docs".into(),
+        keys: Some(fauna_core::folder_keys::FolderContentKeys::genesis(
+            content_key,
+            1_000,
+        )),
+        home: Some("https://peer.example".into()),
+        home_actor_id: Some("cd".repeat(32)),
+        served: false,
+        ids: Vec::new(),
+    });
+    let factory = Arc::new(MemberDoorFactory {
+        served: fetcher,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        Arc::new(FakeMediaNestApi::new()),
+        None,
+        None,
+        Some(resolver as Arc<dyn FolderKeyResolver>),
+    );
+    machine.set_foreign_fetchers(factory.clone());
+
+    let got = machine
+        .download_file(
+            manifest_hex,
+            Some(1),
+            "their-docs".into(),
+            "docs/theirs.bin".into(),
+            KEY.to_vec(),
+        )
+        .await
+        .expect("a foreign set downloads through the member door");
+    assert_eq!(got, expected);
+    let channel = fauna_core::folder_keys::channel_id_for_group(b"raw-group-id");
+    assert_eq!(
+        factory.asked.lock().unwrap().as_slice(),
+        [("https://peer.example".to_string(), channel)],
+        "the member door was asked for the set's home nest and channel"
+    );
+    assert_eq!(
+        *refs.lock().unwrap(),
+        vec![Some(FolderRef::Foreign(channel))],
+        "every chunk batch is read for the folder by its channel ref"
+    );
+}
+
+/// Step (5)'s other half: a removal ends the reads, and the download says so.
+/// The member door's refusal is a `NotFound` naming the removal — never the
+/// generic transient failure a network blip reads as, which the page would
+/// invite the member to retry for ever.
+#[tokio::test]
+async fn a_removed_members_foreign_download_fails_closed_naming_the_removal() {
+    let content_key = [0x42u8; 32];
+    let (fetcher, manifest_hex, _) = seal_shared_file(&[b"no longer yours"], content_key);
+    let resolver = Arc::new(FakeFolderKeyResolver {
+        folder: "their-docs".into(),
+        keys: Some(fauna_core::folder_keys::FolderContentKeys::genesis(
+            content_key,
+            1_000,
+        )),
+        home: Some("https://peer.example".into()),
+        home_actor_id: None,
+        served: false,
+        ids: Vec::new(),
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        Arc::new(FakeMediaNestApi::new()),
+        None,
+        None,
+        Some(resolver as Arc<dyn FolderKeyResolver>),
+    );
+    machine.set_foreign_fetchers(Arc::new(RefusingMemberDoor(fetcher)));
+
+    let err = machine
+        .download_file(
+            manifest_hex,
+            Some(1),
+            "their-docs".into(),
+            "docs/theirs.bin".into(),
+            KEY.to_vec(),
+        )
+        .await
+        .expect_err("a removed member reads nothing");
+    match err {
+        MediaApiError::NotFound { detail } => assert!(
+            detail.contains("no longer a member"),
+            "the refusal names the removal: {detail}"
+        ),
+        other => panic!("a removal is a NotFound naming it, not {other:?}"),
+    }
+}
+
 /// A machine whose download seam is stocked with `fetcher`.
 fn machine_with_download(fetcher: FakeDownloadFetcher) -> Arc<MediaMachine> {
     MediaMachine::new(
@@ -3274,7 +3499,7 @@ async fn uploading_into_a_selected_empty_set_records_into_that_set() {
     machine.refresh(None).await;
 
     // The user picks the empty set in the filter, then uploads.
-    machine.set_filter(Some("fresh".into()));
+    machine.clone().set_filter(Some("fresh".into()));
     machine
         .upload_selected(
             "dev-1".into(),
@@ -3930,7 +4155,7 @@ async fn selecting_a_followed_scope_fetches_its_listing_on_demand() {
     assert!(snap.error.is_none());
 
     // Leaving the scope restores the own-set browse.
-    machine.set_filter(None);
+    machine.clone().set_filter(None);
     let snap = machine.snapshot();
     assert!(snap.followed_scope.is_none());
     assert_eq!(snap.items.len(), 3, "the aggregate browse is back");
@@ -6280,11 +6505,11 @@ async fn an_unjoined_member_row_is_never_offered() {
 #[tokio::test]
 async fn the_view_scopes_by_the_items_row() {
     let (machine, _) = same_named_machine(Some(vec!["g9"]), None, None, true).await;
-    machine.set_filter(Some("photos".into()));
+    machine.clone().set_filter(Some("photos".into()));
     assert_eq!(paths(&machine), vec!["mine.jpg".to_string()]);
-    machine.set_filter(Some("local:9".into()));
+    machine.clone().set_filter(Some("local:9".into()));
     assert_eq!(paths(&machine), vec!["theirs.jpg".to_string()]);
-    machine.set_filter(None);
+    machine.clone().set_filter(None);
     assert_eq!(
         paths(&machine),
         vec!["mine.jpg".to_string(), "theirs.jpg".to_string()]
@@ -6304,9 +6529,9 @@ async fn an_item_without_folder_id_follows_the_name() {
     });
     let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
     machine.refresh(None).await;
-    machine.set_filter(Some("photos".into()));
+    machine.clone().set_filter(Some("photos".into()));
     assert_eq!(paths(&machine), vec!["old.jpg".to_string()]);
-    machine.set_filter(Some("legacy".into()));
+    machine.clone().set_filter(Some("legacy".into()));
     assert_eq!(paths(&machine), vec!["a.jpg".to_string()]);
 }
 
@@ -6327,7 +6552,7 @@ async fn upload_selected_into_the_shared_set_records_its_row() {
         true,
     )
     .await;
-    machine.set_filter(Some("local:9".into()));
+    machine.clone().set_filter(Some("local:9".into()));
     machine
         .upload_selected(
             "dev-1".into(),
@@ -6378,7 +6603,7 @@ async fn upload_selected_into_a_reader_shared_set_is_refused_with_its_reason() {
             .iter()
             .any(|o| o.value == "local:9")
     );
-    machine.set_filter(Some("local:9".into()));
+    machine.clone().set_filter(Some("local:9".into()));
     machine
         .upload_selected(
             "dev-1".into(),
@@ -6456,11 +6681,11 @@ async fn filter_label_and_filter_value_follow_the_option() {
         ]
     );
 
-    machine.set_filter(Some("local:9".into()));
+    machine.clone().set_filter(Some("local:9".into()));
     let snap = machine.snapshot();
     assert_eq!(snap.filter.as_deref(), Some("local:9"), "echoed as given");
     assert_eq!(snap.filter_label.as_deref(), Some("photos (alice)"));
-    machine.set_filter(Some("photos".into()));
+    machine.clone().set_filter(Some("photos".into()));
     assert_eq!(machine.snapshot().filter_label.as_deref(), Some("photos"));
 }
 
@@ -6731,4 +6956,861 @@ async fn versions_of_a_same_named_pair_restore_each_under_its_own_signer() {
         vec![(Some(OWN_ROW), manifest)],
         "the own version re-points verbatim into its own row"
     );
+}
+
+// ── The foreign browse scope (`ui/media.md` § Cross-nest shared sets) ─────
+
+const AWAY: &str = "https://away.example";
+/// The foreign set's raw MLS group id — what `FakeFolderKeyResolver`'s
+/// content-keyed answer carries, so the member door's channel derives from it.
+const RAW_GROUP: &[u8] = b"raw-group-id";
+const FOREIGN_KEY: [u8; 32] = [0x42u8; 32];
+const FOREIGN_PATH: &str = "trip/beach.jpg";
+
+fn foreign_channel() -> [u8; 32] {
+    fauna_core::folder_keys::channel_id_for_group(RAW_GROUP)
+}
+
+fn foreign_value() -> String {
+    fauna_core::folder_keys::FolderRef::Foreign(foreign_channel()).to_wire()
+}
+
+/// A member's custody holding ONE foreign set — the share-accept's record —
+/// that resolves by its `foreign:` ref to content keys homed on [`AWAY`]; any
+/// other set as [`FakeFolderKeyResolver`] answers it.
+struct ForeignScopeResolver {
+    inner: FakeFolderKeyResolver,
+    record: fauna_core::data::ForeignFolder,
+}
+
+#[async_trait::async_trait]
+impl FolderKeyResolver for ForeignScopeResolver {
+    async fn resolve(&self, name_hash: &[u8; 32]) -> anyhow::Result<ResolvedCustody> {
+        self.inner.resolve(name_hash).await
+    }
+
+    async fn resolve_ref(
+        &self,
+        folder_ref: &fauna_core::folder_keys::FolderRef,
+    ) -> anyhow::Result<ResolvedCustody> {
+        match folder_ref {
+            fauna_core::folder_keys::FolderRef::Foreign(channel)
+                if *channel == self.record.channel_id =>
+            {
+                Ok(self.inner.content_keyed())
+            }
+            other => self.inner.resolve_ref(other).await,
+        }
+    }
+
+    async fn foreign_sets(&self) -> anyhow::Result<Vec<fauna_core::data::ForeignFolder>> {
+        Ok(vec![self.record.clone()])
+    }
+}
+
+fn foreign_resolver() -> Arc<dyn FolderKeyResolver> {
+    foreign_resolver_with(None, None)
+}
+
+/// [`foreign_resolver`] with the record's `access` grant and residency
+/// stamp — the two readings the writer door refuses on.
+fn foreign_resolver_with(
+    access: Option<&str>,
+    metadata_only: Option<bool>,
+) -> Arc<dyn FolderKeyResolver> {
+    Arc::new(ForeignScopeResolver {
+        inner: FakeFolderKeyResolver {
+            folder: "no set is named this".into(),
+            keys: Some(fauna_core::folder_keys::FolderContentKeys::genesis(
+                FOREIGN_KEY,
+                1_000,
+            )),
+            home: Some(AWAY.into()),
+            home_actor_id: Some("cd".repeat(32)),
+            served: false,
+            ids: Vec::new(),
+        },
+        record: fauna_core::data::ForeignFolder {
+            channel_id: foreign_channel(),
+            mls_group_id: RAW_GROUP.to_vec(),
+            home_nest_url: AWAY.into(),
+            set_name: Some("trip".into()),
+            owner_handle: Some("bob".into()),
+            owner_domain: Some("away.example".into()),
+            access: access.map(str::to_string),
+            residency: metadata_only.map(|metadata_only| fauna_core::data::ForeignResidency {
+                metadata_only,
+                stamped_at: 1,
+            }),
+            ..Default::default()
+        },
+    })
+}
+
+/// One judged head as the seam lists it: the path sealed under the set's
+/// content key (rendered by the machine under the scope's custody), naming
+/// `manifest_hex` as its file and its thumbnail.
+fn foreign_head(manifest_hex: &str) -> MediaItem {
+    let root = fauna_core::path_crypto::LabelRoot::content_key(FOREIGN_KEY, 1);
+    let manifest = hex::decode(manifest_hex).unwrap();
+    MediaItem {
+        size_bytes: 10,
+        updated_at: 100,
+        path_sealed: Some(
+            fauna_core::label_custody::seal_path(&root, FOREIGN_PATH)
+                .unwrap()
+                .into(),
+        ),
+        path_hash: Some(fauna_core::sync::path_hash(FOREIGN_PATH).to_vec().into()),
+        manifest_hash: Some(manifest.into()),
+        thumbnail_hash: Some(manifest_hex.to_string()),
+        content_key_version: Some(1),
+        signed_as_current: false,
+        signed_as: Some([0xB0; 32]),
+        ..Default::default()
+    }
+}
+
+fn foreign_listing(items: Vec<MediaItem>, reachable: Option<bool>) -> ForeignListing {
+    ForeignListing {
+        items,
+        held: 0,
+        reachable,
+        residency: Some("full".into()),
+    }
+}
+
+/// One judged version of [`FOREIGN_PATH`] as the seam lists it — signed as
+/// the same writer [`foreign_head`] names, sealed under generation 1 — with
+/// the HOME nest's row id stamped, which names nothing on the member's side.
+fn foreign_version(
+    version_num: i64,
+    manifest_hex: &str,
+) -> fauna_media_machine::nest_api::ListedVersion {
+    fauna_media_machine::nest_api::ListedVersion {
+        signed_as_current: false,
+        signed_as: Some([0xB0; 32]),
+        summary: fauna_media_machine::snapshots::FileVersionSummary {
+            version_num,
+            manifest_hash: manifest_hex.to_string(),
+            size_bytes: 10 * version_num,
+            created_at: 100 * version_num,
+            content_key_version: Some(1),
+            author_display: "b0b0".into(),
+            pruned: false,
+            purge_after: None,
+            folder_id: None,
+            thumbnail_hash: None,
+            deposited_by: None,
+        },
+    }
+}
+
+/// A member's machine over the foreign set's custody, joined to its group,
+/// with one own item in the aggregate — refreshed once so the options read.
+async fn foreign_machine(
+    listing: Result<ForeignListing, MediaApiError>,
+) -> (Arc<MediaMachine>, Arc<FakeMediaNestApi>) {
+    foreign_machine_over(listing, foreign_resolver()).await
+}
+
+/// [`foreign_machine`] over a chosen custody resolver.
+async fn foreign_machine_over(
+    listing: Result<ForeignListing, MediaApiError>,
+    resolver: Arc<dyn FolderKeyResolver>,
+) -> (Arc<MediaMachine>, Arc<FakeMediaNestApi>) {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![own_row(OWN_PHOTOS, "photos")]);
+    api.set_snapshot(MediaSnapshot {
+        items: vec![item_in("photos", Some(OWN_PHOTOS), "mine.jpg")],
+        ..Default::default()
+    });
+    api.set_foreign_listing(foreign_channel(), listing);
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        None,
+        None,
+        Some(resolver),
+    );
+    machine.set_mls_query(Arc::new(Joined(vec!["7261772d67726f75702d6964"])));
+    machine.refresh(Some(KEY.to_vec())).await;
+    (machine, api)
+}
+
+/// `ui/media.md` § Cross-nest shared sets → *Which sets are offered*: the
+/// member's foreign set rides `media-folder-filter` as one more option — its
+/// value the `foreign:` ref, its label `<name> (<owner>)` — after the
+/// control-plane rows, never a names-only `folders()` entry (nor, for a
+/// reader, an upload target), and never in the aggregate view.
+#[tokio::test]
+async fn a_joined_foreign_set_is_offered_as_one_more_filter_option() {
+    let (machine, _) = foreign_machine(Ok(foreign_listing(Vec::new(), Some(true)))).await;
+    let snap = machine.snapshot();
+    let options: Vec<(String, String)> = snap
+        .folder_options
+        .iter()
+        .map(|o| (o.value.clone(), o.label.clone()))
+        .collect();
+    assert_eq!(
+        options,
+        vec![
+            ("photos".to_string(), "photos".to_string()),
+            (foreign_value(), "trip (bob@away.example)".to_string()),
+        ]
+    );
+    assert_eq!(snap.folders, vec!["photos".to_string()]);
+}
+
+/// The same join-filter the member rows pass: unwired or unjoined, the record
+/// is dropped (fail-safe); and a record whose group a control-plane row
+/// already carries is dropped too — a set is never in both planes.
+#[tokio::test]
+async fn an_unjoined_or_already_listed_foreign_set_is_never_offered() {
+    let offered = |machine: &MediaMachine| {
+        machine
+            .snapshot()
+            .folder_options
+            .iter()
+            .any(|o| o.value == foreign_value())
+    };
+    for joined in [None, Some(vec!["some-other-group"])] {
+        let api = Arc::new(FakeMediaNestApi::new());
+        let machine = MediaMachine::new(
+            CountingObserver::new(),
+            api,
+            None,
+            None,
+            Some(foreign_resolver()),
+        );
+        if let Some(groups) = joined {
+            machine.set_mls_query(Arc::new(Joined(groups)));
+        }
+        machine.refresh(Some(KEY.to_vec())).await;
+        assert!(!offered(&machine), "an unjoined foreign set is dropped");
+    }
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![member_row(
+        SHARED_PHOTOS,
+        "trip",
+        "bob",
+        "7261772d67726f75702d6964",
+        false,
+    )]);
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api,
+        None,
+        None,
+        Some(foreign_resolver()),
+    );
+    machine.set_mls_query(Arc::new(Joined(vec!["7261772d67726f75702d6964"])));
+    machine.refresh(Some(KEY.to_vec())).await;
+    assert!(
+        !offered(&machine),
+        "the own-nest row already carries that group"
+    );
+}
+
+/// Selecting the scope fetches it through the seam, once, and the page lists
+/// its judged heads — each path rendered under the scope's Foreign custody,
+/// each item's set the scope's rendered name, its `filter_value` the scope's
+/// ref; the select paints the scope's value and label.
+#[tokio::test]
+async fn selecting_a_foreign_scope_lists_its_heads_with_rendered_names() {
+    let manifest_hex = hex::encode([0x11u8; 32]);
+    let (machine, api) = foreign_machine(Ok(foreign_listing(
+        vec![foreign_head(&manifest_hex)],
+        Some(true),
+    )))
+    .await;
+    machine.select_foreign_scope(foreign_value()).await;
+    let snap = machine.snapshot();
+    assert_eq!(snap.error, None);
+    assert_eq!(snap.filter.as_deref(), Some(foreign_value().as_str()));
+    assert_eq!(
+        snap.filter_label.as_deref(),
+        Some("trip (bob@away.example)")
+    );
+    let items: Vec<(String, String, String, bool)> = snap
+        .items
+        .iter()
+        .map(|it| {
+            (
+                it.folder.clone(),
+                it.path.clone(),
+                it.filter_value.clone(),
+                it.source_online,
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        vec![("trip".into(), FOREIGN_PATH.into(), foreign_value(), true)]
+    );
+    assert!(api.calls().contains(&MediaNestCall::ForeignListing {
+        channel: foreign_channel(),
+        home_nest_url: AWAY.into(),
+    }));
+    // Leaving the scope returns to the own browse.
+    machine.clone().set_filter(None);
+    let paths: Vec<String> = machine
+        .snapshot()
+        .items
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert_eq!(paths, vec!["mine.jpg".to_string()]);
+}
+
+/// "No face work": an app hands the `foreign:` value to the SYNCHRONOUS
+/// `set_filter` exactly as for any set, and the machine enters the scope on
+/// its own background executor — here from a thread with no runtime at all,
+/// as a UniFFI shell's UI thread calls it.
+#[tokio::test]
+async fn set_filter_of_a_foreign_value_enters_the_scope_in_the_background() {
+    let manifest_hex = hex::encode([0x11u8; 32]);
+    let (machine, _) = foreign_machine(Ok(foreign_listing(
+        vec![foreign_head(&manifest_hex)],
+        Some(true),
+    )))
+    .await;
+    let handle = machine.clone();
+    std::thread::spawn(move || handle.set_filter(Some(foreign_value())))
+        .join()
+        .unwrap();
+    let mut entered = false;
+    for _ in 0..200 {
+        if machine.snapshot().filter.as_deref() == Some(foreign_value().as_str()) {
+            entered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(entered, "the scope was entered off the caller's thread");
+    assert_eq!(machine.snapshot().items.len(), 1);
+}
+
+/// Every gesture on a foreign item resolves its set as
+/// `SetKey::Ref(FolderRef::Foreign(channel))` from the active scope: the
+/// detail's one version is the judged head, and both the file and its
+/// thumbnail open under the scope's content keys through the MEMBER door at
+/// the set's home nest and channel.
+#[tokio::test]
+async fn a_foreign_items_download_and_thumbnail_open_through_the_member_door() {
+    let (fetcher, manifest_hex, expected) =
+        seal_shared_file(&[b"a foreign ", b"beach photo"], FOREIGN_KEY);
+    let (machine, api) = foreign_machine(Ok(foreign_listing(
+        vec![foreign_head(&manifest_hex)],
+        Some(true),
+    )))
+    .await;
+    api.set_foreign_versions(
+        foreign_channel(),
+        Ok(vec![foreign_version(1, &manifest_hex)]),
+    );
+    let factory = Arc::new(MemberDoorFactory {
+        served: fetcher,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    machine.set_foreign_fetchers(factory.clone());
+    machine.select_foreign_scope(foreign_value()).await;
+
+    let versions = machine
+        .file_versions(foreign_value(), FOREIGN_PATH.into(), false)
+        .await
+        .expect("the relayed history is the detail's");
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].manifest_hash, manifest_hex);
+
+    let got = machine
+        .download_file(
+            versions[0].manifest_hash.clone(),
+            versions[0].content_key_version,
+            "trip".into(),
+            FOREIGN_PATH.into(),
+            KEY.to_vec(),
+        )
+        .await
+        .expect("a foreign item downloads through the member door");
+    assert_eq!(got, expected);
+    let thumb = machine
+        .fetch_thumbnail(manifest_hex, KEY.to_vec())
+        .await
+        .expect("a foreign item's thumbnail opens under the scope's custody");
+    assert_eq!(thumb, expected);
+    let asked = factory.asked.lock().unwrap().clone();
+    assert!(!asked.is_empty());
+    assert!(
+        asked
+            .iter()
+            .all(|(url, channel)| url == AWAY && *channel == foreign_channel()),
+        "{asked:?}"
+    );
+}
+
+/// `media-source-status` reads the HOME nest's verdict; absent, the
+/// residency: full ⇒ reachable, metadata-only ⇒ not.
+#[tokio::test]
+async fn a_foreign_items_source_status_follows_the_home_nests_stamp() {
+    let manifest_hex = hex::encode([0x11u8; 32]);
+    for (reachable, residency, online) in [
+        (Some(false), "full", false),
+        (Some(true), "metadata_only", true),
+        (None, "full", true),
+        (None, "metadata_only", false),
+    ] {
+        let (machine, _) = foreign_machine(Ok(ForeignListing {
+            residency: Some(residency.into()),
+            ..foreign_listing(vec![foreign_head(&manifest_hex)], reachable)
+        }))
+        .await;
+        machine.select_foreign_scope(foreign_value()).await;
+        assert_eq!(
+            machine.snapshot().items[0].source_online,
+            online,
+            "reachable {reachable:?}, residency {residency}"
+        );
+    }
+}
+
+/// Removal is loud: the home nest's refusal enters the scope EMPTY with the
+/// removal on `error-message`, and the option stays listed.
+#[tokio::test]
+async fn a_removed_member_enters_the_scope_empty_with_the_removal() {
+    let (machine, _) = foreign_machine(Err(MediaApiError::NotFound {
+        detail: "fauna.federation.forbidden".into(),
+    }))
+    .await;
+    machine.select_foreign_scope(foreign_value()).await;
+    let snap = machine.snapshot();
+    assert_eq!(snap.filter.as_deref(), Some(foreign_value().as_str()));
+    assert!(snap.items.is_empty());
+    assert_eq!(
+        snap.error.expect("the removal is loud").key,
+        "media.error_foreign_removed"
+    );
+    assert!(
+        snap.folder_options
+            .iter()
+            .any(|o| o.value == foreign_value())
+    );
+}
+
+/// A transport fault keeps the prior browse and reports itself — never as the
+/// removal.
+#[tokio::test]
+async fn a_transport_fault_keeps_the_prior_browse() {
+    let (machine, _) = foreign_machine(Err(MediaApiError::Transient {
+        detail: "connection reset".into(),
+    }))
+    .await;
+    machine.select_foreign_scope(foreign_value()).await;
+    let snap = machine.snapshot();
+    assert_eq!(snap.filter, None, "the prior all-media browse stands");
+    assert_eq!(
+        snap.items.into_iter().map(|i| i.path).collect::<Vec<_>>(),
+        vec!["mine.jpg".to_string()]
+    );
+    assert_eq!(
+        snap.error.expect("the fault reports itself").key,
+        "media.error_refresh"
+    );
+}
+
+/// The member write door (`ui/media.md` § Cross-nest shared sets, *Upload*):
+/// each upload asks for an uploader bound to the set's home nest and channel,
+/// and the bytes land in the one fake uploader handed back.
+struct WriteDoorFactory {
+    uploader: Arc<FakeMediaBlobUploader>,
+    asked: std::sync::Mutex<Vec<(String, [u8; 32])>>,
+}
+
+impl fauna_media_machine::folder_keys::ForeignBlobFetcherFactory for WriteDoorFactory {
+    fn fetcher_for(
+        &self,
+        base_url: &str,
+        _home_nest_actor_id: Option<&str>,
+    ) -> Arc<dyn fauna_core::file_download::BlobFetcher> {
+        panic!("no read was expected of {base_url}");
+    }
+
+    fn member_uploader_for(
+        &self,
+        home: &fauna_core::folder_keys::ForeignHome,
+        channel_id: [u8; 32],
+    ) -> Option<Arc<dyn MediaBlobUploader>> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((home.nest_url.clone(), channel_id));
+        Some(self.uploader.clone())
+    }
+}
+
+/// A writer member's machine inside the foreign scope, its write door wired;
+/// the own uploader panics if touched (bytes must never rest on the own nest).
+async fn foreign_writer_machine(
+    access: Option<&str>,
+    metadata_only: Option<bool>,
+) -> (
+    Arc<MediaMachine>,
+    Arc<FakeMediaNestApi>,
+    Arc<WriteDoorFactory>,
+) {
+    let manifest_hex = hex::encode([0x11u8; 32]);
+    let (machine, api) = foreign_machine_over(
+        Ok(foreign_listing(
+            vec![foreign_head(&manifest_hex)],
+            Some(true),
+        )),
+        foreign_resolver_with(access, metadata_only),
+    )
+    .await;
+    let factory = Arc::new(WriteDoorFactory {
+        uploader: Arc::new(FakeMediaBlobUploader::new("unused")),
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    machine.set_foreign_fetchers(factory.clone());
+    machine.select_foreign_scope(foreign_value()).await;
+    (machine, api, factory)
+}
+
+fn foreign_records(api: &FakeMediaNestApi) -> Vec<MediaNestCall> {
+    api.calls()
+        .into_iter()
+        .filter(|c| matches!(c, MediaNestCall::RecordForeign { .. }))
+        .collect()
+}
+
+fn own_records(api: &FakeMediaNestApi) -> usize {
+    api.calls()
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                MediaNestCall::RecordMember { .. } | MediaNestCall::DeleteMember { .. }
+            )
+        })
+        .count()
+}
+
+/// The writer door end to end: inside the scope the upload seals under the
+/// set's content keys, POSTs its chunks and manifest through the door bound
+/// to the HOME nest and the set's channel, relays the `create` record through
+/// the member's nest by channel — never the own nest's record — and re-reads
+/// the scope.
+#[tokio::test]
+async fn a_writers_upload_inside_a_foreign_scope_posts_home_and_relays_the_record() {
+    let (machine, api, factory) = foreign_writer_machine(Some("writer"), Some(false)).await;
+    let listings_before = api
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, MediaNestCall::ForeignListing { .. }))
+        .count();
+    machine
+        .upload_selected(
+            "dev".into(),
+            "trip/new.jpg".into(),
+            vec![7u8; 64],
+            KEY.to_vec(),
+        )
+        .await;
+    assert_eq!(machine.snapshot().error, None);
+    assert_eq!(
+        factory.asked.lock().unwrap().clone(),
+        vec![(AWAY.to_string(), foreign_channel())],
+        "the door is bound to the home nest and the set's channel"
+    );
+    let manifests = factory.uploader.manifests();
+    assert_eq!(manifests.len(), 1, "one manifest rests on the home nest");
+    assert!(
+        !factory.uploader.chunks().is_empty(),
+        "the chunks went first"
+    );
+    let records = foreign_records(&api);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let MediaNestCall::RecordForeign {
+        channel,
+        home_nest_url,
+        folder,
+        path,
+        manifest_hash,
+        change_type,
+        content_key_version,
+        path_sealed,
+        ..
+    } = &records[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(*channel, foreign_channel());
+    assert_eq!(home_nest_url, AWAY);
+    assert_eq!(folder, "trip");
+    assert_eq!(path, "trip/new.jpg");
+    assert_eq!(change_type, "create");
+    assert_eq!(
+        manifest_hash.as_deref(),
+        Some(hex::encode(manifests[0].0).as_str()),
+        "the record names the manifest the home nest holds"
+    );
+    assert_eq!(
+        *content_key_version,
+        Some(1),
+        "sealed under the set's generation"
+    );
+    assert!(path_sealed.is_some(), "the path is sealed");
+    assert_eq!(own_records(&api), 0, "nothing was recorded on the own nest");
+    let listings_after = api
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, MediaNestCall::ForeignListing { .. }))
+        .count();
+    assert!(listings_after > listings_before, "the scope re-read");
+}
+
+/// A reader member is refused with the same-nest reader's reason, before
+/// anything is sealed or sent.
+#[tokio::test]
+async fn a_readers_upload_inside_a_foreign_scope_is_refused_read_only() {
+    let (machine, api, factory) = foreign_writer_machine(Some("reader"), None).await;
+    machine
+        .upload_selected("dev".into(), "new.jpg".into(), vec![1, 2, 3], KEY.to_vec())
+        .await;
+    let err = machine.snapshot().error.expect("refused");
+    assert_eq!(err.key, "media.error_read_only_shared_folder");
+    assert!(
+        factory.asked.lock().unwrap().is_empty(),
+        "no door was opened"
+    );
+    assert!(foreign_records(&api).is_empty());
+}
+
+/// The metadata-only refusal fires first, even for a writer
+/// (`relay-serving.md` § Relay serving → *A write door that keeps no body
+/// refuses a metadata-only folder*).
+#[tokio::test]
+async fn a_metadata_only_foreign_set_refuses_before_the_writer_door() {
+    let (machine, api, factory) = foreign_writer_machine(Some("writer"), Some(true)).await;
+    machine
+        .upload_selected("dev".into(), "new.jpg".into(), vec![1, 2, 3], KEY.to_vec())
+        .await;
+    let err = machine.snapshot().error.expect("refused");
+    assert_eq!(err.key, "media.error_metadata_only_folder");
+    assert!(
+        factory.asked.lock().unwrap().is_empty(),
+        "no door was opened"
+    );
+    assert!(foreign_records(&api).is_empty());
+}
+
+/// A platform with no write door refuses loudly — never falls back to the own
+/// nest's uploader or record.
+#[tokio::test]
+async fn a_writer_upload_with_no_write_door_refuses_and_records_nothing() {
+    let manifest_hex = hex::encode([0x11u8; 32]);
+    let (machine, api) = foreign_machine_over(
+        Ok(foreign_listing(
+            vec![foreign_head(&manifest_hex)],
+            Some(true),
+        )),
+        foreign_resolver_with(Some("writer"), None),
+    )
+    .await;
+    machine.select_foreign_scope(foreign_value()).await;
+    machine
+        .upload_selected("dev".into(), "new.jpg".into(), vec![1, 2, 3], KEY.to_vec())
+        .await;
+    let err = machine.snapshot().error.expect("refused");
+    assert_eq!(err.key, "media.error_upload");
+    assert!(
+        err.args
+            .get("message")
+            .is_some_and(|m| m.contains("not supported on this platform")),
+        "{err:?}"
+    );
+    assert!(foreign_records(&api).is_empty());
+    assert_eq!(own_records(&api), 0);
+}
+
+/// A writer's delete in the scope is the relayed tombstone: by channel, no
+/// manifest, its path sealed under the set's key — never the own nest's
+/// tombstone.
+#[tokio::test]
+async fn a_writers_delete_inside_a_foreign_scope_relays_a_tombstone() {
+    let (machine, api, _) = foreign_writer_machine(Some("writer"), None).await;
+    machine.set_owner_backup_key(KEY.to_vec());
+    machine
+        .delete(foreign_value(), "dev".into(), FOREIGN_PATH.into())
+        .await;
+    assert_eq!(machine.snapshot().error, None);
+    let records = foreign_records(&api);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let MediaNestCall::RecordForeign {
+        channel,
+        home_nest_url,
+        manifest_hash,
+        size_bytes,
+        change_type,
+        path_sealed,
+        ..
+    } = &records[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(*channel, foreign_channel());
+    assert_eq!(home_nest_url, AWAY);
+    assert_eq!(change_type, "delete");
+    assert_eq!(*manifest_hash, None);
+    assert_eq!(*size_bytes, 0);
+    assert!(path_sealed.is_some(), "the tombstone's path is sealed");
+    assert_eq!(own_records(&api), 0);
+}
+
+/// `ui/media.md` § Cross-nest shared sets: a foreign item's detail lists
+/// EVERY judged version the home nest holds, read through the seam's relayed
+/// history by the scope's channel and home nest — never the own nest's
+/// by-name `file_versions`, which would answer for a namesake.
+#[tokio::test]
+async fn a_foreign_items_history_lists_every_relayed_version() {
+    let (machine, api, _) = foreign_writer_machine(Some("reader"), None).await;
+    let (old, new) = (hex::encode([0x21u8; 32]), hex::encode([0x11u8; 32]));
+    api.set_foreign_versions(
+        foreign_channel(),
+        Ok(vec![foreign_version(1, &old), foreign_version(2, &new)]),
+    );
+    let versions = machine
+        .file_versions(foreign_value(), FOREIGN_PATH.into(), false)
+        .await
+        .expect("the relayed history answers");
+    let manifests: Vec<&str> = versions.iter().map(|v| v.manifest_hash.as_str()).collect();
+    assert_eq!(manifests, vec![old.as_str(), new.as_str()]);
+    let calls = api.calls();
+    assert!(
+        calls.iter().any(|c| matches!(
+            c,
+            MediaNestCall::ForeignVersions { channel, home_nest_url, path }
+                if *channel == foreign_channel() && home_nest_url == AWAY && path == FOREIGN_PATH
+        )),
+        "{calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, MediaNestCall::FileVersions { .. })),
+        "a foreign item's history never reads the own nest by name: {calls:?}"
+    );
+}
+
+/// The removal reads as the removal on the per-item query too — the seam's
+/// `NotFound` passes through, never a stale head.
+#[tokio::test]
+async fn a_removed_members_foreign_history_answers_the_removal() {
+    let (machine, api, _) = foreign_writer_machine(Some("reader"), None).await;
+    api.set_foreign_versions(
+        foreign_channel(),
+        Err(MediaApiError::NotFound {
+            detail: "the folder's home nest refused the read".into(),
+        }),
+    );
+    let err = machine
+        .file_versions(foreign_value(), FOREIGN_PATH.into(), false)
+        .await
+        .expect_err("refused");
+    assert!(matches!(err, MediaApiError::NotFound { .. }), "{err:?}");
+}
+
+/// A writer's restore inside the scope relays a `modify` naming the historical
+/// manifest by channel through the member's own nest — its generation and
+/// thumbnail verbatim, its path sealed — never the own nest's restore record,
+/// and re-reads the scope.
+#[tokio::test]
+async fn a_writers_restore_inside_a_foreign_scope_relays_a_modify() {
+    let (machine, api, _) = foreign_writer_machine(Some("writer"), None).await;
+    machine.set_owner_backup_key(KEY.to_vec());
+    let old = hex::encode([0x21u8; 32]);
+    api.set_foreign_versions(
+        foreign_channel(),
+        Ok(vec![
+            foreign_version(1, &old),
+            foreign_version(2, &hex::encode([0x11u8; 32])),
+        ]),
+    );
+    let versions = machine
+        .file_versions(foreign_value(), FOREIGN_PATH.into(), false)
+        .await
+        .unwrap();
+    let listings_before = api
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, MediaNestCall::ForeignListing { .. }))
+        .count();
+    let restored = fauna_media_machine::snapshots::FileVersionSummary {
+        thumbnail_hash: Some("aa".repeat(32)),
+        ..versions[0].clone()
+    };
+    machine
+        .restore_version(foreign_value(), "dev".into(), FOREIGN_PATH.into(), restored)
+        .await;
+    assert_eq!(machine.snapshot().error, None);
+    let records = foreign_records(&api);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let MediaNestCall::RecordForeign {
+        channel,
+        home_nest_url,
+        manifest_hash,
+        size_bytes,
+        change_type,
+        content_key_version,
+        thumbnail_hash,
+        path_sealed,
+        ..
+    } = &records[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(*channel, foreign_channel());
+    assert_eq!(home_nest_url, AWAY);
+    assert_eq!(change_type, "modify");
+    assert_eq!(manifest_hash.as_deref(), Some(old.as_str()));
+    assert_eq!(*size_bytes, 10);
+    assert_eq!(
+        *content_key_version,
+        Some(1),
+        "the generation rides verbatim"
+    );
+    assert_eq!(thumbnail_hash.as_deref(), Some("aa".repeat(32).as_str()));
+    assert!(path_sealed.is_some(), "the re-point's path is sealed");
+    assert_eq!(own_records(&api), 0);
+    assert!(
+        !api.calls()
+            .iter()
+            .any(|c| matches!(c, MediaNestCall::RestoreMember { .. })),
+        "never the own nest's restore record"
+    );
+    let listings_after = api
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, MediaNestCall::ForeignListing { .. }))
+        .count();
+    assert!(listings_after > listings_before, "the scope is re-read");
+}
+
+/// A reader member's restore is refused with the same-nest reader's reason,
+/// before anything is sealed or sent.
+#[tokio::test]
+async fn a_readers_restore_inside_a_foreign_scope_is_refused_read_only() {
+    let (machine, api, _) = foreign_writer_machine(Some("reader"), None).await;
+    machine
+        .restore_version(
+            foreign_value(),
+            "dev".into(),
+            FOREIGN_PATH.into(),
+            foreign_version(1, &hex::encode([0x21u8; 32])).summary,
+        )
+        .await;
+    let err = machine.snapshot().error.expect("refused");
+    assert_eq!(err.key, "media.error_read_only_shared_folder");
+    assert!(foreign_records(&api).is_empty());
+    assert_eq!(own_records(&api), 0);
 }

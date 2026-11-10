@@ -525,6 +525,19 @@ impl MlsQuery for SessionMlsQuery {
             None => false,
         }
     }
+
+    /// The forked-seat mark (`federation-shared-folders.md` § *A forked seat is
+    /// final*), read off the same engine tui reads. Fail-safe `false` on a
+    /// departed session or undecodable id.
+    fn is_forked_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        let Some(session) = self.session.upgrade() else {
+            return false;
+        };
+        match channel_id_from_hex(mls_group_id_hex) {
+            Some(channel_id) => session.engine().folder_seat_forked(&channel_id).is_some(),
+            None => false,
+        }
+    }
 }
 
 /// Decode a raw hex MLS group id into its derived [`fauna_mls::types::ChannelId`],
@@ -842,5 +855,19 @@ mod tests {
             session: std::sync::Weak::new(),
         };
         assert!(!query.is_joined_shared_set(&hex::encode([0x11u8; 16])));
+    }
+
+    /// The forked-seat query is fail-safe the same way: a departed session or an
+    /// undecodable group id reads `false` (the badge then shows its plain
+    /// reading), never a panic. The forked → `true` half needs a live engine
+    /// and is pinned by the engine's own tests
+    /// (`fauna_mls_backend_tests::a_future_epoch_stall_marks_the_folder_seat_forked…`).
+    #[test]
+    fn a_departed_session_or_bad_group_id_answers_not_forked() {
+        let query = SessionMlsQuery {
+            session: std::sync::Weak::new(),
+        };
+        assert!(!query.is_forked_shared_set(&hex::encode([0x11u8; 16])));
+        assert!(!query.is_forked_shared_set("not-hex"));
     }
 }

@@ -4,6 +4,9 @@ title: Members: requests, registration, invites and actions
 section: admin area
 goal: docs/goal/behavior/admin.md § 2. Users
 guide: docs/guides/admin-tour.md § Users
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -17,7 +20,7 @@ whether registration is open, invite-only or closed, right here.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e129e78aa0.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] A join request is approved at a tier and the member appears; invite codes mint and copy — `docs/goal/behavior/admin.md` § 2. Users
    - `tests/e2e-unified/tests/test_admin_users_hub.py::test_approve_invite_request_at_tier`
@@ -109,19 +112,23 @@ Stamped 2026-10-01 at e129e78aa0.
     - `tests/e2e-unified/tests/api/test_invite_requests.py::test_admin_list_shows_submitted`
 40. [app] Another admin sees who scheduled a waiting action and approves it in one click — `docs/goal/behavior/admin.md` § Pending admin actions
     - `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_co_admin_sees_who_scheduled_an_action_and_approves_it_in_one_click`
+41. [app] A registration mode this app cannot name — reported by an older or a newer nest — is shown read-only, never replaced by a guess that saving would write over the nest's real posture — `docs/goal/architecture/nest/public-mode.md` § Registration Modes
+    - `tests/e2e-unified/tests/test_admin_registration_posture.py::test_an_unnamed_registration_mode_is_shown_read_only_and_never_saved_over`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| linux | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| web | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| linux | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
 | windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
-| macos | ✅ full | 0.1.5-dev+409ac563 standalone |
-| ios | ✅ full | 0.1.5-dev+407a19e1 standalone |
+| macos | ⚠ partial | 0.1.5-dev+409ac563 standalone |
+| ios | ⚠ partial | 0.1.5-dev+407a19e1 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -143,7 +150,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 7 | app | `tests/e2e-unified/tests/test_admin_serving_indicator.py::test_admin_sees_user_serving_status_read_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_admin_users_action_error.py::test_users_action_error_routes_to_dedicated_element` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_admin_management` | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_users_guardian_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_users_guardian_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_users_guardian_picker_offers_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_scheduled_grant_is_listed_and_cancellable_from_the_admin_console` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_pending_action_audience.py::test_the_target_of_an_admin_deletion_is_told_and_can_cancel_it` | nest (linux): passed |
@@ -175,4 +182,5 @@ Stamped 2026-10-01 at e129e78aa0.
 | 38 | nest | `tests/e2e-unified/tests/api/test_admin_users_cut_off.py::test_a_restored_member_comes_back_as_they_were` | nest (linux): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_invite_requests.py::test_admin_list_shows_submitted` | nest (linux): passed |
 | 40 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_co_admin_sees_who_scheduled_an_action_and_approves_it_in_one_click` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 41 | app | `tests/e2e-unified/tests/test_admin_registration_posture.py::test_an_unnamed_registration_mode_is_shown_read_only_and_never_saved_over` | tui (linux): passed |
 <!-- features-render:end -->

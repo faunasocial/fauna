@@ -4,6 +4,9 @@ title: Mail aliases
 section: mail, calendar and contacts
 goal: docs/goal/behavior/mail-aliases.md § Aliases UX
 guide: docs/guides/own-your-mail.md § Addresses: aliases, plus-addresses, and role addresses
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,7 +18,7 @@ primary address, which cannot be removed.
 
 ## Coverage contract
 
-Stamped 2026-09-23 at 039e9619ca.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] Mint a throwaway address, add an exact one, switch one off and on, revoke and delete — `docs/goal/behavior/mail-aliases.md` § Aliases UX
    - `tests/e2e-unified/tests/test_mail_aliases.py::test_mail_aliases_page_reachable`
@@ -41,6 +44,7 @@ Stamped 2026-09-23 at 039e9619ca.
 6. [nest] A per-alias rate cap turns mail away, and a per-address spam threshold rides the message to the filter — `docs/goal/behavior/mail-aliases.md` § Per-alias controls
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_over_per_alias_rate_cap_tempfails_451`
    - `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_per_account_spam_threshold_override_rides_the_message_to_the_scorer`
+   - `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_changing_an_address_threshold_never_refiles_delivered_mail`
 7. [app] You can add a wildcard prefix from the page, so every address under it is yours — `docs/goal/behavior/mail-aliases.md` § Kind 3 — Wildcard prefix
    - `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_wildcard_prefix_from_the_sheet`
 8. [app] You can give any address a label and see it on the row — `docs/goal/behavior/mail-aliases.md` § Layout
@@ -90,6 +94,17 @@ Stamped 2026-09-23 at 039e9619ca.
    - `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_disposable_mints_capped_per_day`
 29. [app] Deleting an address asks you to confirm first, and nothing is deleted until you do — `docs/goal/behavior/mail-aliases.md` § Layout
    - `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_delete_confirm_relabels_the_button_before_deleting`
+30. [nest] A handle and an alias never hold the same address: a handle an alias already holds is refused at registration, invite, handle change and claim, and an alias, forwarder or list on someone's handle is refused — `docs/goal/behavior/mail-aliases.md` § Cross-actor isolation + reserved local-parts
+   - `tests/e2e-unified/tests/api/test_mail_handle_alias_exclusion.py::test_no_alias_forwarder_or_list_can_take_a_handle`
+   - `tests/e2e-unified/tests/api/test_mail_handle_alias_exclusion.py::test_every_handle_door_refuses_a_handle_an_alias_holds`
+31. [nest] Mail to your handle, with or without a plus-suffix, reaches you even with no alias row, ahead of any wildcard, disposable or catch-all, and you can send from your handle with a suffix — `docs/goal/behavior/mail-aliases.md` § Resolution order at RCPT TO time
+   - `tests/e2e-unified/tests/api/test_mail_resolution_order.py::test_mail_to_a_handle_reaches_its_owner_with_no_alias_row_ahead_of_every_pattern`
+32. [nest] Addresses resolve in one fixed order — exact, plus-suffix, disposable, wildcard, catch-all, then a refusal — an invalid sub-address is refused, and an alias is never a login — `docs/goal/behavior/mail-aliases.md` § Resolution order at RCPT TO time
+   - `tests/e2e-unified/tests/api/test_mail_resolution_order.py::test_addresses_resolve_in_one_fixed_order_and_only_an_exact_identity_logs_in`
+33. [nest] Mail sent from the Fauna app to one of your nest's own plus, wildcard, catch-all or disposable addresses is delivered as mail from outside would be, rate cap and disposable count applied — `docs/goal/behavior/mail-aliases.md` § Resolution order at RCPT TO time
+   - `tests/e2e-unified/tests/api/test_mail_resolution_order.py::test_an_app_send_to_the_nests_own_addresses_delivers_like_outside_mail`
+34. [app] The import sheet shows its result in place with a reason for every line it refused, and clears when reopened — `docs/goal/behavior/mail-aliases.md` § Bulk import
+   - `tests/e2e-unified/tests/test_mail_aliases_import.py::test_import_addresses_reports_and_relists`
 
 ## Status
 
@@ -102,7 +117,9 @@ Stamped 2026-09-23 at 039e9619ca.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+d8a27534 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| tui | ✅ full | 0.1.5-dev+d8a27534 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -124,6 +141,7 @@ Stamped 2026-09-23 at 039e9619ca.
 | 5 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_wildcard_conflicts_with_other_users_exact` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_over_per_alias_rate_cap_tempfails_451` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_per_account_spam_threshold_override_rides_the_message_to_the_scorer` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 6 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_changing_an_address_threshold_never_refiles_delivered_mail` | nest (linux): passed, nest (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_wildcard_prefix_from_the_sheet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_sheet_sets_label_spam_threshold_and_hourly_limit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_row_shows_hit_count_and_last_hit_after_real_inbound` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -150,4 +168,10 @@ Stamped 2026-09-23 at 039e9619ca.
 | 27 | nest | `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_exact_alias_cap_enforced_from_put_alias_policy` | nest (linux): passed |
 | 28 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_disposable_mints_capped_per_day` | nest (linux): passed |
 | 29 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_delete_confirm_relabels_the_button_before_deleting` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 30 | nest | `tests/e2e-unified/tests/api/test_mail_handle_alias_exclusion.py::test_no_alias_forwarder_or_list_can_take_a_handle` | nest (linux): passed |
+| 30 | nest | `tests/e2e-unified/tests/api/test_mail_handle_alias_exclusion.py::test_every_handle_door_refuses_a_handle_an_alias_holds` | nest (linux): passed |
+| 31 | nest | `tests/e2e-unified/tests/api/test_mail_resolution_order.py::test_mail_to_a_handle_reaches_its_owner_with_no_alias_row_ahead_of_every_pattern` | nest (linux): passed |
+| 32 | nest | `tests/e2e-unified/tests/api/test_mail_resolution_order.py::test_addresses_resolve_in_one_fixed_order_and_only_an_exact_identity_logs_in` | nest (linux): passed |
+| 33 | nest | `tests/e2e-unified/tests/api/test_mail_resolution_order.py::test_an_app_send_to_the_nests_own_addresses_delivers_like_outside_mail` | nest (linux): passed |
+| 34 | app | `tests/e2e-unified/tests/test_mail_aliases_import.py::test_import_addresses_reports_and_relists` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

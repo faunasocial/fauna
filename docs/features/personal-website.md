@@ -4,6 +4,9 @@ title: Publish to the web
 section: your data and devices
 goal: docs/goal/behavior/web-content-hosting.md § Goal
 guide: docs/guides/who-can-see-what.md § Public posts and your profile
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -17,7 +20,7 @@ handing you a dead link.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at 308c995169.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] A post publishes from its menu, the copied link loads, and it unpublishes from Settings — `docs/goal/behavior/web-content-hosting.md` § Published-post management
    - `tests/e2e-unified/tests/test_web_authoring.py::test_publishing_a_post_from_the_feed_overflow_menu`
@@ -54,19 +57,25 @@ Stamped 2026-10-01 at 308c995169.
    - `tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py::test_a_user_site_never_shadows_the_mounted_spa_at_app`
 12. [nest] A script on someone's published site can never take control of pages beyond that site's own address — `docs/goal/behavior/web-content-hosting.md` § Invariants this model relies on
    - `tests/e2e-unified/tests/api/test_web_served_headers.py::test_a_members_script_is_never_given_a_wider_scope`
+13. [nest] A visitor sees your whole old site or your whole new one, never a half-written one, and past the withdrawal deadline the site goes dark rather than partial — `docs/goal/behavior/web-content-hosting.md` § Routing, render, serving
+   - `tests/e2e-unified/tests/api/test_web_render_atomicity.py::test_a_visitor_sees_the_whole_old_site_or_the_whole_new_one_and_a_withdrawn_site_goes_dark`
+14. [nest] A post that receives a moderation label leaves your published site — `docs/goal/behavior/web-content-hosting.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_web_render_atomicity.py::test_a_post_that_receives_a_moderation_label_leaves_the_published_site`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
-| linux | ✅ full | 0.1.5-dev+db30f58d.dirty standalone |
-| windows | ✅ full | 0.1.2-dev+c04c2468 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+ede1a6ab standalone |
+| web | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| linux | ⚠ partial | 0.1.5-dev+db30f58d.dirty standalone |
+| windows | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+ede1a6ab standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| tui | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -93,4 +102,6 @@ Stamped 2026-10-01 at 308c995169.
 | 11 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_no_user_site_answers_at_the_reserved_hosts_and_paths` | nest (linux): passed, nest (macos): passed |
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py::test_a_user_site_never_shadows_the_mounted_spa_at_app` | nest (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_a_members_script_is_never_given_a_wider_scope` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_web_render_atomicity.py::test_a_visitor_sees_the_whole_old_site_or_the_whole_new_one_and_a_withdrawn_site_goes_dark` | — |
+| 14 | nest | `tests/e2e-unified/tests/api/test_web_render_atomicity.py::test_a_post_that_receives_a_moderation_label_leaves_the_published_site` | — |
 <!-- features-render:end -->

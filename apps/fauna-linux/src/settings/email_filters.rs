@@ -45,6 +45,7 @@ use fauna_protocol::email::{
     describe_filter_action, describe_filter_rule_inputs, encode_filter_action,
     encode_filter_rule_inputs, filter_is_editable, parse_filter_priority,
 };
+use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::client::FaunaClient;
@@ -54,6 +55,17 @@ use crate::testid::set_test_id;
 
 type Nest = Arc<fauna_client::NestClient>;
 type LoadResult = Result<Vec<EmailFilter>, String>;
+
+/// How a mutation settled: re-listed from the nest, or — a create made with no
+/// nest — queued in the device's outbox, listing nothing (the rule has no
+/// server id until the drain; the nest's list after it is the word).
+#[derive(Debug)]
+enum Settled {
+    Listed(Vec<EmailFilter>),
+    Queued,
+}
+
+type MutationResult = (Result<Settled, String>, Option<Vec<i64>>);
 
 /// The shared create/edit form. `create_btn`/`save_btn` are mutually
 /// exclusive (visibility toggled by `Ctx::editing_id`) — distinct ui.yaml IDs
@@ -776,10 +788,11 @@ enum Mutation {
 
 fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
     let nest = ctx.nest.clone();
+    let queue = crate::offline_outbox::queue();
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
         &ctx.rt,
-        move || async move { run_mutation(nest, mutation).await },
+        move || async move { run_mutation(nest, Some(queue), mutation).await },
         move |result| apply_mutation(&ctx_render, result),
     );
 }
@@ -789,14 +802,24 @@ fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
 /// locally-guessed rows with no id, the bug this migration fixes). The second
 /// element is `Some` only when a delete recorded a mark verdict — `None`
 /// leaves [`Ctx::filter_marks`]'s cache alone, same contract as `refresh`'s.
-async fn run_mutation(nest: Nest, mutation: Mutation) -> (LoadResult, Option<Vec<i64>>) {
+///
+/// `queue` is the device's outbox (`crate::offline_outbox::queue`): with no
+/// nest a create rests there (`OfflineQueued`, account-offline-mutation.md
+/// § The offline-mutation contract) and settles [`Settled::Queued`] with no
+/// re-read.
+async fn run_mutation(
+    nest: Nest,
+    queue: Option<Arc<dyn OfflineIntentQueue>>,
+    mutation: Mutation,
+) -> MutationResult {
     let email = EmailClient::new(nest.clone());
     let mut new_marks = None;
-    let outcome: Result<(), String> = async {
+    let outcome: Result<bool, String> = async {
         match mutation {
             Mutation::Create(v) => {
-                email
-                    .filters_create(
+                if let Composed::Queued(_) = email
+                    .filters_create_or_queue(
+                        queue.as_deref(),
                         v.name,
                         vec![v.rule],
                         "all",
@@ -805,7 +828,10 @@ async fn run_mutation(nest: Nest, mutation: Mutation) -> (LoadResult, Option<Vec
                         v.continue_on_match,
                     )
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string())?
+                {
+                    return Ok(true);
+                }
             }
             Mutation::Update { id, values: v } => {
                 email
@@ -828,16 +854,21 @@ async fn run_mutation(nest: Nest, mutation: Mutation) -> (LoadResult, Option<Vec
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
     .await;
-    if let Err(e) = outcome {
-        return (Err(e), new_marks);
+    match outcome {
+        Err(e) => (Err(e), new_marks),
+        Ok(true) => (Ok(Settled::Queued), new_marks),
+        Ok(false) => (
+            email
+                .filters_list()
+                .await
+                .map(Settled::Listed)
+                .map_err(|e| e.to_string()),
+            new_marks,
+        ),
     }
-    (
-        email.filters_list().await.map_err(|e| e.to_string()),
-        new_marks,
-    )
 }
 
 /// Record **Removed** on a just-deleted marked filter, then read the marks
@@ -884,16 +915,21 @@ async fn keep_filter_mark(id: i64) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_mutation(ctx: &Rc<Ctx>, result: (LoadResult, Option<Vec<i64>>)) {
+fn apply_mutation(ctx: &Rc<Ctx>, result: MutationResult) {
     let (result, marks) = result;
     if let Some(marks) = marks {
         store_marks(ctx, marks);
     }
     match result {
-        Ok(filters) => {
+        Ok(Settled::Listed(filters)) => {
             clear_error(ctx);
             close_form(ctx);
             render_rows(ctx, &filters);
+        }
+        // Queued: the form resets like a create, the list is left as it was.
+        Ok(Settled::Queued) => {
+            clear_error(ctx);
+            close_form(ctx);
         }
         Err(msg) => show_error(ctx, &msg),
     }
@@ -963,5 +999,58 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn run_create(word: &'static str) -> (MutationResult, Vec<String>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let nest: Nest = fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        );
+        let mutation = Mutation::Create(FormValues {
+            name: "Move newsletters".into(),
+            rule: fauna_protocol::email::EmailFilterRule::SenderDomain {
+                domain: "news.example".into(),
+            },
+            action: EmailFilterAction::Allow,
+            priority: 0,
+            continue_on_match: false,
+        });
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run_mutation(
+                nest,
+                Some(Arc::clone(&queue) as Arc<dyn OfflineIntentQueue>),
+                mutation,
+            ));
+        let kinds = queue
+            .queued()
+            .into_iter()
+            .map(|q| q.0.to_string())
+            .collect();
+        (result, kinds)
+    }
+
+    /// With no nest, a filter create rests in the outbox (not sent into the
+    /// dead connection) and settles queued, listing nothing.
+    #[test]
+    fn a_filter_create_with_no_nest_is_queued_and_lists_nothing() {
+        let ((settled, marks), kinds) = run_create("disconnected");
+        assert!(matches!(settled, Ok(Settled::Queued)), "{settled:?}");
+        assert!(marks.is_none());
+        assert_eq!(kinds, vec!["fauna.email.filters.create"]);
+    }
+
+    /// Connected, the create is sent as before (to this dummy nest it fails on
+    /// the transport) and nothing is queued.
+    #[test]
+    fn a_filter_create_with_the_nest_connected_is_sent_not_queued() {
+        let ((settled, _), kinds) = run_create("connected");
+        assert!(settled.is_err(), "the send was attempted");
+        assert!(kinds.is_empty());
     }
 }

@@ -9,13 +9,16 @@ import com.fauna.ffi.onboarding.OnboardingStep
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.mockito.ArgumentMatchers.anyString
@@ -549,6 +552,8 @@ class AppLaunchVMTest {
         val registry: com.fauna.ffi.FfiAccountRegistry = mock(com.fauna.ffi.FfiAccountRegistry::class.java),
         val actorScope: com.fauna.app.core.ActorScope = mock(com.fauna.app.core.ActorScope::class.java),
         val machine: LaunchMachine = mock(LaunchMachine::class.java),
+        val currency: com.fauna.app.core.LaunchCurrency = com.fauna.app.core.LaunchCurrency(),
+        val accountStores: com.fauna.app.core.AccountStores = mock(com.fauna.app.core.AccountStores::class.java),
     )
 
     // ── The locked surface (`ui/sessions.md` § Layout & flow, leg 2;
@@ -652,6 +657,80 @@ class AppLaunchVMTest {
         verify(f.machine, never()).start()
     }
 
+    // ── A verdict renders only while its own launch is still the current one
+    // (`onboarding.md` § App-launch routing; multiple-accounts outcome 17) ──
+
+    /**
+     * Red-verify by making `LaunchCurrency.deliver` return `true` and
+     * `retireInFlight` do nothing: the replaced and the retired launch's
+     * verdicts then both count as routed and their machines stay on screen.
+     */
+    @Test
+    fun aReplacedOrRetiredLaunchIsDroppedAndTheCurrentOneRoutes() = runTest {
+        val currency = com.fauna.app.core.LaunchCurrency()
+        val stale = mock(LaunchMachine::class.java)
+        val newer = mock(LaunchMachine::class.java)
+        val retired = mock(LaunchMachine::class.java)
+        val fresh = ArrayDeque(listOf(stale, newer, retired))
+        val f = makeVm()
+        val vm = AppLaunchVM(
+            { fresh.removeFirst() }, currency, mock(LaunchObserverImpl::class.java).also {
+                whenever(it.snapshot).thenReturn(f.snapshots)
+            },
+            f.host, f.store, f.apiClient, f.actorScope, f.persistence, f.registry,
+            mock(com.fauna.app.core.SecureStorage::class.java),
+            cleanStores(),
+            com.fauna.app.core.StolenCeremonyHold(),
+        )
+        vm.finishDispatcher = Dispatchers.Unconfined
+
+        // The stale launch is still awaiting its nest when a newer one begins
+        // (the switcher's re-entry): its verdict lands second and is dropped.
+        val staleVerdict = holdVerdict(stale)
+        val staleDrive = launch { vm.start() }
+        testScheduler.runCurrent()
+        assertTrue("the stale launch is in flight", staleVerdict.isInitialized())
+        vm.start()
+        assertTrue("the newer launch holds the surface", currency.isShown(newer))
+        staleVerdict.value.resumeWith(Result.success(Unit))
+        staleDrive.join()
+        assertEquals(1L to 1L, currency.routedCount to currency.supersededCount)
+        assertTrue("a superseded launch never takes the surface back", currency.isShown(newer))
+
+        // The current launch's verdict routed even though a session may be live
+        // (an ownership test, never a presence test), and then holds nothing in
+        // flight: the session patch retires nothing of a settled launch.
+        assertFalse("a settled launch is not retired", currency.retireInFlight())
+        assertTrue(currency.isShown(newer))
+
+        // A launch still in flight when the session patch builds a newer session.
+        val retiredVerdict = holdVerdict(retired)
+        val retiredDrive = launch { vm.start() }
+        testScheduler.runCurrent()
+        assertTrue(currency.retireInFlight())
+        assertFalse("a retired launch leaves the surface", currency.isShown(retired))
+        retiredVerdict.value.resumeWith(Result.success(Unit))
+        retiredDrive.join()
+        assertEquals(1L to 2L, currency.routedCount to currency.supersededCount)
+    }
+
+    /** Stub [machine]'s `start()` to suspend until the test resumes the handed-back
+     *  continuation — a launch provably in flight, with no clock involved. */
+    private suspend fun holdVerdict(machine: LaunchMachine): Lazy<kotlin.coroutines.Continuation<Unit>> {
+        var held: kotlin.coroutines.Continuation<Unit>? = null
+        // Stubbed from a coroutine: Mockito matches a suspend method without its
+        // trailing continuation, and the answer reads that continuation raw.
+        org.mockito.Mockito.doAnswer { invocation ->
+            @Suppress("UNCHECKED_CAST")
+            held = invocation.rawArguments.last() as kotlin.coroutines.Continuation<Unit>
+            kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
+        }.`when`(machine).start()
+        return object : Lazy<kotlin.coroutines.Continuation<Unit>> {
+            override val value get() = checkNotNull(held) { "start() was never called" }
+            override fun isInitialized() = held != null
+        }
+    }
+
     private fun lockedOutcome(persisted: Boolean) = com.fauna.ffi.FfiStolenOutcome(
         kind = "landed",
         message = null,
@@ -690,12 +769,80 @@ class AppLaunchVMTest {
         val actorScope = mock(com.fauna.app.core.ActorScope::class.java)
         val registry = mock(com.fauna.ffi.FfiAccountRegistry::class.java)
         val secureStorage = mock(com.fauna.app.core.SecureStorage::class.java)
-        val accountStores = mock(com.fauna.app.core.AccountStores::class.java)
+        val accountStores = cleanStores()
+        val currency = com.fauna.app.core.LaunchCurrency()
         val vm = AppLaunchVM(
-            machine, observer, host, store, apiClient, actorScope, persistence,
+            { machine }, currency, observer, host, store, apiClient, actorScope, persistence,
             registry, secureStorage, accountStores, hold,
         )
-        return Fixture(vm, host, store, persistence, snapshots, apiClient, registry, actorScope, machine)
+        vm.finishDispatcher = Dispatchers.Unconfined
+        return Fixture(
+            vm, host, store, persistence, snapshots, apiClient, registry, actorScope, machine,
+            currency, accountStores,
+        )
+    }
+
+    // ── The cold boot's sign-out finish (`account-scoping.md` § Erasure follows
+    //    scope → *The sign-out record is on all 7 apps*, decisions 3 and 4) ──
+
+    /** The launch's finish runs once, before the machine reads the registry. */
+    @Test
+    fun theColdBootFinishRunsOnceAndBeforeTheMachineStarts() = runTest {
+        val f = makeVm()
+
+        f.vm.start()
+        f.vm.start()
+
+        org.mockito.Mockito.inOrder(f.accountStores, f.machine).apply {
+            verify(f.accountStores).finishSignOut(anyHost(), org.mockito.ArgumentMatchers.eq(true), org.mockito.ArgumentMatchers.isNull())
+            // Both launches drive the machine; only the first ran the finish.
+            verify(f.machine, org.mockito.Mockito.times(2)).start()
+        }
+        verify(f.accountStores, org.mockito.Mockito.times(1))
+            .finishSignOut(anyHost(), org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.any())
+        assertFalse(f.vm.failedClosed.value)
+    }
+
+    /**
+     * A refused finish whose record still owes its wipe FAILS CLOSED: the
+     * machine is never started (nothing routes over the registry), and the
+     * refusal waits for the wizard to paint; Remove Again re-runs the routine
+     * and, once it no longer refuses, the launch routes.
+     */
+    @Test
+    fun aFinishThatFailsClosedNeverStartsTheMachineUntilRemoveAgainClearsIt() = runTest {
+        val f = makeVm()
+        val refusal = mock(com.fauna.ffi.FfiSignOutResidue::class.java)
+        whenever(
+            f.accountStores.finishSignOut(anyHost(), org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.any())
+        ).thenReturn(
+            CLEAN_FINISH.copy(failsClosed = true, refused = true, residue = refusal),
+            CLEAN_FINISH,
+        )
+
+        f.vm.start()
+
+        verify(f.machine, never()).start()
+        assertTrue("the launch fails closed", f.vm.failedClosed.value)
+        assertTrue("the refusal waits for the wizard", f.vm.launchResidue.value === refusal)
+
+        assertNull("a clean re-run closes the view", f.vm.retrySignOutResidue())
+        assertFalse(f.vm.failedClosed.value)
+        verify(f.machine).start()
+    }
+
+    private fun cleanStores(): com.fauna.app.core.AccountStores {
+        val stores = mock(com.fauna.app.core.AccountStores::class.java)
+        whenever(
+            stores.finishSignOut(anyHost(), org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.any())
+        ).thenReturn(CLEAN_FINISH)
+        return stores
+    }
+
+    /** `ArgumentMatchers.any` for a non-null Kotlin parameter. */
+    private fun anyHost(): com.fauna.ffi.FfiSignOutHost {
+        org.mockito.ArgumentMatchers.any(com.fauna.ffi.FfiSignOutHost::class.java)
+        return NO_HOST
     }
 
     private companion object {
@@ -708,6 +855,22 @@ class AppLaunchVMTest {
         const val NEST = "http://127.0.0.1:18600"
         const val CLAIM_FREE = "This identity was succeeded — import the new identity to continue."
         fun verifiedReason(successor: String) = "Your account now belongs to $successor."
+
+        /** A launch finish with nothing owed. */
+        val CLEAN_FINISH = com.fauna.ffi.FfiSignOutFinish(
+            failsClosed = false,
+            refused = false,
+            residue = null,
+            credentialsWiped = false,
+            foundRecord = false,
+        )
+
+        /** The stand-in an `any()` matcher returns for a non-null parameter. */
+        val NO_HOST = object : com.fauna.ffi.FfiSignOutHost {
+            override fun wipeOwnStore(): Boolean = true
+            override fun eraseCredentials(): com.fauna.ffi.FfiCredentialSweep =
+                com.fauna.ffi.FfiCredentialSweep(survivors = emptyList(), wipeFailed = false)
+        }
     }
 
     private fun bootSnapshot() = LaunchSnapshot(

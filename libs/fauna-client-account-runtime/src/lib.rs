@@ -85,7 +85,9 @@ pub use fauna_account_plane::departed_fleet::record_departed_fleet;
 pub use fauna_account_plane::owed_delivery::PredecessorSeeds;
 use fauna_anon_client::AnonymousNestClient;
 use fauna_client::NestClient;
-use fauna_client_core::succession_delivery::{OwedNestReach, SignIn, deliver_owed_nests};
+use fauna_client_core::succession_delivery::{
+    OwedNestReach, ParkedOwedNests, SignIn, deliver_owed_nests,
+};
 use fauna_core::identity::ActorKeypair;
 use fauna_credential_store::CredentialStore;
 pub use fauna_sync_engine::account_runtime::CloudBackupExclusion;
@@ -378,13 +380,17 @@ pub async fn sign_in_with_seed(url: &str, keypair: ActorKeypair) -> SignIn<Arc<N
 /// shared delivery body over [`NativeOwedReach`], for whichever keeping nest
 /// the pass hands it. Fresh connections per delivery, dropped when it is done:
 /// an owed entry is a rare thing, and the pass runs at the backstop cadence.
+/// One park ledger per deliverer (`ParkedOwedNests`): an address that answered
+/// as another nest is dialed once per runtime, by every keeper's step alike.
 #[must_use]
 pub fn native_owed_nest_deliverer(seeds: PredecessorSeeds) -> OwedNestDeliverer<Arc<NestClient>> {
     let reach = Arc::new(NativeOwedReach { seeds });
+    let parked = Arc::new(ParkedOwedNests::default());
     Arc::new(move |keeper: Arc<NestClient>| {
         let reach = Arc::clone(&reach);
+        let parked = Arc::clone(&parked);
         Box::pin(async move {
-            deliver_owed_nests(&keeper, &*reach)
+            deliver_owed_nests(&keeper, &*reach, &parked)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -695,6 +701,45 @@ pub async fn read_marker_state_json(
         fauna_account_plane::account_driver::e2e_readers::read_marker_state(handle, channel_id_hex)
             .await;
     serde_json::to_value(view).unwrap_or_else(|_| serde_json::json!({ "found": false }))
+}
+
+/// e2e-only: which content-key generations this seat's folder custody holds
+/// for one shared set, as JSON — `{"found", "channel_id_hex", "generations":
+/// [{"version", "key_fp"}]}`, most-recent first, or `{"found": false,
+/// "error"}` when the custody is unreadable — the succession journeys'
+/// cross-seat comparison (`succession-aftermath.md` § Re-key scope: a seat
+/// still holding a retired seed must hold no key for the generation the
+/// succession rotated in). The set is named by `channel_id_hex` (a member's
+/// form) or `set_name` (an owner's live entry); the load, the selection and
+/// the one-way fingerprint are
+/// [`fauna_client_folders::custody::read_held_generations`], which web's
+/// reader runs too.
+/// `Err` is a refused selector, for the dispatcher's loud refusal (convention
+/// 11). Dispatched and gated exactly like [`device_set_state_json`]: async
+/// store I/O, never the per-tick state path; real custody content.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub async fn folder_set_custody_json(
+    handle: Option<AccountStoreHandle>,
+    set_name: Option<&str>,
+    channel_id_hex: Option<&str>,
+) -> Result<serde_json::Value, &'static str> {
+    use fauna_client_folders::custody::{SetCustodyReading, read_held_generations};
+    let keys = folder_keys::PlaneFolderKeys::new(move || handle.clone());
+    let held = match read_held_generations(&keys, set_name, channel_id_hex).await? {
+        SetCustodyReading::Held(held) => held,
+        SetCustodyReading::Unreadable(e) => {
+            return Ok(serde_json::json!({ "found": false, "error": e }));
+        }
+    };
+    Ok(serde_json::json!({
+        "found": held.found,
+        "channel_id_hex": held.channel_id_hex,
+        "generations": held
+            .generations
+            .iter()
+            .map(|g| serde_json::json!({ "version": g.version, "key_fp": g.key_fp }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 /// e2e-only: where this app's account store's `fauna.state.escrow-wrap`
@@ -1168,10 +1213,12 @@ mod tests {
         );
 
         let mut i = inputs();
-        i.memberships = Some(Arc::new(|| Some(vec![[9u8; 32]])));
+        i.memberships = Some(MembershipSource::Engine(Arc::new(|| Some(vec![[9u8; 32]]))));
         let params = build_params(i, rpc(), "https://nest.example").unwrap();
-        let source = params.memberships.expect("wired");
-        assert_eq!(source(), Some(vec![[9u8; 32]]));
+        let Some(MembershipSource::Engine(engine)) = params.memberships else {
+            panic!("an app's engine wiring stays an engine wiring");
+        };
+        assert_eq!(engine(), Some(vec![[9u8; 32]]));
     }
 
     /// The peer leg is off unless the app wired a factory — hosting the

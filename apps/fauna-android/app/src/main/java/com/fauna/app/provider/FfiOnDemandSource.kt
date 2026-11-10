@@ -23,13 +23,19 @@ import com.fauna.ffi.installCapabilityHostCustody
 import com.fauna.ffi.machineChangeSigner
 import com.fauna.ffi.machineRetainedKeyCustody
 import com.fauna.ffi.mintBearer
+import com.fauna.ffi.onDemandParkedPresences
 import com.fauna.ffi.onDemandPresencePlan
+import com.fauna.ffi.syncSetPark
 import dagger.hilt.android.qualifiers.ApplicationContext
 import uniffi.fauna_devices_machine.FolderSummary
+import uniffi.fauna_folders_machine.PresenceSet
+import uniffi.fauna_folders_machine.SetPark
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -97,6 +103,9 @@ class FfiOnDemandSource @Inject constructor(
     private var account: Account? = null
     /** Desired sets by scoped id → the set's bare `FolderRef` wire string. */
     private var desired: Map<String, Pair<OnDemandSet, String>> = emptyMap()
+    /** The sets the last plan presents, by scoped id — the park fold's presences. */
+    @Volatile private var presented: Map<String, PresenceSet> = emptyMap()
+    private val reconcileTicks = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     private val hosts = java.util.concurrent.ConcurrentHashMap<String, OnDemandSetHost>()
     private val teardownListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
 
@@ -107,6 +116,8 @@ class FfiOnDemandSource @Inject constructor(
     override fun activeActorHex(): String? = currentAccount()?.actorHex
 
     override fun liveHosts(): Map<String, OnDemandSetHost> = HashMap(hosts)
+
+    override val reconciled: Flow<Unit> get() = reconcileTicks
 
     override fun onTeardown(listener: () -> Unit) {
         teardownListeners.add(listener)
@@ -150,7 +161,10 @@ class FfiOnDemandSource @Inject constructor(
         val actorHex = currentAccount()?.actorHex ?: return@withContext null
         runCatching {
             folderRefForRow(folder.id, folder.mlsGroupId, folder.homeNestUrl)?.let { ref ->
-                actorScopedFolderRef(actorHex, ref)?.let { OnDemandIdentity(it.scopedId, ref) }
+                actorScopedFolderRef(actorHex, ref)?.let {
+                    // Fail-safe like `binding_section`: an absent access reads reader.
+                    OnDemandIdentity(it.scopedId, ref, folder.role == "member" && folder.access != "writer")
+                }
             }
         }.getOrNull()
     }
@@ -159,13 +173,57 @@ class FfiOnDemandSource @Inject constructor(
         withContext(Dispatchers.IO) {
             val prefs = prefsStore()
             val stronger = strongerRefs().toSet()
+            // The fold reads the plan's presences: a process that has served no
+            // picker yet runs its first reconcile here (a failure keeps none).
+            if (presented.isEmpty() && sets.isNotEmpty()) runCatching { sets(refresh = false) }
+            val parked = parkedScopedIds(sets)
             sets.associate { set ->
                 set.scopedId to OnDemandToggleState(
                     shown = prefs.isEnabled(set.scopedId),
                     stronger = set.folderRef in stronger,
+                    parked = set.scopedId in parked,
                 )
             }
         }
+
+    /**
+     * The scoped ids among [sets] whose row is warned — the shared fold
+     * (`on_demand_parked_presences`) over each presented set's park read
+     * (`sync_set_park`, the host's own state DB, read in-process), the row's
+     * own `reader` reading taken over the last plan's (`file-sync.md`
+     * § Multi-writer shared sets → *Revocation on a capability host*). A set
+     * this device does not present has no park to read. A read that fails
+     * shows the set parked: the warning fails closed.
+     */
+    private fun parkedScopedIds(sets: List<OnDemandIdentity>): Set<String> {
+        val plan = presented
+        val presences = sets.mapNotNull { id ->
+            plan[id.scopedId]?.let { p -> id.scopedId to p.copy(readOnly = p.readOnly || id.rowReadsReader) }
+        }
+        if (presences.isEmpty()) return emptySet()
+        val stateDir = accountStores.syncStateDir()
+        val reads = presences.map { (_, p) -> parkRead(stateDir, p.folderId) }
+        val parkedFolders = runCatching { onDemandParkedPresences(presences.map { it.second }, reads) }
+            .getOrDefault(emptyList()).toSet()
+        return presences.filter { it.second.folderId in parkedFolders }.map { it.first }.toSet()
+    }
+
+    /** One set's park, read in-process off the host's state DB; a failed read reads parked. */
+    private fun parkRead(stateDir: String, folderId: String): SetPark =
+        runCatching { syncSetPark(stateDir, folderId) }
+            .onFailure { ShellLog.w(TAG, "park read failed — showing the set parked: ${it.message}") }
+            .getOrDefault(SetPark(folderId, true, 0u))
+
+    /**
+     * Every set the last plan presents, by display name, with its park read —
+     * the observation seam the e2e bridge reads for the host's mark (the
+     * revocation witness); the page reads [read]'s fold instead.
+     */
+    suspend fun presentedParks(): List<Pair<String, SetPark>> = withContext(Dispatchers.IO) {
+        if (presented.isEmpty()) runCatching { sets(refresh = false) }
+        val stateDir = accountStores.syncStateDir()
+        presented.values.map { it.name to parkRead(stateDir, it.folderId) }
+    }
 
     override suspend fun setShown(scopedId: String, shown: Boolean) = withContext(Dispatchers.IO) {
         prefsStore().setEnabled(scopedId, shown)
@@ -236,6 +294,8 @@ class FfiOnDemandSource @Inject constructor(
         desired = (plan.add + plan.keep).associate { p ->
             p.scopedId to (OnDemandSet(p.scopedId, p.set.name, p.set.readOnly) to p.set.folderId)
         }
+        presented = (plan.add + plan.keep).associate { it.scopedId to it.set }
+        reconcileTicks.tryEmit(Unit)
     }
 
     /**
@@ -297,6 +357,7 @@ class FfiOnDemandSource @Inject constructor(
     private fun teardown() {
         val gone = synchronized(this) { account.also { account = null } }
         desired = emptyMap()
+        presented = emptyMap()
         val held = HashMap(hosts)
         hosts.clear()
         held.values.forEach { runCatching { it.close() } }

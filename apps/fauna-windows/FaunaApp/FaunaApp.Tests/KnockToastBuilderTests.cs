@@ -1,4 +1,5 @@
 using FaunaApp.Services;
+using uniffi.fauna_ffi;
 using Xunit;
 
 namespace FaunaApp.Tests;
@@ -25,5 +26,16 @@ public class KnockToastBuilderTests
 
         Assert.Equal(KnockToastBuilder.Tag, first.Tag);
         Assert.Equal(first.Tag, second.Tag);
+    }
+
+    /// <summary>The one tag is spelled from the shared replace id
+    /// (<c>knock_toast_replace_id</c>), never a value of windows' own — the id the
+    /// knock-toast log records as <c>replace_id</c>, as web and apple spell theirs
+    /// (<c>notifications.md</c> § Localized body, the knock toast).</summary>
+    [Fact]
+    public void Tag_IsSpelledFromTheSharedReplaceId()
+    {
+        Assert.Equal($"fauna-knock-{FaunaFfiMethods.KnockToastReplaceId()}", KnockToastBuilder.Tag);
+        Assert.Equal("fauna-knock-1003", KnockToastBuilder.Tag);
     }
 }

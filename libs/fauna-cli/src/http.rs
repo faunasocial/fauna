@@ -159,7 +159,12 @@ pub fn origin_allowed(origin: &str, port: u16) -> bool {
 }
 
 fn is_loopback_name(name: &str) -> bool {
-    matches!(name, "127.0.0.1" | "localhost" | "[::1]")
+    // The dialer is the browser, which may forward `x.localhost` to DNS: only
+    // what no resolver forwards (`localhost`) passes by name. The IP side keeps
+    // its two exact literals.
+    matches!(name, "127.0.0.1" | "[::1]")
+        || (name.parse::<std::net::IpAddr>().is_err()
+            && fauna_core::resolve::is_loopback_host_without_dns(name))
 }
 
 struct Request {
@@ -294,6 +299,8 @@ mod tests {
         assert!(!host_allowed(Some("evil.example:4000"), 4000));
         assert!(!host_allowed(Some("localhost.evil.example:4000"), 4000));
         assert!(!host_allowed(Some("127.0.0.1"), 4000));
+        assert!(!host_allowed(Some("x.localhost:4000"), 4000));
+        assert!(!host_allowed(Some("localhost.:4000"), 4000));
         assert!(!host_allowed(None, 4000));
     }
 
@@ -306,6 +313,8 @@ mod tests {
         assert!(!origin_allowed("http://127.0.0.1", 3000));
         assert!(!origin_allowed("https://evil.example:3000", 3000));
         assert!(!origin_allowed("http://localhost.evil.example:3000", 3000));
+        assert!(!origin_allowed("http://x.localhost:3000", 3000));
+        assert!(!origin_allowed("http://localhost.:3000", 3000));
         assert!(!origin_allowed("null", 3000));
         assert!(!origin_allowed("file://localhost:3000", 3000));
     }

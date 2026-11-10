@@ -340,7 +340,12 @@ impl MlsStateSync {
         let mut cursor = HashMap::new();
         let mut history_base = HashMap::new();
         if let Some(provider) = &provider {
-            for channel in provider.channel_ids() {
+            // Every listed group, then every community room: a community room
+            // has no MLS group, so only its durable marker lists it, and
+            // without it the room's slice was never read back — the reopened
+            // app showed no community room at all (`community-rooms.md`
+            // § Implementation status today, residual (d)'s witness).
+            for channel in provider.history_channel_ids() {
                 let hex = channel.to_string();
                 // The cursor rides **inside** the provider blob (Rule 2), so it can
                 // never outrun the crypto state it indexes — one blob, one CAS.
@@ -1082,6 +1087,7 @@ mod tests {
         store.append_message(
             &id,
             MessageSnapshot {
+                queued_send: None,
                 message_id: MessageId(format!("conv:{channel_hex}:{watermark}")),
                 sender: addr("me"),
                 sender_display: String::new(),
@@ -1099,6 +1105,7 @@ mod tests {
                 labels: vec![],
                 plane_ref: None,
                 can_delete: false,
+                can_remove: false,
                 undelivered: false,
                 warmup_hold: None,
                 scan_result_lines: Vec::new(),
@@ -1566,5 +1573,49 @@ mod tests {
             2,
             "B resumes ingest from A's watermark"
         );
+    }
+
+    /// **A community room comes back on the next launch.** A community room has
+    /// no MLS group by construction (born by `room.create`, never
+    /// `bootstrap_group`), so the provider's group listing never names it — and
+    /// `load` used to fetch a `history/<ch>` slice only for a listed group, so a
+    /// community room's slice, saved by every autosave, was never read back and
+    /// the reopened app listed no such room at all. Its durable
+    /// community marker, riding the same provider blob, is what lists it now.
+    /// A chat marker alone on a group-less channel does NOT: that is the inert
+    /// marker of a forgotten end-to-end group, which must stay gone.
+    #[test]
+    fn a_community_rooms_slice_is_loaded_though_no_group_lists_it() {
+        let nest = Arc::new(FakeMlsNest::default());
+        let a = sync(nest.clone());
+        block_on(a.load()).unwrap();
+        let engine = MlsEngine::new_in_memory(keypair()).unwrap();
+        let room = ChannelId([41u8; 32]);
+        let forgotten = ChannelId([42u8; 32]);
+        engine.mark_channel_chat(&room);
+        engine.mark_channel_community(&room);
+        engine.mark_channel_chat(&forgotten);
+        let provider = ProviderReplica::from_engine(&engine);
+        assert!(
+            provider.channel_ids().is_empty(),
+            "neither channel is a group"
+        );
+        block_on(a.save_history_if_changed(&history_slice(&room.to_string(), 4))).unwrap();
+        block_on(a.save_history_if_changed(&history_slice(&forgotten.to_string(), 2))).unwrap();
+        assert!(block_on(a.save_provider_if_changed(&provider)).unwrap());
+
+        let b = sync(nest.clone());
+        let loaded = block_on(b.load()).unwrap();
+        let hexes: Vec<String> = loaded
+            .history
+            .iter()
+            .map(|s| s.channel_id_hex.clone())
+            .collect();
+        assert_eq!(
+            hexes,
+            vec![room.to_string()],
+            "the community room's slice loads; the forgotten group's does not"
+        );
+        assert_eq!(b.processed_seq(&room), 4, "its cursor seeds from the slice");
     }
 }

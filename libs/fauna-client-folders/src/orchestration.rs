@@ -569,7 +569,15 @@ impl<E, GE> FoldersAuthorError<E, GE> {
     fn from_lifecycle(e: crate::set_lifecycle::SetLifecycleError<E>) -> Self {
         match e {
             crate::set_lifecycle::SetLifecycleError::Custody(e) => Self::CustodyStore(e),
-            crate::set_lifecycle::SetLifecycleError::Nest(e) => Self::Transport(e),
+            crate::set_lifecycle::SetLifecycleError::Nest(e)
+            | crate::set_lifecycle::SetLifecycleError::Unattested { error: e, .. } => {
+                Self::Transport(e)
+            }
+            // The author never asks for a public create; were it to, the
+            // missing identity key is a custody fault of this client.
+            crate::set_lifecycle::SetLifecycleError::Unattestable => Self::CustodyStore(
+                anyhow::anyhow!("a public create needs the owner's identity key"),
+            ),
         }
     }
 }
@@ -2282,8 +2290,10 @@ where
     /// under the post-Remove epoch would hand the departing member the
     /// window; the removal's own drive publishes), and an envelope of this
     /// identity's at the current epoch that **does not open** (nothing is
-    /// published on a failed read). An envelope that names custody's live
-    /// nonce as retired is left alone: this device lags a cut.
+    /// published on a failed read). An envelope of this identity's that names
+    /// custody's live nonce as retired is left alone: this device lags a cut.
+    /// An envelope any other key signed is never joined — it is replaced by
+    /// custody alone (ruling (11)(b)).
     ///
     /// Custody is read as a write reads it (a fresh fetch). Best-effort per
     /// set: one set's failure is logged, never another's. Returns how many
@@ -2384,7 +2394,14 @@ where
                 // Ruling (11): an envelope a member cannot use is re-sealed.
                 let reseal = current.is_some_and(|c| (reply.epoch as u64) < c)
                     || !signed.as_ref().is_some_and(|v| v.signer == identity);
-                match signed.and_then(|v| self.group.open_envelope(channel, &v.sealed).ok()) {
+                // Ruling (11)(b): only an envelope this identity signed — the
+                // owner's own other devices sign as it — is joined. Anything
+                // another key signed is replaced by custody alone: never a
+                // join that would launder its generations into the owner's
+                // re-signed envelope, never a `None` that suppresses the
+                // republish.
+                let own = signed.filter(|v| v.signer == identity);
+                match own.and_then(|v| self.group.open_envelope(channel, &v.sealed).ok()) {
                     Some(published) => custody::envelope_join(&published, &expected)
                         .and_then(|(joined, ahead)| (ahead || reseal).then_some(joined)),
                     None => reseal.then_some(expected),
@@ -2690,7 +2707,12 @@ where
         // delete that crashed between its custody retire and the nest call,
         // settle a same-name create race, and bring the nest's nonce copy in
         // line with custody. Best-effort for the same reason as the renew.
-        match crate::set_lifecycle::reconcile_set_custody(
+        // Waits for custody's first listing rather than failing on it: the
+        // rotation below reads the cut, and a successor's launch can run
+        // before the listing lands — which the aftermath's cut waits out — so
+        // a reconcile that failed here would leave the rotation finding
+        // nothing owed and nothing driving it after the cut.
+        match crate::set_lifecycle::reconcile_set_custody_once_listed(
             &self.files,
             &*self.custody,
             self.keypair.actor_id(),
@@ -2706,7 +2728,9 @@ where
         // The succession's content-key rotation, after the cut the reconcile
         // just ran and before the envelopes converge on what custody says.
         match self.rotate_succeeded_sets().await {
-            Ok(0) => {}
+            // Logged, not silent: a rotation that found nothing owed and one
+            // that never ran otherwise read the same.
+            Ok(0) => tracing::info!("folders: the succession owed no content-key rotation"),
             Ok(rotated) => tracing::info!(
                 rotated,
                 "folders: the succession rotated the inherited bound sets' content keys"
@@ -4248,6 +4272,16 @@ mod tests {
         /// write starts from wait the assembly out
         /// (`fauna_account_seams::folder_keys`), modelled here as succeeding.
         runtime_assembling: Mutex<bool>,
+        /// Custody has not listed yet: the gated read
+        /// ([`crate::key_reader::FolderKeyReader::load_listed`]) is refused
+        /// as not ready until a change notice lands the listing — a
+        /// successor's fresh store before its first listing lands.
+        unlisted: Arc<std::sync::atomic::AtomicBool>,
+        /// What lands with the listing, applied to custody at the first read
+        /// after it — the aftermath's succession cut, racing the launch pass.
+        #[allow(clippy::type_complexity)]
+        lands_with_listing:
+            Mutex<Option<Box<dyn FnOnce(&crate::key_reader::MemoryFolderKeyStore) + Send>>>,
         /// The folder-key custody the author writes through — this fake IS
         /// the author's [`FolderKeyStore`], so a test can inject a crash at a
         /// custody write through `fail_next_config_puts`.
@@ -4436,7 +4470,7 @@ mod tests {
                         .unwrap()
                         .iter()
                         .rev()
-                        .find(|p| p.name == req.name)
+                        .find(|p| p.name == req.name && p.name_hash == req.name_hash)
                         .cloned();
                     let Some(stored) = stored else {
                         return Err(FakeErr::Rejected(fauna_protocol::RpcError::new(
@@ -4771,14 +4805,52 @@ mod tests {
             if *self.runtime_assembling.lock().unwrap() {
                 anyhow::bail!("the account runtime is not running");
             }
+            self.land_listing();
             self.custody.load().await
+        }
+        async fn load_listed(&self) -> anyhow::Result<fauna_core::data::FoldersConfig> {
+            if self.unlisted.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!(fauna_client_config::LEDGER_NOT_READY);
+            }
+            crate::key_reader::FolderKeyReader::load(self).await
+        }
+    }
+
+    impl FakeNest {
+        /// Apply what landed with the listing, once the listing has landed.
+        fn land_listing(&self) {
+            if self.unlisted.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            if let Some(land) = self.lands_with_listing.lock().unwrap().take() {
+                land(&self.custody);
+            }
+        }
+    }
+
+    /// One notice — the listing landing — then the source ends.
+    struct ListingLands(Arc<std::sync::atomic::AtomicBool>);
+    #[async_trait::async_trait]
+    impl crate::key_reader::CustodyNotices for ListingLands {
+        async fn changed(&mut self) -> bool {
+            self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
         }
     }
 
     #[async_trait::async_trait]
     impl FolderKeyStore for FakeNest {
         async fn load_for_write(&self) -> anyhow::Result<fauna_core::data::FoldersConfig> {
+            self.land_listing();
             crate::key_reader::FolderKeyReader::load(&self.custody).await
+        }
+
+        async fn change_notices(&self) -> Option<Box<dyn crate::key_reader::CustodyNotices>> {
+            self.unlisted
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| {
+                    Box::new(ListingLands(Arc::clone(&self.unlisted)))
+                        as Box<dyn crate::key_reader::CustodyNotices>
+                })
         }
 
         async fn merge(
@@ -5076,8 +5148,27 @@ mod tests {
     /// it). Returns the predecessor.
     #[cfg(feature = "mls")]
     fn inherited_bound_set(nest: &FakeNest) -> ActorId {
-        let pred = ActorId([0xB0; 32]);
+        let pred = inherited_uncut_bound_set(nest);
+        succession_cut(&nest.custody);
+        pred
+    }
+
+    /// The successor's cut of [`inherited_uncut_bound_set`]'s set, as the
+    /// aftermath's arm lands it.
+    #[cfg(feature = "mls")]
+    fn succession_cut(store: &crate::key_reader::MemoryFolderKeyStore) {
         let own = ActorKeypair::from_secret([0xA0; 32]).actor_id();
+        block_on(crate::key_reader::update(store, |cfg| {
+            custody::remint_owned_entries(cfg, &own, &[[1; 32]], 20, || [2; 32])
+        }))
+        .unwrap();
+    }
+
+    /// [`inherited_bound_set`] before the successor's cut: the live nonce
+    /// still the predecessor's.
+    #[cfg(feature = "mls")]
+    fn inherited_uncut_bound_set(nest: &FakeNest) -> ActorId {
+        let pred = ActorId([0xB0; 32]);
         block_on(crate::key_reader::update(&nest.custody, |cfg| {
             custody::record_created_set(cfg, "docs", [1; 32], Some(pred), 10);
             custody::key_named_set(cfg, "docs", CH, [7; 32], 10);
@@ -5091,10 +5182,6 @@ mod tests {
                 set_nonce: Some(fauna_protocol::ByteBuf::from(vec![1; 32])),
                 ..Default::default()
             });
-        block_on(crate::key_reader::update(&nest.custody, |cfg| {
-            custody::remint_owned_entries(cfg, &own, &[[1; 32]], 20, || [2; 32])
-        }))
-        .unwrap();
         pred
     }
 
@@ -5156,6 +5243,46 @@ mod tests {
             "rotated once per succession"
         );
         assert_eq!(nest.puts.lock().unwrap().len(), published);
+    }
+
+    /// **The rotation follows the cut whatever the order** (take-your-account-back
+    /// outcome 35): the successor's launch pass starts before custody has
+    /// listed, and the aftermath's succession cut lands with the listing —
+    /// after the pass began. The pass's reconcile waits for the listing
+    /// rather than failing on it, so the rotation behind it reads the cut and
+    /// mints the successor's generation.
+    ///
+    /// Red-verified against the reconcile that failed on the unlisted custody:
+    /// the rotation read the un-cut set, answered nothing owed, and nothing
+    /// drove it after the cut landed.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn the_succession_rotation_follows_a_cut_that_lands_after_the_launch_pass_began() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group);
+        inherited_uncut_bound_set(&nest);
+        nest.unlisted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *nest.lands_with_listing.lock().unwrap() = Some(Box::new(succession_cut));
+
+        block_on(a.resume_pending_removals()).expect("the launch pass");
+        // The listing — and the cut with it — has landed by now whatever the
+        // pass did; what is asserted is that the rotation followed it.
+        nest.unlisted
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let cfg = load_cfg(&a);
+        assert_eq!(
+            custody::live_set_nonce(&cfg, "docs"),
+            Some([2; 32]),
+            "the cut landed"
+        );
+        assert_eq!(
+            custody::content_keys(&cfg, &CH).unwrap().current_version(),
+            2,
+            "the rotation followed the cut"
+        );
     }
 
     /// The rotation waits for remove-old: while the predecessor's leaf still
@@ -8421,6 +8548,160 @@ mod tests {
         assert_eq!(block_on(a.converge_envelopes()).unwrap(), 0);
         assert_eq!(nest.puts.lock().unwrap().len(), before, "left alone");
         assert_eq!(stored_payload(&nest), newer);
+    }
+
+    /// Store `payload` as `CH`'s envelope under `signer`'s signature — what a
+    /// hostile nest holds after taking a member's `content_key.put`.
+    #[cfg(feature = "mls")]
+    fn plant_envelope(
+        nest: &FakeNest,
+        group: &Arc<FakeGroup>,
+        signer: &ActorKeypair,
+        payload: &fauna_core::folder_keys::ContentKeyEnvelopePayload,
+    ) {
+        let (sealed, epoch) = FolderGroupCrypto::seal_envelope(group, &CH, payload).unwrap();
+        let blob = fauna_protocol::folder_envelope_sig::sign(signer, &CH, &sealed);
+        // As the wire carries it: by the set's hash, the name taken off.
+        nest.puts
+            .lock()
+            .unwrap()
+            .push(fauna_protocol::folders::addressed(ContentKeyPutRequest {
+                name: "docs".into(),
+                epoch: epoch as i64,
+                sealed: hex::encode(&blob),
+                current_version: payload.keys.current_version(),
+                ..Default::default()
+            }));
+    }
+
+    /// A set this identity minted (a live nonce) and keyed at `CH` — one of
+    /// [`custody::owned_bound_sets`].
+    #[cfg(feature = "mls")]
+    fn owned_docs(a: &Author) {
+        block_on(a.update_custody(|cfg| {
+            custody::record_created_set(cfg, "docs", [1; 32], None, 10);
+            custody::key_named_set(cfg, "docs", CH, [7; 32], 10);
+        }))
+        .unwrap();
+        assert_eq!(
+            custody::owned_bound_sets(&load_cfg(a)),
+            vec![("docs".to_string(), CH)]
+        );
+    }
+
+    /// Custody's generations for `CH`, as `envelope_matches` compares them.
+    #[cfg(feature = "mls")]
+    fn generations_of(keys: &FolderContentKeys) -> Vec<(u64, u64, [u8; 32])> {
+        let mut g: Vec<_> = keys
+            .generations()
+            .map(|g| (g.version, g.rotated_at, *g.key))
+            .collect();
+        g.sort_unstable();
+        g
+    }
+
+    /// Ruling (11)(b): a member-signed envelope carrying
+    /// an extra, higher generation is replaced by custody alone — its
+    /// generation is never joined into what the owner re-signs.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn a_member_signed_envelope_is_replaced_never_joined() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group.clone());
+        owned_docs(&a);
+        let cfg = load_cfg(&a);
+        let custody_keys = custody::content_keys(&cfg, &CH).unwrap();
+        let mut hostile = custody::envelope_payload(&cfg, Some("docs"), &CH, custody_keys.clone());
+        hostile.keys = hostile.keys.merge(
+            &FolderContentKeys::from_generations(vec![ContentKeyGeneration {
+                version: 1_000_000,
+                key: [0xEE; 32].into(),
+                rotated_at: 900,
+            }])
+            .unwrap(),
+        );
+        plant_envelope(
+            &nest,
+            &group,
+            &ActorKeypair::from_secret([0xB1; 32]),
+            &hostile,
+        );
+        let before = nest.puts.lock().unwrap().len();
+
+        assert_eq!(block_on(a.converge_envelopes()).unwrap(), 1);
+        assert_eq!(nest.puts.lock().unwrap().len(), before + 1, "re-published");
+        let blob = hex::decode(&nest.puts.lock().unwrap().last().unwrap().sealed).unwrap();
+        let signed = fauna_protocol::folder_envelope_sig::verify(&blob, &CH).unwrap();
+        assert_eq!(signed.signer, a.keypair.actor_id(), "owner-signed");
+        let payload = stored_payload(&nest);
+        assert_eq!(
+            generations_of(&payload.keys),
+            generations_of(&custody_keys),
+            "custody's generations alone"
+        );
+    }
+
+    /// A member-signed envelope that names custody's live nonce as retired is
+    /// still replaced — the join's `None` never suppresses the republish.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn a_member_signed_envelope_retiring_the_live_nonce_is_still_replaced() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group.clone());
+        owned_docs(&a);
+        let cfg = load_cfg(&a);
+        let custody_keys = custody::content_keys(&cfg, &CH).unwrap();
+        let expected = custody::envelope_payload(&cfg, Some("docs"), &CH, custody_keys.clone());
+        let live = expected.set_nonce.expect("a live nonce");
+        let mut hostile = expected.clone();
+        hostile.set_nonce = Some([0xC3; 32]);
+        hostile.retired_set_nonces.insert(
+            0,
+            fauna_core::folder_keys::RetiredSetNonce {
+                nonce: live,
+                minted_by: None,
+            },
+        );
+        plant_envelope(
+            &nest,
+            &group,
+            &ActorKeypair::from_secret([0xB1; 32]),
+            &hostile,
+        );
+        let before = nest.puts.lock().unwrap().len();
+
+        assert_eq!(block_on(a.converge_envelopes()).unwrap(), 1);
+        assert_eq!(nest.puts.lock().unwrap().len(), before + 1, "re-published");
+        assert_eq!(stored_payload(&nest), expected);
+    }
+
+    /// The case the join exists for: an envelope the owner's own other device
+    /// signed, carrying a later serve stamp, is joined — the stamp survives.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn an_own_device_envelope_with_a_later_serve_stamp_is_joined() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group.clone());
+        owned_docs(&a);
+        let cfg = load_cfg(&a);
+        let custody_keys = custody::content_keys(&cfg, &CH).unwrap();
+        let mut sibling = custody::envelope_payload(&cfg, Some("docs"), &CH, custody_keys.clone());
+        assert!(sibling.served_at.is_none(), "this device never served");
+        sibling.served_at = Some(5_000);
+        // The owner's other device signs as the same identity.
+        plant_envelope(&nest, &group, &a.keypair, &sibling);
+        let before = nest.puts.lock().unwrap().len();
+
+        assert_eq!(
+            block_on(a.converge_envelopes()).unwrap(),
+            0,
+            "already the join"
+        );
+        assert_eq!(nest.puts.lock().unwrap().len(), before, "left alone");
+        assert_eq!(stored_payload(&nest).served_at, Some(5_000));
     }
 
     /// A channel with a staged pending removal is skipped: its Remove may be

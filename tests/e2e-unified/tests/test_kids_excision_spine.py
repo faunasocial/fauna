@@ -347,7 +347,7 @@ _KIDS_ABSENT_FUNCTIONS = (
     "buildWebClient", "subscriptionsCreateTier", "subscriptionsApproveSubscriber",
     "subscriptionsRemoveSubscriber", "subscriptionsSubscribePublishingEk",
     "subscriptionsReconcileOnce", "subscriptionsAuthorPollSecs", "runCriticalAlertSweep",
-    "runCriticalAlertSweepLoop", "npubConfirmationOwed", "confirmNpub", "classifySources",
+    "runCriticalAlertSweepLoop", "startCriticalAlertSweep", "npubConfirmationOwed", "confirmNpub", "classifySources",
 )
 # Element-id prefixes of the surfaces the kids flavor excises — the same list the
 # `android-kids-check` witness greps the dex for (a test below keeps them equal).
@@ -355,7 +355,7 @@ _KIDS_EXCISED_ID_PREFIXES = (
     "feed-", "search-", "atproto-", "personalization-", "nostr-", "labeler-catalog",
     "connected-app", "mail-settings-", "web-settings-", "admin-mail-", "admin-dns-",
     "bridge-", "profile-follow-button", "profile-tiers-tab", "link-preview-card",
-    "folder-paywall-tier-select",
+    "folder-paywall-tier-select", "contact-actor-id-open-profile-button",
 )
 _KIDS_CONDITION = "BuildConfig.KIDS"
 
@@ -776,15 +776,83 @@ def test_the_ios_kids_build_routes_into_no_nest_setup_and_gates_the_retire_ids()
     generator = _UI_IDS_GENERATOR.read_text(encoding="utf-8")
     m = re.search(r"SWIFT_KIDS_ONLY_ID_PREFIXES = \(([^)]*)\)", generator)
     assert m and set(re.findall(r'"([^"]+)"', m.group(1))) == {
-        "admin-nest-retire-", "launch-retire-button", "photo-backup-",
+        "admin-nest-retire-", "launch-retire-button", "photo-backup-", "subscription-",
     }
     table = _UI_IDS_SWIFT.read_text(encoding="utf-8")
     shared = table.split("public enum Ids {", 1)[1].split("\n}\n", 1)[0]
     gated = table.split("#if !FAUNA_KIDS\nextension Ids {", 1)[1]
     for name in ("adminNestRetireSection", "adminNestRetireButton", "launchRetireButton",
-                 "photoBackupControls", "photoBackupEnableToggle", "photoBackupSyncNowButton"):
+                 "photoBackupControls", "photoBackupEnableToggle", "photoBackupSyncNowButton",
+                 "subscriptionSettings", "subscriptionMineList", "subscriptionOfferSubscribeButton"):
         assert name not in shared, f"`{name}` is in the ungated Ids table"
         assert name in gated, f"`{name}` is missing from the kids-gated Ids extension"
+
+
+def test_the_ios_kids_build_opens_no_non_contact_profile_and_paints_no_subscriptions():
+    """D-K5 *Excised* — profiles of non-contacts and monetization
+    (`account-age-band.md` § The account age band): in the iOS kids build a contact
+    row opens a profile only for a CONFIRMED contact (android's
+    `!BuildConfig.KIDS || contact.status == "confirmed"`), a Find User hit paints no
+    open-profile button (the lookup, the knock and the guardian ask stay), and
+    Settings → Subscriptions does not exist — its case, rail row, route and view are
+    compiled out, and `apple-kids-check` greps both archives for its ids."""
+
+    def code(path: Path) -> str:
+        return re.sub(r"(?m)^\s*//[^\n]*\n", "", path.read_text(encoding="utf-8"))
+
+    def guarded(text: str, ref: str) -> bool:
+        before = text[: text.index(ref)]
+        return before.rfind("#if !FAUNA_KIDS") > before.rfind("#endif")
+
+    contacts = code(_APPLE / "Fauna-iOS/Views/Contacts/ContactsView.swift")
+    assert re.search(
+        r"func opensProfile\(status: String\) -> Bool \{\s*#if FAUNA_KIDS\s*"
+        r'status == "confirmed"\s*#else\s*true\s*#endif',
+        contacts,
+    ), "the kids contact-row profile gate (`opensProfile`) is gone or no longer confirmed-only"
+    row_opens = re.findall(r"openProfile\(contact\.peerId, home: contact\.homeNestUrl\)", contacts)
+    gated_opens = re.findall(
+        r"if opensProfile\(status: contact\.status\) \{\s*"
+        r"openProfile\(contact\.peerId, home: contact\.homeNestUrl\)",
+        contacts,
+    )
+    assert len(row_opens) == len(gated_opens) == 2, (
+        "a contact row opens a profile outside the kids `opensProfile` gate"
+    )
+    find_user = re.search(
+        r"#if !FAUNA_KIDS\s*Button\(L\.contacts\.findUser\.openProfile\)(.*?)#endif", contacts, re.S
+    )
+    assert find_user, "the Find User open-profile button lost its `#if !FAUNA_KIDS` guard"
+    assert contacts.count("Ids.contactActorIdOpenProfileButton") == 2 == find_user.group(1).count(
+        "Ids.contactActorIdOpenProfileButton"
+    ), "the Find User open-profile button sits outside the kids guard"
+    assert not guarded(contacts, "Ids.contactsAddButton"), (
+        "the Find User knock is kept in the kids build (family-safety.md's child-initiated requests)"
+    )
+
+    pages = code(_APPLE / "FaunaKit/Sources/FaunaKit/Core/SettingsPage.swift")
+    kids_built = pages.split("#if FAUNA_KIDS", 1)[1].split("#else", 1)[0]
+    assert "[.status" in kids_built and ".subscriptions" not in kids_built, (
+        "the kids SettingsPage.built still lists Subscriptions"
+    )
+    for ref in ("case subscriptions", 'case .subscriptions: "subscription-settings"',
+                'case "subscription-settings": self = .subscriptions',
+                "case .subscriptions: L.subscriptions.title", 'case .subscriptions: "star"'):
+        assert guarded(pages, ref), f"SettingsPage's `{ref}` sits outside the kids guard"
+    settings = code(_APPLE / "Fauna-iOS/Views/Settings/SettingsView.swift")
+    for ref in ("NavigationLink(value: SettingsPage.subscriptions)",
+                "case .subscriptions: SubscriptionSettingsView()"):
+        assert guarded(settings, ref), f"the iOS Settings `{ref}` sits outside the kids guard"
+    view = (_APPLE / "FaunaKit/Sources/FaunaKit/Views/SubscriptionSettingsView.swift").read_text(
+        encoding="utf-8")
+    assert view.startswith("#if !FAUNA_KIDS\n") and view.rstrip().endswith("#endif // !FAUNA_KIDS"), (
+        "SubscriptionSettingsView.swift is no longer compiled out of the kids build whole"
+    )
+    body = _recipe("apple-kids-check")
+    assert "SWIFT_KIDS_ID_PATS=('^subscription-')" in body
+    assert body.count('"${SWIFT_KIDS_ID_PATS[@]}"') == 2, (
+        "apple-kids-check must grep the subscriptions ids in both columns"
+    )
 
 
 def _pbx_target_configs(name: str) -> list[str]:
@@ -856,3 +924,121 @@ def test_the_kids_build_opens_no_outbound_link():
         r"#if FAUNA_KIDS\n\s*\.environment\(\\\.openURL, OpenURLAction \{ _ in \.discarded \}\)\n\s*#endif",
         app,
     ), "the kids app root no longer refuses SwiftUI's own link taps"
+
+
+def test_the_kids_more_page_lists_no_bridges_row():
+    """D-K5 excises every bridge: the iOS More list's Bridges row is compiled out of
+    the kids build together with its destination — a row alone would open nothing.
+    The `kids-app` page's outcome 2 witnesses it on the kids simulator build."""
+    src = (_APPLE / "Fauna-iOS/App/ContentView.swift").read_text(encoding="utf-8")
+    assert re.search(
+        r"#if FAUNA_KIDS\n\s*private static let bridgesItem: \[MoreItem\] = \[\]\n\s*#else\n"
+        r'\s*private static let bridgesItem: \[MoreItem\] = \[\n\s*\.init\(id: "bridges"',
+        src,
+    ), "the More list's Bridges row is no longer behind FAUNA_KIDS"
+    assert src.count('.init(id: "bridges"') == 1, "a second, ungated Bridges row is in the More list"
+
+
+# --- the `--app ios-kids` simulator lane (feature-catalog.md § Cell semantics) ---
+#
+# The kids column is the kids build product on ios's venue, driven like ios: so
+# the e2e needs a kids FFI that ALSO carries the automation seams. That is a TEST
+# artifact; the production kids flavor and the archive `apple-kids-check` fences
+# must stay free of it.
+
+
+def test_the_ios_kids_e2e_ffi_is_the_kids_flavor_plus_the_seams_on_sim_slices():
+    body = _recipe("apple-ffi-kids-test-sim")
+    assert re.search(r'_apple-ffi-flavor\s+"kids-safe,kids-floor,test-helpers"\s+sim\b', body), body
+    impl = _recipe("_apple-ffi-build-impl")
+    arm = re.search(
+        r'elif \[ "\$\{FEATURES#kids-safe,kids-floor,\}" != "\$FEATURES" \]; then\n'
+        r'\s*FEATURE_ARGS=\(--no-default-features --features "\$FEATURES,file-provider-host"\)',
+        impl,
+    )
+    assert arm, (
+        "_apple-ffi-build-impl has no kids-plus arm: `kids-safe,kids-floor,test-helpers` "
+        "falls through to the additive arm and builds WITH the default features"
+    )
+    assert impl.index(arm.group(0)) < impl.index('elif [ -n "$FEATURES" ]; then'), (
+        "the kids-plus arm must sit above the generic additive arm"
+    )
+
+
+def test_the_production_kids_ffi_and_the_kids_archive_never_take_the_seams():
+    assert "test-helpers" not in _recipe("apple-ffi-kids")
+    check = _recipe("apple-kids-check")
+    assert "apple-ffi-kids-test-sim" not in check and "test-helpers" not in check, (
+        "apple-kids-check must archive over the PRODUCTION kids flavor only"
+    )
+
+
+def test_the_ios_kids_app_axis_value_routes_to_the_kids_build(monkeypatch):
+    import conftest
+    from drivers import create_driver
+    from drivers.ios import KIDS_BUNDLE_ID, IosKidsInProcessDriver
+
+    calls = []
+    monkeypatch.setattr(conftest, "_build_via_just", lambda recipe, why: calls.append(recipe))
+    conftest._build_app_via_just("ios-kids")
+    assert calls == ["apple-ffi-kids-test-sim"]
+
+    monkeypatch.setattr(conftest, "get_available_apps", lambda: ["ios-kids"])
+    assert conftest._ios_kids_run()
+    assert conftest._ios_derived_data_dir(True) != conftest._ios_derived_data_dir()
+    calls.clear()
+    conftest._restore_full_apple_ffi()
+    assert calls == ["apple-ffi-kids-test-sim"]
+
+    driver = create_driver("ios-kids")
+    assert isinstance(driver, IosKidsInProcessDriver)
+    assert driver.BUNDLE_ID == KIDS_BUNDLE_ID and driver.APP_NAME == "ios-kids"
+
+
+def test_one_run_drives_one_ios_build():
+    import conftest
+
+    with pytest.raises(pytest.UsageError, match="one run drives one iOS build"):
+        conftest._resolve_app_tokens("ios,ios-kids")
+    assert conftest._resolve_app_tokens("ios-kids") == ["ios-kids"]
+
+
+def test_the_kids_app_bundle_carries_the_kids_plist(tmp_path):
+    from helpers.ios_app_bundle import KIDS_SWIFT_FLAGS, write_app_bundle
+
+    exe = tmp_path / "FaunaiOS"
+    exe.write_bytes(b"")
+    write_app_bundle(tmp_path / "kids.app", exe, "social.fauna.faunakids", kids=True)
+    plist = (tmp_path / "kids.app" / "Info.plist").read_text(encoding="utf-8")
+    assert "<string>social.fauna.faunakids</string>" in plist
+    assert "NSPhotoLibraryUsageDescription" not in plist, (
+        "photo backup is not in the kids app's Kept set (Info-Kids.plist)"
+    )
+    write_app_bundle(tmp_path / "main.app", exe, "social.fauna.fauna")
+    assert "NSPhotoLibraryUsageDescription" in (tmp_path / "main.app" / "Info.plist").read_text()
+    # The same three conditions the kids archive compiles under.
+    check = _recipe("apple-kids-check")
+    flags = KIDS_SWIFT_FLAGS.split("=", 1)[1]
+    assert f"OTHER_SWIFT_FLAGS='{flags}'" in check
+
+
+
+def test_the_android_kids_build_paints_no_find_user_open_profile_button():
+    """D-K5 *Excised* — profiles of non-contacts (`account-age-band.md` § The account
+    age band): the android Find User result paints its open-profile button only under
+    `!BuildConfig.KIDS` (the render, not only the click); the lookup, the knock and the
+    guardian ask stay (family-safety.md's child-initiated contact requests). The iOS
+    twin is pinned above."""
+    path = _ANDROID_MAIN / "com/fauna/app/ui/screen/contacts/ContactsScreen.kt"
+    code = re.sub(r"(?m)^\s*//[^\n]*\n", "", path.read_text(encoding="utf-8"))
+    guarded = re.search(
+        r"if \(!BuildConfig\.KIDS\) \{\s*OutlinedButton\((.*?)\n\s*\}\s*\}", code, re.S
+    )
+    assert guarded, "the Find User open-profile button lost its `if (!BuildConfig.KIDS)` guard"
+    assert code.count("Ids.CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON") == 1 == guarded.group(1).count(
+        "Ids.CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON"
+    ), "the Find User open-profile button sits outside the kids guard"
+    before = code[: code.index("Ids.CONTACTS_ADD_BUTTON")]
+    assert "if (!BuildConfig.KIDS)" not in before[-200:], (
+        "the Find User knock must stay in the kids build"
+    )

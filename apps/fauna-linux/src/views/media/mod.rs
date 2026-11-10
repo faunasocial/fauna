@@ -302,9 +302,14 @@ fn upload_path_of(typed: &str) -> Result<&str, &'static str> {
 /// `error-message`, formatted as the localized `media.error_upload` banner so it
 /// reads like a machine-surfaced upload error. A successful upload's refresh
 /// clears it (the render loop sets the label from `snapshot().error`).
-fn show_upload_glue_error(error_label: &gtk::Label, detail: &str) {
-    let err = LocalizedText::key_arg("media.error_upload", "message", detail.to_string());
-    crate::settings::render_error_label(error_label, Some(&err.resolve(strings::lookup)));
+/// Through the machine, never straight onto the label: the render loop repaints
+/// the label from the snapshot on every wake, which would wipe it.
+fn show_upload_glue_error(machine: &MediaMachine, detail: &str) {
+    machine.report_error(LocalizedText::key_arg(
+        "media.error_upload",
+        "message",
+        detail.to_string(),
+    ));
 }
 
 /// Read a dropdown's selected string value (its stable model key).
@@ -656,7 +661,7 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
                 Some(v) if v == FILTER_ALL_VALUE => None,
                 other => other,
             };
-            machine.set_filter(filter);
+            Arc::clone(&machine).set_filter(filter);
         });
     }
     // ── Render loop ─────────────────────────────────────────────────────
@@ -701,14 +706,13 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
     {
         let machine = Arc::clone(&machine);
         let handle = fauna_client.runtime_handle();
-        let ctx = Rc::clone(&ctx);
         let file_entry = file_entry.clone();
         let secret = fauna_client.secret_bytes();
         upload_btn.connect_clicked(move |_| {
             let typed = file_entry.text().to_string();
             let picked = match upload_path_of(&typed) {
                 Ok(p) => p,
-                Err(message) => {
+                Err(_) => {
                     // Never silence: pressing Upload with an empty box used to
                     // do nothing at all, which reads as a broken button (the
                     // live-user report that produced tui's identical fix).
@@ -717,21 +721,24 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
                     // `media.error_upload` "Failed to upload:" banner would
                     // misstate what happened (tui and windows both surface it
                     // bare too; row 29).
-                    crate::settings::render_error_label(&ctx.error_label, Some(message));
+                    // Held in the machine's snapshot, never painted straight
+                    // onto the label: the render loop repaints the label from
+                    // the snapshot on every wake and would wipe it.
+                    machine.report_error(LocalizedText::key("media.file_required"));
                     return;
                 }
             };
             let raw_bytes = match std::fs::read(picked) {
                 Ok(b) => b,
                 Err(e) => {
-                    show_upload_glue_error(&ctx.error_label, &e.to_string());
+                    show_upload_glue_error(&machine, &e.to_string());
                     return;
                 }
             };
             let device_id = match crate::sync::device_id() {
                 Ok(id) => fauna_core::hex32::encode(&id),
                 Err(e) => {
-                    show_upload_glue_error(&ctx.error_label, &e.to_string());
+                    show_upload_glue_error(&machine, &e.to_string());
                     return;
                 }
             };

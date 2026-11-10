@@ -79,6 +79,7 @@ use fauna_core::data::{FeedSources, UnknownPeerDm, UnknownSenderMail};
 use fauna_core::obligation::ContentPolicy;
 use fauna_i18n::strings::family as t;
 use fauna_protocol::family::FamilyAgeBandInfo;
+use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::{App, DataMessage, PageOutcome, UiMessage};
@@ -858,6 +859,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.family.contact_input.clear();
             Some(Op::ContactAdd {
                 nest,
+                queue: offline_queue(app),
                 ward,
                 peer,
                 read_gen: claim_read_gen(&app.family),
@@ -904,6 +906,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let entry = app.family.approvals.get(index)?.clone();
             Some(Op::Decide {
                 nest,
+                queue: offline_queue(app),
                 entry: Box::new(entry),
                 approve,
                 read_gen: claim_read_gen(&app.family),
@@ -933,6 +936,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             peer_id,
         } => Some(Op::AllowBlockedPeer {
             nest: app.family.nest.clone()?,
+            queue: offline_queue(app),
             ward,
             bridge_id,
             peer_id,
@@ -950,6 +954,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             read_gen: claim_read_gen(&app.family),
         }),
     }
+}
+
+/// The device's outbox, lent to the gestures whose kind is `OfflineQueued`
+/// ([`App::account_outbox`]; `None` before the account store is ready, when a
+/// gesture sends as it always did).
+fn offline_queue(app: &App) -> Option<Arc<dyn OfflineIntentQueue>> {
+    app.account_outbox
+        .clone()
+        .map(|outbox| outbox as Arc<dyn OfflineIntentQueue>)
 }
 
 // ── Network half ─────────────────────────────────────────────────────────────
@@ -991,14 +1004,19 @@ pub enum Op {
     /// and each kind names its item with a different one — so the whole entry
     /// travels and `run` passes every key through (`family-safety.md` § Reach
     /// approvals), rather than this page deciding which key a kind uses.
+    /// `queue` is the device's outbox ([`App::account_outbox`]): with no nest
+    /// the decision rests there and drains when the nest is back
+    /// (`account-offline-mutation.md` § The offline-mutation contract).
     Decide {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         entry: Box<FamilyApprovalEntry>,
         approve: bool,
         read_gen: u64,
     },
     ContactAdd {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         ward: Vec<u8>,
         peer: Vec<u8>,
         read_gen: u64,
@@ -1040,6 +1058,7 @@ pub enum Op {
     /// `(bridge, peer)` on one ward.
     AllowBlockedPeer {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         ward: Vec<u8>,
         bridge_id: String,
         peer_id: String,
@@ -1149,6 +1168,16 @@ pub enum Outcome {
     },
     /// A transport or authorization failure — lands on `error-message`.
     Failed(String),
+    /// No nest: the gesture rests in the device's outbox and drains when the
+    /// nest is back (`account-offline-mutation.md` § The offline-mutation
+    /// contract). Nothing is re-read — there is no nest to read. A queued
+    /// approvals decision (`decided`) takes its item out of the local queue,
+    /// the way a queued like still lights its toggle: the guardian's verdict
+    /// is recorded, and the next read after the drain is the nest's word. A
+    /// queued pre-approval or un-deny folds nothing.
+    Queued {
+        decided: Option<Box<FamilyApprovalEntry>>,
+    },
     /// A `fauna.family.usage_report` reply: the nest's stamped local-day bucket
     /// and that day's cross-device total. Folds into [`crate::screen_lock`],
     /// never into the page — it repaints no Family element.
@@ -1237,6 +1266,7 @@ impl Op {
             }
             Op::Decide {
                 nest,
+                queue,
                 entry,
                 approve,
                 read_gen,
@@ -1246,33 +1276,32 @@ impl Op {
                 // carries all of them (`FamilyClient::approvals_decide` docs) —
                 // pass them straight through rather than re-deriving the kind →
                 // key map per client.
-                let result = client
-                    .approvals_decide(
-                        entry.supervised_actor_id.to_vec(),
-                        entry.kind.clone(),
-                        entry.peer_actor_id.to_vec(),
-                        entry.message_id.to_vec(),
-                        entry.bridge_id.clone(),
-                        entry.operation.clone(),
-                        entry.target.clone(),
-                        entry.peer_address.clone(),
-                        approve,
-                    )
-                    .await;
-                match result {
-                    Ok(()) => refresh(nest, read_gen).await,
+                let request = fauna_client_family::decide_request_for(&entry);
+                match client
+                    .approvals_decide_or_queue(queue.as_deref(), request, approve)
+                    .await
+                {
+                    Ok(Composed::Sent(())) => refresh(nest, read_gen).await,
+                    Ok(Composed::Queued(_)) => Outcome::Queued {
+                        decided: Some(entry),
+                    },
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
             Op::ContactAdd {
                 nest,
+                queue,
                 ward,
                 peer,
                 read_gen,
             } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
-                match client.contact_add(ward, peer).await {
-                    Ok(()) => refresh(nest, read_gen).await,
+                match client
+                    .contact_add_or_queue(queue.as_deref(), ward, peer)
+                    .await
+                {
+                    Ok(Composed::Sent(())) => refresh(nest, read_gen).await,
+                    Ok(Composed::Queued(_)) => Outcome::Queued { decided: None },
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1347,6 +1376,7 @@ impl Op {
             }
             Op::AllowBlockedPeer {
                 nest,
+                queue,
                 ward,
                 bridge_id,
                 peer_id,
@@ -1356,9 +1386,12 @@ impl Op {
                 // The shared un-deny owns the wire shape (the approving
                 // `dm_hold` decide with the peer riding `peer_address`); this
                 // row only hands it its own `(bridge_id, peer_id)` pair.
-                let result = client.allow_blocked_dm_peer(ward, bridge_id, peer_id).await;
+                let result = client
+                    .allow_blocked_dm_peer_or_queue(queue.as_deref(), ward, bridge_id, peer_id)
+                    .await;
                 match result {
-                    Ok(()) => refresh(nest, read_gen).await,
+                    Ok(Composed::Sent(())) => refresh(nest, read_gen).await,
+                    Ok(Composed::Queued(_)) => Outcome::Queued { decided: None },
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1707,6 +1740,14 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         }
         Outcome::Failed(msg) => {
             app.errors.insert(Page::Family, msg);
+        }
+        Outcome::Queued { decided } => {
+            app.errors.remove(&Page::Family);
+            if let Some(entry) = decided {
+                let approvals = std::mem::take(&mut app.family.approvals);
+                app.family.approvals =
+                    fauna_client_family::approvals_after_queued_decision(approvals, &entry);
+            }
         }
         Outcome::UsageReported {
             day,
@@ -2492,6 +2533,100 @@ mod tests {
             "http://127.0.0.1:9".to_string(),
             fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
         )
+    }
+
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn run_op(op: Op) -> Outcome {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(op.run())
+    }
+
+    fn held_mail() -> FamilyApprovalEntry {
+        FamilyApprovalEntry {
+            supervised_actor_id: ByteBuf::from(vec![3u8; 32]),
+            kind: "mail_hold".into(),
+            message_id: ByteBuf::from(vec![9u8; 32]),
+            ..Default::default()
+        }
+    }
+
+    /// With no nest, a guardian's decision rests in the outbox (not sent into
+    /// the dead connection) and the item leaves the local queue.
+    #[test]
+    fn a_decision_with_no_nest_is_queued_and_leaves_the_local_queue() {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new("disconnected"));
+        let outcome = run_op(Op::Decide {
+            nest: dummy_nest(),
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+            entry: Box::new(held_mail()),
+            approve: true,
+            read_gen: 0,
+        });
+        assert!(
+            matches!(&outcome, Outcome::Queued { decided: Some(e) } if **e == held_mail()),
+            "a queued decision answers Queued with its entry"
+        );
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, "fauna.family.approvals.decide");
+
+        let mut app = authed_app();
+        app.family.approvals = vec![held_mail(), FamilyApprovalEntry::default()];
+        app.errors.insert(Page::Family, "stale".into());
+        apply_outcome(&mut app, outcome);
+        assert_eq!(app.family.approvals, vec![FamilyApprovalEntry::default()]);
+        assert!(!app.errors.contains_key(&Page::Family));
+    }
+
+    /// Connected, the gesture is sent as before (to this dummy nest it fails on
+    /// the transport) and nothing is queued.
+    #[test]
+    fn a_decision_with_the_nest_connected_is_sent_not_queued() {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new("connected"));
+        let outcome = run_op(Op::Decide {
+            nest: dummy_nest(),
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+            entry: Box::new(held_mail()),
+            approve: false,
+            read_gen: 0,
+        });
+        assert!(
+            matches!(outcome, Outcome::Failed(_)),
+            "the send was attempted"
+        );
+        assert!(queue.queued().is_empty());
+    }
+
+    /// The pre-approval and the un-deny queue the same way, folding nothing.
+    #[test]
+    fn a_pre_approval_and_an_un_deny_with_no_nest_are_queued() {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new("unreachable"));
+        let add = run_op(Op::ContactAdd {
+            nest: dummy_nest(),
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+            ward: vec![3u8; 32],
+            peer: vec![4u8; 32],
+            read_gen: 0,
+        });
+        assert!(matches!(add, Outcome::Queued { decided: None }));
+        let allow = run_op(Op::AllowBlockedPeer {
+            nest: dummy_nest(),
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+            ward: vec![3u8; 32],
+            bridge_id: "nostr".into(),
+            peer_id: "npub1aaa".into(),
+            read_gen: 0,
+        });
+        assert!(matches!(allow, Outcome::Queued { decided: None }));
+        let kinds: Vec<_> = queue.queued().into_iter().map(|q| q.0).collect();
+        assert_eq!(
+            kinds,
+            vec!["fauna.family.contact.add", "fauna.family.approvals.decide"]
+        );
     }
 
     // ── The un-deny surface (family-safety.md § The bridge-DM gate) ──────────

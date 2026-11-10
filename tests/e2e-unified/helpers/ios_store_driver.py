@@ -40,6 +40,17 @@ DRIVER_PRODUCTS = "build/ios-store-driver/signed/Build/Products"
 DRIVER_TEST_CLASS = "StoreDriverUITests/StoreDriverTests"
 OBTAIN_TEST = f"{DRIVER_TEST_CLASS}/testObtainFromTestFlight"
 SIGN_IN_TEST = f"{DRIVER_TEST_CLASS}/testSignInToFeed"
+#: The ``store-install`` outcomes, one runner method each (``docs/features/store-install.md``).
+#: Each signs in first if the install opens on onboarding, so they run in any order.
+STORE_NO_PROVIDER_NO_CODE_TEST = f"{DRIVER_TEST_CLASS}/testStoreNoProviderNoCode"
+STORE_TIER_EDITOR_NO_PRICE_TEST = f"{DRIVER_TEST_CLASS}/testStoreTierEditorHasNoPrice"
+STORE_COMPOSE_NO_SALE_TEST = f"{DRIVER_TEST_CLASS}/testStoreComposeNeverOffersASale"
+#: The buyer halves of outcomes 2 and 3 read the box's seeding author, whose
+#: priced tier and sold post a full build seeded.
+STORE_PRICED_TIER_NO_PRICE_TEST = f"{DRIVER_TEST_CLASS}/testStorePricedTierShowsNoPrice"
+STORE_SOLD_POST_NO_PRICE_TEST = f"{DRIVER_TEST_CLASS}/testStoreSoldPostShowsNoPrice"
+STORE_NO_TIPS_NO_ZAP_SIGNER_TEST = f"{DRIVER_TEST_CLASS}/testStoreNoTipsNoZapSigner"
+STORE_NO_IN_PERSON_SHARE_TEST = f"{DRIVER_TEST_CLASS}/testStoreLeavesOutTheInPersonShare"
 
 #: Picks one paired device when several are present (its UDID or CoreDevice id).
 DEVICE_ENV = "E2E_IOS_DEVICE"

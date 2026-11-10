@@ -120,7 +120,7 @@ func startSubmissionListenerForTest(t *testing.T, kind submissionListenerKind, t
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- runSubmissionListener(ctx, l, backend, kind, tlsCfg, "test.example.com", 0, 0, nil, slog.Default())
+		serveErr <- runSubmissionListener(ctx, l, backend, kind, tlsCfg, "test.example.com", 0, nil, slog.Default())
 	}()
 	return l.Addr().String(), func() {
 		cancelCtx()
@@ -1995,7 +1995,7 @@ func TestRunSubmissionListenerRejectsBadKind(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tlsCfg := newSelfSignedTLSConfig(t)
-	err = runSubmissionListener(ctx, l, backend, submissionListenerKind(99), tlsCfg, "test.example.com", 0, 0, nil, slog.Default())
+	err = runSubmissionListener(ctx, l, backend, submissionListenerKind(99), tlsCfg, "test.example.com", 0, nil, slog.Default())
 	if err == nil {
 		t.Fatal("expected error for unknown listener kind; got nil")
 	}

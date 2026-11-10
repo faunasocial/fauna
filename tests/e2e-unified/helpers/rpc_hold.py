@@ -57,14 +57,25 @@ import urllib.request
 HELD_ARRIVAL_S = 60.0
 
 
+def _base(port: int) -> tuple[str, object]:
+    """The nest's base URL and urllib SSL context, from the harness's one
+    port→scheme fact (`common.auth.port_base_url`): a `serve_tls=True` nest —
+    the box-recovery journeys' — serves ONLY https on its API listener, so a
+    hard-coded ``http://`` would never reach its test hook."""
+    from common.auth import _resolve_base
+
+    return _resolve_base(port, None)
+
+
 def _post(port: int, path: str) -> dict:
+    base, ctx = _base(port)
     req = urllib.request.Request(
-        f"http://127.0.0.1:{port}{path}",
+        f"{base}{path}",
         data=b"",
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    return json.loads(urllib.request.urlopen(req).read() or b"{}")
+    return json.loads(urllib.request.urlopen(req, context=ctx).read() or b"{}")
 
 
 def arm_rpc_hold(port: int, kind: str, *, pass_first: int = 0) -> None:
@@ -112,8 +123,9 @@ def rpc_hold_status(port: int, kind: str) -> dict:
     gave up on — its own deadline's Cancel, or a closed connection) are
     cumulative over the nest process's life.
     """
+    base, ctx = _base(port)
     with urllib.request.urlopen(
-        f"http://127.0.0.1:{port}/api/v1/test/rpc-hold/{kind}"
+        f"{base}/api/v1/test/rpc-hold/{kind}", context=ctx
     ) as resp:
         return json.loads(resp.read())
 
@@ -166,7 +178,8 @@ def wait_for_held_rpc(port: int, kind: str, *, count: int = 1,
     )
 
 
-def refuse_rpc(port: int, kind: str, *, as_: str | None = None) -> None:
+def refuse_rpc(port: int, kind: str, *, as_: str | None = None,
+               actor: str | None = None) -> None:
     """Answer every request of ``kind`` with an error reply until
     :func:`release_rpc_hold` — the parked ones included.
 
@@ -185,8 +198,18 @@ def refuse_rpc(port: int, kind: str, *, as_: str | None = None) -> None:
     federation kind it stands that peer in for an outdated one
     (`version-compatibility.md` § Dimension 5). The default is a code no app
     recognises. The set is closed on the nest side (``Refusal``).
+
+    ``actor`` (64-hex) refuses only that actor's requests of the kind and
+    passes every other caller's — for two seats on one nest reading the same
+    kind when only one must be turned away (the parked floor delete: the
+    member's policy-version read refused, the founder's own delete still
+    filing). A federation request has no actor and is never refused by a
+    scoped refusal; ``refused`` counts only the requests turned away.
     """
-    query = f"?as={as_}" if as_ else ""
+    params = [f"as={as_}"] if as_ else []
+    if actor:
+        params.append(f"actor={actor}")
+    query = f"?{'&'.join(params)}" if params else ""
     _post(port, f"/api/v1/test/rpc-hold/{kind}/refuse{query}")
 
 

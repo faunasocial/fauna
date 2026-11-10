@@ -68,14 +68,15 @@ public sealed partial class JoiningNestRules : UserControl
     }
 
     /// The heading (with the not-applied sentence after it, when set), then one
-    /// line per rule.
+    /// line per rule — a rule this device cannot apply carrying its not-applied
+    /// note under its line.
     private static string[] Lines(NestRulesSummary summary)
     {
         var heading = S.Resolve(Text("nest_rules.joining_heading", ("nest", summary.domain)));
         var text = summary.notAppliedSentence is { } why
             ? $"{heading} {S.Resolve(why)}"
             : heading;
-        return new[] { text }.Concat(summary.rules.Select(r => FaunaApp.Core.Services.NestRulesHost.RuleLine(r))).ToArray();
+        return new[] { text }.Concat(summary.rules.Select(r => FaunaApp.Core.Services.NestRulesHost.JoiningRuleLine(r))).ToArray();
     }
 
     private static LocalizedText Text(string key, params (string Name, string Value)[] args)

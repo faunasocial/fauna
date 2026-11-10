@@ -229,8 +229,12 @@ pub fn roster_row_text_with(
 
     let mut facts = Vec::new();
     // A paused row says why it cannot act and how to undo it; "not
-    // connected" is only for a row nothing but itself holds back.
-    if row.paused {
+    // connected" is only for a row nothing but itself holds back. A row a
+    // step-down suspended names that undo first; with the switch OFF too,
+    // the switch's words follow once Bluesky is back on.
+    if row.suspended {
+        facts.push(ComposedText::key("connected_apps.paused_suspended"));
+    } else if row.paused {
         facts.push(ComposedText::key("connected_apps.paused"));
     } else if !row.connected {
         facts.push(ComposedText::key("connected_apps.not_connected"));
@@ -243,10 +247,16 @@ pub fn roster_row_text_with(
         Some(ms) => ComposedText::args("connected_apps.last_used", [("time", &format_time(ms))]),
         None => ComposedText::key("connected_apps.never_used"),
     });
-    facts.push(match row.lasts_until_millis {
-        Some(ms) => ComposedText::args("connected_apps.lasts_until", [("time", &format_time(ms))]),
-        None => ComposedText::key("connected_apps.open_ended"),
-    });
+    // A suspended row runs to no end it can reach, so it states none — not
+    // even "until you disconnect it".
+    if !row.suspended {
+        facts.push(match row.lasts_until_millis {
+            Some(ms) => {
+                ComposedText::args("connected_apps.lasts_until", [("time", &format_time(ms))])
+            }
+            None => ComposedText::key("connected_apps.open_ended"),
+        });
+    }
     RosterRowText {
         lines,
         facts,

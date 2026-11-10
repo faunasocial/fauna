@@ -15,8 +15,9 @@ namespace FaunaApp.Helpers;
 /// where <c>FaunaApp.Tests</c> (plain <c>net10.0</c>, Core-only) can reach it.</para>
 ///
 /// <para>⚠ <b>Rule 1 — the one that wins on collision.</b> Never call this from
-/// <c>secret-key-display</c> (<c>Views/Onboarding/IdentityCreatedView.xaml</c>) or from a
-/// <c>recovery-kit-secret-display</c> surface should windows ever grow one. Those show
+/// <c>secret-key-display</c> (<c>Views/Onboarding/IdentityCreatedView.xaml</c>) or from
+/// <c>recovery-kit-secret-display</c> (<c>Views/SettingsAccountPage.xaml</c>,
+/// <c>Views/Onboarding/RecoveryKitView.xaml</c>). Those show
 /// client-only-resident key material: a user who loses it loses the account, and users
 /// screenshot a recovery kit precisely because that copy is what saves them. Suppressing
 /// there trades a shoulder-surfing risk for an account-loss risk — the irreversible one.

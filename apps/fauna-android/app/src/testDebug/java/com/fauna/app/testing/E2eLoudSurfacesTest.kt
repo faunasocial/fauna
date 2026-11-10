@@ -77,6 +77,23 @@ class E2eLoudSurfacesTest {
     }
 
     @Test
+    fun theKnockToastLogIsPublishedTopLevelInTheSharedShape() {
+        // The production call site's doors (`NotificationHelper.postKnockNotification`).
+        TestAgent.observeKnockNotice()
+        TestAgent.observeKnockNotice()
+        TestAgent.recordKnockNotice("notifications.row_knock", "a knock", 1003)
+
+        val log = state().getJSONObject("knock_notices")
+        assertEquals("every push is seen, muted or not", 2, log.getInt("seen"))
+        val fired = log.getJSONArray("fired")
+        assertEquals(1, fired.length())
+        val entry = fired.getJSONObject(0)
+        assertEquals("notifications.row_knock", entry.getString("key"))
+        assertEquals("a knock", entry.getString("text"))
+        assertEquals(1003, entry.getInt("replace_id"))
+    }
+
+    @Test
     fun theSweepPassCountersArePublishedTopLevelAsAPairOfInts() {
         val passes = state().getJSONObject("alert_sweep_passes")
         assertEquals(setOf("started", "completed"), passes.keys().asSequence().toSet())

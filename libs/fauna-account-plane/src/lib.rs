@@ -156,6 +156,11 @@ pub mod kind_manifest_rows;
 pub mod linked_leg;
 pub mod mail_import_source_rows;
 pub mod mail_rows;
+/// The membership record: the seed-leg holder's membership answer, stamped in
+/// the shared store for a seedless engine holder to read
+/// (`account-runtime-roles.md` § Multi-instance concurrency → *The membership
+/// record*).
+pub mod membership_record;
 pub mod moderation_rows;
 pub mod nostr_confirmation_rows;
 /// The T1 body-rendered browse trigger: the shared intake that turns an app's

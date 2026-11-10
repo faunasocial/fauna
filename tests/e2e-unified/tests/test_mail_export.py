@@ -2024,3 +2024,108 @@ def test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains
     after = _session(nest_instance, test_user, sid)
     assert after and after["state"] == "cancelled", f"the cancelled export came back: {after!r}"
     assert not _blob_files(nest_instance, sid)
+
+
+@pytest.mark.feature("mailbox-export")
+def test_mail_export_discarded_on_another_device_disappears_from_this_wizard_too(
+    request, logged_in_app, android_other_device_seat, mail_bridge_mta, nest_instance,
+    test_user
+):
+    """An export another of your devices discarded disappears from this
+    device's wizard too: it does not linger as a Done screen whose Download
+    names a blob already gone (`mail-export.md` § Implementation status today,
+    the linux paragraph's shared fix (4): "a refresh now drops a held session
+    the nest no longer lists live"; § A failed export is a record the wizard
+    shows until the user moves on: after a discard "every other device's next
+    refresh — the push below, or its next visit — finds no record").
+
+    Device A runs the export to Done and keeps holding it, its export page
+    left open. Device B opens the export page, which adopts that finished
+    export on its Done step, and discards it there; B's wizard returns to
+    Format and the nest lists the export no more. Device A, never navigated,
+    returns to Format on its own: the discard's `BridgeExportSessionChanged`
+    push stales A's open page (`StaleSurfaces::mail_export`), its re-read
+    finds no record, and the held Done screen and its Download go. A later
+    visit then opens on Format too. Nest pin of the push:
+    `bridge_export_handlers.rs::cancel_and_discard_nudge_the_owners_other_devices`;
+    shared-Rust pin of the drop:
+    `export.rs::a_session_discarded_elsewhere_is_dropped_on_the_next_refresh`.
+    """
+    from actions.mail_export import MailExportActions
+
+    app = logged_in_app
+    _require_driving_app(app.driver)
+    runner = _runner_app(app, android_other_device_seat)
+    _export, _nonce, _subject = _export_to_done(
+        runner, mail_bridge_mta, nest_instance, test_user, "e2eexportotherdiscard"
+    )
+    sid = _newest_completed_session(nest_instance, test_user)["session_id"]
+
+    device_b, export_b = _adopting_device(request, app, android_other_device_seat)
+    wait_until(
+        lambda: device_b.driver.is_visible("mail-export-done-summary") or None,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: (
+            f"the second device's export page did not open on the finished export.\n"
+            f"  Format step showing: {device_b.driver.is_visible('mail-export-format-picker')}\n"
+            f"  error-message: {export_b.error_text()!r}\n"
+            f"  session: {_session(nest_instance, test_user, sid)!r}"
+        ),
+    )
+
+    # ── Discard on device B: its wizard returns to Format, the nest forgets it.
+    export_b.discard()
+    assert MailExportActions(device_b.driver).is_page_visible(), (
+        f"a discarded export must return the second device's wizard to Format: "
+        f"{export_b.error_text()!r}"
+    )
+    wait_until(
+        lambda: _session(nest_instance, test_user, sid) is None or None,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: (
+            f"Discard on the second device left the export listed: "
+            f"{_session(nest_instance, test_user, sid)!r}; "
+            f"error-message: {export_b.error_text()!r}"
+        ),
+    )
+    assert not _blob_files(nest_instance, sid), (
+        f"the discarded export left its archive on the nest: {_blob_files(nest_instance, sid)}"
+    )
+
+    # ── Device A, its page left open on the finished export, follows the push.
+    export_a = MailExportActions(runner.driver)
+    wait_until(
+        lambda: runner.driver.is_absent("mail-export-done-summary") or None,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: (
+            f"the open wizard on the device that ran the export kept the Done step "
+            f"after another device discarded it — no push re-read reached it.\n"
+            f"  Format step showing: {runner.driver.is_visible('mail-export-format-picker')}\n"
+            f"  error-message: {export_a.error_text()!r}\n"
+            f"  sessions on the nest: {list_sessions(nest_instance, test_user['signing_key'])!r}"
+        ),
+    )
+    assert export_a.is_page_visible(), (
+        f"the pushed re-read dropped the Done step but did not land on Format: "
+        f"{export_a.error_text()!r}"
+    )
+
+    # ── And a later visit opens on Format too.
+    runner.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    export_a.navigate()
+    assert export_a.is_page_visible(), (
+        f"the export another device discarded still holds this device's wizard.\n"
+        f"  Done step showing: {runner.driver.is_visible('mail-export-done-summary')}\n"
+        f"  Progress step showing: {runner.driver.is_visible('mail-export-progress-summary')}\n"
+        f"  error-message: {export_a.error_text()!r}\n"
+        f"  sessions on the nest: {list_sessions(nest_instance, test_user['signing_key'])!r}"
+    )
+    assert runner.driver.is_absent("mail-export-done-summary"), (
+        "the wizard shows the Format step and the discarded export's Done step at once"
+    )
+    assert runner.driver.is_absent("mail-export-download-button"), (
+        "the wizard still offers a Download for an export another device discarded"
+    )
+    assert export_a.error_text() == "", (
+        f"re-reading after another device's discard reported an error: {export_a.error_text()!r}"
+    )

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import C2paImage from './C2paImage.svelte';
   import ContentLabelBadge from './ContentLabelBadge.svelte';
   import InteractionBar from './InteractionBar.svelte';
   import ReactionPills from './ReactionPills.svelte';
@@ -8,8 +7,7 @@
   import DelegatedOriginBadge from './DelegatedOriginBadge.svelte';
   import QuotedPost from './QuotedPost.svelte';
   import LinkPreviewCard from './LinkPreviewCard.svelte';
-  import ProxiedImage from './ProxiedImage.svelte';
-  import VideoThumbnail from './VideoThumbnail.svelte';
+  import PostMedia from './PostMedia.svelte';
   import TipSurface from './payments/TipSurface.svelte';
   import SoldPostTeaser from './payments/SoldPostTeaser.svelte';
   import PurchasePendingLine from './payments/PurchasePendingLine.svelte';
@@ -19,9 +17,10 @@
   import { markdownToHtml } from '#lib/markdown';
   import { liveStatusClass } from '#lib/feed-utils';
   import { contactOverlays, contactsRevision } from '#lib/conversations';
-  import { structuredView, markdownToDocument, postCardGate, type BridgeIdentity, type ItemPlaceholder as RegionPlaceholderValue } from '#lib/wasm';
-  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, documentMediaBlocks, mediaBlockKey, resolvedLinkPreviews } from '#lib/document';
+  import { structuredView, markdownToDocument, postCardGate, type BridgeIdentity, type ShowAgain, type ItemPlaceholder as RegionPlaceholderValue } from '#lib/wasm';
+  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, resolvedLinkPreviews } from '#lib/document';
   import { t } from '#lib/i18n/strings';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { relativeTime } from '#lib/value-format';
   import { IDS } from '#lib/generated/uiIds';
 
@@ -124,6 +123,12 @@
      *  that act — "You reported this", `source="reported"` — and no body paints
      *  (`moderation.md` § Corollary). Only meaningful with `contentBlocked`. */
     contentReported?: boolean;
+    /** The reporter's show-again beside the reported notice
+     *  (`content-policy-show-again-button`, `moderation.md` § Corollary — the
+     *  reporter's hide is theirs to undo): the shared fold's ids + label, or
+     *  `null` when nothing of the viewer's matched. The parent runs the press. */
+    showAgain?: ShowAgain | null;
+    onshowagain?: (ids: string[]) => void;
     /** The guardian rule's reason, verbatim, painted beside the family-policy
      *  frame in `content-policy-blocked-reason` — block and collapse arms alike
      *  (`nest-rules.md` § The shared rule editor → *The reason is the member's
@@ -132,6 +137,13 @@
     /** `feed-post-report-button` in the ⋯ menu — gated `!isOwn`; the parent
      *  opens the shared report sheet on this post. */
     onreport?: (post_id: string) => void;
+    /** `feed-post-mark-as-spam-button` in the ⋯ menu — gated `!isOwn`, a
+     *  toggle (`report-sharing.md` § Report capture → *The post's mark-as-spam
+     *  verb*); the parent runs the shared surfaces. */
+    onmarkspam?: (post_id: string) => void;
+    /** The verb's `state`: the reader marked this post (the manager's
+     *  `isSpamMarked`, which the card cannot reach). */
+    spamMarked?: boolean;
 
     // ── Own-post web-publishing verbs (web-content-hosting.md
     // § Published-post management; presence rules `ui/feed.md` § User
@@ -185,12 +197,25 @@
     onrevealcontent,
     regionPlaceholder = null,
     contentReported = false,
+    showAgain = null,
+    onshowagain,
     contentReason = null,
     onreport,
+    onmarkspam,
+    spamMarked = false,
   }: Props = $props();
 
   // The report verb: another's post only (`!is_own`).
   const showReport = $derived(!!onreport && !isOwn);
+
+  // The mark-as-spam verb: another's post only (`!is_own`), beside report.
+  const showMarkSpam = $derived(!!onmarkspam && !isOwn);
+
+  function markSpam(e: MouseEvent): void {
+    e.stopPropagation();
+    actionsOpen = false;
+    onmarkspam?.(post.post_id);
+  }
 
   function report(e: MouseEvent): void {
     e.stopPropagation();
@@ -297,10 +322,9 @@
   // into `post.document` once `resolve_quoted_post` / `resolve_media` resolves, so
   // the card + media are sourced from the one document — no sibling `quotedPost`
   // prop, no `post.media_hash` read, and (since the typed `Video` variant landed) no
-  // second app-side `decodePost` to tell an mp4 from a png: `mediaBlocks` is the
+  // second app-side `decodePost` to tell an mp4 from a png: `PostMedia` paints the
   // shared fold's own in-body-order answer, images and videos alike.
   let quotedBlock = $derived(quotedPostBlock(post.document));
-  let mediaBlocks = $derived(documentMediaBlocks(post.document));
 
   // The resolved link-preview cards (render-model.md § D4): the feed manager folds
   // each bare-url `LinkPreview` block into `post.document` (Resolving) and, once
@@ -380,6 +404,13 @@
       data-state="blocked"
       data-source={contentReported ? 'reported' : undefined}
     >{contentReported ? t.moderation.report.hidden_placeholder : t.family.content_blocked_notice}</span>
+    {#if contentReported && showAgain}
+      <button
+        type="button"
+        data-testid={IDS.CONTENT_POLICY_SHOW_AGAIN_BUTTON}
+        onclick={(e) => { e.stopPropagation(); onshowagain?.(showAgain.ids); }}
+      >{resolveLocalized(showAgain.label)}</button>
+    {/if}
     {#if contentReason}
       <span class="muted" data-testid={IDS.CONTENT_POLICY_BLOCKED_REASON}>{contentReason}</span>
     {/if}
@@ -499,7 +530,7 @@
     {#if __FAUNA_PAYMENTS__ && !post.unlock_offer && post.unlock_purchase_pending && !post.gated_unlocked}
       <PurchasePendingLine />
     {/if}
-    {#if ontrain || showDelete || showWebPublish || showReport}
+    {#if ontrain || showDelete || showWebPublish || showReport || showMarkSpam}
       <!-- Per-card ⋯ overflow (the dm-message-actions-button precedent applied to
            posts). Hosts the trained-topic training verbs, own-post delete, and
            the own-post web-publishing verbs. -->
@@ -589,6 +620,15 @@
             </p>
           {/if}
         {/if}
+      {/if}
+      {#if showMarkSpam}
+        <button
+          class="menu-item"
+          data-testid={IDS.FEED_POST_MARK_AS_SPAM_BUTTON}
+          data-state={spamMarked ? 'on' : 'off'}
+          class:active={spamMarked}
+          onclick={markSpam}
+        >{t.feed.mark_as_spam}</button>
       {/if}
       {#if showReport}
         <button
@@ -712,55 +752,18 @@
       </div>
     {/if}
     <!-- Media: every trusted media block the SHARED fold emitted, in body order
-         (render-model.md § D6 — FeedManager::resolve_media folds one typed block per
-         MediaItem). Web keeps its multi-item render, but no longer derives it from a
-         second app-side `decodePost`: the image-vs-video branch is now made once in
-         shared Rust, which is what makes `video-thumbnail` reachable on all 7 apps
-         instead of only here. -->
-    {#if mediaBlocks.length > 0}
-      <div class="post-media">
-        {#each mediaBlocks as block, i (mediaBlockKey(block, i))}
-          {#if 'Image' in block}
-            <!-- `mediaUrl`, not `blobUrl`: a tier-restricted post's attachment is
-                 sealed under the post's own per-post key and no URL can render it,
-                 so the page hands back a local object URL for those and the plain
-                 blob URL for everything else. No is-this-post-gated branch here —
-                 the card paints whatever string it is given (media.md
-                 § Encryption at rest). `null` = in flight or would not open. -->
-            {@const mediaSrc = mediaUrl(block.Image.hash, post)}
-            {#if mediaSrc}
-              <C2paImage data-testid={IDS.POST_IMAGE} data-blob-hash={block.Image.hash} src={mediaSrc} alt={block.Image.alt || 'post media'} class="post-media-img" thumb />
-            {/if}
-          {:else if 'Video' in block}
-            <VideoThumbnail
-              src={blobUrl(block.Video.hash)}
-              alt={block.Video.alt || 'post video'}
-              resolveSource={playbackUrl ? () => playbackUrl(block, post) : undefined}
-              postId={post.post_id}
-            />
-          {:else if 'ProxiedImage' in block}
-            <!-- A bridged post's own picture (render-model.md § D6c): an authenticated fetch of
-                 its nest-relative path → object URL, never a bare `<img src>` to the path. -->
-            <ProxiedImage
-              path={block.ProxiedImage.path}
-              alt={block.ProxiedImage.alt}
-              src={proxiedMediaUrl ? proxiedMediaUrl(block.ProxiedImage.path) : null}
-              class="post-media-img"
-            />
-          {:else if 'ProxiedVideo' in block}
-            <!-- A bridged post's own video (render-model.md § D6c → *Proxied video*): the play
-                 glyph over a poster-less frame carrying the path — never byte-loaded before the
-                 tap, which plays the ticketed proxied path the shared projection mints. -->
-            <VideoThumbnail
-              caption={block.ProxiedVideo.path}
-              alt={block.ProxiedVideo.alt || 'post video'}
-              resolveSource={playbackUrl ? () => playbackUrl(block, post) : undefined}
-              postId={post.post_id}
-            />
-          {/if}
-        {/each}
-      </div>
-    {/if}
+         (render-model.md § D6b) — the one `PostMedia` component the post detail paints too. -->
+    <PostMedia
+      document={post.document}
+      {post}
+      {blobUrl}
+      {mediaUrl}
+      {proxiedMediaUrl}
+      {playbackUrl}
+      postId={post.post_id}
+      imageClass="post-media-img"
+      thumb
+    />
     <!-- Quoted-post embed, painted from the folded document `QuotedPost` block
          (render-model.md § D6 — FeedManager::resolve_quoted_post folds it in), in
          both list card + post_detail (feed.md § Layout). -->
@@ -914,7 +917,6 @@
     color: var(--accent);
   }
 
-  .post-media { margin-top: 0.5rem; }
   .post-id-line { font-size: 0.75rem; margin: 0; }
 
   /* Article variant */

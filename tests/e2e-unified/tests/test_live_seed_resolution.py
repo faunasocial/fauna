@@ -38,6 +38,10 @@ Pinned here, headlessly (no box, no driver):
      overrides. And a non-destructive module's box is the `--nest live` run's
      own (`live_box_door.live_box_url`), so ``FAUNA_LIVE_NEST_URL`` is an
      override there too.
+  6. The three-machine filesync round is the exception that takes no admin
+     seed at all: its seats sign in as the non-admin seat account
+     (`multiseat_config.resolve_seat_secret`), and with only the admin file
+     present it skips, naming the seat file's path.
 """
 
 from __future__ import annotations
@@ -73,7 +77,8 @@ _SEED_MODULES = {
     # default, because the `live_box` opt-in, not the seed, selects the test.
     "tests/test_activitypub_live.py": None,
     "tests/test_live_box_bootstrap.py": None,
-    "tests/test_filesync_multiseat_live.py": None,
+    # (`tests/test_filesync_multiseat_live.py` is not here: its seats sign in
+    # as the non-admin seat account, never the admin seed — pinned in § 6.)
     # Sender leg adds one credential and revokes it; opt-in is the
     # live-provision gate (HETZNER_API_TOKEN + FAUNA_E2E_LIVE=1).
     "tests/live/test_private_relay_hetzner.py": None,
@@ -176,10 +181,8 @@ def _calls(tree: ast.Module) -> set[str]:
     }
 
 
-@pytest.mark.parametrize("rel", [m for m in _NON_DESTRUCTIVE if "filesync" not in m])
+@pytest.mark.parametrize("rel", _NON_DESTRUCTIVE)
 def test_a_non_destructive_module_resolves_through_admin_seed(rel):
-    # (The multiseat filesync module predates the helper and resolves through
-    # `multiseat_config.load_secret`, the same precedence.)
     assert "admin_seed" in _calls(_tree(rel)), f"{rel} does not call live_box_door.admin_seed"
 
 
@@ -403,3 +406,41 @@ def test_the_derived_mail_password_is_per_seed_and_does_not_echo_it():
     assert a == derived_mail_password("44" * 32)
     assert a != b
     assert len(a) == 32 and "44" * 4 not in a
+
+
+# ── 6. the multiseat round's seats sign in as the SEAT account ─────────────
+#
+# Every seat of the three-machine filesync round signs in as the one non-admin
+# `multiseat-seat` account (`staging_box.SEAT_ACCOUNTS`). Under the same temp
+# HOME as § 4 — a staging-box file holding the box's ADMIN seed, and every
+# other input set — the module must not take the admin seed as its seat, and
+# takes the seat file's seed once one exists.
+
+_MULTISEAT = "tests/test_filesync_multiseat_live.py"
+_SEAT_SEED = "66" * 32
+
+
+def _seat_file(home: Path) -> Path:
+    return home / ".config" / "fauna" / "staging-box" / _BOX / "accounts" / "multiseat-seat.json"
+
+
+def test_the_multiseat_module_never_signs_its_seat_in_with_the_admin_seed(_staging_home, _run_mode):
+    (_staging_home / ".fauna-id").write_text("77" * 32)
+    _run_mode(nest_mode.parse_nest_mode(f"live:{_BOX_URL}"))
+    module = _fresh_import(_MULTISEAT)
+    assert module.SECRET is None
+    reasons = _firing_skips(module)
+    assert any(str(_seat_file(_staging_home)) in r for r in reasons), (
+        f"the multiseat module's skip must name the seat file's path; firing skips: {reasons}"
+    )
+
+
+def test_the_multiseat_module_signs_its_seat_in_with_the_seat_file(_staging_home, _run_mode):
+    path = _seat_file(_staging_home)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"domain": _BOX, "localpart": "multiseat-seat", "secret_hex": _SEAT_SEED}))
+    _run_mode(nest_mode.parse_nest_mode(f"live:{_BOX_URL}"))
+    module = _fresh_import(_MULTISEAT)
+    assert module.SECRET == _SEAT_SEED
+    assert module.SEAT_FILE == str(path)
+    assert _firing_skips(module) == []

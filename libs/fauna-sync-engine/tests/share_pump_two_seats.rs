@@ -455,7 +455,7 @@ async fn holiday_seats_with(
     let bob_db_path = bob_dir.path().join("fs-holiday.db");
     {
         let db = SyncDb::open(&bob_db_path).unwrap();
-        db.cache_share_writer_roster(&[(alice().actor_id().to_hex(), true)], &[], None)
+        db.cache_share_writer_roster(&[(alice().actor_id().to_hex(), true)], &[], None, &[])
             .unwrap();
     }
     let bob_node = bind_seat_on(&listeners, &bob(), bob_path).await;
@@ -1249,7 +1249,7 @@ async fn an_offline_authored_pending_file_arrives_at_an_admitted_member() {
     let bob_db_path = bob_dir.path().join("fs-holiday.db");
     {
         let db = SyncDb::open(&bob_db_path).unwrap();
-        db.cache_share_writer_roster(&[(alice().actor_id().to_hex(), true)], &[], None)
+        db.cache_share_writer_roster(&[(alice().actor_id().to_hex(), true)], &[], None, &[])
             .unwrap();
     }
     let bob_node = bind_seat(&listeners, &bob()).await;
@@ -1731,7 +1731,7 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
     let bob_db_path = bob_dir.path().join("fsid-local-1.db");
     {
         let db = SyncDb::open(&bob_db_path).unwrap();
-        db.cache_share_writer_roster(&[(alice().actor_id().to_hex(), true)], &[], None)
+        db.cache_share_writer_roster(&[(alice().actor_id().to_hex(), true)], &[], None, &[])
             .unwrap();
     }
     let bob_node = bind_cabin_seat(&listeners, &bob()).await;
@@ -1909,6 +1909,7 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
             ],
             &[],
             None,
+            &[],
         )
         .unwrap();
     }

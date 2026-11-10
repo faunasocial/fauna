@@ -157,19 +157,87 @@ pub fn load_hidden_content(client: &FaunaClient) {
         move || async move {
             let store = crate::account_runtime::handle_source();
             crate::async_helper::hydrate_with_retry(|| async {
-                fauna_sync_engine::preference_surfaces::load_hidden_content(&store)
+                use fauna_sync_engine::preference_surfaces as surfaces;
+                let hidden = surfaces::load_hidden_content(&store)
                     .await
-                    .map_err(fauna_sync_engine::preference_surfaces::plane_failure)
+                    .map_err(surfaces::plane_failure)?;
+                // Its sibling on the same record, the post spam marks
+                // (`report-sharing.md` § Report capture → *The post's
+                // mark-as-spam verb*), handed to the feed manager's fold.
+                let spam_marked = surfaces::load_spam_marked(&store)
+                    .await
+                    .map_err(surfaces::plane_failure)?;
+                Ok::<_, String>((hidden, spam_marked))
             })
             .await
         },
         |read| match read {
-            Ok(list) => apply_hidden(list),
+            Ok((hidden, spam_marked)) => {
+                crate::feed::host::set_spam_marked(spam_marked);
+                apply_hidden(hidden);
+            }
             Err(e) => tracing::warn!(
                 "hidden_content read failed; the reporter-side hide is inactive: {e}"
             ),
         },
     );
+}
+
+/// The reporter's show-again beside a reported placeholder
+/// (`content-policy-show-again-button`, `moderation.md` § Corollary — the
+/// reporter's hide is theirs to undo): `None` when the shared fold matched
+/// nothing of the viewer's to this item; else the button, labelled with the
+/// scope the fold picked, whose press runs one `unhide_reported` per matched
+/// id and hands the stored list the last returns to the render engine — the
+/// open surfaces repaint without the placeholder, and the record's tombstones
+/// carry the un-hide to the user's other devices. A failure rides
+/// `error-message`; the report itself is never withdrawn. `item_id` /
+/// `author_id` are the keys the render verdict matched
+/// ([`crate::region::ReportKey`]). tui's `content_policy::reported_placeholder`
+/// is the reference.
+pub fn show_again_button(
+    client: &FaunaClient,
+    item_id: &str,
+    author_id: Option<&str>,
+) -> Option<gtk::Button> {
+    let again = crate::content_policy::show_again_for_item(item_id, author_id)?;
+    let button = gtk::Button::with_label(&resolve(&again.label));
+    button.set_halign(gtk::Align::Start);
+    crate::testid::set_test_id(&button, ids::CONTENT_POLICY_SHOW_AGAIN_BUTTON);
+    let handle = client.runtime_handle();
+    let matched = again.ids;
+    button.connect_clicked(move |b| {
+        b.set_sensitive(false);
+        let ids = matched.clone();
+        let weak = b.downgrade();
+        crate::async_helper::spawn_with_snapshot(
+            &handle,
+            move || async move {
+                use fauna_sync_engine::preference_surfaces as surfaces;
+                let store = crate::account_runtime::handle_source();
+                let mut hidden = Vec::new();
+                for id in &ids {
+                    hidden = surfaces::unhide_reported(&store, id)
+                        .await
+                        .map_err(surfaces::plane_failure)?;
+                }
+                Ok::<_, String>(hidden)
+            },
+            move |written| match written {
+                Ok(hidden) => {
+                    show_error(None);
+                    apply_hidden(hidden);
+                }
+                Err(e) => {
+                    show_error(Some(&e));
+                    if let Some(b) = weak.upgrade() {
+                        b.set_sensitive(true);
+                    }
+                }
+            },
+        );
+    });
+    Some(button)
 }
 
 /// What the network half of a submit resolved to.
@@ -187,35 +255,59 @@ enum Outcome {
     Failed(String),
 }
 
-async fn run_submit(
+/// `queue` is the device's outbox (`crate::offline_outbox::queue`): with no
+/// nest the report rests there (`OfflineQueued`, account-offline-mutation.md
+/// § The offline-mutation contract) — the acknowledgement is
+/// `report::report_queued` (no nest answered, so none is named), a ticked block
+/// is not tried (it needs the nest; `report::report_block_not_sent` says so on
+/// `error-message`), and the reporter-side hide still lands (it is local).
+/// `hide` is step 3, injected so the composer's routing is testable without the
+/// account store.
+async fn run_submit<H, F>(
     nest: Arc<NestClient>,
+    queue: Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>,
     request: AbuseReportSubmitRequest,
     block: Option<String>,
-) -> Outcome {
+    hide: H,
+) -> Outcome
+where
+    H: FnOnce(String) -> F,
+    F: std::future::Future<Output = Result<Vec<String>, String>>,
+{
+    use fauna_protocol::offline_intent::Composed;
     let hide_id = request.subject.id().to_string();
-    let reply = match ModerationClient::new(Arc::clone(&nest))
-        .abuse_report_submit(request)
+    let composed = match ModerationClient::new(Arc::clone(&nest))
+        .abuse_report_submit_or_queue(queue.as_deref(), request)
         .await
     {
-        Ok(reply) => reply,
+        Ok(composed) => composed,
         Err(e) => return Outcome::Failed(resolve(&report::report_failed(e.to_string()))),
     };
     let mut followup_error = None;
     let mut blocked = None;
-    if let Some(author) = block {
-        match fauna_client_contacts::ContactsClient::new(Arc::clone(&nest))
-            .knocks_block(author.clone())
-            .await
-        {
-            Ok(_) => blocked = Some(author),
-            Err(e) => followup_error = Some(format!("block: {e}")),
+    let acknowledgement = match composed {
+        Composed::Sent(reply) => {
+            if let Some(author) = block {
+                match fauna_client_contacts::ContactsClient::new(Arc::clone(&nest))
+                    .knocks_block(author.clone())
+                    .await
+                {
+                    Ok(_) => blocked = Some(author),
+                    Err(e) => followup_error = Some(format!("block: {e}")),
+                }
+            }
+            report::report_acknowledgement(&reply.routed_to)
         }
-    }
+        Composed::Queued(_) => {
+            if block.is_some() {
+                followup_error = Some(resolve(&report::report_block_not_sent()));
+            }
+            report::report_queued()
+        }
+    };
     // Never a silent no-op: when the report went and the hide did not, the page
     // says so.
-    let store = crate::account_runtime::handle_source();
-    let hidden = match fauna_sync_engine::preference_surfaces::hide_reported(&store, &hide_id).await
-    {
+    let hidden = match hide(hide_id).await {
         Ok(list) => Some(list),
         Err(e) => {
             followup_error.get_or_insert(format!("hide: {e}"));
@@ -223,11 +315,20 @@ async fn run_submit(
         }
     };
     Outcome::Submitted {
-        acknowledgement: resolve(&report::report_acknowledgement(&reply.routed_to)),
+        acknowledgement: resolve(&acknowledgement),
         blocked,
         hidden,
         followup_error,
     }
+}
+
+/// Step 3 against the account store: the subject joins the sealed
+/// `hidden_content` list, the stored list returned.
+async fn hide_reported(id: String) -> Result<Vec<String>, String> {
+    let store = crate::account_runtime::handle_source();
+    fauna_sync_engine::preference_surfaces::hide_reported(&store, &id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The callback a report sheet runs with the author's actor id when the
@@ -406,13 +507,14 @@ pub fn open_sheet(
             sending.set(true);
             refresh();
             let nest = Arc::clone(client_for_send.nest_rpc());
+            let queue = crate::offline_outbox::queue();
             let dialog = dialog.clone();
             let sending = Rc::clone(&sending);
             let refresh = Rc::clone(&refresh);
             let on_blocked = on_blocked.clone();
             crate::async_helper::spawn_with_snapshot(
                 &client_for_send.runtime_handle(),
-                move || run_submit(nest, request, block),
+                move || run_submit(nest, Some(queue), request, block, hide_reported),
                 move |outcome| match outcome {
                     Outcome::Failed(message) => {
                         // The sheet stays open for a retry.
@@ -708,6 +810,93 @@ mod tests {
         assert!(block.contains("Harassment"), "{block}");
         let unblock = block_confirm_text(&subject, AbuseReportReason::Harassment, true);
         assert!(unblock.starts_with("Unblock post cid1"), "{unblock}");
+    }
+
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn submit(word: &'static str, block: bool) -> (Outcome, Vec<String>, Vec<String>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let nest = NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        );
+        let target = ReportTarget {
+            subject: AbuseReportSubject::Post {
+                cid: "ab".repeat(32),
+            },
+            sealed: false,
+            author: Some("ef".repeat(32)),
+            plaintext: None,
+        };
+        let form = ReportForm {
+            reason: Some(AbuseReportReason::Spam),
+            block_author: block,
+            ..ReportForm::default()
+        };
+        let request = report::report_request(&target, &form).expect("sendable");
+        let hides = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hides_in = Arc::clone(&hides);
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run_submit(
+                nest,
+                Some(Arc::clone(&queue) as Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>),
+                request,
+                block.then(|| "ef".repeat(32)),
+                move |id: String| async move {
+                    hides_in.lock().unwrap().push(id.clone());
+                    Ok(vec![id])
+                },
+            ));
+        let kinds = queue
+            .queued()
+            .into_iter()
+            .map(|q| q.0.to_string())
+            .collect();
+        let hides = hides.lock().unwrap().clone();
+        (outcome, kinds, hides)
+    }
+
+    /// With no nest the report rests in the outbox and the sheet closes on the
+    /// queued line; the reporter-side hide still lands, and a ticked block is
+    /// not tried — the error line says so.
+    #[test]
+    fn a_report_with_no_nest_is_queued_and_says_so() {
+        let (outcome, kinds, hides) = submit("disconnected", true);
+        assert_eq!(kinds, vec!["fauna.moderation.abuse_report.submit"]);
+        assert_eq!(hides, vec!["ab".repeat(32)]);
+        match outcome {
+            Outcome::Submitted {
+                acknowledgement,
+                blocked,
+                hidden,
+                followup_error,
+            } => {
+                assert_eq!(acknowledgement, resolve(&report::report_queued()));
+                assert!(blocked.is_none(), "the block needs the nest");
+                assert_eq!(hidden, Some(vec!["ab".repeat(32)]));
+                assert_eq!(
+                    followup_error,
+                    Some(resolve(&report::report_block_not_sent()))
+                );
+            }
+            Outcome::Failed(e) => panic!("expected a queued report, got {e}"),
+        }
+    }
+
+    /// Connected, the report is sent (to this dummy nest it fails on the
+    /// transport — the sheet stays open) and nothing is queued or hidden.
+    #[test]
+    fn a_report_with_the_nest_connected_is_sent_not_queued() {
+        let (outcome, kinds, hides) = submit("connected", false);
+        assert!(kinds.is_empty());
+        assert!(hides.is_empty());
+        assert!(
+            matches!(outcome, Outcome::Failed(_)),
+            "the send was attempted"
+        );
     }
 
     /// The notice every viewer but the author sees in the body's place.

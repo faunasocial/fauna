@@ -102,7 +102,66 @@ impl BindingBasis {
     pub fn content_key_floor(&self) -> Option<u64> {
         self.content_key_floor
     }
+
+    /// The caller's access this basis was read with (`writer` / `reader`).
+    #[must_use]
+    pub fn access(&self) -> Option<&str> {
+        self.access.as_deref()
+    }
 }
+
+/// What a capability host does with its set's persisted park mark at an edge
+/// (`file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+/// host*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkMark {
+    /// Leave the mark as it stands.
+    Leave,
+    /// Persist the mark before the edge's read-only rebuild: the demotion.
+    Write,
+    /// Clear the mark and rebuild two-way (a fresh access gate): the row reads
+    /// `writer` again.
+    Clear,
+}
+
+/// The one decision a capability host takes on its park mark at a refresh or
+/// pre-seal edge, given the access the resident engine was `built` with (`None`
+/// when no engine is built), the row read `now` (`None` = the row is gone,
+/// which decides nothing here — the rebuild refuses), whether the set is
+/// `marked`, and whether the resident engine's access gate is `gate_revoked`
+/// (the nest refused a record or mint typed while the row read was stale).
+///
+/// - The row reads `writer` → clear a mark (and rebuild over a revoked gate):
+///   a POSITIVE fact from the nest is the only clear, never the absence of a
+///   refusal.
+/// - Not marked, and a gate flip, or an engine built `writer` whose row now
+///   reads `reader` → write the mark, before the rebuild.
+/// - Otherwise leave it.
+#[must_use]
+pub fn park_mark_at_edge(
+    built: Option<&str>,
+    now: Option<&BindingBasis>,
+    marked: bool,
+    gate_revoked: bool,
+) -> ParkMark {
+    let now_access = now.and_then(BindingBasis::access);
+    if now_access == Some(MEMBER_WRITER) {
+        return if marked || gate_revoked {
+            ParkMark::Clear
+        } else {
+            ParkMark::Leave
+        };
+    }
+    let demoted = built == Some(MEMBER_WRITER) && now_access == Some(MEMBER_READER);
+    if !marked && (gate_revoked || demoted) {
+        ParkMark::Write
+    } else {
+        ParkMark::Leave
+    }
+}
+
+const MEMBER_WRITER: &str = "writer";
+const MEMBER_READER: &str = "reader";
 
 /// Is the set's content-key `floor` ahead of the generation an engine `held`?
 /// No floor established ⇒ never. A floor over an engine holding no generation at
@@ -330,6 +389,99 @@ impl std::fmt::Debug for BindingEdge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member(access: &str) -> BindingBasis {
+        BindingBasis {
+            role: Some("member".into()),
+            access: Some(access.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_writer_demoted_to_reader_writes_the_park_mark_before_the_rebuild() {
+        let now = member("reader");
+        assert_eq!(
+            park_mark_at_edge(Some("writer"), Some(&now), false, false),
+            ParkMark::Write
+        );
+        // Already marked: the first stamp stands.
+        assert_eq!(
+            park_mark_at_edge(Some("writer"), Some(&now), true, false),
+            ParkMark::Leave
+        );
+        // A reader that was always a reader parks nothing.
+        assert_eq!(
+            park_mark_at_edge(Some("reader"), Some(&now), false, false),
+            ParkMark::Leave
+        );
+    }
+
+    /// A host process started after the demotion has no resident engine: its
+    /// basis is the access the last build persisted (`SyncDb::host_built_access`),
+    /// and the first build over the `reader` row is the writer→reader edge.
+    #[test]
+    fn a_relaunched_host_marks_a_demotion_from_the_persisted_built_access() {
+        let now = member("reader");
+        // The persisted access read `writer`: the demotion happened while no
+        // host ran — the mark is written all the same.
+        assert_eq!(
+            park_mark_at_edge(Some("writer"), Some(&now), false, false),
+            ParkMark::Write
+        );
+        // Nothing persisted (the set's first build ever): a reader member is
+        // just a reader, never a park.
+        assert_eq!(
+            park_mark_at_edge(None, Some(&now), false, false),
+            ParkMark::Leave
+        );
+    }
+
+    #[test]
+    fn an_access_gate_flip_writes_the_mark_whatever_the_stale_row_reads() {
+        let stale = member("reader");
+        assert_eq!(
+            park_mark_at_edge(Some("writer"), None, false, true),
+            ParkMark::Write
+        );
+        assert_eq!(
+            park_mark_at_edge(None, Some(&stale), false, true),
+            ParkMark::Write
+        );
+    }
+
+    #[test]
+    fn only_a_row_reading_writer_clears_the_mark() {
+        let writer = member("writer");
+        assert_eq!(
+            park_mark_at_edge(Some("reader"), Some(&writer), true, false),
+            ParkMark::Clear
+        );
+        // A writer row clears even over a revoked gate: the clear rebuilds a
+        // fresh gate, the write-token mint still the enforcement.
+        assert_eq!(
+            park_mark_at_edge(Some("writer"), Some(&writer), true, true),
+            ParkMark::Clear
+        );
+        assert_eq!(
+            park_mark_at_edge(Some("writer"), Some(&writer), false, false),
+            ParkMark::Leave
+        );
+        assert_eq!(
+            park_mark_at_edge(Some("writer"), Some(&writer), false, true),
+            ParkMark::Clear,
+            "a revoked gate under a writer row rebuilds a fresh one"
+        );
+        // The absence of a refusal clears nothing: a reader row, a row gone.
+        assert_eq!(
+            park_mark_at_edge(Some("reader"), Some(&member("reader")), true, false),
+            ParkMark::Leave
+        );
+        assert_eq!(
+            park_mark_at_edge(Some("reader"), None, true, false),
+            ParkMark::Leave
+        );
+    }
 
     #[test]
     fn a_floor_ahead_of_the_held_generation_holds_the_seal() {

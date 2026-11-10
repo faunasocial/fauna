@@ -4,6 +4,9 @@ title: Your mail server refuses abuse
 section: your nest
 goal: docs/goal/behavior/smtp-server.md § Inbound policy stack
 guide: docs/guides/own-your-mail.md § Why this is normally hard, and what Fauna does about it
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,7 +18,7 @@ tighten or loosen the checks that have a setting in the admin area's mail policy
 
 ## Coverage contract
 
-Stamped 2026-10-26 at 67caf70a71.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [nest] The server is not an open relay, sending needs a password, and mail forging your own domain is refused — `docs/goal/behavior/smtp-server.md` § Inbound policy stack
    - `tests/e2e-unified/tests/platform/docker/test_mail_security_relay.py::test_no_open_relay_on_port25`
@@ -74,6 +77,17 @@ Stamped 2026-10-26 at 67caf70a71.
    - `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar`
 25. [nest] While other connections hold as much unfinished mail as the server will keep in memory, a further message is put off so the sender retries later, instead of being read in without limit — `docs/goal/behavior/smtp-server.md` § Connection-time limits
    - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_messages_past_the_servers_memory_budget_are_put_off_not_accepted`
+26. [nest] A mail app that connects to any of the mail ports but never signs in is disconnected after a short wait — `docs/goal/behavior/smtp-server.md` § Connection-time limits
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_silent_connection_that_never_signs_in_is_closed_at_the_pre_auth_deadline`
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_talkative_connection_that_never_signs_in_is_still_closed_at_the_bound_fixed_at_accept`
+27. [nest] A sending server that names ten unknown recipients in one session is disconnected — `docs/goal/behavior/smtp-server.md` § Connection-time limits
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_ten_unknown_recipients_in_one_session_end_it_with_421`
+28. [nest] Every message the perimeter accepts is scanned whatever size limit the admin set, and mail that never passed the scanner — an app submission or your own Sent copy — carries no verdict and is never shown as clean — `docs/goal/behavior/mail-content-scanning.md` § Pipeline
+   - `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_message_accepted_under_an_admin_set_size_limit_is_still_scanned`
+   - `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_size_limit_raised_above_the_boot_value_applies_without_a_restart`
+   - `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_submitted_message_and_the_senders_sent_copy_carry_no_verdict`
+29. [nest] When checking a sender takes too long, the message is put off for a retry rather than read in unchecked — `docs/goal/behavior/smtp-server.md` § Connection-time limits
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_whose_sender_cannot_be_checked_in_time_is_put_off_with_451`
 
 ## Status
 
@@ -87,6 +101,8 @@ Stamped 2026-10-26 at 67caf70a71.
 | ios | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
 | android | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
 | tui | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -122,4 +138,11 @@ Stamped 2026-10-26 at 67caf70a71.
 | 24 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan` | nest (linux): passed, nest (macos): passed |
 | 24 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar` | nest (linux): passed |
 | 25 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_messages_past_the_servers_memory_budget_are_put_off_not_accepted` | nest (linux): passed, nest (macos): passed |
+| 26 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_silent_connection_that_never_signs_in_is_closed_at_the_pre_auth_deadline` | nest (linux): passed |
+| 26 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_talkative_connection_that_never_signs_in_is_still_closed_at_the_bound_fixed_at_accept` | nest (linux): passed |
+| 27 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_ten_unknown_recipients_in_one_session_end_it_with_421` | nest (linux): passed |
+| 28 | nest | `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_message_accepted_under_an_admin_set_size_limit_is_still_scanned` | nest (linux): passed |
+| 28 | nest | `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_size_limit_raised_above_the_boot_value_applies_without_a_restart` | nest (linux): passed |
+| 28 | nest | `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_submitted_message_and_the_senders_sent_copy_carry_no_verdict` | nest (linux): passed |
+| 29 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_whose_sender_cannot_be_checked_in_time_is_put_off_with_451` | nest (linux): passed |
 <!-- features-render:end -->

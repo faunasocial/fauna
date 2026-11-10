@@ -243,3 +243,47 @@ def test_the_override_refuses_an_app_it_cannot_build(monkeypatch):
 def test_the_override_is_silent_without_the_marker():
     request = SimpleNamespace(session=SimpleNamespace(items=[_plain()]))
     assert conftest._release_app_override(request, "tui") is None
+
+
+# ── the launched app's own strings ──────────────────────────────────────────
+# The harness's `S` catalog is the tip's; a release build renders its own
+# commit's wording (0.1.5's device-cap notice said "plan", the tip's says
+# "tier"), so a classifier keyed on an app-rendered string reads it there.
+
+_EN_AT_RELEASE = """\
+error:
+  sync:
+    device_limit_exceeded: This account already has as many devices as its plan allows.
+"""
+
+
+def test_an_app_string_is_read_at_the_launched_commit(launched):
+    ra.note_launched("tui", "b" * 40, PUBLIC, "/nowhere")
+    asked = []
+
+    def show(commit, path):
+        asked.append((commit, path))
+        return _EN_AT_RELEASE
+
+    got = ra.app_string("error.sync.device_limit_exceeded", show=show)
+    assert got == "This account already has as many devices as its plan allows."
+    assert asked == [("b" * 40, "i18n/strings/en.yaml")]
+
+
+def test_no_launched_release_build_reads_no_app_string(launched):
+    assert ra.app_string("error.sync.device_limit_exceeded",
+                         show=lambda *_: pytest.fail("read with nothing launched")) is None
+
+
+def test_a_key_the_release_lacks_is_none(launched):
+    ra.note_launched("tui", "b" * 40, PUBLIC, "/nowhere")
+    assert ra.app_string("error.sync.nope", show=lambda *_: _EN_AT_RELEASE) is None
+
+
+def test_the_device_cap_reads_the_launched_apps_wording(launched, monkeypatch):
+    from helpers import org_account_session as oas
+    monkeypatch.setattr(ra, "app_string", lambda key, **_: "plan wording"
+                        if key == "error.sync.device_limit_exceeded" else None)
+    assert oas.device_limit_text() == "plan wording"
+    monkeypatch.setattr(ra, "app_string", lambda key, **_: None)
+    assert oas.device_limit_text() == oas.S.error.sync.device_limit_exceeded

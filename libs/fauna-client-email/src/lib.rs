@@ -29,6 +29,7 @@ use fauna_protocol::email::{
     ListEmailFiltersRequest, MarkSeenReply, MarkSeenRequest, SendEmailReply, SendEmailRequest,
     UpdateEmailFilterReply, UpdateEmailFilterRequest,
 };
+use fauna_protocol::offline_intent::{ComposeError, Composed, OfflineIntentQueue, send_or_queue};
 
 mod autorespond;
 pub use autorespond::{
@@ -95,6 +96,52 @@ impl<R: RpcRequester> EmailClient<R> {
             )
             .await?;
         Ok(reply.id)
+    }
+
+    /// [`filters_create`](Self::filters_create) through the `OfflineQueued`
+    /// composer (`fauna_protocol::offline_intent::send_or_queue`,
+    /// `account-offline-mutation.md` § The offline-mutation contract): sent now
+    /// while the app has a nest — [`Composed::Sent`] carries the new row id —
+    /// or, when `queue` is wired and reports no nest, appended to the device's
+    /// outbox and drained once the nest is back, the intent id its idempotency
+    /// key. A queued create has NO server id until the drain, so a caller lists
+    /// nothing for it: the nest's list after the drain is the word.
+    ///
+    /// The drain FIFO scope is the rule's name (`email.filters.create:<name>`):
+    /// a refused create of one rule never holds the create of another.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn filters_create_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        name: impl Into<String>,
+        rules: Vec<EmailFilterRule>,
+        combination: impl Into<String>,
+        action: EmailFilterAction,
+        priority: i32,
+        continue_on_match: bool,
+    ) -> Result<Composed<i64>, ComposeError<R::Error>> {
+        let name = name.into();
+        let scope = format!("email.filters.create:{name}");
+        let composed: Composed<CreateEmailFilterReply> = send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.email.filters.create",
+            &scope,
+            CreateEmailFilterRequest {
+                name,
+                rules,
+                combination: combination.into(),
+                action,
+                priority,
+                continue_on_match,
+                extra: Default::default(),
+            },
+        )
+        .await?;
+        Ok(match composed {
+            Composed::Sent(reply) => Composed::Sent(reply.id),
+            Composed::Queued(id) => Composed::Queued(id),
+        })
     }
 
     /// `fauna.email.filters.get` — fetch a single filter rule by id.
@@ -463,6 +510,56 @@ mod tests {
         assert_eq!(req.combination, "any");
         assert_eq!(req.priority, 10);
         assert!(req.continue_on_match);
+    }
+
+    /// A filter created with no nest rests in the outbox — kind, the rule's
+    /// name as scope, the canonical request — and nothing is sent.
+    #[test]
+    fn a_filter_create_with_no_nest_is_queued_scoped_to_its_name() {
+        let (rec, c) = client();
+        let queue = fauna_client_testkit::RecordingQueue::new("disconnected");
+        let out = block_on(c.filters_create_or_queue(
+            Some(&queue),
+            "Move newsletters",
+            vec![email::EmailFilterRule::SenderDomain {
+                domain: "news.example".into(),
+            }],
+            "all",
+            email::EmailFilterAction::Allow,
+            3,
+            false,
+        ));
+        assert_eq!(out.unwrap(), Composed::Queued([7; 16]));
+        assert!(rec.kinds().is_empty(), "no nest: nothing may be sent");
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        let (kind, scope, payload) = &queued[0];
+        assert_eq!(*kind, "fauna.email.filters.create");
+        assert_eq!(scope, "email.filters.create:Move newsletters");
+        let req: email::CreateEmailFilterRequest =
+            fauna_protocol::decode_strict(payload).expect("decodes");
+        assert_eq!(req.name, "Move newsletters");
+        assert_eq!(req.priority, 3);
+    }
+
+    /// Connected, the same call is the old send exactly — the reply's id comes
+    /// back — and the outbox stays empty.
+    #[test]
+    fn a_filter_create_with_the_nest_connected_is_sent_not_queued() {
+        let (rec, c) = client();
+        let queue = fauna_client_testkit::RecordingQueue::new("connected");
+        let out = block_on(c.filters_create_or_queue(
+            Some(&queue),
+            "Move newsletters",
+            vec![],
+            "all",
+            email::EmailFilterAction::Allow,
+            0,
+            false,
+        ));
+        assert_eq!(out.unwrap(), Composed::Sent(7));
+        assert_eq!(rec.kinds(), vec!["fauna.email.filters.create"]);
+        assert!(queue.queued().is_empty());
     }
 
     #[test]

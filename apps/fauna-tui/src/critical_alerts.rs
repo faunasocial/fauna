@@ -54,58 +54,89 @@ pub fn registry(tx: tokio::sync::mpsc::UnboundedSender<UiMessage>) -> Arc<Critic
     alerts
 }
 
-/// Start the critical-alert sweep for the session that just came up
-/// (`critical-alerts.md` § Goal — the set-and-forget half).
+/// The post-auth split's process-wide record (`fauna_client_alert_sweep::LoopClaim`),
+/// so every post-auth hook decides its arm by the shared rule and tui keeps no
+/// loop record or forget of its own. It forgets an identity by the registry's
+/// teardown epoch, which `drop_authenticated_state`'s `clear_all` already bumps.
+static LOOP_CLAIM: fauna_client_alert_sweep::LoopClaim<fauna_client::NestClient> =
+    fauna_client_alert_sweep::LoopClaim::new();
+
+/// **The post-auth hook's one critical-alert call** (`critical-alerts.md`
+/// § Mechanism → *Who runs the detector* / *How often the detector runs*), run
+/// by [`crate::session::establish`] and by the converge arm
+/// ([`crate::session::apply_session_patch`]) alike: `LoopClaim` decides the arm —
+/// a first or identity-changing sign-in starts the re-sweep loop (first pass at
+/// once, then every `RE_SWEEP_INTERVAL_SECS` until the identity's teardown), the
+/// same identity on the client its live loop rides runs ONE pass (a second loop
+/// would only stack), and the same identity on a client its loop does not ride
+/// starts a loop that opens on the custody door.
 ///
-/// This is the call that runs every feeder which must be checked outside its
-/// own page: the pending-RecoveryKey-replacement window (whose 30-day alarm was
-/// reaching nobody because nothing polled it), the published handle binding,
-/// and the genesis-seniority custody check — which also posts from the ATProto
-/// settings page's convergence, but only for a user who opens that page.
-///
-/// It sweeps **immediately and then every
-/// `fauna_client_alert_sweep::RE_SWEEP_INTERVAL_SECS`** for as long as the
-/// identity lives, so a terminal left open for days keeps re-checking rather
-/// than answering once at start (§ Mechanism → *Who runs the detector*). The
-/// task needs no cancelling here: it stops itself on the first wake after
-/// `drop_authenticated_state` calls `CriticalAlerts::clear_all`.
-///
-/// Best-effort and fire-and-forget, exactly like the convergence beside it at
-/// [`crate::session::establish`] (the mail connect-time refresh): sign-in must not fail, or even wait, because a nest
-/// could not answer the recovery plane. Which feeders run, how often, how a
-/// failure is handled, and what gets logged belong to the shared crate, not
-/// here — this function is deliberately only a spawn, so the other six apps'
-/// copies are the same three lines (priority #1).
-pub fn spawn_session_start_sweep(
+/// Best-effort and fire-and-forget: sign-in must not fail, or even wait, because
+/// a nest could not answer the recovery plane. Which feeders run, how a failure is
+/// handled and what is logged belong to the shared crate. `wake` is the e2e seam
+/// (convention 14): a debug/e2e build races the loop's wait against it, a
+/// production build runs the clock alone.
+pub fn spawn_post_auth_sweep(
     nest: Arc<fauna_client::NestClient>,
     runtime: crate::settings::AccountRuntimeSlot,
     alerts: Arc<CriticalAlerts>,
     actor_id: fauna_core::identity::ActorId,
     wake: SweepWake,
 ) {
+    use fauna_client_alert_sweep::SweepArm;
+    // Keyed on the client's own literal URL, which both hooks read the same way.
+    let identity = format!("{}@{}", actor_id.to_hex(), nest.nest_url());
+    let (arm, ticket) = LOOP_CLAIM.claim(&identity, &nest, &alerts);
     let custody = crate::settings::atproto::identity_door(runtime);
     tokio::spawn(async move {
-        // The e2e build runs the SAME loop with its wait raceable by the agent's
-        // `alert_sweep_wake` command, so a test drives this loop's own re-sweep
-        // instead of waiting out six hours (convention 14). A production build
-        // has no wake to race and runs the clock alone.
-        #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
-        fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
-            nest,
-            &custody,
-            &alerts,
-            &actor_id,
-            move || {
-                let notify = wake.notify();
-                async move { notify.notified().await }
-            },
-        )
-        .await;
-        #[cfg(not(any(test, debug_assertions, feature = "e2e-agent")))]
-        {
-            let _ = wake;
-            fauna_client_alert_sweep::run_alert_sweep_loop(nest, &custody, &alerts, &actor_id)
+        let _ticket = ticket;
+        match arm {
+            SweepArm::OnePass => {
+                fauna_client_alert_sweep::run_one_shot_sweep(nest, &custody, &alerts, &actor_id)
+                    .await;
+            }
+            #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+            SweepArm::Loop => {
+                fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
+                    nest,
+                    &custody,
+                    &alerts,
+                    &actor_id,
+                    move || {
+                        let notify = wake.notify();
+                        async move { notify.notified().await }
+                    },
+                )
                 .await;
+            }
+            #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+            SweepArm::ReestablishedLoop => {
+                fauna_client_alert_sweep::run_alert_sweep_loop_reestablished_wakeable(
+                    nest,
+                    &custody,
+                    &alerts,
+                    &actor_id,
+                    move || {
+                        let notify = wake.notify();
+                        async move { notify.notified().await }
+                    },
+                )
+                .await;
+            }
+            #[cfg(not(any(test, debug_assertions, feature = "e2e-agent")))]
+            SweepArm::Loop => {
+                let _ = wake;
+                fauna_client_alert_sweep::run_alert_sweep_loop(nest, &custody, &alerts, &actor_id)
+                    .await;
+            }
+            #[cfg(not(any(test, debug_assertions, feature = "e2e-agent")))]
+            SweepArm::ReestablishedLoop => {
+                let _ = wake;
+                fauna_client_alert_sweep::run_alert_sweep_loop_reestablished(
+                    nest, &custody, &alerts, &actor_id,
+                )
+                .await;
+            }
         }
     });
 }
@@ -119,50 +150,6 @@ pub fn spawn_session_start_sweep(
 /// which lingers until its next wake reads the teardown — holds a handle nothing
 /// fires any more. The shape is the shared [`fauna_core::loop_wake::LoopWake`].
 pub type SweepWake = fauna_core::loop_wake::LoopWake;
-
-/// Run **one** sweep pass against the live session's client, at the converge
-/// arm of the universal post-auth hook ([`crate::session::apply_session_patch`]).
-///
-/// A same-actor, same-nest session patch converges on the live session instead
-/// of re-running `session::establish` — a second `establish` would open a
-/// second conversations engine over the live `mls_state.db` and hit its role
-/// lock. That arm still owes the post-auth feeders their re-run, exactly as
-/// linux's own converge arm re-runs its four (`critical-alerts.md`
-/// § Implementation status today, TRACK 10): without it the sweep answered
-/// once per *process* rather than once per session establishment, and anything
-/// that changed after the first login — a tampered directory, a replacement
-/// window opened mid-session — could never be observed.
-///
-/// **One shot, never a second loop, and that is the whole point of a separate
-/// function.** [`spawn_session_start_sweep`]'s `run_alert_sweep_loop` from the
-/// first `establish` is still running (it stops only on the first wake after
-/// `CriticalAlerts::clear_all` bumps the teardown epoch, which a converge does
-/// not do), so re-firing the loop here would stack one concurrent sweeper per
-/// patch, forever. windows' leg ratified this exact split for the same seam
-/// (`critical-alerts.md` § Implementation status today: its e2e `session`
-/// command "deliberately stays on the one-shot `RunAsync`, since it can re-fire
-/// on every e2e login in one process … and stacking a concurrent loop per
-/// re-auth was never this leg's job").
-///
-/// Best-effort and fire-and-forget, same posture as the loop beside it.
-pub fn spawn_one_shot_sweep(
-    nest: Arc<fauna_client::NestClient>,
-    runtime: crate::settings::AccountRuntimeSlot,
-    alerts: Arc<CriticalAlerts>,
-    actor_id: fauna_core::identity::ActorId,
-) {
-    let custody = crate::settings::atproto::identity_door(runtime);
-    tokio::spawn(async move {
-        let report =
-            fauna_client_alert_sweep::run_session_start_sweep(nest, &custody, &alerts, &actor_id)
-                .await;
-        tracing::debug!(
-            failures = report.failures.len(),
-            skipped = report.skipped.len(),
-            "converge-arm critical-alert sweep pass done"
-        );
-    });
-}
 
 /// Word-wrap the alert rows to `width` for paint. The band reserves exactly as
 /// many terminal rows as this returns, so the wrap has to happen *here* rather

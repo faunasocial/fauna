@@ -33,6 +33,7 @@ use fauna_payments::{Buyer, PaymentEntitlement};
 
 use crate::db::now_epoch_secs;
 use crate::routes::AppState;
+use crate::subscription_handlers::SubscriberHome;
 
 /// What applying a payment did.
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +99,20 @@ pub async fn apply_payment(
     state: &Arc<AppState>,
     entitlement: &PaymentEntitlement,
 ) -> Result<PaymentApplied, GrantError> {
+    apply_payment_from(state, entitlement, None).await
+}
+
+/// [`apply_payment`] for a buyer who may live on another nest: `home` is
+/// `Some` exactly when a claim is redeemed across nests (`federated-follow.md`
+/// § Decision 2 → *The redeem twin*) — the payment-entitled request row then
+/// carries the buyer's home, as a relayed subscribe's does, so the approval
+/// copies it onto the roster and the state leg, delivery and the key-blob
+/// relay find it.
+pub(crate) async fn apply_payment_from(
+    state: &Arc<AppState>,
+    entitlement: &PaymentEntitlement,
+    home: Option<SubscriberHome<'_>>,
+) -> Result<PaymentApplied, GrantError> {
     let payee = &entitlement.payee.0;
     let valid_until = valid_until_of(entitlement);
 
@@ -123,7 +138,8 @@ pub async fn apply_payment(
     match &buyer {
         Buyer::Actor(b) => {
             let queued =
-                grant_paid_entitlement(state, payee, &b.0, &entitlement.tier, valid_until).await?;
+                grant_paid_entitlement(state, payee, &b.0, &entitlement.tier, valid_until, home)
+                    .await?;
             record_purchase(state, entitlement, Some(&b.0), None).await?;
             Ok(PaymentApplied::Granted { queued })
         }
@@ -345,9 +361,9 @@ async fn mint_claim(
 }
 
 /// Grant a verified paid entitlement to a bound buyer. Returns `queued`:
-/// `false` = the subscription is active now (a window extension on an
-/// already-active subscriber); `true` = enqueued for the creator's client to
-/// mint.
+/// `false` = the subscription is active now (a window re-stamped on a roster
+/// row that still stands with no removal queued); `true` = enqueued for the
+/// creator's client to mint.
 ///
 /// Private on purpose: mechanisms reach the engine through
 /// [`apply_payment`]'s waist value, never by assembling loose scalars.
@@ -357,6 +373,7 @@ async fn grant_paid_entitlement(
     buyer_id: &[u8; 32],
     tier_name: &str,
     valid_until: Option<i64>,
+    home: Option<SubscriberHome<'_>>,
 ) -> Result<bool, GrantError> {
     let tier = state
         .db
@@ -401,19 +418,25 @@ async fn grant_paid_entitlement(
         .await;
     }
 
-    // Already entitled (expiry-aware): a renewal — extend/refresh the window
-    // in place. No re-approve, no queue round-trip.
-    if state
+    // A renewal: the buyer's roster row for the tier still stands — its window
+    // passed or not — and no removal of it is queued, so the key is still
+    // wrapped to them and re-stamping the window in place is the whole grant.
+    // No re-approve, no queue round-trip; an hour-late recurring renewal is a
+    // renewal, not a request (`monetization.md` § Pillar 3 → *Expiry &
+    // revocation*: inside the lapse grace the standing row is re-stamped). Once
+    // a removal is queued (a void, or a lapse past the grace) or the row is
+    // gone, the payment lands as a first purchase does — the request path below.
+    if !state
         .db
-        .is_subscriber(author_id, buyer_id, tier_name)
+        .has_pending_unsubscribe_request(author_id, buyer_id, tier_name)
         .await
         .map_err(internal)?
-    {
-        state
+        && state
             .db
             .set_subscriber_valid_until(author_id, buyer_id, tier_name, valid_until)
             .await
-            .map_err(internal)?;
+            .map_err(internal)?
+    {
         return Ok(false);
     }
 
@@ -422,7 +445,7 @@ async fn grant_paid_entitlement(
     // drain pump approves it without creator judgment.
     state
         .db
-        .upsert_payment_entitled_request(author_id, buyer_id, tier_name, valid_until)
+        .upsert_payment_entitled_request(author_id, buyer_id, tier_name, valid_until, home)
         .await
         .map_err(internal)?;
     // Grant-time rank fan-out (`monetization.md:126`): enqueue the
@@ -434,7 +457,7 @@ async fn grant_paid_entitlement(
     // next boot reconcile or the buyer's idempotent re-subscribe.
     if let Err(e) = state
         .db
-        .enqueue_unlock_fanout(author_id, buyer_id, tier_name)
+        .enqueue_unlock_fanout(author_id, buyer_id, tier_name, home)
         .await
     {
         tracing::error!("payment grant: unlock fan-out enqueue({tier_name}): {e}");
@@ -700,10 +723,16 @@ async fn void_claim_row(
 }
 
 /// Void `buyer`'s paid window on `author_id`'s tier: `valid_until = now`
-/// un-entitles at the gates immediately (the roster row survives for the
-/// author's client to prune) and any pending payment marker is dropped, so
-/// the author's client never approves a voided payment later. Returns whether
-/// anything changed.
+/// un-entitles at the gates immediately, any pending payment marker is
+/// dropped (so the author's client never approves a voided payment later),
+/// and — the money having gone back — the removal a leave takes is queued
+/// for the roster row, its home carried on the request, so the author's drain
+/// rotates the buyer out and a remote buyer's nest reads `removed`
+/// (`monetization.md` § Pillar 3 → *Expiry & revocation*, the 2026-11-09
+/// ruling). A membership tier queues no removal: its window's end is Rail C's
+/// downgrade (§ Pillar 4). A refund or dispute ([`apply_refund`]) and the
+/// author's void of a redeemed code ([`void_claim`]) both arrive here.
+/// Returns whether anything changed.
 async fn void_entitlement_window(
     state: &Arc<AppState>,
     author_id: &[u8; 32],
@@ -720,6 +749,27 @@ async fn void_entitlement_window(
         .clear_request_payment_entitlement(author_id, buyer, tier_name)
         .await
         .map_err(internal)?;
+    if windowed
+        && state
+            .db
+            .get_membership_tier(author_id, tier_name)
+            .await
+            .map_err(internal)?
+            .is_none()
+    {
+        let home = state
+            .db
+            .subscriber_home_with_url(author_id, buyer, tier_name)
+            .await
+            .map_err(internal)?;
+        let home = home.as_ref().map(|(nest_id, url)| SubscriberHome {
+            nest_id,
+            url: url.as_deref(),
+        });
+        crate::subscription_handlers::enqueue_removal(state, author_id, buyer, tier_name, home)
+            .await
+            .map_err(internal)?;
+    }
     Ok(windowed || unmarked)
 }
 
@@ -787,6 +837,9 @@ pub enum RedeemError {
     NotFound,
     AlreadyRedeemed,
     Voided,
+    /// A membership tier's code redeemed from another nest
+    /// (`fauna.payments.claim_admits_elsewhere`): the claim is left unstamped.
+    AdmitsElsewhere,
     Grant(GrantError),
 }
 
@@ -808,6 +861,21 @@ pub async fn redeem_claim(
     state: &Arc<AppState>,
     redeemer: &[u8; 32],
     code: &str,
+) -> Result<Redeemed, RedeemError> {
+    redeem_claim_from(state, redeemer, code, None).await
+}
+
+/// [`redeem_claim`] for a redeemer who may live on another nest — the redeem
+/// twin's body (`federated-follow.md` § Decision 2 → *The redeem twin*): with
+/// `home` set, the payment-entitled request carries the redeemer's home, and a
+/// code whose tier is designated for nest membership (§ Pillar 4) is refused
+/// [`RedeemError::AdmitsElsewhere`] BEFORE the claim is stamped — admission is
+/// registration on this nest, which a redeem across nests never grants.
+pub(crate) async fn redeem_claim_from(
+    state: &Arc<AppState>,
+    redeemer: &[u8; 32],
+    code: &str,
+    home: Option<SubscriberHome<'_>>,
 ) -> Result<Redeemed, RedeemError> {
     let claim = state
         .db
@@ -844,6 +912,16 @@ pub async fn redeem_claim(
     {
         return Err(RedeemError::Grant(GrantError::TierNotFound));
     }
+    if home.is_some()
+        && state
+            .db
+            .get_membership_tier(&author_id, &claim.tier_name)
+            .await
+            .map_err(|e| RedeemError::Grant(internal(e)))?
+            .is_some()
+    {
+        return Err(RedeemError::AdmitsElsewhere);
+    }
 
     // Stamp first-redemption atomically (the guard rejects a concurrent
     // different-actor race); a same-actor retry skips the stamp and just
@@ -875,7 +953,7 @@ pub async fn redeem_claim(
         purchase_refs: Vec::new(),
         product_reference: None,
     };
-    let queued = match apply_payment(state, &entitlement)
+    let queued = match apply_payment_from(state, &entitlement, home)
         .await
         .map_err(RedeemError::Grant)?
     {
@@ -915,10 +993,10 @@ pub struct TierFacts<'a> {
 /// ([`crate::db::CacheDb::enqueue_unlock_fanout`]), evaluated against the
 /// claim's tier instead of a `subscribers` row (`monetization.md` § Pillar 2
 /// → *Visitor entitlement doors* ruling (4), § Per-post pay-to-unlock rules
-/// (a)–(e)): the same tier always; otherwise the target must sit at or below
-/// the claim's rank, a designated claim reaches only undesignated targets
-/// (rule (a) — one cheap post never unlocks every sold post), and a hidden
-/// target is never reached (rule (e)). Rules (b)–(d) govern the fan-out's
+/// (a)–(e)): the same tier always; otherwise a designated claim reaches
+/// nothing else (rule (a), re-ruled 2026-11-07 — a purchase is a good, not a
+/// relationship), the target must sit at or below the claim's rank, and a
+/// hidden target is never reached (rule (e)). Rules (b)–(d) govern the fan-out's
 /// delivery (perpetual enrolment, the creation-time door, readability
 /// suppression) and have no stateless counterpart: the claim's own window is
 /// the door's `valid_until` check.
@@ -926,10 +1004,7 @@ pub fn claim_tier_entitles(claim: TierFacts<'_>, resource: TierFacts<'_>) -> boo
     if claim.name == resource.name {
         return true;
     }
-    if resource.hidden || resource.rank > claim.rank {
-        return false;
-    }
-    !(claim.designated && resource.designated)
+    !(claim.designated || resource.hidden || resource.rank > claim.rank)
 }
 
 /// [`claim_tier_entitles`] over `owner`'s live tier rows. A tier that no
@@ -997,7 +1072,7 @@ mod claim_entitlement_tests {
     }
 
     #[test]
-    fn rule_a_designated_to_designated_is_the_only_blocked_edge() {
+    fn rule_a_every_designated_edge_is_blocked() {
         let cheap = TierFacts {
             designated: true,
             ..tier("post-cheap", 5)
@@ -1010,14 +1085,17 @@ mod claim_entitlement_tests {
     }
 
     #[test]
-    fn a_designated_claim_reaches_undesignated_tiers_below_it() {
-        // A buyer of a sold post becomes a follower (the rank-0 cascade).
-        let sold = TierFacts {
+    fn a_designated_claim_entitles_only_its_own_tier() {
+        // Rule (a), re-ruled 2026-11-07: a purchase enrolls the buyer in
+        // nothing else — not followers, and not a paid tier below a pure
+        // pay-per-view sale minted above it.
+        let pay_per_view = TierFacts {
             designated: true,
-            ..tier("post-1", 1)
+            ..tier("post-unlock-x", 3)
         };
-        assert!(claim_tier_entitles(sold, tier("followers", 0)));
-        assert!(!claim_tier_entitles(sold, tier("gold", 3)));
+        assert!(!claim_tier_entitles(pay_per_view, tier("followers", 0)));
+        assert!(!claim_tier_entitles(pay_per_view, tier("gold", 2)));
+        assert!(claim_tier_entitles(pay_per_view, pay_per_view));
     }
 
     #[test]
@@ -1508,6 +1586,262 @@ mod tests {
                 .unwrap()
                 .voided_at
                 .is_some()
+        );
+    }
+
+    // ── The end of a paid window queues the leave's removal ────────────
+    //
+    // `monetization.md` § Pillar 3 → *Expiry & revocation*, the 2026-11-09
+    // ruling: a void queues the `kind='unsubscribe'` row at once, a lapse
+    // queues it past the grace, a renewal inside the grace re-stamps in place.
+
+    const AUTHOR: [u8; 32] = [0x7A; 32];
+    const BUYER: [u8; 32] = [0x7B; 32];
+
+    /// An author with a `gold` content tier and `BUYER` on its roster,
+    /// `valid_until` as given.
+    async fn roster_fixture(valid_until: Option<i64>) -> (Arc<CacheDb>, Arc<AppState>) {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        db.create_subscription_tier(
+            &AUTHOR, "gold", 1, None, None, None, false, None, None, false,
+        )
+        .await
+        .unwrap();
+        db.add_subscriber(&AUTHOR, &BUYER, "gold", None)
+            .await
+            .unwrap();
+        db.set_subscriber_valid_until(&AUTHOR, &BUYER, "gold", valid_until)
+            .await
+            .unwrap();
+        let state = Arc::new(AppState::for_test(db.clone()));
+        (db, state)
+    }
+
+    fn bound(tier: &str, valid_until: Option<u64>, external_ref: &str) -> PaymentEntitlement {
+        PaymentEntitlement {
+            provider: "fake".into(),
+            payee: fauna_core::identity::ActorId(AUTHOR),
+            buyer: Buyer::Actor(fauna_core::identity::ActorId(BUYER)),
+            tier: tier.into(),
+            valid_until_secs: valid_until,
+            external_ref: external_ref.into(),
+            return_ref: None,
+            purchase_refs: Vec::new(),
+            product_reference: None,
+        }
+    }
+
+    /// `(kind, subscriber, tier)` of every request row queued for `AUTHOR`.
+    async fn queued(db: &CacheDb) -> Vec<(String, Vec<u8>, String)> {
+        db.list_subscribe_requests(&AUTHOR)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.kind, r.subscriber_id, r.tier_name))
+            .collect()
+    }
+
+    fn removal_of_buyer() -> (String, Vec<u8>, String) {
+        ("unsubscribe".into(), BUYER.to_vec(), "gold".into())
+    }
+
+    /// The `free` quota tier a membership designation's foreign keys name.
+    async fn seed_free_quota_tier(db: &CacheDb) {
+        db.conn()
+            .await
+            .execute(
+                "INSERT OR IGNORE INTO tiers (name, max_inbox_bytes, max_storage_bytes, \
+                 max_devices, max_blob_size) VALUES ('free', 1, 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refund_queues_the_leaves_removal_carrying_the_roster_rows_home() {
+        let (db, state) = roster_fixture(Some(now_epoch_secs() + 86_400)).await;
+        let home: [u8; 32] = [0x99; 32];
+        db.conn()
+            .await
+            .execute(
+                "UPDATE subscribers SET home_nest_id = ?1, home_nest_url = 'https://f.example'
+                  WHERE author_id = ?2 AND subscriber_id = ?3",
+                rusqlite::params![home.as_slice(), AUTHOR.as_slice(), BUYER.as_slice()],
+            )
+            .unwrap();
+
+        assert!(
+            apply_refund(&state, &bound("gold", None, "pay_1"))
+                .await
+                .unwrap()
+                .acted
+        );
+
+        assert!(!db.is_subscriber(&AUTHOR, &BUYER, "gold").await.unwrap());
+        let rows = db.list_subscribe_requests(&AUTHOR).await.unwrap();
+        assert_eq!(rows.len(), 1, "exactly the removal: {rows:?}");
+        assert_eq!(
+            (
+                rows[0].kind.as_str(),
+                rows[0].subscriber_id.as_slice(),
+                rows[0].tier_name.as_str()
+            ),
+            ("unsubscribe", BUYER.as_slice(), "gold")
+        );
+        assert_eq!(rows[0].home_nest_url.as_deref(), Some("https://f.example"));
+        assert_eq!(
+            db.subscribe_request_home(rows[0].id).await.unwrap(),
+            Some(home)
+        );
+
+        // A repeat delivery of the refund queues no second row.
+        apply_refund(&state, &bound("gold", None, "pay_1"))
+            .await
+            .unwrap();
+        assert_eq!(queued(&db).await, vec![removal_of_buyer()]);
+    }
+
+    #[tokio::test]
+    async fn the_authors_void_of_a_redeemed_code_queues_the_removal() {
+        let (db, state) = roster_fixture(Some(now_epoch_secs() + 86_400)).await;
+        db.insert_payment_claim("CODE-V", &AUTHOR, "gold", "manual", "ref_v", None)
+            .await
+            .unwrap();
+        assert!(db.redeem_payment_claim("CODE-V", &BUYER).await.unwrap());
+
+        void_claim(&state, &AUTHOR, "CODE-V").await.unwrap();
+
+        assert!(!db.is_subscriber(&AUTHOR, &BUYER, "gold").await.unwrap());
+        assert_eq!(queued(&db).await, vec![removal_of_buyer()]);
+    }
+
+    #[tokio::test]
+    async fn a_membership_tiers_refund_queues_no_removal() {
+        let (db, state) = roster_fixture(Some(now_epoch_secs() + 86_400)).await;
+        seed_free_quota_tier(&db).await;
+        db.upsert_membership_tier(&AUTHOR, "gold", "free", "free")
+            .await
+            .unwrap();
+
+        assert!(
+            apply_refund(&state, &bound("gold", None, "pay_1"))
+                .await
+                .unwrap()
+                .acted
+        );
+
+        assert!(
+            queued(&db).await.is_empty(),
+            "a membership's end is Rail C's downgrade, never a removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refund_for_a_buyer_with_no_roster_row_queues_none() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        db.create_subscription_tier(
+            &AUTHOR, "gold", 1, None, None, None, false, None, None, false,
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(AppState::for_test(db.clone()));
+
+        apply_refund(&state, &bound("gold", None, "pay_1"))
+            .await
+            .unwrap();
+
+        assert!(queued(&db).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_lapse_sweep_queues_a_window_only_once_it_is_past_the_grace() {
+        use crate::entitlement_lapse::{PAID_WINDOW_LAPSE_GRACE_SECS, sweep_once};
+        let now = now_epoch_secs();
+        // BUYER: ended a minute beyond the grace — queued.
+        let (db, state) = roster_fixture(Some(now - PAID_WINDOW_LAPSE_GRACE_SECS - 60)).await;
+        // Inside the grace by an hour — left standing for a late renewal.
+        let inside: [u8; 32] = [0x7C; 32];
+        db.add_subscriber(&AUTHOR, &inside, "gold", None)
+            .await
+            .unwrap();
+        db.set_subscriber_valid_until(
+            &AUTHOR,
+            &inside,
+            "gold",
+            Some(now - PAID_WINDOW_LAPSE_GRACE_SECS + 3_600),
+        )
+        .await
+        .unwrap();
+        // No window at all (an author-approved subscriber) — never a lapse.
+        let unwindowed: [u8; 32] = [0x7D; 32];
+        db.add_subscriber(&AUTHOR, &unwindowed, "gold", None)
+            .await
+            .unwrap();
+        // A membership tier long past its window — Rail C's, never a removal.
+        seed_free_quota_tier(&db).await;
+        db.create_subscription_tier(
+            &AUTHOR, "club", 2, None, None, None, false, None, None, false,
+        )
+        .await
+        .unwrap();
+        db.upsert_membership_tier(&AUTHOR, "club", "free", "free")
+            .await
+            .unwrap();
+        db.add_subscriber(&AUTHOR, &BUYER, "club", None)
+            .await
+            .unwrap();
+        db.set_subscriber_valid_until(&AUTHOR, &BUYER, "club", Some(now - 30 * 86_400))
+            .await
+            .unwrap();
+
+        let swept = sweep_once(&state).await.unwrap();
+
+        assert_eq!(swept.removals_queued, 1);
+        assert_eq!(queued(&db).await, vec![removal_of_buyer()]);
+        // The next tick finds the removal already queued.
+        assert_eq!(sweep_once(&state).await.unwrap().removals_queued, 0);
+        assert_eq!(queued(&db).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_renewal_inside_the_grace_re_stamps_the_standing_row_in_place() {
+        let (db, state) = roster_fixture(Some(now_epoch_secs() - 3_600)).await;
+        let until = (now_epoch_secs() + 30 * 86_400) as u64;
+
+        let applied = apply_payment(&state, &bound("gold", Some(until), "pay_renew"))
+            .await
+            .unwrap();
+
+        assert_eq!(applied, PaymentApplied::Granted { queued: false });
+        assert!(queued(&db).await.is_empty(), "a renewal is not a request");
+        assert_eq!(
+            db.get_subscriber_valid_until(&AUTHOR, &BUYER, "gold")
+                .await
+                .unwrap(),
+            Some(until as i64)
+        );
+        assert!(db.is_subscriber(&AUTHOR, &BUYER, "gold").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_payment_after_the_removal_is_queued_takes_the_request_path() {
+        let (db, state) = roster_fixture(Some(now_epoch_secs() + 86_400)).await;
+        apply_refund(&state, &bound("gold", None, "pay_1"))
+            .await
+            .unwrap();
+        let until = (now_epoch_secs() + 30 * 86_400) as u64;
+
+        let applied = apply_payment(&state, &bound("gold", Some(until), "pay_2"))
+            .await
+            .unwrap();
+
+        assert_eq!(applied, PaymentApplied::Granted { queued: true });
+        let mut kinds: Vec<String> = queued(&db).await.into_iter().map(|(k, _, _)| k).collect();
+        kinds.sort();
+        assert_eq!(kinds, vec!["subscribe", "unsubscribe"]);
+        assert!(
+            !db.is_subscriber(&AUTHOR, &BUYER, "gold").await.unwrap(),
+            "the voided window is not silently revived on a row being removed"
         );
     }
 }

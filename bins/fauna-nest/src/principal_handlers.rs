@@ -1730,6 +1730,7 @@ mod tests {
             home_nest_url: None,
             intent: None,
             author_id: fauna_core::identity::ActorId(AUTHOR),
+            tier: None,
             extra: Default::default(),
         })
         .unwrap()

@@ -22,7 +22,7 @@ request shows you the reason and lets you ask again.
 
 ## Coverage contract
 
-Stamped 2026-10-17 at 7295eb4a13.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] Typing your handle tells you whether that nest knows you and what happens next — `docs/goal/behavior/onboarding.md` § 2. Handle entry
    - `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_nest_user_unregistered_routes_to_invite`
@@ -61,19 +61,33 @@ Stamped 2026-10-17 at 7295eb4a13.
 12. [app] Before you send a join request or redeem a code, you are told what age range your app store will share with the nest's administrators, and whether it is shared as verified or as declared — `docs/goal/behavior/account-age-band.md` § App surface
     - `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_is_declared_for_an_attestation_the_nest_did_not_list`
     - `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_follows_the_minted_nonces_platform_list`
+13. [nest] A handle on the nest's reserved list — admin, www, mail, relay and the like — is refused at sign-up and as a later handle change, and no admin setting frees it — `docs/goal/architecture/nest/public-mode.md` § Registration & Identity
+   - `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_reserved_handle_is_refused_at_sign_up_and_as_a_handle_change`
+14. [nest] Holding a key is never an account: a key the nest has not admitted is refused sign-in in every registration mode, open included, and an account comes only from registering with a handle, claiming the nest, or an admin admitting you — `docs/goal/architecture/nest/public-mode.md` § Registration & Identity
+   - `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_key_the_nest_never_admitted_is_refused_sign_in_whatever_the_mode`
+15. [app] While your request to join is pending, a nest the app cannot reach keeps it pending and the app keeps checking; a nest whose identity has changed ends the request with an error and no offer to trust the new identity — `docs/goal/behavior/onboarding.md` § The pending-invite surface
+   - `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_pending_request_stays_pending_while_the_nest_is_unreachable`
+   - `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_changed_nest_identity_ends_the_pending_request_with_no_trust_offer`
+16. [nest] A verified age band comes only from a valid store attestation: a forged, replayed or wrong-app attestation refuses the whole admission and is never downgraded to a declared band — `docs/goal/behavior/account-age-band.md` § The account age band
+   - `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_nonce_the_nest_never_minted_refuses_the_whole_admission`
+   - `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_replayed_nonce_is_refused_because_the_first_attempt_spent_it`
+   - `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_an_attestation_naming_a_bundle_the_nest_does_not_pin_is_refused`
+   - `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_platform_the_nest_cannot_check_is_admitted_as_declared_not_verified`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+52eff9ec standalone |
-| linux | ✅ full | 0.1.5-dev+52eff9ec standalone |
+| web | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
+| linux | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
 | windows | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
+| macos | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
+| ios | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+52eff9ec standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -81,7 +95,7 @@ Stamped 2026-10-17 at 7295eb4a13.
 | 1 | app | `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_already_on_nest_handle_matches_enables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_probe_error_transient_shows_retry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_invite_request_submit_roundtrip.py::test_invite_request_submit_reaches_pending_review` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_admin_approval_advances_the_requester_with_no_user_action` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_admin_approval_advances_the_requester_with_no_user_action` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_a_denied_requester_reads_the_reason_and_can_resubmit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_denied_shows_reason_disables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_oob_valid_enables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -103,4 +117,12 @@ Stamped 2026-10-17 at 7295eb4a13.
 | 12 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_is_declared_for_an_attestation_the_nest_did_not_list` | web (linux): skipped, linux (linux): skipped, macos (macos): skipped, ios (macos): passed, tui (linux): skipped, tui (macos): skipped |
 | 12 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_age_notice_follows_the_minted_nonces_platform_list` — requires `machine-async-dispatch-bridge` (test harness) (not built: web, linux, windows, macos, tui) | web (linux): skipped, linux (linux): skipped, macos (macos): skipped, ios (macos): passed, tui (linux): skipped, tui (macos): skipped |
 | 12 | app | absent by design on web, linux, windows, macos, tui | — |
+| 13 | nest | `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_reserved_handle_is_refused_at_sign_up_and_as_a_handle_change` | nest (linux): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_registration_reserved_and_unadmitted.py::test_a_key_the_nest_never_admitted_is_refused_sign_in_whatever_the_mode` | nest (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_pending_request_stays_pending_while_the_nest_is_unreachable` | tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_pending_invite_recheck_verdicts.py::test_a_changed_nest_identity_ends_the_pending_request_with_no_trust_offer` | tui (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_nonce_the_nest_never_minted_refuses_the_whole_admission` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_replayed_nonce_is_refused_because_the_first_attempt_spent_it` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_an_attestation_naming_a_bundle_the_nest_does_not_pin_is_refused` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_age_band_attestation.py::test_a_platform_the_nest_cannot_check_is_admitted_as_declared_not_verified` | nest (linux): passed |
 <!-- features-render:end -->

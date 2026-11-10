@@ -704,6 +704,25 @@ fn admit_base(
     Ok(profile)
 }
 
+/// Trim an edit-form text field; a blank one is `None` (the profile holds no
+/// empty display name or bio).
+fn non_blank_trimmed(s: Option<String>) -> Option<String> {
+    s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Trim every link's label and uri and drop rows blank in both — the edit
+/// form's repeatable-links list may carry freshly added empty rows.
+fn clean_profile_links(links: Vec<ProfileLink>) -> Vec<ProfileLink> {
+    links
+        .into_iter()
+        .map(|l| ProfileLink {
+            label: l.label.trim().to_string(),
+            uri: l.uri.trim().to_string(),
+        })
+        .filter(|l| !(l.label.is_empty() && l.uri.is_empty()))
+        .collect()
+}
+
 /// [`build_edited_profile`] plus the two image fields — the full edit-form
 /// write once a client can set or remove a profile picture / banner
 /// (`profile.md` § Field ownership).
@@ -739,6 +758,13 @@ pub fn build_edited_profile_with_images(
     banner: ProfileImageEdit,
     audience: Option<ProfileAudience>,
 ) -> Result<Vec<u8>, ProfileWriteError> {
+    // The one normalization every app's edit form used to hand-copy: text
+    // fields trimmed (blank → `None`), link rows trimmed, and a row blank in
+    // both label and uri dropped. Idempotent, so a caller that already did it
+    // is unaffected.
+    let display_name = non_blank_trimmed(display_name);
+    let bio = non_blank_trimmed(bio);
+    let links = clean_profile_links(links);
     let mut profile = match base_body {
         Some(b) => {
             // `admit_base`, never a bare `decode_profile`: it re-labels a base
@@ -1678,6 +1704,43 @@ mod tests {
         // The rest of the identity still survives an image edit.
         assert_eq!(decoded.inbox_mode, InboxMode::ContactsOnly);
         assert_eq!(decoded.recovery_head, Some(ChainHead::new([0xA7; 32], 3)));
+    }
+
+    #[test]
+    fn edit_normalizes_text_fields_and_links() {
+        let kp = ActorKeypair::generate();
+        let link = |l: &str, u: &str| ProfileLink {
+            label: l.into(),
+            uri: u.into(),
+        };
+        let built = build_edited_profile_with_images(
+            &kp,
+            None,
+            None,
+            &[],
+            Some("  ".into()),
+            Some("  hi  ".into()),
+            vec![
+                link("  site ", " https://x.example "),
+                link(" ", "\t"),
+                link("", "https://y.example"),
+            ],
+            ProfileImageEdit::Keep,
+            ProfileImageEdit::Keep,
+            None,
+        )
+        .expect("build");
+        let (decoded, _) = decode_profile(&built).expect("decode");
+        assert_eq!(decoded.display_name, None, "blank collapses to None");
+        assert_eq!(decoded.bio.as_deref(), Some("hi"), "trimmed");
+        assert_eq!(
+            decoded.links,
+            vec![
+                link("site", "https://x.example"),
+                link("", "https://y.example")
+            ],
+            "trimmed, and the row blank in both fields is dropped"
+        );
     }
 
     #[test]

@@ -29,13 +29,21 @@ public class AccountSwitcherViewModelTests
     private const string ActorB = "bb22222222222222222222222222222222222222222222222222222222222222";
     private const string ActorC = "cc33333333333333333333333333333333333333333333333333333333333333";
 
-    /// <summary>The remove door answering "nobody serves it" — so a remove test never
-    /// probes the real install base's lock files.</summary>
-    private static FfiEraseRemoveBlocked? NobodyServes(string _) => null;
+    /// <summary>The whole remove gesture answering "removed": it records the account it was
+    /// asked for and takes it out of the fake registry, as the shared export's registry step
+    /// does — so a remove test never reaches the real install base, store or nest.</summary>
+    private static Func<string, Task<FfiEraseRemoveBlocked?>> Removes(
+        FakeAccountRegistry fake, List<string> gestured) =>
+        actor =>
+        {
+            gestured.Add(actor);
+            fake.Remove(actor);
+            return Task.FromResult<FfiEraseRemoveBlocked?>(null);
+        };
 
-    /// <summary>An erase that records which account it was asked for and finishes at once.</summary>
-    private static Func<string, Task> Recording(List<string> erased) =>
-        actor => { erased.Add(actor); return Task.CompletedTask; };
+    /// <summary>The gesture for a test that never removes: reaching it fails the test.</summary>
+    private static Task<FfiEraseRemoveBlocked?> NeverRemoves(string actor) =>
+        throw new InvalidOperationException($"this test never removes, but the gesture ran for {actor}");
 
     // ── Row projection ──
 
@@ -51,7 +59,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA, handle: "alice"),
                 FakeAccountRegistry.Entry(ActorB, handle: "bob"),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
 
         vm.Refresh();
 
@@ -76,7 +84,7 @@ public class AccountSwitcherViewModelTests
         var fake = new FakeAccountRegistry(
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA, handle: handle) });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
 
         vm.Refresh();
 
@@ -100,7 +108,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorB),
                 FakeAccountRegistry.Entry(ActorC),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
 
         vm.Refresh();
 
@@ -126,7 +134,7 @@ public class AccountSwitcherViewModelTests
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) })
         { Served = ActorB };
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
 
         vm.Refresh();
 
@@ -146,7 +154,7 @@ public class AccountSwitcherViewModelTests
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) })
         { Served = ActorB };
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         var requests = 0;
         vm.OnSwitchRequested = (_, _) => { requests++; return Task.CompletedTask; };
@@ -170,7 +178,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
 
         vm.Refresh();
 
@@ -192,7 +200,7 @@ public class AccountSwitcherViewModelTests
         var fake = new FakeAccountRegistry(
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA, requireConfirm: false) });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         Assert.False(Assert.Single(vm.Accounts).RequireConfirmToActivate);
 
@@ -207,13 +215,15 @@ public class AccountSwitcherViewModelTests
     // ── Remove ──
 
     /// <summary>
-    /// Remove calls through to the registry and refreshes the SAME bound collection —
-    /// removing a non-active account does not switch, so nothing rebuilds the page and no
-    /// re-navigation happens. The e2e polls the already-navigated page, so an implementation
-    /// that only refreshes on navigate-to would hang there.
+    /// Remove makes ONE call — the whole shared gesture (ask, snapshot and remove, the
+    /// retirement of this machine on the removed account's nest, the erase) — and then
+    /// refreshes the SAME bound collection: removing a non-active account does not switch,
+    /// so nothing rebuilds the page and no re-navigation happens. The e2e polls the
+    /// already-navigated page, so an implementation that only refreshes on navigate-to
+    /// would hang there.
     /// </summary>
     [Fact]
-    public async Task Remove_CallsRegistry_AndShrinksTheBoundCollectionInPlace()
+    public async Task Remove_RunsTheWholeGestureOnce_AndShrinksTheBoundCollectionInPlace()
     {
         var fake = new FakeAccountRegistry(
             active: ActorA,
@@ -222,9 +232,8 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB),
             });
-        var erased = new List<string>();
-        var vm = new AccountSwitcherViewModel(
-            fake, eraseAccountState: Recording(erased), removeAccountBlocked: NobodyServes);
+        var gestured = new List<string>();
+        var vm = new AccountSwitcherViewModel(fake, Removes(fake, gestured));
         vm.Refresh();
         var bound = vm.Accounts;           // the instance the page bound to
         var changes = 0;
@@ -233,10 +242,8 @@ public class AccountSwitcherViewModelTests
 
         await vm.RemoveAsync(ActorB);
 
-        Assert.Equal(new[] { ActorB }, fake.Removed);
-        // Erasure follows scope: a successful remove also erases the account's
-        // scoped content stores (account-scoping.md § Erasure follows scope).
-        Assert.Equal(new[] { ActorB }, erased);
+        // The gesture owns the registry step: the VM never removes on its own.
+        Assert.Equal(new[] { ActorB }, gestured);
         Assert.Same(bound, vm.Accounts);   // no new collection — the page's binding survives
         Assert.Equal(ActorA, Assert.Single(bound).ActorId);
         Assert.True(changes > 0, "the bound collection must raise CollectionChanged in place");
@@ -245,38 +252,71 @@ public class AccountSwitcherViewModelTests
     }
 
     /// <summary>
-    /// The erase waits for the removed account's store to stop
-    /// (<c>AccountStateDir.EraseWhenStoppedAsync</c>), and after a switch that stop can
-    /// still be running. The row goes as soon as the registry has removed the account,
-    /// so the user is never offered a second remove of an account that is already gone,
-    /// and the remove completes only once the erase has run.
+    /// The gesture is one awaited call — on windows it first waits for every account-runtime
+    /// stop still in flight, then retires this machine over a nest round trip — so the row
+    /// goes when it returns, never before. Meanwhile the row is still on screen, and a
+    /// second press on it does nothing: the removal it would ask for is already running, and
+    /// a second gesture would meet an account the first has already taken out of the
+    /// registry and paint that as an error over a removal that is succeeding.
     /// </summary>
     [Fact]
-    public async Task Remove_TheRowGoesAtOnce_AndTheRemoveFinishesOnlyAfterTheErase()
+    public async Task Remove_TheRowGoesWhenTheGestureReturns_AndASecondPressMeanwhileDoesNothing()
     {
         var fake = new FakeAccountRegistry(
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) });
-        var erasing = new TaskCompletionSource();
-        var erased = new List<string>();
+        var finishing = new TaskCompletionSource<FfiEraseRemoveBlocked?>();
+        var gestured = new List<string>();
         var vm = new AccountSwitcherViewModel(
             fake,
-            eraseAccountState: actor => { erased.Add(actor); return erasing.Task; },
-            removeAccountBlocked: NobodyServes);
+            actor => { gestured.Add(actor); return finishing.Task; });
         vm.Refresh();
 
         var removing = vm.RemoveAsync(ActorB);
+        var second = vm.RemoveAsync(ActorB);
 
-        Assert.Equal(new[] { ActorB }, erased);
-        Assert.Equal(ActorA, Assert.Single(vm.Accounts).ActorId);
-        Assert.False(removing.IsCompleted, "the remove finished before its erase did");
-        erasing.SetResult();
+        Assert.True(second.IsCompleted, "a second press on a removal in flight must return at once");
+        Assert.Equal(new[] { ActorB }, gestured);
+        Assert.Equal(2, vm.Accounts.Count);
+        Assert.False(removing.IsCompleted, "the remove finished before its gesture did");
+
+        fake.Remove(ActorB);               // what the gesture's registry step did
+        finishing.SetResult(null);
         await removing;
+
+        Assert.Equal(ActorA, Assert.Single(vm.Accounts).ActorId);
         Assert.Null(vm.ErrorMessage);
     }
 
-    /// <summary>A registry rejection surfaces on the page's <c>error-message</c> banner and
-    /// leaves the list intact.</summary>
+    /// <summary>A gesture that has finished frees its row's button again: a later press on
+    /// an account still listed (a refusal left it there) runs the gesture again.</summary>
+    [Fact]
+    public async Task Remove_AFinishedGesture_LetsTheNextPressRunAgain()
+    {
+        var line = new uniffi.fauna_core.LocalizedText(
+            "settings.remove_account_blocked_other_window", new Dictionary<string, string>());
+        var fake = new FakeAccountRegistry(
+            active: ActorA,
+            entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) });
+        var gestured = new List<string>();
+        var vm = new AccountSwitcherViewModel(
+            fake,
+            actor =>
+            {
+                gestured.Add(actor);
+                return Task.FromResult<FfiEraseRemoveBlocked?>(
+                    new FfiEraseRemoveBlocked.ServedElsewhere(new[] { ActorB }, line));
+            });
+        vm.Refresh();
+
+        await vm.RemoveAsync(ActorB);
+        await vm.RemoveAsync(ActorB);
+
+        Assert.Equal(new[] { ActorB, ActorB }, gestured);
+    }
+
+    /// <summary>A gesture that fails (the registry refused the removal; nothing else ran)
+    /// surfaces on the page's <c>error-message</c> banner and leaves the list intact.</summary>
     [Fact]
     public async Task Remove_Failure_SurfacesTheErrorAndKeepsTheList()
     {
@@ -286,31 +326,27 @@ public class AccountSwitcherViewModelTests
             {
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB),
-            })
-        { ThrowOnRemove = true };
-        var erased = new List<string>();
+            });
         var vm = new AccountSwitcherViewModel(
-            fake, eraseAccountState: Recording(erased), removeAccountBlocked: NobodyServes);
+            fake, _ => Task.FromException<FfiEraseRemoveBlocked?>(new InvalidOperationException("remove rejected")));
         vm.Refresh();
 
         await vm.RemoveAsync(ActorB);
 
         Assert.NotNull(vm.ErrorMessage);
-        // A rejected removal must NOT erase the account's stores (the account is
-        // still on this install).
-        Assert.Empty(erased);
+        Assert.Empty(fake.Removed);
         Assert.Equal(2, vm.Accounts.Count);
     }
 
     /// <summary>
-    /// A remove that reaches the path anyway (a stale row, a race with a launch) asks the
-    /// shared door BEFORE the registry removal — which drops the account's secret slots, so
-    /// a refusal after it would strand the scopes with nothing left to sign in to them. On
-    /// <c>ServedHere</c> it paints the door's own line (<c>settings.remove_account_blocked_this_window</c>)
-    /// on <c>error-message</c>, and nothing is removed or erased.
+    /// A remove that reaches the path anyway (a stale row, a race with a launch) is refused
+    /// by the gesture's own first step — the shared door, asked BEFORE the registry removal
+    /// drops the account's secret slots. On <c>ServedHere</c> the VM paints the door's own
+    /// line (<c>settings.remove_account_blocked_this_window</c>) on <c>error-message</c>
+    /// and the list stays as it was.
     /// </summary>
     [Fact]
-    public async Task Remove_TheServedAccount_IsRefusedWithTheThisWindowLine_AndTouchesNothing()
+    public async Task Remove_TheServedAccount_IsRefusedWithTheThisWindowLine_AndKeepsTheList()
     {
         var line = new uniffi.fauna_core.LocalizedText(
             "settings.remove_account_blocked_this_window", new Dictionary<string, string>());
@@ -318,30 +354,21 @@ public class AccountSwitcherViewModelTests
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) })
         { Served = ActorB };
-        var erased = new List<string>();
-        var asked = new List<string>();
         var vm = new AccountSwitcherViewModel(
             fake,
-            eraseAccountState: Recording(erased),
-            removeAccountBlocked: actor =>
-            {
-                asked.Add(actor);
-                return new FfiEraseRemoveBlocked.ServedHere(line);
-            });
+            _ => Task.FromResult<FfiEraseRemoveBlocked?>(new FfiEraseRemoveBlocked.ServedHere(line)));
         vm.Refresh();
 
         await vm.RemoveAsync(ActorB);
 
-        Assert.Equal(new[] { ActorB }, asked);
         Assert.Empty(fake.Removed);
-        Assert.Empty(erased);
         Assert.Equal(FaunaApp.Core.Services.Strings.Resolve(line), vm.ErrorMessage);
         Assert.Equal(2, vm.Accounts.Count);
     }
 
     /// <summary>The sibling half of the same door: an account another live window (of this
     /// app or another on the same login) serves is refused with the other-window line, and
-    /// nothing is removed or erased.</summary>
+    /// the list stays as it was.</summary>
     [Fact]
     public async Task Remove_AnAccountASiblingServes_IsRefusedWithTheOtherWindowLine()
     {
@@ -350,17 +377,15 @@ public class AccountSwitcherViewModelTests
         var fake = new FakeAccountRegistry(
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) });
-        var erased = new List<string>();
         var vm = new AccountSwitcherViewModel(
             fake,
-            eraseAccountState: Recording(erased),
-            removeAccountBlocked: _ => new FfiEraseRemoveBlocked.ServedElsewhere(new[] { ActorB }, line));
+            _ => Task.FromResult<FfiEraseRemoveBlocked?>(
+                new FfiEraseRemoveBlocked.ServedElsewhere(new[] { ActorB }, line)));
         vm.Refresh();
 
         await vm.RemoveAsync(ActorB);
 
         Assert.Empty(fake.Removed);
-        Assert.Empty(erased);
         Assert.Equal(FaunaApp.Core.Services.Strings.Resolve(line), vm.ErrorMessage);
         Assert.Equal(2, vm.Accounts.Count);
     }
@@ -376,7 +401,7 @@ public class AccountSwitcherViewModelTests
         var fake = new FakeAccountRegistry(
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA, requireConfirm: false) });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
 
         vm.SetRequireConfirm(ActorA, true);
@@ -406,7 +431,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         string? requested = null;
         bool? requestedConfirmed = null;
@@ -432,7 +457,7 @@ public class AccountSwitcherViewModelTests
         var fake = new FakeAccountRegistry(
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA) });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         var requests = 0;
         vm.OnSwitchRequested = (_, _) => { requests++; return Task.CompletedTask; };
@@ -465,7 +490,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB, requireConfirm: true),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         string? requested = null;
         bool? requestedConfirmed = null;
@@ -497,7 +522,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB, requireConfirm: true),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         var requests = 0;
         vm.ConfirmReauth = () => Task.FromResult(false);  // Hello declined / cancelled
@@ -534,7 +559,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB, requireConfirm: true),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
 
         var before = FaunaApp.Core.Services.E2eSessionCounters.ActivationGestures;
@@ -569,7 +594,7 @@ public class AccountSwitcherViewModelTests
         var fake = new FakeAccountRegistry(
             active: ActorA,
             entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         vm.OnSwitchRequested = (_, _) => Task.CompletedTask;
 
@@ -596,7 +621,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB, requireConfirm: true),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         var requests = 0;
         vm.ConfirmReauth = null;                 // no native gate wired
@@ -619,7 +644,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB, requireConfirm: false),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         var gateConsulted = false;
         vm.ConfirmReauth = () => { gateConsulted = true; return Task.FromResult(true); };
@@ -647,7 +672,7 @@ public class AccountSwitcherViewModelTests
                 FakeAccountRegistry.Entry(ActorA),
                 FakeAccountRegistry.Entry(ActorB, requireConfirm: false),
             });
-        var vm = new AccountSwitcherViewModel(fake);
+        var vm = new AccountSwitcherViewModel(fake, NeverRemoves);
         vm.Refresh();
         Assert.False(vm.Accounts[1].RequireConfirmToActivate);   // the rendered row is stale-OFF
 

@@ -18,6 +18,11 @@ pub mod publish;
 pub mod relay_endpoint;
 pub mod relay_pool;
 pub mod relays;
+// The Nostr advertisement of a sold post (`monetization.md` § The Nostr
+// advertisement of a sold post): always compiled — `clear`, the lifecycle
+// retractions and the push are de-escalation or serve what a full build
+// authored; only `set` is `zaps`-gated, inside the module.
+pub mod advertise;
 pub mod store;
 pub mod sync_worker;
 // The NIP-57 zap surfaces — the `zaps` registry member, a SUBSET of `payments`
@@ -25,6 +30,10 @@ pub mod sync_worker;
 // composition with `nostr` is STRUCTURAL: they sit inside this already-
 // `nostr`-gated module, so the reachable surface is `nostr AND zaps` with no
 // cargo edge between the two features and no `cfg(all(...))` at each site.
+// The zap purchase's delivery of a stranger's claim code — the purchase leg's
+// completion, so `zaps`-gated with it.
+#[cfg(feature = "zaps")]
+pub mod claim_delivery;
 #[cfg(feature = "zaps")]
 pub mod zap_ingest;
 #[cfg(feature = "zaps")]

@@ -25,7 +25,7 @@ def app_launch_config(app_name: str, request) -> dict:
     a ``--app macos`` run never triggers the iOS build, and vice versa. The dict
     spreads into both call shapes (``launch({...})`` and
     ``make_launch_harness(app, **cfg)``)."""
-    if app_name == "ios":
+    if app_name in ("ios", "ios-kids"):  # ios-kids: the kids build on ios's venue
         setup = request.getfixturevalue("ios_setup")
         return {"app_path": setup["app_path"], "udid": setup["udid"]}
     if app_name == "android":

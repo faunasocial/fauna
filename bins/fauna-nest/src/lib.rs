@@ -139,6 +139,7 @@ pub mod domain_expiry_handlers;
 pub mod domain_expiry_test_hook;
 pub mod drafts_handlers;
 pub mod email_handlers;
+pub mod entitlement_lapse;
 pub mod factory_reset;
 pub mod mail_body_plane;
 pub mod webdav_bridge;
@@ -190,6 +191,10 @@ pub mod filesync_handlers;
 pub mod generation_escrow_handlers;
 #[cfg(feature = "test-hooks")]
 pub mod generation_escrow_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod guardian_content_document_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod guardian_policy_test_hook;
 pub mod host_maintenance;
 pub mod http_range;
 pub mod identity_domain_core;
@@ -220,11 +225,11 @@ pub mod mail_import_tunnel;
 pub(crate) mod mail_submitter_proof;
 #[cfg(feature = "test-hooks")]
 pub mod mass_mailing_test_hook;
+pub mod materializer;
 pub mod media_handlers;
 pub mod media_proxy_routes;
 pub mod media_ticket;
 pub mod media_ticket_secret;
-pub mod membership_lapse;
 #[cfg(feature = "test-hooks")]
 pub mod membership_lapse_test_hook;
 pub mod mls_replica_handlers;
@@ -239,6 +244,8 @@ pub mod mta_sts_advance_test_hook;
 pub mod mta_sts_test_hook;
 pub mod nat_mode_core;
 pub mod nat_mode_handlers;
+#[cfg(feature = "test-hooks")]
+pub mod nest_id_claim_test_hook;
 pub mod nest_identity;
 /// The nest-internal key-encryption key family — its context strings, the one
 /// walk that re-keys every member at deployment-seed rotation, and the one boot
@@ -330,9 +337,13 @@ pub mod rescore_drain_test_hook;
 pub mod room_post_view;
 pub mod room_read_key;
 #[cfg(feature = "test-hooks")]
+pub mod room_seat_key_test_hook;
+#[cfg(feature = "test-hooks")]
 pub mod spam_baseline_cadence_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod spam_history_gc_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod trending_test_hook;
 // pairing_routes deleted — `fauna.pair.list` is the sole surface (pair_handlers).
 pub mod payload_store;
 // The money plane (`dynamic-features.md` § Charter members, the `payments`
@@ -372,6 +383,8 @@ pub mod push_handlers;
 pub mod router_status;
 // push_routes deleted — `fauna.push.*` is the sole surface (push_handlers).
 #[cfg(feature = "test-hooks")]
+pub mod materialize_tear_test_hook;
+#[cfg(feature = "test-hooks")]
 pub mod pending_actions_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod push_test_hooks;
@@ -383,9 +396,12 @@ pub mod recovery_landing_test_hook;
 pub mod region_relay;
 pub mod region_tier;
 pub mod registration;
+#[cfg(feature = "test-hooks")]
+pub mod registration_mode_report_test_hook;
 pub mod relay_admission;
 #[cfg(feature = "test-hooks")]
 pub mod rename_cert_test_hook;
+pub mod rename_driver;
 pub mod restore;
 pub mod routes;
 pub mod rpc_errors;
@@ -401,6 +417,8 @@ pub mod web_blank_site_test_hook;
 pub mod web_domain_activate_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod web_render_fault_test_hook;
+#[cfg(feature = "test-hooks")]
+pub mod web_render_park_test_hook;
 // search_routes deleted — `fauna.search.query` is the sole surface (search_handlers).
 pub mod security_notify;
 pub mod segment_backup;
@@ -1310,9 +1328,17 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     #[cfg(feature = "test-hooks")]
     let router = router.merge(keypackage_age_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(room_seat_key_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(share_link_age_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(guardian_content_document_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(guardian_policy_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(recovery_landing_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(materialize_tear_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(version_prune_test_hook::routes());
     #[cfg(feature = "test-hooks")]
@@ -1322,7 +1348,11 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     #[cfg(feature = "test-hooks")]
     let router = router.merge(web_render_fault_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(web_render_park_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(rescore_drain_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(trending_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(spam_history_gc_test_hook::routes());
     #[cfg(feature = "test-hooks")]
@@ -1384,7 +1414,11 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     #[cfg(feature = "test-hooks")]
     let router = router.merge(capability_withhold_test_hook::routes());
     #[cfg(feature = "test-hooks")]
+    let router = router.merge(nest_id_claim_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
     let router = router.merge(tls_cert_withhold_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(registration_mode_report_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(channel_refusal_test_hook::routes());
     #[cfg(feature = "test-hooks")]
@@ -2076,6 +2110,12 @@ pub(crate) fn build_rpc_router() -> rpc_router::RpcRouter {
     // § Zap receipts — the trust model).
     #[cfg(all(feature = "nostr", feature = "zaps"))]
     nostr::zap_signer_handlers::register_nostr_zap_signer_handlers(&mut b);
+    // The Nostr advertisement of a sold post (`fauna.nostr.advertise.*`) — the
+    // zap purchase leg's ingress (`docs/goal/behavior/monetization.md` § The
+    // Nostr advertisement of a sold post). `set` registers with `zaps` inside
+    // the module; `clear` in every nostr build.
+    #[cfg(feature = "nostr")]
+    nostr::advertise::register_nostr_advertise_handlers(&mut b);
     b.build()
 }
 
@@ -2578,8 +2618,15 @@ pub async fn start_server(
     // `mx_resolver` field below). A `test-hooks` build answers a domain whose
     // MX the e2e seeded into `dns_verifier` from that seed, so a tier_3 test
     // can stand up a no-MX domain, a failed lookup or a two-MX set.
-    let live_mx: Arc<dyn fauna_mail::outbound::mx::MxRrsetResolver> =
-        Arc::new(fauna_mail::outbound::mx::LiveMxRrsetResolver);
+    //
+    // Both outbound DANE legs consult ONE resolver-path posture, probed once
+    // per process against the root zone (`smtp-server.md` § MX resolution
+    // item 1, the resolver-path paragraph): capable → validating lookups whose
+    // failures delay delivery; incapable → an honest pre-DANE MTA.
+    let dnssec_path = fauna_mail::outbound::dnssec_path::DnssecPath::live();
+    let live_mx: Arc<dyn fauna_mail::outbound::mx::MxRrsetResolver> = Arc::new(
+        fauna_mail::outbound::mx::LiveMxRrsetResolver::new(dnssec_path.clone()),
+    );
     #[cfg(feature = "test-hooks")]
     let mx_resolver: Arc<dyn fauna_mail::outbound::mx::MxRrsetResolver> = Arc::new(
         crate::dns_seed_test_hook::SeededMxRrsetResolver::new(dns_verifier.clone(), live_mx),
@@ -2621,6 +2668,34 @@ pub async fn start_server(
         }
     } else {
         None
+    };
+    // The materializer (`encryption-at-rest.md` § Capability tiering → *The
+    // materialization grant*): the in-process holder of materialization
+    // grants. Its init IS the boot reconcile — every `__materialized/<actor>/<kind>/`
+    // view whose bound grant no longer stands is deleted here, before the nest
+    // serves. `None` on a box with no data dir or an admin-revoked holder row
+    // (init then deletes every area itself).
+    let materializer = match crate::mail_enable::data_dir_from_db_path(&nest_config.nest.db_path) {
+        Some(data_dir) => {
+            match crate::materializer::Materializer::init(
+                &data_dir,
+                db.clone(),
+                crate::materializer::ContentStores {
+                    mail: mail_segments.clone(),
+                    calendar: cal_segments.clone(),
+                    card: card_segments.clone(),
+                },
+            )
+            .await
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("materializer init failed: {e:#}; no materialized view is kept");
+                    None
+                }
+            }
+        }
+        None => None,
     };
     let web_content_service = backup_service.as_ref().map(|svc| {
         let mut service =
@@ -2779,6 +2854,7 @@ pub async fn start_server(
         web_content_service,
         host_resolver,
         web_serve_holder,
+        materializer,
         push_service,
         services_json_path,
         // Same data-dir derivation as main.rs (parent of nest.db_path); the
@@ -2876,6 +2952,10 @@ pub async fn start_server(
         custody_hosting_clock_offset_secs: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         #[cfg(feature = "test-hooks")]
         custody_hosting_meter_fault: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(feature = "test-hooks")]
+        custodied_fleet_handshakes: Arc::default(),
+        #[cfg(feature = "test-hooks")]
+        materialize_tear: Arc::default(),
         mta_sts_fetcher,
         dns_verifier,
         #[cfg(feature = "test-hooks")]
@@ -2886,8 +2966,11 @@ pub async fn start_server(
         // `test-hooks` gate); the test override is consulted ahead of it in
         // the handler. Unlike the MTA-STS fetcher there's no fallible
         // construction — `LiveTlsaResolver` builds a fresh DNSSEC resolver per
-        // lookup (DANE lookups are infrequent: once per surviving MX host).
-        tlsa_resolver: Arc::new(fauna_mail::outbound::dane::LiveTlsaResolver),
+        // lookup (DANE lookups are infrequent: once per surviving MX host), on
+        // a capable resolver path only (`dnssec_path` below).
+        tlsa_resolver: Arc::new(fauna_mail::outbound::dane::LiveTlsaResolver::new(
+            dnssec_path.clone(),
+        )),
         // The MX leg of the same split. Outbound DANE may only bind to
         // a name that came out of a DNSSEC-validated MX RRset (RFC 7672
         // §2.2), and the Go stdlib resolver cannot validate — so nest
@@ -2896,6 +2979,7 @@ pub async fn start_server(
         // infallible, a fresh DNSSEC resolver per lookup (one lookup per
         // delivery attempt).
         mx_resolver,
+        dnssec_path,
         #[cfg(feature = "test-hooks")]
         tlsa_override: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         // Deliverability-diagnostic outbound-STARTTLS prober (the gmail `:25`
@@ -2922,7 +3006,11 @@ pub async fn start_server(
         #[cfg(feature = "test-hooks")]
         capabilities_withheld: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         #[cfg(feature = "test-hooks")]
+        nest_id_claim_override: Arc::new(std::sync::Mutex::new(None)),
+        #[cfg(feature = "test-hooks")]
         tls_cert_fetch_withheld: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        #[cfg(feature = "test-hooks")]
+        registration_mode_report_override: Arc::new(std::sync::Mutex::new(None)),
         #[cfg(feature = "test-hooks")]
         channel_send_refusal: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "test-hooks")]
@@ -3344,6 +3432,12 @@ pub async fn start_server(
     // kinds' leases so clients see it as the runner and the re-score drain
     // gate opens (delegation_runner module doc).
     state.spawn_scoped(delegation_runner::run(state.clone()));
+
+    // The materializer's worker: the trickle and catch-up wake loop and the
+    // reconcile tick (`materializer` module doc).
+    if let Some(m) = state.materializer.clone() {
+        state.spawn_scoped(m.run());
+    }
 
     // Start the installed WASM plugins (`third-party.md` § The principal
     // model → *Hosted principals*). A plugin whose files are gone or whose
@@ -3845,6 +3939,17 @@ async fn serve_admitted(
     ));
     let header_parse_shed = std::sync::Arc::new(fauna_conn_limit::ShedCounter::new());
 
+    // A loopback connection whose PROXY-v2 header the nest refused resolves
+    // to `UNTRUSTED_PROXIED_SOURCE` and is served as one untrusted remote
+    // source (`read_optional_proxy_header`, *A refused header forfeits
+    // loopback trust*). Say so — one line per `SHED_LOG_INTERVAL` carrying the
+    // count, the same reporter the caps use: one such line is a forging
+    // co-resident process, a steady stream is a router whose secret this
+    // nest does not hold — the misprovision that used to read as "every
+    // client is loopback" and now reads as this line plus every remote
+    // bucket filling from one source.
+    let refused_header_report = std::sync::Arc::new(fauna_conn_limit::ShedCounter::new());
+
     loop {
         let (stream, addr) = match listener.accept().await {
             Ok(conn) => conn,
@@ -3887,6 +3992,7 @@ async fn serve_admitted(
         let router_auth = router_auth.clone();
         let header_parse_gate = std::sync::Arc::clone(&header_parse_gate);
         let header_parse_shed = std::sync::Arc::clone(&header_parse_shed);
+        let refused_header_report = std::sync::Arc::clone(&refused_header_report);
         let svc = match make_service.call(addr).await {
             Ok(s) => s,
             Err(e) => match e {},
@@ -3940,6 +4046,17 @@ async fn serve_admitted(
                     return;
                 }
             };
+            if source_addr == UNTRUSTED_PROXIED_SOURCE
+                && let Some(n) = refused_header_report.record()
+            {
+                tracing::warn!(
+                    "PROXY-v2 header from loopback peer {addr} refused (router-auth TLV \
+                     missing or mismatched, or malformed); serving it as an untrusted \
+                     remote source with no loopback trust ({n} refused since last line) \
+                     — on a router-fronted box check /data/keys/router/proxy-secret \
+                     provisioning"
+                );
+            }
             // Per-source-IP cap: now that the real client IP is resolved, shed
             // this connection (before the expensive TLS handshake) if the source
             // already holds its ceiling of live connections — the admin's cap
@@ -3956,6 +4073,8 @@ async fn serve_admitted(
                     if let Some(shed) = per_ip_shed.record() {
                         let kind = if source_addr.ip().is_loopback() {
                             "loopback connection ceiling"
+                        } else if source_addr == UNTRUSTED_PROXIED_SOURCE {
+                            "per-IP connection cap (the untrusted-proxied bucket)"
                         } else {
                             "per-IP connection cap"
                         };
@@ -4186,11 +4305,25 @@ impl<IO: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Admitted<IO> {
 /// box that provisioned the secret), a header is honoured only if it carries a
 /// matching [`fauna_proxy_protocol::TLV_TYPE_ROUTER_AUTH`] TLV — the router
 /// writes the secret from a file only it and nest can read, so a bridge UID
-/// cannot produce one. A header with a missing/wrong secret falls back to the
-/// genuine loopback peer (untrusted), not the spoofed address. When `None`
-/// (non-router box, or a provisioning gap), the trust-any-loopback-header
-/// behaviour stands. See `docs/goal/architecture/security.md` § Co-resident
-/// process trust boundary.
+/// cannot produce one. When `None` (non-router box, or a provisioning gap),
+/// the trust-any-loopback-header behaviour stands. See
+/// `docs/goal/architecture/security.md` § Co-resident process trust boundary.
+///
+/// **A refused header forfeits loopback trust.** A loopback peer that sent the PROXY signature but whose header
+/// the nest does not honour — a missing or wrong auth TLV, an unparseable
+/// prefix or address block, an oversized declared length, a header stalled
+/// past the parse timeout — resolves to [`UNTRUSTED_PROXIED_SOURCE`], a
+/// constant non-loopback source: never the conveyed address (unauthenticated,
+/// so a forger would pick its own rate-limit bucket) and never the loopback
+/// peer (which carries a trust — the `request_enrollment` gate, the loopback
+/// connection ceiling and request-rate aggregate — that only a headerless
+/// same-box dial has earned). Before this, a router provisioned with a
+/// secret this nest did not hold would have delivered every internet client
+/// as `127.0.0.1`. The connection is still served: a misprovisioned box
+/// degrades to one shared untrusted bucket and says so (the accept loop's
+/// rate-limited warning), rather than failing open or stranding its users
+/// (`security.md` § Co-resident process trust boundary → *A refused header
+/// forfeits loopback trust*).
 ///
 /// **A non-loopback `tcp_peer` never touches `header_parse_gate`** — the early
 /// return below is unconditional, so a genuinely external client is admitted
@@ -4199,6 +4332,21 @@ impl<IO: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Admitted<IO> {
 /// *before* the first byte is read; a full gate returns
 /// `Err(ErrorKind::WouldBlock)` immediately — the caller sheds the connection
 /// rather than let it join a stall it can't yet be distinguished from.
+/// The source a loopback connection resolves to when it carried a PROXY-v2
+/// signature the nest refused to honour ([`read_optional_proxy_header`], *A
+/// refused header forfeits loopback trust*). Constant and non-loopback by
+/// construction: `0.0.0.0:0` is no peer's real address and `is_loopback()` is
+/// false on it, so every consumer keyed on the resolved source — the
+/// dispatcher's `requires_loopback_peer` gate, the per-IP connection cap, the
+/// request-rate governor, the anonymous-kind limiter, the sign-in address
+/// record — treats such a connection as one untrusted remote source without
+/// learning a new flag. Deliberately ONE bucket for all of them: a loopback
+/// peer's only other distinguishing bit is its TCP source port, which the
+/// peer chooses.
+pub(crate) const UNTRUSTED_PROXIED_SOURCE: std::net::SocketAddr = std::net::SocketAddr::V4(
+    std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
+);
+
 async fn read_optional_proxy_header(
     mut stream: tokio::net::TcpStream,
     tcp_peer: std::net::SocketAddr,
@@ -4230,7 +4378,8 @@ async fn read_optional_proxy_header(
         let mut prefix = [0u8; fauna_proxy_protocol::PREFIX_LEN];
         stream.read_exact(&mut prefix).await?;
         let Some(info) = fauna_proxy_protocol::parse_prefix(&prefix) else {
-            return Ok(tcp_peer);
+            tracing::debug!("PROXY-v2 header from {tcp_peer} refused: unparseable prefix");
+            return Ok(UNTRUSTED_PROXIED_SOURCE);
         };
         // Defensive cap: our router emits a 12/36-byte address block plus, when
         // authenticating, a small router-auth TLV (≤ ~1 KiB). A wildly large
@@ -4238,23 +4387,36 @@ async fn read_optional_proxy_header(
         // malformed (the stream is now out of sync, so the TLS handshake fails
         // and the connection drops — acceptable).
         if info.addr_len > 1024 {
-            return Ok(tcp_peer);
+            tracing::debug!(
+                "PROXY-v2 header from {tcp_peer} refused: declared length {} over the cap",
+                info.addr_len
+            );
+            return Ok(UNTRUSTED_PROXIED_SOURCE);
         }
         let mut block = vec![0u8; info.addr_len];
         stream.read_exact(&mut block).await?;
         let Some(src) = fauna_proxy_protocol::parse_src(info.fam_proto, &block) else {
-            return Ok(tcp_peer);
+            tracing::debug!("PROXY-v2 header from {tcp_peer} refused: unparseable address block");
+            return Ok(UNTRUSTED_PROXIED_SOURCE);
         };
         // On a router-fronted box, honour the conveyed source only when
         // the header proves it came from the router (matching auth TLV);
-        // otherwise fall back to the genuine loopback peer so a forging bridge
-        // gains nothing. Constant-time compare avoids a timing oracle on the
-        // secret.
+        // otherwise the untrusted-proxied sentinel — never the loopback peer,
+        // so a forging bridge gains nothing, and a router carrying a secret
+        // this nest does not hold delivers its clients as untrusted remotes,
+        // not as loopback. Constant-time compare avoids a timing oracle on
+        // the secret.
         match expected_router_auth {
             Some(expected) => {
                 match fauna_proxy_protocol::parse_router_auth_tlv(info.fam_proto, &block) {
                     Some(got) if fauna_core::secret::constant_time_eq(got, expected) => Ok(src),
-                    _ => Ok(tcp_peer),
+                    _ => {
+                        tracing::debug!(
+                            "PROXY-v2 header from {tcp_peer} refused: router-auth TLV missing \
+                             or mismatched"
+                        );
+                        Ok(UNTRUSTED_PROXIED_SOURCE)
+                    }
                 }
             }
             None => Ok(src),
@@ -4265,7 +4427,10 @@ async fn read_optional_proxy_header(
     let resolved = match tokio::time::timeout(std::time::Duration::from_secs(10), parse).await {
         Ok(Ok(addr)) => addr,
         Ok(Err(e)) => return Err(e),
-        Err(_elapsed) => tcp_peer,
+        // The signature byte arrived and the rest never did: a header the
+        // nest did not honour, so no loopback trust (the stream is out of sync
+        // anyway; the TLS handshake fails and the connection drops).
+        Err(_elapsed) => UNTRUSTED_PROXIED_SOURCE,
     };
     Ok((stream, resolved))
 }
@@ -4355,7 +4520,7 @@ mod proxy_header_tests {
     //! SNI router, which prepends a header carrying the real client IP, while
     //! the in-container bridge dials nest's loopback directly with no header.
     //! These tests drive the parser over a real loopback socket pair.
-    use super::read_optional_proxy_header;
+    use super::{UNTRUSTED_PROXIED_SOURCE, read_optional_proxy_header};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -4451,17 +4616,21 @@ mod proxy_header_tests {
     #[tokio::test]
     async fn spoofed_header_without_secret_is_not_trusted() {
         // A co-resident bridge forges a PROXY header (no auth TLV) to spoof a
-        // source IP. nest expects the secret, so the forged address is rejected
-        // and the connection keeps its genuine loopback peer.
+        // source IP. nest expects the secret, so the forged address is
+        // rejected — and the connection resolves to the
+        // untrusted-proxied sentinel, not back to its genuine loopback peer,
+        // whose loopback trust a refused header forfeits.
         let spoofed: std::net::SocketAddr = "203.0.113.7:54321".parse().unwrap();
         let dst: std::net::SocketAddr = "198.51.100.1:443".parse().unwrap();
         let mut payload = fauna_proxy_protocol::encode_v2(spoofed, dst); // no TLV
         payload.extend_from_slice(&CLIENT_HELLO);
         let (resolved, trailing) = resolve_with_auth(payload, Some(ROUTER_SECRET)).await;
-        assert!(
-            resolved.ip().is_loopback(),
-            "a header without the router secret must NOT be trusted; got {resolved}"
+        assert_eq!(
+            resolved, UNTRUSTED_PROXIED_SOURCE,
+            "a header without the router secret must NOT be trusted, and the connection \
+             forfeits loopback trust; got {resolved}"
         );
+        assert!(!resolved.ip().is_loopback());
         assert_eq!(trailing, CLIENT_HELLO, "the ClientHello must survive");
     }
 
@@ -4474,10 +4643,12 @@ mod proxy_header_tests {
             fauna_proxy_protocol::encode_v2_authed(spoofed, dst, Some(b"the-wrong-secret-guess!!"));
         payload.extend_from_slice(&CLIENT_HELLO);
         let (resolved, trailing) = resolve_with_auth(payload, Some(ROUTER_SECRET)).await;
-        assert!(
-            resolved.ip().is_loopback(),
-            "a header with a wrong secret must NOT be trusted; got {resolved}"
+        assert_eq!(
+            resolved, UNTRUSTED_PROXIED_SOURCE,
+            "a header with a wrong secret must NOT be trusted, and the connection forfeits \
+             loopback trust; got {resolved}"
         );
+        assert!(!resolved.ip().is_loopback());
         assert_eq!(trailing, CLIENT_HELLO, "the ClientHello must survive");
     }
 
@@ -4493,6 +4664,43 @@ mod proxy_header_tests {
             "a headerless dial is unaffected by the auth gate; got {resolved}"
         );
         assert_eq!(trailing, CLIENT_HELLO, "the ClientHello must be untouched");
+    }
+
+    #[tokio::test]
+    async fn malformed_header_from_loopback_forfeits_loopback_trust() {
+        // The PROXY signature byte followed by garbage — a header the nest
+        // cannot parse. It is still a header-carrying loopback connection, so
+        // it resolves to the untrusted-proxied sentinel, never back to the
+        // loopback peer. The parse needs no
+        // secret to refuse it, so this holds on a direct-listener nest too.
+        let mut payload =
+            vec![fauna_proxy_protocol::SIGNATURE[0]; fauna_proxy_protocol::PREFIX_LEN];
+        payload.extend_from_slice(&CLIENT_HELLO);
+        let (resolved, trailing) = resolve(payload).await;
+        assert_eq!(
+            resolved, UNTRUSTED_PROXIED_SOURCE,
+            "an unparseable header must forfeit loopback trust; got {resolved}"
+        );
+        assert_eq!(
+            trailing, CLIENT_HELLO,
+            "the bytes after the consumed prefix stay on the stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_header_from_loopback_forfeits_loopback_trust() {
+        // A well-formed prefix declaring an address block past the defensive
+        // cap. Only the prefix is consumed (the stream is out of sync after,
+        // as documented) and the source is the sentinel.
+        let real: std::net::SocketAddr = "203.0.113.7:54321".parse().unwrap();
+        let dst: std::net::SocketAddr = "198.51.100.1:443".parse().unwrap();
+        let mut payload = fauna_proxy_protocol::encode_v2(real, dst);
+        payload[14..16].copy_from_slice(&2000u16.to_be_bytes());
+        let (resolved, _trailing) = resolve_with_auth(payload, Some(ROUTER_SECRET)).await;
+        assert_eq!(
+            resolved, UNTRUSTED_PROXIED_SOURCE,
+            "an oversized header must forfeit loopback trust; got {resolved}"
+        );
     }
 
     // ---- Header-parse gate ----

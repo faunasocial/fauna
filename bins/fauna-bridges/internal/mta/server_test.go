@@ -66,7 +66,7 @@ func TestServerAcceptsBasicMessage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- runListenerWithBackend(ctx, ln, backend, nil, "test.example", 0, 0, nil, slog.Default())
+		serveErr <- runListenerWithBackend(ctx, ln, backend, nil, "test.example", 0, nil, slog.Default())
 	}()
 
 	addr := ln.Addr().String()
@@ -302,7 +302,7 @@ func startBackendListenerTLS(t *testing.T, backend *inboundBackend, tlsConfig *t
 	ctx, cancelFn := context.WithCancel(context.Background())
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- runListenerWithBackend(ctx, ln, backend, tlsConfig, domain, 0, 0, nil, slog.Default())
+		serveErr <- runListenerWithBackend(ctx, ln, backend, tlsConfig, domain, 0, nil, slog.Default())
 	}()
 	time.Sleep(20 * time.Millisecond)
 	cancel = func() {
@@ -2730,5 +2730,92 @@ func TestInboundMessageRatePerIPRefusesOverTheHourlyCap(t *testing.T) {
 func TestInboundMessageRateCapIsFiftyAnHour(t *testing.T) {
 	if maxInboundMsgsPerIPPerHour != 50 {
 		t.Fatalf("maxInboundMsgsPerIPPerHour = %d, want 50", maxInboundMsgsPerIPPerHour)
+	}
+}
+
+// TestListenerBackstopIsTheProductCeiling pins go-smtp's own size field — what
+// EHLO advertises and what go-smtp enforces before our hooks run — to the
+// product ceiling, never an admin cap read at boot. A boot value there refused
+// a cap the admin later raised until the bridge restarted; the admin's cap is
+// enforced live by checkDeclaredSize and the Data guard instead
+// (mail-message-size.md, the perimeter + EHLO bullet).
+func TestListenerBackstopIsTheProductCeiling(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	backend := &recordingBackend{received: make(chan []byte, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = runListenerWithBackend(ctx, ln, backend, nil, "test.example", 0, nil, slog.Default()) }()
+	var c *smtp.Client
+	for i := 0; i < 50; i++ {
+		if c, err = smtp.Dial(ln.Addr().String()); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("smtp.Dial: %v", err)
+	}
+	defer c.Close()
+	if err := c.Hello("client.example"); err != nil {
+		t.Fatalf("EHLO: %v", err)
+	}
+	ok, param := c.Extension("SIZE")
+	if !ok {
+		t.Fatal("EHLO must advertise SIZE")
+	}
+	if want := fmt.Sprint(mailfauna.MaxMessageBytesCeiling()); param != want {
+		t.Errorf("EHLO SIZE = %q, want the product ceiling %s", param, want)
+	}
+}
+
+// TestMailRefusesADeclaredSizeOverTheLiveCap: a `MAIL FROM … SIZE=` above the
+// session's live cap is refused 552 5.3.4 before any transfer; at the cap, or
+// undeclared, it passes. checkDeclaredSize is the one predicate both doors call.
+func TestMailRefusesADeclaredSizeOverTheLiveCap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		opts   *gosmtp.MailOptions
+		cap    uint32
+		refuse bool
+	}{
+		{"over the cap", &gosmtp.MailOptions{Size: 101}, 100, true},
+		{"at the cap", &gosmtp.MailOptions{Size: 100}, 100, false},
+		{"undeclared", &gosmtp.MailOptions{}, 100, false},
+		{"no options", nil, 100, false},
+		{"no cap", &gosmtp.MailOptions{Size: 1 << 40}, 0, false},
+	} {
+		got := checkDeclaredSize(tc.opts, tc.cap)
+		if !tc.refuse {
+			if got != nil {
+				t.Errorf("%s: refused %v, want pass", tc.name, got)
+			}
+			continue
+		}
+		if got == nil || got.Code != 552 || got.EnhancedCode != (gosmtp.EnhancedCode{5, 3, 4}) {
+			t.Errorf("%s: got %v, want 552 5.3.4", tc.name, got)
+		}
+	}
+
+	s := &inboundSession{
+		logger:          slog.Default(),
+		clientIP:        "127.0.0.1",
+		maxMessageBytes: 100,
+		sleep:           func(time.Duration) {},
+	}
+	err := s.Mail("alice@example.org", &gosmtp.MailOptions{Size: 101})
+	var smtpErr *gosmtp.SMTPError
+	if !errors.As(err, &smtpErr) || smtpErr.Code != 552 {
+		t.Fatalf("inbound MAIL FROM over the live cap: got %v, want 552", err)
+	}
+	if s.from != "" {
+		t.Error("a refused MAIL FROM must not open a transaction")
+	}
+	if err := s.Mail("alice@example.org", &gosmtp.MailOptions{Size: 100}); err != nil {
+		t.Fatalf("inbound MAIL FROM at the live cap: got %v, want accept", err)
 	}
 }

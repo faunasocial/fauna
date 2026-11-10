@@ -469,14 +469,22 @@ def test_a_paid_subscription_ends_when_its_window_runs_out_and_a_renewal_extends
         f"a lapsed buyer must not be served the tier's key: {exc.value.code}"
     )
 
-    # 2. A renewal re-entitles: it queues like a new grant (the lapsed row is
-    #    not active), the author's client completes it, and the window it
-    #    carried is the one in force.
+    # 2. A renewal re-entitles. The window ended a minute ago, well inside
+    #    PAID_WINDOW_LAPSE_GRACE_SECS, so no removal is queued yet and the
+    #    standing roster row is re-stamped in place — a late renewal is a
+    #    renewal, not a request (monetization.md § Pillar 3 → *Expiry &
+    #    revocation*: "Inside the grace a renewal re-stamps the standing row
+    #    in place whether or not the window has passed").
     first_until = now + 3600
     reply = _pay(paid_nest, creator, secret,
                  _payment_body(reference=buyer["actor_id_hex"], valid_until=first_until))
-    assert reply.get("queued") is True, f"a lapsed buyer's renewal re-queues: {reply!r}"
-    creator_actor.subscription_grant_pending("gold", period_key, buyer_id)
+    assert reply.get("queued") is False, (
+        f"a renewal inside the lapse grace re-stamps the standing row, never re-queues: {reply!r}"
+    )
+    assert [
+        r for r in creator_actor.subscription_requests_list()
+        if bytes(r["subscriber_id"]) == bytes(buyer["actor_id_bytes"])
+    ] == [], "a renewal inside the grace leaves nothing for the author's client to do"
     sub = buyer_actor.subscription_status(author_id)
     assert sub.get("tier") == "gold", f"the renewal must put the subscription back in force: {sub!r}"
     assert sub.get("expires_at") == first_until * 1_000_000, (
@@ -659,3 +667,136 @@ def test_a_bought_post_stays_unlocked_with_no_end_date(paid_nest):
     row = [c for c in listed.get("claims", []) if c.get("code") == minted["code"]]
     assert len(row) == 1 and row[0].get("valid_until") is None, f"{listed!r}"
     assert row[0].get("redeemed_by") == bytes(buyer["actor_id_bytes"]), f"{row!r}"
+
+
+def _stripe_post(paid_nest, author_hex: str, secret: str, evt: str, ty: str, obj: dict):
+    """POST one Stripe-shaped event, signed the way the production adapter
+    verifies (`Stripe-Signature: t=<secs>,v1=hex(HMAC_SHA256(secret, "t.body"))`
+    — `libs/fauna-payments/src/stripe.rs::sign`). Returns (status, reply)."""
+    body = json.dumps({"id": evt, "type": ty, "data": {"object": obj}}).encode()
+    t = int(time.time())
+    sig = hmac.new(secret.encode(), f"{t}.".encode() + body, hashlib.sha256).hexdigest()
+    req = urllib.request.Request(
+        f"{paid_nest['url']}/api/v1/payments/webhook/{author_hex}/stripe", data=body, method="POST"
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Stripe-Signature", f"t={t},v1={sig}")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_a_refund_voids_the_purchases_code_after_redemption_a_renewal_keeps_it_and_an_unpaid_checkout_grants_nothing(paid_nest):
+    """monetization.md § Pillar 3 → *Expiry & revocation* (the purchase
+    reference, ruled 2026-11-05): a renewal or a refund finds its entitlement by
+    the PURCHASE, never by the delivery, and only money that has cleared is a
+    payment. Driven through the production Stripe adapter (the settlement rule
+    lives only there — the fake provider maps any other event to ignored), each
+    event its own delivery with its own id, naming the purchase only as Stripe
+    does:
+
+    - an unbound paid checkout mints a code; the subscription's renewal invoice
+      re-stamps that open code (same code, the new window) instead of minting
+      another;
+    - the buyer redeems the code and the author's client completes the grant;
+      a refund of the renewal's charge — naming only its payment intent — voids
+      the code although it was redeemed, and ends the buyer's access;
+    - a checkout completed unpaid, or needing no payment, grants nothing and
+      mints no code though it names a buyer; a delayed payment that settles
+      mints the code, and its failure voids it."""
+    creator = create_actor_and_register(
+        paid_nest["port"], base_url=paid_nest["url"], admin_signing_key=paid_nest["admin_sk"]
+    )
+    creator_actor = ApiActor(
+        paid_nest["url"], creator["token"], creator["actor_id_hex"], bytes(creator["signing_key"]),
+    )
+    reply, period_key = creator_actor.subscription_create_tier_with_key(
+        "gold", rank=1, auto_approve=False, price_hint="$5/mo"
+    )
+    assert reply.get("created") is True, f"tier create failed: {reply!r}"
+    secret = f"whsec_{uuid.uuid4().hex}"
+    saved = creator_actor._ws_call(
+        "fauna.payments.providers.set", {"kind": "stripe", "webhook_secret": secret, "tier": "gold"},
+    )
+    assert saved.get("saved") is True, f"providers.set failed: {saved!r}"
+    author_hex = creator["actor_id_hex"]
+    author_id = bytes(creator["actor_id_bytes"])
+    tag = uuid.uuid4().hex[:8]
+    subscription, renewal_intent = f"sub_{tag}", f"pi_{tag}_2"
+
+    def post(n: int, ty: str, obj: dict) -> dict:
+        status, reply = _stripe_post(paid_nest, author_hex, secret, f"evt_{tag}_{n}", ty, obj)
+        assert status == 200, f"a signed {ty} must be accepted: {status} {reply!r}"
+        return reply
+
+    def claims() -> dict[str, dict]:
+        rows = creator_actor._ws_call("fauna.payments.claims.list", {}).get("claims", [])
+        return {c["code"]: c for c in rows}
+
+    # 1. An unbound paid checkout mints a code.
+    paid = post(1, "checkout.session.completed",
+                {"id": f"cs_{tag}", "payment_status": "paid", "subscription": subscription})
+    assert paid.get("status") == "claim_minted", f"{paid!r}"
+    code = paid["claim_code"]
+
+    # 2. The renewal invoice — its own delivery, no checkout binding, naming the
+    #    subscription — re-stamps the open code rather than minting another.
+    until = int(time.time()) + 30 * 24 * 3600
+    renewed = post(2, "invoice.paid", {"id": f"in_{tag}", "subscription": subscription,
+                                       "payment_intent": renewal_intent,
+                                       "current_period_end": until})
+    assert renewed.get("status") == "claim_exists", f"{renewed!r}"
+    assert renewed.get("claim_code") == code, f"the renewal keeps the purchase's code: {renewed!r}"
+    held = claims()
+    assert list(held) == [code], f"a renewal mints no second code: {held!r}"
+    assert held[code].get("valid_until"), f"the renewal re-stamps the code's window: {held[code]!r}"
+
+    # 3. The buyer redeems it; the author's client completes the grant.
+    buyer, buyer_actor = _fresh_buyer(paid_nest)
+    redeemed = buyer_actor._ws_call("fauna.payments.claims.redeem", {"code": code})
+    assert redeemed.get("tier") == "gold" and redeemed.get("queued") is True, f"{redeemed!r}"
+    creator_actor.subscription_grant_pending("gold", period_key, bytes(buyer["actor_id_bytes"]))
+    sub = buyer_actor.subscription_status(author_id)
+    assert sub.get("tier") == "gold", f"the redeemed purchase must be in force: {sub!r}"
+
+    # 4. A refund of the renewal's charge names only its payment intent: it
+    #    voids the code — redeemed or not — and ends the buyer's access.
+    refunded = post(3, "charge.refunded", {"id": f"ch_{tag}", "payment_intent": renewal_intent})
+    assert refunded.get("status") == "refund_applied", f"{refunded!r}"
+    assert claims()[code].get("voided_at") is not None, "the refund voids the redeemed code"
+    sub = buyer_actor.subscription_status(author_id)
+    assert sub.get("tier") != "gold", f"the refund must end the buyer's access: {sub!r}"
+    with pytest.raises(RpcCallError) as exc:
+        buyer_actor.subscription_key_blob(author_id, "gold")
+    assert exc.value.code.endswith("not_subscribed"), exc.value.code
+
+    # 5. A checkout whose money has not cleared grants nothing — not even to the
+    #    buyer it names — and mints no code; neither does one needing no payment.
+    other, _other_actor = _fresh_buyer(paid_nest)
+    want = bytes(other["actor_id_bytes"])
+    for n, payment_status in ((4, "unpaid"), (5, "no_payment_required")):
+        ignored = post(n, "checkout.session.completed",
+                       {"id": f"cs_{tag}_{payment_status}", "payment_status": payment_status,
+                        "payment_intent": f"pi_{tag}_{n}",
+                        "client_reference_id": other["actor_id_hex"]})
+        assert ignored.get("status") == "ignored", f"{payment_status}: {ignored!r}"
+    assert list(claims()) == [code], "a checkout that never paid mints no code"
+    assert not [
+        r for r in creator_actor.subscription_requests_list() if bytes(r["subscriber_id"]) == want
+    ], "a checkout that never paid queues no grant"
+
+    # 6. A delayed payment: the unpaid completion is nothing, its settlement is
+    #    the payment (a code), and a failed settlement voids what it minted.
+    delayed = {"id": f"cs_{tag}_delayed", "payment_status": "unpaid",
+               "payment_intent": f"pi_{tag}_delayed"}
+    assert post(6, "checkout.session.completed", delayed).get("status") == "ignored"
+    settled = post(7, "checkout.session.async_payment_succeeded", delayed)
+    assert settled.get("status") == "claim_minted", f"{settled!r}"
+    late = settled["claim_code"]
+    assert claims()[late].get("voided_at") is None
+    failed = post(8, "checkout.session.async_payment_failed", delayed)
+    assert failed.get("status") == "refund_applied", f"{failed!r}"
+    assert claims()[late].get("voided_at") is not None, "a failed settlement voids the code"

@@ -157,8 +157,8 @@ class AppState {
      * credentials are gone by then, so the shared LaunchMachine routes to
      * `IDENTITY_CHOICE`.
      *
-     * Set by the sign-out, by the signed-out launch's silent re-check (the
-     * record outlives the process — `AppLaunchVM.recheckSignOutResidue`), and by
+     * Set by the sign-out, by the cold launch's sign-out finish (the records
+     * outlive the process — `AppLaunchVM.start`, `AppLaunchVM.launchResidue`), and by
      * Remove Again, whose `null` closes the view. Never cleared on display: until
      * a re-sweep says otherwise the statement is still true.
      */

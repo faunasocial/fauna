@@ -78,6 +78,12 @@ pub struct ProviderForm {
     pub secret: String,
     /// The tier this provider's payments entitle.
     pub tier: String,
+    /// The product the tier is sold as, in the provider's own reference
+    /// (Stripe: the Payment Link id) — optional; empty maps every verified
+    /// payment (monetization.md § Pillar 3 → *Configuration*). Not a secret:
+    /// pre-filled from the listed provider when its kind is picked, and sent
+    /// as shown on save, so an emptied field clears the saved mapping.
+    pub product: String,
 }
 
 /// The SELF Tiers-tab author-management state, hung off [`ProfileState`].
@@ -281,6 +287,8 @@ pub fn field(st: &ProfileState, field: &TierField) -> String {
         TierField::FormPaymentUrl => form(st).map(|f| f.payment_url.clone()),
         #[cfg(feature = "payments")]
         TierField::ProviderFormSecret => provider_form(st).map(|f| f.secret.clone()),
+        #[cfg(feature = "payments")]
+        TierField::ProviderFormProduct => provider_form(st).map(|f| f.product.clone()),
     }
     .unwrap_or_default()
 }
@@ -328,6 +336,12 @@ pub fn set_field(st: &mut ProfileState, field: TierField, value: String) {
                 f.secret = value;
             }
         }
+        #[cfg(feature = "payments")]
+        TierField::ProviderFormProduct => {
+            if let Some(f) = st.author.provider_form.as_mut() {
+                f.product = value;
+            }
+        }
     }
 }
 
@@ -364,6 +378,9 @@ pub enum TierField {
     /// `subscription-provider-form-secret`
     #[cfg(feature = "payments")]
     ProviderFormSecret,
+    /// `subscription-provider-form-product`
+    #[cfg(feature = "payments")]
+    ProviderFormProduct,
 }
 
 // ── Derived strings ──────────────────────────────────────────────────────────
@@ -733,6 +750,17 @@ pub fn elements(
                 )
                 .labelled(s::PROVIDER_TIER_LABEL),
             );
+            // The optional product the tier is sold as (not a secret — it is
+            // pre-filled from the listed provider when its kind is picked).
+            out.push(
+                Element::input(
+                    ids::SUBSCRIPTION_PROVIDER_FORM_PRODUCT,
+                    f.product.clone(),
+                    Field::Profile(ProfileField::Tier(TierField::ProviderFormProduct)),
+                )
+                .labelled(s::PRODUCT_LABEL),
+            );
+            out.push(Element::chrome(s::PRODUCT_HINT));
             // Recomputes with the kind select — it is derived from the form, not
             // stored, so there is no stale-preview state to keep in sync.
             out.push(

@@ -555,10 +555,11 @@ struct FeedListView: View {
                                     .automationScope(Ids.postCard, index: offset)
                                 }
 
+                                // The next page loads as the reader reaches this
+                                // end (`feedScrollEdge` on the ScrollView) — no
+                                // load-more element.
                                 if vm.hasMore {
-                                    Button(L.common.loadMore) {
-                                        Task { await vm.loadMore() }
-                                    }
+                                    Color.clear.frame(height: 1).feedScrollEdgeSentinel()
                                 }
                             }
                         }
@@ -581,6 +582,9 @@ struct FeedListView: View {
             }
             .accessibilityIdentifier(Ids.feedView)
             .automationValue(Ids.feedView, text: { "" })
+            .feedScrollEdge(itemCount: vm.posts.count, hasMore: vm.hasMore) {
+                Task { await vm.loadMore() }
+            }
             // Engagement-cue capture: reads this ScrollView's frame as the
             // viewport every `cueCard` row is measured against, ticks while the
             // feed is on screen, and drains + seals on disappear.
@@ -628,6 +632,9 @@ struct FeedListView: View {
             // runs through `configure` once the feed is on screen at login
             // (`test_gated_post_compose` subscriber leg).
             .onChange(of: vm.managerGeneration) { selectedPost = nil }
+            // The reader's post spam marks reach the manager (report-sharing.md
+            // § Report capture → The post's mark-as-spam verb).
+            .feedSpamMarkSync(vm: vm)
             // Re-pull the current selection every time the Feed tab becomes
             // selected again — the feed has no poll backstop, so a nav back
             // (e.g. from muting a term in Settings) must re-fetch to reload the

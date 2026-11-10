@@ -1472,6 +1472,40 @@ pub fn actor_home(
     )
 }
 
+/// The family page's fold of a decision `familyApprovalsDecideOrQueue`
+/// answered QUEUED: the approvals list (the `familyApprovalsList` entries, as
+/// received) without the decided item, matched by its item key in shared Rust
+/// (`fauna_client_family::approvals_after_queued_decision`), never by display
+/// fields. Nothing is re-read while there is no nest.
+#[wasm_bindgen(js_name = familyApprovalsAfterQueuedDecision)]
+pub fn family_approvals_after_queued_decision(
+    approvals: JsValue,
+    decided: JsValue,
+) -> Result<JsValue, JsValue> {
+    let approvals: Vec<fauna_protocol::family::FamilyApprovalEntry> = from_js(approvals)?;
+    let decided: fauna_protocol::family::FamilyApprovalEntry = from_js(decided)?;
+    to_js(&fauna_client_family::approvals_after_queued_decision(
+        approvals, &decided,
+    ))
+}
+
+/// One approvals-queue entry's item identity — what the family page keys the
+/// entry's row by (`fauna_client_family::approval_item_key`), so two items
+/// one ward holds (two held bridge peers, say) never share a render key.
+#[wasm_bindgen(js_name = familyApprovalItemKey)]
+pub fn family_approval_item_key(entry: JsValue) -> Result<String, JsValue> {
+    let entry: fauna_protocol::family::FamilyApprovalEntry = from_js(entry)?;
+    Ok(fauna_client_family::approval_item_key(&entry))
+}
+
+/// `true` when the shared composer queued the gesture, `false` when it sent it.
+fn composed_queued(composed: fauna_protocol::offline_intent::Composed<()>) -> bool {
+    matches!(
+        composed,
+        fauna_protocol::offline_intent::Composed::Queued(_)
+    )
+}
+
 /// Whether the ward's own `contact_requests` (the `familyStatus` reply's list,
 /// passed back as received) hold an outstanding ask for `peer_actor_id_hex` —
 /// what `contact-request-pending` renders from. Over the shared
@@ -1752,6 +1786,10 @@ pub struct WsRpcClient {
     /// latch lives here, with the session, or the once-per-connect pass would
     /// run on every 30 s tick.
     subscriptions_connect_pass: ConnectPassLatch,
+    /// This client's name for the critical-alert post-auth split
+    /// (`fauna_client_alert_sweep::LoopClaim::claim_keyed`): minted once per
+    /// client from a counter, never reused.
+    loop_key: usize,
 }
 
 /// This browser's device id for `actor_id_hex` — the same derivation
@@ -1802,6 +1840,7 @@ impl WsRpcClient {
             inner,
             actor_id_hex,
             subscriptions_connect_pass: ConnectPassLatch::default(),
+            loop_key: crate::critical_alerts::mint_loop_key(),
         }
     }
 
@@ -4048,6 +4087,93 @@ impl WsRpcClient {
         })
     }
 
+    // ── The family `OfflineQueued` composer (account-offline-mutation.md
+    // § The offline-mutation contract): with no nest the gesture rests in this
+    // tab's outbox (`crate::offline_outbox::wired`, built by a manager's first
+    // connection word) and drains when the nest is back. Each resolves `true`
+    // when it QUEUED — re-read nothing; a queued decision's item leaves the
+    // list through `familyApprovalsAfterQueuedDecision` — and `false` when it
+    // was sent, when the page re-reads as before.
+
+    /// The approvals decide for one `familyApprovalsList` entry, passed back
+    /// whole (shared Rust passes every item key through), sent or queued.
+    #[wasm_bindgen(js_name = familyApprovalsDecideOrQueue)]
+    pub fn family_approvals_decide_or_queue(
+        &self,
+        entry: JsValue,
+        approve: bool,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let entry: fauna_protocol::family::FamilyApprovalEntry = from_js(entry)?;
+            let request = fauna_client_family::decide_request_for(&entry);
+            let queue = crate::offline_outbox::wired();
+            let composed = FamilyClient::new(client)
+                .approvals_decide_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    request,
+                    approve,
+                )
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_bool(composed_queued(composed)))
+        })
+    }
+
+    /// The un-deny of one denied bridge-DM peer, sent or queued (a queued
+    /// un-deny folds nothing).
+    #[wasm_bindgen(js_name = familyAllowBlockedDmPeerOrQueue)]
+    pub fn family_allow_blocked_dm_peer_or_queue(
+        &self,
+        supervised_actor_id: Vec<u8>,
+        bridge_id: String,
+        peer_id: String,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let queue = crate::offline_outbox::wired();
+            let composed = FamilyClient::new(client)
+                .allow_blocked_dm_peer_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    supervised_actor_id,
+                    bridge_id,
+                    peer_id,
+                )
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_bool(composed_queued(composed)))
+        })
+    }
+
+    /// The contact pre-approval, sent or queued (a queued pre-approval folds
+    /// nothing).
+    #[wasm_bindgen(js_name = familyContactAddOrQueue)]
+    pub fn family_contact_add_or_queue(
+        &self,
+        supervised_actor_id: Vec<u8>,
+        peer_actor_id: Vec<u8>,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let queue = crate::offline_outbox::wired();
+            let composed = FamilyClient::new(client)
+                .contact_add_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    supervised_actor_id,
+                    peer_actor_id,
+                )
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_bool(composed_queued(composed)))
+        })
+    }
+
     /// `fauna.family.contact.request` — the **supervised** caller's in-app
     /// ask to contact a peer (family-safety.md § Child-initiated contact
     /// requests); pending in the guardian's queue until decided.
@@ -4228,6 +4354,47 @@ impl WsRpcClient {
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::from_f64(id as f64))
+        })
+    }
+
+    /// [`Self::email_filters_create`] sent now or queued with no nest (the
+    /// `OfflineQueued` composer over the tab's outbox,
+    /// account-offline-mutation.md § The offline-mutation contract) → `true`
+    /// when queued: the rule has no server id until the drain, so the caller
+    /// resets its form and lists nothing; `false` when sent.
+    #[wasm_bindgen(js_name = emailFiltersCreateOrQueue)]
+    pub fn email_filters_create_or_queue(
+        &self,
+        name: String,
+        rules: JsValue,
+        combination: String,
+        action: JsValue,
+        priority: i32,
+        continue_on_match: Option<bool>,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let rules: Vec<EmailFilterRule> = from_js(rules)?;
+            let action: EmailFilterAction = from_js(action)?;
+            let queue = crate::offline_outbox::wired();
+            let composed = EmailClient::new(client)
+                .filters_create_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    name,
+                    rules,
+                    combination,
+                    action,
+                    priority,
+                    continue_on_match.unwrap_or(false),
+                )
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_bool(matches!(
+                composed,
+                fauna_protocol::offline_intent::Composed::Queued(_)
+            )))
         })
     }
 
@@ -5905,6 +6072,33 @@ impl WsRpcClient {
         })
     }
 
+    /// [`Self::knocks_accept`] sent now or queued with no nest (the
+    /// `OfflineQueued` composer over the tab's outbox,
+    /// account-offline-mutation.md § The offline-mutation contract) → `true`
+    /// when queued: the caller drops the knock from its local list and adds no
+    /// roster row (the nest's read after the drain is the word); `false` when
+    /// sent.
+    #[wasm_bindgen(js_name = knocksAcceptOrQueue)]
+    pub fn knocks_accept_or_queue(&self, peer_id: String) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let queue = crate::offline_outbox::wired();
+            let composed = ContactsClient::new(client)
+                .knocks_accept_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    peer_id,
+                )
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from_bool(matches!(
+                composed,
+                fauna_protocol::offline_intent::Composed::Queued(_)
+            )))
+        })
+    }
+
     /// `fauna.knocks.block` — block the knock sender `peer_id` (hex).
     #[wasm_bindgen(js_name = knocksBlock)]
     pub fn knocks_block(&self, peer_id: String) -> js_sys::Promise {
@@ -6512,6 +6706,10 @@ impl WsRpcClient {
                 identity.actor_id(),
                 &phrase,
                 &dial,
+                // This chunk's registry: the gesture settles the
+                // pending-replacement banner from the nests' answers.
+                &crate::critical_alerts::alerts_registry(),
+                fauna_core::data::Timestamp::now_secs(),
             )
             .await
             .map_err(|e| JsValue::from_str(&e))?;
@@ -7900,6 +8098,50 @@ impl WsRpcClient {
         })
     }
 
+    // ── the post's mark-as-spam verb (`report-sharing.md` § Report capture):
+    // the same sealed record again; the list feeds the FeedManager's spam
+    // fold and the verb's `state`. Twins of the UniFFI
+    // `{load_spam_marked,mark_spam,unmark_spam}`.
+
+    /// The post ids the owner marked as spam.
+    #[wasm_bindgen(js_name = loadSpamMarked)]
+    pub fn load_spam_marked(&self) -> js_sys::Promise {
+        future_to_promise(async move {
+            let store = crate::account_runtime::handle_source();
+            let ids = preference_surfaces::load_spam_marked(&store)
+                .await
+                .map_err(preference_surfaces::plane_failure)
+                .map_err(err_to_js)?;
+            to_js(&ids)
+        })
+    }
+
+    /// Mark a post as spam for the owner; resolves to the stored list.
+    #[wasm_bindgen(js_name = markSpam)]
+    pub fn mark_spam(&self, id: String) -> js_sys::Promise {
+        future_to_promise(async move {
+            let store = crate::account_runtime::handle_source();
+            let ids = preference_surfaces::mark_spam(&store, &id)
+                .await
+                .map_err(preference_surfaces::plane_failure)
+                .map_err(err_to_js)?;
+            to_js(&ids)
+        })
+    }
+
+    /// Un-mark a post; resolves to the stored list.
+    #[wasm_bindgen(js_name = unmarkSpam)]
+    pub fn unmark_spam(&self, id: String) -> js_sys::Promise {
+        future_to_promise(async move {
+            let store = crate::account_runtime::handle_source();
+            let ids = preference_surfaces::unmark_spam(&store, &id)
+                .await
+                .map_err(preference_surfaces::plane_failure)
+                .map_err(err_to_js)?;
+            to_js(&ids)
+        })
+    }
+
     // ── trained topic factors (topic-factors.md § Authoring surface & picker) ──
     //
     // The Trained-topics facet's four gestures. Each is a thin wrapper over the
@@ -8218,7 +8460,7 @@ impl WsRpcClient {
     /// Run the feeders that have no page of their own, at the same universal
     /// post-auth point as [`Self::self_heal_deployment_seed_custody`] /
     /// `refreshMailEpochSchedule` (`critical-alerts.md` § Mechanism → *Who
-    /// runs the detector*). tui's `critical_alerts::spawn_session_start_sweep`
+    /// runs the detector*). tui's `critical_alerts::spawn_post_auth_sweep`
     /// (`session::establish`) is the reference this mirrors; `secret_hex`
     /// derives the actor id the sweep checks conditions against, and feeder
     /// #1 reads the rotation keyring from that account's runtime in this tab
@@ -8235,14 +8477,16 @@ impl WsRpcClient {
     /// (`+layout.svelte`'s `void runCriticalAlertSweep(...).catch(...)`, never
     /// awaited). Only rejects on a malformed `secret_hex`.
     ///
-    /// **One loop per identity.** A call for an identity whose loop is already
-    /// running (no teardown since it started) runs ONE pass and resolves — the
-    /// SPA fires this on every session establishment, a same-actor re-establish
-    /// included, and a second loop there would only stack a concurrent sweeper
-    /// (`crate::critical_alerts::loop_is_live_for`).
+    /// **One loop per identity.** The shared `LoopClaim` decides the arm: a call
+    /// for an identity whose loop already rides this client (no teardown since it
+    /// started) runs ONE pass and resolves — the SPA fires this on every session
+    /// establishment, a same-actor re-establish included, and a second loop there
+    /// would only stack a concurrent sweeper; the same identity on a client its
+    /// loop does not ride starts a loop that opens on the custody door.
     #[wasm_bindgen(js_name = runCriticalAlertSweep)]
     pub fn run_critical_alert_sweep(&self, secret_hex: String) -> js_sys::Promise {
         let client = self.inner.clone();
+        let loop_key = self.loop_key;
         future_to_promise(async move {
             let keypair = keypair_from_secret_hex(&secret_hex)?;
             let actor_id = keypair.actor_id();
@@ -8255,35 +8499,55 @@ impl WsRpcClient {
                 }),
             );
             let alerts = crate::critical_alerts::alerts_registry();
-            if crate::critical_alerts::loop_is_live_for(&actor_id) {
-                fauna_client_alert_sweep::run_session_start_sweep(
-                    client, &custody, &alerts, &actor_id,
-                )
-                .await;
-                return Ok(JsValue::UNDEFINED);
-            }
-            crate::critical_alerts::mark_loop_live(&actor_id);
-            // The e2e bundle runs the SAME loop with its wait raceable by
-            // `alertSweepWakeForTest` (convention 14); a production bundle has
-            // no wake to race and runs the clock alone.
-            #[cfg(feature = "test-helpers")]
-            {
-                let wake = crate::critical_alerts::mint_sweep_wake();
-                fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
-                    client,
-                    &custody,
-                    &alerts,
-                    &actor_id,
-                    move || {
+            let (arm, _ticket) = crate::critical_alerts::LOOP_CLAIM.claim_keyed(
+                &keypair.actor_id_hex(),
+                loop_key,
+                &alerts,
+            );
+            match arm {
+                fauna_client_alert_sweep::SweepArm::OnePass => {
+                    fauna_client_alert_sweep::run_one_shot_sweep(
+                        client, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                // The e2e bundle runs the SAME loop with its wait raceable by
+                // `alertSweepWakeForTest` (convention 14); a production bundle
+                // has no wake to race and runs the clock alone.
+                #[cfg(feature = "test-helpers")]
+                loop_arm => {
+                    let wake = crate::critical_alerts::mint_sweep_wake(alerts.teardown_epoch());
+                    let wake = move || {
                         let notify = std::rc::Rc::clone(&wake);
                         async move { notify.notified().await }
-                    },
-                )
-                .await;
+                    };
+                    if loop_arm == fauna_client_alert_sweep::SweepArm::Loop {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
+                            client, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    } else {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_reestablished_wakeable(
+                            client, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    }
+                }
+                #[cfg(not(feature = "test-helpers"))]
+                fauna_client_alert_sweep::SweepArm::Loop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop(
+                        client, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                #[cfg(not(feature = "test-helpers"))]
+                fauna_client_alert_sweep::SweepArm::ReestablishedLoop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop_reestablished(
+                        client, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
             }
-            #[cfg(not(feature = "test-helpers"))]
-            fauna_client_alert_sweep::run_alert_sweep_loop(client, &custody, &alerts, &actor_id)
-                .await;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -8774,6 +9038,49 @@ impl WsRpcClient {
                     fauna_client_moderation::report::report_acknowledgement(&reply.routed_to),
                 "routed_to": reply.routed_to,
             }))
+        })
+    }
+
+    /// [`Self::moderation_abuse_report_submit`] sent now or queued with no nest
+    /// (the `OfflineQueued` composer over the tab's outbox,
+    /// account-offline-mutation.md § The offline-mutation contract). Resolves
+    /// to the same `{ report_id, routed_to, acknowledgement }` when sent, or
+    /// `null` when QUEUED: the sheet closes on `reportQueued`'s line, still
+    /// lands the reporter-side hide, and does not try a ticked block (it needs
+    /// the nest — `reportBlockNotSent`).
+    #[wasm_bindgen(js_name = moderationAbuseReportSubmitOrQueue)]
+    pub fn moderation_abuse_report_submit_or_queue(
+        &self,
+        target: JsValue,
+        form: JsValue,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let target: fauna_client_moderation::report::ReportTarget = from_js(target)?;
+            let form: fauna_client_moderation::report::ReportForm = from_js(form)?;
+            let request = fauna_client_moderation::report::report_request(&target, &form)
+                .ok_or_else(|| JsValue::from_str("the report cannot be sent yet"))?;
+            let queue = crate::offline_outbox::wired();
+            let composed = ModerationClient::new(client)
+                .abuse_report_submit_or_queue(
+                    queue
+                        .as_deref()
+                        .map(|q| q as &dyn fauna_core::offline_intent::OfflineIntentQueue),
+                    request,
+                )
+                .await
+                .map_err(err_to_js)?;
+            match composed {
+                fauna_protocol::offline_intent::Composed::Sent(reply) => {
+                    to_js(&serde_json::json!({
+                        "report_id": reply.report_id,
+                        "acknowledgement":
+                            fauna_client_moderation::report::report_acknowledgement(&reply.routed_to),
+                        "routed_to": reply.routed_to,
+                    }))
+                }
+                fauna_protocol::offline_intent::Composed::Queued(_) => Ok(JsValue::NULL),
+            }
         })
     }
 
@@ -9419,7 +9726,7 @@ fn subscribe_reply_to_web_json(r: &SubscribeReply) -> Result<serde_json::Value, 
 /// per-offer-row status badge. `expires_at` is omitted (the browse UI shows only
 /// active/pending/none).
 fn status_get_reply_to_web_json(r: &StatusGetReply) -> serde_json::Value {
-    serde_json::json!({ "tier": r.tier, "auto_approve": r.auto_approve })
+    serde_json::json!({ "tier": r.tier, "auto_approve": r.auto_approve, "follow_pending": r.follow_pending })
 }
 
 /// A [`ReconcilePass`] (one author-pump tick) → JSON for the web pump's log
@@ -9779,14 +10086,20 @@ impl WsRpcClient {
     /// `fauna.subscriptions.unsubscribe` — the calling actor drops its
     /// subscription to `author_id` (thin). Encrypted mode returns `Queued` (the
     /// subscriber stays until the author commits the removal), so the row does not
-    /// vanish immediately — the page re-reads to reflect nest state.
+    /// vanish immediately — the page re-reads to reflect nest state. `tier` is
+    /// the leave's floor: it and every tier held above it (`"followers"` is the
+    /// unfollow); absent leaves every paid tier and keeps the follow.
     #[wasm_bindgen(js_name = subscriptionsUnsubscribe)]
-    pub fn subscriptions_unsubscribe(&self, author_id_hex: String) -> js_sys::Promise {
+    pub fn subscriptions_unsubscribe(
+        &self,
+        author_id_hex: String,
+        tier: Option<String>,
+    ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
             let author_id = ActorId(hex_array_32(&author_id_hex)?);
             SubscriptionsClient::new(client)
-                .unsubscribe(author_id)
+                .unsubscribe(author_id, tier)
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)
@@ -9894,6 +10207,43 @@ impl WsRpcClient {
         })
     }
 
+    /// The payment-link gesture — the web twin of `fauna-ffi`'s
+    /// `subscriptions_subscribe_and_checkout`
+    /// (`SubscriptionsClient::subscribe_and_checkout`, `monetization.md`
+    /// § Pillar 3, the Q13 ruling): the subscribe to `tier` first (local when
+    /// `home_nest_url` is `null` or blank, else across nests, as
+    /// `subscriptionsSubscribeAcrossNests`), then the checkout URL composed by
+    /// the shared reference rule. Resolves `null` for an unsafe payment URL (no
+    /// request sent), else `{reply, url}` — `reply` the same JSON as
+    /// `subscriptionsSubscribe`, `url` the one to open. A refused subscribe
+    /// rejects, and nothing is to be opened.
+    #[wasm_bindgen(js_name = subscriptionsSubscribeAndCheckout)]
+    pub fn subscriptions_subscribe_and_checkout(
+        &self,
+        secret_hex: String,
+        author_id_hex: String,
+        tier: String,
+        payment_url: String,
+        home_nest_url: Option<String>,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let subscriber = keypair_from_secret_hex(&secret_hex)?;
+            let author_id = ActorId(hex_array_32(&author_id_hex)?);
+            let open = SubscriptionsClient::new(client)
+                .subscribe_and_checkout(author_id, tier, &payment_url, &subscriber, home_nest_url)
+                .await
+                .map_err(err_to_js)?;
+            match open {
+                None => Ok(JsValue::NULL),
+                Some(open) => to_js(&serde_json::json!({
+                    "reply": subscribe_reply_to_web_json(&open.reply)?,
+                    "url": open.url,
+                })),
+            }
+        })
+    }
+
     /// The leave twin of `subscriptionsSubscribeAcrossNests`
     /// (`SubscriptionsClient::unsubscribe_across_nests`); `tier` is the tier
     /// being left. Resolves `undefined`, like `subscriptionsUnsubscribe`.
@@ -9974,6 +10324,9 @@ fn provider_item_to_web_json(p: &fauna_protocol::payments::ProviderItem) -> serd
         "tier": p.tier,
         "last_verified_at": p.last_verified_at,
         "last_rejected_at": p.last_rejected_at,
+        // The product the tier is sold as (not a secret — the form pre-fills
+        // it); `null` = every verified payment maps to the tier.
+        "product_ref": p.product_ref,
     })
 }
 
@@ -10034,19 +10387,22 @@ pub fn payments_return_url(site_url: String, kind: String) -> String {
 impl WsRpcClient {
     /// `fauna.payments.providers.set` — upsert the calling author's config
     /// for one provider kind (kind + webhook-verification secret + entitled
-    /// tier). Typed errors: `fauna.payments.{unknown_provider,tier_not_found,
-    /// malformed}`.
+    /// tier + the optional product the tier is sold as — `undefined`/`null`
+    /// keeps the saved product, `""` clears it; a form that shows the field
+    /// passes what it shows). Typed errors:
+    /// `fauna.payments.{unknown_provider,tier_not_found,malformed}`.
     #[wasm_bindgen(js_name = paymentsProvidersSet)]
     pub fn payments_providers_set(
         &self,
         kind: String,
         webhook_secret: String,
         tier: String,
+        product_ref: Option<String>,
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
             PaymentsClient::new(client)
-                .providers_set(kind, webhook_secret, tier)
+                .providers_set(kind, webhook_secret, tier, product_ref)
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)
@@ -10095,6 +10451,38 @@ impl WsRpcClient {
         future_to_promise(async move {
             let reply = PaymentsClient::new(client)
                 .claims_redeem(code)
+                .await
+                .map_err(err_to_js)?;
+            to_js(&serde_json::json!({
+                "author": hex::encode(reply.author.0),
+                "tier": reply.tier,
+                "queued": reply.queued,
+            }))
+        })
+    }
+
+    /// The redeem gesture across nests — the web twin of `fauna-ffi`'s
+    /// `FfiPaymentsClient::claims_redeem_across_nests`
+    /// (`PaymentsClient::claims_redeem_across_nests`): `paymentsClaimsRedeem`
+    /// when `author_home_url` is `null` or blank, and for a code minted by an
+    /// author homed on another nest the redeem carrying the home and the
+    /// redeemer's own signed intent (`monetization.md` § Pillar 3 → *Which
+    /// nest an in-app redeem binds on*). Same reply JSON as
+    /// `paymentsClaimsRedeem`.
+    #[wasm_bindgen(js_name = paymentsClaimsRedeemAcrossNests)]
+    pub fn payments_claims_redeem_across_nests(
+        &self,
+        code: String,
+        secret_hex: String,
+        author_id_hex: String,
+        author_home_url: Option<String>,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let redeemer = keypair_from_secret_hex(&secret_hex)?;
+            let author_id = ActorId(hex_array_32(&author_id_hex)?);
+            let reply = PaymentsClient::new(client)
+                .claims_redeem_across_nests(code, &redeemer, author_id, author_home_url)
                 .await
                 .map_err(err_to_js)?;
             to_js(&serde_json::json!({
@@ -10229,4 +10617,26 @@ pub fn build_version() -> String {
 #[wasm_bindgen(js_name = termsUrl)]
 pub fn terms_url() -> String {
     fauna_core::TERMS_URL.to_owned()
+}
+
+/// Test-only: hold this module's author drain — the wasm half of the
+/// `subscriptions_hold_author_drain` e2e command (`#lib/subscriptions-e2e`), so
+/// a payment-backed subscribe request stands in the author's §2 requests while
+/// the test reads its paid badge (`monetization.md` § Pillar 3). The shared
+/// flag (`fauna_client_subscriptions::orchestration::hold_author_drain_for_test`)
+/// is read by `subscriptionsDrainAutoApprovals`'s `drain_auto_approvals` after
+/// its queue read. Gated on `test-helpers` (convention 15); the `ForTest`
+/// suffix is what `scripts/check-wasm-seam-exclusion.py` keys on.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = subscriptionsHoldAuthorDrainForTest)]
+pub fn subscriptions_hold_author_drain_for_test() {
+    fauna_client_subscriptions::orchestration::hold_author_drain_for_test();
+}
+
+/// Test-only: release a [`subscriptions_hold_author_drain_for_test`] hold; the
+/// next author-pump pass drains as usual. A no-op when nothing is held.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = subscriptionsReleaseAuthorDrainForTest)]
+pub fn subscriptions_release_author_drain_for_test() {
+    fauna_client_subscriptions::orchestration::release_author_drain_for_test();
 }

@@ -147,7 +147,23 @@ pub async fn post_octets_keyed(
             context: "chunk upload bearer",
             detail: e.to_string(),
         })?;
-    let url = format!("{}{path}", nest.nest_url().trim_end_matches('/'));
+    post_octets_keyed_with_bearer(&nest.nest_url(), &token, path, content_hash_hex, body).await
+}
+
+/// [`post_octets_keyed`] against an explicit `base_url` + bearer — the
+/// cross-nest arm: a writer member of a folder homed on another nest POSTs its
+/// chunks and manifest DIRECT to the folder's **home** nest under the
+/// short-lived write token its own nest relayed (`fauna.folders.write_token.get`),
+/// never the session bearer, which names nobody there. The session-bearer
+/// helper above delegates here.
+pub async fn post_octets_keyed_with_bearer(
+    base_url: &str,
+    token: &str,
+    path: &str,
+    content_hash_hex: Option<&str>,
+    body: &[u8],
+) -> Result<String, BlobHttpError> {
+    let url = format!("{}{path}", base_url.trim_end_matches('/'));
     let mut req = gloo_net::http::Request::post(&url)
         .header("authorization", &format!("Bearer {token}"))
         .header("content-type", "application/octet-stream");

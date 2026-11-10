@@ -95,9 +95,6 @@ struct MacInviteRequestView: View {
         }
         .padding()
         .frame(minWidth: 480)
-        .task(id: vm.isInvitePendingReview) {
-            guard vm.isInvitePendingReview else { return }
-            await vm.pollPendingInviteWhileNeeded()
-        }
+        .task(id: vm.isInviteRequestPending) { vm.armInvitePollIfNeeded() }
     }
 }

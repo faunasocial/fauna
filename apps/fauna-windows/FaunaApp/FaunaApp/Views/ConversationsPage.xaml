@@ -171,14 +171,20 @@
                                 Style="{StaticResource BodyStrongTextBlockStyle}" />
 
                             <!-- Top-right: shared contextual last-activity timestamp
-                                 (conversations.md § Layout) then the protocol rail glyph. -->
+                                 (conversations.md § Layout) then the protocol rail glyph.
+                                 conversation-item-timestamp sits on the TextBlock itself:
+                                 this StackPanel gets no automation peer, so its children
+                                 surface directly under the conversation-item row; Collapsed
+                                 (absent) while the thread has no activity time. -->
                             <StackPanel
                                 Grid.Row="0" Grid.Column="2"
                                 Orientation="Horizontal"
                                 Spacing="6"
                                 VerticalAlignment="Center">
                                 <TextBlock
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ConversationItemTimestamp}"
                                     Text="{x:Bind Timestamp}"
+                                    Visibility="{x:Bind TimestampVis}"
                                     FontSize="11"
                                     Opacity="0.6"
                                     VerticalAlignment="Center" />
@@ -746,5 +752,13 @@
                 </StackPanel>
             </Grid>
         </Border>
+
+        <!-- Image Lightbox (image-lightbox) — the app's one lightbox control, the one
+             the feed and the profile's Posts tab host (Controls/ImageLightboxOverlay.xaml
+             says why it is a toggled Button, not a ContentDialog). A dm-attachment-image's
+             click opens it over the thread (conversations.md § User actions); Escape
+             closes it, and leaving the thread closes it (OpenImageLightbox and
+             RefreshCore's check). Declared last so it stacks above every overlay. -->
+        <controls:ImageLightboxOverlay x:Name="Lightbox" Grid.ColumnSpan="3" />
     </Grid>
 </Page>

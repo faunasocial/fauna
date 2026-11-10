@@ -1371,6 +1371,22 @@ pub fn apply_reply_to_roster(
     roster
 }
 
+/// The searchable parts of one event: its `SUMMARY` (the title, `None` when
+/// empty) and the rest of its text — the description and location, joined by
+/// newlines. The one derivation a device's own index and the nest's
+/// materialized calendar view both read (`encryption-at-rest.md` § Capability
+/// tiering → *The materialization grant*), so the two hold the same document.
+#[must_use]
+pub fn event_search_parts(fields: &EventFields) -> (Option<String>, String) {
+    let text = [&fields.description, &fields.location]
+        .into_iter()
+        .map(String::as_str)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (Some(fields.summary.clone()).filter(|s| !s.is_empty()), text)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

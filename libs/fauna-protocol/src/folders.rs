@@ -1693,8 +1693,22 @@ pub struct MembersListReply {
 pub struct FolderActorMember {
     /// Hex-encoded 32-byte actor id.
     pub actor_id: String,
-    /// Display handle resolved nest-side; empty when unknown (remote / unset).
+    /// Display handle resolved nest-side, bare; empty when unknown (a local
+    /// user with none set, or a cross-nest member whose own nest has not
+    /// announced them yet). The apps feed it through
+    /// `fauna_core::format::qualified_handle` with [`Self::domain`] into
+    /// `account_display_label` — the handle-else-short-id rule.
     pub handle: String,
+    /// The handle's domain — present only on a cross-nest member (`remote`),
+    /// the domain their own home nest announced beside [`Self::handle`] and
+    /// the set's home bound to that nest's key before recording it
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append, the id→handle bullet → *The folder roster*); absent on every
+    /// local row, where a bare handle means one of the viewer's own nest's
+    /// users. Split on the wire as every such pair is, joined only at display.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     /// `"owner"` | `"member"`.
     pub role: String,
     /// `"reader"` | `"writer"` — the member's access grant (multi-writer
@@ -1715,8 +1729,9 @@ pub struct FolderActorMember {
     /// `Some(true)` for a **cross-nest** member (a `channel_foreign_members`
     /// row — their home nest relays their reads/sends; Phase 2,
     /// `ui/folders.md` § Sharing → Cross-nest members). Additive: absent on
-    /// every local row. Their `handle` is empty (a foreign
-    /// member is not a local `users` row).
+    /// every local row. Their `handle` + [`Self::domain`] are the pair their
+    /// own nest announced, empty/absent until it has (a foreign member is not
+    /// a local `users` row, and the set's home never asks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<bool>,
     /// The landed succession statements whose chain **ends at this member** —
@@ -1772,6 +1787,34 @@ pub struct ActorMembersListReply {
     /// carries. `None` = not stated, never *full*. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub residency: Option<String>,
+    /// The set's **former writers** — every actor that held `writer` on it and
+    /// holds it no longer (demoted, evicted, departed), each with the
+    /// succession statements that end at it (`writer-signed-change-records.md`
+    /// ruling (12)(c)). A reader admits a row whose signed actor resolves to the
+    /// owner, a current writer or one of these (the *writers of record*); its
+    /// own standing reads the current writers alone. A separate list, never a
+    /// row in [`Self::members`]: the member list is the membership, and the
+    /// UI's member render and count derive from it. A re-granted writer may
+    /// appear in both. Additive: absent ⇒ none, judged as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_writers: Vec<FolderFormerWriter>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One entry of [`ActorMembersListReply::former_writers`] — ids only (no
+/// handle, on either door): the actor and the landed succession statements
+/// whose chain ends at it, the carriage a `writer` row's
+/// [`FolderActorMember::succession_statements`] gets, so a former writer's
+/// predecessor-signed rows place too.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FolderFormerWriter {
+    /// Lowercase hex of the 32-byte actor id.
+    pub actor_id: String,
+    /// Verbatim `SignedIdentitySuccession` bytes ending at this actor, oldest
+    /// first; empty for an identity that never succeeded another.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub succession_statements: Vec<ByteBuf>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -3389,6 +3432,11 @@ mod tests {
             ],
             caller_access: Some("writer".into()),
             residency: Some("full".into()),
+            former_writers: vec![FolderFormerWriter {
+                actor_id: "c3".repeat(32),
+                succession_statements: vec![ByteBuf::from(vec![1u8, 2, 3])],
+                ..Default::default()
+            }],
             extra: BTreeMap::new(),
         });
         round_trip(&ActorMembersListRemoteRequest {

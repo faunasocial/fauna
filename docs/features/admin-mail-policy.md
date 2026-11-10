@@ -4,6 +4,9 @@ title: Mail policy
 section: admin area
 goal: docs/goal/behavior/admin.md § 6. Mail
 guide: docs/guides/admin-tour.md § Mail
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -151,6 +154,8 @@ Stamped 2026-10-11 at 29b0959751.
 | ios | ⚠ partial | 0.1.5-dev+0daa3736 docker |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+0daa3736 docker |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

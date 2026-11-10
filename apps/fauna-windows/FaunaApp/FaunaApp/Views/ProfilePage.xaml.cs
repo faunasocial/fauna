@@ -94,12 +94,26 @@ public sealed partial class ProfilePage : Page, IPostCardPage
             var actorId = isSelf
                 ? (clients.Crypto.HasKey ? clients.Crypto.ActorIdHex : "")
                 : target!;
-            _vm = new ProfileViewModel(clients.Rpc, actorId, isSelf, targetHome);
+            // The SELF header's handle is read at every paint, never baked here: the
+            // launch machine's live identity over the account's registry cache, through
+            // the shared resolver (mail-primary-domain-rename.md § Display-handle
+            // interaction — a rename moves it).
+            var account = clients.Account;
+            _vm = new ProfileViewModel(clients.Rpc, actorId, isSelf, targetHome,
+                selfDisplayHandle: isSelf
+                    ? () =>
+                    {
+                        var live = App.CurrentLaunchIdentity;
+                        return SelfDisplayHandle.Resolve(
+                            live?.handle, live?.domain, account.Handle, account.Domain);
+                    }
+                    : null);
             PublishProfileState();
             _vm.PropertyChanged += ViewModel_PropertyChanged;
 
             // Rich identity is publish-path-gated, so until the profile read lands the
-            // header is the shared resolver's answer with no display name: the viewer's
+            // header has no display name: SELF shows the handle on the current primary,
+            // else the actor id; OTHER the shared resolver's answer — the viewer's
             // nickname, else the canonical short id (never a windows-side fallback).
             _vm.RepaintHeader();
             HandleText.Text = _vm.HeaderName;
@@ -136,6 +150,14 @@ public sealed partial class ProfilePage : Page, IPostCardPage
     {
         _vm?.RepaintHeader();
         if (_private.Reload()) PaintPrivate();
+    });
+
+    /// <summary>The account's identity moved (the launch machine's verify reply named a
+    /// new handle or primary): the SELF header re-reads its handle with no profile
+    /// re-read. Raised on the machine's thread — marshalled here.</summary>
+    private void OnSelfIdentityMoved() => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (_vm is { IsSelf: true }) _vm.RepaintHeader();
     });
 
     /// <summary><c>profile-public-name</c>: the public name a nickname replaced —
@@ -292,6 +314,7 @@ public sealed partial class ProfilePage : Page, IPostCardPage
         Current = this;
 #endif
         ContactOverlayNames.Moved += OnOverlayMoved;
+        SelfDisplayHandle.Moved += OnSelfIdentityMoved;
         // The ward's durable asks moved (a status read landed): repaint the ask pair.
         WardAsksCache.Changed += OnWardAsksChanged;
         PaintKnock();
@@ -342,6 +365,7 @@ public sealed partial class ProfilePage : Page, IPostCardPage
 #endif
         App.ProfileStateNow = null;
         ContactOverlayNames.Moved -= OnOverlayMoved;
+        SelfDisplayHandle.Moved -= OnSelfIdentityMoved;
         WardAsksCache.Changed -= OnWardAsksChanged;
         // An open still in flight lands nowhere; the window stops observing.
         _postsEpoch++;

@@ -306,3 +306,42 @@ def test_people_who_join_by_paying_do_not_count_against_the_free_account_cap(mem
         assert still.value.code == "fauna.account.free_limit_reached", still.value.code
     finally:
         set_mode(member_nest, "invite_required")
+
+
+@pytest.mark.feature("admin-tiers")
+def test_a_refund_drops_the_member_to_the_lapse_tier_at_once(member_nest):
+    """Outcome 14 (`monetization.md` § Pillar 4; the refund half of § Pillar 3
+    → *Expiry & revocation*): a refund of the membership's purchase ends the
+    paid window, and the member drops to the lapse tier the moment the refund
+    lands — no sweep — keeping everything they stored; still an account,
+    never suspended or evicted."""
+    member = _member(member_nest)
+    purchase = f"pur_{member['actor_id_hex'][:12]}"
+    status, reply = pay_membership(member_nest, member["actor_id_hex"], _in_force(),
+                                   purchase=purchase)
+    assert status == 200 and reply.get("status") == "granted", f"{status} {reply!r}"
+    assert _tier(member_nest, member) == QUOTA_TIER
+
+    with _ws(member_nest, member) as ws:
+        made = {ws.call("fauna.feed.create",
+                        {"name": f"refunded-{i}", "rules": [], "combination": "any"})["feed_id"]
+                for i in range(2)}
+
+    status, reply = pay_membership(member_nest, member["actor_id_hex"], None,
+                                   event="refund", purchase=purchase)
+    assert status == 200 and reply.get("status") == "refund_applied", f"{status} {reply!r}"
+
+    # At once: no lapse sweep has run between the refund and this read.
+    row = user_row(member_nest, bytes(member["actor_id_bytes"]))
+    assert row is not None, "a refund must never delete the account"
+    assert row["tier"] == LAPSE_TIER, f"a refund drops the member to the lapse tier: {row!r}"
+    assert row["suspended"] is False, f"a refund must never suspend: {row!r}"
+    assert row.get("eviction") is None, f"a refund must never start an eviction: {row!r}"
+    with _ws(member_nest, member) as ws:
+        listed = {f["feed_id"] for f in ws.call("fauna.feed.list", {})["feeds"]}
+        assert made <= listed, f"every feed made while paid must still be there: {listed!r}"
+
+    # And the window is gone, not just the tier: a sweep leaves the member on
+    # the lapse tier.
+    _lapse_sweep(member_nest)
+    assert _tier(member_nest, member) == LAPSE_TIER

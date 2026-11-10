@@ -57,7 +57,9 @@ from common.envelope import (
 # getting it wrong is a decode error at ingest rather than a silent mismatch.
 
 
-def media_item(blob_hash_hex: str, mime: str, size_bytes: int) -> dict:
+def media_item(
+    blob_hash_hex: str, mime: str, size_bytes: int, *, alt: str | None = None
+) -> dict:
     """One `fauna_core::data::MediaItem` — a post's attachment by blob hash.
 
     The shape every app's composer produces for a photo post
@@ -67,11 +69,13 @@ def media_item(blob_hash_hex: str, mime: str, size_bytes: int) -> dict:
     (`docs/goal/ui/media.md` § Public-post-attached media).
 
     `dimensions` / `thumbnail` / `remote_url` are `None` exactly as the
-    composer leaves them for a plain image attachment.
+    composer leaves them for a plain image attachment. `alt` is the item's own
+    author description (`MediaItem.alt`), omitted from the wire when `None`
+    exactly as the Rust side's `skip_serializing_if` does.
     """
     digest = bytes.fromhex(blob_hash_hex)
     assert len(digest) == 32, f"blob hash must be a 32-byte digest, got {len(digest)}"
-    return {
+    item = {
         "blob_hash": cid_link(CID_RAW_PREFIX + digest),
         "media_type": mime,
         "size_bytes": size_bytes,
@@ -79,6 +83,9 @@ def media_item(blob_hash_hex: str, mime: str, size_bytes: int) -> dict:
         "thumbnail": None,
         "remote_url": None,
     }
+    if alt is not None:
+        item["alt"] = alt
+    return item
 
 
 def post_reference(kind: str, target_post_id_hex: str, *, emoji: str | None = None) -> dict:
@@ -147,6 +154,7 @@ def sign_and_encode_post(
     body_text: str,
     *,
     tags: list[tuple[str, int, int]] | None = None,
+    facets: list[dict] | None = None,
     references: list[dict] | None = None,
     media_items: list[dict] | None = None,
 ) -> bytes:
@@ -160,6 +168,10 @@ def sign_and_encode_post(
         created_at_us: Microseconds since epoch (u64).
         body_text: Post content.
         tags: Optional list of (tag_name, byte_start, byte_end) `FacetFeature::Tag` facets.
+        facets: Optional list of raw `Facet` maps appended after ``tags`` — for a
+            feature ``tags`` cannot spell, e.g. ``{"byte_start": 0, "byte_end": 6,
+            "feature": {"Mention": {"actor_id": <32 bytes>}}}`` or a
+            ``{"Link": {"uri": ...}}`` feature (`fauna_core::data::FacetFeature`).
         references: Optional list of `Reference` maps (build with `post_reference`)
             — a reply/repost/quote post carries the target it references, which
             bumps the target's interaction counter at ingest (`feed.md` §
@@ -173,7 +185,8 @@ def sign_and_encode_post(
     Returns the canonical dag-cbor ``EmbedAsBytes`` wrapper ready for
     ``fauna.posts.create``'s ``body`` — see the module docstring for the shape.
     """
-    facets: list[dict] = []
+    raw_facets = facets
+    facets = []
     for tag_name, byte_start, byte_end in tags or []:
         facets.append(
             {
@@ -182,6 +195,7 @@ def sign_and_encode_post(
                 "feature": {"Tag": {"name": tag_name}},
             }
         )
+    facets.extend(raw_facets or [])
 
     if media_items:
         body = {

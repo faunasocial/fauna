@@ -180,6 +180,7 @@ impl InboundMailSource for OneMessageMailbox {
                 .to_vec(),
                 mailbox: fauna_conversations::backend::MailFeed::Inbox,
                 suppress_from_view: false,
+                spam: Default::default(),
                 has_seen_flag: false,
                 warmup_hold: None,
             }],

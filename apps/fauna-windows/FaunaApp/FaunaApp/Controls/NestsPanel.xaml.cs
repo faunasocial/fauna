@@ -990,12 +990,12 @@ public sealed partial class NestsPanel : UserControl
             confirmBtn.IsEnabled = picked is not null;
             if (picked is { } o && o.holderCandidates.Length > 1)
             {
-                holderCombo.Items.Clear();
-                foreach (var h in o.holderCandidates)
-                {
-                    holderCombo.Items.Add(new ComboBoxItem { Content = h });
-                }
-                holderCombo.SelectedIndex = 0;
+                // A scope pick repaints the holder select through Reconcile (a
+                // holder's bridge id is its own label), so a re-pick offering the
+                // same candidates keeps the items an automation client may still
+                // hold; the first candidate is the default either way, and Confirm
+                // reads the pick by position in the same candidate list.
+                PickerOption.Reconcile(holderCombo, o.holderCandidates, o.holderCandidates[0]);
                 holderCombo.Visibility = Visibility.Visible;
             }
             else

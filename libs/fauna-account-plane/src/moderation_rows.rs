@@ -1,10 +1,10 @@
-//! The account's muted words and hidden report subjects — the typed door for
+//! The account's muted words, hidden report subjects and spam marks — the typed door for
 //! `fauna.state.moderation` (`content-moderation-and-ranking.md`
 //! § Implementation status today → *The moderation kind's rows — one per
 //! keyword, one per hidden id* owns the ruling; `fauna_core::moderation_rows`
 //! owns the key grammar, the fold and the diff).
 //!
-//! **One row per muted term, one per hidden id**, each latest-wins on the
+//! **One row per muted term, one per hidden id, one per spam mark**, each latest-wins on the
 //! entry's `LwwStamp`: an add or a re-weight is a put, a removal a stamped
 //! tombstone — the `follows_rows` shape. [`ModerationConfig`] is the READ fold
 //! over the live rows; a surface runs its shared delta
@@ -25,7 +25,7 @@ use fauna_account_store::backend::StoreBackend;
 use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::StateEntry;
 use fauna_core::data::{ModerationConfig, MutedKeyword};
-use fauna_core::moderation_rows::{HiddenContentMark, ModerationChange};
+use fauna_core::moderation_rows::{HiddenContentMark, ModerationChange, SpamMark};
 use fauna_protocol::RpcRequester;
 use fauna_protocol::merge_policy::{KIND_MODERATION, LwwStamp};
 
@@ -177,6 +177,20 @@ where
     put_row(store, plane, stamps, &mark.plane_key(), value.to_vec()).await
 }
 
+async fn put_spam_row<B, R>(
+    store: &AccountStore<B>,
+    plane: &AccountStatePlane<'_, B, R>,
+    stamps: &mut Stamps,
+    mark: &SpamMark,
+) -> Result<bool>
+where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+{
+    let value = fauna_core::encoding::canonical_encode(mark).context("encode spam mark")?;
+    put_row(store, plane, stamps, &mark.plane_key(), value.to_vec()).await
+}
+
 /// Put `keyword` at its own key. Whether anything was written.
 pub async fn put_muted_keyword<B, R>(
     store: &AccountStore<B>,
@@ -252,6 +266,8 @@ where
             ModerationChange::DropKeyword(key) => tombstone_row(store, plane, stamps, key).await?,
             ModerationChange::PutHidden(mark) => put_hidden_row(store, plane, stamps, mark).await?,
             ModerationChange::DropHidden(key) => tombstone_row(store, plane, stamps, key).await?,
+            ModerationChange::PutSpam(mark) => put_spam_row(store, plane, stamps, mark).await?,
+            ModerationChange::DropSpam(key) => tombstone_row(store, plane, stamps, key).await?,
         };
     }
     Ok(wrote)

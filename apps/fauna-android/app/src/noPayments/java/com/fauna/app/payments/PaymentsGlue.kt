@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
  *
  * Signature-for-signature identical to that twin, and deliberately naming **no
  * `payments` FFI symbol at all** — a `storeSafe` build links a `fauna-ffi`
- * built `--no-default-features --features store-safe,tunnel`, whose generated
+ * built `--no-default-features --features store-safe`, whose generated
  * Kotlin bindings carry no `FfiPaymentsClient`, no `FfiProviderItem` /
  * `FfiClaimItem` and no `paymentsKnownKinds` / `paymentsWebhookUrl`. That absence is the point: it makes a
  * half-excised build a **compile error** rather than a silent leak, so this
@@ -36,7 +36,12 @@ suspend fun ApiClient.paymentsProvidersList(): List<ProviderItem> = emptyList()
 
 /** Excised — the §4 add form is not rendered in this flavor. */
 @Suppress("UNUSED_PARAMETER")
-suspend fun ApiClient.paymentsProvidersSet(kind: String, webhookSecret: String, tier: String) = Unit
+suspend fun ApiClient.paymentsProvidersSet(
+    kind: String,
+    webhookSecret: String,
+    tier: String,
+    product: String,
+) = Unit
 
 /** Excised — the §4 provider rows are not rendered in this flavor. */
 @Suppress("UNUSED_PARAMETER")

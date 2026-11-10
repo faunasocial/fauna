@@ -1791,6 +1791,97 @@ pub fn wall_clock_epoch_regime_conflict(wrapped_keys: &[WrappedScopeKey]) -> boo
         .any(|&(_, has_none, has_some)| has_none && has_some)
 }
 
+/// The own-actor kinds a materialization grant may cover today — the kinds
+/// whose derived views may rest readable on the owner's own nest
+/// (`encryption-at-rest.md` § Capability tiering → *The materialization
+/// grant*, part (a): mail, then calendar and card, each under its own key —
+/// a grant naming one opens no other kind's records).
+pub const MATERIALIZABLE_KINDS: &[&str] = &[
+    ScopeTuple::KIND_MAIL,
+    ScopeTuple::KIND_CALENDAR,
+    ScopeTuple::KIND_CARD,
+];
+
+/// Why a grant's declared scope and wraps are not a well-formed
+/// **materialization grant**, or `None` when they are — or when the grant
+/// declares no `materialize` tuple at all, which makes it no materialization
+/// grant and none of this function's business (`encryption-at-rest.md`
+/// § Capability tiering → *The materialization grant*, part (a)).
+///
+/// The one shape check both sides read: the owner's app before it deposits
+/// ([`crate::wrapped_blob`]'s callers in `fauna-client-capabilities`), and
+/// the nest's mint and renew doors — the latter over the stored wraps merged
+/// with the appended ones — so the master-key regime is enforced at the
+/// door, not trusted to the minting app. A well-formed one is:
+///
+/// - every `materialize{k}` names a [`MATERIALIZABLE_KINDS`] kind and is
+///   accompanied by the master-key `content.read{k}` tuple (no factor, no
+///   qualifier) that carries its keys;
+/// - nothing else rides the grant — never `content.label-write` (a
+///   materializer is not a filter), never another kind's read;
+/// - every wrap of a materialized kind's read is **standing** (`epoch:
+///   None`), and there is at least one: the bounded per-epoch form is
+///   refused, because the view is retroactive over the already-held history
+///   and a view rebuilt as a window slides is churn.
+#[must_use]
+pub fn materialization_shape_refusal(
+    scope: &[ScopeTuple],
+    wrapped_keys: &[WrappedScopeKey],
+) -> Option<String> {
+    let materialized: Vec<&ScopeTuple> = scope.iter().filter(|t| t.is_materialize()).collect();
+    if materialized.is_empty() {
+        return None;
+    }
+    let mut reads: Vec<ScopeTuple> = Vec::new();
+    for tuple in &materialized {
+        let kind = tuple.kind.as_deref().unwrap_or_default();
+        if !MATERIALIZABLE_KINDS.contains(&kind) {
+            return Some(format!("{kind:?} is not a materializable kind"));
+        }
+        if **tuple != ScopeTuple::materialize(kind) {
+            return Some(format!(
+                "the materialize{{{kind}}} tuple carries a qualifier"
+            ));
+        }
+        let read = ScopeTuple::delegable_kind_read(kind);
+        if !scope.contains(&read) {
+            return Some(format!(
+                "materialize{{{kind}}} rides without the master-key content.read{{{kind}}} tuple"
+            ));
+        }
+        reads.push(read);
+    }
+    if let Some(stray) = scope
+        .iter()
+        .find(|t| !t.is_materialize() && !reads.contains(t))
+    {
+        return Some(format!(
+            "a materialization grant carries nothing but its read and materialize tuples, \
+             not {:?}{{{}}}",
+            stray.class,
+            stray.kind.as_deref().unwrap_or_default()
+        ));
+    }
+    for read in &reads {
+        let wraps: Vec<&WrappedScopeKey> =
+            wrapped_keys.iter().filter(|k| &k.scope == read).collect();
+        if wraps.is_empty() {
+            return Some(format!(
+                "content.read{{{}}} carries no key",
+                read.kind.as_deref().unwrap_or_default()
+            ));
+        }
+        if wraps.iter().any(|k| k.epoch.is_some()) {
+            return Some(format!(
+                "content.read{{{}}} is wrapped in the bounded per-epoch regime; a \
+                 materialization grant needs the standing master-key wrap",
+                read.kind.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    None
+}
+
 /// A bounded grant's window is never wider than its wraps: the first
 /// `(scope, epoch)` a `fauna.capabilities.renew` moving `window.1` from
 /// `old_end` to `new_end` would leave without a key. For every

@@ -458,7 +458,9 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // records.md` ruling (8)(j)(2), 2026-10-02): the claimant's Welcome
         // that seats the successor on a folder channel deletes the
         // predecessor's row here and carries its `folder_member_access` grant,
-        // in one write (`register_successor_carrying_seat`). Reason 3 survives
+        // in one write (`register_successor_carrying_seat`) — and so does the
+        // claimant seating ITSELF through `channel.send`, which retires the
+        // owner's own predecessor seat on its set. Reason 3 survives
         // it because the handler reads the push targets before it replies
         // (`succession_push_targets_for_reply`), so the read precedes every
         // such Welcome. `Stay` is unchanged: it governs the transaction.
@@ -1180,11 +1182,13 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // question that minted it.
         //
         // And the question does not survive to be exported:
-        // `sweep_expired_atproto_consent_requests` is `DELETE ... WHERE
-        // expires_at <= now` with no carve-out for a resolved row, and its own
-        // docstring reads "Not user data: a consent request is a minutes-long
-        // question". Approved and denied rows alike are gone minutes after the
-        // ceremony; an export can only ever catch one mid-flight.
+        // `sweep_expired_atproto_consent_requests` deletes a row at its
+        // `expires_at` — an approved one only once its code can no longer be
+        // redeemed, a few minutes later (`CONSENT_REDEMPTION_GRACE_MILLIS`) —
+        // and its own docstring reads "Not user data: a consent request is a
+        // minutes-long question". Approved and denied rows alike are gone
+        // minutes after the ceremony; an export can only ever catch one
+        // mid-flight.
         //
         // ⚠ A DENIAL therefore leaves no durable trace anywhere. That is a
         // property of the sweep, not of this verdict — ruling `Verbatim` would
@@ -1335,6 +1339,46 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // handle. The account's own audit of who holds reach over it — the
         // same *audited from the user's app* reading `atproto_oauth_grants`'
         // export takes, one table over.
+        export: Export::Verbatim,
+    },
+    ActorTable {
+        table: "third_party_former_writers",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        // SUCCESSION RULING (`third-party-kinds.md` § Principal write authority
+        // → *A reconnecting app keeps its writer*, 2026-11-08). Unlike its
+        // roster twin `third_party_principals` (`Burn`), this row grants no
+        // authority: it names the writer keys an app's ENDED rows attested, so
+        // the same app's own key is not mistaken for a foreign writer when the
+        // app is authorized again. The account's `sync_changes` — where that
+        // key's rows sit — move to the successor, so the record moves with
+        // them: the successor re-authorizing the same app must find the app's
+        // former writer under its own id. `record_succession` writes the
+        // burning roster's writers here under the OLD id before the burn leg,
+        // and this plain move carries them.
+        succession: Succession::Move(MoveShape::Plain),
+        // EXPORT RULING. Public keys the account's change log already carries
+        // in the clear, beside the client ids the roster export names: the
+        // account's own audit of which app wrote under which key.
+        export: Export::Verbatim,
+    },
+    ActorTable {
+        table: "plugin_account_settings",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "one account's settings for a hosted plugin it bound \
+             (`third-party.md` § The principal model → *Hosted principals*: \
+             \"deleted with the binding\"). The binding row in \
+             `third_party_principals` burns, so its settings burn with it: settings \
+             nothing backs would be read by the plugin under an id no account holds, \
+             and the successor binds and configures the plugin afresh by its own \
+             consent",
+        ),
+        // What the user typed into the plugin's settings card — their data,
+        // and nothing in it opens anything.
         export: Export::Verbatim,
     },
     ActorTable {
@@ -3116,6 +3160,40 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // it is asked and answered per table — and it happens to land the same
         // way here, which is worth stating so the next reader does not take the
         // agreement for a derivation.
+        export: Export::Verbatim,
+    },
+    ActorTable {
+        table: "folder_former_writers",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        // DELETION RULING (`writer-signed-change-records.md` ruling (12),
+        // 2026-11-07). The bit is what keeps the rows this actor recorded in
+        // ANOTHER owner's set admitted on every reader once the grant has
+        // ended; the actor leaving the nest does not take those rows out of
+        // the owner's set, so a raw delete would turn each of them into
+        // `NotAWriter` on the owner's devices and every member's — a user's
+        // files lost to someone else's account deletion.
+        policy: Policy::Retain(
+            "the ever-a-writer bit keeps the rows this actor recorded in another owner's \
+             set admitted on every reader (writer-signed-change-records.md ruling (12)); \
+             a raw delete on the actor's departure would drop those files from the owner's \
+             and every member's seats",
+        ),
+        // SUCCESSION RULING (ruling (12)(c)). Unlike its twin
+        // `folder_member_access` (`Stay`, carried with the seat by the
+        // propagation leg because the write gate is a conjunction with
+        // `actor_channels`), this row authorizes NO write — it is admission of
+        // what was already recorded — and a former writer has no seat left to
+        // travel with. So it moves in the ceremony itself: the successor is
+        // listed with the chain that ends at it, a reader places the
+        // predecessor's rows under that chain, and the succession cut applies
+        // to them. Left on the retired id, a reader would admit the old key's
+        // rows directly, chainless, past the cut. A successor gains nothing
+        // it could record with; the cross-nest twin is `record_peer_succession`.
+        succession: Succession::Move(MoveShape::Plain),
+        // EXPORT RULING. The holder's own side of a grant ledger, as
+        // `folder_member_access` is: the sets in which this actor once held
+        // `writer`, which the actor's own rows there already show.
         export: Export::Verbatim,
     },
     ActorTable {
@@ -9261,13 +9339,14 @@ mod tests {
                  the oracle may sign requests to, never an actor id; `peer` is the \
                  fediverse word for another server",
             ),
-            // The same roster handle on the three tables that hang off a
-            // principal and belong to no account. `hosted_plugins` and
-            // `plugin_state` are the hosted half of an INSTALL, the nest's act
-            // and no account's (`third-party.md` § The principal model →
-            // *Hosted principals*): uninstall deletes them, and the one person
-            // on them, `hosted_plugins.installed_by`, is ruled in
-            // `SUCCESSION_REFERENCES`.
+            // The same roster handle on the tables that hang off a principal.
+            // `hosted_plugins` and `plugin_state` are the hosted half of an
+            // INSTALL, the nest's act and no account's (`third-party.md` § The
+            // principal model → *Hosted principals*): uninstall deletes them,
+            // and the one person on them, `hosted_plugins.installed_by`, is
+            // ruled in `SUCCESSION_REFERENCES`. An account's own settings for a
+            // plugin are `plugin_account_settings`, registered by its
+            // `actor_id`; its `principal_id` is the plugin it configures.
             (
                 "hosted_plugins",
                 "principal_id",
@@ -9281,6 +9360,13 @@ mod tests {
                 "principal_id",
                 "the hosted plugin whose state scope the row is -- the same install-row \
                  handle as `hosted_plugins.principal_id`, deleted with the plugin",
+            ),
+            (
+                "plugin_account_settings",
+                "principal_id",
+                "the hosted plugin the settings configure -- the install-row handle \
+                 (`hosted_plugins.principal_id`), an app and never an account; the row's \
+                 own actor is `actor_id`, registered",
             ),
             (
                 "folder_deposit_inbox",

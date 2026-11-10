@@ -258,6 +258,18 @@ impl RpcError {
     pub const CODE_BRIDGES_MAIL_UNAVAILABLE_HERE: &'static str =
         "fauna.bridges.mail_unavailable_here";
 
+    /// A room invitation the invitee's inbox could not take
+    /// (`community-rooms.md` § Implementation status today, the invitations
+    /// entry): ONE code for every failed check at the invite door's quota
+    /// check — invitee unregistered, suspended, envelope over the tier's blob
+    /// size, inbox over quota — so an inviter cannot probe which. Its own code
+    /// rather than `fauna.conversations.forbidden`, whose reach-policy sentence
+    /// offers a contact request that cannot make room in an inbox. Minted by
+    /// the nest's room-invite door; [`Self::localized`] carries its sentence,
+    /// [`Self::action`] keeps it [`RpcErrorAction::Rejected`].
+    pub const CODE_CONVERSATIONS_INVITEE_INBOX_FULL: &'static str =
+        "fauna.conversations.invitee_inbox_full";
+
     /// The bridged reply/quote/interact doors' refusals (`feed.md`
     /// § Interaction bar → *Reply and quote on a bridged post*): one code per
     /// remedy, a remedy being what to change AND on which page. Minted by the
@@ -291,6 +303,13 @@ impl RpcError {
     pub const CODE_NOSTR_NO_RELAYS_CONFIGURED: &'static str = "fauna.nostr.no_relays_configured";
     /// Publishing replies is switched off on the Nostr page.
     pub const CODE_NOSTR_REPLIES_OFF: &'static str = "fauna.nostr.replies_off";
+    /// `fauna.nostr.advertise.set`: no tier sells this post — only a sold post
+    /// may be advertised (`monetization.md` § The Nostr advertisement of a
+    /// sold post → *The act*).
+    pub const CODE_NOSTR_NOT_SOLD: &'static str = "fauna.nostr.not_sold";
+    /// `fauna.nostr.advertise.set`: the selling tier carries no asking price,
+    /// and a priceless advertisement could only ever yield tips.
+    pub const CODE_NOSTR_NO_ASKING_PRICE: &'static str = "fauna.nostr.no_asking_price";
 
     /// The content-residency serving refusals (`file-sync.md` § Content
     /// residency, the *v1 scope cuts* bullet): metadata-only is refused
@@ -611,6 +630,10 @@ impl RpcError {
             // with scanners. Explicit for the same side-by-side reason as the
             // device cap; the client machines key on the exact code.
             Self::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE => RpcErrorAction::Rejected,
+            // A full invitee inbox clears only when the invitee makes room or
+            // their admin raises the tier, never on a retry of its own.
+            // Explicit beside its exact `localized` arm.
+            Self::CODE_CONVERSATIONS_INVITEE_INBOX_FULL => RpcErrorAction::Rejected,
             "fauna.protocol.timeout"
             | "fauna.protocol.disconnected"
             | "fauna.protocol.resync_required"
@@ -724,6 +747,10 @@ impl RpcError {
             // family gap below stayed invisible: the one namespace anybody had
             // written a string for rendered the generic fallback too.
             "fauna.conversations.forbidden" => error::conversations::FORBIDDEN,
+            // The room-invitation door's full-inbox refusal — its own code
+            // because the reach-policy sentence above names a remedy that
+            // cannot make room in an inbox. `action()` keeps it `Rejected`.
+            Self::CODE_CONVERSATIONS_INVITEE_INBOX_FULL => error::conversations::INVITEE_INBOX_FULL,
             // The tier device-cap refusal (`devices.md` § Step 4) — "a typed
             // error the app renders so the user can ask their admin for a
             // bigger tier". It carried no arm from 2026-09-02 (the day the nest
@@ -803,6 +830,11 @@ impl RpcError {
             // § Errors & edge cases): one arm covers every caller.
             Self::CODE_NOSTR_NO_RELAYS_CONFIGURED => error::nostr::NO_RELAYS_CONFIGURED,
             Self::CODE_NOSTR_REPLIES_OFF => error::nostr::REPLIES_OFF,
+            // The advertisement's two typed refusals (`monetization.md` § The
+            // Nostr advertisement of a sold post → *The act*): each names the
+            // fix — sell the post, or set its price.
+            Self::CODE_NOSTR_NOT_SOLD => error::nostr::NOT_SOLD,
+            Self::CODE_NOSTR_NO_ASKING_PRICE => error::nostr::NO_ASKING_PRICE,
             // The content-residency serving refusals (`file-sync.md` § Content
             // residency, *v1 scope cuts*; the guide promises "Fauna will tell
             // you to turn serving off first"). Until these arms existed all six
@@ -1235,6 +1267,21 @@ mod tests {
 
     /// A curated exact-code arm outranks the family fallback, so a namespace
     /// that has something more useful to say keeps saying it.
+    /// The room-invitation door's full-inbox refusal renders its own sentence
+    /// — not the reach-policy one, whose contact-request remedy cannot make
+    /// room in an inbox — and is never auto-retried.
+    #[test]
+    fn a_full_invitee_inbox_renders_its_own_sentence_and_is_rejected() {
+        use fauna_i18n::strings::error;
+        let err = RpcError::new(
+            RpcError::CODE_CONVERSATIONS_INVITEE_INBOX_FULL,
+            "error.ignored",
+        );
+        assert_eq!(err.localized(), error::conversations::INVITEE_INBOX_FULL);
+        assert_ne!(err.localized(), error::conversations::FORBIDDEN);
+        assert_eq!(err.action(), RpcErrorAction::Rejected);
+    }
+
     #[test]
     fn a_curated_forbidden_arm_wins_over_the_family_fallback() {
         use fauna_i18n::strings::error;

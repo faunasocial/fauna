@@ -418,6 +418,19 @@ impl CacheDb {
                     rusqlite::params![old.as_slice(), channel_id.as_slice(), successor.as_slice()],
                 )
                 .context("carry the predecessor's grant to the successor")?;
+            // The collision drops a predecessor `writer` grant in favour of a
+            // successor grant that is not `writer`: the member loses the grant,
+            // so the successor is recorded as a former writer (ruling (12)(c)).
+            tx.execute(
+                "INSERT OR IGNORE INTO folder_former_writers (channel_id, actor_id)
+                 SELECT o.channel_id, ?3 FROM folder_member_access o
+                  WHERE o.channel_id = ?2 AND o.actor_id = ?1 AND o.access = 'writer'
+                    AND EXISTS (SELECT 1 FROM folder_member_access n
+                                 WHERE n.channel_id = ?2 AND n.actor_id = ?3
+                                   AND n.access <> 'writer')",
+                rusqlite::params![old.as_slice(), channel_id.as_slice(), successor.as_slice()],
+            )
+            .context("record the successor as a former writer on a writer-grant collision")?;
             tx.execute(
                 "DELETE FROM folder_member_access WHERE channel_id = ?2 AND actor_id = ?1",
                 rusqlite::params![old.as_slice(), channel_id.as_slice()],
@@ -661,6 +674,11 @@ impl CacheDb {
     /// `bytes_used` (the abuse counter survives a role edit); `byte_cap = None`
     /// = uncapped (ratified — the warning lives client-side). `access` is
     /// validated here (belt) and by the table CHECK (braces).
+    ///
+    /// A move from `writer` to `reader` records the member as a **former
+    /// writer** in the same transaction (`writer-signed-change-records.md`
+    /// ruling (12)(c)): the rows they recorded while a writer stay admitted on
+    /// every reader.
     pub async fn set_folder_member_access(
         &self,
         channel_id: &[u8; 32],
@@ -676,8 +694,12 @@ impl CacheDb {
         let actor_id = *actor_id;
         let access = access.to_string();
         let conn = self.conn.lock().await;
+        let tx = conn.unchecked_transaction().context("begin tx")?;
         let now = now_epoch_secs();
-        conn.execute(
+        if access != "writer" {
+            record_former_writer_if_writer(&tx, &channel_id, &actor_id)?;
+        }
+        tx.execute(
             "INSERT INTO folder_member_access (channel_id, actor_id, access, byte_cap, bytes_used, updated_at)
              VALUES (?1, ?2, ?3, ?4, 0, ?5)
              ON CONFLICT(channel_id, actor_id) DO UPDATE SET
@@ -693,7 +715,27 @@ impl CacheDb {
             ],
         )
         .context("set_folder_member_access")?;
+        tx.commit().context("commit set_folder_member_access")?;
         Ok(())
+    }
+
+    /// The set's **former writers** — every actor that held `writer` on the
+    /// channel and lost it (`writer-signed-change-records.md` ruling (12)(c)),
+    /// in id order. A re-granted writer is still listed: a reader admits by the
+    /// union.
+    pub async fn list_folder_former_writers(&self, channel_id: &[u8; 32]) -> Result<Vec<[u8; 32]>> {
+        let channel_id = *channel_id;
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT actor_id FROM folder_former_writers WHERE channel_id = ?1 ORDER BY actor_id",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![channel_id.as_slice()], |row| {
+                blob_col_to_array(row.get(0)?, 0, "actor_id")
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("list_folder_former_writers")?;
+        Ok(rows)
     }
 
     /// A member's access row on a claimed folder channel, or `None` — and an
@@ -764,6 +806,10 @@ impl CacheDb {
     /// (`members.evict` rotate-on-removal, `folders.leave`). The grant dies
     /// with the membership so a later re-add starts from the fail-safe default
     /// (absent row = reader), never a resurrected `writer`. Idempotent.
+    ///
+    /// A deleted row that read `writer` records the member as a **former
+    /// writer** in the same transaction (`writer-signed-change-records.md`
+    /// ruling (12)(c)): the grant ends, what they recorded under it does not.
     pub async fn delete_folder_member_role(
         &self,
         channel_id: &[u8; 32],
@@ -772,11 +818,14 @@ impl CacheDb {
         let channel_id = *channel_id;
         let actor_id = *actor_id;
         let conn = self.conn.lock().await;
-        conn.execute(
+        let tx = conn.unchecked_transaction().context("begin tx")?;
+        record_former_writer_if_writer(&tx, &channel_id, &actor_id)?;
+        tx.execute(
             "DELETE FROM folder_member_access WHERE channel_id = ?1 AND actor_id = ?2",
             rusqlite::params![channel_id.as_slice(), actor_id.as_slice()],
         )
         .context("delete_folder_member_role")?;
+        tx.commit().context("commit delete_folder_member_role")?;
         Ok(())
     }
 
@@ -1731,6 +1780,26 @@ impl CacheDb {
         .context("upsert channel_commit_watermark")?;
         Ok(())
     }
+}
+
+/// Record `actor` as a **former writer** of `channel` when its stored grant
+/// reads `writer` — the one step every write that takes `writer` away runs
+/// inside its own transaction, before it changes or drops the row
+/// (`writer-signed-change-records.md` ruling (12)(c)). Idempotent; a row
+/// already there stays (the bit is never cleared).
+pub(super) fn record_former_writer_if_writer(
+    tx: &rusqlite::Transaction<'_>,
+    channel_id: &[u8; 32],
+    actor_id: &[u8; 32],
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO folder_former_writers (channel_id, actor_id)
+         SELECT channel_id, actor_id FROM folder_member_access
+          WHERE channel_id = ?1 AND actor_id = ?2 AND access = 'writer'",
+        rusqlite::params![channel_id.as_slice(), actor_id.as_slice()],
+    )
+    .context("record the former writer")?;
+    Ok(())
 }
 
 #[cfg(test)]

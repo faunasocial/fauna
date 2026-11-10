@@ -5,7 +5,14 @@
 # ui.yaml id where the surface is one), with
 #   kind    = "product" (the APP lacks it) | "harness" (the e2e driver lacks it
 #             for that app; the matrix reads it as unrun, never as unbuilt)
-#   built   = the apps that HAVE it — a positive list
+#   built   = the apps that HAVE it — a positive list; the kids channels
+#             `android-kids` / `ios-kids` (feature-catalog.md § Cell semantics) are
+#             listed where the kids build keeps the surface — seeded 2026-11-07 on
+#             the product surfaces of D-K5's *Kept* planes (calendar, family,
+#             onboarding, conversations) that the parent has built; a surface of an
+#             excised plane is never listed, its page declares the column absent;
+#             a `harness` entry never lists them — the kids build is driven by its
+#             parent's driver, so the reader gives a kids column its parent's answer
 #   detail  = what is missing and what closes it
 #   tracked = where the work is captured
 # `helpers/app_surface.py::require_surface(driver, key)` and the
@@ -31,11 +38,23 @@ built = ["android", "ios", "linux", "macos", "tui", "windows"]
 detail = "rendered on tui, linux, android, macos, ios and windows; web renders neither it nor the sign-in"
 tracked = "mailbox-migration.md § Implementation status today"
 
+[archive-import-resume-handback]
+kind = "product"
+built = []
+detail = "handing the archive back to a resume whose folder holds no readable raw copy: no app paints archive-import-archive-path / archive-import-archive-open-button on a paused or errored Progress step, so the machine's verify_handed_back (the marker's length + BLAKE3) is unreachable from any UI; nor does a test anchor reach that state (a run stopped after the marker learns raw_len/raw_blake3 and before the raw copy is written)"
+tracked = "docs/goal/behavior/archive-import.md § Storage — the archive folder"
+
 [app-log-reader]
 kind = "harness"
 built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
 detail = "the driver's reader of the app's own log (`app_log_text` / `app_stderr_text`, answered by `helpers/app_log_section.has_reader`): a test that reads the log as evidence needs one, since an absent marker with no log behind it proves nothing. Every leaf driver has one; the proof half pins this list against them"
 tracked = "docs/goal/architecture/e2e-self-diagnosing-failures.md § The convention"
+
+[author-drain-hold]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the `subscriptions_hold_author_drain` / `subscriptions_release_author_drain` agent commands over shared Rust's `hold_author_drain_for_test`, which keep a paid subscribe request standing in the author's requests while its badge is read; tui (lead) has them, the other apps' agents call the same shared seam through their FFI/wasm test flavor (the kids builds excise the author-side subscriptions plane, so they have none)"
+tracked = "monetization.md § Pillar 3"
 
 [author-seat-pump-cadence]
 kind = "harness"
@@ -75,7 +94,7 @@ tracked = "caldav-server.md"
 
 [calendar-after-reclaim]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web"]
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web"]
 detail = "each built app's Events page is the observation surface for the standalone factory-reset, re-claim, enable-mail, create-event cycle; windows and android are the remaining cross-app follow-on. The docker tier_4 twin is the separate harness surface calendar-after-reclaim-docker-drive"
 tracked = "caldav-server.md"
 
@@ -87,9 +106,39 @@ tracked = "nest/common.md § Factory reset (outcome 13's docker witness)"
 
 [caltime-pan-visible-range]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web", "windows"]
 detail = "events-prev/next-month still steps a month (or nothing) outside month view"
 tracked = "events.md § Where logic lives (view-mode + visible-range lift)"
+
+[community-room-relaunch-restore]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a community room comes back after a pinned-store relaunch with its messages and tombstones — its community marker lists the group-less room in the replica (devices.md § Durability rules, *A community room is listed by its marker*), shared Rust, witnessed on tui 2026-11-07. Until then the reopened app logged `0 channel(s) restored from replica` and listed no community room at all. Web, linux and android joined 2026-11-08 with the community-room lift (the shared Rust is theirs too; their witness runs are the lift's verify requests); macos and ios joined 2026-11-08 with their own leg (FaunaKit forwards every room control to the same shared manager; their witness runs are that leg's verify requests); windows joins in its own trickle-down leg"
+tracked = "community-rooms.md § Implementation status today; "
+
+[community-room-rekey-retry]
+kind = "product"
+built = ["tui"]
+detail = "a community-room removal whose unseat lands but whose re-key does not keeps the member's chip gone and says so on the page's error line in its own sentence (`BackendError::RemovalUnsevered`, never the generic failure with the chip put back), and the next owner's or admin's tend pass completes the re-key without a gesture by reading the floor's `severance_owed` — all shared Rust, witnessed on tui. The other apps join as their room surfaces land in the trickle-down"
+tracked = "community-rooms.md § Implementation status today (*A removal severs*, the retry paragraph); "
+
+[room-invite-inbox-full-reason]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a room invitation the nest refuses because the invitee's inbox is full says so on the page's error line: the nest answers `fauna.conversations.invitee_inbox_full`, which `RpcError::localized` (shared Rust) renders as its own catalog sentence. Until 2026-11-08 the code was `fauna.conversations.forbidden`, rendered as the reach-policy sentence (\"This person isn't accepting new conversations right now…\") — a wrong reason with a wrong remedy. Web, linux and android joined 2026-11-08 with the community-room lift (the shared Rust is theirs too; their witness runs are the lift's verify requests); macos and ios joined 2026-11-08 with their own leg (FaunaKit forwards every room control to the same shared manager; their witness runs are that leg's verify requests); windows joins in its own trickle-down leg"
+tracked = "community-rooms.md § Implementation status today (the invitations entry); "
+
+[room-roster-refusal-per-actor]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the parked-floor-delete witness refuses the MEMBER's `room.list_roster` alone (`refuse_rpc(..., actor=)`, the nest test hook's actor-scoped refusal) while the founder's own floor delete still reads the version it signs under, and the founder moves the room's policy one version through the settings editor first, so the record names a version the member never anchored and parks. Until 2026-11-07 the refusal was per kind and no floor delete record was ever filed. Web, linux and android joined 2026-11-08 with the community-room lift (the shared Rust is theirs too; their witness runs are the lift's verify requests); macos and ios joined 2026-11-08 with their own leg (FaunaKit forwards every room control to the same shared manager; their witness runs are that leg's verify requests); windows joins in its own trickle-down leg"
+tracked = "community-rooms.md § Implementation status today; "
+
+[room-seat-lost-key]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the lost-key witness poisons the member's floor reception key through the nest's test hook (`POST /api/v1/test/rooms/poison-seat-key`, `test-hooks` builds only — no door can store an invalid key any more, so no gesture reaches the state) and refuses the member's `room.set_reception_key` alone while it reads the seat keyless; the member's own tend pass then re-keys the seat. Web, linux and android joined 2026-11-08 with the community-room lift (the shared Rust is theirs too; their witness runs are the lift's verify requests); macos and ios joined 2026-11-08 with their own leg (FaunaKit forwards every room control to the same shared manager; their witness runs are that leg's verify requests); windows joins in its own trickle-down leg"
+tracked = "community-rooms.md § Implementation status today (*A reception key is FIPS-203-valid before it is ever stored*); "
 
 [compose-body-bulk-fill]
 kind = "product"
@@ -103,10 +152,16 @@ built = ["ios", "linux", "macos", "tui", "web", "windows"]
 detail = "this app publishes no connection state, so the shared connection barrier is a no-op on it and every OnlineOnly affordance it drives after launch is still racing the handshake"
 tracked = ""
 
+[content-policy-show-again-button]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the reporter's show-again control beside the reported placeholder (moderation.md § Corollary — the reporter's hide is theirs to undo): tui led, web, linux, android, macos and ios lifted it; windows paints the placeholder without the button until its leg lifts it over the shared obligation::show_again_for_item + unhide_reported faces"
+tracked = "moderation.md § Implementation status today"
+
 [conversations-archive-rail]
 kind = "product"
 built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the Archive rail: the archive-import machine's thread source is registered with the conversations manager (threads::register_archive_threads over ConversationsManager::set_archive_thread_source — tui and linux in their own conv_backend, the FFI legs in the shared conversations factory, web through WsRpcClient::registerArchiveThreads) and re-read on each conversations-page visit, so an import's message threads list read-only on the Archive rail; an app that does not re-read it lists nothing"
+detail = "the Archive rail: the archive-import machine's thread source is registered with the conversations manager (threads::register_archive_threads over ConversationsManager::set_archive_thread_source — tui and linux in their own conv_backend, the FFI legs in the shared conversations factory, web through WsRpcClient::registerArchiveThreads) and re-read on each conversations-page visit, so an import's message threads list read-only on the Archive rail; an app that does not re-read it lists nothing; ios-kids is unlisted: the kids build excises archive import (not in D-K5's *Kept* — `ArchiveImportVM.swift` and `ArchiveLinksStore.swift` are behind `#if !FAUNA_KIDS`, and so is `ConversationsVM.refreshArchiveThreads`'s read), so its Archive rail lists nothing"
 tracked = "archive-import.md § Implementation status today (slice 6's threads half); the batched per-app trickle-down"
 
 [cross-nest-mls-receive-seam]
@@ -132,6 +187,12 @@ kind = "harness"
 built = ["android", "linux", "macos", "tui", "windows"]
 detail = "SearchNav::Mail's message-selection half is built on tui (lead app, 2026-08-10) and linux (2026-08-15); the shared state is already in ConversationsManager, so an app that registers its local search arm owes only the paint"
 tracked = "conversations.md § The selected message; the per-app trickle-down NEXTs"
+
+[document-painted-read]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a document element's body as painted (`helpers/painted_lines.py`) — a task item's box state and a nested item's indent kept, which the one-line `get_text` drops: tui answers `get_attr(<id>, painted)` off its own paint lines, web reads the rendered DOM's checkboxes and laid-out indents, linux's agent reads the labels it laid out, android's test agent reads the laid-out text of the body under the element's frame (`DocumentPaint.kt`), macos and ios answer it off the frames FaunaKit's shared walk laid its text leaves out at (`DocumentBodyView.swift::DocumentPaintedLines`); an app joins when its test agent answers `get_attr(<id>, painted)` off the widgets it actually painted"
+tracked = "docs/goal/architecture/render-model.md § Implementation status today (D7 task lists and nested lists)"
 
 [dns-provider-machine-dispatch]
 kind = "harness"
@@ -159,13 +220,13 @@ tracked = "mail-settings.md"
 
 [event-card-rsvp]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web", "windows"]
 detail = "the card-level `event-rsvp-*` trio on the agenda `event-card` (the detail-page trio is built everywhere); android carries it only on its separate invited-events quick-list"
 tracked = "events.md § Implementation status today (Inline card-level RSVP)"
 
 [events-day-cell]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web", "windows"]
 detail = "the month grid's indexed day cells (`events-day-cell-{YYYY-MM-DD}`) and their Outlook single-click drill-in / double-click prefill; android still paints its month cells as untagged chrome"
 tracked = "events.md § Implementation status today (Month day-cell drill-in row)"
 
@@ -177,14 +238,14 @@ tracked = "behavior/family-client-enforcement.md § Guardian Notify"
 
 [family-policy-content-hint]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web"]
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web", "windows"]
 detail = "the content-category bound on the guardian's editor, tagged"
 tracked = "family-client-enforcement.md § Content policy"
 
 [federated-report-sheet]
 kind = "product"
 built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the UI-driven two-nest leg of user-initiated reporting (moderation.md § User-initiated reporting → Routing) is driven on tui first"
+detail = "the UI-driven two-nest leg of user-initiated reporting (moderation.md § User-initiated reporting → Routing) is driven on tui first; ios-kids is unlisted: the leg reports a foreign post a discovery feed indexed, and the kids build excises the feed and discovery (D-K5 *Excised* — `FeedPostActions.swift`, which paints `feed-post-report-button`, is file-wide `#if !FAUNA_KIDS`, and `apple-kids-check` fences every `feed-` id); the report sheet itself stays, opened from a conversation message"
 tracked = ""
 
 [firewalled-trust-differential-drive]
@@ -193,11 +254,11 @@ built = ["linux", "tui"]
 detail = "proven on linux and tui; the remaining NATIVE apps (windows, macos, ios) are ordinary cross-app trickle-down — they share trust.rs's TOFU model, so each one's leg is a driver swap, not new trust work. Every leg needs a fresh nest image on a docker-capable box, which is the actual gate here (web declares its absence in the test)"
 tracked = ""
 
-[first-setup-mail-auto-mint]
+[folder-create-public]
 kind = "product"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
-detail = "linux wires FaunaClient::provision_mail_at_first_setup; macOS + iOS wire the same first-setup auto-mint via the shared FaunaKit MailEnableGlue (iOS confirmed in-process 2026-06-17); tui wires the ported mail_glue::provision_mail_at_first_setup (2026-07-19); android wires it through MailEnableGlueVM.applyPostClaimServingEnablement, latched on WizardOutcome::LoggedIn and run once at the first authed launch (built, not yet witnessed by an android run of this test); web wires the same shared step through the wasm applyPostClaimServingEnablement on its LoggedIn handoff (onboarding page); windows is the remaining cross-app follow-on"
-tracked = "mail-settings.md"
+built = ["tui", "web", "linux", "android", "macos", "ios"]
+detail = "tui, web, linux and android (2026-11-08), macos and ios (2026-11-09, the shared FaunaKit sheet) create a folder born public through the wizard: wizard-audience-select / wizard-audience-hint on the Name step, Create arming the owner row's folder-audience-public-confirm, the confirm creating it public and attested (docs/goal/ui/folders.md § Audience and website serving → Born public). windows trails on the shared FolderWizardMachine and widens this list when it lands"
+tracked = ""
 
 [folder-location-free-space-button]
 kind = "product"
@@ -217,15 +278,9 @@ built = ["linux", "macos", "tui"]
 detail = "this app's leg of the journey has not landed"
 tracked = "docs/features/local-folder-sync.md outcome 15 (per-app trickle-down)"
 
-[folder-share-cross-nest]
-kind = "product"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
-detail = "the owner-side share picker resolves a typed user@<peer> handle through the shared find_user and carries its nest_url as member_nest_url into FoldersAuthor::share_set; windows is owed (its row below)"
-tracked = "ui/folders.md § Implementation status today"
-
 [fresh-box-floor-cert-reach]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "windows"]
+built = ["ios", "ios-kids", "linux", "macos", "tui", "windows"]
 detail = "a pre-claim box serves only its self-signed floor cert (it learns its name from the claim, so no ACME cert can exist yet) and this app's TLS stack cannot accept it — on web the browser owns TLS in wasm and the strict client is deliberate. Not a DNS race. Unblocks with the nest's IP bridge cert + the wizard claiming the box as Online's last substep"
 tracked = "onboarding.md § handle entry"
 
@@ -345,14 +400,14 @@ tracked = "mail-settings.md"
 
 [mail-token-refresh-clock]
 kind = "harness"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
-detail = "the shared refresh and its clock are in place; this app's automation agent does not route the command yet (windows is the last app without the route)"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the `mail_token_refresh_advance_clock` agent command (the submission-token refresh's clock, convention 14) is routed on every app's test agent over the shared `token_refresh` clock, and every app runs the shared refresh (windows was the last to route the clock)"
 tracked = "mail-credentials.md § Trigger taxonomy"
 
 [member-review-defer-button]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web"]
-detail = "the ephemeral kit-side review pass (succession-propagation ruling 1, item (ii)): tui, web, macos, ios and linux paint its defer button; windows and android lack the pass"
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web", "windows"]
+detail = "the ephemeral kit-side review pass (succession-propagation ruling 1, item (ii)): tui, web, macos, ios, linux and windows paint its defer button; android lacks the pass. The iOS kids build keeps it: Settings → Account's recovery kit (`RecoveryKitSection.swift`'s `memberReviewPass`) carries no `FAUNA_KIDS` condition — identity settings are D-K5 *Kept*"
 tracked = "docs/goal/behavior/succession-propagation.md § Implementation status today (the item-(ii) bullet's Gap)"
 
 [mls-cross-device-sync-proof]
@@ -387,14 +442,14 @@ tracked = ""
 
 [nests-custody-restore]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "the shared RestoreFromCustodian command is exported; android's Nests page paints the whole restore block (button, input, submit, cancel and notice: `LinkedNestsScreen.kt` `CustodyRestoreBlock`) but no custody witness carries the android mark yet, so `built` gains android with the witness"
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web", "windows"]
+detail = "the iOS kids build keeps it — the Nests page and FaunaKit's `CustodyRestoreBlockView` carry no `FAUNA_KIDS` condition, and backups (the client-device custodian) are D-K5 *Kept*; the shared RestoreFromCustodian command is exported; android's Nests page paints the whole restore block (button, input, submit, cancel and notice: `LinkedNestsScreen.kt` `CustodyRestoreBlock`) but no custody witness carries the android mark yet, so `built` gains android with the witness"
 tracked = "nests.md § Implementation status today"
 
 [on-device-log-reader]
 kind = "harness"
-built = ["ios", "linux", "macos", "tui"]
-detail = "the driver's reader of the app's own on-device log file (`on_device_log_text`): tui and linux read the file from the host, the Apple in-process driver reads its own; android's and windows' drivers have none (web keeps no file and is declared absent where the journeys gate on it). The proof half pins this list against the leaf drivers"
+built = ["android", "ios", "linux", "macos", "tui"]
+detail = "the driver's reader of the app's own on-device log file (`on_device_log_text`, and its sizes half `on_device_log_sizes`): tui and linux read the file from the host, the Apple in-process driver reads its own, android's reads it over its bridge (`GET /app-log`); windows' driver has none (web keeps no file and is declared absent where the journeys gate on it). The proof half pins this list against the leaf drivers"
 tracked = "docs/features/app-log.md outcome 6"
 
 [on-demand-replica-serve-seat]
@@ -433,22 +488,22 @@ built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
 detail = "the button copies, but only tui, linux, web, macos, ios, windows and android report the value it wrote, so a test cannot assert what reached the clipboard"
 tracked = "profile.md § User actions; the cross-app lift"
 
-[profile-handle-primary-domain]
-kind = "product"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
-detail = "windows' SELF header falls back to the bare handle (or the actor id) and never reads the account's live domain"
-tracked = ""
-
 [profile-offers-browse]
 kind = "product"
 built = ["ios", "linux", "macos", "tui", "web", "windows"]
 detail = "android has it too but no witness carries the android mark yet, so `built` gains android with the witness; every other app but windows is listed"
 tracked = "per-app NEXTs"
 
+[profile-follow-unfollow]
+kind = "product"
+built = ["tui", "linux", "web", "android", "macos", "ios"]
+detail = "profile-follow-button as the Follow ⇄ Following toggle: Following pressed unfollows (a leave of the followers tier), confirm-gated by a second press when a paid tier is held. Built on tui (lead), linux, web, android, macos and ios (one FaunaKit leg); windows still subscribes on every press until its trickle-down lifts the toggle over the shared is_following / unfollow_ends_paid_tier"
+tracked = "subscriptions.md § Implementation status today"
+
 [proxied-video-playback]
 kind = "product"
-built = ["ios", "linux", "macos", "web", "windows"]
-detail = "the video-thumbnail on a bridged post paints the glyph + path inert on the other apps; the tap is not wired to playback_source's ticketed Url yet"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the video-thumbnail on a bridged post paints the glyph + path inert on the other apps; the tap is not wired to playback_source's ticketed Url yet (tui's leg is the external handoff's bearer GET of the proxied path, no ticket); ios-kids is unlisted: a proxied video is a bridged feed post's, and the kids build excises the feed and every bridge (D-K5 *Excised* — the feed renders and `VideoPlaybackPlan.init(PlaybackSource)` are behind `#if !FAUNA_KIDS`)"
 tracked = "render-model.md § D6c → Inline playback (each native app wires its ProxiedVideo tap)"
 
 [registry-refuse-secret-writes]
@@ -483,9 +538,15 @@ tracked = "docs/goal/architecture/e2e-conventions.md convention 10"
 
 [retained-generation-rows]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "web", "windows"]
-detail = "android has it but is excluded here until its witness carries the android mark (the venue is fleet-wide work); `built` gains android with the witness"
+built = ["ios", "ios-kids", "linux", "macos", "tui", "web", "windows"]
+detail = "android has it but is excluded here until its witness carries the android mark (the venue is fleet-wide work); `built` gains android with the witness. The iOS kids build keeps it: `LinkedNestsView.swift`'s generation rows carry no `FAUNA_KIDS` condition and the Nests page is on the kids Settings rail"
 tracked = "nests.md § Trust facet — generation recovery"
+
+[screen-time-heartbeat-unfocused]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the `screen_time_heartbeat` agent command's additive `focused: false` field (advance the clock with the app out of front or locked, billing nothing — the billing half of family-safety outcome 67) is honoured on tui, linux, web, android, macos and ios; windows' agent ignores the field and would bill the minutes, so the billing witness skips there until its twin lands"
+tracked = "behavior/family-client-enforcement.md § Implementation status today"
 
 [second-device-same-user]
 kind = "harness"
@@ -513,8 +574,8 @@ tracked = ""
 
 [server-offers-follow-location]
 kind = "product"
-built = ["ios", "linux", "macos", "tui", "windows"]
-detail = "android shares the shared-Rust re-list but has not witnessed these journeys yet; web omits the picker"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "android shares the shared-Rust re-list but has not witnessed these journeys yet"
 tracked = "registry.md § Server offers follow the location"
 
 [set-provider-base-urls]
@@ -541,6 +602,12 @@ built = ["linux", "macos", "tui", "windows"]
 detail = "the serve hold and the serve tally have no agent arm on this app"
 tracked = "p2p.md § Implementation status today (the resumed-transfer paragraph)"
 
+[sign-out-record]
+kind = "product"
+built = ["ios", "linux", "macos", "tui"]
+detail = "a native sign-out writes the sign-out record (sign-out-record.json under the install base) before its first await, and the next launch finishes a sign-out the app died inside (account-scoping.md § Erasure follows scope → The sign-out record is on all 7 apps); built on tui, linux, macos and ios (one FaunaKit seat; ios witnessed by the background tester); android (wired, its device e2e waits on the android venue) has no arm here yet, and windows adds its with its row. web keeps its record in localStorage and is witnessed by test_sign_out_web.py"
+tracked = "account-scoping.md § Implementation status today"
+
 [sign-out-releases-instance-lock]
 kind = "product"
 built = ["linux", "macos", "tui", "windows"]
@@ -555,7 +622,7 @@ tracked = "test_moderation_local_detection.py module docstring (slice-4 legs)"
 
 [state-protocol-messages-field]
 kind = "product"
-built = ["android", "ios", "linux", "macos", "tui", "windows"]
+built = ["android", "android-kids", "ios", "ios-kids", "linux", "macos", "tui", "windows"]
 detail = "the unified message display system serialised into the state protocol's `messages` field ({error, warning, info}): every app's test agent but web's"
 tracked = "tests/e2e-unified/tests/test_messages.py module docstring"
 
@@ -589,14 +656,26 @@ built = ["ios", "linux", "macos", "tui", "web", "windows"]
 detail = "the driver's unclean-kill primitive (`PlatformDriver.kill_uncleanly`, answered by `supports_unclean_kill`): the driver must own the app child it kills — a Popen, a pty session leader, a simulator pid, a bridge session — and the android bridge driver owns none"
 tracked = "docs/goal/architecture/e2e-conventions.md convention 7, mode 5"
 
-[vps-location-picker]
-kind = "product"
-built = ["android", "ios", "linux", "macos", "tui", "windows"]
-detail = "painted on every app but web (apps/fauna-tui/src/wizard/vps_config.rs paints the full onboarding.md § 5 VPS wizard); web's vps_config step has no location picker yet"
-tracked = "installers/vps.md"
-
 [window-capture]
 kind = "harness"
 built = ["windows"]
 detail = "a sized capture of the app's own window (`PlatformDriver.capture_window`), what the store-listing screenshots are taken with: built on windows (flaui-bridge /window/capture); the other store apps each need their own capture. The proof half pins this list against the drivers that override the method"
 tracked = "docs/goal/architecture/installers/windows.md § Store distribution"
+
+[community-room-survives-succession]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a device that ran the theft remedy keeps listing its community rooms as the successor, so its tend pass re-keys the seat the floor handed on. Built for tui 2026-11-08: the `__mls` re-seal walks the community markers as well as the groups (`ProviderReplica::history_channel_ids`), so the successor's first load opens the room's slice. Web, linux and android joined 2026-11-08 with the community-room lift (the shared Rust is theirs too; their witness runs are the lift's verify requests); macos and ios joined 2026-11-08 with their own leg (FaunaKit forwards every room control to the same shared manager; their witness runs are that leg's verify requests); windows joins in its own trickle-down leg"
+tracked = "community-rooms.md § Implementation status today; "
+
+[community-room-foreign-attachment-pin]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "a community-room member homed on another nest can put attachment bytes on a self-signed home and read them from it — the member's nest stamps the home's verified identity on the cross-nest invitation knock and the accept records it with the home (conversation-rooms.md § Implementation status today, the self-signed home's trust), shared Rust and nest, built for tui 2026-11-08; macos and ios joined 2026-11-08 with their own leg (the identity rides the shared accept and the shared native blob plane, which FaunaKit calls unchanged; their witness runs are that leg's verify requests); linux and android joined 2026-11-08 with the web, linux and android lift (linux builds the same native `NestConversationsRpc` as tui, android reaches it through fauna-ffi as FaunaKit does; their witness runs are that lift's verify requests). Until then the accept recorded the home with no identity, and the member's upload to `https://<home>/api/v1/blob` failed `error sending request`. Web joined 2026-11-08 on the shared wasm plane that was already built — the write-token upload `fauna_rpc_wasm::post_multipart_blob_with_bearer` and the open-CORS blob read — once the e2e home nest seeded the web seat's browser origin into its CORS allow-list (conftest `_start_handled_tls_nest`): a browser has no pin plane by ruling, not by omission (transport-trust.md § The browser's leg — the self-signed home is the declared browser residual, and *the witness splits the mile*: the web arm runs under the harness's standing `ignore_https_errors` and witnesses the upload, the read, the pin's survival of clean-up and the stranger's refusal against a home serving the floor, while the outcome's own wording keeps the self-signed clause to native apps); windows joins in its own trickle-down leg"
+tracked = "conversation-rooms.md § Implementation status today (the self-signed home's trust); "
+
+[payment-link-subscribes-first]
+kind = "product"
+built = ["tui"]
+detail = "the storefront payment link sends the subscribe intent before opening the checkout and the checkout URL carries client_reference_id for a Stripe host (shared Rust SubscriptionsClient::subscribe_and_checkout); tui leads, the other six apps follow in the batched trickle-down"
+tracked = "monetization.md § Pillar 3 → Buyer↔actor binding (Q4)"

@@ -83,10 +83,19 @@ def _post_webhook(base_url: str, author_hex: str, provider: str, body: bytes, si
         return e.code, {}
 
 
-def _payment_body(*, reference: str | None = None, external_ref: str | None = None) -> bytes:
+def _payment_body(
+    *, reference: str | None = None, external_ref: str | None = None, product: str | None = None,
+) -> bytes:
+    """``product`` names what the payment was for, in the provider's own
+    reference (the fake provider's `product` body field — on Stripe the
+    Payment Link a Checkout Session came through); the per-product tier
+    mapping (monetization.md § Pillar 3 → *Configuration*) covers a payment
+    only when it names the mapped product."""
     body = {"id": external_ref or f"pay_{uuid.uuid4().hex[:10]}", "event": "payment"}
     if reference is not None:
         body["reference"] = reference
+    if product is not None:
+        body["product"] = product
     return json.dumps(body).encode()
 
 
@@ -215,16 +224,42 @@ def test_provider_config_add_and_remove(app, payments_nest):
         row_or_grant, AUTHOR_GRANT_BUDGET_S, interval=1,
         diagnose=lambda: f"no §2 row and no grant; error={subs.error_text()!r}",
     )
-    if subs.pending_request_count() >= 1 and _has_new_ids(app):
-        assert subs.request_paid(0) or subs.pending_request_count() == 0, (
-            "a payment-entitled request should show the paid badge "
-            "(PendingRequest.payment_entitled)"
-        )
+    # The paid badge on a standing row is witnessed, held, by
+    # `test_a_payment_backed_request_shows_the_paid_badge` below: here the pump
+    # is free to grant the row, so no badge reading would be deterministic.
     # The §4 status badge reflects the just-verified delivery evidence
     # (last_verified_at stamped at webhook ingress — provider_status_label).
     assert subs.wait_for_provider_status("Verified", 0), (
         f"a verified webhook delivery should flip the §4 status badge to "
         f"'Verified'; got {subs.provider_status(0)!r}; error={subs.error_text()!r}"
+    )
+
+    # ── A badly signed delivery flips the badge to "Error". ─────────────────
+    # The nest refuses it non-2xx and stamps `last_rejected_at`; a rejection
+    # wins unless a STRICTLY later verification follows it, and a same-second
+    # tie resolves to error (`provider_status_label`), so this reading does
+    # not depend on how close it lands to the verified delivery above. The
+    # row reflects the stamp only once the page re-reads, so each poll
+    # refreshes; the wait ends on the state, never a fixed delay
+    # (convention 14).
+    bad_body = _payment_body(reference=buyer["actor_id_hex"])
+    status, _ = _post_webhook(
+        payments_nest["url"], author["actor_id_hex"], "fake", bad_body, "0" * 64,
+    )
+    assert not 200 <= status < 300, (
+        f"a webhook with a bad signature must be refused non-2xx, got {status}"
+    )
+
+    def provider_reads_error() -> bool:
+        subs.refresh()
+        return subs.provider_status(0) == "Error"
+
+    wait_until(
+        provider_reads_error, AUTHOR_GRANT_BUDGET_S, interval=1,
+        diagnose=lambda: (
+            f"a rejected webhook delivery should flip the §4 status badge to "
+            f"'Error'; got {subs.provider_status(0)!r}; error={subs.error_text()!r}"
+        ),
     )
 
     # ── Remove deregisters: the row goes, and the same webhook now 404s. ────
@@ -238,6 +273,181 @@ def test_provider_config_add_and_remove(app, payments_nest):
         _sign_fake(FAKE_SECRET, body2),
     )
     assert status == 404, f"webhook to a removed provider must be non-2xx, got {status}"
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_provider_product_mapping_covers_only_its_own_payments(app, payments_nest):
+    """Author journey for the per-product tier mapping (monetization.md
+    § Pillar 3 → *Configuration*, ruled 2026-11-05): the creator fills the
+    §4 form's optional product field (`subscription-provider-form-product` —
+    on Stripe the Payment Link id) and saves; `providers.list` carries it and
+    the re-opened form pre-fills it (not a secret). Then two signed webhooks:
+    a payment for ANOTHER product is acknowledged 2xx (so the provider never
+    retries it) and mints nothing — `{"status":"ignored","reason":
+    "product_not_mapped"}` — while a payment naming the mapped product mints
+    a claim as before."""
+    admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
+    author = create_actor_and_register(
+        payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
+    )
+
+    _login_as(app, payments_nest, author, handle="e2e-product-author")
+    subs = app.subscriptions
+    tier = _unique("gold")
+    product = f"plink_{uuid.uuid4().hex[:8]}"
+
+    subs.navigate()
+    subs.open_tiers_tab()
+    subs.create_tier(tier, rank=1, price_hint="$5/mo")
+    assert subs.wait_for_tier(tier), (
+        f"created tier {tier!r} should appear in §1; error={subs.error_text()!r}"
+    )
+
+    # ── §4: add the provider WITH the product, through the form. ───────────
+    subs.add_provider("fake", FAKE_SECRET, tier, product=product)
+    assert subs.wait_for_provider("fake"), (
+        f"the configured provider should appear in §4; error={subs.error_text()!r}"
+    )
+
+    # The nest holds the product (the wire's `product_ref`), readable by the
+    # author — the proof the form sent what it showed.
+    author_api = ApiActor(
+        payments_nest["url"], author["token"], author["actor_id_hex"],
+        bytes(author["signing_key"]),
+    )
+    listed = author_api._ws_call("fauna.payments.providers.list", {})
+    rows = listed.get("providers") or []
+    assert [r.get("product_ref") for r in rows if r.get("kind") == "fake"] == [product], (
+        f"providers.list must carry the product the form saved: {listed!r}"
+    )
+
+    # Re-opening the form for the configured kind pre-fills the saved product
+    # (it is not a secret — the secret stays blank).
+    subs.open_provider_form("fake")
+    wait_until(
+        lambda: subs.provider_form_product() == product, 10.0, interval=0.5,
+        diagnose=lambda: (
+            f"the re-opened form should pre-fill the saved product {product!r}; "
+            f"got {subs.provider_form_product()!r}; error={subs.error_text()!r}"
+        ),
+    )
+    subs.close_provider_form()
+
+    # ── A payment for another product (a tip link on the same account): ─────
+    # acknowledged, not retried, nothing minted.
+    other = _payment_body(product="plink_tips")
+    status, reply = _post_webhook(
+        payments_nest["url"], author["actor_id_hex"], "fake", other,
+        _sign_fake(FAKE_SECRET, other),
+    )
+    assert status == 200, f"an unmapped product is acknowledged 2xx, got {status} {reply!r}"
+    assert reply.get("status") == "ignored" and reply.get("reason") == "product_not_mapped", (
+        f"an unmapped product mints nothing: {reply!r}"
+    )
+
+    # ── A payment naming the mapped product mints a claim as before. ────────
+    mapped = _payment_body(product=product)
+    status, reply = _post_webhook(
+        payments_nest["url"], author["actor_id_hex"], "fake", mapped,
+        _sign_fake(FAKE_SECRET, mapped),
+    )
+    assert status == 200 and reply.get("status") == "claim_minted", (
+        f"the mapped product mints: {status} {reply!r}"
+    )
+    assert reply.get("claim_code"), f"claim_minted must carry the code: {reply!r}"
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_a_payment_backed_request_shows_the_paid_badge(app, payments_nest):
+    """Author journey: a verified payment's subscribe request stands in §2 with
+    the paid badge (`subscription-request-paid-badge`, rendering
+    `PendingRequest.payment_entitled` — monetization.md § Pillar 3).
+
+    The author's own pump grants a payment-backed row with no judgment on its
+    next tick, so the row is read with the drain HELD (the agent's
+    `subscriptions_hold_author_drain`, checked after the pump's queue read):
+    every row enqueued after the hold stands until the release, so the badge
+    assertion is unconditional and no pump timing decides it (convention 14).
+    Released, the same row is granted — the hold kept a real paid request, not
+    an inert one."""
+    require_surface(app.driver, "author-drain-hold")
+    admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
+    author = create_actor_and_register(
+        payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
+    )
+    buyer = create_actor_and_register(
+        payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
+    )
+
+    _login_as(app, payments_nest, author, handle="e2e-paid-badge-author")
+    subs = app.subscriptions
+    tier = _unique("gold")
+
+    subs.navigate()
+    subs.open_tiers_tab()
+    subs.create_tier(tier, rank=1, price_hint="$5/mo")
+    assert subs.wait_for_tier(tier), (
+        f"created tier {tier!r} should appear in §1; error={subs.error_text()!r}"
+    )
+    subs.add_provider("fake", FAKE_SECRET, tier)
+    assert subs.wait_for_provider("fake"), (
+        f"the configured provider should appear in §4; error={subs.error_text()!r}"
+    )
+    assert subs.pending_request_count() == 0, "no request may stand before the payment"
+
+    subs.hold_author_drain()
+    try:
+        body = _payment_body(reference=buyer["actor_id_hex"])
+        status, reply = _post_webhook(
+            payments_nest["url"], author["actor_id_hex"], "fake", body,
+            _sign_fake(FAKE_SECRET, body),
+        )
+        assert status == 200 and reply.get("queued") is True, (
+            f"a webhook signed with the form-entered secret must verify: {status} {reply!r}"
+        )
+
+        def row_stands() -> bool:
+            subs.refresh()
+            return subs.pending_request_count() >= 1
+
+        wait_until(
+            row_stands, AUTHOR_GRANT_BUDGET_S, interval=1,
+            diagnose=lambda: (
+                f"the paid request never reached §2 with the drain held; "
+                f"error={subs.error_text()!r}"
+            ),
+        )
+        assert subs.pending_request_count() == 1, (
+            f"exactly the one paid request should stand; "
+            f"got {subs.pending_request_count()}"
+        )
+        assert subs.request_paid(0), (
+            "a payment-backed subscribe request must show the paid badge "
+            f"(PendingRequest.payment_entitled); error={subs.error_text()!r}"
+        )
+    finally:
+        subs.release_author_drain()
+
+    buyer_api = ApiActor(
+        payments_nest["url"], buyer["token"], buyer["actor_id_hex"],
+        bytes(buyer["signing_key"]),
+    )
+
+    def buyer_granted() -> bool:
+        try:
+            return buyer_api.subscription_key_blob(
+                bytes.fromhex(author["actor_id_hex"]), tier,
+            )["version"] >= 1
+        except RpcCallError:
+            return False
+
+    wait_until(
+        buyer_granted, AUTHOR_GRANT_BUDGET_S, interval=1,
+        diagnose=lambda: (
+            f"released, the author's pump should grant the paid request; "
+            f"error={subs.error_text()!r}"
+        ),
+    )
 
 
 @pytest.mark.feature("subscriptions-and-tiers")
@@ -285,6 +495,7 @@ def test_provider_return_url_display(web_hosting_app, web_hosting_nest):
     web.navigate()
     web.set_subdomain_enabled(True)
     handle = web_hosting_nest["user"]["handle"]
+    author_hex = web_hosting_nest["user"]["actor_id_hex"]
     origin = f"https://{handle}.{WEB_HOSTING_DOMAIN}"
 
     subs = app.subscriptions
@@ -306,6 +517,13 @@ def test_provider_return_url_display(web_hosting_app, web_hosting_nest):
         assert shown == expected
         assert subs.driver.is_visible("subscription-provider-form-return-url-copy-button"), (
             "the return URL should be copyable"
+        )
+        # Beside it on the same form: the webhook address for the same kind.
+        webhook_url = subs.provider_webhook_url()
+        webhook_path = f"/api/v1/payments/webhook/{author_hex}/{kind}"
+        assert webhook_url.endswith(webhook_path), (
+            f"the {kind!r} form should show the webhook address beside the return "
+            f"URL; got {webhook_url!r}"
         )
         subs.close_provider_form()
 
@@ -521,4 +739,101 @@ def test_manual_claim_void(app, payments_nest):
         buyer_actor._ws_call("fauna.payments.claims.redeem", {"code": code})
     assert refused.value.code == "fauna.payments.claim_voided", (
         f"a voided code must be refused as voided, got {refused.value.code!r}"
+    )
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_the_payment_link_subscribes_first_and_binds_the_checkout(
+    app, payments_nest, opened_urls,
+):
+    """Buyer journey (``monetization.md`` § Pillar 3 → *Buyer↔actor binding
+    (Q4)* → *A checkout-bound buyer homed on another nest*, the Q13 rules (1)
+    and (2)): the storefront's ``subscription-offer-payment-link`` sends the
+    buyer's subscribe intent FIRST and then opens the checkout, whose URL
+    carries the buyer's actor id as ``client_reference_id`` on a Stripe host.
+    A signed provider webhook naming that same reference then marks the ONE
+    pending request paid — the binding with no claim code pasted.
+
+    The author is headless (an orphan tier is fine: what is asserted is the
+    request row the payment completes, not a minted KeyBlob — the drain of a
+    paid row is ``test_a_payment_backed_request_shows_the_paid_badge``'s).
+    The opened URL is read from the session's opener record (``opened_urls``),
+    never a browser."""
+    require_surface(app.driver, "payment-link-subscribes-first")
+    app.profile.require_other_profile_offers_browse_supported()
+    admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
+    author = create_actor_and_register(
+        payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
+    )
+    buyer = create_actor_and_register(
+        payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
+    )
+    author_actor = ApiActor(
+        payments_nest["url"], author["token"], author["actor_id_hex"],
+        bytes(author["signing_key"]),
+    )
+    tier = _unique("gold")
+    checkout = f"https://buy.stripe.com/test_{uuid.uuid4().hex[:10]}"
+    author_actor.subscription_create_tier(
+        tier, rank=1, price_hint="$5/mo", payment_url=checkout,
+    )
+    saved = author_actor._ws_call(
+        "fauna.payments.providers.set",
+        {"kind": "fake", "webhook_secret": FAKE_SECRET, "tier": tier},
+    )
+    assert saved.get("saved") is True, f"providers.set failed: {saved!r}"
+
+    buyer_actor = ApiActor(
+        payments_nest["url"], buyer["token"], buyer["actor_id_hex"],
+        bytes(buyer["signing_key"]),
+    )
+    buyer_actor.accept_knock(author["actor_id_hex"])
+    _login_as(app, payments_nest, buyer, handle="e2e-paylink-buyer")
+    app.contacts.open_contact_profile(author["actor_id_hex"])
+    app.driver.wait_for("profile-view", timeout=10.0)
+    app.profile.open_tiers_tab()
+    assert app.profile.wait_for_offer(tier), (
+        f"the author's tier {tier!r} should render in the offers section; "
+        f"error={app.profile.error_text()!r}"
+    )
+
+    opened_before = len(opened_urls())
+    app.profile.open_offer_payment_link(0)
+
+    want_url = f"{checkout}?client_reference_id={buyer['actor_id_hex']}"
+    wait_until(
+        lambda: want_url in opened_urls()[opened_before:], 30, interval=0.5,
+        diagnose=lambda: (
+            f"the payment link should open {want_url!r}; opened since the tap: "
+            f"{opened_urls()[opened_before:]!r}; error={app.profile.error_text()!r}"
+        ),
+    )
+
+    def buyer_rows() -> list:
+        want = bytes.fromhex(buyer["actor_id_hex"])
+        return [r for r in author_actor.subscription_requests_list()
+                if bytes(r["subscriber_id"]) == want]
+
+    # Rule (1): the checkout opens only after the subscribe returned, so the
+    # pending request is already on the author's nest — a causal barrier, no
+    # wait (convention 14).
+    rows = buyer_rows()
+    assert len(rows) == 1 and not rows[0].get("payment_entitled"), (
+        f"the tap must leave one unpaid pending request for the buyer: {rows!r}"
+    )
+
+    # The provider reports the payment carrying the reference the opened URL
+    # handed it — the same row turns paid; no second row, no claim code.
+    body = _payment_body(reference=buyer["actor_id_hex"])
+    status, reply = _post_webhook(
+        payments_nest["url"], author["actor_id_hex"], "fake", body,
+        _sign_fake(FAKE_SECRET, body),
+    )
+    assert status == 200 and reply.get("queued") is True, (
+        f"the signed webhook must verify and bind: {status} {reply!r}"
+    )
+    assert not reply.get("claim_code"), f"a bound payment mints no claim code: {reply!r}"
+    rows = buyer_rows()
+    assert len(rows) == 1 and rows[0].get("payment_entitled") is True, (
+        f"the payment must complete the app's own request row: {rows!r}"
     )

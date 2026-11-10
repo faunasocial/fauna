@@ -4283,6 +4283,191 @@ async fn folder_actors_fetch_serves_the_roster_ids_only_and_refuses_wrong_bindin
     assert_eq!(err.code, "fauna.federation.not_found");
 }
 
+/// `fauna.federation.folder.versions.list` — the cross-nest version history
+/// read (`ui/media.md` § Cross-nest shared sets): a foreign member bound to the
+/// requesting nest reads EVERY version of one path in the claimed set,
+/// oldest→newest, through the same projection the same-nest
+/// `fauna.files.versions.list` serves (a sibling path stays out), with the
+/// `caller_access` stamp; a removed member (its foreign row gone), a stranger,
+/// and a member bound to a DIFFERENT home nest are refused `forbidden`; an
+/// unclaimed channel is `not_found` (S7); a malformed `path_hash` is refused.
+#[tokio::test]
+async fn folder_versions_list_serves_every_version_and_refuses_a_removed_member() {
+    use fauna_nest::federation_handlers::{
+        FedFolderVersionsListReply, FedFolderVersionsListRequest,
+    };
+    let (_h_url, h_state) = start_nest().await;
+    let (f_url, f_state) = start_nest().await;
+    let f_nest_id = nest_id_hex(&f_state);
+    let h_nest_id_bytes = h_state.nest_identity.public_key_bytes();
+
+    let owner = [0xa1u8; 32];
+    let writer = [0xe5u8; 32];
+    let removed = [0xb2u8; 32];
+    let stranger = [0xc3u8; 32];
+    let channel_id = seed_claimed_shared_set(&f_state, &owner, "shared-docs").await;
+    let fs_id = f_state
+        .db
+        .get_folders_for_actor_full(&owner)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|fs| fs.name == "shared-docs")
+        .expect("the claimed set")
+        .id;
+    // A second version of the seeded path, and an unrelated sibling path.
+    let path = [0x11u8; 32];
+    f_state
+        .db
+        .record_sync_change(
+            &owner,
+            &path,
+            Some(&[0x33u8; 32]),
+            2345,
+            "modified",
+            Some(fs_id),
+            None,
+            Some("docs/hello.txt"),
+        )
+        .await
+        .unwrap();
+    f_state
+        .db
+        .record_sync_change(
+            &owner,
+            &[0x12u8; 32],
+            Some(&[0x44u8; 32]),
+            10,
+            "created",
+            Some(fs_id),
+            None,
+            Some("docs/other.txt"),
+        )
+        .await
+        .unwrap();
+    for actor in [writer, removed] {
+        f_state
+            .db
+            .register_foreign_channel_member(
+                &channel_id,
+                &actor,
+                &h_nest_id_bytes,
+                None,
+                RebindPower::Standing,
+            )
+            .await
+            .unwrap();
+    }
+    f_state
+        .db
+        .set_folder_member_access(&channel_id, &writer, "writer", Some(1_000_000))
+        .await
+        .unwrap();
+    // The removal: the member's foreign row goes.
+    assert!(
+        f_state
+            .db
+            .remove_foreign_channel_member(&channel_id, &removed)
+            .await
+            .unwrap()
+    );
+
+    let conn = dial(&h_state, &f_url, &f_nest_id).await.unwrap();
+    let list = |actor: [u8; 32], channel: [u8; 32], path_hex: String, corr: u8| {
+        let conn = &conn;
+        async move {
+            conn.dispatcher
+                .request_raw(
+                    "fauna.federation.folder.versions.list",
+                    [corr; 16],
+                    to_value(&FedFolderVersionsListRequest {
+                        requesting_actor_id: hex::encode(actor),
+                        channel_id: hex::encode(channel),
+                        path_hash: path_hex,
+                    }),
+                    None,
+                )
+                .await
+                .unwrap()
+                .await_reply()
+                .await
+        }
+    };
+
+    let reply: FedFolderVersionsListReply = from_value(
+        &list(writer, channel_id, hex::encode(path), 0x71)
+            .await
+            .expect("member reads the history"),
+    );
+    let manifests: Vec<Vec<u8>> = reply
+        .versions
+        .iter()
+        .map(|v| v.manifest_hash.to_vec())
+        .collect();
+    assert_eq!(
+        manifests,
+        vec![vec![0x22u8; 32], vec![0x33u8; 32]],
+        "every version of the path, oldest→newest, the sibling path out"
+    );
+    assert!(
+        reply.versions.iter().all(|v| v.folder_id == Some(fs_id)),
+        "each version names the claimed set's row"
+    );
+    assert_eq!(reply.caller_access.as_deref(), Some("writer"));
+
+    for (actor, corr, why) in [
+        (removed, 0x72, "a removed member"),
+        (stranger, 0x73, "a stranger"),
+    ] {
+        let err = list(actor, channel_id, hex::encode(path), corr)
+            .await
+            .expect_err(why);
+        assert_eq!(err.code, "fauna.federation.forbidden", "{why}");
+    }
+
+    // A member bound to a DIFFERENT home nest is refused for THIS origin.
+    let elsewhere = [0xd4u8; 32];
+    f_state
+        .db
+        .register_foreign_channel_member(
+            &channel_id,
+            &elsewhere,
+            &[0x77u8; 32],
+            None,
+            RebindPower::Standing,
+        )
+        .await
+        .unwrap();
+    let err = list(elsewhere, channel_id, hex::encode(path), 0x74)
+        .await
+        .expect_err("wrong home-nest binding → refused");
+    assert_eq!(err.code, "fauna.federation.forbidden");
+
+    // S7: a channel with a foreign member but no folder claim.
+    let conversation = [0x98u8; 32];
+    f_state
+        .db
+        .register_foreign_channel_member(
+            &conversation,
+            &writer,
+            &h_nest_id_bytes,
+            None,
+            RebindPower::Standing,
+        )
+        .await
+        .unwrap();
+    let err = list(writer, conversation, hex::encode(path), 0x75)
+        .await
+        .expect_err("no folder claim on the channel → refused");
+    assert_eq!(err.code, "fauna.federation.not_found");
+
+    // A malformed path hash is refused, never read as an empty history.
+    let err = list(writer, channel_id, "zz".into(), 0x76)
+        .await
+        .expect_err("malformed path_hash → refused");
+    assert_eq!(err.code, "fauna.federation.invalid_params");
+}
+
 /// The relayed door carries each writer's succession statements, because it
 /// serves the one projection the same-nest read serves
 /// (`mls-group-key-material.md` § M2 → *Writer-signed change records*, ruling
@@ -5204,5 +5389,175 @@ async fn every_federated_folder_read_reply_stamps_the_folders_residency() {
                 "{reply} stamps the folder's residency, stated"
             );
         }
+        // The `reachable` stamp rides the change-log fetch beside it — the
+        // home nest's own content-reachability verdict, always stated: a full
+        // folder is reachable (the nest holds it), a metadata-only one with
+        // no announced or foreign seat is not (`federation-shared-folders.md`
+        // § Relay serving across nests, the `reachable` stamp).
+        assert_eq!(
+            changes.reachable,
+            Some(expected == "full"),
+            "changes.fetch stamps the home nest's reachability verdict, stated"
+        );
     }
+}
+
+/// The relayed roster door carries the set's former writers
+/// (`writer-signed-change-records.md` ruling (12)(c)): a cross-nest writer the
+/// owner demoted, and one who left through their own home nest, are listed
+/// under `former_writers` — ids only, apart from `members` — and a former
+/// writer's peer-learned succession moves the bit to the successor, which
+/// carries the statement that ends at it.
+#[tokio::test]
+async fn folder_actors_fetch_carries_the_former_writers() {
+    use fauna_nest::federation_handlers::{
+        FedChannelLeaveReply, FedChannelLeaveRequest, FedFolderActorsFetchReply,
+        FedFolderActorsFetchRequest,
+    };
+    let (_h_url, h_state) = start_nest().await;
+    let (f_url, f_state) = start_nest().await;
+    let f_nest_id = nest_id_hex(&f_state);
+    let h_nest_id_bytes = h_state.nest_identity.public_key_bytes();
+
+    let owner = [0xa1u8; 32];
+    let (demoted0, demoted1) = ([0xd5u8; 32], [0xd6u8; 32]);
+    let leaver = [0xc7u8; 32];
+    let reader = [0xb2u8; 32];
+    let channel_id = seed_claimed_shared_set(&f_state, &owner, "shared-docs").await;
+    f_state.db.create_user(&owner, "free", "t").await.unwrap();
+    f_state
+        .db
+        .register_actor_channel(&owner, &channel_id)
+        .await
+        .unwrap();
+    for actor in [demoted0, leaver, reader] {
+        f_state
+            .db
+            .register_foreign_channel_member(
+                &channel_id,
+                &actor,
+                &h_nest_id_bytes,
+                None,
+                RebindPower::Standing,
+            )
+            .await
+            .unwrap();
+    }
+    for actor in [demoted0, leaver] {
+        f_state
+            .db
+            .set_folder_member_access(&channel_id, &actor, "writer", None)
+            .await
+            .unwrap();
+    }
+    // The owner demotes one writer.
+    f_state
+        .db
+        .set_folder_member_access(&channel_id, &demoted0, "reader", None)
+        .await
+        .unwrap();
+
+    let conn = dial(&h_state, &f_url, &f_nest_id).await.unwrap();
+    // The other leaves through their home nest's relay.
+    let left: FedChannelLeaveReply = from_value(
+        &conn
+            .dispatcher
+            .request_raw(
+                "fauna.federation.channel.leave",
+                [0x72; 16],
+                to_value(&FedChannelLeaveRequest {
+                    requesting_actor_id: hex::encode(leaver),
+                    channel_id: hex::encode(channel_id),
+                }),
+                None,
+            )
+            .await
+            .unwrap()
+            .await_reply()
+            .await
+            .expect("the member leaves"),
+    );
+    assert!(left.removed);
+
+    let fetch = |id: u8| {
+        let conn = &conn;
+        async move {
+            let reply: FedFolderActorsFetchReply = from_value(
+                &conn
+                    .dispatcher
+                    .request_raw(
+                        "fauna.federation.folder.actors.fetch",
+                        [id; 16],
+                        to_value(&FedFolderActorsFetchRequest {
+                            requesting_actor_id: hex::encode(reader),
+                            channel_id: hex::encode(channel_id),
+                        }),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .await_reply()
+                    .await
+                    .expect("a rostered member reads"),
+            );
+            reply
+        }
+    };
+    let reply = fetch(0x73).await;
+    let former: Vec<String> = reply
+        .former_writers
+        .iter()
+        .map(|f| f.actor_id.clone())
+        .collect();
+    assert_eq!(
+        former,
+        vec![hex::encode(leaver), hex::encode(demoted0)],
+        "the demoted and the departed writer are writers of record, in id order"
+    );
+    assert!(
+        reply
+            .members
+            .iter()
+            .any(|m| m.actor_id == hex::encode(demoted0) && m.access.as_deref() == Some("reader")),
+        "the demoted writer stays a member, as a reader"
+    );
+    assert!(
+        !reply
+            .members
+            .iter()
+            .any(|m| m.actor_id == hex::encode(leaver)),
+        "the departed writer is no member"
+    );
+
+    // The demoted writer's succession, as federation delivers it: the bit
+    // follows the identity and carries the link.
+    assert!(
+        f_state
+            .db
+            .record_peer_succession(&demoted0, &demoted1, b"demoted-link", 1)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    let reply = fetch(0x74).await;
+    let successor = reply
+        .former_writers
+        .iter()
+        .find(|f| f.actor_id == hex::encode(demoted1))
+        .expect("the successor is the former writer now");
+    assert_eq!(
+        successor
+            .succession_statements
+            .iter()
+            .map(|s| s.to_vec())
+            .collect::<Vec<_>>(),
+        vec![b"demoted-link".to_vec()]
+    );
+    assert!(
+        !reply
+            .former_writers
+            .iter()
+            .any(|f| f.actor_id == hex::encode(demoted0)),
+        "no former-writer bit is left under the retired id"
+    );
 }

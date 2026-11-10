@@ -1194,6 +1194,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.nostr.zap_signers.add" => matches!(class, User),
         #[cfg(feature = "zaps")]
         "fauna.nostr.zap_signers.remove" => matches!(class, User),
+        // The Nostr advertisement of a sold post (`monetization.md` § The
+        // Nostr advertisement of a sold post): the author's per-post act,
+        // caller = the author, so User-only like the trust root above. `set`
+        // rides the `zaps` plane; `clear` is de-escalation and compiled always.
+        #[cfg(feature = "zaps")]
+        "fauna.nostr.advertise.set" => matches!(class, User),
+        "fauna.nostr.advertise.clear" => matches!(class, User),
         // Protocol-native Nostr content (`nostr.*`, the prefix-less family —
         // the `bluesky.feed.thread` precedent; native-content HTTP→WS-RPC
         // rip 2026-07-22, `docs/goal/ui/nostr.md` § WS-RPC migration
@@ -1324,6 +1331,12 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // as the roster relays above: a leave retires the caller's own seat,
         // and the kind names a peer nest for this one to dial.
         "fauna.conversations.room.leave_remote" => matches!(class, User),
+        // The removal's and the keying acts' relayed twins — user-only as
+        // their same-nest doors are (a rank and a signed mint are a seated
+        // principal's own), and each kind names a peer nest to dial.
+        "fauna.conversations.room.remove_remote" => matches!(class, User),
+        "fauna.conversations.room.publish_generation_remote" => matches!(class, User),
+        "fauna.conversations.room.backfill_generations_remote" => matches!(class, User),
         // The acceptance's relayed twin — user-only as the same-nest accept
         // is (a seat is a user principal's own), and the kind names a peer
         // nest for this one to dial.
@@ -4267,6 +4280,27 @@ mod tests {
         ] {
             assert!(is_permitted(CallerClass::User, kind), "User must {kind}");
             assert!(is_permitted(CallerClass::Admin, kind), "Admin must {kind}");
+            assert!(
+                !is_permitted(CallerClass::BridgeMta, kind),
+                "BridgeMta must not {kind}"
+            );
+            assert!(
+                !is_permitted(CallerClass::BridgeMda, kind),
+                "BridgeMda must not {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn nostr_advertise_kinds_are_user_class() {
+        // The author's own per-post act: no bridge actor may publish (or
+        // withdraw) a payee's priced advertisement on their behalf.
+        let mut kinds = vec!["fauna.nostr.advertise.clear"];
+        if cfg!(feature = "zaps") {
+            kinds.push("fauna.nostr.advertise.set");
+        }
+        for kind in kinds {
+            assert!(is_permitted(CallerClass::User, kind), "User must {kind}");
             assert!(
                 !is_permitted(CallerClass::BridgeMta, kind),
                 "BridgeMta must not {kind}"

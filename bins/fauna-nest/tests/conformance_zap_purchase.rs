@@ -14,8 +14,10 @@
 //! as a sale, which then erased that zap from the post's tip list. Every
 //! fixture below therefore builds a **real** sold post through
 //! `CacheDb::put_post`, so `content_meta.gated_tier` is production-written;
-//! the sole hand-made link is the outbound `nostr_event_map` row, for the
-//! reason `publish_note_as` gives.
+//! a sellable post's outbound `nostr_event_map` row is produced by the
+//! production advertise act (`advertise_for_real`, the real
+//! `fauna.nostr.advertise.set` handler, 2026-11-07), and only a post the act
+//! refuses gets a hand-made one, for the reason `publish_note_as` gives.
 //!
 //! **Why these are flow tests, not unit tests.** The comparison itself is
 //! pinned nine ways in `fauna_payments::asking_price` (including a
@@ -90,7 +92,9 @@ mod purchase {
     use fauna_nest::nostr::{db, store, zap_ingest};
     use fauna_protocol::subscriptions::TierAskingPrice;
 
-    use common::zap::{designate_zap_signer as designate, link_payee, zap_receipt};
+    use common::zap::{
+        designate_zap_signer as designate, link_payee, link_payee_with_nsec, zap_receipt,
+    };
 
     /// 21 sats = 21_000 msats. The `n` (nano) HRP multiplier is `amount x 100`
     /// msats, so `210n` is 21_000.
@@ -98,20 +102,49 @@ mod purchase {
     /// 20 sats = 20_000 msats — one sat under a 21-sat asking price.
     const LNBC_20_SATS: &str = "lnbc200n1pjfake";
 
-    /// Give the post a Nostr presence a receipt's `e` tag can name.
+    /// Advertise a real sold post through **the production act** —
+    /// `fauna.nostr.advertise.set`'s real handler — and return the event id
+    /// the materializer signed and mapped `outbound` (`monetization.md` § The
+    /// Nostr advertisement of a sold post). This is the ingress that makes a
+    /// zap receipt able to name a sold post at all; nothing in the chain below
+    /// it is hand-made. The payee must hold a deposited key
+    /// (`link_payee_with_nsec`).
+    async fn advertise_for_real(state: &Arc<AppState>, author: [u8; 32], post_id: &str) -> String {
+        let _ = state.db.create_user(&author, "free", "payee").await;
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::nostr::advertise::register_nostr_advertise_handlers(&mut b);
+        let router = b.build();
+        let req = fauna_protocol::nostr::AdvertiseSetRequest {
+            post_id: post_id.into(),
+            extra: Default::default(),
+        };
+        common::call_raw(
+            &router,
+            state.clone(),
+            "fauna.nostr.advertise.set",
+            author,
+            bytes::Bytes::from(fauna_protocol::encode_canonical(&req).unwrap().to_vec()),
+        )
+        .await
+        .expect("a sold, priced post advertises");
+        let conn = state.db.conn().await;
+        let ids = db::list_event_ids_by_fauna_id(&conn, post_id).expect("read the map");
+        drop(conn);
+        assert_eq!(ids.len(), 1, "the act maps exactly one outbound event");
+        ids[0].clone()
+    }
+
+    /// Give a post **no tier sells** a Nostr presence a receipt's `e` tag can
+    /// name — for the cases where the post cannot be advertised (ungated,
+    /// undesignated, priceless, gated to another tier), so the act refuses it
+    /// and production gives it no outbound row as a sold post.
     ///
-    /// ⚠ **This is the one deliberately hand-made link in the chain, and it
-    /// stands in for an ingress that does not exist yet.** In production the
-    /// only writer of an outbound `nostr_event_map` row is
-    /// `nostr::store::materialize_account`, and it skips gated posts
-    /// (`public_post_from_payload` → `None`) — so a *sold* post, which is gated
-    /// by construction, never reaches Nostr at all today and no zap can name
-    /// it. That reachability fact is pinned on the materializer itself
-    /// (`nostr::store`'s `a_sold_post_is_never_materialized_so_no_zap_can_name_it`)
-    /// and declared in `monetization.md` § Implementation status today; here we
-    /// simulate the future advertise ingress so the *split* below is testable.
-    /// Everything else in these tests — the post, its gate, the tier, the
-    /// prices, the ingest path — is production-written.
+    /// ⚠ **Hand-made, deliberately, as defence in depth.** These tests prove
+    /// that a receipt naming such a post stays a tip *even if* something mapped
+    /// it — the split must not lean on the advertise act's refusals alone. A
+    /// sellable post's link is never made here: it goes through
+    /// [`advertise_for_real`]. Everything else in these tests — the post, its
+    /// gate, the tier, the prices, the ingest path — is production-written.
     async fn publish_note_as(state: &AppState, author: &Keypair, fauna_post_id: &str) -> String {
         static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -338,7 +371,7 @@ mod purchase {
         let state = state().await;
         let author = [1u8; 32];
         let buyer = [2u8; 32];
-        let payee = link_payee(&state, author).await;
+        let payee = link_payee_with_nsec(&state, author, None).await;
         let buyer_kp = link_payee(&state, buyer).await;
         let signer = Keypair::generate();
         designate(&state, author, &signer).await;
@@ -350,7 +383,7 @@ mod purchase {
             Some(TierAskingPrice::msats(21_000)),
         )
         .await;
-        let note_id = publish_note_as(&state, &payee, &post_id).await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
 
         let receipt = zap_receipt(
             &signer,
@@ -392,7 +425,7 @@ mod purchase {
         let state = state().await;
         let author = [3u8; 32];
         let buyer = [4u8; 32];
-        let payee = link_payee(&state, author).await;
+        let payee = link_payee_with_nsec(&state, author, None).await;
         let buyer_kp = link_payee(&state, buyer).await;
         let signer = Keypair::generate();
         designate(&state, author, &signer).await;
@@ -404,7 +437,7 @@ mod purchase {
             Some(TierAskingPrice::msats(21_000)),
         )
         .await;
-        let note_id = publish_note_as(&state, &payee, &post_id).await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
 
         let receipt = zap_receipt(
             &signer,
@@ -508,7 +541,7 @@ mod purchase {
         let state = state().await;
         let author = [9u8; 32];
         let buyer = [10u8; 32];
-        let payee = link_payee(&state, author).await;
+        let payee = link_payee_with_nsec(&state, author, None).await;
         let buyer_kp = link_payee(&state, buyer).await;
         let signer = Keypair::generate();
         designate(&state, author, &signer).await;
@@ -524,7 +557,7 @@ mod purchase {
             Some(TierAskingPrice::msats(0)),
         )
         .await;
-        let note_id = publish_note_as(&state, &payee, &post_id).await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
 
         let receipt = zap_receipt(
             &signer,
@@ -548,7 +581,7 @@ mod purchase {
     async fn a_buyer_with_no_local_account_still_buys_through_the_claim_fallback() {
         let state = state().await;
         let author = [11u8; 32];
-        let payee = link_payee(&state, author).await;
+        let payee = link_payee_with_nsec(&state, author, None).await;
         let signer = Keypair::generate();
         designate(&state, author, &signer).await;
         // A tipper from outside this box: a real Nostr key with no local
@@ -562,7 +595,7 @@ mod purchase {
             Some(TierAskingPrice::msats(21_000)),
         )
         .await;
-        let note_id = publish_note_as(&state, &payee, &post_id).await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
 
         let receipt = zap_receipt(
             &signer,
@@ -591,7 +624,7 @@ mod purchase {
         let state = state().await;
         let author = [12u8; 32];
         let buyer = [13u8; 32];
-        let payee = link_payee(&state, author).await;
+        let payee = link_payee_with_nsec(&state, author, None).await;
         let buyer_kp = link_payee(&state, buyer).await;
         let signer = Keypair::generate();
         designate(&state, author, &signer).await;
@@ -603,7 +636,7 @@ mod purchase {
             Some(TierAskingPrice::msats(21_000)),
         )
         .await;
-        let note_id = publish_note_as(&state, &payee, &post_id).await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
 
         let receipt = zap_receipt(
             &signer,
@@ -782,7 +815,7 @@ mod purchase {
         let state = state().await;
         let author = [11u8; 32];
         let buyer = [12u8; 32];
-        let payee = link_payee(&state, author).await;
+        let payee = link_payee_with_nsec(&state, author, None).await;
         let buyer_kp = link_payee(&state, buyer).await;
         let signer = Keypair::generate();
         designate(&state, author, &signer).await;
@@ -794,7 +827,7 @@ mod purchase {
             Some(TierAskingPrice::msats(21_000)),
         )
         .await;
-        let note_id = publish_note_as(&state, &payee, &post_id).await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
 
         state
             .db
@@ -856,7 +889,7 @@ mod purchase {
         let state = state().await;
         let author = [13u8; 32];
         let buyer = [14u8; 32];
-        let payee = link_payee(&state, author).await;
+        let payee = link_payee_with_nsec(&state, author, None).await;
         let buyer_kp = link_payee(&state, buyer).await;
         let signer = Keypair::generate();
         designate(&state, author, &signer).await;
@@ -868,7 +901,7 @@ mod purchase {
             Some(TierAskingPrice::msats(21_000)),
         )
         .await;
-        let note_id = publish_note_as(&state, &payee, &post_id).await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
 
         // Nothing may buy: a payments operations bound of 0 for the payee.
         state
@@ -912,5 +945,421 @@ mod purchase {
             vec![21_000],
             "the sats arrived, so the attribution is owed regardless"
         );
+    }
+
+    // ── delivering the unlock to a stranger who paid ─────────────────────
+    //
+    // `monetization.md` § The Nostr advertisement of a sold post → *Delivering
+    // the unlock to a stranger who paid*: an unbound buyer whose receipt names
+    // a self-certified sender gets the claim code as a NIP-17 DM from the
+    // payee's custodial key, through the Nostr DM leg's outbox, once per zap.
+    //
+    // The DM's sentence is a public text that only its public-texts round
+    // lands in the catalog (`nostr::claim_delivery`). Until then the ingest
+    // path sends nothing, so the mechanism's cases drive the send half
+    // (`deliver_claim_message`) with a stand-in body, and the ingest cases
+    // assert whichever the catalog decides — and the no-delivery cases hold
+    // either way.
+
+    use fauna_nest::db::bridged_conversations::{NOSTR_LEG_BRIDGE_ID, NOSTR_LEG_PRINCIPAL_ID};
+    use fauna_nest::nostr::claim_delivery::{
+        ClaimDelivery, claim_delivery_body, deliver_claim_message,
+    };
+
+    /// The recipient key's MSEK every delivery fixture seeds for the payee.
+    const PAYEE_MSEK: [u8; 32] = [0x5e; 32];
+
+    /// A payee who can send on the leg: a deposited Nostr key (default
+    /// relays) and a recipient seal key for the Sent copy.
+    async fn sending_payee(state: &Arc<AppState>, author: [u8; 32]) -> Keypair {
+        let payee = link_payee_with_nsec(state, author, None).await;
+        common::seed_recipient_seal_key(&state.db, &author, &PAYEE_MSEK).await;
+        payee
+    }
+
+    /// Every item queued on the Nostr leg's outbox, opened under the leg's
+    /// key: (account, far room id = the recipient pubkey, text).
+    async fn leg_outbox(state: &AppState) -> Vec<([u8; 32], String, String)> {
+        let items = state
+            .db
+            .fetch_principal_outbox(&NOSTR_LEG_PRINCIPAL_ID, 50)
+            .await
+            .expect("read the leg's outbox");
+        let (secret, _) = state
+            .db
+            .first_party_bridge_key(NOSTR_LEG_BRIDGE_ID)
+            .await
+            .expect("the leg's key");
+        items
+            .into_iter()
+            .map(|(actor, item)| {
+                let text = fauna_nest::bridge_legs::open_outbox_text(&item.ciphertext, &secret)
+                    .expect("the item opens under the leg's key, as the drain opens it");
+                (actor.try_into().unwrap(), item.far_room_id, text)
+            })
+            .collect()
+    }
+
+    /// The payee's Sent rows on the leg, opened with their recipient key.
+    async fn sent_texts(state: &AppState, author: [u8; 32]) -> Vec<String> {
+        let conn = state.db.conn().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT sealed_content FROM bridge_conversation_messages
+                  WHERE actor_id = ?1 AND direction = 'out' ORDER BY id",
+            )
+            .unwrap();
+        let blobs: Vec<Vec<u8>> = stmt
+            .query_map([&author[..]], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(stmt);
+        drop(conn);
+        blobs
+            .iter()
+            .map(|b| String::from_utf8(common::open_recipient_record(b, &PAYEE_MSEK)).unwrap())
+            .collect()
+    }
+
+    /// The claim codes the waist minted for the payee.
+    async fn minted_codes(state: &AppState, author: [u8; 32]) -> Vec<String> {
+        state
+            .db
+            .list_payment_claims(&author)
+            .await
+            .expect("list claims")
+            .into_iter()
+            .map(|c| c.code)
+            .collect()
+    }
+
+    /// A stranger's purchase of an advertised post, through the real ingest
+    /// path. Returns (payee key, the stranger's key, the receipt, the post id).
+    async fn stranger_buys(
+        state: &Arc<AppState>,
+        author: [u8; 32],
+        tier: &str,
+    ) -> (Keypair, Keypair, Event, String) {
+        let payee = sending_payee(state, author).await;
+        let signer = Keypair::generate();
+        designate(state, author, &signer).await;
+        let stranger = Keypair::generate();
+        let post_id =
+            sell_post_for_real(state, author, tier, Some(TierAskingPrice::msats(21_000))).await;
+        let note_id = advertise_for_real(state, author, &post_id).await;
+        let receipt = zap_receipt(
+            &signer,
+            &payee.public_key_hex(),
+            &payee.public_key_hex(),
+            &note_id,
+            &stranger,
+            Some(LNBC_21_SATS),
+            1_700_002_000,
+        );
+        (payee, stranger, receipt, post_id)
+    }
+
+    #[tokio::test]
+    async fn the_delivery_queues_one_dm_to_the_buyer_and_a_sent_copy_for_the_author() {
+        let state = state().await;
+        let author = [40u8; 32];
+        let payee = sending_payee(&state, author).await;
+        let stranger = Keypair::generate();
+        let body = "stand-in sentence: your code is ABCD-2345";
+
+        let outcome = deliver_claim_message(
+            &state,
+            "zap-event-40",
+            &author,
+            &payee.public_key_hex(),
+            &stranger.public_key_hex(),
+            body,
+        )
+        .await
+        .expect("deliver");
+        assert!(matches!(outcome, ClaimDelivery::Queued(_)), "{outcome:?}");
+
+        assert_eq!(
+            leg_outbox(&state).await,
+            vec![(author, stranger.public_key_hex(), body.to_string())],
+            "one item on the leg's outbox, from the payee's account to the buyer's \
+             key, opening under the leg's key to the body — what the drain \
+             gift-wraps with the payee's custodial key"
+        );
+        assert_eq!(
+            sent_texts(&state, author).await,
+            vec![body.to_string()],
+            "the author's Sent copy, sealed to their own recipient key"
+        );
+        let rooms = state.db.list_bridged_rooms(&author).await.unwrap();
+        assert_eq!(rooms.len(), 1, "one room, with the buyer");
+        assert_eq!(rooms[0].far_room_id, stranger.public_key_hex());
+        assert_eq!(rooms[0].participants, vec![stranger.public_key_hex()]);
+        assert_eq!(
+            rooms[0].self_address.as_deref(),
+            Some(payee.public_key_hex().as_str())
+        );
+    }
+
+    /// A redelivered receipt, or a crash replay that finds the code already
+    /// minted (`ClaimExists`), reaches the delivery again: the zap's own
+    /// delivery record — written with the send — makes it once.
+    #[tokio::test]
+    async fn a_second_delivery_for_the_same_zap_sends_nothing() {
+        let state = state().await;
+        let author = [41u8; 32];
+        let payee = sending_payee(&state, author).await;
+        let stranger = Keypair::generate();
+        for expect_first in [true, false] {
+            let outcome = deliver_claim_message(
+                &state,
+                "zap-event-41",
+                &author,
+                &payee.public_key_hex(),
+                &stranger.public_key_hex(),
+                "stand-in sentence: ABCD-3456",
+            )
+            .await
+            .expect("deliver");
+            if expect_first {
+                assert!(matches!(outcome, ClaimDelivery::Queued(_)), "{outcome:?}");
+            } else {
+                assert_eq!(outcome, ClaimDelivery::AlreadyDelivered);
+            }
+        }
+        assert_eq!(leg_outbox(&state).await.len(), 1, "one DM, not two");
+        assert_eq!(sent_texts(&state, author).await.len(), 1, "one Sent copy");
+
+        // A different zap from the same buyer is a different purchase.
+        let outcome = deliver_claim_message(
+            &state,
+            "zap-event-41b",
+            &author,
+            &payee.public_key_hex(),
+            &stranger.public_key_hex(),
+            "stand-in sentence: ABCD-4567",
+        )
+        .await
+        .expect("deliver");
+        assert!(matches!(outcome, ClaimDelivery::Queued(_)), "{outcome:?}");
+        assert_eq!(leg_outbox(&state).await.len(), 2);
+        assert_eq!(
+            state.db.list_bridged_rooms(&author).await.unwrap().len(),
+            1,
+            "both in the one room with the buyer"
+        );
+    }
+
+    /// A payee with no recipient seal key cannot rest a Sent copy sealed, so
+    /// nothing is queued — and nothing is recorded, so a later replay may send.
+    #[tokio::test]
+    async fn a_payee_with_no_seal_key_sends_nothing_and_records_nothing() {
+        let state = state().await;
+        let author = [42u8; 32];
+        let payee = link_payee_with_nsec(&state, author, None).await;
+        let stranger = Keypair::generate();
+        let (payee_hex, stranger_hex) = (payee.public_key_hex(), stranger.public_key_hex());
+        let deliver = || {
+            deliver_claim_message(
+                &state,
+                "zap-event-42",
+                &author,
+                &payee_hex,
+                &stranger_hex,
+                "stand-in sentence: ABCD-5678",
+            )
+        };
+        assert_eq!(deliver().await.unwrap(), ClaimDelivery::NoSealKey);
+        assert!(leg_outbox(&state).await.is_empty());
+
+        common::seed_recipient_seal_key(&state.db, &author, &PAYEE_MSEK).await;
+        assert!(
+            matches!(deliver().await.unwrap(), ClaimDelivery::Queued(_)),
+            "the refused attempt left no record behind"
+        );
+    }
+
+    /// The ingest path end to end: a stranger's purchase with a certified
+    /// sender delivers the code the waist minted — once, however often the
+    /// receipt arrives — as soon as the catalog holds the sentence. The post
+    /// is not web-published, so the message is the code-only sentence and
+    /// names no URL.
+    #[tokio::test]
+    async fn a_strangers_purchase_delivers_the_minted_code_once() {
+        let state = state().await;
+        let author = [43u8; 32];
+        let (_payee, stranger, receipt, _post) =
+            stranger_buys(&state, author, "post-unlock-dm-1").await;
+
+        assert_eq!(
+            ingest(&state, &receipt).await.as_deref(),
+            Some("post-unlock-dm-1")
+        );
+        assert_eq!(
+            ingest(&state, &receipt).await.as_deref(),
+            Some("post-unlock-dm-1")
+        );
+
+        let codes = minted_codes(&state, author).await;
+        assert_eq!(codes.len(), 1, "one purchase, one claim code");
+        let outbox = leg_outbox(&state).await;
+        match claim_delivery_body(&codes[0], None) {
+            Some(body) => {
+                assert_eq!(
+                    outbox,
+                    vec![(author, stranger.public_key_hex(), body)],
+                    "one DM to the buyer's key carrying the minted code"
+                );
+                assert!(outbox[0].2.contains(&codes[0]));
+                assert!(
+                    !outbox[0].2.contains("https://"),
+                    "an unpublished post has no page: the code-only sentence"
+                );
+                assert_eq!(sent_texts(&state, author).await.len(), 1);
+            }
+            None => assert!(
+                outbox.is_empty(),
+                "the sentence awaits its public-texts round: no invented prose is sent"
+            ),
+        }
+    }
+
+    /// A stranger's purchase of a web-published post delivers the with-link
+    /// sentence: the minted code AND the post's public page — the URL
+    /// `public_post_url` derives, the advertisement's `r` tag and the web
+    /// redeem door a buyer with no account uses.
+    #[tokio::test]
+    async fn a_web_published_posts_delivery_carries_its_public_url() {
+        let state = state().await;
+        let author = [48u8; 32];
+        let (_payee, stranger, receipt, post) =
+            stranger_buys(&state, author, "post-unlock-dm-web").await;
+        // The author's site, after the account exists.
+        state.db.set_handle(&author, "alice").await.unwrap();
+        state.db.set_subdomain_enabled(&author).await.unwrap();
+        state
+            .identity_domain
+            .store(Some(Arc::new("example.org".to_string())));
+        let post_bytes: [u8; 32] = hex::decode(&post).unwrap().try_into().unwrap();
+        state
+            .db
+            .publish_web_post(&author, &post_bytes, "the-teaser")
+            .await
+            .unwrap();
+        let url = fauna_nest::web_content::public_url::public_post_url(
+            &state.db,
+            &author,
+            &post_bytes,
+            &state.web_serving_domain(),
+        )
+        .await
+        .unwrap()
+        .expect("a web-published post with a public origin has a page");
+        assert_eq!(url, "https://alice.example.org/post/the-teaser.html");
+
+        assert_eq!(
+            ingest(&state, &receipt).await.as_deref(),
+            Some("post-unlock-dm-web")
+        );
+
+        let codes = minted_codes(&state, author).await;
+        assert_eq!(codes.len(), 1, "one purchase, one claim code");
+        let outbox = leg_outbox(&state).await;
+        match claim_delivery_body(&codes[0], Some(&url)) {
+            Some(body) => {
+                assert_eq!(
+                    outbox,
+                    vec![(author, stranger.public_key_hex(), body)],
+                    "one DM to the buyer's key"
+                );
+                assert!(outbox[0].2.contains(&codes[0]), "it carries the code");
+                assert!(outbox[0].2.contains(&url), "and the post's public page");
+                assert!(!outbox[0].2.contains('{'), "no placeholder left unfilled");
+            }
+            None => assert!(outbox.is_empty()),
+        }
+    }
+
+    /// A receipt whose request the named sender did not sign has nobody to
+    /// deliver to: the purchase still stands, the audit is the recourse.
+    #[tokio::test]
+    async fn a_purchase_with_no_certified_sender_delivers_nothing() {
+        let state = state().await;
+        let author = [44u8; 32];
+        let payee = sending_payee(&state, author).await;
+        let signer = Keypair::generate();
+        designate(&state, author, &signer).await;
+        let post_id = sell_post_for_real(
+            &state,
+            author,
+            "post-unlock-dm-2",
+            Some(TierAskingPrice::msats(21_000)),
+        )
+        .await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
+        // Signed by one key, relabelled with another: the request names a
+        // sender who never signed it, so check (iv) certifies nobody.
+        let mut forged =
+            common::zap::zap_request(&Keypair::generate(), &payee.public_key_hex(), 1_700_002_100);
+        forged.pubkey = Keypair::generate().public_key_hex();
+        let receipt = common::zap::zap_receipt_embedding(
+            &signer,
+            &payee.public_key_hex(),
+            &note_id,
+            serde_json::to_string(&forged).unwrap(),
+            Some(LNBC_21_SATS),
+            1_700_002_100,
+        );
+
+        assert_eq!(
+            ingest(&state, &receipt).await.as_deref(),
+            Some("post-unlock-dm-2"),
+            "still a purchase: the waist mints a claim code for the unbound buyer"
+        );
+        assert_eq!(minted_codes(&state, author).await.len(), 1);
+        assert!(leg_outbox(&state).await.is_empty(), "nobody to deliver to");
+        assert!(sent_texts(&state, author).await.is_empty());
+    }
+
+    /// A buyer with an account on this box is granted by the waist directly;
+    /// no claim code exists and no message is sent.
+    #[tokio::test]
+    async fn a_local_actor_buyer_gets_no_message() {
+        let state = state().await;
+        let author = [45u8; 32];
+        let buyer = [46u8; 32];
+        let payee = sending_payee(&state, author).await;
+        let buyer_kp = link_payee(&state, buyer).await;
+        let signer = Keypair::generate();
+        designate(&state, author, &signer).await;
+        let post_id = sell_post_for_real(
+            &state,
+            author,
+            "post-unlock-dm-3",
+            Some(TierAskingPrice::msats(21_000)),
+        )
+        .await;
+        let note_id = advertise_for_real(&state, author, &post_id).await;
+        let receipt = zap_receipt(
+            &signer,
+            &payee.public_key_hex(),
+            &payee.public_key_hex(),
+            &note_id,
+            &buyer_kp,
+            Some(LNBC_21_SATS),
+            1_700_002_200,
+        );
+
+        assert_eq!(
+            ingest(&state, &receipt).await.as_deref(),
+            Some("post-unlock-dm-3")
+        );
+        assert!(is_entitled(&state, author, buyer, "post-unlock-dm-3").await);
+        assert!(
+            minted_codes(&state, author).await.is_empty(),
+            "no claim code"
+        );
+        assert!(leg_outbox(&state).await.is_empty(), "no message");
     }
 }

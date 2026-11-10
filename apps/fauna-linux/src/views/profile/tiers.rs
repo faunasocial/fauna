@@ -92,6 +92,8 @@ struct Widgets {
     #[cfg(feature = "payments")]
     provider_form_tier: gtk::DropDown,
     #[cfg(feature = "payments")]
+    provider_form_product: gtk::Entry,
+    #[cfg(feature = "payments")]
     provider_form_webhook_url: gtk::Entry,
     #[cfg(feature = "payments")]
     provider_form_return_url: gtk::Entry,
@@ -136,6 +138,10 @@ struct Ctx {
     /// tier-map dropdown model (refreshed with the same `tiers_list` read).
     #[cfg(feature = "payments")]
     provider_tier_names: RefCell<Vec<String>>,
+    /// The last §4 provider list read, so the form pre-fills the saved product
+    /// of the kind it edits (one config per kind; the product is not a secret).
+    #[cfg(feature = "payments")]
+    providers_read: RefCell<Vec<ProviderItem>>,
     /// The current tier names, index-aligned with the §5 claim-mint tier
     /// select's dropdown model (refreshed with the same `tiers_list` read).
     #[cfg(feature = "payments")]
@@ -244,6 +250,7 @@ pub fn build_tiers_tab(
         provider_form_kind,
         provider_form_secret,
         provider_form_tier,
+        provider_form_product,
         provider_form_webhook_url,
         provider_form_return_url,
         provider_form_return_url_copy,
@@ -269,6 +276,7 @@ pub fn build_tiers_tab(
             provider_form_kind,
             provider_form_secret,
             provider_form_tier,
+            provider_form_product,
             provider_form_webhook_url,
             provider_form_return_url,
             provider_form_return_url_copy,
@@ -313,6 +321,7 @@ pub fn build_tiers_tab(
             provider_form_kind,
             provider_form_secret,
             provider_form_tier,
+            provider_form_product,
             provider_form_webhook_url,
             provider_form_return_url,
             provider_form_return_url_copy,
@@ -358,6 +367,8 @@ pub fn build_tiers_tab(
         provider_form_secret,
         #[cfg(feature = "payments")]
         provider_form_tier,
+        #[cfg(feature = "payments")]
+        provider_form_product,
         #[cfg(feature = "payments")]
         provider_form_webhook_url,
         #[cfg(feature = "payments")]
@@ -627,6 +638,7 @@ fn build_provider_form() -> (
     gtk::DropDown,
     gtk::Entry,
     gtk::Entry,
+    gtk::Entry,
     gtk::Button,
     gtk::Button,
     gtk::Button,
@@ -664,6 +676,21 @@ fn build_provider_form() -> (
     set_test_id(&tier, ids::SUBSCRIPTION_PROVIDER_FORM_TIER_MAP);
     tier_row.append(&tier);
     form.append(&tier_row);
+
+    // The optional product the tier is sold as (monetization.md § Pillar 3 →
+    // *Configuration*; on Stripe the Payment Link id): empty maps every
+    // verified payment. Not a secret — pre-filled from the listed provider of
+    // the picked kind, sent as shown on save (tui's `ProviderForm::product`).
+    let product = entry(s::PRODUCT_LABEL);
+    set_test_id(&product, ids::SUBSCRIPTION_PROVIDER_FORM_PRODUCT);
+    form.append(&product);
+    let product_hint = gtk::Label::builder()
+        .label(s::PRODUCT_HINT)
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .build();
+    product_hint.add_css_class("dim-label");
+    form.append(&product_hint);
 
     let webhook_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -726,6 +753,7 @@ fn build_provider_form() -> (
         kind,
         secret,
         tier,
+        product,
         webhook_url,
         return_url,
         return_copy,
@@ -745,6 +773,8 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         tier_names: RefCell::new(Vec::new()),
         #[cfg(feature = "payments")]
         provider_tier_names: RefCell::new(Vec::new()),
+        #[cfg(feature = "payments")]
+        providers_read: RefCell::new(Vec::new()),
         #[cfg(feature = "payments")]
         claim_tier_names: RefCell::new(Vec::new()),
         #[cfg(feature = "payments")]
@@ -816,6 +846,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             let ctx = Rc::clone(&ctx);
             ctx.w.provider_add_button.clone().connect_clicked(move |_| {
                 ctx.w.provider_form_secret.set_text("");
+                prefill_provider_product(&ctx);
                 update_webhook_url_preview(&ctx);
                 update_return_url_preview(&ctx);
                 // Hydrate the web origin once on open (a no-op once cached);
@@ -836,6 +867,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
                 .provider_form_kind
                 .clone()
                 .connect_selected_notify(move |_| {
+                    prefill_provider_product(&ctx);
                     update_webhook_url_preview(&ctx);
                     update_return_url_preview(&ctx);
                 });
@@ -873,6 +905,27 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
     }
 
     ctx
+}
+
+/// Pre-fill the §4 form's product from the listed provider of the selected
+/// kind — one config per kind, so picking a configured kind edits it; a kind
+/// with no config starts empty. The secret is never pre-filled (the list reply
+/// does not carry it).
+#[cfg(feature = "payments")]
+fn prefill_provider_product(ctx: &Rc<Ctx>) {
+    let kinds = fauna_client_payments::known_kinds();
+    let kind = kinds
+        .get(ctx.w.provider_form_kind.selected() as usize)
+        .copied()
+        .unwrap_or("");
+    let saved = ctx
+        .providers_read
+        .borrow()
+        .iter()
+        .find(|p| p.kind == kind)
+        .and_then(|p| p.product_ref.clone())
+        .unwrap_or_default();
+    ctx.w.provider_form_product.set_text(&saved);
 }
 
 /// Recompute + set the §4 form's webhook-URL preview from the current kind
@@ -944,12 +997,14 @@ fn submit_provider_form(ctx: &Rc<Ctx>) {
         return; // no tiers yet — §1 creates one first
     };
     let secret = ctx.w.provider_form_secret.text().to_string();
+    let product = ctx.w.provider_form_product.text().to_string();
     dispatch(
         ctx,
         Action::SetProvider {
             kind: kind.to_string(),
             webhook_secret: secret,
             tier,
+            product,
         },
     );
 }
@@ -1036,6 +1091,8 @@ enum Action {
         kind: String,
         webhook_secret: String,
         tier: String,
+        /// Sent as shown: an emptied field clears the saved mapping.
+        product: String,
     },
     #[cfg(feature = "payments")]
     RemoveProvider {
@@ -1171,8 +1228,12 @@ fn dispatch(ctx: &Rc<Ctx>, action: Action) {
                     kind,
                     webhook_secret,
                     tier,
+                    product,
                 } => PaymentsClient::new(nest.clone())
-                    .providers_set(kind, webhook_secret, tier)
+                    // The product is sent as shown — `Some(value)`, empty
+                    // included — so the saved mapping is always what the
+                    // creator last saw (`None` would keep it).
+                    .providers_set(kind, webhook_secret, tier, Some(product))
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
@@ -1594,6 +1655,7 @@ fn build_subscriber_row(ctx: &Rc<Ctx>, subscriber_id: ActorId, tier_name: String
 
 #[cfg(feature = "payments")]
 fn render_provider_rows(ctx: &Rc<Ctx>, providers: &[ProviderItem]) {
+    *ctx.providers_read.borrow_mut() = providers.to_vec();
     let mut rows = ctx.w.provider_rows.borrow_mut();
     for row in rows.drain(..) {
         ctx.w.provider_list.remove(&row);

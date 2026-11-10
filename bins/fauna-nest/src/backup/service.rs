@@ -511,13 +511,13 @@ mod tests {
                         ("web_content/file_bytes.rs", "read_file_by_manifest"),
                         ("web_content/file_bytes.rs", "fetch_decoded"),
                     ],
-                    gates: &["is_legally_withheld("],
+                    gates: &["withhold_ground("],
                 },
                 "`handle_share`'s public-link arm, after the shared `admit` prelude: \
                  serves a caller-named manifest through \
                  `web_content::file_bytes::read_file_by_manifest`, which consults the \
                  withhold on the manifest hash and on every chunk it reads and answers \
-                 `FileOpenError::Withheld` → 451; a `BulkWriteAuth` writer can mint a \
+                 `FileOpenError::Withheld` → 451 or 403 by its ground; a `BulkWriteAuth` writer can mint a \
                  manifest naming any digest, so gating the walk is what binds this door. \
                  `read_file_by_manifest` is itself a seam — the withhold predicate lives one \
                  hop below it, in `fetch_decoded` — so both links are held, not only the \
@@ -528,11 +528,11 @@ mod tests {
             "share_routes.rs",
             "private_manifest",
             Use::Gated(
-                Gate::Calls(&["is_legally_withheld("]),
+                Gate::Calls(&["withhold_ground("]),
                 "a fragment-keyed share link's gate: the token names the manifest, and a \
                  `BulkWriteAuth` writer can mint one naming any digest. It reads the manifest \
-                 through `file_bytes::fetch_decoded` (withheld → 451) and then calls \
-                 `blob_routes::is_legally_withheld` on EVERY store key the manifest names \
+                 through `file_bytes::fetch_decoded` (withheld → 451 / 403 by ground) and \
+                 then calls `blob_routes::withhold_ground` on EVERY store key the manifest names \
                  before any private-arm answer — the viewer page, the manifest, a chunk — \
                  so a link over a withheld blob is refused whole, as the public walk refuses it",
             ),
@@ -543,7 +543,7 @@ mod tests {
             Use::Gated(
                 Gate::Via {
                     hops: &[("web_content/file_bytes.rs", "fetch_decoded")],
-                    gates: &["is_legally_withheld("],
+                    gates: &["withhold_ground("],
                 },
                 "serves the i-th ciphertext chunk of a private link's manifest, by its store \
                  key, only after `private_manifest` cleared every key of that manifest; the \
@@ -560,7 +560,7 @@ mod tests {
                         ("web_content/file_bytes.rs", "read_file_by_manifest"),
                         ("web_content/file_bytes.rs", "fetch_decoded"),
                     ],
-                    gates: &["is_legally_withheld("],
+                    gates: &["withhold_ground("],
                 },
                 "a render input's `web_files` row names a manifest, and a `BulkWriteAuth` \
                  writer can mint one naming any digest; the read runs through the \

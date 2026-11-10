@@ -169,12 +169,25 @@ pub fn newest_release(state: &AppState) -> Option<String> {
 /// paid-tier surfaces, degrading exactly as against an older nest: *a peer
 /// without a capability, never a fork of the wire*.
 pub fn advertised_capabilities(relay_runtime_enabled: bool) -> Vec<String> {
-    capabilities_for(
+    let mut caps = capabilities_for(
         cfg!(feature = "payments"),
         relay_runtime_enabled,
         cfg!(feature = "p2p-share"),
         cfg!(feature = "zaps"),
-    )
+    );
+    push_nostr_advertise(&mut caps, cfg!(feature = "zaps"), cfg!(feature = "nostr"));
+    caps
+}
+
+/// NOSTR_ADVERTISE: this nest serves `fauna.nostr.advertise.{set,clear}`
+/// (`monetization.md` § The Nostr advertisement of a sold post → *Wire
+/// compat*) — iff it compiles both the `zaps` member (the `set` gate) and the
+/// Nostr bridge (the materializer that publishes). The apps show the verb only
+/// on it. Cfg-free for the dark-arm reason [`capabilities_for`] states.
+pub fn push_nostr_advertise(caps: &mut Vec<String>, zaps: bool, nostr: bool) {
+    if zaps && nostr {
+        caps.push(fauna_protocol::discovery::capability::NOSTR_ADVERTISE.to_string());
+    }
 }
 
 /// The cfg-free body of [`advertised_capabilities`] — the flavor decisions taken
@@ -437,6 +450,19 @@ pub async fn nest_info_core(state: &AppState) -> NestInfo {
         None => None,
     };
 
+    let nest_id = state.nest_identity.public_key_bytes();
+    // Test-only: a running e2e nest claiming an id it does not prove — a
+    // backup destination whose claim and proof disagree
+    // (`nest_id_claim_test_hook`). Production compiles no substitution here.
+    #[cfg(feature = "test-hooks")]
+    let nest_id = crate::nest_id_claim_test_hook::claimed_nest_id(
+        nest_id,
+        *state
+            .nest_id_claim_override
+            .lock()
+            .expect("nest_id_claim_override mutex poisoned"),
+    );
+
     NestInfo {
         domain,
         // Read from the SAME accessor `HostResolver` and the per-subdomain cert
@@ -448,7 +474,7 @@ pub async fn nest_info_core(state: &AppState) -> NestInfo {
         // which is what tells a client to disable its copy affordances instead
         // of composing `<handle>.localhost`.
         web_serving_domain: state.web_serving_domain(),
-        nest_id: state.nest_identity.public_key_bytes(),
+        nest_id,
         room_read_pubkey,
         // Coarsened to the `major.minor` line — the anonymous `nest.info` reply
         // is world-readable, and exposing the exact patch-level
@@ -542,7 +568,13 @@ pub async fn resolve_nest_core(domain: &str) -> Result<String, DiscoveryError> {
         return Err(DiscoveryError::InvalidDomain("IP addresses not allowed"));
     }
     let lower = domain.to_lowercase();
-    if lower == "localhost" || lower.ends_with(".local") || lower.ends_with(".internal") {
+    // The reserved trees that never name a nest on the internet: RFC 6761's
+    // `localhost` and RFC 6762's mDNS `.local` (the shared predicates), and
+    // ICANN's private-use `.internal`.
+    if fauna_core::resolve::is_localhost_name(domain)
+        || fauna_core::resolve::is_mdns_local_name(domain)
+        || lower.ends_with(".internal")
+    {
         return Err(DiscoveryError::InvalidDomain(
             "internal domains not allowed",
         ));
@@ -829,6 +861,17 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
         let (m, cap) = *state.registration_mode.read().await;
         (Some(m.as_wire_str().to_string()), cap)
     };
+    // A test nest may report a mode the client cannot name, or none, over the
+    // live one (`registration_mode_report_test_hook`); the posture is untouched.
+    #[cfg(feature = "test-hooks")]
+    let registration_mode = crate::registration_mode_report_test_hook::reported(
+        state
+            .registration_mode_report_override
+            .lock()
+            .expect("registration_mode_report_override mutex poisoned")
+            .as_ref(),
+        registration_mode,
+    );
     let subhandles = *state.subhandles.read().await;
     let age_verification_required = *state.age_verification_required.read().await;
     let max_storage_bytes = *state.max_storage_bytes.read().await;
@@ -1092,6 +1135,22 @@ mod tests {
                      this the assertion above is vacuous"
                 );
             }
+        }
+    }
+
+    /// `nostr-advertise` needs both halves: the `zaps` gate on `set` and the
+    /// Nostr materializer that publishes. Asserted all four ways, so neither
+    /// the positive nor the negatives can pass against a deleted token.
+    #[test]
+    fn nostr_advertise_capability_advertised_iff_zaps_and_nostr_are_built() {
+        for (zaps, nostr) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut caps = capabilities_for(true, false, false, zaps);
+            push_nostr_advertise(&mut caps, zaps, nostr);
+            assert_eq!(
+                capability::supports(&caps, capability::NOSTR_ADVERTISE),
+                zaps && nostr,
+                "zaps={zaps} nostr={nostr}"
+            );
         }
     }
 

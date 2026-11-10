@@ -134,10 +134,50 @@ def seat_member(room: Room, member: dict) -> None:
     room.floor = conv_api.room_list_roster(room.nest["port"], room.owner, room.room_hex)["members"]
 
 
+def seat_foreign_member(room: Room, away: dict, member: dict) -> None:
+    """Seat ``member``, an actor homed on the nest ``away``, on the room's
+    floor through the cross-nest invitation (``room-invitations.md`` § Join
+    rules and invites → *A cross-nest invitation*): the member accepts the
+    owner as a contact on its own nest (its reach policy judges the
+    inviter there), the owner's ``room.invite`` names ``away`` as the
+    invitee's home so the room's home delivers the knock over federation,
+    and the member accepts through its own nest
+    (``room.accept_invite_remote``), whose relay seats it on the home's
+    floor and writes the foreign-member binding every relayed door reads."""
+    conv_api.accept_contact(away["port"], member, room.owner["actor_id_hex"])
+    invite = fauna_ffi.sign_room_member_invite(
+        secret_of(room.owner), room.room_id, bytes.fromhex(member["actor_id_hex"]), 1
+    )
+    call(
+        room.nest,
+        room.owner,
+        "fauna.conversations.room.invite",
+        {"invite": invite, "invitee_node": away["url"]},
+    )
+    call(
+        away,
+        member,
+        "fauna.conversations.room.accept_invite_remote",
+        {
+            "room_id": room.room_hex,
+            "nest_url": room.nest["url"],
+            "reception_pubkey": fauna_ffi.mint_room_reception_pubkey(),
+        },
+    )
+    room.floor = conv_api.room_list_roster(room.nest["port"], room.owner, room.room_hex)["members"]
+
+
 def rotate(room: Room) -> None:
     """The owner mints a generation over the room's whole current floor,
-    parented on the current one — the mint that covers a newly seated member."""
-    targets = wrap_targets(room.floor)
+    parented on the current one — the mint that covers a newly seated member.
+    Like a member's device it keeps the home nest's read as the tip has it:
+    the nest's own roster row answering ``tip_wrapped: false`` (the members
+    withdrew the read) leaves the nest out (``NestRead::Keep``,
+    ``community-rooms.md`` § Implementation status today, *The nest's read is
+    the members' standing choice, and a rotation keeps it*)."""
+    room.floor = conv_api.room_list_roster(room.nest["port"], room.owner, room.room_hex)["members"]
+    withdrawn = any(m.get("kind") == "nest" and m.get("tip_wrapped") is False for m in room.floor)
+    targets = wrap_targets(room.floor, without_nest=withdrawn)
     mint, gen_key, generation = fauna_ffi.build_room_generation_mint(
         secret_of(room.owner), targets, [room.generation], int(time.time() * 1000)
     )
@@ -185,3 +225,49 @@ def room_labels(nest: dict, actor: dict, post_id: str) -> list[dict]:
     nest serves for it (empty when it serves none)."""
     reply = call(nest, actor, "fauna.posts.room_labels", {"post_ids": [post_id]})
     return [p for p in reply.get("posts", []) if p.get("post_id") == post_id]
+
+
+def room_send(
+    room: Room,
+    actor: dict,
+    text: str,
+    *,
+    claimed_author: dict | None = None,
+) -> int:
+    """``actor`` sends one text message into the room the way a member's
+    engine does: authored (signed) under the room's current generation and
+    sealed into the ``RoomSealed`` envelope ``channel.send`` carries. Returns
+    the assigned ``seq``. ``claimed_author`` relabels the signed core to that
+    actor — a message sealed in another member's name, which the generation
+    key every member holds cannot tell apart and only the signature can."""
+    envelope = fauna_ffi.build_room_message_envelope(
+        secret_of(actor),
+        room.room_id,
+        room.generation,
+        room.gen_key,
+        text,
+        int(time.time() * 1000),
+        claimed_author=bytes.fromhex(claimed_author["actor_id_hex"]) if claimed_author else None,
+    )
+    return conv_api.channel_send(room.nest["port"], actor, room.room_hex, envelope)
+
+
+def remove_member(room: Room, member: dict) -> None:
+    """The owner removes ``member`` from the floor (``room.remove``) and, as a
+    client's removal does, rotates the room over the floor that is left — the
+    severance mint, wrapping to the home nest as the tip did
+    (``community-rooms.md`` § Implementation status today, *A removal severs,
+    because the client rotates*)."""
+    call(
+        room.nest,
+        room.owner,
+        "fauna.conversations.room.remove",
+        {"room_id": room.room_hex, "principal": member["actor_id_hex"]},
+    )
+    rotate(room)
+
+
+def nest_row(room: Room) -> dict:
+    """The home nest's own row on the room's floor roster, read fresh."""
+    floor = conv_api.room_list_roster(room.nest["port"], room.owner, room.room_hex)["members"]
+    return next(m for m in floor if m.get("kind") == "nest")

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.MemberReviewList"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      The member-review rows, built ONCE and called from both surfaces that
+      render them (settings.md § Recovery kit: "the two surfaces differ in their
+      gate, not their markup, which is why the row is built once and called from
+      both"): the permanent Members To Review page and the ephemeral kit-side
+      pass on the Recovery Kit section. apple's MemberReviewRowView and linux's
+      shared row builder are the twins. Each host owns its own gate, its own
+      empty/defer chrome and its own error slot; this paints rows and reports
+      presses, nothing else.
+    -->
+    <ItemsControl x:Name="Rows">
+        <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+                <StackPanel Orientation="Vertical" Spacing="8" />
+            </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:MemberReviewRow">
+                <!-- The row's own AutomationId carries BOTH the text an
+                     e2e get_text reads and the container the keep/remove
+                     buttons are scoped inside (mirrors nostr-bunker-app-item:
+                     AutomationId + a dynamic Name, no separate static
+                     Name — reference_windows_flaui_gettext_dynamic_label_no_name). -->
+                <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewRow}"
+                        AutomationProperties.Name="{x:Bind DisplayText}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="6" Padding="12">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind DisplayText}" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewKeepButton}"
+                                    AutomationProperties.Name="{x:Bind DisplayText}"
+                                    Tag="{x:Bind Person}"
+                                    Content="{loc:Localize Key=settings/recovery_kit/review_keep}"
+                                    Click="Keep_Click" />
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewRemoveButton}"
+                                    AutomationProperties.Name="{x:Bind DisplayText}"
+                                    Tag="{x:Bind Person}"
+                                    Content="{loc:Localize Key=settings/recovery_kit/review_remove}"
+                                    Click="Remove_Click" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </DataTemplate>
+        </ItemsControl.ItemTemplate>
+    </ItemsControl>
+</UserControl>

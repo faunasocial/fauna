@@ -253,6 +253,27 @@ pub fn signer_keypair(
     }
 }
 
+/// Does the account stand at `now` — a `users` row whose authority is not
+/// revoked (`ActorAuthority::is_revoked_at`: suspended, or locked until
+/// later)? Read for every author at the signer's door, before any roster or
+/// oracle lookup: the admin's suspension cuts the account off entirely
+/// (`admin.md` § Cutting a user off → *What suspension prevents*) and the
+/// emergency lock freezes it for everyone, so the nest signs for none of the
+/// account's connected apps meanwhile — `connect` included, a pending invite
+/// secret included; a lapsed lock and the restore serve again with nothing
+/// redone (`nostr.md` § The nest as the user's NIP-46 signer → *Connection
+/// model*). A missing row is an unknown or deleted account: no authority. The
+/// external-apps switch is not read here — it pauses principals, never the
+/// user's own apps (`oracle::authorize` reads it for a bound client).
+pub fn account_stands(conn: &Connection, actor_hex: &str, now: u64) -> Result<bool> {
+    let Ok(owner) = hex::decode(actor_hex) else {
+        return Ok(false);
+    };
+    let now_secs = i64::try_from(now).unwrap_or(i64::MAX);
+    Ok(crate::db::admin::read_actor_authority(conn, &owner)?
+        .is_some_and(|authority| !authority.is_revoked_at(now_secs)))
+}
+
 /// The active-connection check, evaluated per request (revocation and expiry
 /// are immediate). Returns the row id to record use against.
 fn authorized_app(
@@ -311,6 +332,11 @@ pub fn handle_request(
     let Some(actor_id) = signer_actor(conn, signer_pubkey)? else {
         return Ok(build_response_json(&req.id, Err("unauthorized")));
     };
+    // The account's authority, before any author is told apart: suspended or
+    // locked out, the signer serves nobody.
+    if !account_stands(conn, &actor_id, now)? {
+        return Ok(build_response_json(&req.id, Err("unauthorized")));
+    }
 
     if req.method == Nip46Method::Connect {
         return handle_connect(conn, &actor_id, app_pubkey, req, now);
@@ -553,6 +579,14 @@ mod tests {
     /// A linked custodial account with a real deposited key; returns the
     /// user's keypair.
     fn link_custodial(conn: &Connection, actor_id: &str) -> Keypair {
+        // The `users` row the signer's door reads the account's authority
+        // from (`account_stands`): without one the account is unknown and
+        // nothing is served.
+        conn.execute(
+            "INSERT OR IGNORE INTO users (actor_id, tier, created_at) VALUES (?1, 'free', 0)",
+            params![hex::decode(actor_id).unwrap()],
+        )
+        .unwrap();
         let user_kp = Keypair::generate();
         let enc = key_crypto::encrypt_nostr_privkey(&NEST_KEY, &user_kp.secret_bytes()).unwrap();
         db::link_account(

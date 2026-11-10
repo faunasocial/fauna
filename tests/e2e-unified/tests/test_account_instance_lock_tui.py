@@ -179,6 +179,20 @@ def _await_first_seat_follows(first, old_actor, new_actor):
     )
 
 
+def _log_tail(driver, lines: int = 40) -> str:
+    """The seat's own last log lines (convention 6): a ceremony that stalls
+    before its kit paints leaves its reason in the app log, never on screen."""
+    text = driver.app_stderr_text() or ""
+    keep = ("succession", "success", "recover", "kit", "ceremony", "ERROR", "WARN")
+    # The seat's own lines, not its sync agent's (an inherited-fd child whose
+    # keyless-custody warnings would bury the ceremony's).
+    picked = [
+        line for line in text.splitlines()
+        if any(k in line for k in keep) and "fauna_sync_agent" not in line
+    ]
+    return "\n".join(picked[-lines:]) or "(no log)"
+
+
 def _wait_authenticated(driver):
     return driver.wait_for_state(
         lambda s: bool(s.get("session", {}).get("authenticated")), timeout=45
@@ -549,7 +563,8 @@ def test_tui_a_bound_instance_survives_its_own_succession(
                 "before the successor's kit was shown",
                 diagnose=lambda: (
                     f"no kit on screen for the successor (reads {kit_on_screen(app)!r}), "
-                    f"error={app.error_text()!r}"
+                    f"error={app.error_text()!r}; the bound seat's last log lines: "
+                    f"{_log_tail(second)}"
                 ),
             )
             assert kit_on_screen(app) != held, (

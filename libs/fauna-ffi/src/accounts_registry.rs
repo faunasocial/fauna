@@ -676,6 +676,24 @@ pub fn account_display_handle(
     )
 }
 
+/// The launch surfaces' cached identity — `<handle>@<domain> · <tier>` from the
+/// bound account's cached handle/domain/tier
+/// (`fauna_client_accounts::identity_line`; `onboarding.md` § App-launch
+/// routing → *The cached identity on the launch surfaces*). `None` while the
+/// cache holds no handle — the label is then absent.
+#[uniffi::export]
+pub fn account_identity_line(
+    entry_handle: Option<String>,
+    entry_domain: Option<String>,
+    entry_tier: Option<String>,
+) -> Option<String> {
+    fauna_client_accounts::identity_line(
+        entry_handle.as_deref(),
+        entry_domain.as_deref(),
+        entry_tier.as_deref(),
+    )
+}
+
 /// The paired predecessor chain ([`FfiAccountRegistry::predecessor_chain`]):
 /// `actor_ids[i]` is the identity `keys[i]` (a 32-byte retired owner
 /// `BackupKey`) belongs to, nearest hop first. No `Debug` — the keys are
@@ -1028,6 +1046,14 @@ impl FfiAccountRegistry {
     /// (`fauna_client_accounts::AccountRegistry::resolve_launch_binding`).
     pub fn resolve_launch_binding(&self) -> Option<String> {
         self.registry.resolve_launch_binding()
+    }
+
+    /// The launch surfaces' `launch-identity-label`: the bound (else active)
+    /// account's cached `handle@domain · tier`
+    /// (`fauna_client_accounts::AccountRegistry::launch_identity_line`); `None`
+    /// while its cache holds no handle — the label is then absent.
+    pub fn launch_identity_line(&self) -> Option<String> {
+        self.registry.launch_identity_line()
     }
 
     pub fn record_succession(&self, old_actor: String, new_actor: String) -> Result<(), FfiError> {
@@ -1641,7 +1667,6 @@ mod tests {
     /// the one a live read hands an app.
     fn supervised_ffi_status() -> crate::FfiFamilyStatus {
         use fauna_client_family::family::{FamilyGuardianInfo, FamilyStatusReply, ReachPolicy};
-        use fauna_core::obligation::ContentPolicy;
         use fauna_core::screen_time::ScreenTimePolicy;
         FamilyStatusReply {
             supervised_by: Some(FamilyGuardianInfo {

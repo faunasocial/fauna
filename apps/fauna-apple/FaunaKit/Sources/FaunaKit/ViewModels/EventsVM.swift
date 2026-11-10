@@ -16,6 +16,15 @@ public class EventsVM {
     public var selectedEvent: EventDetail?
     public var selectedEventAttendees: [Attendee] = []
     public var reminderOffset: String?
+    /// A `search-result-item` Event-arm deep link's target — the hit's hex
+    /// `uid_hash`, which IS this page's event id (every per-event CalDAV op is
+    /// keyed by it), so no locate read is owed (`ui/search.md` § State & data
+    /// shape: a calendar result opens its event). Staged by `SearchResultsView`
+    /// alongside switching to the Events page; consumed by `openPendingEvent()`,
+    /// which the Events page calls once its VM holds an api. Mirrors
+    /// `FeedVM.pendingPostOpen` and tui's `open_result` →
+    /// `events::open_event_detail`. Account-scoped: `reset()` drops it.
+    public var pendingEventOpen: String?
     /// The open refused scheduling changes (`ui/events.md` § Refused scheduling
     /// changes) — the shared `refused_change_view` rows; empty means the list is
     /// absent. Re-read on every calendar load and, while the page is open, on the
@@ -217,6 +226,7 @@ public class EventsVM {
         selectedEvent = nil
         selectedEventAttendees = []
         reminderOffset = nil
+        pendingEventOpen = nil
         refusedChanges = []
         composePrefillDate = nil
         isLoading = false
@@ -733,6 +743,27 @@ public class EventsVM {
             selectedEventAttendees = detail.attendees
             reminderOffset = detail.reminder
         } catch {
+            errorMessage = DisplayError.http(error)
+        }
+    }
+
+    /// Open the event `pendingEventOpen` names — the search Event arm's detail
+    /// (`ui/search.md` § State & data shape). Called by the Events page after
+    /// `configure(api:)` and whenever the target changes while the page is
+    /// mounted; with no api yet it leaves the target staged for that call.
+    public func openPendingEvent() async {
+        guard let api, let uidHash = pendingEventOpen else { return }
+        pendingEventOpen = nil
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let detail = try await api.getEvent(id: uidHash)
+            guard self.api === api else { return }   // the in-flight clause
+            selectedEvent = detail
+            selectedEventAttendees = detail.attendees
+            reminderOffset = detail.reminder
+        } catch {
+            guard self.api === api else { return }
             errorMessage = DisplayError.http(error)
         }
     }

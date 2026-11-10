@@ -36,6 +36,7 @@ export const PAYMENTS_IDS = {
   SUBSCRIPTION_PROVIDER_FORM: 'subscription-provider-form',
   SUBSCRIPTION_PROVIDER_FORM_CANCEL: 'subscription-provider-form-cancel',
   SUBSCRIPTION_PROVIDER_FORM_KIND: 'subscription-provider-form-kind',
+  SUBSCRIPTION_PROVIDER_FORM_PRODUCT: 'subscription-provider-form-product',
   SUBSCRIPTION_PROVIDER_FORM_RETURN_URL: 'subscription-provider-form-return-url',
   SUBSCRIPTION_PROVIDER_FORM_RETURN_URL_COPY_BUTTON: 'subscription-provider-form-return-url-copy-button',
   SUBSCRIPTION_PROVIDER_FORM_SAVE: 'subscription-provider-form-save',

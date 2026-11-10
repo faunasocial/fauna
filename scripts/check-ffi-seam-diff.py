@@ -276,6 +276,20 @@ KNOWN_SEAMS: list[dict[str, str]] = [
         "why": "dials a peer as this seat, claims a share set in the admission "
         "exchange and reports what the peer serves, without acting on it",
     },
+    {
+        "name": "folder_set_custody_json",
+        "kind": "method",
+        "why": "a real plane-content read: which content-key generations this "
+        "app's folder custody holds for one set (the succession journeys' "
+        "cross-seat custody comparison); same block as device_set_state_json",
+    },
+    # -- the in-app custodian host's shifted-clock pass (custodian_host.rs)
+    {
+        "name": "run_all_kinds_at_offset",
+        "kind": "method",
+        "why": "runs the in-app custodian pass at a shifted clock so a test "
+        "reaches a store's second self-audit (convention 14's fake clock)",
+    },
 ]
 
 # ── Declaration extraction ───────────────────────────────────────────────────

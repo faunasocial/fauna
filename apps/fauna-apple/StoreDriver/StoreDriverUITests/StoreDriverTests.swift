@@ -19,6 +19,20 @@
 // test method per call with `xcodebuild test-without-building` and reads the
 // outcome off the result bundle: a skip's message starts with `state=<word>`,
 // which the host maps to an environment skip; anything else is a failure.
+//
+// The `store-install` outcomes (docs/features/store-install.md) are absence
+// checks: each reaches the screen that would carry a money or in-person-share
+// control in a full build, proves it is ON that screen by an id the store flavor
+// keeps, then asserts the excised ids are not in the tree. The ids asserted
+// absent sit between the `store-absent` markers below, and
+// `test_ios_store_driver_pins.py` holds each to two facts: the store flavor
+// excises it (`#if !FAUNA_EXCISE_*` in `UiIds.swift`), and an iOS view paints it
+// in a full build — so no absence here is of an id nothing ever drew. Where a
+// full build paints the control only on some data (a tipped post, a linked Nostr
+// account, a nest advertising `p2p-share`) the device read is a lower bound;
+// each such method prints its reading as a `STORE-DRIVER reading=` line, and the
+// strict proof stays the build's own (dynamic-features.md § What "completely
+// compiled away" means).
 
 import XCTest
 
@@ -43,9 +57,60 @@ private enum Input {
     private static func trimmed(_ name: String) -> String {
         (env[name] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    /// The compose audience picker's "Public" and "Sell this post…" answers, read
+    /// by the host from `i18n/strings/en.yaml` (`feed.post.gate_public` /
+    /// `gate_sell`): a menu item carries no identifier, so outcome 3 reads it by
+    /// its label, and the host keeps that label in step with the app's string.
+    static var gatePublicLabel: String { trimmed("FAUNA_STORE_GATE_PUBLIC_LABEL") }
+    static var gateSellLabel: String { trimmed("FAUNA_STORE_GATE_SELL_LABEL") }
+    /// The author the buyer halves of outcomes 2 and 3 read: the box's seeding
+    /// account, which a FULL build seeded with a priced tier and a sold post
+    /// (the provisioning drive's seed). The store build cannot make either, so
+    /// the content is the box's, and the driver only reads it.
+    static var sellerHandle: String { trimmed("FAUNA_STORE_SELLER_HANDLE") }
     /// How long TestFlight's download and install may take after Install.
     static var installBudget: TimeInterval { TimeInterval(env["FAUNA_STORE_INSTALL_BUDGET_S"] ?? "") ?? 600 }
 }
+
+// store-absent:begin — every id in this block is asserted ABSENT from the store
+// install; `test_ios_store_driver_pins.py` reads the block. An id the driver
+// reads as present belongs outside it.
+private enum Excised {
+    /// Outcome 1: no payment provider to connect, no code to hand out (own
+    /// profile → Tiers) …
+    static let providerAndMint = [
+        Ids.subscriptionProviderAddButton, Ids.subscriptionProviderSection,
+        Ids.subscriptionClaimSection, Ids.subscriptionClaimMintButton,
+    ]
+    /// … and no code to redeem (Settings → Subscriptions).
+    static let redeem = [Ids.subscriptionClaimRedeemInput, Ids.subscriptionClaimRedeemButton]
+    /// Outcome 2, the author half: the tier editor's three money fields.
+    static let tierMoney = [
+        Ids.subscriptionTierFormPriceHint, Ids.subscriptionTierFormAskingPrice,
+        Ids.subscriptionTierFormPaymentUrl,
+    ]
+    /// Outcome 3, the author half: the sale controls under compose.
+    static let sell = [Ids.composeSellPrice, Ids.composeSellAskingPrice, Ids.composeSellSubscribersFree]
+    /// Outcome 2, the buyer half: another author's priced tier, on their
+    /// profile's Tiers tab, shows no price and no payment link.
+    static let offerMoney = [
+        Ids.subscriptionOfferPrice, Ids.subscriptionOfferPaymentLink, Ids.subscriptionTierPrice,
+    ]
+    /// Outcome 3, the buyer half: a post sold elsewhere shows no price, payment
+    /// link or buy button beside its badge.
+    static let soldPostMoney = [Ids.gatedPostPrice, Ids.gatedPostBuyButton, Ids.gatedPostPaymentLink]
+    /// Outcome 4: a post's tip surface …
+    static let tips = [Ids.postTipTotal, Ids.postTipCount, Ids.postTipListButton]
+    /// … and the zap-signer section of the Nostr settings.
+    static let zapSigner = [Ids.nostrZapSignerAddBtn, Ids.nostrZapSignerPubkeyInput, Ids.nostrZapSignerEmpty]
+    /// Outcome 5, the App Store half: the in-person share and the peer-transfer
+    /// readings, both on Settings → Folders.
+    static let inPersonShare = [
+        Ids.offlineShareButton, Ids.offlineReceiveButton, Ids.offlineShareOwnCode,
+        Ids.shareTransferList, Ids.shareServeStatus,
+    ]
+}
+// store-absent:end
 
 final class StoreDriverTests: XCTestCase {
     override func setUp() {
@@ -112,16 +177,267 @@ final class StoreDriverTests: XCTestCase {
     /// registers only with an invite code, and the organisation's nests are
     /// invite-only (feature-catalog.md § Implementation status today).
     func testSignInToFeed() throws {
-        let handle = Input.accountHandle
-        let secret = Input.accountSecret
-        guard !handle.isEmpty, secret.count == 64 else {
-            throw XCTSkip("state=no_account the host passed no reviewer account (FAUNA_STORE_ACCOUNT_HANDLE and a 64-hex FAUNA_STORE_ACCOUNT_SECRET) — the sign-in leg imports the apple-reviewer account on test.fauna.build")
+        let app = try launch()
+        try signIn(app)
+        try waitForMainTabs(app, after: "signing in as \(Input.accountHandle)")
+    }
+
+    // MARK: - store-install: the store flavor's absences
+
+    /// `store-install` outcome 1: no payment provider to connect and no code to
+    /// hand out or redeem for a paid tier. The provider and mint halves sit on the
+    /// own profile's Tiers tab, the redeem half on Settings → Subscriptions.
+    func testStoreNoProviderNoCode() throws {
+        let app = try openSignedIn()
+        try openOwnTiers(app)
+        assertAbsent(app, Excised.providerAndMint, on: "the own profile's Tiers tab")
+
+        let settings = try openSettingsPage(key: "subscription-settings", anchors: [Ids.subscriptionMineSection])
+        assertAbsent(settings, Excised.redeem, on: "Settings → Subscriptions")
+    }
+
+    /// `store-install` outcome 2, the author half: a tier you create has no price,
+    /// price hint or payment link to fill in. The form is opened and cancelled —
+    /// nothing is saved.
+    func testStoreTierEditorHasNoPrice() throws {
+        let app = try openSignedIn()
+        try openOwnTiers(app)
+        tap(app, Ids.subscriptionTierCreateButton, timeout: 30)
+        XCTAssertTrue(element(app, Ids.subscriptionTierForm).waitForExistence(timeout: 30),
+                      diagnose(app, Ids.subscriptionTierForm))
+        XCTAssertTrue(element(app, Ids.subscriptionTierFormSave).exists, diagnose(app, Ids.subscriptionTierFormSave))
+        assertAbsent(app, Excised.tierMoney, on: "the tier editor")
+        tap(app, Ids.subscriptionTierFormCancel, timeout: 10)
+    }
+
+    /// `store-install` outcome 3, the author half: writing a post never offers to
+    /// sell it — the audience picker has no "Sell this post…" answer and no sale
+    /// control is painted. The picker is opened and closed on "Public"; nothing
+    /// is posted.
+    func testStoreComposeNeverOffersASale() throws {
+        let publicLabel = Input.gatePublicLabel
+        let sellLabel = Input.gateSellLabel
+        guard !publicLabel.isEmpty, !sellLabel.isEmpty else {
+            XCTFail("the host passed no compose-gate labels (FAUNA_STORE_GATE_PUBLIC_LABEL, FAUNA_STORE_GATE_SELL_LABEL)")
+            return
         }
+        let app = try openSignedIn()
+        try selectTab(app, index: TabIndex.feed)
+        let picker = element(app, Ids.composeGateTierSelect)
+        XCTAssertTrue(picker.waitForExistence(timeout: 60), diagnose(app, Ids.composeGateTierSelect))
+        XCTAssertTrue(element(app, Ids.composeTextField).exists, diagnose(app, Ids.composeTextField))
+        assertAbsent(app, Excised.sell, on: "compose")
+
+        picker.tap()
+        let publicItem = labelled(app, publicLabel)
+        XCTAssertTrue(publicItem.waitForExistence(timeout: 15),
+                      "the audience picker opened no menu with a '\(publicLabel)' answer; visible: \(visibleTexts(app))")
+        XCTAssertFalse(labelled(app, sellLabel).exists,
+                       "the store install's audience picker offers '\(sellLabel)' — the sale is not excised")
+        print("STORE-DRIVER absent on the audience picker: \(sellLabel)")
+        publicItem.tap()
+    }
+
+    /// `store-install` outcome 2, the buyer half: a tier that carries a price
+    /// elsewhere shows as an ordinary tier to subscribe to, with no price. The
+    /// seller's profile is opened through Find User, its Tiers tab lists the
+    /// seeded priced tier (the row is the proof the screen holds it), and none of
+    /// the price or payment-link ids is in the tree. Nothing is subscribed to.
+    func testStorePricedTierShowsNoPrice() throws {
+        let app = try openSignedIn()
+        try openSellerProfile(app)
+        tap(app, Ids.profileTiersTab, timeout: 30)
+        XCTAssertTrue(element(app, Ids.subscriptionOffersSection).waitForExistence(timeout: 60),
+                      diagnose(app, Ids.subscriptionOffersSection))
+        XCTAssertTrue(element(app, Ids.subscriptionOfferRow).waitForExistence(timeout: 60),
+                      "\(Input.sellerHandle) offers no tier — the box holds no priced tier from the full-build seed; "
+                      + diagnose(app, Ids.subscriptionOfferRow))
+        assertAbsent(app, Excised.offerMoney, on: "\(Input.sellerHandle)'s Tiers tab")
+    }
+
+    /// `store-install` outcome 3, the buyer half: a post sold elsewhere shows as a
+    /// gated post with its badge and no price, payment link or buy button. The
+    /// seller's Posts tab paints the seeded sold post with its badge (the proof),
+    /// and none of the teaser's ids is in the tree. A full build paints the teaser
+    /// once the post's offer resolves, so the reading is a lower bound; nothing is
+    /// bought.
+    func testStoreSoldPostShowsNoPrice() throws {
+        let app = try openSignedIn()
+        try openSellerProfile(app)
+        tap(app, Ids.profilePostsTab, timeout: 30)
+        XCTAssertTrue(element(app, Ids.gatedPostBadge).waitForExistence(timeout: 60),
+                      "\(Input.sellerHandle)'s Posts tab shows no gated post — the box holds no sold post from the "
+                      + "full-build seed; " + diagnose(app, Ids.gatedPostBadge))
+        assertAbsent(app, Excised.soldPostMoney, on: "\(Input.sellerHandle)'s Posts tab")
+    }
+
+    /// `store-install` outcome 4: a post shows no tip total, tip count or
+    /// tippers, and nobody can be named as your zap signer.
+    func testStoreNoTipsNoZapSigner() throws {
+        let app = try openSignedIn()
+        try selectTab(app, index: TabIndex.feed)
+        XCTAssertTrue(element(app, Ids.composeGateTierSelect).waitForExistence(timeout: 60),
+                      diagnose(app, Ids.composeGateTierSelect))
+        if element(app, Ids.postCard).waitForExistence(timeout: 30) {
+            print("STORE-DRIVER reading=feed_has_post")
+            assertAbsent(app, Excised.tips, on: "the feed's post cards")
+        } else {
+            // A full build paints the tip surface only on a tipped post, so an
+            // empty feed reads nothing either way; the zap-signer half still runs.
+            print("STORE-DRIVER reading=feed_empty")
+        }
+
+        let settings = try openSettingsPage(key: "nostr", anchors: [Ids.nostrUnlinkButton, Ids.nostrLinkMode])
+        // A full build paints the zap-signer section for a linked account only.
+        let linked = element(settings, Ids.nostrUnlinkButton).exists
+        print("STORE-DRIVER reading=nostr_\(linked ? "linked" : "unlinked")")
+        assertAbsent(settings, Excised.zapSigner, on: "Settings → Nostr")
+    }
+
+    /// `store-install` outcome 5, the App Store half: sharing a folder in person
+    /// with someone else's device is left out — Settings → Folders paints neither
+    /// the offline-share panel nor the peer-transfer readings (a full build paints
+    /// them only where the nest advertises `p2p-share`).
+    func testStoreLeavesOutTheInPersonShare() throws {
+        _ = try openSignedIn()
+        let settings = try openSettingsPage(key: "folders", anchors: [Ids.folderAddButton])
+        assertAbsent(settings, Excised.inPersonShare, on: "Settings → Folders")
+    }
+
+    // MARK: - navigation, from outside
+
+    /// `MainTabView`'s tab order. A SwiftUI tab item takes no accessibility
+    /// identifier, so the bar's items are addressed by position.
+    private enum TabIndex {
+        static let feed = 1
+        static let contacts = 2
+        static let more = 3
+    }
+
+    /// Launch the installed app afresh.
+    private func launch() throws -> XCUIApplication {
         let app = XCUIApplication(bundleIdentifier: faunaBundleID)
         app.terminate()
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 60),
                       "the installed app never came to the foreground")
+        return app
+    }
+
+    /// Launch the installed app afresh and reach the main tab view, signing in
+    /// first when the install opens on onboarding — so every outcome method
+    /// stands alone, in whatever order the host runs them.
+    private func openSignedIn() throws -> XCUIApplication {
+        let app = try launch()
+        let tabView = element(app, Ids.mainTabView)
+        let onboarding = element(app, Ids.importIdentityButton)
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline {  // deadline-ok: waits for whichever root the launch shows, a state
+            if tabView.exists || app.tabBars.firstMatch.exists { return app }
+            if onboarding.exists { break }
+            _ = tabView.waitForExistence(timeout: 2)
+        }
+        try signIn(app)
+        try waitForMainTabs(app, after: "signing in as \(Input.accountHandle)")
+        return app
+    }
+
+    private func selectTab(_ app: XCUIApplication, index: Int) throws {
+        let bar = app.tabBars.firstMatch
+        XCTAssertTrue(bar.waitForExistence(timeout: 30), "no tab bar on screen; visible: \(visibleTexts(app))")
+        let item = bar.buttons.element(boundBy: index)
+        XCTAssertTrue(item.waitForExistence(timeout: 10),
+                      "the tab bar has no item \(index); items: \(bar.buttons.allElementsBoundByIndex.map(\.label))")
+        item.tap()
+    }
+
+    /// A row of the More tab's root list (`<view>-tab`), leaving any page a
+    /// previous visit left open first.
+    private func openMoreRow(_ app: XCUIApplication, _ rowId: String) throws {
+        try selectTab(app, index: TabIndex.more)
+        let back = element(app, Ids.moreBackButton)
+        if back.waitForExistence(timeout: 3) { back.tap() }
+        XCTAssertTrue(element(app, Ids.moreView).waitForExistence(timeout: 15), diagnose(app, Ids.moreView))
+        tap(app, rowId, timeout: 15)
+    }
+
+    /// The own profile's Tiers tab, its tier list loaded.
+    private func openOwnTiers(_ app: XCUIApplication) throws {
+        try openMoreRow(app, Ids.profileTab)
+        tap(app, Ids.profileTiersTab, timeout: 30)
+        XCTAssertTrue(element(app, Ids.subscriptionTiersSection).waitForExistence(timeout: 60),
+                      diagnose(app, Ids.subscriptionTiersSection))
+        XCTAssertTrue(element(app, Ids.subscriptionTierCreateButton).waitForExistence(timeout: 30),
+                      diagnose(app, Ids.subscriptionTierCreateButton))
+    }
+
+    /// The seller's profile, opened as a reader opens anyone's: Contacts → Find
+    /// User by handle → Open profile (`contacts.md` § Layout & flow region 3).
+    private func openSellerProfile(_ app: XCUIApplication) throws {
+        let handle = Input.sellerHandle
+        guard !handle.isEmpty else {
+            XCTFail("the host passed no seller handle (FAUNA_STORE_SELLER_HANDLE)")
+            return
+        }
+        try selectTab(app, index: TabIndex.contacts)
+        let field = element(app, Ids.contactActorIdField)
+        XCTAssertTrue(field.waitForExistence(timeout: 30), diagnose(app, Ids.contactActorIdField))
+        clearAndType(field, handle)
+        tap(app, Ids.contactActorIdLookup, timeout: 10)
+        XCTAssertTrue(element(app, Ids.contactActorIdResult).waitForExistence(timeout: 60),
+                      "Find User never resolved \(handle); " + diagnose(app, Ids.contactActorIdResult))
+        tap(app, Ids.contactActorIdOpenProfileButton, timeout: 10)
+        XCTAssertTrue(element(app, Ids.profilePostsTab).waitForExistence(timeout: 60),
+                      diagnose(app, Ids.profilePostsTab))
+    }
+
+    /// A Settings sub-page by its rail row (`settings-nav-row[<key>]`, the key
+    /// `SettingsPage.pageKey` gives), reached from a fresh launch and on screen
+    /// once any of `anchors` is.
+    @discardableResult
+    private func openSettingsPage(key: String, anchors: [String]) throws -> XCUIApplication {
+        let app = try launch()
+        try waitForMainTabs(app, after: "relaunching")
+        try openMoreRow(app, Ids.settingsTab)
+        let rowId = "\(Ids.settingsNavRow)[\(key)]"
+        let row = element(app, rowId)
+        // A SwiftUI list builds its rows lazily: a row below the fold is not in
+        // the tree until the list is scrolled to it.
+        for _ in 0..<10 where !(row.exists && row.isHittable) { app.swipeUp() }
+        XCTAssertTrue(row.exists && row.isHittable, diagnose(app, rowId))
+        row.tap()
+        let found = anchors.map { element(app, $0) }
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline {  // deadline-ok: waits for the page's own anchor, a state
+            if found.contains(where: \.exists) { return app }
+            _ = found[0].waitForExistence(timeout: 2)
+        }
+        XCTFail("Settings → \(key) never showed any of \(anchors); error element: \(errorText(app)); "
+                + "visible: \(visibleTexts(app))")
+        return app
+    }
+
+    /// Assert none of `ids` is in the tree, the screen's anchor already found.
+    private func assertAbsent(_ app: XCUIApplication, _ ids: [String], on screen: String) {
+        let present = ids.filter { element(app, $0).exists }
+        XCTAssertTrue(present.isEmpty,
+                      "the store install paints \(present) on \(screen) — the store flavor's excision did not hold")
+        print("STORE-DRIVER absent on \(screen): \(ids.joined(separator: ","))")
+    }
+
+    private func labelled(_ app: XCUIApplication, _ label: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
+    }
+
+    /// Sign in through the app's own onboarding UI, as the App Store's reviewer
+    /// does from the review notes: import the identity, type the handle,
+    /// continue.
+    private func signIn(_ app: XCUIApplication) throws {
+        let handle = Input.accountHandle
+        let secret = Input.accountSecret
+        guard !handle.isEmpty, secret.count == 64 else {
+            throw XCTSkip("state=no_account the host passed no reviewer account (FAUNA_STORE_ACCOUNT_HANDLE and a 64-hex FAUNA_STORE_ACCOUNT_SECRET) — the sign-in leg imports the apple-reviewer account on test.fauna.build")
+        }
 
         // The release build opens on onboarding's identity choice. Import the
         // reviewer's identity on the paste tab (the import view's default).
@@ -145,14 +461,17 @@ final class StoreDriverTests: XCTestCase {
                        "'\(Ids.handleEntryContinueButton)' never enabled — the handle check did not pass; "
                        + "handle-message-area: \(element(app, Ids.handleMessageArea).label)")
         next.tap()
+    }
 
-        // Signed in: the main tab view is on screen (the android witness waits
-        // for `feed-tab`). On iOS the `{page}-tab` ids are registered with the
-        // in-process registry only (a SwiftUI tab item takes no accessibility
-        // identifier; `test_ios_store_driver_pins.py` refuses a driver that
-        // reads one), so the release tree is read at the container the view
-        // does identify, `main-tab-view`, or at the tab bar it hosts —
-        // whichever the first device run finds, it reports.
+    /// Signed in: the main tab view is on screen (the android witness waits
+    /// for `feed-tab`). On iOS the tab bar's `{page}-tab` ids are registered
+    /// with the in-process registry only (a SwiftUI tab item takes no
+    /// accessibility identifier; `test_ios_store_driver_pins.py` refuses a
+    /// driver that reads one), so the release tree is read at the container the
+    /// view does identify, `main-tab-view`, or at the tab bar it hosts —
+    /// whichever the first device run finds, it reports. (The More list's
+    /// `<view>-tab` rows are buttons that do carry their id.)
+    private func waitForMainTabs(_ app: XCUIApplication, after step: String) throws {
         let tabView = element(app, Ids.mainTabView)
         let tabBar = app.tabBars.firstMatch
         let deadline = Date().addingTimeInterval(180)
@@ -161,7 +480,7 @@ final class StoreDriverTests: XCTestCase {
             if tabBar.exists { print("STORE-DRIVER signed_in=tab-bar"); return }
             _ = tabView.waitForExistence(timeout: 2)
         }
-        XCTFail("the store-installed app never reached the main tab view after signing in as \(handle); "
+        XCTFail("the store-installed app never reached the main tab view after \(step); "
                 + "error element: \(errorText(app))")
     }
 

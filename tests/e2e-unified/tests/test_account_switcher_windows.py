@@ -53,6 +53,7 @@ from common.scope_store import attach_scope_store
 from conftest import _apply_real_conversations_env, _seeded_environment
 from drivers import create_driver
 from drivers.machine_test_setter import set_handle_check_snapshot
+from helpers import enrollment
 from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.registry_store import describe_registry, read_registry_index, read_store_map
 from helpers.waiting import (
@@ -937,8 +938,12 @@ def test_windows_remove_account_shrinks_switcher_live(
         driver.click(REMOVE_BUTTON, scope=f"{SWITCHER_ITEM}[1]")
 
         # The removal does not switch (no teardown/rebuild), so the row can only
-        # vanish via an in-place live refresh — assert WITHOUT re-navigating.
-        _wait_live_switcher_count(driver, 1, timeout=20)
+        # vanish via an in-place live refresh — assert WITHOUT re-navigating. The
+        # row goes when the whole gesture returns, and the gesture retires this
+        # machine on the removed account's nest within its own budget
+        # (`REMOVED_ACCOUNT_RETIRE_BUDGET`, 10 s) before it erases: the ceiling
+        # covers that budget; a green run returns the moment the row is gone.
+        _wait_live_switcher_count(driver, 1, timeout=30)
         assert driver.count(ACTIVE_INDICATOR) == 1, (
             "exactly one account must remain marked active after the removal"
         )
@@ -1533,8 +1538,8 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
 ):
     """Removing an identity deletes THAT identity's data on this device and
     leaves every other identity's data untouched (`account-scoping.md` § The
-    scoping taxonomy; windows' erase door is the switcher VM's
-    `AccountStateDir.Erase` after a successful registry remove).
+    scoping taxonomy; windows' door is the shared `remove_account_gesture`,
+    run by the switcher VM through `AccountStateDir.RemoveAccountGestureAsync`).
 
     `test_windows_remove_account_shrinks_switcher_live` proves the row and the
     registry entry go; neither says anything about the account's on-device
@@ -1545,11 +1550,26 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
     the flat base and the unified store root) while the user's scope and secret
     are still there. Every wait is on state.
 
-    Both identities are dedicated, never the run's shared admin: the removal
-    erases the removed identity's slot on this machine without retiring its
-    enrollment nest-side, so no teardown could find that grant to retire it
+    The removal also retires this machine from the removed identity, as a
+    sign-out does (`account-scoping.md` § Erasure follows scope → *Removing an
+    account retires this machine from it, as a sign-out does*): the removed
+    identity's named row stays on its nest with its grant cleared. The roster
+    read sits behind causal barriers (convention 14): the removed identity's
+    own enrollment latch before the removal, the cleared roster within a named
+    budget after it. The apple twin is
+    `test_apple_removing_an_identity_deletes_its_data_and_leaves_the_others`.
+
+    Both identities are dedicated, never the run's shared admin: the roster
+    must be exact (``helpers.enrollment``), and a removal whose nest half were
+    deferred would leave a grant no teardown could find to retire
     (`e2e-launch-isolation.md`, *A discarded driver retires its machine*)."""
     seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
+    # The removed identity as the roster helpers address it: its id and its
+    # signing key, read back out of the seed that carries its secret.
+    other = {
+        "actor_id_hex": other_actor,
+        "signing_key": SigningKey(bytes.fromhex(seed[f"fauna/{other_actor}/secret"])),
+    }
 
     driver = create_driver("windows")
     driver.launch({
@@ -1570,6 +1590,14 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
         _await_working_session(driver, other_actor, "the switch to the other identity")
         other_dirs = store.scope_dirs(other_actor)
         _wait_for_path(other_dirs[0], "the other identity's own account scope")
+        # This machine is enrolled on it now: its named row carries a grant.
+        url = nest_instance["url"]
+        _writer, other_row, _ = enrollment.await_enrollment(
+            SimpleNamespace(driver=driver), url, other
+        )
+        assert enrollment.principals(url, other).get(other_row), (
+            f"the precondition: the latched row {other_row} carries this machine's grant"
+        )
 
         # Back to the user: the other row is now the non-active one, the only row
         # the switcher offers a remove button on.
@@ -1602,6 +1630,11 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
         )
         assert _read_store_slot(driver, f"fauna/{user_actor}/secret"), (
             "the remaining identity's secret must survive the removal"
+        )
+        # The nest half: the named row stays, its grant cleared — as after a
+        # sign-out (the barrier's diagnosis names every other reading).
+        enrollment.await_grant_cleared(
+            url, other, other_row, "after removing the identity through the switcher"
         )
     finally:
         driver.teardown()

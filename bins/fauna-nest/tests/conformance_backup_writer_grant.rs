@@ -1484,3 +1484,112 @@ async fn a_revoke_between_the_carrys_read_and_its_handover_is_kept() {
     assert_eq!(seat[0].writer_nest_id, hex::encode(successor));
     assert!(!seat[0].revoked);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The custody address — an open family's squat is a coded, recoverable refusal
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The owner's own set created by `name`'s hash alone, through the ordinary
+/// client create — what a squat of an open family's address is.
+async fn squat_by_hash(state: &Arc<AppState>, owner: [u8; 32], name: &str) {
+    let mut b = RpcRouter::builder();
+    fauna_nest::folder_handlers::register_folders_handlers(&mut b);
+    client_call::<_, fauna_protocol::folders::FolderCreateReply>(
+        &b.build(),
+        state,
+        owner,
+        "fauna.folders.create",
+        &fauna_protocol::folders::FolderCreateRequest {
+            name: String::new(),
+            name_hash: Some(fauna_protocol::ByteBuf::from(
+                fauna_core::path_crypto::set_name_hash(name).to_vec(),
+            )),
+            name_sealed: Some(fauna_protocol::ByteBuf::from(vec![0xa1u8; 24])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an open family's address is not enumerable at the create");
+}
+
+/// The federated custody provisioner (`resolve_backup_custody_set`) meeting
+/// the owner's own set created by hash alone on a folder-axis custody name
+/// (`__folder/<origin>/<id>`) answers the coded, recoverable
+/// `fauna.folders.reserved_address_taken`, never an internal error; deleting
+/// the squatter by its hash lets the same record provision a custody copy
+/// (`reserved-folders.md` § The management surface refuses the namespace —
+/// whole, *the address*). The sync door's twin is pinned in
+/// `conformance_folders.rs`.
+#[tokio::test]
+async fn a_squatted_folder_axis_custody_address_refuses_the_federated_record_coded() {
+    let (router, fed, state) = destination().await;
+    register_user(&state, OWNER, "alice").await;
+    register_grant(&router, &state, OWNER, SOURCE_NEST)
+        .await
+        .unwrap();
+    let name = fauna_core::data::folder_backup_set_name(&SOURCE_NEST, 13);
+    squat_by_hash(&state, OWNER, &name).await;
+    let (mh, _) = seed_held_bytes(&state, 0xB1, &[64]).await;
+    let req = FedBackupChangesRecordRequest {
+        folder_id: Some(13),
+        ..record_req_with(OWNER, "seg-0.dat", &mh, 4096)
+    };
+
+    let refused = record_custody(&fed, &state, SOURCE_NEST, &req)
+        .await
+        .expect_err("the squatted address refuses the provisioning");
+    assert_eq!(refused.code, "fauna.folders.reserved_address_taken");
+
+    let mut b = RpcRouter::builder();
+    fauna_nest::folder_handlers::register_folders_handlers(&mut b);
+    client_call::<_, fauna_protocol::folders::FolderDeleteReply>(
+        &b.build(),
+        &state,
+        OWNER,
+        "fauna.folders.delete",
+        &fauna_protocol::folders::FolderDeleteRequest {
+            name_hash: Some(fauna_protocol::ByteBuf::from(
+                fauna_core::path_crypto::set_name_hash(&name).to_vec(),
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the squatter is the owner's own set, deletable by its hash");
+    record_custody(&fed, &state, SOURCE_NEST, &req)
+        .await
+        .expect("with the squatter gone the custody set provisions");
+    assert!(
+        state
+            .db
+            .get_folder_for_actor(&name, &OWNER)
+            .await
+            .unwrap()
+            .expect("provisioned")
+            .custody_copy
+    );
+}
+
+/// The same refusal for the conv custody name (`__conv/<channel_hex>`), the
+/// other open family the federated provisioner mints.
+#[tokio::test]
+async fn a_squatted_conv_custody_address_refuses_the_federated_record_coded() {
+    let (router, fed, state) = destination().await;
+    register_user(&state, OWNER, "alice").await;
+    register_grant(&router, &state, OWNER, SOURCE_NEST)
+        .await
+        .unwrap();
+    let channel = [0x6Cu8; 32];
+    let name = fauna_protocol::segments::reserved_backup_set_name("conv", &channel).unwrap();
+    squat_by_hash(&state, OWNER, &name).await;
+    let (mh, _) = seed_held_bytes(&state, 0xB2, &[64]).await;
+    let req = FedBackupChangesRecordRequest {
+        kind: "conv".into(),
+        scope_id: hex::encode(channel),
+        ..record_req_with(OWNER, "seg-0.dat", &mh, 4096)
+    };
+    let refused = record_custody(&fed, &state, SOURCE_NEST, &req)
+        .await
+        .expect_err("the squatted address refuses the provisioning");
+    assert_eq!(refused.code, "fauna.folders.reserved_address_taken");
+}

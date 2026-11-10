@@ -107,7 +107,10 @@ fn repaint(state: &State, widgets: &Widgets) {
 }
 
 fn build_pending_action_row(row: &PendingActionSummary) -> adw::ActionRow {
-    let description = row.description();
+    // An automatic prune names its folder from the roster the Devices page's
+    // machine already holds, else the neutral sentence — tui's
+    // `settings/account.rs::pending_description` twin.
+    let description = row.description_naming(crate::views::devices_folders::current_folder_name);
     let applies_at = pa::applies(&fauna_core::format::format_unix_local(row.execute_after));
     let action_row = adw::ActionRow::builder()
         .title(&description)

@@ -153,6 +153,9 @@ func (s *Session) PrepareIdle() error {
 	stale := s.preparedIdle
 	s.preparedIdle = reg
 	router := s.router
+	// From here a revocation is answered by the IDLE loop's BYE, not by
+	// closing the connection under the `+ idling` write.
+	s.idling = true
 	s.mu.Unlock()
 	if stale != nil {
 		// A prepare whose IDLE never ran (the continuation write failed);
@@ -265,7 +268,23 @@ func (s *Session) idle(
 	parentCtx context.Context,
 	w updateWriter,
 	stop <-chan struct{},
-) error {
+) (err error) {
+	s.mu.Lock()
+	s.idling = true
+	revoked := s.revokedChLocked()
+	s.mu.Unlock()
+	defer func() {
+		// Leaving IDLE: a revocation from here on closes the connection. One
+		// that arrived while the loop was ending on DONE or the timeout still
+		// ends the session — with the BYE, not a return to the command loop.
+		s.mu.Lock()
+		s.idling = false
+		if s.revokedClosed {
+			err = errSessionRevoked
+		}
+		s.mu.Unlock()
+	}()
+
 	s.mu.Lock()
 	actorID := s.actorID
 	mailbox := s.selectedMailbox
@@ -312,6 +331,12 @@ func (s *Session) idle(
 			if err := s.handleEvent(parentCtx, w, fetcher, actorID, mailbox, ev); err != nil {
 				return err
 			}
+		case <-revoked:
+			// The account was locked, suspended, evicted or deleted
+			// (`account_revoked` push, revocation_teardown.go): answer
+			// `* BYE` now, without waiting for the MUA's next command.
+			s.wakeIdleRead(stop)
+			return errSessionRevoked
 		case <-stop:
 			// MUA sent DONE (or the IMAP connection dropped — emersion
 			// closes `stop` either way). Clean return; emersion

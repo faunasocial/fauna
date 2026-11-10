@@ -78,6 +78,19 @@ pub trait RpcRequester {
     fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
         None
     }
+
+    /// Resolves once this transport has been torn down — the native
+    /// `NestClient::disconnect`, after which every request fails at once — and
+    /// never before. A consumer that outlives one request and is bound to this
+    /// transport ends on it: the critical-alert sweep loop rides one client and
+    /// ends with it, rather than failing every later pass on a client nothing
+    /// will reconnect (`critical-alerts.md` § Mechanism → *How often the
+    /// detector runs*). The default never resolves: a transport that is never
+    /// torn down (a browser socket the tab owns, a client that reconnects on
+    /// demand, a test fake) is never retired from under its consumer.
+    async fn torn_down(&self) {
+        core::future::pending::<()>().await;
+    }
 }
 
 /// The outbox-drain seam: a transport that sends a request whose envelope
@@ -293,6 +306,10 @@ impl<T: RpcRequester + ?Sized> RpcRequester for &T {
     fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
         (**self).nest_info_memo()
     }
+
+    async fn torn_down(&self) {
+        (**self).torn_down().await;
+    }
 }
 
 impl<T: KeyedRpcRequester + ?Sized> KeyedRpcRequester for &T {
@@ -337,6 +354,10 @@ impl<T: RpcRequester + ?Sized> RpcRequester for std::sync::Arc<T> {
 
     fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
         (**self).nest_info_memo()
+    }
+
+    async fn torn_down(&self) {
+        (**self).torn_down().await;
     }
 }
 

@@ -24,6 +24,28 @@ import (
 // user-irrecoverable data.
 const spamScoredKeyword = "$FaunaSpamScored"
 
+// notJunkKeyword is the RFC 5788 per-message ham veto. A ham lesson stamps it
+// nest-side; a third-party client's own stamp is honoured the same way. A copy
+// carrying it is never re-filed by this pass (it is still watermarked, so it
+// is never re-decrypted) — report-sharing.md § Applying the aggregate. MUST
+// match `fauna_protocol::email::NOT_JUNK_KEYWORD`.
+const notJunkKeyword = "$NotJunk"
+
+// reportSpamFactor is the community report aggregate's bus factor
+// (`fauna_core::scoring::factor::REPORT_SPAM`), read off the copy's scores.
+const reportSpamFactor = "report:spam"
+
+// reportSpamPm returns the copy's live `report:spam` score (per-mille), 0
+// when the copy carries no such row.
+func reportSpamPm(scores []wsrpc.ScoreEntry) int64 {
+	for _, e := range scores {
+		if e.Factor == reportSpamFactor {
+			return e.Score
+		}
+	}
+	return 0
+}
+
 // spamScoreMilliScale converts a 0–15 spam-tier threshold to the
 // milli-units the combined score is carried in (dag-cbor forbids floats).
 // Mirrors `milli()` in libs/fauna-mail/src/spam/mod.rs — the scale
@@ -55,6 +77,11 @@ const spamScoreRPCTimeout = 30 * time.Second
 // cap-vs-async tradeoff) is a pre-GA tuning question; this conservative
 // default keeps a cold-start SELECT snappy while draining in a handful of
 // SELECTs.
+//
+// Its twin is the Fauna app's held-copy catch-up cap,
+// `fauna_core::scoring::inbox_catch_up::INBOX_SPAM_RESCORE_PER_PASS_CAP`
+// (libs/fauna-core/src/scoring.rs): the two stay equal — one cap at both
+// scoring positions (mail-spam.md § Scoring placement → The app's catch-up).
 const spamScorePerPassCap = 100
 
 // scoreSelectedInbox is the post-delivery, AUTH'd-MDA-session per-user
@@ -108,16 +135,18 @@ func (s *Session) scoreSelectedInbox(ctx context.Context, opener mailfauna.Recor
 	// session-level exit would skip exactly the messages a user set an
 	// override for — the goal doc names this trap explicitly. The per-message
 	// value is the one consulted, with the session policy as its fallback;
-	// the disabled case is decided per message, below. The cheap cold-start
-	// exit that actually bounds this pass is the untrained-model check in
-	// step 1 — an actor with no model is still one RPC, not an INBOX scan.
+	// the disabled case is decided per message, below. What bounds the pass
+	// for an actor with no model is step 2's filter: such an actor has no
+	// Bayesian term, so only a copy carrying a community `report:spam` row
+	// (report-sharing.md § Applying the aggregate) has anything to score —
+	// two RPCs and no body decrypt when no copy carries one.
 
 	rpcCtx, cancel := context.WithTimeout(ctx, spamScoreRPCTimeout)
 	defer cancel()
 
-	// 1. Fetch + unwrap the per-user model first — the cheap exit for the
-	//    cold-start / untrained actor (one DB lookup returning None, no
-	//    INBOX scan or body decrypts).
+	// 1. Fetch + unwrap the per-user model first. An untrained actor (one DB
+	//    lookup returning None) has no Bayesian term; its pass goes on only
+	//    for the report term (step 2).
 	// stored_sealed is the TRAIN path's dispatch signal; scoring opens
 	// the returned envelope identically either way — discard it here.
 	// contribute_baseline/holder_seal_target are the piece-(b4) TRAIN-path
@@ -129,20 +158,21 @@ func (s *Session) scoreSelectedInbox(ctx context.Context, opener mailfauna.Recor
 		}
 		return
 	}
-	if len(sealed) == 0 {
-		return // untrained ⇒ cold start ⇒ nothing to score
-	}
-	// STRICT open — the model is sealed-on-read by nest in BOTH modes,
-	// never raw (a raw model here means corruption); the same strict open
-	// every mail record gets.
-	modelBytes, err := opener.Open(sealed)
-	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("imap: spam-score: model unwrap failed; INBOX not scored this SELECT", "err", err)
+	untrained := len(sealed) == 0
+	var modelBytes []byte
+	if !untrained {
+		// STRICT open — the model is sealed-on-read by nest in BOTH modes,
+		// never raw (a raw model here means corruption); the same strict
+		// open every mail record gets.
+		modelBytes, err = opener.Open(sealed)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("imap: spam-score: model unwrap failed; INBOX not scored this SELECT", "err", err)
+			}
+			return
 		}
-		return
+		defer zeroize(modelBytes)
 	}
-	defer zeroize(modelBytes)
 	// The published deployment baseline rides the reply only for a
 	// stored (sealed) model — fold it into the just-unwrapped model
 	// HERE, the agent leg of the read-time faded prior (the cold-start
@@ -152,12 +182,20 @@ func (s *Session) scoreSelectedInbox(ctx context.Context, opener mailfauna.Recor
 	// is never persisted into the user's model. The FFI returns a fresh
 	// slice either way; a 0 confidence horizon (uninitialized knobs under
 	// an injected test scoreFn) is a guarded no-op inside the fold.
-	if len(baseline) > 0 {
+	if !untrained && len(baseline) > 0 {
 		folded := mailfauna.FoldSpamModelBaseline(modelBytes, baseline,
 			s.bayesianKnobs.FullConfidenceSamples)
 		defer zeroize(folded)
 		modelBytes = folded
 	}
+	// The scorer's say (mail-spam.md § Scoring placement → *The scorer's
+	// say*): a model whose term could not reach the account's spam-folder
+	// tier even at a maximal verdict is the report-only scorer — read off
+	// the FOLDED bytes, the same model the score reads, and the account's
+	// tier, before any copy is opened. The shared `bayesian_has_say` decides
+	// it byte-identically with the app's InboxSpamScorer.
+	hasSay := !untrained && mailfauna.BayesianHasSayForModel(modelBytes,
+		s.bayesianKnobs, uint32(policy.SpamFolderThreshold))
 
 	// 2. List INBOX; keep the messages not yet watermarked.
 	rows, err := wsrpc.FetchMessageMetadata(rpcCtx, client, actorID, "INBOX", nil)
@@ -194,8 +232,20 @@ func (s *Session) scoreSelectedInbox(ctx context.Context, opener mailfauna.Recor
 	// are deferred to the next read-write SELECT, where the watermark lets the
 	// scan resume — eventual consistency, already the model.
 	pending := make([]wsrpc.MessageMeta, 0, len(rows))
+	// A `$NotJunk` copy is never re-filed: watermark it without scoring.
+	var vetoedUIDs []uint32
 	for _, m := range rows {
 		if hasFlag(m.Flags, spamScoredKeyword) {
+			continue
+		}
+		// No say ⇒ no term that could file this copy: a copy with no
+		// community report stays un-watermarked, owed to the SELECT at which
+		// the say begins (no model, or one under the say line, alike).
+		if !hasSay && reportSpamPm(m.Scores) <= 0 {
+			continue
+		}
+		if hasFlag(m.Flags, notJunkKeyword) {
+			vetoedUIDs = append(vetoedUIDs, m.UID)
 			continue
 		}
 		pending = append(pending, m)
@@ -207,7 +257,8 @@ func (s *Session) scoreSelectedInbox(ctx context.Context, opener mailfauna.Recor
 		pending = pending[:spamScorePerPassCap]
 	}
 
-	var scoredUIDs, spamUIDs []uint32
+	scoredUIDs := append([]uint32(nil), vetoedUIDs...)
+	var spamUIDs []uint32
 	for _, m := range pending {
 		ct, err := wsrpc.FetchMessageCiphertext(rpcCtx, client, actorID, m.MessageID)
 		if err != nil {
@@ -243,7 +294,10 @@ func (s *Session) scoreSelectedInbox(ctx context.Context, opener mailfauna.Recor
 		// at train + score, so the per-user score agrees across positions
 		// (mail-spam.md § Scoring placement — "byte-identical scores at
 		// every position").
-		weighted := score(modelBytes, string(pt))
+		var weighted int32
+		if !untrained {
+			weighted = score(modelBytes, string(pt))
+		}
 		// THIS message's spam-folder tier: the delivery stamp nest folded from
 		// per-alias > per-account > admin default at RCPT (mail-aliases.md
 		// § Spam-threshold override), or the session policy when the message
@@ -256,8 +310,11 @@ func (s *Session) scoreSelectedInbox(ctx context.Context, opener mailfauna.Recor
 		// rspamd term is 0 here: rspamd already scored at ingest and routed
 		// to Junk anything that crossed a tier (so it isn't in INBOX). The
 		// MDA pass adds the per-user Bayesian term the ingest path
-		// hard-codes to 0 (mta/server.go `CombinedSpamScoreMilli(rspamd, 0)`).
-		combined := mailfauna.CombinedSpamScoreMilli(0, weighted)
+		// hard-codes to 0 (mta/server.go `CombinedSpamScoreMilli(rspamd, 0)`),
+		// plus the community `report:spam` term on top of the max — other
+		// people's judgments, compared at THIS message's own threshold
+		// (report-sharing.md § Applying the aggregate).
+		combined := mailfauna.EffectiveSpamScoreMilli(0, weighted, reportSpamPm(m.Scores))
 		scoredUIDs = append(scoredUIDs, m.UID)
 		// A 0 threshold means auto-Junk routing is off for this message — the
 		// same `reached()` semantics the shared scorer uses, now decided per

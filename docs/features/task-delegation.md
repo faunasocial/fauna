@@ -4,6 +4,9 @@ title: Choose which device does the heavy lifting
 section: your data and devices
 goal: docs/goal/behavior/participants.md § Task delegation (Q-B/Q-C)
 guide: docs/guides/app-tour.md § Settings
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,7 +18,7 @@ set-up at all.
 
 ## Coverage contract
 
-Stamped 2026-09-26 at ef1315baff.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] The page lists every job with its runner and an assignment that defaults to automatic — `docs/goal/behavior/participants.md` § The assignment picker
    - `tests/e2e-unified/tests/test_task_delegation.py::test_task_delegation_page_lists_the_live_task_kinds`
@@ -40,6 +43,8 @@ Stamped 2026-09-26 at ef1315baff.
     - `tests/e2e-unified/tests/test_capability_rescore_drain.py::test_rescore_drain_fires_on_model_bump_via_user_minted_capability`
 10. [nest] A nest whose attempts keep failing hands the job back to your devices — `docs/goal/behavior/participants.md` § Coordination primitive (Q-C — ratified + built)
     - `tests/e2e-unified/tests/api/test_backup_lease_handback.py::test_repeated_failures_hand_the_backup_job_back`
+11. [app] An assignment made or cleared on another of your devices shows on an open Task delegation page without leaving it — `docs/goal/architecture/account-runtime.md` § Multi-instance concurrency
+   - `tests/e2e-unified/tests/test_task_delegation.py::test_an_assignment_made_on_another_device_repaints_the_open_page`
 
 ## Status
 
@@ -48,11 +53,13 @@ Stamped 2026-09-26 at ef1315baff.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
-| windows | ⚠ partial | 0.1.3-dev+7135fff0.dirty standalone |
+| windows | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -63,10 +70,11 @@ Stamped 2026-09-26 at ef1315baff.
 | 3 | nest | `tests/e2e-unified/tests/api/test_delegation.py::test_renew_resets_age_keeping_a_live_holder_fresh` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_delegation.py::test_leases_are_actor_scoped` | nest (linux): passed, nest (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_on_automatic_the_policy_prefers_the_nest_then_this_desktop_never_a_phone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_only_a_kind_this_device_can_run_offers_this_device` — requires `picker-options-attr` (test harness) (not built: windows, android) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_an_assignment_made_on_another_device_shows_here_and_clears_here` — requires `picker-options-attr` (test harness) (not built: windows, android) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_only_a_kind_this_device_can_run_offers_this_device` — requires `picker-options-attr` (test harness) (not built: windows, android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_an_assignment_made_on_another_device_shows_here_and_clears_here` — requires `picker-options-attr` (test harness) (not built: windows, android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_a_kind_whose_runner_went_away_says_waiting_not_its_name` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_a_kind_pinned_to_another_device_waits_for_it_rather_than_moving` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/test_capability_rescore_drain.py::test_rescore_drain_fires_on_model_bump_via_user_minted_capability` | nest (linux): passed, nest (macos): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_backup_lease_handback.py::test_repeated_failures_hand_the_backup_job_back` | nest (linux): passed, nest (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_an_assignment_made_on_another_device_repaints_the_open_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

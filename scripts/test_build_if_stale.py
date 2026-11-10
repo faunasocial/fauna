@@ -294,6 +294,43 @@ def test_content_key_rebuilds_on_a_new_commit(tmp_path: Path) -> None:
     assert marker.exists(), "a committed change matched the old content key"
 
 
+def _age_all_mtimes(repo: Path, stamp: Path) -> None:
+    """What a mtime-rewriting pass on macOS did: every source back to a rounded
+    instant OLDER than the stamp, whatever its content."""
+    earlier = stamp.stat().st_mtime - 3600
+    for p in (repo / "libs").rglob("*"):
+        if p.is_file():
+            os.utime(p, (earlier, earlier))
+
+
+def test_content_key_rebuilds_a_changed_tree_with_old_mtimes(tmp_path: Path) -> None:
+    """A committed change under a source whose mtimes read OLDER than the stamp
+    is still stale: a recorded key that differs from the clean tree's key wins
+    over the mtimes (observed on macOS 2026-11-09, stale FFI bindings served)."""
+    repo = _content_repo(tmp_path)
+    marker = repo / "ran"
+    _run_in(repo, _content_args(), _touch_cmd(marker))
+    marker.unlink()
+    (repo / "libs" / "a" / "lib.rs").write_text("fn d() {}\n")
+    _git(repo, "commit", "-q", "-am", "edit")
+    _age_all_mtimes(repo, repo / "stamp")
+    result = _run_in(repo, _content_args(), _touch_cmd(marker))
+    assert marker.exists(), "a changed content key was read fresh by its old mtimes"
+    assert "content key changed" in result.stdout
+
+
+def test_content_key_old_mtimes_dirty_tree_keeps_mtime_verdict(tmp_path: Path) -> None:
+    """A dirty tree has no key to compare, so the mtime verdict stands."""
+    repo = _content_repo(tmp_path)
+    marker = repo / "ran"
+    _run_in(repo, _content_args(), _touch_cmd(marker))
+    marker.unlink()
+    _touch(repo / "libs" / "a" / "new.rs")
+    _age_all_mtimes(repo, repo / "stamp")
+    _run_in(repo, _content_args(), _touch_cmd(marker))
+    assert not marker.exists()
+
+
 def test_content_key_still_reads_ignored_files_by_mtime(tmp_path: Path) -> None:
     """A generated, git-ignored file under a source has no tree id; its mtime
     is still the only signal, so it alone can make the gate stale."""

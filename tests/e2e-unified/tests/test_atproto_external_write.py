@@ -119,6 +119,9 @@ BATCH_TEXT_A = "first of a batch, written by an external app"
 BATCH_TEXT_B = "second of a batch, in the very same commit"
 # Leg 9 (F2.4 slice 2): the media round-trip.
 MEDIA_TEXT = "an image post from a third-party app, media and all"
+# Leg 11: a quote of leg 1's post. Leg 12: a post the external app deletes.
+QUOTE_TEXT = "quoting that post from the same third-party app"
+EXTERNAL_DELETE_TEXT = "a post the third-party app will delete again"
 # A complete, genuinely decodable 1x1 PNG — the upload leg SNIFFS the bytes
 # (never the declared Content-Type), so the fixture must really be a PNG.
 TINY_PNG = bytes.fromhex(
@@ -1173,6 +1176,70 @@ def test_external_app_write_becomes_a_fauna_post(
         assert "this post must never exist" not in bodies, (
             "a refused media write must manufacture no Fauna post"
         )
+
+        # ── 16. LEG 11 — A QUOTE OF A FAUNA POST ROUND-TRIPS AS A REAL FAUNA
+        # QUOTE (atproto-pds-full.md § Problem 1: replies, quotes and embeds
+        # round-trip; the bridge resolves the quoted AT-URI to its Fauna post id
+        # through `resolved_targets`, slice 4b). The quoting post must name leg
+        # 1's post as its quoted post, and that post's quote_count must move. ──
+        quote_body = _create_body(session_did, QUOTE_TEXT)
+        quote_body["record"]["embed"] = {
+            "$type": "app.bsky.embed.record",
+            "record": {"uri": post_uri, "cid": post_cid},
+        }
+        status, quoted = _xrpc_post(
+            xrpc_base, "com.atproto.repo.createRecord", quote_body, access,
+        )
+        assert status == 200, f"quote createRecord failed: {status} {quoted}\n{_tail()}"
+        with alice_ws:
+            quote_item = _await_feed_item(
+                alice_ws, QUOTE_TEXT, _tail, until=lambda p: p.get("quoted_post_id")
+            )
+        assert _hex(quote_item["quoted_post_id"]) == _hex(fauna_post_id), (
+            "the quote must land as a real Fauna quote of leg 1's post, not a "
+            f"standalone post or a quote of something else: {quote_item}"
+        )
+        assert quote_item["author"] == alice["actor_id_bytes"].hex(), quote_item
+        with alice_ws:
+            _await_feed_item(
+                alice_ws, POST_TEXT, _tail, until=lambda p: p["quote_count"] >= 1
+            )
+
+        # ── 17. LEG 12 — AN EXTERNAL `deleteRecord` OF A ROUND-TRIPPED POST IS
+        # THE FAUNA TOMBSTONE (§ Problem 1, "Deletion/tombstones": the bridge
+        # resolves the rkey to its Fauna post id). The post leaves the account's
+        # own Fauna feed — the wire every app renders from — and its record
+        # leaves the repo. ──
+        status, doomed = _xrpc_post(
+            xrpc_base, "com.atproto.repo.createRecord",
+            _create_body(session_did, EXTERNAL_DELETE_TEXT), access,
+        )
+        assert status == 200, f"createRecord failed: {status} {doomed}\n{_tail()}"
+        with alice_ws:
+            _await_feed_item(alice_ws, EXTERNAL_DELETE_TEXT, _tail)
+        doomed_rkey = doomed["uri"].rsplit("/", 1)[-1]
+        status, deleted = _xrpc_post(
+            xrpc_base, "com.atproto.repo.deleteRecord",
+            {"repo": session_did, "collection": "app.bsky.feed.post", "rkey": doomed_rkey},
+            access,
+        )
+        assert status == 200, f"deleteRecord failed: {status} {deleted}\n{_tail()}"
+        deadline = time.monotonic() + 60
+        bodies = []
+        while time.monotonic() < deadline:
+            with alice_ws:
+                bodies = [
+                    p["body"]
+                    for p in alice_ws.call("fauna.feed.local.posts", {"limit": 100})["posts"]
+                ]
+            if EXTERNAL_DELETE_TEXT not in bodies:
+                break
+            time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+        assert EXTERNAL_DELETE_TEXT not in bodies, (
+            "an external deleteRecord must become the Fauna tombstone; the post is "
+            f"still on the account's feed: {bodies}\n{_tail()}"
+        )
+        assert POST_TEXT in bodies, "the delete must remove only the deleted post"
     finally:
         if proc is not None:
             try:
@@ -1190,6 +1257,13 @@ def test_external_app_write_becomes_a_fauna_post(
         dns.close()
         directory.close()
         nest_cleanup()
+
+
+def _hex(value) -> str:
+    """A post id as lowercase hex, whichever shape the wire carried it in."""
+    if isinstance(value, str):
+        return value.lower()
+    return bytes(value).hex()
 
 
 def _fauna_profile(alice_ws, actor_id: bytes) -> dict:

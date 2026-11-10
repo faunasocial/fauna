@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import pytest
 
-from helpers.folder_content import require_fuse_host
 from helpers.on_demand_hydrate import (
     FUSE_HOST,
     ROOT_WINDOW,
@@ -55,7 +54,11 @@ from tests.test_filesync_seats import (
     _set_name_for,
 )
 
-pytestmark = pytest.mark.tier_3
+# A witness of the linux FUSE root: tui runs on all three hosts, but a macOS host
+# owes no on-demand root (always-resident by design) and a windows host serves
+# cloud files, which its own twins witness (feature-catalog.md § The ledger,
+# *Stale records*, ruling (i)).
+pytestmark = [pytest.mark.tier_3, pytest.mark.host_platform("linux")]
 
 LINUX_SEATS = ("native", "tui")
 # Both seats tui: the second app under this test's lane is the lead app itself.
@@ -97,5 +100,4 @@ def test_tui_a_file_from_another_device_lists_as_a_placeholder_and_hydrates_on_o
     seat_set, nest_mode, tmp_path_factory, request
 ):
     """The same promise with tui's bound row turning the folder on-demand."""
-    require_fuse_host("tui")
     _placeholder_journey(seat_set, nest_mode, tmp_path_factory, request)

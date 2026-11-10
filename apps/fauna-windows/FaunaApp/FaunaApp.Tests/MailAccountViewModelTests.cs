@@ -166,6 +166,53 @@ public class MailAccountViewModelTests
     }
 
     [Fact]
+    public async Task TheScanResultSwitch_IsReadWithTheOthers()
+    {
+        var rpc = new MockNestRpcClient { NextMailSwitches = new(true, true, false) };
+        var vm = new MailAccountViewModel(rpc);
+        Assert.Null(vm.ScanResultVisible);
+
+        await vm.LoadAsync();
+
+        Assert.False(vm.ScanResultVisible);
+    }
+
+    [Fact]
+    public async Task SetScanResultVisible_WritesOnlyThatSwitch()
+    {
+        var rpc = new MockNestRpcClient { NextMailSwitches = new(true, true, true) };
+        var vm = new MailAccountViewModel(rpc);
+        await vm.LoadAsync();
+
+        await vm.SetScanResultVisibleAsync(false);
+
+        Assert.Equal(false, rpc.LastScanResultVisibleSet);
+        Assert.Null(rpc.LastMailSwitchesSet);
+        Assert.False(vm.ScanResultVisible);
+        Assert.True(vm.ReceiveEnabled);
+        Assert.True(vm.SendEnabled);
+    }
+
+    [Fact]
+    public async Task TheScanResultSwitch_PaintsWhatTheNestKept_AndIsInertBeforeTheRead()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMailSwitches = new(true, true, true),
+            MailSwitchesReread = new(true, true, true),
+        };
+        var vm = new MailAccountViewModel(rpc);
+
+        await vm.SetScanResultVisibleAsync(false);
+        Assert.Null(rpc.LastScanResultVisibleSet);
+
+        await vm.LoadAsync();
+        await vm.SetScanResultVisibleAsync(false);
+
+        Assert.True(vm.ScanResultVisible);
+    }
+
+    [Fact]
     public async Task ASwitchPaintsWhatTheNestKept_NotTheGesture()
     {
         var rpc = new MockNestRpcClient

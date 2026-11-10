@@ -103,6 +103,10 @@ APP_LAUNCHING_FIXTURES = frozenset({
     "folder_share_owner_app",
     "folder_share_recipient_app",
     "folder_share_stranger_app",
+    # The cross-nest shared-folder journey's two seats, an owner app on one nest
+    # and a member app on another, built from the folder-share seat generators
+    # (`test_folder_cross_nest_member_reads.py`).
+    "cross_nest_folder_seats",
     # The Fauna iOS app installed on a throwaway simulator and driven through
     # its DEBUG File Provider verbs (`test_folder_deposit_adoption_file_provider_ios.py`).
     "ios_file_provider_app",
@@ -150,6 +154,12 @@ DRIVER_FACTORY_IMPORTS = frozenset({
     # by import from its home module by journeys that need two seats of one
     # account (the linux on-demand hydrate journey) — the same door as above.
     ("tests.test_filesync_seats", "_seat_run"),
+    # The cross-nest community-room seats (a founder on the room's home, a
+    # member on another nest, and the trio's third home seat), adopted by
+    # import from their home module by the foreign-member journeys
+    # (`test_conversation_room_community_foreign_member.py`) — the same door.
+    ("tests.test_conversation_room_community_cross_nest", "cross_nest_room_seats"),
+    ("tests.test_conversation_room_community_cross_nest", "cross_nest_room_trio"),
     # The hosted-ATProto world (nest, real PDS bridge, fake directory and DNS,
     # and a launched app logged in as its user), lifted out of the custody
     # journeys' module 2026-10-13 so the published-repo journeys share it.

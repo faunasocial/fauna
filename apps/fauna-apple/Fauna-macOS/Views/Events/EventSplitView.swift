@@ -57,11 +57,15 @@ struct EventSplitView: View {
             await vm.loadCalendars()
             await vm.loadInvitedEvents()
             appState.lastEvents = vm.events
+            // A search Event-arm target staged before the page mounted.
+            await vm.openPendingEvent()
             // Runs until this view disappears (task cancellation) — surfaces an
             // externally-written CalDAV calendar/event while the user stays on
             // the page (events.md § Implementation status, quick-appearance poll).
             await vm.pollWhileVisible()
         }
+        // A search Event-arm target staged while the page is already mounted.
+        .task(id: vm.pendingEventOpen) { await vm.openPendingEvent() }
         // Re-pull on a fauna.calendar.changed push — cuts the poll's latency
         // down to push latency; the poll above stays as backstop.
         .onCalendarChanged { await vm.refreshFromPush() }

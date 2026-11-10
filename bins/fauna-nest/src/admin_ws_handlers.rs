@@ -1002,6 +1002,7 @@ fn suspend_handler() -> RpcHandler {
             // still matters when the actor has no live connection at all.
             push_account_updated(&state, &target, "suspension");
             state.close_actor_sockets(&target);
+            state.end_bridge_held_sessions(&target).await;
 
             let _ = state
                 .db

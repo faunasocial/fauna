@@ -149,6 +149,16 @@ so every image silently stopped loading after any re-login until the app was
 restarted (fixed 2026-07-11; regression-guarded by the settings-then-image
 ordering in the windows e2e).
 
+A cache like that loader's has a second duty: **it shares a load still in flight,
+not only a finished one.** The feed asks for each picture many times while it
+loads (each post-card sync asks for every unchecked row's C2PA verdict, and a
+content-changed row re-binds its image), so a cache that kept only finished loads
+re-fetched, re-parsed and re-decoded the same blob on every tick — enough UI-thread
+work to stall the app past the e2e bridge's UIA budget. `BlobImageLoader`'s caches
+are `FaunaApp.Core` `Helpers/SingleFlightCache`, whose clear also forgets loads in
+flight, so the manager-change boundary holds for a load begun before it (fixed
+2026-11-07; pinned by `SingleFlightCacheTests`).
+
 The rule has a second half that binds the *producer* of the hand-off: **whenever
 the clients are replaced, the hand-off must actually be re-performed.** A page
 that took its `ServiceClients` at one navigation keeps them until it is navigated
@@ -229,7 +239,14 @@ which forces the host-wrapper path deterministically. The same window holds for 
 conversations SESSION a page was handed (the actor change closes it), so every page
 resolves its manager through `ConversationsManagerHost.ManagerFor`, which answers
 "nothing" for a retired session — never the host's manager, which after the actor
-change is the incoming identity's.
+change is the incoming identity's. The Feed page has the same window: the dropped feed
+manager still ticks between the reset and the page's teardown, so `FeedPage.Refresh`
+paints only while `FeedManagerHost.Holds` the page's manager. A repaint on such a tick
+re-published the outgoing identity's window to the e2e state after
+`AppDataSnapshot.Clear` had emptied it, so the incoming account's first reads saw the
+old ♥ and the old card order. Fixed 2026-11-06. The rule is pinned by
+`FeedCueTrackerHostTests.OnlyTheInstalledManagerIsHeld_NeverOneAnActorChangeOrARebuildLeftBehind`,
+and the journey that exposed it is `test_archive_import.py`'s follower like.
 
 The producer side of the same window: **a disposed `NestRpcClient` is silent.** Its
 own `Disconnect()` makes the connection-state watch yield a last `Disconnected`, and
@@ -324,6 +341,19 @@ ContentDialog per XamlRoot and throws on a second, so the gate refuses a
 second open on `error-message` (`common.dialog_already_open`) and leaves the
 open dialog untouched; its registry is what the e2e `reset` force-closes.
 Pinned by `test_windows_dialog_gate_ratchet.py`.
+
+**Pickers:** a code-built picker is repainted from its view model only through
+`Helpers/PickerOption.cs` `Reconcile`, which rebuilds the items only when the
+option set changed and moves the selection on its own. A picker is never
+repainted by an unconditional `Items.Clear()` and refill on a path that can run
+after its own gesture or on a view-model tick. Such a rebuild destroys the items
+while an automation client (the e2e bridge's `select`, a screen reader) still
+holds providers on them. XAML then fails in native code with a stowed
+`E_UNEXPECTED`, and the process dies `0xC000027B` with no frame of the app's on
+the stack. It is a race, so a green run does not clear a site. The mechanism and
+its measurements are on `Reconcile`'s doc comment. Pinned by
+`test_windows_picker_option_ratchet.py`, which refuses an `Items.Clear()`
+anywhere in the app but inside `Reconcile`.
 
 Per-page behavior is owned by the ui/ page docs — this doc does not restate it.
 

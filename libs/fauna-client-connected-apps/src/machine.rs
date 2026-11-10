@@ -1115,14 +1115,31 @@ fn now_epoch_secs() -> u64 {
     fauna_core::data::Timestamp::now_secs().max(0) as u64
 }
 
-/// `paused`: the account's external-apps switch is OFF, which suspends every
-/// principal (`atproto-pds-full.md` § F1 detail, the kill-switch bullet).
+/// Whether a step-down suspended every OAuth grant `client_id` holds
+/// (`atproto-oauth-provider.md` § Detailed design, the OAuth-grant suspension
+/// bullet): at least one grant, none of them usable. A client with one grant
+/// signed in afresh since the step-down is not suspended.
+fn oauth_suspended(client_id: &str, grants: &[AtprotoGrantInfo]) -> bool {
+    let mut held = grants
+        .iter()
+        .filter(|g| g.client_id == client_id)
+        .peekable();
+    held.peek().is_some() && held.all(|g| g.suspended)
+}
+
+/// `switch_off`: the account's external-apps switch is OFF, which pauses
+/// every principal (`atproto-pds-full.md` § F1 detail, the kill-switch
+/// bullet). A principal a step-down suspended (`oauth_suspended`) is paused
+/// too — the roster's one not-working-but-reversible state — and carries no
+/// *lasts-until*, since nothing it holds runs to an end it can reach.
 fn principal_row(
     p: &PrincipalInfo,
     grants: &[AtprotoGrantInfo],
     grant_log: Option<&SuccessionLedger>,
-    paused: bool,
+    switch_off: bool,
 ) -> ConnectedAppRow {
+    let suspended = !is_hosted(&p.execution_form) && oauth_suspended(&p.client_id, grants);
+    let paused = switch_off || suspended;
     ConnectedAppRow {
         key: principal_key(p),
         class: p.execution_form.clone(),
@@ -1136,9 +1153,14 @@ fn principal_row(
         sets: principal_sets(&p.client_id, grants),
         created_at_millis: p.created_at,
         last_used_at_millis: p.last_used_at,
-        lasts_until_millis: principal_lasts_until(p, grants, grant_log),
+        lasts_until_millis: if suspended {
+            None
+        } else {
+            principal_lasts_until(p, grants, grant_log)
+        },
         connected: (p.live_grants > 0 || is_hosted(&p.execution_form)) && !paused,
         paused,
+        suspended,
         mail: None,
         signer_burned: false,
         oracle: p.oracle.as_ref().map(oracle_summary_row),
@@ -1180,6 +1202,7 @@ fn app_password_row(s: &AtprotoSessionInfo, paused: bool) -> ConnectedAppRow {
         lasts_until_millis: Some(s.expires_at),
         connected: !paused,
         paused,
+        suspended: false,
         mail: None,
         signer_burned: false,
         oracle: s.oracle.as_ref().map(oracle_summary_row),
@@ -1203,6 +1226,7 @@ fn mail_row(c: &MailCredentialSummary) -> ConnectedAppRow {
         lasts_until_millis: None,
         connected: !c.revoked,
         paused: false,
+        suspended: false,
         mail: Some(MailAppPassword {
             mua_username: c.mua_username.clone(),
             kind: credential_kind_badge(c.kind),
@@ -1245,6 +1269,7 @@ fn signer_row(b: &BunkerAppEntry) -> ConnectedAppRow {
         lasts_until_millis: Some(secs_to_millis(b.expires_at)),
         connected: !pending && !burned,
         paused: false,
+        suspended: false,
         mail: None,
         signer_burned: burned,
         oracle: None,

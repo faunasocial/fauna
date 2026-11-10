@@ -5,9 +5,9 @@
     familyStatus,
     familyPolicyUpdate,
     familyApprovalsList,
-    familyAllowBlockedDmPeer,
-    familyApprovalsDecide,
-    familyContactAdd,
+    familyAllowBlockedDmPeerOrQueue,
+    familyApprovalsDecideOrQueue,
+    familyContactAddOrQueue,
     familyGraduate,
     familyTransfer,
     familyTransferAccept,
@@ -41,6 +41,8 @@
     contentNoticeLine,
     usageTodayLine,
     approvalDisplayTextRaw,
+    approvalsAfterQueuedDecision,
+    approvalItemKey,
     parseTimeOfDay,
     formatTimeOfDay,
     parseDailyMinutes,
@@ -53,7 +55,7 @@
   import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import type { FamilyAgeBandInfo } from '#lib/rpc';
   import { toBytes, actorHex, actorIdFromHex } from '#lib/hex';
-  import { approvalText } from '#lib/family-approvals';
+  import { approvalText, decideApproval } from '#lib/family-approvals';
   import { approvalTimestamp } from '#lib/value-format';
   import { blockedPeerRows, type BlockedPeer } from '#lib/ward-asks';
   import { setWardAsksFromStatus } from '#lib/wardAsks.svelte';
@@ -269,11 +271,6 @@
   // (localized no-sender label when empty — a held null-path message),
   // `summary` for every other kind.
 
-  function approvalKey(a: FamilyApprovalEntry): string {
-    const item = a.kind === 'mail_hold' ? a.message_id : a.peer_actor_id;
-    return `${a.kind}:${actorHex(a.supervised_actor_id)}:${actorHex(item)}`;
-  }
-
   // ── Load ─────────────────────────────────────────────────────────────────
   function loadPolicyFromWard(w: FamilyWardInfo) {
     if (!selectedWard || actorHex(selectedWard.actor_id) !== actorHex(w.actor_id)) {
@@ -465,24 +462,25 @@
     }
   }
 
+  /** Approve/deny one queue item — with no nest it rests in this tab's
+   *  outbox and the item leaves the local list, nothing re-read
+   *  (`#lib/family-approvals` `decideApproval`). */
   async function decide(a: FamilyApprovalEntry, approve: boolean) {
     const s = secret();
     if (!s) return;
     actionError = '';
     try {
-      await familyApprovalsDecide(
-        s,
-        toBytes(a.supervised_actor_id),
-        a.kind,
-        toBytes(a.peer_actor_id),
-        toBytes(a.message_id),
-        a.bridge_id ?? '',
-        a.operation ?? '',
-        a.target ?? '',
-        a.peer_address ?? '',
+      const folded = await decideApproval(
+        {
+          decideOrQueue: (entry, verdict) => familyApprovalsDecideOrQueue(s, entry, verdict),
+          afterQueued: approvalsAfterQueuedDecision,
+          reread: refresh,
+        },
+        approvals,
+        a,
         approve,
       );
-      await refresh();
+      if (folded) approvals = folded;
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
     }
@@ -500,7 +498,8 @@
     }
     actionError = '';
     try {
-      await familyContactAdd(s, toBytes(selectedWard.actor_id), peer);
+      // Sent or queued with no nest (a queued pre-approval folds nothing).
+      await familyContactAddOrQueue(s, toBytes(selectedWard.actor_id), peer);
       contactAddInput = '';
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -589,8 +588,9 @@
     if (!s || !selectedWard) return;
     actionError = '';
     try {
-      await familyAllowBlockedDmPeer(s, toBytes(selectedWard.actor_id), peer);
-      await refresh();
+      // Queued with no nest: nothing to re-read, the un-deny folds nothing.
+      const queued = await familyAllowBlockedDmPeerOrQueue(s, toBytes(selectedWard.actor_id), peer);
+      if (!queued) await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
     }
@@ -1009,7 +1009,7 @@
         <p class="muted">{t.family.no_approvals}</p>
       {:else}
         <ul class="list">
-          {#each approvals as a, i (approvalKey(a))}
+          {#each approvals as a, i (approvalItemKey(a))}
             <li class="row" data-testid={IDS.FAMILY_APPROVAL_ITEM} data-index={i}>
               <span class="approval-text">{approvalText(a, approvalDisplayTextRaw, approvalTimestamp)}</span>
               <span class="muted small">{a.supervised_handle}</span>

@@ -68,6 +68,7 @@ from tests import (
     test_photo_backup_one_way as one_way,
     test_photo_backup_pass_coalescing as pass_coalescing,
     test_photo_backup_pass_progress as pass_progress,
+    test_photo_backup_sealed_and_stripped as sealed_and_stripped,
     test_photo_backup_unattended as unattended,
 )
 
@@ -164,4 +165,27 @@ def test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone(
 ):
     """Outcome 8 — the nest keeps the library's pixels, metadata stripped losslessly."""
     byte_fidelity.test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone(
+        logged_in_app, tmp_path, nest_instance, test_user)
+
+
+@pytest.mark.feature("photo-backup")
+def test_a_backed_up_photo_rests_on_the_nest_sealed(
+    logged_in_app, tmp_path, nest_instance, test_user
+):
+    """Outcome 9 — everything the nest holds for a backed-up photo is ciphertext,
+    read off its bulk-binary plane with no credentials. The plaintext-address
+    probe is this test's own photo whichever fixture-sized create the debris puts
+    newest; the manifest and chunk checks hold for any photo the app backed up."""
+    sealed_and_stripped.test_a_backed_up_photo_rests_on_the_nest_sealed(
+        logged_in_app, tmp_path, nest_instance, test_user)
+
+
+@pytest.mark.feature("photo-backup")
+def test_a_photos_location_and_camera_never_leave_the_phone(
+    logged_in_app, tmp_path, nest_instance, test_user
+):
+    """Outcome 10 — a photo carrying GPS and camera EXIF rests under the same
+    sealed manifest as the plain photo of the identical pixel: the metadata came
+    off on the Mac, and the picture was not re-encoded."""
+    sealed_and_stripped.test_a_photos_location_and_camera_never_leave_the_phone(
         logged_in_app, tmp_path, nest_instance, test_user)

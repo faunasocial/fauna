@@ -16,7 +16,7 @@ SBG5 with d2-2 only, and a Brussels localzone verify must leave out; the
 catalogue prices d2-2 at 5.71 + 1.3133 tax (gross 7.02) and d2-4 at 14.04.
 
 Drives the real ``verify_vps`` and the real orchestrator (the verified helper:
-web + linux + tui); web omits the location picker, so it runs on linux + tui.
+web + linux + tui); it runs on every app that has witnessed the re-list.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ PROJECT = "proj-ovh-e2e"
 CREDS = {"app-key": "AK", "app-secret": "AS", "consumer-key": "CK"}
 
 
+@pytest.mark.feature("set-up-a-nest-from-the-app")
 def test_ovh_project_regions_priced_offers_and_the_resolved_create(app, fake_cloud):
     drv = app.driver
     app.onboarding.require_offers_follow_the_location()
@@ -61,6 +62,15 @@ def test_ovh_project_regions_priced_offers_and_the_resolved_create(app, fake_clo
         f"radio 1 should be d2-4 at the gross 14.04; read {drv.get_text(second)!r}"
     )
 
+    # Choose d2-4: the choice is complete, so Continue comes alive.
+    drv.click(second)
+    wait_until(
+        lambda: app.is_enabled("vps-config-continue-button"),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: "Continue stayed dead with d2-4 chosen: "
+        + drv.diagnose("vps-config-continue-button"),
+    )
+
     # The second region lacks d2-4: the radio re-lists without it.
     drv.select(picker, "Strasbourg (SBG5)")
     wait_until(
@@ -74,6 +84,15 @@ def test_ovh_project_regions_priced_offers_and_the_resolved_create(app, fake_clo
     )
     assert drv.get_text(picker) == "Strasbourg (SBG5)", drv.diagnose(picker)
     assert "d2-2" in drv.get_text(first), drv.diagnose(first)
+    # The chosen d2-4 dropped out of the choice with the re-list: nothing is
+    # chosen, so Continue is dead again until the user picks an offer
+    # (registry.md § Server offers follow the location).
+    wait_until(
+        lambda: not app.is_enabled("vps-config-continue-button"),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: "Continue stayed alive after d2-4 left the list: "
+        + drv.diagnose("vps-config-continue-button"),
+    )
     drv.click(first)
 
     # Continue to the run and start it: the Server step creates in SBG5 with

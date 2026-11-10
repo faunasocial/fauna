@@ -230,6 +230,55 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             raise RuntimeError(f"android clipboard read refused: {reply['error']}")
         return reply.get("text")
 
+    # ── The documents provider, as another app's picker drives it ──────────
+    # (`DocumentsOps` on the androidTest bridge). The provider is guarded by
+    # MANAGE_DOCUMENTS, which `adb shell content` does not hold; the bridge runs
+    # in the app's own process, so its ContentResolver calls reach exactly the
+    # entry points a picker's do. A provider refusal raises (RuntimeError, or
+    # LookupError for a not-found).
+
+    DOCUMENTS_ROOT_ID = "fauna"
+
+    def documents_children(self, parent: str = DOCUMENTS_ROOT_ID) -> list[dict]:
+        """``parent``'s children as ``{id, name, flags}`` — the root lists the
+        account's presented sets."""
+        return list(self._get("/documents/children", {"parent": parent}).get("children", []))
+
+    def documents_create(self, parent: str, name: str) -> str:
+        """Create an empty document ``name`` in ``parent`` (``createDocument``);
+        its new document id."""
+        return self._post("/documents/create", {"parent": parent, "name": name})["document_id"]
+
+    def documents_open_write(self, document_id: str) -> int:
+        """Open ``document_id`` for write and hold the descriptor on the device —
+        an edit the user has open. ``documents_write_close`` ends it."""
+        return int(self._post("/documents/open-write", {"document_id": document_id})["handle"])
+
+    def documents_write_close(self, handle: int, body: bytes) -> None:
+        """Replace the held descriptor's bytes with ``body`` and close it — the
+        written close the provider ingests."""
+        import base64
+
+        self._post(
+            "/documents/write-close",
+            {"handle": handle, "body_b64": base64.b64encode(body).decode()},
+        )
+
+    def documents_write(self, document_id: str, body: bytes) -> None:
+        """One open → write → close of ``document_id``."""
+        self.documents_write_close(self.documents_open_write(document_id), body)
+
+    def documents_read(self, document_id: str) -> bytes:
+        """``document_id``'s bytes as the provider serves them."""
+        import base64
+
+        return base64.b64decode(self._get("/documents/read", {"document_id": document_id})["body_b64"])
+
+    def documents_parks(self) -> list[dict]:
+        """Each presented set's park read, in-process off the host's state DB:
+        ``{name, folder_id, access_revoked, unrecorded}``."""
+        return list(self._get("/documents/parks").get("parks", []))
+
     def app_log_text(self) -> str | None:
         """This launch's on-disk app log — the client's own account of itself,
         attached to every failing test's report by `helpers/app_log_section.py`.
@@ -260,6 +309,32 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         except Exception:  # noqa: BLE001 — a dead bridge at report time is "no log", not a second failure
             return None
         return "\n".join(chunks) if chunks else None
+
+    def on_device_log_text(self) -> str:
+        """The app's own on-device rolling log file(s), whole — every
+        `fauna.log.*` under `<filesDir>/logs/` oldest first, or "" — fetched
+        over the bridge (`GET /app-log` + `/app-log-file`) because no host path
+        reaches the app's `filesDir`. Unlike `app_log_text()` it reads every
+        file from its start, not this launch's slice: the journeys that ask
+        (`test_settings_logs.py`, `test_app_log_size_cap_tui.py`) read what the
+        file holds across launches and prunes. Same contract as linux's and
+        tui's host-side readers."""
+        chunks = []
+        for name in self.on_device_log_sizes():
+            data = self._get_bytes("/app-log-file", {"name": name, "from": 0})
+            text = data.decode("utf-8", errors="replace")
+            if text:
+                chunks.append(text)
+        return "\n".join(chunks)
+
+    def on_device_log_sizes(self) -> dict[str, int]:
+        """Each on-device `fauna.log.*` file's size by name, from the bridge's
+        listing of `<filesDir>/logs/` (`GET /app-log`)."""
+        return {
+            entry["name"]: int(entry.get("size", 0))
+            for entry in self._app_log_listing()
+            if str(entry.get("name", "")).startswith("fauna.log.")
+        }
 
     def app_stderr_text(self) -> str:
         """This launch's on-disk app log, `""` if it has none yet (the cross-app contract)."""
@@ -303,20 +378,38 @@ class AndroidBridgeDriver(HttpBridgeDriver):
     def is_android(self) -> bool:
         return True
 
+    #: Document bodies the ``painted`` read answers for (``DocumentBlocks`` under
+    #: these test tags) — the ids the ``document-painted-read`` witnesses read.
+    PAINTED_DOCUMENT_IDS = frozenset({"feed-post-text", "dm-message-text"})
+
     def get_attr(
         self, element_id: str, attribute: str, index: int = 0, *, scope: str | None = None
     ) -> str | None:
-        """The bridge's attribute read, but for the compose field's ``text-runs``.
+        """The bridge's attribute read, but for the compose field's ``text-runs`` and a
+        document body's ``painted`` lines.
 
         The compose field's applied styling is the AnnotatedString its
         VisualTransformation hands the field, which the accessibility tree does not
         carry. So ``text-runs`` on ``dm-text-field`` is the app's ``compose_text_runs``
         command, which serializes what the field last applied in linux's JSON shape
         (``appliedRuns`` in ``MarkdownCompose.kt``) — windows's route for the same
-        attribute. Returned as the JSON string the other drivers return."""
+        attribute. Returned as the JSON string the other drivers return.
+
+        ``painted`` (``helpers/painted_lines.py``) is what a document body's laid-out
+        text drew line by line, which the accessibility tree does not carry either:
+        the bridge resolves the element (index and scope included) to its on-screen
+        ``frame``, and the app's ``document_painted`` command answers the lines of the
+        body painted under that frame (``DocumentPaint.kt``). Returned newline-joined,
+        tui's shape; ``None`` when the element is not there."""
         if attribute == "text-runs" and element_id == "dm-text-field":
             runs = self.call_command("compose_text_runs")
             return None if runs is None else json.dumps(runs)
+        if attribute == "painted" and element_id in self.PAINTED_DOCUMENT_IDS:
+            frame = super().get_attr(element_id, "frame", index, scope=scope)
+            if not frame:
+                return None
+            lines = self.call_command("document_painted", {"frame": frame})
+            return None if lines is None else "\n".join(str(line) for line in lines)
         return super().get_attr(element_id, attribute, index, scope=scope)
 
     def in_viewport(self, element_id: str, *, index: int = 0,
@@ -660,6 +753,60 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self._record_relaunch_pin(config, (self._PRESERVE_STORE_KEY,))
         return True
 
+    #: Where an actor's account store rests inside the app's data directory:
+    #: `AccountStores.accountStoreContainerDir()` (`files/account-store`) is the
+    #: `StoreRoot` the app hands shared Rust, and
+    #: `fauna_account_store::root::StoreRoot::store_dir` scopes
+    #: `<actor>/account-store` under it.
+    _DEVICE_STORE_ROOT = "files/account-store"
+
+    def wipe_replica_at_next_relaunch(self, actor_id_hex: str) -> bool:
+        """Make the next relaunch a machine whose local account store was wiped
+        — android's arm of the base contract.
+
+        android carries nothing host-side: the app's filesDir outlives every
+        relaunch, so an unpinned relaunch keeps the replica on the device while
+        its empty seed erases the credential file, and the replayed sign-in
+        adopts the surviving replica under a fresh writer
+        (`account-replica-posture.md` § The store device principal, refinement
+        10). Withholding the replica is therefore a DELETE on the device:
+        `recover()` removes `<store root>/<actor>/account-store` inside the app
+        sandbox (`run-as`, the e2e build is debuggable) after the app is stopped
+        and before it starts again, once. The relaunched seat then holds a
+        replica that has never listed the account.
+
+        False when the next relaunch would not be that machine: before any
+        launch, under a `preserve_state_across_relaunch()` pin (its whole point
+        is that the store survives), or on a production-store launch."""
+        config = getattr(self, "_launch_config", None)
+        if config is None or self._relaunch_pinned() or config.get(self._PRODUCTION_STORE_KEY):
+            return False
+        actor = actor_id_hex.lower()
+        if len(actor) != 64 or any(c not in "0123456789abcdef" for c in actor):
+            raise ValueError(f"not an actor id: {actor_id_hex!r}")
+        self.__dict__.setdefault("_replica_wipes", set()).add(actor)
+        return True
+
+    def _wipe_device_replicas(self) -> None:
+        """Consume `wipe_replica_at_next_relaunch`: remove each named actor's
+        replica from the app's data directory. Called by `recover()` with the
+        app stopped (a live process holds the store open). A refusal raises —
+        a relaunch that silently kept the replica would pass the first-sync
+        witness for the wrong reason."""
+        wipes = self.__dict__.pop("_replica_wipes", set())
+        for actor in sorted(wipes):
+            rel = f"{self._DEVICE_STORE_ROOT}/{actor}/account-store"
+            done = subprocess.run(
+                [*self._adb_cmd(), "shell",
+                 f'run-as social.fauna.fauna sh -c "rm -rf {rel} && test ! -e {rel} && echo FAUNA_WIPED"'],
+                capture_output=True, text=True, timeout=30,
+            )
+            if "FAUNA_WIPED" not in (done.stdout or ""):
+                raise RuntimeError(
+                    f"the replica wipe of {rel} was refused on the device: "
+                    f"rc={done.returncode} stdout={done.stdout!r} stderr={done.stderr!r}"
+                )
+
     def recover(self) -> bool:
         """Relaunch the app under test in place — the windows shape.
 
@@ -699,6 +846,9 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         except Exception:
             self._bridge_dead = True
             return False
+        # The app is stopped (`stopApp` force-stops it): the one window in which
+        # a replica can be removed without a live process holding it open.
+        self._wipe_device_replicas()
         body = self._session_body(config)
         if not config.get(self._PRESERVE_STORE_KEY) and not config.get(self._PRODUCTION_STORE_KEY):
             # The empty seed below erases the store with every enrollment in it
@@ -835,6 +985,30 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         config = getattr(self, "_launch_config", None) or {}
         if config.get(self._PRODUCTION_STORE_KEY) and not self._relaunch_pinned():
             self._wipe_production_store(check=False)
+
+    def app_process_identity(self) -> str | None:
+        """``"<pid>@<start ticks>"`` of the app's process, asked of the device's
+        kernel — or ``None`` when the app has no process.
+
+        The android stand-in for an out-of-process agent's pid: the app's
+        background sync (`PhotoBackupEngine` over the in-process
+        `FfiSyncEngineHost`) runs in the app's own process, so "the background
+        sync was not restarted" is "the app's process was not restarted". The
+        start time (`/proc/<pid>/stat` field 22, in clock ticks since boot) is
+        what makes a recycled pid read as a different process."""
+        text = self._device_shell(
+            f'pid=$(pidof {self.APPLICATION_ID}); [ -n "$pid" ] && cat /proc/$pid/stat'
+        )
+        line = next((ln for ln in text.splitlines() if ")" in ln), "")
+        if not line:
+            return None
+        pid = line.split(" ", 1)[0]
+        # The comm field is parenthesized and may hold spaces: split after its
+        # closing paren, where field 3 (state) is index 0, so field 22 is index 19.
+        rest = line.rsplit(")", 1)[1].split()
+        if not pid.isdigit() or len(rest) < 20:
+            return None
+        return f"{pid}@{rest[19]}"
 
     # --- Convention 6's close rider: was the app already dead of a crash? ---
 
@@ -1156,6 +1330,54 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             line for line in result.stdout.decode(errors="replace").splitlines()
             if "/backup-custodian/blobs/" in line
         )
+
+    #: What `overwrite_custodian_store_blobs` writes and
+    #: `custodian_store_blobs_holding` looks for — plain ASCII, so it rides a
+    #: device shell command line unquoted.
+    _CUSTODIAN_ROT = "rot"
+
+    def overwrite_custodian_store_blobs(self) -> int:
+        """Overwrite every sealed blob of the in-app custodian store with
+        `_CUSTODIAN_ROT`, and return how many were written — the emulator twin
+        of the host-side `blob.write_bytes(b"rot")` the store-rot witness does
+        on a desktop store.
+
+        An OVERWRITE, never a delete, for the witness's own reason (a delete
+        fails a mere stat; an overwrite fails only a store that verifies the
+        content it claims). Run inside the sandbox as the app's own uid
+        (``run-as`` — the e2e build is debuggable), from outside the app the
+        way ``custodian_store_blob_paths`` reads it. Blob names are hex
+        (``<2-hex>/<64-hex>``), so the device shell needs no quoting for them;
+        ``exec-out`` carries no exit status, so the count is a marker printed
+        once per file written.
+        """
+        script = (
+            "find files -type f -path '*/backup-custodian/blobs/*' | "
+            f"while read f; do printf {self._CUSTODIAN_ROT} > \\$f && echo FAUNA_ROTTED; done"
+        )
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out", f'run-as social.fauna.fauna sh -c "{script}"'],
+            capture_output=True, timeout=60,
+        )
+        return result.stdout.count(b"FAUNA_ROTTED")
+
+    def custodian_store_blobs_holding_rot(self) -> int:
+        """How many of the in-app custodian store's blobs still hold exactly the
+        bytes `overwrite_custodian_store_blobs` wrote — the heal half of the
+        store-rot witness (a repaired blob holds its sealed bytes again). Size
+        and content both, so a real blob merely starting with the same three
+        bytes never counts."""
+        rot = self._CUSTODIAN_ROT
+        script = (
+            "find files -type f -path '*/backup-custodian/blobs/*' | "
+            f"while read f; do [ \\$(wc -c < \\$f) -eq {len(rot)} ] && "
+            f"[ \\\"\\$(cat \\$f)\\\" = {rot} ] && echo FAUNA_STILL_ROT; done; true"
+        )
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out", f'run-as social.fauna.fauna sh -c "{script}"'],
+            capture_output=True, timeout=60,
+        )
+        return result.stdout.count(b"FAUNA_STILL_ROT")
 
     def _require_plain_app_path(self, rel_path: str) -> None:
         parts = rel_path.split("/")

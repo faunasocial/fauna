@@ -1593,6 +1593,7 @@ def _oidc_sign_in(nest, *, scope, nonce):
     return key, json.loads(raw)
 
 
+@pytest.mark.feature("connected-apps")
 def test_an_openid_sign_in_mints_an_id_token_the_jwks_verifies(oidc_issuer_nest):
     """The ID token verifies against ``/oauth/jwks`` and says exactly what
     § OIDC says it says — and the discovery document advertises the members a
@@ -1626,6 +1627,7 @@ def test_an_openid_sign_in_mints_an_id_token_the_jwks_verifies(oidc_issuer_nest)
     assert access_header["typ"] == "at+jwt", access_header
 
 
+@pytest.mark.feature("connected-apps")
 def test_userinfo_answers_under_the_dpop_bound_access_token_and_refuses_a_bearer(
     oidc_issuer_nest,
 ):

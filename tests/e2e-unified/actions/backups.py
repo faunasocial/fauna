@@ -2821,6 +2821,17 @@ class BackupsActions:
         """Set the folder name in the wizard."""
         self.driver.clear_and_type("wizard-name-input", name)
 
+    def wizard_set_audience(self, value: str) -> None:
+        """Pick who can see the new folder on the wizard's Name step
+        (``wizard-audience-select``: ``private`` | ``public``; `ui/folders.md`
+        § Audience and website serving → *Born public*).
+
+        ⚠ Picking ``public`` commits nothing: the choice rides the wizard, and
+        Create then ARMS the owner row's declassify confirm
+        (``folder-audience-public-confirm``) instead of creating — answering it
+        is the gesture that creates."""
+        self.driver.select("wizard-audience-select", value)
+
     # The wizard has no type step and no per-device role picker (folders re-model
     # phase 2 slice e — a folder has no type). The transitional `wizard_has_mode_step`
     # probe and the `wizard_select_sync/backup/web` + `wizard_set_device_role`
@@ -2924,6 +2935,7 @@ class BackupsActions:
         *,
         device_indices: list[int] | None = None,
         await_row: bool = True,
+        audience: str | None = None,
     ) -> int:
         """Drive the folder wizard end-to-end and return the resulting count.
 
@@ -2947,12 +2959,20 @@ class BackupsActions:
         carries a row named ``name`` — a folder shared with this user under the
         same name — which would satisfy it at once; such a caller waits on its
         own observable instead.
+
+        ``audience="public"`` creates the folder born public: it is chosen on
+        the Name step, and Create arms the declassify confirm, which this
+        asserts appears (the gate a regression must not bypass) and answers.
+        ``None`` leaves the wizard's default (private) untouched.
         """
         self.add_folder()
         self._wait_visible("wizard-name-input")
 
-        # Step 1 — the name.
+        # Step 1 — the name, and who can see the folder.
         self.wizard_set_name(name)
+        if audience is not None:
+            self._wait_visible("wizard-audience-select")
+            self.wizard_set_audience(audience)
         self.wizard_next()
 
         # Step 2 — device places (optional enrollment).
@@ -2965,6 +2985,11 @@ class BackupsActions:
         # used to sit here retired with phase 5.)
         self._wait_visible("wizard-create-button")
         self.wizard_create()
+        if audience == "public":
+            # Create on a Public wizard only arms the dialog; nothing is sent
+            # until the confirm is answered.
+            self._wait_visible("folder-audience-public-confirm")
+            self.confirm_public()
         if not await_row:
             return self.folder_count()
 
@@ -3116,6 +3141,36 @@ class BackupsActions:
             )
         return result
 
+    def folder_set_custody(
+        self, *, set_name: str | None = None, channel_id_hex: str | None = None
+    ) -> dict:
+        """Which content-key generations THIS seat's folder custody holds for a
+        set — ``{"found", "channel_id_hex", "generations": [{"version",
+        "key_fp"}]}``, most-recent first, or ``{"found": false, "error"}`` when
+        the custody is unreadable (``fauna_client_folders::custody::
+        held_generations``). Name an owner's set by ``set_name``; a member's by
+        ``channel_id_hex`` (its entry for another owner's set need carry no
+        name). ``key_fp`` is a one-way fingerprint: two seats print the same
+        value exactly when they hold the same key, so comparing prints across
+        seats says which seat can open a file sealed under a generation.
+        """
+        import json
+
+        payload = {}
+        if set_name is not None:
+            payload["set_name"] = set_name
+        if channel_id_hex is not None:
+            payload["channel_id_hex"] = channel_id_hex
+        result = self.driver.call_command("folder_set_custody", payload)
+        if isinstance(result, str):
+            result = json.loads(result)
+        if not isinstance(result, dict):
+            raise AssertionError(
+                f"folder_set_custody returned no reading ({result!r}); "
+                f"error-message={self.driver.get_text('error-message')!r}"
+            )
+        return result
+
     def open_offline_share(self) -> None:
         """`offline-share-button` — the INITIATOR panel. Binds this session's
         ceremony listener on first open (where the brake is read), so allow it
@@ -3227,7 +3282,26 @@ class BackupsActions:
 
     def cancel_offline_share(self) -> None:
         """`offline-share-cancel-button` — close the panel; on the recipient
-        side it also withdraws the expectation (wormability rule 6)."""
+        side it also withdraws the expectation (wormability rule 6).
+
+        ⚠ The entry buttons come back where the panel's TOP was, and the panel's
+        lower controls are read with ``is_visible_scrolled``, which centres them
+        (windows' ``scroll_to`` brings an element in whole since 2026-11-06). On a
+        window shorter than the open panel that leaves the panel's top — and so
+        the restored `offline-share-button` — above the viewport, where windows'
+        bare ``is_visible`` (UIA ``!IsOffscreen``) reads a correct page False. So
+        the wait asks what it means, "is the entry back", with
+        ``is_visible_scrolled`` (a positive read; the closed panel's absence is
+        the caller's ``is_absent``)."""
         self.driver.click("offline-share-cancel-button")
-        self._wait_visible("offline-share-button")
+        wait_until(
+            lambda: self.driver.is_visible_scrolled("offline-share-button"),
+            WIZARD_STEP_WAIT_S,
+            diagnose=lambda: (
+                "the entry buttons did not come back after Cancel: "
+                f"{self.driver.diagnose('offline-share-button')}; "
+                f"open panel: {self.driver.diagnose('offline-share-own-code')}; "
+                f"error-message={self.driver.get_text('error-message')!r}"
+            ),
+        )
 

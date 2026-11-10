@@ -28,6 +28,7 @@ from helpers.labeler_publish import (
     new_publisher,
     publish_labeler_version,
 )
+from i18n.strings import S
 
 pytestmark = pytest.mark.tier_3
 
@@ -192,6 +193,50 @@ def test_a_labeler_your_app_is_too_old_to_read_leaves_your_feeds_as_they_were(
             f"a labeler this app cannot read must leave the recency order as it "
             f"was — the newer control first — never score the cat post up: cat "
             f"at {cat_at}, control at {control_at}; error={app.error_text()!r}"
+        )
+    finally:
+        _unsubscribe(app, factor)
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.feature("community-labelers")
+def test_a_subscribed_labeler_that_cannot_be_loaded_says_so_on_the_feed(
+    logged_in_app, nest_instance, run_seal_helper
+):
+    """`community-labelers` outcome 23 (`content-moderation-and-ranking.md`
+    § Tier-3 → *Where it runs*, invariant (e)): a subscribed labeler whose
+    prepare step refuses — here republished at a `label_abi` no build reads,
+    so the shared boundary refuses it after the verify and before the compile
+    — composes nothing AND says so, on the feed page's `error-message` in the
+    `feed.error_subscribed_model` sentence. Outcome 14 pins the order half
+    (the feed stays as it was); this pins that the user is told."""
+    app = logged_in_app
+    labeler_id, pub_seed, factor = _publish(run_seal_helper, nest_instance)
+    _subscribe(app, factor)
+    try:
+        publish_labeler_version(
+            run_seal_helper, nest_instance["url"], labeler_id, pub_seed, _CAT_WAT,
+            version=2, content_kind="post", artifact_kind="wasm",
+            label_abi=_NEWER_LABEL_ABI,
+        )
+        app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        app.feed.open_feed("General")
+        _open_factor_feed(app, factor)
+        # The sentence's fixed head; the tail is the refusal's own detail.
+        sentence = S.feed.error_subscribed_model(message="")
+        deadline = time.monotonic() + 30.0
+        seen = app.error_text() or ""
+        while sentence not in seen and time.monotonic() < deadline:
+            time.sleep(0.3)
+            seen = app.error_text() or ""
+        assert sentence in seen, (
+            f"a subscribed labeler that cannot be prepared must say so on the "
+            f"feed's error-message ({sentence!r}…); error-message={seen!r}"
         )
     finally:
         _unsubscribe(app, factor)

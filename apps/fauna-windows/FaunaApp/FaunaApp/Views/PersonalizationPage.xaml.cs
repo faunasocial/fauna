@@ -719,22 +719,16 @@ public sealed partial class PersonalizationPage : Page
 
     /// <summary>Build <c>personalization-trained-factor-publish-kind-select</c>'s
     /// items from the shared catalog (<see cref="ValueFormat.PublishKindOptions"/>)
-    /// — Content = the localized label, Tag + AutomationProperties.Name = the
-    /// WIRE value. Name carries the wire value (never the label) because the
-    /// shared e2e's <c>driver.select</c>/<c>get_text</c> match a ComboBoxItem
-    /// by Name EXACTLY on windows (the <c>backup-destination-kind-select</c>
-    /// precedent). Pure catalog, no state — built once, not repopulated per
-    /// sheet open.</summary>
+    /// — each item paints the localized label and is keyed by the WIRE value
+    /// (<see cref="PickerOption"/>). Pure catalog, no state — built on the page's
+    /// Loaded, not repopulated per sheet open; a Loaded that fires again (the page
+    /// re-entering the tree) finds the same catalog and keeps the items and the
+    /// selection (<see cref="PickerOption.Reconcile"/>).</summary>
     private void PopulatePublishKindSelect()
-    {
-        PublishKindSelect.Items.Clear();
-        foreach (var (value, label) in ValueFormat.PublishKindOptions())
-        {
-            var item = new ComboBoxItem { Content = label, Tag = value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, value);
-            PublishKindSelect.Items.Add(item);
-        }
-    }
+        => PickerOption.Reconcile(
+            PublishKindSelect,
+            ValueFormat.PublishKindOptions().Select(o => (o.Label, o.Value)).ToList(),
+            (PublishKindSelect.SelectedItem as ComboBoxItem)?.Tag as string);
 
     /// <summary>Preselect <paramref name="wire"/> in the kind select without
     /// inventing a selection for a value not among the painted options.</summary>

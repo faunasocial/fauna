@@ -246,4 +246,51 @@ public class ScreenCaptureGuardTests
         Assert.Empty(fake.Sets);
         Assert.Equal(IntPtr.Zero, hold.HeldWindow);
     }
+
+    /// <summary>The e2e <c>capture_posture</c>'s <c>holds</c> is every live hold the guard
+    /// keeps, across windows — a reveal on a second window still counts, and a release
+    /// brings the total back down (security.md § Implementation status today, the
+    /// running-app witness).</summary>
+    [Fact]
+    public void TotalHoldsCountsEveryWindowsHolds()
+    {
+        var guard = new ScreenCaptureGuard(new FakeAffinity());
+        Assert.Equal(0, guard.TotalHolds);
+
+        guard.Acquire(WindowA);
+        guard.Acquire(WindowA);
+        guard.Acquire(WindowB);
+        Assert.Equal(3, guard.TotalHolds);
+
+        guard.Release(WindowA);
+        guard.Release(WindowB);
+        Assert.Equal(1, guard.TotalHolds);
+
+        guard.Release(WindowA);
+        Assert.Equal(0, guard.TotalHolds);
+    }
+
+    /// <summary><c>window_excluded</c> is the platform bit read back, never the guard's own
+    /// belief: a window something else excluded reads excluded with no hold, and one the
+    /// platform cannot answer for reads <c>null</c> (published as absent, never a stand-in
+    /// <c>false</c>).</summary>
+    [Fact]
+    public void WindowExcludedReadsThePlatformBit()
+    {
+        var fake = new FakeAffinity();
+        var guard = new ScreenCaptureGuard(fake);
+
+        Assert.False(guard.WindowExcluded(WindowA));
+        guard.Acquire(WindowA);
+        Assert.True(guard.WindowExcluded(WindowA));
+        guard.Release(WindowA);
+        Assert.False(guard.WindowExcluded(WindowA));
+
+        fake.Current[WindowB] = ScreenCaptureGuard.WdaExcludeFromCapture;
+        Assert.True(guard.WindowExcluded(WindowB));
+
+        Assert.Null(guard.WindowExcluded(IntPtr.Zero));
+        fake.GetFails = true;
+        Assert.Null(guard.WindowExcluded(WindowA));
+    }
 }

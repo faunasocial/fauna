@@ -105,7 +105,7 @@ def test_macos_style_mkcalendar_create_then_event_round_trip(app, dedicated_mail
         "enabling mail must mint the default credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"mail must report enabled; status={app.mail_settings.status_text()!r}"
     )
 

@@ -46,16 +46,24 @@ export interface PaymentProvider {
   tier: string;
   last_verified_at: number | null;
   last_rejected_at: number | null;
+  /** The product the tier is sold as (Stripe: the Payment Link id); `null` = every verified payment maps to the tier. */
+  product_ref: string | null;
 }
 
-/** Upsert the author's provider config (`providers.set`; kind + webhook secret + entitled tier). */
+/** Upsert the author's provider config (`providers.set`; kind + webhook secret + entitled tier + the
+ *  optional product the tier is sold as — `undefined` keeps the saved product, `""` clears it; a form
+ *  that shows the field passes what it shows). */
 export function paymentsProvidersSet(
   secretHex: string,
   kind: string,
   webhookSecret: string,
   tier: string,
+  productRef?: string,
 ): Promise<void> {
-  return rpcCall(secretHex, (c) => c.paymentsProvidersSet(kind, webhookSecret, tier) as Promise<void>);
+  return rpcCall(
+    secretHex,
+    (c) => c.paymentsProvidersSet(kind, webhookSecret, tier, productRef) as Promise<void>,
+  );
 }
 
 /** The author's configured providers (`providers.list`), ascending by kind. */

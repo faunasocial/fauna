@@ -1,7 +1,7 @@
 """The Windows app as the Microsoft Store installed it: the OS facts that say so,
 and the registered layout the mechanism is proven against before the Store serves.
 
-The ruling this module serves is ``docs/goal/architecture/feature-catalog.md``
+The ruling this module serves is ``docs/goal/architecture/packaging-witnesses.md``
 § Implementation status today, the bullet on how the Windows Store install is
 driven. In short:
 
@@ -67,6 +67,81 @@ STORE_LAYOUT_RECIPE = (
     f'just windows-store-package {{arch}} {STORE_FLAVOUR} {IDENTITY_NAME} "{STORE_PUBLISHER}"'
 )
 
+#: The architectures `windows-store-package` builds a layout for, as a package full
+#: name spells them. An x64 layout registers and runs under emulation on an Arm
+#: box, which is the x64 leg of the Store witness (`packaging-witnesses.md`
+#: § Implementation status today, the bullet on how the Windows Store install is
+#: driven).
+STORE_ARCHES = ("x64", "arm64")
+
+# ── store-install: what the Store's flavour leaves out, and what it keeps ──────
+#
+# `docs/features/store-install.md`: the Microsoft Store takes `store-no-payments`
+# (`dynamic-features.md` § The store flavors), whose build removes every XAML under
+# `Views\Payments\` (`FaunaApp.csproj`, the `FaunaExcisePayments` item group) and
+# keeps `Views\P2pShare\`. Each `STORE_ABSENT_*` tuple is asserted ABSENT on the
+# screen a full build paints it on, and `test_windows_store_install_pins.py` holds
+# every id in them to a `Views\Payments` XAML that spells it, so no absence is of an
+# id nothing ever drew. Each tuple is one screen's share of one outcome.
+
+#: Outcome 1: no payment provider to connect and no code to hand out — the own
+#: profile's Tiers tab, where a full build hosts both sections …
+STORE_ABSENT_PROVIDER_AND_MINT = (
+    "subscription-provider-section", "subscription-provider-add-button",
+    "subscription-claim-section", "subscription-claim-mint-button",
+)
+#: … and no code to redeem (Settings → Subscriptions).
+STORE_ABSENT_REDEEM = ("subscription-claim-redeem-input", "subscription-claim-redeem-button")
+#: Outcome 2, the author half: the tier editor's three money fields.
+STORE_ABSENT_TIER_MONEY = (
+    "subscription-tier-form-price-hint", "subscription-tier-form-asking-price",
+    "subscription-tier-form-payment-url",
+)
+#: Outcome 2, the buyer half: another author's priced tier, on their Tiers tab.
+STORE_ABSENT_OFFER_MONEY = ("subscription-offer-price", "subscription-offer-payment-link")
+#: Outcome 3, the author half: the sale controls under compose.
+STORE_ABSENT_SELL = ("compose-sell-price", "compose-sell-asking-price", "compose-sell-subscribers-free")
+#: Outcome 3, the buyer half: a post sold elsewhere, beside its badge.
+STORE_ABSENT_SOLD_POST_MONEY = ("gated-post-price", "gated-post-buy-button", "gated-post-payment-link")
+#: Outcome 4: a post card's tip surface …
+STORE_ABSENT_TIPS = ("post-tip-total", "post-tip-count", "post-tip-list-button")
+#: … and the zap-signer section of Settings → Nostr.
+STORE_ABSENT_ZAP_SIGNER = (
+    "nostr-zap-signer-add-btn", "nostr-zap-signer-pubkey-input", "nostr-zap-signer-empty",
+)
+
+#: Every id asserted absent, for the pin.
+STORE_ABSENT = (
+    STORE_ABSENT_PROVIDER_AND_MINT + STORE_ABSENT_REDEEM + STORE_ABSENT_TIER_MONEY
+    + STORE_ABSENT_OFFER_MONEY + STORE_ABSENT_SELL + STORE_ABSENT_SOLD_POST_MONEY
+    + STORE_ABSENT_TIPS + STORE_ABSENT_ZAP_SIGNER
+)
+
+#: Outcome 5, the Microsoft Store half: the in-person share is KEPT — its two
+#: entry buttons on Settings → Folders, and this device's compare code once the
+#: share panel opens. Spelled in `Views\P2pShare\`, which this flavour keeps.
+STORE_KEPT_IN_PERSON_SHARE = ("offline-share-button", "offline-receive-button", "offline-share-own-code")
+
+#: Ids the outcome nodes read as PRESENT on a store build — the tabs and buttons
+#: they click and each screen's anchor. The pin holds each to a XAML outside
+#: `Views\Payments\`, since an id only that folder spells is gone from the build.
+#: The Settings rail rows they click (`settings-nav-row[<key>]`, composed in
+#: `SettingsShellPage.xaml.cs`) are pinned by `STORE_SETTINGS_RAIL_KEYS` instead.
+STORE_DRIVEN_IDS = (
+    "feed-tab", "profile-tab", "contacts-tab", "settings-tab",
+    "profile-posts-tab", "profile-tiers-tab", "subscription-tiers-section",
+    "subscription-tier-create-button", "subscription-tier-form-save",
+    "subscription-tier-form-cancel", "subscription-mine-section",
+    "compose-gate-tier-select", "compose-text-field",
+    "contact-actor-id-field", "contact-actor-id-lookup", "contact-actor-id-result",
+    "contact-actor-id-open-profile-button", "subscription-offer-row", "gated-post-badge",
+    "post-card", "nostr-link-mode", "nostr-unlink-button", "folder-add-button",
+    "offline-share-cancel-button",
+)
+
+#: The Settings rail rows the outcome nodes open, by key.
+STORE_SETTINGS_RAIL_KEYS = ("subscription-settings", "nostr", "folders")
+
 #: How long one catalogue call may take. Registering a ~350 MB loose layout is
 #: the slow one; a healthy read answers in about a second.
 _PS_BUDGET_S = 600
@@ -103,8 +178,22 @@ def _ps(script: str, timeout: float = _PS_BUDGET_S) -> tuple[int, str, str]:
     return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
 
 
-def package_facts(name: str = IDENTITY_NAME) -> PackageFacts | None:
-    """This user's installed package ``name``, or ``None`` when there is none.
+def pick_package(raw: dict | list[dict], arch: str | None = None) -> dict:
+    """The one package of ``Get-AppxPackage``'s answer the run drives.
+
+    Two architectures of one name can both be installed, and then the answer is a
+    list: the package of ``arch`` (default the host's own) is taken, else the first.
+    A single package is taken whatever its architecture — the fixtures' own checks
+    (``registered_from``, the subject checks) decide whether it is theirs."""
+    if not isinstance(raw, list):
+        return raw
+    wanted = f"_{arch or host_arch()}_"
+    return next((r for r in raw if wanted in r.get("PackageFullName", "")), raw[0])
+
+
+def package_facts(name: str = IDENTITY_NAME, arch: str | None = None) -> PackageFacts | None:
+    """This user's installed package ``name``, or ``None`` when there is none;
+    when both architectures are installed, the one of ``arch`` (``pick_package``).
 
     The enums are stringified on the PowerShell side: ``ConvertTo-Json`` writes an
     enum as its number, and ``SignatureKind`` 4 says nothing to a reader of a
@@ -119,11 +208,7 @@ def package_facts(name: str = IDENTITY_NAME) -> PackageFacts | None:
         raise RuntimeError(f"Get-AppxPackage {name} failed (rc={rc}): {err or out}")
     if not out:
         return None
-    raw = json.loads(out)
-    if isinstance(raw, list):
-        # Two architectures of one name can both be installed; the witness drives
-        # this box's own.
-        raw = next((r for r in raw if f"_{host_arch()}_" in r.get("PackageFullName", "")), raw[0])
+    raw = pick_package(json.loads(out), arch)
     return PackageFacts(
         name=raw["Name"],
         publisher=raw["Publisher"],
@@ -192,6 +277,54 @@ def host_arch() -> str:
     return "arm64" if native.upper() == "ARM64" else "x64"
 
 
+def selected_layout_arch(option: str | None) -> str:
+    """The architecture whose staged layout the development-mode nodes register:
+    the run's ``--store-layout-arch`` when given, else this box's own.
+
+    The option is the test harness's alone — the app reads nothing of it
+    (convention 15)."""
+    if not option:
+        return host_arch()
+    if option not in STORE_ARCHES:
+        raise ValueError(
+            f"--store-layout-arch {option!r}: windows-store-package builds a layout for "
+            f"{' or '.join(STORE_ARCHES)} only"
+        )
+    return option
+
+
+def layout_recipe(arch: str) -> str:
+    """The recipe that stages ``arch``'s store-no-payments layout under the reserved
+    identity — what a fixture tells the reader to run when the stage is missing."""
+    return STORE_LAYOUT_RECIPE.format(arch=arch)
+
+
+#: Words a hypervisor's virtual firmware puts in ``Win32_ComputerSystem``'s
+#: Manufacturer or Model (the virtualization host: "the virtualization host ARM Virtual Machine"; Hyper-V:
+#: "Virtual Machine"; VMware: "VMware, Inc."; QEMU/KVM; VirtualBox: "innotek GmbH").
+_VIRTUAL_MACHINE_WORDS = ("virtual", "parallels", "vmware", "qemu", "kvm", "xen", "innotek")
+
+
+def machine_is_virtual(manufacturer: str, model: str) -> bool:
+    """Whether ``Win32_ComputerSystem``'s Manufacturer and Model name a virtual
+    machine. It fails closed: a reading that names no hypervisor, an empty one
+    included, is a person's own PC as far as the Store witness's venue is concerned
+    (convention 12's Windows arm, the Store-witness exception)."""
+    reading = f"{manufacturer} {model}".lower()
+    return any(word in reading for word in _VIRTUAL_MACHINE_WORDS)
+
+
+def this_machine_is_virtual() -> tuple[bool, str]:
+    """``machine_is_virtual`` of this box, and the reading it was decided on."""
+    rc, out, err = _ps(
+        "$c = Get-CimInstance Win32_ComputerSystem; \"$($c.Manufacturer)`t$($c.Model)\""
+    )
+    if rc != 0:
+        return False, f"Win32_ComputerSystem unreadable (rc={rc}): {err or out}"
+    manufacturer, _, model = out.partition("\t")
+    return machine_is_virtual(manufacturer, model), f"{manufacturer!r} / {model!r}"
+
+
 def staged_layout_manifest(repo: Path, arch: str | None = None) -> Path:
     """Where ``windows-store-package`` leaves the loose layout it packed — the
     manifest ``Add-AppxPackage -Register`` takes (the packer derives the stage from
@@ -206,14 +339,15 @@ def layout_identity(manifest: Path) -> tuple[str, str]:
     return identity.get("Name", ""), identity.get("Publisher", "")
 
 
-def register_layout(manifest: Path) -> PackageFacts:
+def register_layout(manifest: Path, arch: str | None = None) -> PackageFacts:
     """Register a staged loose layout for this user (deployment path 3 of
     ``tests/real_session/test_store_package_registration.py``: Developer Mode, no
-    signing, no elevation) and return what the catalogue then says."""
+    signing, no elevation) and return what the catalogue then says about the
+    package of ``arch`` (default the host's own), the layout's architecture."""
     rc, out, err = _ps(f"$ErrorActionPreference='Stop'; Add-AppxPackage -Register '{manifest}'")
     if rc != 0:
         raise RuntimeError(f"Add-AppxPackage -Register {manifest} failed (rc={rc}):\n{out}\n{err}")
-    facts = package_facts()
+    facts = package_facts(arch=arch)
     if facts is None:
         raise RuntimeError(
             f"Add-AppxPackage -Register {manifest} reported success but no {IDENTITY_NAME} "

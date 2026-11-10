@@ -172,6 +172,38 @@ pub struct WebContentService {
     /// build without `test-hooks`.
     #[cfg(feature = "test-hooks")]
     render_faults: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
+    /// The registry the publisher fold verifies against, armed at RUNTIME by
+    /// `POST /api/v1/test/region/publisher-registry`
+    /// (`crate::region_relay_test_hook`): a running e2e nest has no
+    /// [`Self::with_region_registry`] seam, and the compiled-in registry
+    /// enrols nobody, so without it no tier_3 test could see a situs content
+    /// policy reach a public page. Wins over `region_registry` while armed.
+    /// Compiled out of every build without `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    region_registry_armed: std::sync::Mutex<Option<fauna_core::region_authority::RegionRegistry>>,
+    /// Actors whose next render parks at its first body write until
+    /// released — the render-park door (`crate::web_render_park_test_hook`),
+    /// the outside way to read the site while a real render is in flight.
+    /// Compiled out of every build without `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    render_parks: std::sync::Mutex<std::collections::HashMap<[u8; 32], RenderPark>>,
+}
+
+/// One armed render park (see `WebContentService::render_parks`).
+#[cfg(feature = "test-hooks")]
+struct RenderPark {
+    /// The withdrawal deadline renders run under while this park is armed, in
+    /// place of [`WITHDRAWAL_DEADLINE`] — so the door states which side of it
+    /// a render is on, as the Rust pins do through
+    /// [`WebContentService::with_withdrawal_deadline`]. `None` = the
+    /// service's own.
+    deadline: Option<std::time::Duration>,
+    /// A render has reached the park point and waits on `gate`.
+    parked: bool,
+    /// The park point has been taken once; later body writes pass.
+    taken: bool,
+    /// Released by [`WebContentService::release_render_park`].
+    gate: Arc<tokio::sync::Notify>,
 }
 
 /// Re-render every publishing site of `state`'s web service after a publisher
@@ -216,6 +248,10 @@ impl WebContentService {
             withdrawal_deadline: WITHDRAWAL_DEADLINE,
             #[cfg(feature = "test-hooks")]
             render_faults: Default::default(),
+            #[cfg(feature = "test-hooks")]
+            region_registry_armed: Default::default(),
+            #[cfg(feature = "test-hooks")]
+            render_parks: Default::default(),
         }
     }
 
@@ -242,6 +278,20 @@ impl WebContentService {
     ) -> Self {
         self.region_registry = Some(registry);
         self
+    }
+
+    /// Arm (`Some`) or disarm (`None`) the runtime registry the publisher fold
+    /// verifies against — the `test-hooks` door (see the field's note). Takes
+    /// effect at the next render; arming renders nothing by itself.
+    #[cfg(feature = "test-hooks")]
+    pub fn arm_region_registry_for_test(
+        &self,
+        registry: Option<fauna_core::region_authority::RegionRegistry>,
+    ) {
+        *self
+            .region_registry_armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = registry;
     }
 
     /// Wire the at-rest blob key so the synced-file read path can strip the
@@ -667,7 +717,8 @@ impl WebContentService {
         // render that listed before a revoke would still outrank one that
         // listed after it.
         let claim = self.db.begin_web_render(actor_id).await?;
-        let deadline = tokio::time::Instant::now() + self.withdrawal_deadline;
+        let withdrawal_deadline = self.withdrawal_deadline_for(actor_id);
+        let deadline = tokio::time::Instant::now() + withdrawal_deadline;
         // A render that completes is also the restore of a site a clear took
         // dark, whichever door asked for it. Read AFTER the mint, unlike the
         // marker: a clear that landed before the mint is answered by this
@@ -706,7 +757,7 @@ impl WebContentService {
                                 actor = %hex::encode(&actor_id[..4]),
                                 "web render answering an owed revoke outlasted {:?}; the old \
                                  site was withdrawn until it commits",
-                                self.withdrawal_deadline
+                                withdrawal_deadline
                             );
                             restore = Some(nonce);
                             cleared_at_deadline = true;
@@ -786,9 +837,16 @@ impl WebContentService {
         // The nest-as-publisher leg (`region-blocking.md` § The content plane;
         // `nest-rules.md` § The publisher leg): the declared situs chain's
         // content policies and the nest's own rules, read once per render.
-        let registry = self
-            .region_registry
-            .clone()
+        #[cfg(feature = "test-hooks")]
+        let armed = self
+            .region_registry_armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        #[cfg(not(feature = "test-hooks"))]
+        let armed: Option<fauna_core::region_authority::RegionRegistry> = None;
+        let registry = armed
+            .or_else(|| self.region_registry.clone())
             .unwrap_or_else(crate::region_tier::relay_registry);
         let policies = super::region::publisher_policies(&self.db, &registry).await?;
         let mut scores = self.region_scores.begin(actor_id);
@@ -1050,6 +1108,97 @@ impl WebContentService {
         Ok(still_dark)
     }
 
+    /// The withdrawal deadline a render of `actor_id` runs under: the
+    /// service's own, unless the render-park door armed a park carrying one.
+    fn withdrawal_deadline_for(&self, actor_id: &[u8; 32]) -> std::time::Duration {
+        #[cfg(feature = "test-hooks")]
+        if let Some(deadline) = self
+            .render_parks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(actor_id)
+            .and_then(|park| park.deadline)
+        {
+            return deadline;
+        }
+        let _ = actor_id;
+        self.withdrawal_deadline
+    }
+
+    /// Arm a render park for `actor_id` — the render-park door's half
+    /// (`crate::web_render_park_test_hook`): the actor's next render stops at
+    /// its first body write — past its claim, its deadline race and its
+    /// listing — and waits there until [`Self::release_render_park`]. While it
+    /// waits, whatever the site serves is what a reader sees mid-render.
+    /// `deadline` replaces the withdrawal deadline for renders that start
+    /// while the park is armed. Re-arming replaces the previous arming.
+    #[cfg(feature = "test-hooks")]
+    pub fn arm_render_park(&self, actor_id: &[u8; 32], deadline: Option<std::time::Duration>) {
+        self.render_parks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                *actor_id,
+                RenderPark {
+                    deadline,
+                    parked: false,
+                    taken: false,
+                    gate: Arc::new(tokio::sync::Notify::new()),
+                },
+            );
+    }
+
+    /// Whether a render of `actor_id` waits at its armed park.
+    #[cfg(feature = "test-hooks")]
+    pub fn render_parked(&self, actor_id: &[u8; 32]) -> bool {
+        self.render_parks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(actor_id)
+            .is_some_and(|park| park.parked)
+    }
+
+    /// Release and disarm `actor_id`'s park: a parked render carries on, and
+    /// no later render parks. `false` = nothing was armed.
+    #[cfg(feature = "test-hooks")]
+    pub fn release_render_park(&self, actor_id: &[u8; 32]) -> bool {
+        let park = self
+            .render_parks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(actor_id);
+        match park {
+            // `notify_one` stores a permit when nothing waits yet, so a render
+            // between taking the park and awaiting the gate still wakes.
+            Some(park) => {
+                park.gate.notify_one();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The park point: the first body write of a render of an actor whose
+    /// park is armed waits here until the park is released.
+    #[cfg(feature = "test-hooks")]
+    async fn render_park_point(&self, actor_id: &[u8; 32]) {
+        let gate = {
+            let mut parks = self
+                .render_parks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match parks.get_mut(actor_id) {
+                Some(park) if !park.taken => {
+                    park.taken = true;
+                    park.parked = true;
+                    Arc::clone(&park.gate)
+                }
+                _ => return,
+            }
+        };
+        gate.notified().await;
+    }
+
     /// Make `actor_id`'s renders fail, or stop failing — the render-fault
     /// door's half (`crate::web_render_fault_test_hook`). Turning the fault on
     /// also re-renders the site through [`Self::rerender_fail_closed`], so the
@@ -1277,16 +1426,8 @@ impl WebContentService {
                 return None;
             }
         };
-        use fauna_core::data::PostBody;
-        let text = match &body {
-            PostBody::Text { content, .. } | PostBody::TextWithMedia { content, .. } => {
-                content.clone()
-            }
-            PostBody::Structured { content, .. } => content.clone().unwrap_or_default(),
-            PostBody::Media { alt_text, .. } => alt_text.clone().unwrap_or_default(),
-            PostBody::Video { .. } => String::new(),
-        };
-        Some((text, seal_key))
+        // Which variants carry text is `PostBody::text`'s one home.
+        Some((body.text(), seal_key))
     }
 
     // ---- Private helpers ----
@@ -1393,6 +1534,8 @@ impl WebContentService {
         data: &[u8],
         content_type: &str,
     ) -> Result<Option<[u8; 32]>> {
+        #[cfg(feature = "test-hooks")]
+        self.render_park_point(claim.actor_id()).await;
         let hash_bytes = *blake3::hash(data).as_bytes();
         if !self.db.stage_web_render_body(claim, &hash_bytes).await? {
             return Ok(None);

@@ -1286,8 +1286,13 @@ def prebuild_memo_isolated():
 
 
 class _FakeItem:
-    def __init__(self, fixturenames=(), params=None, markers=()):
+    def __init__(self, fixturenames=(), params=None, markers=(), fixturedefs=None):
         self.fixturenames = list(fixturenames)
+        if fixturedefs is not None:
+            import types
+
+            # What `helpers/fixture_closure.py::lazily_resolved` reads.
+            self._fixtureinfo = types.SimpleNamespace(name2fixturedefs=dict(fixturedefs))
         if params is None:
             self.callspec = None
         else:
@@ -1401,16 +1406,17 @@ def test_prebuild_selection_is_lazy_and_exact(monkeypatch, prebuild_memo_isolate
 
 @pytest.mark.timeout(60)
 def test_prebuild_hoists_the_mail_venue_binaries_dedicated_mail_nest_hides(
-    monkeypatch, prebuild_memo_isolated
+    monkeypatch, prebuild_memo_isolated, request
 ):
-    """`dedicated_mail_nest` (and its three `_start_mail_venue` siblings) fetch
+    """`dedicated_mail_nest` (like every `_start_mail_venue` caller) fetches
     `mail_bridge_binary`/`seal_helper_binary` via `request.getfixturevalue`
     inside the standalone provider, not as a declared parameter — invisible to
     `item.fixturenames`, so a test whose ONLY mail-venue fixture is one of
-    these four must still trigger both builds at collection time. Reproduces
-    the 2026-09-09 `test_addressbook.py` failure: a bare `Timeout (>900.0s)`
-    on the mail-bridge `just` build, running inside the test's own budget
-    because nothing in its closure named `mail_bridge_binary`."""
+    these must still trigger both builds at collection time, through the
+    fixture's `@resolves_lazily` declaration. Reproduces the 2026-09-09
+    `test_addressbook.py` failure: a bare `Timeout (>900.0s)` on the
+    mail-bridge `just` build, running inside the test's own budget because
+    nothing in its closure named `mail_bridge_binary`."""
     mod = prebuild_memo_isolated
     built = []
     for fn in ("_ensure_mail_bridge_built", "_ensure_seal_helper_built", "_ensure_nest_built"):
@@ -1425,13 +1431,16 @@ def test_prebuild_hoists_the_mail_venue_binaries_dedicated_mail_nest_hides(
             _FakeItem(
                 fixturenames=["dedicated_mail_nest", "nest_mode", "tmp_path_factory"],
                 params={"app": "web"},
+                # The REAL fixturedef — its function carries the declaration.
+                fixturedefs={"dedicated_mail_nest": request.session._fixturemanager
+                             .getfixturedefs("dedicated_mail_nest", request.node)},
             )
         )
     )
     assert "_ensure_mail_bridge_built" in built
     assert "_ensure_seal_helper_built" in built
 
-    # A run touching neither `dedicated_mail_nest` nor its three siblings must
+    # A run touching no mail-venue fixture must
     # still build neither binary (laziness is unaffected by the correction).
     built.clear()
     mod._prebuild_binaries(

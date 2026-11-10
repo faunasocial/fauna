@@ -13,6 +13,7 @@ import (
 
 	"github.com/emersion/go-webdav/carddav"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/authlock"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/httpdrain"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/dav"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/davauth"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
@@ -160,7 +161,10 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 	mux.Handle("/", chain)
 
 	inner := &http.Server{
-		Handler:           mux,
+		// The drain discards (never buffers) what a refused request left of its
+		// body — davauth's anonymous 401 comes before any body byte is read — so
+		// a Connection: close client gets the 401 rather than a reset.
+		Handler:           httpdrain.Handler(mux),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

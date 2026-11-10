@@ -1,5 +1,7 @@
 package com.fauna.app.provider
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import uniffi.fauna_devices_machine.FolderSummary
 
 /**
@@ -37,10 +39,28 @@ interface OnDemandToggle {
      * changed, so a set appears in or leaves Files at once.
      */
     suspend fun replan()
+
+    /**
+     * Ticks after every presence reconcile the provider runs, whoever started
+     * it (the picker's own refresh included), so the page re-reads each row's
+     * park then — the app watches the park, it is never told (`file-sync.md`
+     * § Multi-writer shared sets → *Revocation on a capability host*, "What
+     * the app shows, and how the park reaches it").
+     */
+    val reconciled: Flow<Unit> get() = emptyFlow()
 }
 
-/** A set's identity on this device's presence surface. */
-data class OnDemandIdentity(val scopedId: String, val folderRef: String)
+/**
+ * A set's identity on this device's presence surface. [rowReadsReader] is the
+ * page's own row reading — a member row whose access is not `writer` — which
+ * the park fold takes over the last plan's: a demotion has no push, so the
+ * folder-list refresh can read it before the provider's next reconcile does.
+ */
+data class OnDemandIdentity(
+    val scopedId: String,
+    val folderRef: String,
+    val rowReadsReader: Boolean = false,
+)
 
 /** One row's `folder-on-demand-toggle` reading. */
 data class OnDemandToggleState(
@@ -52,4 +72,12 @@ data class OnDemandToggleState(
      * toggle (the apple bound-location caption's android twin).
      */
     val stronger: Boolean,
+    /**
+     * The set is parked on this device's documents provider: the host
+     * persisted its revocation mark, or the row reads `reader` while the
+     * provider still keeps bodies the nest never recorded — the shared
+     * `on_demand_parked_presences` fold. It is `binding_section`'s `parked`
+     * input; a set this device does not present reads `false`.
+     */
+    val parked: Boolean = false,
 )

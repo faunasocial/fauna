@@ -461,7 +461,7 @@ def test_like_toggle_records_and_reverses_the_callers_like(logged_in_app):
     )
 
     # Toggle ON.
-    index = logged_in_app.feed.post_index_by_id(post_id)
+    index = logged_in_app.feed.card_index_by_id(post_id)
     logged_in_app.feed.like_post(index)
     after = logged_in_app.feed.wait_for_interaction_count_by_id(post_id, "like", 1)
     assert after == 1, (
@@ -476,7 +476,7 @@ def test_like_toggle_records_and_reverses_the_callers_like(logged_in_app):
     )
 
     # Toggle OFF — the half that was unreachable from every app's UI.
-    logged_in_app.feed.like_post(logged_in_app.feed.post_index_by_id(post_id))
+    logged_in_app.feed.like_post(logged_in_app.feed.card_index_by_id(post_id))
     back = logged_in_app.feed.wait_for_interaction_count_by_id(post_id, "like", 0)
     assert back == 0, (
         f"a second tap must UN-like and reverse the count 1 → 0; got {back!r}. "
@@ -567,14 +567,14 @@ def test_repost_toggle_creates_and_removes_the_callers_repost(logged_in_app):
     # 2026-08-11) is the element that distinguishes a repost card from an
     # empty-commentary quote card; before it, this could only be inferred from
     # the state dump, which is not what the user sees.
-    repost_index = logged_in_app.feed.post_index_by_id(repost_row["post_id"])
+    repost_index = logged_in_app.feed.card_index_by_id(repost_row["post_id"])
     assert logged_in_app.feed.repost_attribution_count(repost_index) == 1, (
         f"the repost row (card {repost_index}) must paint one "
         f"repost-attribution marker; the original's own card must paint none. "
         f"error={logged_in_app.error_text()!r}"
     )
     assert logged_in_app.feed.repost_attribution_count(
-        logged_in_app.feed.post_index_by_id(original_id)
+        logged_in_app.feed.card_index_by_id(original_id)
     ) == 0, "an ordinary post's card must not claim to be a repost"
     row = logged_in_app.feed.post_state_by_id(original_id)
     assert row and row.get("viewer_repost_id") == repost_row.get("post_id"), (
@@ -583,7 +583,7 @@ def test_repost_toggle_creates_and_removes_the_callers_repost(logged_in_app):
     )
 
     # Toggle OFF — aimed by id (the text-keyed index could hit the repost row).
-    index = logged_in_app.feed.post_index_by_id(original_id)
+    index = logged_in_app.feed.card_index_by_id(original_id)
     assert index >= 0, f"original {original_id!r} left the window unexpectedly"
     logged_in_app.feed.repost_post(index)
     back = logged_in_app.feed.wait_for_interaction_count_by_id(
@@ -635,7 +635,7 @@ def test_a_count_shows_no_number_until_the_post_has_activity(logged_in_app):
         f"error={logged_in_app.error_text()!r}"
     )
     post_id = row["post_id"]
-    index = feed.post_index_by_id(post_id)
+    index = feed.card_index_by_id(post_id)
 
     for button in feed.INTERACTION_BUTTONS:
         label = feed.interaction_button_label(button, index)
@@ -664,7 +664,7 @@ def test_a_count_shows_no_number_until_the_post_has_activity(logged_in_app):
             f"{feed.interaction_button_label('feed-like-button', feed.post_index_by_id(post_id))!r}"
         ),
     )
-    index = feed.post_index_by_id(post_id)
+    index = feed.card_index_by_id(post_id)
     for button in ("feed-reply-button", "feed-repost-button", "feed-quote-button"):
         label = feed.interaction_button_label(button, index)
         assert not any(ch.isdigit() for ch in label), (
@@ -708,7 +708,7 @@ def test_a_repost_names_the_reposter_shows_the_original_and_opens_it(
         f"own post {mine!r} should be readable from feed state; "
         f"error={app.error_text()!r}"
     )
-    me = feed.post_author(feed.post_index_by_id(my_row["post_id"]))
+    me = feed.post_author(feed.card_index_by_id(my_row["post_id"]))
     assert me.strip(), "the app should name the author of my own post"
 
     other = create_actor_and_register(
@@ -730,13 +730,13 @@ def test_a_repost_names_the_reposter_shows_the_original_and_opens_it(
         f"error={app.error_text()!r}"
     )
     original_id = row["post_id"]
-    them = feed.post_author(feed.post_index_by_id(original_id))
+    them = feed.post_author(feed.card_index_by_id(original_id))
     assert them.strip() and them != me, (
         f"the original's author ({them!r}) must read differently from mine "
         f"({me!r}) for this test to tell reposter from author"
     )
 
-    feed.repost_post(feed.post_index_by_id(original_id))
+    feed.repost_post(feed.card_index_by_id(original_id))
     assert feed.wait_for_interaction_count_by_id(original_id, "repost", 1) == 1, (
         f"the repost never landed; error={app.error_text()!r}"
     )
@@ -747,7 +747,7 @@ def test_a_repost_names_the_reposter_shows_the_original_and_opens_it(
         f"after a reload the repost row naming {original_id!r} must render; "
         f"error={app.error_text()!r}"
     )
-    at = feed.post_index_by_id(repost_row["post_id"])
+    at = feed.card_index_by_id(repost_row["post_id"])
 
     assert feed.repost_attribution_count(at) == 1, (
         f"the repost card (card {at}) must say it is a repost"

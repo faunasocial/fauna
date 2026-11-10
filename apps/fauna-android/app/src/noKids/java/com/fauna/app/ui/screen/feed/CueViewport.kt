@@ -1,8 +1,10 @@
 package com.fauna.app.ui.screen.feed
 
 import android.os.SystemClock
+import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
@@ -101,22 +103,7 @@ class CueCapture internal constructor(
         val layout = listState.layoutInfo
         val posts = posts()
         val mediaById = posts.associate { it.postId to it.playsMedia }
-        // postId ← the row's own key (never an index-into-list read,
-        // which mid-update attributes one post's dwell to another).
-        val rows = layout.visibleItemsInfo.mapNotNull { item ->
-            val postId = item.key as? String ?: return@mapNotNull null
-            val isMedia = mediaById[postId] ?: false
-            CueRow(
-                postId = postId,
-                top = item.offset.toDouble(),
-                // A not-yet-measured item reports its non-positive size
-                // as-is; what that MEANS is the tracker's call, not the
-                // probe's (it holds the row rather than flushing it).
-                height = item.size.toDouble(),
-                isMedia = isMedia,
-                mediaPlayedPm = null,
-            )
-        }
+        val rows = cueRowsOf(layout.visibleItemsInfo, mediaById, CueSubjects::contains)
         return tracker.sample(
             rows,
             posts.map { it.postId },
@@ -145,6 +132,68 @@ class CueCapture internal constructor(
         @Volatile
         var active: CueCapture? = null
             internal set
+    }
+}
+
+/**
+ * The visible rows the probe hands the tracker: one [CueRow] per row whose card
+ * shows its post ([isSubject]) — never a region, nest, guardian-block, muted-word
+ * or collapse placeholder painted under the same key, which hides what the post
+ * says, so lingering on it is no exposure to the post at all
+ * (`engagement-cues.md` § Cue vocabulary & derivation; the twins of linux's
+ * `feed::viewport::CUE_SUBJECT_CLASS` mark and web's `data-cue-post`).
+ */
+internal fun cueRowsOf(
+    items: List<LazyListItemInfo>,
+    mediaById: Map<String, Boolean>,
+    isSubject: (String) -> Boolean,
+): List<CueRow> = items.mapNotNull { item ->
+    // postId ← the row's own key (never an index-into-list read,
+    // which mid-update attributes one post's dwell to another).
+    val postId = item.key as? String ?: return@mapNotNull null
+    if (!isSubject(postId)) return@mapNotNull null
+    CueRow(
+        postId = postId,
+        top = item.offset.toDouble(),
+        // A not-yet-measured item reports its non-positive size
+        // as-is; what that MEANS is the tracker's call, not the
+        // probe's (it holds the row rather than flushing it).
+        height = item.size.toDouble(),
+        isMedia = mediaById[postId] ?: false,
+        mediaPlayedPm = null,
+    )
+}
+
+/**
+ * The posts whose card shows the post itself right now — the cue subjects.
+ * [PostCard]'s post-body arm marks its post ([CueSubjectMark]) and unmarks it on
+ * leaving composition, so a card that turns into a placeholder (a muted word
+ * added, a rule arriving) stops being measured at once. Counted, so a post
+ * composed twice at once (the feed and a profile's Posts tab) stays a subject
+ * until both cards leave. Main thread only, like the sample that reads it.
+ */
+object CueSubjects {
+    private val marks = HashMap<String, Int>()
+
+    fun mark(postId: String) {
+        marks[postId] = (marks[postId] ?: 0) + 1
+    }
+
+    fun unmark(postId: String) {
+        val n = (marks[postId] ?: return) - 1
+        if (n <= 0) marks.remove(postId) else marks[postId] = n
+    }
+
+    fun contains(postId: String): Boolean = marks.containsKey(postId)
+}
+
+/** Mark [postId] a cue subject for as long as the caller is composed — called
+ *  from [PostCard]'s post-body arm and nowhere else. */
+@Composable
+internal fun CueSubjectMark(postId: String) {
+    DisposableEffect(postId) {
+        CueSubjects.mark(postId)
+        onDispose { CueSubjects.unmark(postId) }
     }
 }
 

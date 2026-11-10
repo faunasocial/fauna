@@ -41,7 +41,9 @@ fn lifecycle_err(
 ) -> FfiError {
     match e {
         fauna_client_folders::SetLifecycleError::Nest(e) => stringify(e),
-        e @ fauna_client_folders::SetLifecycleError::Custody(_) => {
+        e @ (fauna_client_folders::SetLifecycleError::Custody(_)
+        | fauna_client_folders::SetLifecycleError::Unattestable
+        | fauna_client_folders::SetLifecycleError::Unattested { .. }) => {
             FfiError::General { msg: e.to_string() }
         }
     }
@@ -124,18 +126,23 @@ pub(crate) fn ffi_folder_members(
 /// FFI mirror of [`fauna_protocol::folders::FolderActorMember`] — one actor
 /// (user) a shared folder is shared with, or its owner: the owner-side
 /// "Shared with" list. `role` is `"owner"` | `"member"` and `handle` is empty
-/// when unknown (a remote actor, or a local user with no handle set).
+/// when unknown (a remote actor not yet announced by its own nest, or a local
+/// user with no handle set).
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct FfiFolderActorMember {
     /// Hex-encoded 32-byte actor id.
     pub actor_id: String,
-    /// Display handle; empty when unknown (remote / unset).
+    /// The bare handle; empty when unknown (unset, or a remote actor whose own
+    /// nest has not announced it yet). A remote member's domain is folded into
+    /// [`Self::display`] only — the wire's `domain` does not cross here.
     pub handle: String,
     /// `"owner"` | `"member"`.
     pub role: String,
     /// The pre-computed `folder-member-handle` label — render this, never
-    /// re-derive: the handle when present, else the canonical `short_id` of
-    /// [`Self::actor_id`] (`fauna_core::format::account_display_label`, the
+    /// re-derive: the handle when present — for a cross-nest member the
+    /// `handle@domain` its own nest announced, joined by
+    /// `fauna_core::format::qualified_handle` — else the canonical `short_id`
+    /// of [`Self::actor_id`] (`fauna_core::format::account_display_label`, the
     /// same rule behind `FfiPendingShare::shared_by_display` and
     /// `FolderSummary::owner_display`). Never the raw 64-hex id.
     pub display: String,
@@ -158,8 +165,14 @@ impl From<fauna_client_folders::folders::FolderActorMember> for FfiFolderActorMe
     fn from(m: fauna_client_folders::folders::FolderActorMember) -> Self {
         Self {
             // `handle` is empty (not absent) when unknown; `account_display_label`
-            // treats an empty handle as absent and falls back to `short_id`.
-            display: fauna_core::format::account_display_label(Some(&m.handle), &m.actor_id),
+            // treats an empty handle as absent and falls back to `short_id`. A
+            // cross-nest member's announced `domain` joins here, at display, as
+            // on every app (`value-formatting.md` § Account display label).
+            display: fauna_core::format::account_display_label(
+                fauna_core::format::qualified_handle(Some(&m.handle), m.domain.as_deref())
+                    .as_deref(),
+                &m.actor_id,
+            ),
             actor_id: m.actor_id,
             handle: m.handle,
             role: m.role,

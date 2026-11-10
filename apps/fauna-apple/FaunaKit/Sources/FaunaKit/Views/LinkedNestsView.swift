@@ -76,7 +76,7 @@ public struct LinkedNestsView: View {
             // task, so a bumped token re-reads the mounted page too.
             await vm.refresh(api: client.api)
         }
-        .onStoreChange { await vm.resyncCustody() }
+        .onStoreChange { await vm.resyncStore() }
         // The machine is pull-based and the nest's outbox worker stamps a failed
         // send's reason (and later delivers) on its own clock, so while the
         // queue is non-empty keep re-reading it — otherwise a page the user
@@ -881,8 +881,14 @@ struct MintFlowView: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .accessibilityIdentifier(Ids.nestTrustMintScopeSelect)
+                // `options` is the picker's whole painted catalog, placeholder
+                // first — what the driver's `options` attr serves, so a witness
+                // can name what the picker does NOT offer (the reserved tiers,
+                // `nests.md` § Trust facet — grants → *Which tiers the post
+                // option names*), as web's and tui's selects already do.
                 .automationSelect(
-                    Ids.nestTrustMintScopeSelect, value: { selectedOptionLabel }
+                    Ids.nestTrustMintScopeSelect, value: { selectedOptionLabel },
+                    options: { [L.nests.mintScopePlaceholder] + row.mintOptions.map(mintOptionLabel) }
                 ) { newValue in
                     selectedOptionLabel = newValue
                     selectedHolderIndex = 0

@@ -47,9 +47,6 @@ fun StatusScreen(
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(stringResource(R.string.common_account), style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
-                        Text("${stringResource(R.string.common_handle)}: ${acc.handle}")
-                        Text("${stringResource(R.string.common_domain)}: ${acc.domain}")
-                        Text("${stringResource(R.string.common_tier)}: ${acc.tier}")
                         CopyableRow(
                             label = stringResource(R.string.common_actor_id),
                             displayValue = shortId(acc.actorId),
@@ -59,6 +56,15 @@ fun StatusScreen(
                                 appMessages.showInfo(context.getString(R.string.settings_account_page_copied_clipboard))
                             }
                         )
+                        // The identity cell (`settings.md` § Layout & flow item 1),
+                        // beside the actor id: the bare values carry the ids, the
+                        // shared `common.*` labels sit beside them, never inside.
+                        acc.handle?.let { handle ->
+                            StatusLegRow(stringResource(R.string.common_handle), Ids.SETTINGS_HANDLE_LABEL, handle)
+                            acc.tier?.let { tier ->
+                                StatusLegRow(stringResource(R.string.common_tier), Ids.SETTINGS_TIER_LABEL, tier)
+                            }
+                        }
                         CopyableRow(
                             label = stringResource(R.string.common_node_url),
                             displayValue = acc.nodeUrl,

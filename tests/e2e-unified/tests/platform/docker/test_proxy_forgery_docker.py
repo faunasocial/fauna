@@ -6,9 +6,12 @@ Every helper the image runs (the mail bridges, the relay, …) reaches the nest
 over loopback, the same position the SNI router dials from. The router conveys a
 client's real address in a PROXY-v2 header, and the nest honours that header
 only when it carries the router's secret, which no helper can read
-(``test_proxy_router_auth.py``). A header without it is answered with the true
-loopback peer (``lib.rs::read_optional_proxy_header``), so every per-address
-limit and lockout keyed on the source still keys on the helper itself.
+(``test_proxy_router_auth.py``). A header without it forfeits the connection's
+loopback trust: the nest resolves it to a constant non-loopback source,
+``0.0.0.0`` (``lib.rs::read_optional_proxy_header``, *A refused header forfeits
+loopback trust*), so the helper lands in one untrusted bucket — never the
+address it claimed, and never the loopback trust its true peer would carry
+(the loopback-only enrollment gate, the loopback connection ceiling).
 
 **How the forger is placed.** A stock python container joins the nest
 container's network namespace and runs ``fakes/proxy_forger.py``: each connection
@@ -21,8 +24,10 @@ through it unchanged.
 (``auth_core::note_sign_in_address`` → ``actor_last_ip``), the same attribution
 the per-address throttles read. The admin signs in once directly from the host
 (the control: a non-loopback address is recorded, so the column is live), then
-once through the forger; the recorded address must become loopback — the forger's
-real address — and never the address it claimed. That the nest *read* the forged
+once through the forger; the recorded address must become the untrusted-proxied
+sentinel ``0.0.0.0`` — never the address it claimed, and not the helper's
+loopback address either, which would hand a forger (or a router whose secret
+differs from the nest's) the loopback-only enrollment gate. That the nest *read* the forged
 header rather than ignoring PROXY headers altogether is proven by the sign-in
 succeeding at all: an unconsumed header would sit in front of the TLS
 ClientHello and break the handshake.
@@ -63,6 +68,9 @@ pytestmark = [
 CLAIM_CODE = "FORGE9"
 #: TEST-NET-3 (RFC 5737): an address nothing real will ever arrive from.
 FORGED_SOURCE = "203.0.113.77"
+# What the nest records for a connection whose PROXY-v2 header it refused:
+# `lib.rs::UNTRUSTED_PROXIED_SOURCE`, rendered as the sign-in address.
+UNTRUSTED_PROXIED_SOURCE = "0.0.0.0"
 #: The port the forger listens on inside the shared network namespace.
 FORGER_PORT = 4999
 
@@ -161,7 +169,8 @@ def test_a_helper_cannot_fake_where_a_connection_comes_from(forged_nest):
         f"attributed to {FORGED_SOURCE}, so a helper can dodge every per-address "
         f"limit and lockout by naming a fresh address each time"
     )
-    assert forged == "127.0.0.1", (
-        f"a forged header must be answered with the helper's true loopback "
-        f"address; recorded {forged!r} (direct sign-in was {direct!r})"
+    assert forged == UNTRUSTED_PROXIED_SOURCE, (
+        f"a forged header must forfeit loopback trust and be attributed to the "
+        f"untrusted-proxied sentinel; recorded {forged!r} (direct sign-in was "
+        f"{direct!r})"
     )

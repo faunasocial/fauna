@@ -337,7 +337,20 @@ use rusqlite::Connection;
 ///  device verifies). Additive with a constant default: a part staged before
 ///  it counts 0, so its upload's signed commit is refused and the principal
 ///  re-sends (a staged upload expires within the hour anyway).
-pub const CURRENT_SCHEMA_VERSION: u32 = 169;
+///  170 = `folder_former_writers` (2026-11-07): the ever-a-writer bit per
+///  (set, actor), written where a `writer` grant is taken away, so a former
+///  writer's rows stay admitted on every reader
+///  (`writer-signed-change-records.md` ruling (12)). A new table, additive: an
+///  older binary never writes or reads it, and its readers judge by the
+///  current roster as before.
+///  171 = `third_party_former_writers` (2026-11-08): the writer keys each
+///  `client_id` attested on an account under a roster row that has since
+///  ended — revoked, replaced, or burned by a succession — so the same app
+///  authorized again keeps its writer (`third-party-kinds.md` § Principal
+///  write authority → *A reconnecting app keeps its writer*). A new table,
+///  additive: an older binary never writes or reads it, and refuses a
+///  reconnecting app's former writer as before.
+pub const CURRENT_SCHEMA_VERSION: u32 = 171;
 
 /// The oldest `schema_version` whose binary can still safely **operate** a DB
 /// this binary writes. Bump **only** on a non-additive/breaking change (the
@@ -1842,6 +1855,19 @@ pub(super) const MIGRATIONS_FOLDER_MEMBER_ROLES: &str = "
         byte_cap    INTEGER,
         bytes_used  INTEGER NOT NULL DEFAULT 0,
         updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (channel_id, actor_id)
+    );
+
+    -- The writers of record who hold the grant no longer
+    -- (`writer-signed-change-records.md` ruling (12)(c)): one row per actor
+    -- that ever held `writer` on the set and lost it — demoted by
+    -- `members.set_access`, evicted, or gone by `leave` — written in the same
+    -- transaction that takes the grant away. Never deleted: a re-grant leaves
+    -- it, since a reader admits by the union of current and former writers.
+    -- The roster read projects it as `former_writers`, apart from `members`.
+    CREATE TABLE IF NOT EXISTS folder_former_writers (
+        channel_id  BLOB NOT NULL,
+        actor_id    BLOB NOT NULL,
         PRIMARY KEY (channel_id, actor_id)
     );
 ";
@@ -5019,6 +5045,22 @@ pub(super) const MIGRATIONS_ATPROTO_PDS: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_third_party_principals_writer
         ON third_party_principals(actor_id, writer_ed25519)
         WHERE writer_ed25519 IS NOT NULL;
+    -- The writer keys a `client_id` attested on the account under a roster
+    -- row that has ended (third-party-kinds.md § Principal write authority ->
+    -- *A reconnecting app keeps its writer*): written at the revoke (the
+    -- row's writer), at a writer replacement (the old writer) and at the
+    -- succession, before the roster burns (every row's writer, which the
+    -- plain move then carries to the successor). The writer refusal at
+    -- `/oauth/token` reads it to admit the same app's own former key. Never
+    -- deleted but by the account's purge: a record stays true when the key
+    -- is attested again. `ended_at` is epoch milliseconds.
+    CREATE TABLE IF NOT EXISTS third_party_former_writers (
+        actor_id       BLOB NOT NULL,
+        client_id      TEXT NOT NULL,
+        writer_ed25519 BLOB NOT NULL,
+        ended_at       INTEGER NOT NULL,
+        PRIMARY KEY (actor_id, client_id, writer_ed25519)
+    );
 
     -- The hosted-form half of an installed plugin's principal (third-party.md
     -- § Execution forms → WASM components): what the install leg resolved
@@ -5051,12 +5093,26 @@ pub(super) const MIGRATIONS_ATPROTO_PDS: &str = "
     -- A hosted plugin's own state scope: the key/value store behind its
     -- `state` import. Deleted with the plugin. Plaintext to the nest -- what
     -- a plugin keeps here is its working state, never a user's key (the
-    -- holder secret lives beside the module, above).
+    -- holder secret lives beside the module, above) and never an account's
+    -- settings (the table below).
     CREATE TABLE IF NOT EXISTS plugin_state (
         principal_id BLOB NOT NULL,
         key          TEXT NOT NULL,
         value        BLOB NOT NULL,
         PRIMARY KEY (principal_id, key)
+    );
+
+    -- One bound account's settings for a hosted plugin
+    -- (`fauna.plugins.set_settings`), keyed by the account so they leave with
+    -- it: revoke, uninstall, account deletion and identity succession each
+    -- delete the row. `principal_id` is the plugin's install row; the plugin
+    -- reads `value` through its `state` import under the reserved key
+    -- `settings/<actor hex>` and can never write it.
+    CREATE TABLE IF NOT EXISTS plugin_account_settings (
+        actor_id     BLOB NOT NULL,
+        principal_id BLOB NOT NULL,
+        value        BLOB NOT NULL,
+        PRIMARY KEY (actor_id, principal_id)
     );
 
     CREATE TABLE IF NOT EXISTS atproto_native_records (
@@ -5915,10 +5971,12 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // The nest-computable hash companions a writer left unset (reserved
     // folders are inserted without a `name_hash`).
     reconcile_path_sealing_companions(conn)?;
-    // Scrub resting plaintext wherever its sealed sibling now rests. A scrubbed
-    // value's page stays on the freelist with its bytes intact (`secure_delete`
-    // is off), so a boot that cleared anything rewrites the file: the byte-level
-    // guarantee `tests/conformance_at_rest_byte_scan.rs` pins, not merely the
+    // Scrub resting plaintext wherever its sealed sibling now rests. The
+    // connection's `secure_delete` (`CacheDb::open`) zeroes what this scrub
+    // frees, but not the copies an earlier write freed while the plaintext
+    // still rested (by a binary predating the pragma), so a boot that cleared
+    // anything still rewrites the file: the byte-level guarantee
+    // `tests/conformance_at_rest_byte_scan.rs` pins, not merely the
     // column-level one. Outside any transaction, which VACUUM requires.
     let scrubbed: usize = run_scrub_plaintext(conn)?.iter().map(|(_, n)| n).sum();
     if scrubbed > 0 {
@@ -6371,8 +6429,9 @@ fn backfill_segment_records_changed_seq(conn: &Connection) -> Result<()> {
 
 /// Enqueue the `monetization.md:19` + `:126` rank fan-out rows any grant
 /// missed: for every tier (each is the author's client's to mint), every
-/// unexpired subscriber of the same author's tiers at or above its
-/// rank who neither **readably** holds it nor has a pending request for it
+/// unexpired subscriber of the same author's **undesignated** tiers at or
+/// above its rank (a designated tier — a purchase — qualifies its buyer for
+/// nothing else: rule (a), re-ruled 2026-11-07) who neither **readably** holds it nor has a pending request for it
 /// gets a `payment_entitled` subscribe request, drained by the author's client
 /// like any other (`bins/fauna-nest/src/db/subscriptions.rs::
 /// enqueue_unlock_fanout` is the grant-time twin; the predicates mirror it,
@@ -6440,7 +6499,7 @@ pub(super) fn reconcile_unlock_fanout_requests(
                  ON r.author_id = d.author_id
                 AND r.rank >= d.rank
                 AND r.name <> d.name
-                AND (r.unlocks_post IS NULL OR d.unlocks_post IS NULL)
+                AND r.unlocks_post IS NULL
                JOIN subscribers s
                  ON s.author_id = r.author_id AND s.tier_name = r.name
               WHERE d.hidden = 0
@@ -6541,11 +6600,15 @@ fn reconcile_path_sealing_companions(conn: &Connection) -> Result<()> {
         rows.filter_map(|r| r.ok()).collect()
     };
     for (id, name) in sets {
-        conn.execute(
+        // A boot that a client-made row can stop is exactly the unrecoverable
+        // state `nest/common.md` forbids: a UNIQUE conflict (a squatter holds
+        // this hash) is logged and the row skipped, never propagated.
+        if let Err(e) = conn.execute(
             "UPDATE folders SET name_hash = ?1 WHERE id = ?2",
             rusqlite::params![fauna_core::path_crypto::set_name_hash(&name).to_vec(), id],
-        )
-        .context("fill in folders.name_hash")?;
+        ) {
+            tracing::warn!(folder_id = id, error = %e, "skipping folders.name_hash fill-in");
+        }
     }
 
     // `import_sessions.source_hash`.
@@ -9981,19 +10044,20 @@ mod tests {
 
     /// The sweep's boundary predicates. A lapsed qualifying subscription and a
     /// qualifying rank below the target's (the free rank-0 follow included)
-    /// enqueue nothing. A *designated* qualifying tier (a buyer of post B) is
-    /// the case that got corrected: it must not reach post A
-    /// (designated→designated — one cheap post unlocking every sold post), but
-    /// it MUST reach the undesignated rank-0 `followers` tier, because
-    /// `monetization.md:126` ratifies that buyers of a sold post also become
-    /// followers. Before the fix, this test asserted zero rows here, which pinned
-    /// the defect rather than the contract.
+    /// enqueue nothing, and a *designated* qualifying tier (a buyer of post B)
+    /// reaches nothing at all — neither post A nor the rank-0 `followers` tier
+    /// (`monetization.md` § Per-post pay-to-unlock, rule (a), re-ruled
+    /// 2026-11-07: a purchase enrolls the buyer in nothing else). The live
+    /// gold subscriber is the positive control: the same pass does heal their
+    /// missed `followers` row, so the buyer's absence is the rule, not a
+    /// sweep that never ran.
     #[test]
     fn unlock_fanout_reconcile_respects_expiry_rank_and_designation_bounds() {
         let conn = Connection::open_in_memory().unwrap();
         apply_genesis(&conn).unwrap();
         let author = vec![7u8; 32];
-        let (lapsed, follower, buyer) = (vec![1u8; 32], vec![2u8; 32], vec![3u8; 32]);
+        let (lapsed, follower, buyer, gold) =
+            (vec![1u8; 32], vec![2u8; 32], vec![3u8; 32], vec![4u8; 32]);
         conn.execute(
             "INSERT INTO subscription_tiers (author_id, name, rank, created_at, unlocks_post)
              VALUES (?1, 'post-unlock-a', 1, 0, '11'),
@@ -10007,12 +10071,14 @@ mod tests {
             "INSERT INTO subscribers (author_id, subscriber_id, tier_name, approved_at, valid_until)
              VALUES (?1, ?2, 'gold', 0, 1),
                     (?1, ?3, 'followers', 0, NULL),
-                    (?1, ?4, 'post-unlock-b', 0, NULL)",
+                    (?1, ?4, 'post-unlock-b', 0, NULL),
+                    (?1, ?5, 'gold', 0, NULL)",
             rusqlite::params![
                 author.as_slice(),
                 lapsed.as_slice(),
                 follower.as_slice(),
-                buyer.as_slice()
+                buyer.as_slice(),
+                gold.as_slice()
             ],
         )
         .unwrap();
@@ -10021,35 +10087,27 @@ mod tests {
         // Idempotent by construction — a second pass must add nothing.
         reconcile_unlock_fanout_requests(&conn, None).unwrap();
 
-        // Nothing designated is ever reached: post A is the designated→
-        // designated edge from the post-B buyer, and neither the lapsed gold
-        // holder nor the rank-0 follower qualifies for it.
-        let designated: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM subscribe_requests
-                  WHERE tier_name IN ('post-unlock-a', 'post-unlock-b')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            designated, 0,
-            "lapsed / rank-0 / designated→designated must enqueue no designated tier"
-        );
-
-        // The one row the contract requires: the post-B buyer becomes a
-        // follower (rank-0, undesignated, client-mintable).
-        let rows: Vec<(String, Vec<u8>)> = conn
+        // The live gold subscriber is enrolled in every tier at or below
+        // rank 2 — both rank-1 sold posts (subscribers get them free) and
+        // `followers` — and nobody else gets anything: not the lapsed gold
+        // holder, not the rank-0 follower, and not the post-B buyer.
+        let mut rows: Vec<(String, Vec<u8>)> = conn
             .prepare("SELECT tier_name, subscriber_id FROM subscribe_requests")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
+        rows.sort();
         assert_eq!(
             rows,
-            vec![("followers".to_string(), buyer.clone())],
-            "the sold-post buyer is enrolled as a follower exactly once (monetization.md:126)"
+            vec![
+                ("followers".to_string(), gold.clone()),
+                ("post-unlock-a".to_string(), gold.clone()),
+                ("post-unlock-b".to_string(), gold.clone()),
+            ],
+            "only the live gold subscriber is enrolled; the post-B buyer is enrolled in nothing \
+             (monetization.md § Per-post pay-to-unlock, rule (a))"
         );
     }
 

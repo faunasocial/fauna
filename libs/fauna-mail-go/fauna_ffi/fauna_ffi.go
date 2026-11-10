@@ -389,6 +389,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_describe_pending_action_with_folder()
+		})
+		if checksum != 34625 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_describe_pending_action_with_folder: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_admin_picker_option()
 		})
 		if checksum != 60616 {
@@ -538,6 +547,15 @@ func uniffiCheckChecksums() {
 		if checksum != 51856 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_silent_challenge: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_bridge_card_title()
+		})
+		if checksum != 44248 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_bridge_card_title: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -943,6 +961,15 @@ func uniffiCheckChecksums() {
 		if checksum != 44030 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_approval_display_text: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_approvals_after_queued_decision()
+		})
+		if checksum != 2685 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_approvals_after_queued_decision: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1627,6 +1654,15 @@ func uniffiCheckChecksums() {
 		if checksum != 33997 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_verify_blob_upload_echo: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_knock_toast_replace_id()
+		})
+		if checksum != 47807 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_knock_toast_replace_id: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2747,6 +2783,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_fficontactsclient_knocks_accept_or_queue()
+		})
+		if checksum != 2030 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_fficontactsclient_knocks_accept_or_queue: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_fficontactsclient_knocks_block()
 		})
 		if checksum != 34661 {
@@ -2855,6 +2900,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffiemailclient_filters_create_or_queue()
+		})
+		if checksum != 523 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffiemailclient_filters_create_or_queue: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffiemailclient_filters_delete()
 		})
 		if checksum != 13648 {
@@ -2909,11 +2963,29 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffifamilyclient_allow_blocked_peer_or_queue()
+		})
+		if checksum != 15494 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifamilyclient_allow_blocked_peer_or_queue: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffifamilyclient_approvals_decide()
 		})
 		if checksum != 39083 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifamilyclient_approvals_decide: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffifamilyclient_approvals_decide_or_queue()
+		})
+		if checksum != 13856 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifamilyclient_approvals_decide_or_queue: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2932,6 +3004,15 @@ func uniffiCheckChecksums() {
 		if checksum != 23957 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifamilyclient_contact_add: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffifamilyclient_contact_add_or_queue()
+		})
+		if checksum != 17436 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifamilyclient_contact_add_or_queue: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4126,7 +4207,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffisubscriptionsclient_unsubscribe()
 		})
-		if checksum != 15307 {
+		if checksum != 59121 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffisubscriptionsclient_unsubscribe: UniFFI API checksum mismatch")
 		}
@@ -8353,6 +8434,14 @@ type FfiContactsClientInterface interface {
 	InboxModeSet(mode string) error
 	// `fauna.knocks.accept` — accept the knock from `peer_id` (hex).
 	KnocksAccept(peerId string) error
+	// [`Self::knocks_accept`] sent now or queued with no nest (the
+	// `OfflineQueued` composer, `account-offline-mutation.md` § The
+	// offline-mutation contract), over the device outbox the first connection
+	// word wired (`offline_outbox::DEVICE`). `true` = queued: the caller drops
+	// the knock from its local list and adds no roster row (the nest's read
+	// after the drain is the word); `false` = sent, and the caller re-reads
+	// as after an accept.
+	KnocksAcceptOrQueue(peerId string) (bool, error)
 	// `fauna.knocks.block` — block the knock sender `peer_id` (hex).
 	KnocksBlock(peerId string) error
 	// `fauna.knocks.dismiss` — dismiss the knock from `peer_id` (hex).
@@ -8541,6 +8630,46 @@ func (_self *FfiContactsClient) KnocksAccept(peerId string) error {
 	}
 
 	return err
+}
+
+// [`Self::knocks_accept`] sent now or queued with no nest (the
+// `OfflineQueued` composer, `account-offline-mutation.md` § The
+// offline-mutation contract), over the device outbox the first connection
+// word wired (`offline_outbox::DEVICE`). `true` = queued: the caller drops
+// the knock from its local list and adds no roster row (the nest's read
+// after the drain is the word); `false` = sent, and the caller re-reads
+// as after an accept.
+func (_self *FfiContactsClient) KnocksAcceptOrQueue(peerId string) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiContactsClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_fficontactsclient_knocks_accept_or_queue(
+			_pointer, FfiConverterStringINSTANCE.Lower(peerId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 
 // `fauna.knocks.block` — block the knock sender `peer_id` (hex).
@@ -8903,6 +9032,13 @@ type FfiEmailClientInterface interface {
 	// (`email-filters.md` § Email filter rules); a caller that does not
 	// collect the flag leaves it at its default, first-match-wins.
 	FiltersCreate(name string, rules []FfiEmailFilterRule, combination string, action FfiEmailFilterAction, priority int32, continueOnMatch bool) (int64, error)
+	// [`Self::filters_create`] sent now or queued with no nest (the
+	// `OfflineQueued` composer, `account-offline-mutation.md` § The
+	// offline-mutation contract), over the device outbox the first connection
+	// word wired (`offline_outbox::DEVICE`). `true` = queued: the rule has no
+	// server id until the drain, so a caller resets its form and lists
+	// nothing; `false` = sent, and the caller re-lists as after a create.
+	FiltersCreateOrQueue(name string, rules []FfiEmailFilterRule, combination string, action FfiEmailFilterAction, priority int32, continueOnMatch bool) (bool, error)
 	// `fauna.email.filters.delete`
 	FiltersDelete(id int64) error
 	// `fauna.email.filters.get`
@@ -8951,6 +9087,45 @@ func (_self *FfiEmailClient) FiltersCreate(name string, rules []FfiEmailFilterRu
 		// freeFn
 		func(handle C.uint64_t) {
 			C.ffi_fauna_ffi_rust_future_free_i64(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// [`Self::filters_create`] sent now or queued with no nest (the
+// `OfflineQueued` composer, `account-offline-mutation.md` § The
+// offline-mutation contract), over the device outbox the first connection
+// word wired (`offline_outbox::DEVICE`). `true` = queued: the rule has no
+// server id until the drain, so a caller resets its form and lists
+// nothing; `false` = sent, and the caller re-lists as after a create.
+func (_self *FfiEmailClient) FiltersCreateOrQueue(name string, rules []FfiEmailFilterRule, combination string, action FfiEmailFilterAction, priority int32, continueOnMatch bool) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiEmailClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffiemailclient_filters_create_or_queue(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterSequenceFfiEmailFilterRuleINSTANCE.Lower(rules), FfiConverterStringINSTANCE.Lower(combination), FfiConverterFfiEmailFilterActionINSTANCE.Lower(action), FfiConverterInt32INSTANCE.Lower(priority), FfiConverterBoolINSTANCE.Lower(continueOnMatch)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
 		},
 	)
 
@@ -9201,6 +9376,9 @@ type FfiFamilyClientInterface interface {
 	// `dm_hold` wire kind and the peer riding `peer_address` are the shared
 	// client's, never an app's.
 	AllowBlockedPeer(supervisedActorId []byte, peer FfiFamilyBlockedPeer) error
+	// [`Self::allow_blocked_peer`] sent now or queued with no nest. `true` =
+	// queued; a queued un-deny folds nothing.
+	AllowBlockedPeerOrQueue(supervisedActorId []byte, peer FfiFamilyBlockedPeer) (bool, error)
 	// `fauna.family.approvals.decide` — approve or deny one pending item on
 	// the ward's behalf.
 	//
@@ -9212,10 +9390,17 @@ type FfiFamilyClientInterface interface {
 	// `link` and whose `label` is never part of the key; `dm_hold` →
 	// `(bridge_id, peer_address)`, the external peer that is not an actor here.
 	ApprovalsDecide(supervisedActorId []byte, kind string, peerActorId []byte, messageId []byte, bridgeId string, operation string, target string, peerAddress string, approve bool) error
+	// [`Self::approvals_decide`] for one approvals-list entry, taken whole
+	// (every item key verbatim — the app never picks which key a kind uses),
+	// sent now or queued with no nest. `true` = queued.
+	ApprovalsDecideOrQueue(entry FfiFamilyApprovalEntry, approve bool) (bool, error)
 	// `fauna.family.approvals.list` — the guardian's pending reach approvals.
 	ApprovalsList() ([]FfiFamilyApprovalEntry, error)
 	// `fauna.family.contact.add` — pre-approve a contact on the ward's behalf.
 	ContactAdd(supervisedActorId []byte, peerActorId []byte) error
+	// [`Self::contact_add`] sent now or queued with no nest. `true` = queued;
+	// a queued pre-approval folds nothing.
+	ContactAddOrQueue(supervisedActorId []byte, peerActorId []byte) (bool, error)
 	// `fauna.family.contact.request` — the **supervised** caller's in-app
 	// ask to contact a peer (`family-safety.md` § Child-initiated contact
 	// requests). Pending in the guardian's queue as kind `contact_request`;
@@ -9325,6 +9510,41 @@ func (_self *FfiFamilyClient) AllowBlockedPeer(supervisedActorId []byte, peer Ff
 	return err
 }
 
+// [`Self::allow_blocked_peer`] sent now or queued with no nest. `true` =
+// queued; a queued un-deny folds nothing.
+func (_self *FfiFamilyClient) AllowBlockedPeerOrQueue(supervisedActorId []byte, peer FfiFamilyBlockedPeer) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiFamilyClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffifamilyclient_allow_blocked_peer_or_queue(
+			_pointer, FfiConverterBytesINSTANCE.Lower(supervisedActorId), FfiConverterFfiFamilyBlockedPeerINSTANCE.Lower(peer)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
 // `fauna.family.approvals.decide` — approve or deny one pending item on
 // the ward's behalf.
 //
@@ -9364,6 +9584,42 @@ func (_self *FfiFamilyClient) ApprovalsDecide(supervisedActorId []byte, kind str
 	}
 
 	return err
+}
+
+// [`Self::approvals_decide`] for one approvals-list entry, taken whole
+// (every item key verbatim — the app never picks which key a kind uses),
+// sent now or queued with no nest. `true` = queued.
+func (_self *FfiFamilyClient) ApprovalsDecideOrQueue(entry FfiFamilyApprovalEntry, approve bool) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiFamilyClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffifamilyclient_approvals_decide_or_queue(
+			_pointer, FfiConverterFfiFamilyApprovalEntryINSTANCE.Lower(entry), FfiConverterBoolINSTANCE.Lower(approve)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 
 // `fauna.family.approvals.list` — the guardian's pending reach approvals.
@@ -9432,6 +9688,41 @@ func (_self *FfiFamilyClient) ContactAdd(supervisedActorId []byte, peerActorId [
 	}
 
 	return err
+}
+
+// [`Self::contact_add`] sent now or queued with no nest. `true` = queued;
+// a queued pre-approval folds nothing.
+func (_self *FfiFamilyClient) ContactAddOrQueue(supervisedActorId []byte, peerActorId []byte) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiFamilyClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffifamilyclient_contact_add_or_queue(
+			_pointer, FfiConverterBytesINSTANCE.Lower(supervisedActorId), FfiConverterBytesINSTANCE.Lower(peerActorId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 
 // `fauna.family.contact.request` — the **supervised** caller's in-app
@@ -14882,8 +15173,11 @@ type FfiSubscriptionsClientInterface interface {
 	// has no clear verb for any of its fields — and an amount too large to
 	// express in msats is refused rather than clamped.
 	TiersUpdate(name string, rank *uint32, description *string, priceHint *string, paymentUrl *string, autoApprove *bool, askingPriceSats *uint64) (bool, error)
-	// `fauna.subscriptions.unsubscribe`
-	Unsubscribe(authorId []byte) (FfiUnsubscribeReply, error)
+	// `fauna.subscriptions.unsubscribe` — leave `tier` and every tier held
+	// above it (`Some("followers")` is the unfollow); `None` leaves every
+	// paid tier and keeps the follow
+	// ([`fauna_client_subscriptions::SubscriptionsClient::unsubscribe`]).
+	Unsubscribe(authorId []byte, tier *string) (FfiUnsubscribeReply, error)
 }
 
 // UniFFI handle for the `fauna.subscriptions.*` kinds. Construct via
@@ -15306,8 +15600,11 @@ func (_self *FfiSubscriptionsClient) TiersUpdate(name string, rank *uint32, desc
 	return res, err
 }
 
-// `fauna.subscriptions.unsubscribe`
-func (_self *FfiSubscriptionsClient) Unsubscribe(authorId []byte) (FfiUnsubscribeReply, error) {
+// `fauna.subscriptions.unsubscribe` — leave `tier` and every tier held
+// above it (`Some("followers")` is the unfollow); `None` leaves every
+// paid tier and keeps the follow
+// ([`fauna_client_subscriptions::SubscriptionsClient::unsubscribe`]).
+func (_self *FfiSubscriptionsClient) Unsubscribe(authorId []byte, tier *string) (FfiUnsubscribeReply, error) {
 	_pointer := _self.ffiObject.incrementPointer("*FfiSubscriptionsClient")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*FfiError](
@@ -15324,7 +15621,7 @@ func (_self *FfiSubscriptionsClient) Unsubscribe(authorId []byte) (FfiUnsubscrib
 			return FfiConverterFfiUnsubscribeReplyINSTANCE.Lift(ffi)
 		},
 		C.uniffi_fauna_ffi_fn_method_ffisubscriptionsclient_unsubscribe(
-			_pointer, FfiConverterBytesINSTANCE.Lower(authorId)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(authorId), FfiConverterOptionalStringINSTANCE.Lower(tier)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -19481,6 +19778,11 @@ type FfiBridgeStatus struct {
 	SupportsFollowRequests bool
 	LinkModes              *[]FfiBridgeLinkMode
 	Error                  *string
+	// `BridgeStatus.glyph` — a consented bridge app's declared `SourceGlyph`
+	// id, `None` on a first-party row. Feed it to [`bridge_card_title`]; never
+	// map it to an emoji per app. Last and defaulted, so existing positional
+	// constructions in the bindings keep compiling.
+	Glyph *string
 }
 
 func (r *FfiBridgeStatus) Destroy() {
@@ -19495,6 +19797,7 @@ func (r *FfiBridgeStatus) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.SupportsFollowRequests)
 	FfiDestroyerOptionalSequenceFfiBridgeLinkMode{}.Destroy(r.LinkModes)
 	FfiDestroyerOptionalString{}.Destroy(r.Error)
+	FfiDestroyerOptionalString{}.Destroy(r.Glyph)
 }
 
 type FfiConverterFfiBridgeStatus struct{}
@@ -19517,6 +19820,7 @@ func (c FfiConverterFfiBridgeStatus) Read(reader io.Reader) FfiBridgeStatus {
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalSequenceFfiBridgeLinkModeINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 	}
 }
@@ -19541,6 +19845,7 @@ func (c FfiConverterFfiBridgeStatus) Write(writer io.Writer, value FfiBridgeStat
 	FfiConverterBoolINSTANCE.Write(writer, value.SupportsFollowRequests)
 	FfiConverterOptionalSequenceFfiBridgeLinkModeINSTANCE.Write(writer, value.LinkModes)
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.Error)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Glyph)
 }
 
 type FfiDestroyerFfiBridgeStatus struct{}
@@ -22020,17 +22325,22 @@ func (_ FfiDestroyerFfiFolder) Destroy(value FfiFolder) {
 // FFI mirror of [`fauna_protocol::folders::FolderActorMember`] — one actor
 // (user) a shared folder is shared with, or its owner: the owner-side
 // "Shared with" list. `role` is `"owner"` | `"member"` and `handle` is empty
-// when unknown (a remote actor, or a local user with no handle set).
+// when unknown (a remote actor not yet announced by its own nest, or a local
+// user with no handle set).
 type FfiFolderActorMember struct {
 	// Hex-encoded 32-byte actor id.
 	ActorId string
-	// Display handle; empty when unknown (remote / unset).
+	// The bare handle; empty when unknown (unset, or a remote actor whose own
+	// nest has not announced it yet). A remote member's domain is folded into
+	// [`Self::display`] only — the wire's `domain` does not cross here.
 	Handle string
 	// `"owner"` | `"member"`.
 	Role string
 	// The pre-computed `folder-member-handle` label — render this, never
-	// re-derive: the handle when present, else the canonical `short_id` of
-	// [`Self::actor_id`] (`fauna_core::format::account_display_label`, the
+	// re-derive: the handle when present — for a cross-nest member the
+	// `handle@domain` its own nest announced, joined by
+	// `fauna_core::format::qualified_handle` — else the canonical `short_id`
+	// of [`Self::actor_id`] (`fauna_core::format::account_display_label`, the
 	// same rule behind `FfiPendingShare::shared_by_display` and
 	// `FolderSummary::owner_display`). Never the raw 64-hex id.
 	Display string
@@ -26914,12 +27224,19 @@ type FfiSubscriptionStatus struct {
 	Tier        *string
 	ExpiresAt   *uint64
 	AutoApprove bool
+	// A follow asked and waiting on the author's client — with `tier`, the
+	// input of `value_format::is_following` (`subscriptions.md` § The free
+	// followers tier — follow and unfollow, rule 4). Defaulted at the FFI
+	// boundary so memberwise construction in app tests keeps compiling
+	// (`version-compatibility.md` § I4 — the FFI binding boundary rule).
+	FollowPending bool
 }
 
 func (r *FfiSubscriptionStatus) Destroy() {
 	FfiDestroyerOptionalString{}.Destroy(r.Tier)
 	FfiDestroyerOptionalUint64{}.Destroy(r.ExpiresAt)
 	FfiDestroyerBool{}.Destroy(r.AutoApprove)
+	FfiDestroyerBool{}.Destroy(r.FollowPending)
 }
 
 type FfiConverterFfiSubscriptionStatus struct{}
@@ -26934,6 +27251,7 @@ func (c FfiConverterFfiSubscriptionStatus) Read(reader io.Reader) FfiSubscriptio
 	return FfiSubscriptionStatus{
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 	}
 }
@@ -26950,6 +27268,7 @@ func (c FfiConverterFfiSubscriptionStatus) Write(writer io.Writer, value FfiSubs
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.Tier)
 	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ExpiresAt)
 	FfiConverterBoolINSTANCE.Write(writer, value.AutoApprove)
+	FfiConverterBoolINSTANCE.Write(writer, value.FollowPending)
 }
 
 type FfiDestroyerFfiSubscriptionStatus struct{}
@@ -37963,6 +38282,19 @@ func DescribePendingAction(actionType string, target *string) string {
 	}))
 }
 
+// `fauna_protocol::pending_actions::describe_pending_action_with_folder` —
+// [`describe_pending_action`] naming the folder an automatic prune targets,
+// by the name the app's folder roster gave (`DevicesMachine.folderName`);
+// `None` paints the neutral sentence. See `docs/goal/ui/settings.md`
+// § Pending actions.
+func DescribePendingActionWithFolder(actionType string, target *string, folderName *string) string {
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_describe_pending_action_with_folder(FfiConverterStringINSTANCE.Lower(actionType), FfiConverterOptionalStringINSTANCE.Lower(target), FfiConverterOptionalStringINSTANCE.Lower(folderName), _uniffiStatus),
+		}
+	}))
+}
+
 // `fauna_client_admin::admin_picker_option` over the FFI boundary — the
 // option text an admin picker (guardian, invite-request) offers for `user`:
 // the **handle**, falling back to the full actor hex for a handle-less
@@ -38407,6 +38739,20 @@ func SilentChallenge(nestUrl string, secret []byte) (*FfiSilentSignInResult, err
 	}
 
 	return res, err
+}
+
+// UniFFI face of [`fauna_client_bridges::bridge_card_title`] — a Bridges page
+// network row's title: `"<emoji> <name>"` when the row declares a glyph (a
+// consented bridge app's), the bare name otherwise (`bridges.md` § Coverage
+// contract, outcome 11). Field-shaped like [`bridge_link_block`]: pass the
+// row's `name` and `glyph`, so no shell rebuilds the record to get a title.
+// The emoji comes from the one `SourceGlyph::emoji` map — no app keeps its own.
+func BridgeCardTitle(name string, glyph *string) string {
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_bridge_card_title(FfiConverterStringINSTANCE.Lower(name), FfiConverterOptionalStringINSTANCE.Lower(glyph), _uniffiStatus),
+		}
+	}))
 }
 
 // UniFFI face of [`fauna_client_bridges::link_block`] — `None` means the Link
@@ -39053,6 +39399,18 @@ func ApprovalDisplayText(entry FfiFamilyApprovalEntry) *string {
 	return FfiConverterOptionalStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_ffi_fn_func_approval_display_text(FfiConverterFfiFamilyApprovalEntryINSTANCE.Lower(entry), _uniffiStatus),
+		}
+	}))
+}
+
+// The page's fold of a decision [`FfiFamilyClient::approvals_decide_or_queue`]
+// answered QUEUED: the approvals list without the decided item, matched by its
+// item key (`fauna_client_family::approvals_after_queued_decision`), never by
+// display fields. Nothing is re-read while there is no nest.
+func ApprovalsAfterQueuedDecision(approvals []FfiFamilyApprovalEntry, decided FfiFamilyApprovalEntry) []FfiFamilyApprovalEntry {
+	return FfiConverterSequenceFfiFamilyApprovalEntryINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_approvals_after_queued_decision(FfiConverterSequenceFfiFamilyApprovalEntryINSTANCE.Lower(approvals), FfiConverterFfiFamilyApprovalEntryINSTANCE.Lower(decided), _uniffiStatus),
 		}
 	}))
 }
@@ -40784,6 +41142,17 @@ func VerifyBlobUploadEcho(echoed string, bytes []byte) (string, error) {
 	} else {
 		return FfiConverterStringINSTANCE.Lift(_uniffiRV), nil
 	}
+}
+
+// The one notification id every knock toast is raised under — the UniFFI
+// face of `fauna_client_notifications::KNOCK_TOAST_REPLACE_ID`
+// (`behavior/notifications.md` § Localized body, the knock toast: one id per
+// app, never one per sender). A native app tags its knock toast with this,
+// never a value of its own, so the seven apps cannot drift apart.
+func KnockToastReplaceId() uint32 {
+	return FfiConverterUint32INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint32_t {
+		return C.uniffi_fauna_ffi_fn_func_knock_toast_replace_id(_uniffiStatus)
+	}))
 }
 
 // UniFFI face of [`fauna_protocol::nostr_relay::relay_list_appending`].

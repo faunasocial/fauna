@@ -23,7 +23,11 @@
 
 import { stripComments } from "./source-contract.ts";
 
-const SOURCES = [
+// The list card and the post detail both paint one shared `PostMedia` component, so
+// its blob-image tag is the one render site this contract reads; the two surfaces are
+// held to it by the "both surfaces paint PostMedia" test below.
+const SOURCES = [new URL("./components/PostMedia.svelte", import.meta.url)];
+const SURFACES = [
   new URL("../routes/feed/+page.svelte", import.meta.url),
   new URL("./components/PostCard.svelte", import.meta.url),
 ];
@@ -58,16 +62,31 @@ Deno.test("no post-image element resolves its src through blobUrl", () => {
 // A guard on the guard: if either file is restructured so the matcher stops finding
 // the elements, the test above passes vacuously — green while checking nothing,
 // which is the failure mode conventions 7 and 17 both warn about.
-Deno.test("the post-image contract matcher still sees both render sites", () => {
+Deno.test("the post-image contract matcher still sees the render site", () => {
   const counts = SOURCES.map((u) => postImageTags(Deno.readTextFileSync(u)).length);
-  const total = counts.reduce((a, b) => a + b, 0);
-  if (total < 2 || counts.some((c) => c === 0)) {
+  if (counts.some((c) => c === 0)) {
     throw new Error(
-      `expected at least one post-image element in each of the feed page (the post ` +
-        `detail) and PostCard (the list card), found ${JSON.stringify(counts)}. The ` +
-        `matcher looks for a single-line tag containing IDS.POST_IMAGE; if the markup ` +
-        `moved or was split across lines, fix the matcher — do not let it read zero.`,
+      `expected a post-image element in PostMedia (the list card's and the post ` +
+        `detail's one media painter), found ${JSON.stringify(counts)}. The matcher ` +
+        `looks for a single-line tag containing IDS.POST_IMAGE; if the markup moved ` +
+        `or was split across lines, fix the matcher — do not let it read zero.`,
     );
+  }
+});
+
+Deno.test("both surfaces paint post media through PostMedia, never a tag of their own", () => {
+  for (const url of SURFACES) {
+    const code = stripComments(Deno.readTextFileSync(url));
+    const name = url.pathname.split("/").pop();
+    if (!/<PostMedia\b/.test(code)) {
+      throw new Error(`${name} no longer paints its media through PostMedia`);
+    }
+    if (postImageTags(code).length > 0) {
+      throw new Error(
+        `${name} paints a post-image tag of its own beside PostMedia — the list card and ` +
+          `the detail must share the one painter (render-model.md § D6b)`,
+      );
+    }
   }
 });
 

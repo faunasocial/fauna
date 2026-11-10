@@ -430,11 +430,18 @@ const CREATE_TABLES_SQL: &str = "
     -- (writer-signed-change-records.md ruling (11)(c)): the owner a reader
     -- that holds no marker judges by, offline as on the nest pull. A constant
     -- default with no backfill: the table is replaced whole by the next read.
+    -- is_former_writer marks a FORMER writer of the set
+    -- (writer-signed-change-records.md ruling (12)(e)): one that held writer
+    -- and holds it no longer, whose signed rows the peer door's judge admits
+    -- when sequenced; never a cached writer (is_writer answers standing). Its
+    -- row may exist for the mark alone — an evicted former writer is no
+    -- member. Same constant default, same no-backfill reasoning.
     CREATE TABLE IF NOT EXISTS share_writer_roster (
-        actor_id     TEXT PRIMARY KEY,
-        is_writer    INTEGER NOT NULL,
-        refreshed_at INTEGER NOT NULL,
-        is_owner     INTEGER NOT NULL DEFAULT 0
+        actor_id         TEXT PRIMARY KEY,
+        is_writer        INTEGER NOT NULL,
+        refreshed_at     INTEGER NOT NULL,
+        is_owner         INTEGER NOT NULL DEFAULT 0,
+        is_former_writer INTEGER NOT NULL DEFAULT 0
     );
 
     -- The same roster read's PROVEN predecessor chains, each stored beside
@@ -964,6 +971,42 @@ pub fn set_unrecorded_rels(state_dir: &Path, folder_ref: FolderRef) -> Result<Ve
         .filter(entry_is_unrecorded)
         .map(|e| e.path)
         .collect())
+}
+
+/// One set's capability-host park as the app reads it
+/// (`file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+/// host*): the mark the host persisted at a writer→reader edge or an
+/// access-gate flip, and how many rels hold local content the nest never
+/// recorded ([`set_unrecorded_rels`]'s rule). The app folds it with the row's
+/// access (`fauna_folders_machine::on_demand_presence::parked_presences`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetParkRead {
+    /// When the host marked the set parked (unix seconds); `None` = no mark.
+    pub access_revoked_at: Option<i64>,
+    /// The count of [`set_unrecorded_rels`].
+    pub unrecorded: u32,
+}
+
+/// Read one set's [`SetParkRead`] from its state DB — the same cross-process
+/// WAL read [`set_unrecorded_rels`] makes. A missing DB is a set never served:
+/// no mark, nothing un-recorded. An unreadable one is an error the caller
+/// treats as parked (fail closed: an un-shown park is the silent un-sync the
+/// iron rule forbids).
+pub fn set_park(state_dir: &Path, folder_ref: FolderRef) -> Result<SetParkRead> {
+    let path = folder_ref.state_db_path(state_dir);
+    if !path.exists() {
+        return Ok(SetParkRead::default());
+    }
+    let db = SyncDb::open(&path)?;
+    let unrecorded = db
+        .list_all()?
+        .iter()
+        .filter(|e| entry_is_unrecorded(e))
+        .count();
+    Ok(SetParkRead {
+        access_revoked_at: db.access_revoked_at()?,
+        unrecorded: u32::try_from(unrecorded).unwrap_or(u32::MAX),
+    })
 }
 
 fn entry_is_unrecorded(e: &SyncEntry) -> bool {
@@ -2043,6 +2086,53 @@ impl SyncDb {
         )
     }
 
+    /// The candidate set the adoption marker naming `nonce` is bound to
+    /// (ruling (11)(d), residual (3) of (11)(j)): each `(path_hash, head
+    /// seq)` its first adopting pass saw. `None` = no adopting pass has run
+    /// yet; a later pass under the same marker adopts only these, so a nest
+    /// that holds the adoption open cannot extend it to a head it serves
+    /// afterwards.
+    pub fn adoption_candidates(&self, nonce: &[u8; 32]) -> Result<Option<Vec<(String, i64)>>> {
+        let Some(value) = self.meta_get(&Self::adoption_candidates_key(nonce))? else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        for item in value.split(';').filter(|s| !s.is_empty()) {
+            let (hash, seq) = item
+                .split_once(':')
+                .with_context(|| format!("adoption candidate {item:?}: no seq"))?;
+            out.push((
+                hash.to_string(),
+                seq.parse()
+                    .with_context(|| format!("adoption candidate {item:?}: seq"))?,
+            ));
+        }
+        Ok(Some(out))
+    }
+
+    /// Record (`Some`) or clear (`None`) [`Self::adoption_candidates`].
+    pub fn set_adoption_candidates(
+        &self,
+        nonce: &[u8; 32],
+        candidates: Option<&[(String, i64)]>,
+    ) -> Result<()> {
+        let key = Self::adoption_candidates_key(nonce);
+        match candidates {
+            Some(set) => self.meta_put(
+                &key,
+                &set.iter()
+                    .map(|(hash, seq)| format!("{hash}:{seq}"))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            ),
+            None => self.meta_del(&key),
+        }
+    }
+
+    fn adoption_candidates_key(nonce: &[u8; 32]) -> String {
+        format!("adoption_set:{}", fauna_core::hex32::encode(nonce))
+    }
+
     /// Whether this `SyncDb` holds any entry at all — the take-over's *holds
     /// local state* (ruling (11)(d): synced, placeholder, or awaiting
     /// hydration alike).
@@ -3086,6 +3176,50 @@ impl SyncDb {
     /// pass returns cleanly, so a crash mid-pass re-drives it.
     pub fn set_corpus_audience(&self, shape: &str) -> Result<()> {
         self.meta_put("corpus_audience", shape)
+    }
+
+    /// The capability host's park mark on this set (unix seconds), or `None`
+    /// (`file-sync.md` § Multi-writer shared sets → *Revocation on a
+    /// capability host*). Written by the host at the edge whose basis read
+    /// `writer` and whose fresh row reads `reader`, and at an access-gate flip;
+    /// cleared only at an edge whose row reads `writer` — a positive fact from
+    /// the nest, never the absence of a refusal. A `meta` row, so the mark
+    /// rides the per-set DB the host and the app of one device share, and
+    /// outlives an unloaded extension.
+    pub fn access_revoked_at(&self) -> Result<Option<i64>> {
+        Ok(self
+            .meta_get("access_revoked_at")?
+            .and_then(|v| v.parse::<i64>().ok()))
+    }
+
+    /// Persist the park mark (the write half of [`Self::access_revoked_at`]).
+    /// An existing mark keeps its first stamp: the park began then.
+    pub fn mark_access_revoked(&self, at_unix_s: i64) -> Result<()> {
+        if self.access_revoked_at()?.is_some() {
+            return Ok(());
+        }
+        self.meta_put("access_revoked_at", &at_unix_s.to_string())
+    }
+
+    /// Clear the park mark — the row read `writer` again.
+    pub fn clear_access_revoked(&self) -> Result<()> {
+        self.meta_del("access_revoked_at")
+    }
+
+    /// The access (`writer` / `reader`) the capability host's last engine on
+    /// this set was built from, or `None` before its first build. The host
+    /// compares it with each fresh build's basis, so a demotion the row took
+    /// while no host process was running — an iOS extension is relaunched per
+    /// request — still reads as the writer→reader edge
+    /// [`Self::access_revoked_at`] marks (`file-sync.md` § Multi-writer shared
+    /// sets → *Revocation on a capability host*).
+    pub fn host_built_access(&self) -> Result<Option<String>> {
+        self.meta_get("host_built_access")
+    }
+
+    /// Persist the write half of [`Self::host_built_access`].
+    pub fn set_host_built_access(&self, access: &str) -> Result<()> {
+        self.meta_put("host_built_access", access)
     }
 
     /// What this seat remembers about its folder's audience attestations —
@@ -4405,11 +4539,19 @@ impl SyncDb {
     /// (`WriterRoster::owner`): the member row of that actor is marked, and a
     /// reader whose binding names no owner judges by it
     /// ([`Self::cached_share_roster`]).
+    ///
+    /// `former_writers` is the same read's former writers
+    /// (`WriterRoster::former_writers`, ruling (12)(e)): each is marked on its
+    /// row — a row of its own, `is_writer` false, when the read lists no
+    /// member of that id — and their chains ride in `chains` beside the
+    /// writers'. A former writer is never a cached WRITER
+    /// ([`Self::cached_share_writer`] answers standing).
     pub fn cache_share_writer_roster(
         &self,
         members: &[(String, bool)],
         chains: &[(String, Vec<String>)],
         owner: Option<&str>,
+        former_writers: &[String],
     ) -> Result<()> {
         let tx = self
             .conn
@@ -4446,6 +4588,15 @@ impl SyncDb {
                 ],
             )
             .context("insert share_writer_roster row")?;
+        }
+        for former_hex in former_writers {
+            tx.execute(
+                "INSERT INTO share_writer_roster
+                    (actor_id, is_writer, refreshed_at, is_former_writer) VALUES (?1, 0, ?2, 1)
+                 ON CONFLICT(actor_id) DO UPDATE SET is_former_writer = 1",
+                params![former_hex.to_lowercase(), now],
+            )
+            .context("mark share_writer_roster former writer")?;
         }
         tx.commit().context("commit roster replace")
     }
@@ -4598,8 +4749,9 @@ impl SyncDb {
     }
 
     /// The whole cached roster as the peer door's judge reads it: the cached
-    /// WRITERS (`actor_hex`), and each writer's proven predecessors nearest
-    /// first — `(writer_hex, predecessors)`, a writer with none absent — and
+    /// WRITERS (`actor_hex`), the FORMER writers, and each one's proven
+    /// predecessors nearest first — `(writer_hex, predecessors)`, one with
+    /// none absent — and
     /// the read's owner, when exactly one cached row is marked. All empty when
     /// no roster was ever cached (or the set is unshared).
     pub fn cached_share_roster(&self) -> Result<CachedShareRoster> {
@@ -4626,6 +4778,15 @@ impl SyncDb {
             .context("read share_writer_roster")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("read share_writer_roster row")?;
+        let mut former = self
+            .conn
+            .prepare("SELECT actor_id FROM share_writer_roster WHERE is_former_writer != 0")
+            .context("prepare share_writer_roster former-writer read")?;
+        let former_writers = former
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("read share_writer_roster former writers")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read share_writer_roster former-writer row")?;
         let mut rows = self
             .conn
             .prepare(
@@ -4648,6 +4809,7 @@ impl SyncDb {
         }
         Ok(CachedShareRoster {
             writers,
+            former_writers,
             chains,
             owner,
         })
@@ -4659,6 +4821,9 @@ impl SyncDb {
 pub struct CachedShareRoster {
     /// The cached writers, lowercase hex.
     pub writers: Vec<String>,
+    /// The cached former writers (ruling (12)(e)), lowercase hex — admitted
+    /// by, never standing as writers.
+    pub former_writers: Vec<String>,
     /// `(writer, its proven predecessors nearest first)`, lowercase hex.
     pub chains: Vec<(String, Vec<String>)>,
     /// The cached read's owner (its one `role == "owner"` row), lowercase hex.
@@ -5367,6 +5532,68 @@ mod tests {
     /// states and the record-failed `Synced` shape — while placeholder /
     /// remote-only rows never block a removal. A set with no DB has nothing to
     /// lose.
+    #[test]
+    fn set_park_reads_the_hosts_mark_and_the_unrecorded_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let set = FolderRef::Local(11);
+        // No DB: never served, nothing parked.
+        assert_eq!(set_park(state_dir, set).unwrap(), SetParkRead::default());
+
+        let db = SyncDb::open(set.state_db_path(state_dir)).unwrap();
+        db.upsert_entry(
+            "kept.txt",
+            Some(test_hash(1)),
+            None,
+            Some(test_hash(9)),
+            SyncState::LocallyModified,
+            0,
+            0,
+            1,
+            1,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            set_park(state_dir, set).unwrap(),
+            SetParkRead {
+                access_revoked_at: None,
+                unrecorded: 1
+            }
+        );
+
+        db.mark_access_revoked(1_000).unwrap();
+        // A second mark keeps the first stamp: the park began then.
+        db.mark_access_revoked(2_000).unwrap();
+        assert_eq!(
+            set_park(state_dir, set).unwrap(),
+            SetParkRead {
+                access_revoked_at: Some(1_000),
+                unrecorded: 1
+            }
+        );
+
+        db.clear_access_revoked().unwrap();
+        assert_eq!(set_park(state_dir, set).unwrap().access_revoked_at, None);
+    }
+
+    /// The capability host's built access outlives the connection that wrote
+    /// it, as a relaunched extension reads it.
+    #[test]
+    fn the_hosts_built_access_survives_a_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = FolderRef::Local(12).state_db_path(tmp.path());
+        {
+            let db = SyncDb::open(&path).unwrap();
+            assert_eq!(db.host_built_access().unwrap(), None);
+            db.set_host_built_access("writer").unwrap();
+        }
+        let db = SyncDb::open(&path).unwrap();
+        assert_eq!(db.host_built_access().unwrap().as_deref(), Some("writer"));
+        db.set_host_built_access("reader").unwrap();
+        assert_eq!(db.host_built_access().unwrap().as_deref(), Some("reader"));
+    }
+
     #[test]
     fn set_unrecorded_rels_reports_unproven_local_content_only() {
         let tmp = tempfile::tempdir().unwrap();

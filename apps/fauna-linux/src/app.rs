@@ -53,6 +53,13 @@ pub enum UiMessage {
     Data(DataMessage),
     Action(ActionResult),
     Realtime(WsEvent),
+    /// A deployment-seed custody leg ended with an admin's custody unconfirmed
+    /// (`box-recovery.md` § The plane-era recovery floor, (c) The writes): the
+    /// text is the shared `fauna_client_config::custody_leg_warning`, already
+    /// resolved, and it paints the app-wide `warning-message` banner verbatim —
+    /// the same surface and words as tui's `AppEvent::RecoveryCustodyWarning`,
+    /// so every app warns in the one shared wording.
+    RecoveryCustodyWarning(String),
     /// No-op message — used when a callback handles UI inline on the GTK
     /// thread and does not need to route through the normal message handler.
     #[allow(dead_code)]
@@ -131,6 +138,12 @@ pub enum DataMessage {
     },
     KnocksLoaded {
         knocks: Vec<crate::rows::KnockRow>,
+    },
+    /// A knock accept made with no nest rested in the device's outbox: the
+    /// knock leaves the local list, no roster row is added (the nest's read
+    /// after the drain is the word — account-offline-mutation.md).
+    KnockAcceptQueued {
+        peer_id: String,
     },
     /// The private contact overlay projection moved (`contacts.md` § The
     /// private overlay): the roster rows and knock senders name people through
@@ -1012,7 +1025,7 @@ pub struct WidgetHandles {
     pub status_handle_row: adw::ActionRow,
     pub status_node_url_row: adw::ActionRow,
     pub status_connection_row: adw::ActionRow,
-    pub status_quota_tier_row: adw::ActionRow,
+    pub status_tier_row: adw::ActionRow,
     pub status_quota_inbox_row: adw::ActionRow,
     pub status_quota_storage_row: adw::ActionRow,
     pub status_quota_devices_row: adw::ActionRow,
@@ -1187,7 +1200,7 @@ impl WidgetHandles {
             handle_row: self.status_handle_row.clone(),
             node_url_row: self.status_node_url_row.clone(),
             connection_row: self.status_connection_row.clone(),
-            quota_tier_row: self.status_quota_tier_row.clone(),
+            tier_row: self.status_tier_row.clone(),
             quota_inbox_row: self.status_quota_inbox_row.clone(),
             quota_storage_row: self.status_quota_storage_row.clone(),
             quota_devices_row: self.status_quota_devices_row.clone(),
@@ -1633,8 +1646,8 @@ pub fn build_main_window(
                     // Refresh the moderation queue (a flag may have landed since
                     // login / last visit — the actions are nest-authoritative).
                     "moderation" => client_for_nav.fetch_moderation_actions(),
-                    // The admin's installed plugins sit under the bridge list.
-                    "bridges" => views::bridges::plugins::refresh(&client_for_nav),
+                    // The bridge list and, under it, the plugin cards.
+                    "bridges" => views::bridges::refresh(&client_for_nav),
                     // Notifications are fetched per view (`notifications.md`
                     // § Persistence — apps hold no durable cache): a row minted
                     // while no push reached this session (an admin's doorbell
@@ -2330,7 +2343,7 @@ pub fn build_main_window(
         status_handle_row: status_handles.handle_row,
         status_node_url_row: status_handles.node_url_row,
         status_connection_row: status_handles.connection_row,
-        status_quota_tier_row: status_handles.quota_tier_row,
+        status_tier_row: status_handles.tier_row,
         status_quota_inbox_row: status_handles.quota_inbox_row,
         status_quota_storage_row: status_handles.quota_storage_row,
         status_quota_devices_row: status_handles.quota_devices_row,
@@ -2462,7 +2475,12 @@ pub fn handle_ui_message(
 
                 // Update status view.
                 widgets.status_actor_id_row.set_subtitle(actor_id);
-                widgets.status_handle_row.set_subtitle(handle);
+                // The identity cell paints from the registry's cache only
+                // (`settings.md` § Layout & flow item 1), never this reply.
+                views::status::paint_identity_cell(
+                    &widgets.status_handle_row,
+                    &widgets.status_tier_row,
+                );
                 widgets
                     .status_connection_row
                     .set_subtitle(common::CONNECTED);
@@ -3075,6 +3093,19 @@ pub fn handle_ui_message(
                 views::contacts::list::update_knocks_list(
                     &widgets.knocks_list_box,
                     knocks,
+                    fauna_client,
+                );
+            }
+
+            DataMessage::KnockAcceptQueued { peer_id } => {
+                let knocks = {
+                    let mut st = state.borrow_mut();
+                    st.knocks.retain(|k| &k.peer_actor_id != peer_id);
+                    st.knocks.clone()
+                };
+                views::contacts::list::update_knocks_list(
+                    &widgets.knocks_list_box,
+                    &knocks,
                     fauna_client,
                 );
             }
@@ -3960,18 +3991,12 @@ pub fn handle_ui_message(
                 // auth-token response doesn't carry the handle, so we fetch
                 // /api/v1/account separately after auth success.
                 crate::settings::set_handle(handle.clone());
+                // No cache write and no identity-cell paint here: the
+                // server-data cache has ONE writer, the verify reply
+                // (`long-term-store.md` § Cross-app server-data cache), and
+                // `IdentityRefreshed` repaints the cell from it.
                 if let Some(h) = handle.as_deref() {
                     state.borrow_mut().handle = h.to_string();
-                    widgets.status_handle_row.set_subtitle(h);
-
-                    // Also refresh the libsecret cache so the next cold
-                    // launch can show the handle instantly without
-                    // waiting for /api/v1/account. Best-effort + log:
-                    // a libsecret failure here just means we'll re-write
-                    // on the next account fetch (idempotent).
-                    if let Err(e) = crate::client::store_account_cache(Some(h), None, None) {
-                        tracing::error!("[libsecret] cache handle write failed: {e:#}");
-                    }
                 }
             }
 
@@ -3987,7 +4012,13 @@ pub fn handle_ui_message(
                 // conversations session's live self-address cell).
                 crate::settings::set_handle(Some(handle.clone()));
                 state.borrow_mut().handle = handle.clone();
-                widgets.status_handle_row.set_subtitle(handle);
+                // The identity cell re-reads the cache this reply just wrote
+                // (handle, domain AND tier — `settings.md` § Layout & flow
+                // item 1).
+                views::status::paint_identity_cell(
+                    &widgets.status_handle_row,
+                    &widgets.status_tier_row,
+                );
                 // The ONE self-heal call (`conversations.md` § State & data
                 // shape → *Self-address: live, never baked*): a session built
                 // before this refresh landed (empty cache) starts sending, and
@@ -4005,7 +4036,7 @@ pub fn handle_ui_message(
                 // The profile SELF header shows `<handle>@<current primary>`,
                 // read at render time — repaint it now the cache has moved.
                 views::profile::repaint_self_headers();
-                let _ = tier; // settings UI doesn't surface tier yet
+                let _ = tier; // the identity cell re-read the cache above
             }
 
             DataMessage::QuotaLoaded { quota } => {
@@ -4170,7 +4201,12 @@ pub fn handle_ui_message(
                     s.handle = new_handle.clone();
                 }
                 crate::settings::set_handle(Some(new_handle.clone()));
-                widgets.status_handle_row.set_subtitle(new_handle);
+                // The identity cell stays on the cache until the session's
+                // identity follow lands the renamed handle there.
+                views::status::paint_identity_cell(
+                    &widgets.status_handle_row,
+                    &widgets.status_tier_row,
+                );
             }
 
             DataMessage::RecoveryStatusLoaded { result } => {
@@ -4862,6 +4898,10 @@ pub fn handle_ui_message(
             handle_ws_event(ws_event, state, widgets, fauna_client);
         }
 
+        UiMessage::RecoveryCustodyWarning(message) => {
+            set_warning_message(widgets, message);
+        }
+
         UiMessage::Noop => {}
     }
 }
@@ -5082,6 +5122,15 @@ pub fn set_error_message(widgets: &WidgetHandles, message: &str) {
     crate::settings::render_error_label(&widgets.error_label, Some(message));
 }
 
+/// Set the app-wide `warning-message` banner to `message` and make it visible.
+/// A warning is "displayed to the user" too (observability.md § category 1),
+/// so it is logged at `warn` as it shows.
+pub fn set_warning_message(widgets: &WidgetHandles, message: &str) {
+    tracing::warn!("{message}");
+    widgets.warning_label.set_text(message);
+    widgets.warning_label.set_visible(true);
+}
+
 /// Hide the persistent error banner and clear its text.
 #[allow(dead_code)]
 pub fn clear_error_message(widgets: &WidgetHandles) {
@@ -5141,6 +5190,9 @@ fn update_connection_indicator(widgets: &Rc<WidgetHandles>, ws_event: &WsEvent) 
     // contract → *How a surface asks*; tui states the identical guarantee in
     // `App::connection_state_word`).
     crate::offline_gate::set_connection_state(state_word);
+    // …and the offline composer reads it too, so a control the gate keeps
+    // live is exactly a control whose gesture queues with no nest.
+    crate::offline_outbox::set_connection_state(state_word);
 }
 
 /// Update the global `sync-agent-status` sidebar indicator (health of the
@@ -5468,10 +5520,10 @@ fn handle_ws_event(
                 // paints the same relayed text as the row and cannot be
                 // revealed, so a push whose row would collapse raises none.
                 PushEvent::Knock(p) => {
-                    let muted = crate::conversations::muted_keywords_cache();
-                    if !fauna_client_notifications::knock_push_muted(&muted, p) {
-                        crate::notifications::notify_knock(&crate::i18n::knock_push_text(p));
-                    }
+                    crate::notifications::raise_knock_toast(
+                        &crate::conversations::muted_keywords_cache(),
+                        p,
+                    );
                 }
                 PushEvent::AccountUpdated(_) => {
                     // Nothing beyond the account re-read above.
@@ -5565,6 +5617,11 @@ fn handle_ws_event(
                     // `StaleSurfaces::nest_info` above, and nothing else is
                     // linux's.
                 }
+                PushEvent::DevicesChanged(_) => {
+                    // A sibling renamed, removed or braked a device
+                    // (`devices.md` § Listing Devices): the re-read is the
+                    // seam's `StaleSurfaces::devices` above.
+                }
                 PushEvent::MailFlagsChanged(_) => {
                     // Mail read-state wake (`mail-app-surface.md` § Read state).
                     // The consumer is the shared conversations mail rail, which
@@ -5617,6 +5674,10 @@ fn handle_ws_event(
                     // IMAP/CalDAV mailbox-state push (mail-bridge I5 Phase F).
                     // Consumed by the mailbox-state slice when it lands on
                     // linux; no-op until then.
+                }
+                PushEvent::BridgeAccountRevoked(_) => {
+                    // Bridge-held session teardown — pushed only to approved
+                    // MDA bridge connections, never a user client's. No-op.
                 }
                 PushEvent::BridgeConfigChanged(_) => {
                     // Bridge config hot-reload nudge — pushed only to approved
@@ -5716,8 +5777,10 @@ fn handle_ws_event(
                 }
                 PushEvent::BridgeExportProgress(_)
                 | PushEvent::BridgeExportError(_)
-                | PushEvent::BridgeExportComplete(_) => {
-                    // `fauna.bridges.push.export_{progress,error,complete}` — an
+                | PushEvent::BridgeExportComplete(_)
+                | PushEvent::BridgeExportSessionChanged(_) => {
+                    // `fauna.bridges.push.export_{progress,error,complete,
+                    // session_changed}` — an
                     // export of this actor's moved, here or on another device.
                     // Consumed above via `invalidates()` →
                     // `StaleSurfaces::mail_export` → `apply_stale`, which
@@ -5727,7 +5790,8 @@ fn handle_ws_event(
                 }
                 PushEvent::BridgeImportProgress(_)
                 | PushEvent::BridgeImportError(_)
-                | PushEvent::BridgeImportComplete(_) => {
+                | PushEvent::BridgeImportComplete(_)
+                | PushEvent::BridgeImportSessionChanged(_) => {
                     // `fauna.bridges.push.import_{progress,error,complete}` —
                     // an import of this actor's moved, here or on another
                     // device. Consumed above via `invalidates()` →

@@ -182,8 +182,8 @@ pub fn queue_row_stalled(
 }
 
 /// Does this diagnostics row name an SPF/DKIM/DMARC/rDNS record check (the
-/// checks `records_failing` reads; MTA-STS, TLSRPT and the outbound-TLS probe
-/// are not records failures)?
+/// checks `records_failing` reads; MTA-STS, TLSRPT, the outbound-TLS probe and
+/// the DNSSEC resolver path are not records failures)?
 pub fn is_records_check(name: &str) -> bool {
     ["SPF ", "DKIM ", "DMARC ", "Reverse-DNS "]
         .iter()
@@ -662,6 +662,7 @@ mod tests {
             "MTA-STS policy file fetchable",
             "TLSRPT record present",
             "Outbound TLS to gmail.com",
+            "DNSSEC resolver path",
             "Mail enabled",
         ] {
             assert!(!is_records_check(name), "{name}");

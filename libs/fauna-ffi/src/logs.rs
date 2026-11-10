@@ -120,3 +120,36 @@ pub fn log_rendered_text(entries: Vec<LogEntry>, tz_offset_secs: i32) -> String 
 pub fn log_rows(entries: Vec<LogEntry>, tz_offset_secs: i32) -> Vec<LogRow> {
     fauna_log::format::rows(&entries, tz_offset_secs)
 }
+
+// ---------------------------------------------------------------------------
+// app-log's size-cap e2e seams (`docs/features/app-log.md` outcome 7) — the
+// UniFFI apps' twin of the tui and linux `app_log_emit` arms, one shared body
+// each (`fauna_log::rolling`). `test-helpers` only (convention 15 rule (b)):
+// the `*-ffi-test` flavors carry them, the shipped artifacts compile them out.
+// ---------------------------------------------------------------------------
+
+/// Re-read `FAUNA_E2E_LOG_TOTAL_CAP_BYTES` and lower the open log writer's caps
+/// (`fauna_log::rolling::reload_e2e_caps_for_test`): for an app whose launch
+/// environment becomes process env only after [`install_logging`] ran — the
+/// android app's `MainActivity` re-exports its launch intent's extras after
+/// `FaunaApp` installed logging. Answers whether a lowered cap is in force.
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn log_reload_e2e_caps_for_test() -> bool {
+    fauna_log::rolling::reload_e2e_caps_for_test().is_some()
+}
+
+/// The `app_log_emit` agent command's body: `count` tagged `info` lines through
+/// the installed subscriber, each padded to about `bytes` bytes
+/// (`fauna_log::rolling::emit_burst_for_test`). Answers the JSON result every
+/// app's arm returns — `{"emitted": n}`, or `{"error": "…"}` for a refused burst
+/// (convention 11: an untagged or oversized burst is refused loudly).
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn log_emit_burst_for_test(tag: String, count: u64, bytes: u64) -> String {
+    let outcome = match fauna_log::rolling::emit_burst_for_test(&tag, count, bytes) {
+        Ok(emitted) => serde_json::json!({ "emitted": emitted }),
+        Err(e) => serde_json::json!({ "error": e }),
+    };
+    outcome.to_string()
+}

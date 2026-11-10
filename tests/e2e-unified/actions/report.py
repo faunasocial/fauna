@@ -74,6 +74,22 @@ class ReportActions:
     def tick_block_author(self) -> None:
         self.driver.click("report-block-author-checkbox")
 
+    # ── The show-again control on the reported placeholder ──
+    # (`content-policy-show-again-button`, moderation.md § Corollary — the
+    # reporter's hide is theirs to undo). Scoped with the notice in
+    # `post-card[i]`, so a caller names the card; unscoped reads count every
+    # placeholder on the page.
+
+    def show_again_count(self) -> int:
+        return self.driver.count("content-policy-show-again-button")
+
+    def show_again_label(self, *, scope: str | None = None) -> str:
+        """The button's label — names the scope: the item, or the account."""
+        return self.driver.get_text("content-policy-show-again-button", scope=scope)
+
+    def show_again(self, *, scope: str | None = None) -> None:
+        self.driver.click("content-policy-show-again-button", scope=scope)
+
     def submit_enabled(self) -> bool:
         return self.driver.is_enabled("report-submit-button")
 

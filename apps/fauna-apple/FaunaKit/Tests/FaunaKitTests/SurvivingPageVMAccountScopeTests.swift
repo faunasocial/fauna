@@ -763,7 +763,7 @@ struct ProfileOffersVMAccountScopeTests {
     func aSwitchDropsTheViewersTier() async throws {
         let apiA = ScriptedSubscriptionsAPI("account A")
         apiA.offers = [tierA]
-        apiA.status = FfiSubscriptionStatus(tier: "account-a-tier", expiresAt: nil, autoApprove: false)
+        apiA.status = FfiSubscriptionStatus(tier: "account-a-tier", expiresAt: nil, autoApprove: false, followPending: false)
         let vm = ProfileOffersVM()
         await vm.configure(api: apiA, authorIdHex: "some-creator")
         try #require(vm.statusTier == "account-a-tier",
@@ -784,7 +784,7 @@ struct ProfileOffersVMAccountScopeTests {
     func resetDropsTheViewerState() async throws {
         let apiA = ScriptedSubscriptionsAPI("account A")
         apiA.offers = [tierA]
-        apiA.status = FfiSubscriptionStatus(tier: "account-a-tier", expiresAt: nil, autoApprove: false)
+        apiA.status = FfiSubscriptionStatus(tier: "account-a-tier", expiresAt: nil, autoApprove: false, followPending: false)
         let vm = ProfileOffersVM()
         await vm.configure(api: apiA, authorIdHex: "some-creator")
 

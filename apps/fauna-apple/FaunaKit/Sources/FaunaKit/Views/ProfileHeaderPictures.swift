@@ -3,6 +3,7 @@ import SwiftUI
 /// The Profile header's stored avatar and banner (`profile.md` § Layout & flow, the
 /// `user-header` component; `profile-avatar` / `profile-banner`).
 public enum ProfileHeaderPictures {
+    #if !FAUNA_KIDS  // rides the post-blob plane, which the kids flavor lacks
     /// The post-blob home a header picture is fetched from: `nil` (this nest) when
     /// this nest served the profile, else the `relayed_from` home paired with the
     /// identity the relay reply stamped (`HeaderRead::home_nest_actor_id`). Never
@@ -12,6 +13,7 @@ public enum ProfileHeaderPictures {
         guard let url = read?.relayedFrom else { return nil }
         return FfiPostBlobHome(url: url, nestActorId: read?.homeNestActorId)
     }
+    #endif
 }
 
 /// One header picture leaf. Rendered only when the profile names the picture;

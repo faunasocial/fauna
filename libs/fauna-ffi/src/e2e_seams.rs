@@ -4,14 +4,16 @@
 //! call where its indicator takes its state and where it publishes its e2e
 //! state, never a Swift/Kotlin/C# re-implementation of the counting. The fourth
 //! seam, `ALERT_SWEEP_WAKE`, lives beside the loop it wakes
-//! (`crate::critical_alerts`). tui is the reference leg.
+//! (`crate::critical_alerts`). tui is the reference leg. The knock-toast log
+//! (`fauna_e2e_agent::KNOCK_NOTICES_KEY`) rides here too: the same shape of
+//! seam — a shared counter an app's firing arm feeds and its state publishes.
 //!
 //! `test-helpers` only (convention 15 rule (b)): the `*-ffi-test` flavors carry
 //! these; the production flavors — the shipped artifacts — compile them out.
 
 use std::sync::{Arc, Mutex};
 
-use fauna_e2e_contract::{ConnectionReports, PaintedErrorTally};
+use fauna_e2e_contract::{ConnectionReports, KnockNotices, PaintedErrorTally};
 
 use crate::nest_client::FfiConnectionState;
 use crate::{FfiError, FfiNestClient};
@@ -105,6 +107,29 @@ pub fn dial_budget_clear_for_test() {
     fauna_ws_substrate::reach_hint::clear_all_for_test();
 }
 
+/// Hold this process's subscriptions author drain — the
+/// `subscriptions_hold_author_drain` agent command's mechanism on the UniFFI
+/// apps (tui's arm is the reference): every later `drain_auto_approvals` pass
+/// reads the queue and commits nothing, so a payment-backed subscribe request
+/// stands in the author's §2 while the test reads its paid badge
+/// (`monetization.md` § Pillar 3). The flag is the shared process-wide one
+/// (`fauna_client_subscriptions::orchestration`), which the in-process author
+/// pump reads. Gated like its neighbours (convention 15): the shared fn it
+/// calls is itself compiled out of a production flavor.
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn subscriptions_hold_author_drain_for_test() {
+    fauna_client_subscriptions::orchestration::hold_author_drain_for_test();
+}
+
+/// Release [`subscriptions_hold_author_drain_for_test`]; the next pump tick
+/// drains as usual. A no-op when nothing is held.
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn subscriptions_release_author_drain_for_test() {
+    fauna_client_subscriptions::orchestration::release_author_drain_for_test();
+}
+
 /// The counter behind `fauna_e2e_agent::CONNECTION_REPORTS_KEY`. An app holds
 /// ONE, fed every connection-state value its indicator receives (each
 /// `FfiConnectionStateSubscription::next`, repeats included), and publishes
@@ -133,6 +158,54 @@ impl FfiConnectionReportsForTest {
     }
 
     /// The `connection_reports` state value, as JSON text.
+    pub fn json(&self) -> String {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .json()
+            .to_string()
+    }
+}
+
+/// The log behind `fauna_e2e_agent::KNOCK_NOTICES_KEY` — the knock toasts this
+/// app process raised (`notifications` outcome 15). An app holds ONE, calls
+/// [`Self::observe`] for every knock push its toast arm receives (before the
+/// muted-word gate) and [`Self::record`] for every toast it handed the platform
+/// (after it), and publishes [`Self::json`] under that key. The counting is the
+/// shared `fauna_e2e_contract::KnockNotices`, tui's and linux's too.
+#[derive(uniffi::Object)]
+pub struct FfiKnockNoticesForTest {
+    inner: Mutex<KnockNotices>,
+}
+
+#[uniffi::export]
+impl FfiKnockNoticesForTest {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(KnockNotices::default()),
+        })
+    }
+
+    /// A knock push reached the toast arm (call before the muted gate).
+    pub fn observe(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe();
+    }
+
+    /// A knock toast was raised: the catalog `key` its text resolved from
+    /// (`None` for a verbatim text), the painted `text`, and the platform
+    /// notification id it replaces under.
+    pub fn record(&self, key: Option<String>, text: String, replace_id: Option<u32>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(key.as_deref(), &text, replace_id);
+    }
+
+    /// The `knock_notices` state value, as JSON text.
     pub fn json(&self) -> String {
         self.inner
             .lock()
@@ -218,5 +291,22 @@ mod tests {
         tally.observe(frame());
         let json: serde_json::Value = serde_json::from_str(&tally.json()).unwrap();
         assert_eq!(json["count"], 1, "a standing error counts once");
+
+        let knocks = FfiKnockNoticesForTest::new();
+        knocks.observe();
+        knocks.observe();
+        knocks.record(
+            Some("notifications.row_knock".into()),
+            "hello".into(),
+            Some(fauna_client_notifications::KNOCK_TOAST_REPLACE_ID),
+        );
+        let json: serde_json::Value = serde_json::from_str(&knocks.json()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "seen": 2,
+                "fired": [{ "key": "notifications.row_knock", "text": "hello", "replace_id": 1003 }],
+            })
+        );
     }
 }

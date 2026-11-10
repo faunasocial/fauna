@@ -147,6 +147,13 @@ impl Fixture {
         // nest key so the seal seam can decrypt it) and provisions the actor's
         // MSEK-derived seal key (the D2 row the seal seam seals to).
         let msek = [0x88u8; 32];
+        // The actor is a standing account on HEAD: the NIP-46 signer serves
+        // nobody for an account with no authority row (`bunker::account_stands`).
+        head_state
+            .db
+            .create_user(&actor, "free", "proxy-actor")
+            .await
+            .unwrap();
         {
             let nest_key = head_state.nest_identity.signing_key.to_bytes();
             let enc = encrypt_nostr_privkey(&nest_key, &kp.secret_bytes()).unwrap();
@@ -258,9 +265,11 @@ impl Fixture {
             &self.head_state.db,
             &self.head_state.post_segments,
             &nest_key,
+            "",
         )
         .await
-        .expect("materialize sweep");
+        .expect("materialize sweep")
+        .count;
         assert_eq!(n, 1, "the exposed post materialized into one signed event");
 
         // The derived event now rests on HEAD as ORIGIN_INGEST (the push scope).

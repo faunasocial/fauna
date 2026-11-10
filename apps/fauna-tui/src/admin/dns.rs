@@ -1101,6 +1101,7 @@ pub(crate) mod tests {
             delegations: Vec::new(),
             cert_statuses: Vec::new(),
             cert_issuance_errors: Vec::new(),
+            uncovered_sans: Vec::new(),
         }
     }
 

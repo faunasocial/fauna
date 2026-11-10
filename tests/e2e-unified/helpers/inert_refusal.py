@@ -15,8 +15,10 @@ failure of the gesture is a real one and must still raise.
 from __future__ import annotations
 
 #: The refusal each agent answers, by the phrase its error carries:
-#: tui and apple "not actuable"; linux "not activatable" (a click) — and, for a
-#: key an agent has no arm for, tui's and linux's "is not driven on".
+#: tui, apple and windows "not actuable" (windows' FlaUI bridge: a click on a
+#: text label nothing can activate, a key on a non-focusable leaf —
+#: `flaui-bridge/InertGesture.cs`); linux "not activatable" (a click) — and, for
+#: a key an agent has no arm for, tui's and linux's "is not driven on".
 _INERT_PHRASES = ("not actuable", "not activatable", "is not driven on")
 
 

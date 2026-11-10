@@ -4,12 +4,12 @@
 use std::sync::Arc;
 
 use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
+use wasmtime::{Config, Engine, ResourceLimiter, Store, Trap};
 
 use crate::services::{HostServices, HttpRequest, LogLevel, OutboundPolicy, RpcRefusal};
 use crate::{
-    PLUGIN_FUEL_PER_CALL, PLUGIN_FUEL_YIELD_INTERVAL, PLUGIN_MAX_MEMORY_BYTES,
-    PLUGIN_MODULE_MAX_BYTES,
+    PLUGIN_FUEL_PER_CALL, PLUGIN_FUEL_YIELD_INTERVAL, PLUGIN_LOG_LINE_MAX_BYTES,
+    PLUGIN_MAX_MEMORY_BYTES, PLUGIN_MAX_TABLE_ELEMENTS, PLUGIN_MODULE_MAX_BYTES,
 };
 
 /// The generated bindings for the `fauna:plugin` world (`wit/plugin.wit`).
@@ -89,7 +89,95 @@ pub enum PluginFault {
 struct State {
     services: Arc<dyn HostServices>,
     policy: OutboundPolicy,
-    limits: StoreLimits,
+    limits: InstanceLimits,
+}
+
+/// The store limiter: the caps are the INSTANCE's, summed over every linear
+/// memory and every table its core instances create, so a component of
+/// several memories or tables holds no more than one of each could
+/// ([`PLUGIN_MAX_MEMORY_BYTES`], [`PLUGIN_MAX_TABLE_ELEMENTS`]). A refused
+/// growth is a failed `memory.grow` / `table.grow` the plugin observes, never
+/// a fault; a refused initial size fails the instantiation.
+#[derive(Debug, Default)]
+struct InstanceLimits {
+    /// Bytes held by every linear memory of the instance.
+    memory_bytes: usize,
+    /// Elements held by every table of the instance.
+    table_elements: usize,
+}
+
+impl InstanceLimits {
+    /// Admit one growth of a resource from `current` to `desired` if the
+    /// instance's running `total` stays within `cap`, moving the total.
+    fn admit(total: &mut usize, current: usize, desired: usize, cap: usize) -> bool {
+        let next = total.saturating_sub(current).saturating_add(desired);
+        if next > cap {
+            return false;
+        }
+        *total = next;
+        true
+    }
+}
+
+impl ResourceLimiter for InstanceLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(Self::admit(
+            &mut self.memory_bytes,
+            current,
+            desired,
+            PLUGIN_MAX_MEMORY_BYTES,
+        ))
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(Self::admit(
+            &mut self.table_elements,
+            current,
+            desired,
+            PLUGIN_MAX_TABLE_ELEMENTS,
+        ))
+    }
+
+    // A component is several core instances (the module, the canonical-ABI
+    // shims), so the counts bound a small component, not one instance; the
+    // byte and element caps above are what bound its size.
+    fn instances(&self) -> usize {
+        8
+    }
+
+    fn tables(&self) -> usize {
+        8
+    }
+
+    fn memories(&self) -> usize {
+        4
+    }
+}
+
+/// A plugin's log line, cut to [`PLUGIN_LOG_LINE_MAX_BYTES`] at a character
+/// boundary and marked, so one call cannot fill the nest's log.
+fn bounded_log_line(mut message: String) -> String {
+    const MARK: &str = " [truncated]";
+    if message.len() <= PLUGIN_LOG_LINE_MAX_BYTES {
+        return message;
+    }
+    let mut cut = PLUGIN_LOG_LINE_MAX_BYTES - MARK.len();
+    while !message.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    message.truncate(cut);
+    message.push_str(MARK);
+    message
 }
 
 impl types::Host for State {}
@@ -136,11 +224,11 @@ impl state::Host for State {
         self.services.state_get(key).await.map_err(host_err)
     }
 
-    async fn put(&mut self, key: String, value: Vec<u8>) -> wasmtime::Result<()> {
+    async fn put(&mut self, key: String, value: Vec<u8>) -> wasmtime::Result<Result<(), String>> {
         self.services.state_put(key, value).await.map_err(host_err)
     }
 
-    async fn delete(&mut self, key: String) -> wasmtime::Result<()> {
+    async fn delete(&mut self, key: String) -> wasmtime::Result<Result<(), String>> {
         self.services.state_delete(key).await.map_err(host_err)
     }
 }
@@ -202,7 +290,7 @@ impl log::Host for State {
             log::Level::Warn => LogLevel::Warn,
             log::Level::Error => LogLevel::Error,
         };
-        self.services.log(level, message);
+        self.services.log(level, bounded_log_line(message));
         Ok(())
     }
 }
@@ -247,15 +335,7 @@ impl PluginInstance {
     ) -> anyhow::Result<Self> {
         let mut linker = Linker::<State>::new(&engine.engine);
         Plugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(PLUGIN_MAX_MEMORY_BYTES)
-            // A component is several core instances (the module, the
-            // canonical-ABI shims), so the counts bound a small component,
-            // not one instance.
-            .instances(8)
-            .memories(4)
-            .tables(8)
-            .build();
+        let limits = InstanceLimits::default();
         let mut store = Store::new(
             &engine.engine,
             State {
@@ -368,4 +448,51 @@ fn classify(e: wasmtime::Error) -> PluginFault {
 /// faults ([`PluginFault::Host`]), with the embedder's message intact.
 fn host_err(e: anyhow::Error) -> wasmtime::Error {
     wasmtime::Error::msg(format!("{e:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The memory cap is the instance's: two memories share it.
+    #[test]
+    fn memories_share_one_instance_cap() {
+        let mut l = InstanceLimits::default();
+        let half = PLUGIN_MAX_MEMORY_BYTES / 2;
+        assert!(l.memory_growing(0, half, None).unwrap());
+        assert!(
+            l.memory_growing(0, half, None).unwrap(),
+            "a second memory up to the cap"
+        );
+        assert!(
+            !l.memory_growing(0, 64 * 1024, None).unwrap(),
+            "a third memory past the instance's cap"
+        );
+        assert!(
+            !l.memory_growing(half, half + 64 * 1024, None).unwrap(),
+            "growing one past the instance's cap"
+        );
+        assert_eq!(l.memory_bytes, PLUGIN_MAX_MEMORY_BYTES);
+    }
+
+    #[test]
+    fn tables_share_one_element_cap() {
+        let mut l = InstanceLimits::default();
+        assert!(
+            l.table_growing(0, PLUGIN_MAX_TABLE_ELEMENTS - 1, None)
+                .unwrap()
+        );
+        assert!(l.table_growing(0, 1, None).unwrap());
+        assert!(!l.table_growing(0, 1, None).unwrap());
+        assert!(!l.table_growing(1, 2, None).unwrap());
+    }
+
+    #[test]
+    fn a_long_log_line_is_cut_at_a_character_boundary() {
+        assert_eq!(bounded_log_line("short".into()), "short");
+        let cut = bounded_log_line("é".repeat(PLUGIN_LOG_LINE_MAX_BYTES));
+        assert!(cut.len() <= PLUGIN_LOG_LINE_MAX_BYTES, "{}", cut.len());
+        assert!(cut.ends_with(" [truncated]"));
+        assert!(cut.starts_with('é'));
+    }
 }

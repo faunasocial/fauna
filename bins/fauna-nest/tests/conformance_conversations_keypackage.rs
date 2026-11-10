@@ -625,3 +625,48 @@ async fn addressable_does_not_consume() {
     let reply: KeypackageCountReply = decode(&reply_bytes).unwrap();
     assert_eq!(reply.count, 1, "the boolean probe consumes nothing");
 }
+
+/// A fetch whose `nest_url` names THIS nest — its own identity domain, as a
+/// client derives a peer's node from a `handle@domain` spelling — is served
+/// from this nest's own store, never relayed: a nest never dials itself
+/// (`conversation-rooms.md` § The home nest). Before this, a client whose
+/// own domain read differently from the roster's spelling of a same-nest
+/// peer sent its node here, and the nest tried to federate to itself by
+/// name and answered `internal`.
+#[tokio::test]
+async fn fetch_naming_this_nests_own_domain_is_served_locally() {
+    let (router, state) = router_with_db_only().await;
+    state
+        .identity_domain
+        .store(Some(Arc::new("Own.Example".to_string())));
+    let (target_engine, target) = real_actor_engine();
+    let caller = [33u8; 32];
+    let target_hex = hex::encode(target);
+    let kps = target_engine.generate_key_packages_bytes(1).unwrap();
+    dispatch(
+        &router,
+        state.clone(),
+        target,
+        "fauna.conversations.keypackage.upload",
+        upload_payload(kps.clone()),
+    )
+    .await
+    .expect("upload ok");
+
+    let req = KeypackageFetchRequest {
+        actor_id: target_hex,
+        nest_url: Some("https://own.example/".into()),
+        extra: std::collections::BTreeMap::new(),
+    };
+    let reply_bytes = dispatch(
+        &router,
+        state,
+        caller,
+        "fauna.conversations.keypackage.fetch",
+        Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+    )
+    .await
+    .expect("a fetch naming this nest is served here, not relayed");
+    let reply: KeypackageFetchReply = decode(&reply_bytes).unwrap();
+    assert_eq!(reply.key_package, Some(kps[0].clone()));
+}

@@ -212,17 +212,26 @@ impl RowVerdict {
     }
 }
 
-/// One roster read's writers, with what each writer's carried statements
-/// prove about its retired identities — what [`RowReader::install_roster`]
-/// takes ([`writer_roster`] builds it).
+/// One roster read's writers of record — the current writers and the former
+/// ones — with what each one's carried statements prove about its retired
+/// identities: what [`RowReader::install_roster`] takes ([`writer_roster`]
+/// builds it).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriterRoster {
-    /// The `writer`-access members (the owner included when the nest lists
-    /// one).
+    /// The CURRENT `writer`-access members (the owner included when the nest
+    /// lists one) — the only set a seat's standing reads
+    /// ([`RowReader::is_current_writer`]).
     pub writers: HashSet<[u8; 32]>,
-    /// For a writer whose row carried a chain that **verified**: the
-    /// predecessor ids it proves, nearest hop first. A writer with no chain,
-    /// or one that proved nothing, has no entry.
+    /// The set's **former writers** — every actor that held `writer` and
+    /// holds it no longer (`writer-signed-change-records.md` ruling (12)): a
+    /// row they signed is admitted and attributed to them, while they stand
+    /// as no writer of the set. A re-granted writer may sit here and in
+    /// [`Self::writers`] at once.
+    pub former_writers: HashSet<[u8; 32]>,
+    /// For a writer — current or former — whose row carried a chain that
+    /// **verified**: the predecessor ids it proves, nearest hop first. One map
+    /// for both, keyed by the id the chain ends at. An id with no chain, or one
+    /// that proved nothing, has no entry.
     pub predecessors: HashMap<[u8; 32], Vec<[u8; 32]>>,
     /// The actor of the read's one `role == "owner"` row — the set's owner
     /// for a reader whose binding names none (ruling (11)(c): a host that
@@ -238,6 +247,7 @@ impl WriterRoster {
     pub fn without_predecessors(self) -> Self {
         Self {
             writers: self.writers,
+            former_writers: self.former_writers,
             predecessors: HashMap::new(),
             owner: self.owner,
         }
@@ -248,6 +258,7 @@ impl From<HashSet<[u8; 32]>> for WriterRoster {
     fn from(writers: HashSet<[u8; 32]>) -> Self {
         Self {
             writers,
+            former_writers: HashSet::new(),
             predecessors: HashMap::new(),
             owner: None,
         }
@@ -324,14 +335,33 @@ impl RowReader {
             .or_else(|| self.roster.as_ref().and_then(|r| r.owner))
     }
 
-    /// Whether `actor` is itself a writer of this set as far as this reader
-    /// knows — the owner, or a `writer` on the last roster read.
-    pub fn is_writer(&self, actor: &[u8; 32]) -> bool {
+    /// **Standing** (`writer-signed-change-records.md` ruling (12)(d)): whether
+    /// `actor` may write this set NOW as far as this reader knows — the owner,
+    /// or a `writer` on the last roster read; a former writer never. The one
+    /// question a reader asks about its OWN id (may this seat write), and the
+    /// one the peer leg asks of an un-sequenced row's writer (ruling (12)(e)).
+    /// Never an admission question: that is [`Self::is_writer_of_record`].
+    pub fn is_current_writer(&self, actor: &[u8; 32]) -> bool {
         self.owner().as_ref() == Some(actor)
             || self
                 .roster
                 .as_ref()
                 .is_some_and(|r| r.writers.contains(actor))
+    }
+
+    /// **Admission** (`writer-signed-change-records.md` ruling (12)(a)/(d)):
+    /// whether `actor` is itself a *writer of record* of this set — the owner,
+    /// a current writer, or a former writer on the last roster read. What a row
+    /// signed as `actor` is admitted by (directly; [`Self::resolve_writer`]
+    /// adds the proven predecessors). Never a standing question: a former
+    /// writer is admitted here and may write nothing
+    /// ([`Self::is_current_writer`]).
+    pub fn is_writer_of_record(&self, actor: &[u8; 32]) -> bool {
+        self.is_current_writer(actor)
+            || self
+                .roster
+                .as_ref()
+                .is_some_and(|r| r.former_writers.contains(actor))
     }
 
     /// The predecessor ids proven for the writer `writer`, by either source of
@@ -390,16 +420,20 @@ impl RowReader {
     }
 
     /// **What this reader admits by** — every identity a row may be signed as
-    /// and resolve to a writer ([`Self::resolve_writer`]): the owner, each
-    /// `writer` on the last roster read, and every proven predecessor of one
-    /// of those. What a reader with a cursor compares across time (ruling
-    /// (8)(f)): an id here that was not here before is a *gain*, and rows the
-    /// cursor passed while it was missing are worth judging again.
+    /// and resolve to a writer of record ([`Self::resolve_writer`]): the owner,
+    /// each current and each former writer on the last roster read (ruling
+    /// (12)(d)), and every proven predecessor of one of those. What a reader
+    /// with a cursor compares across time (ruling (8)(f)): an id here that was
+    /// not here before is a *gain*, and rows the cursor passed while it was
+    /// missing are worth judging again. A demotion moves an id from the
+    /// writers to the former writers and leaves this set unchanged.
     pub fn admitted_signers(&self) -> std::collections::BTreeSet<[u8; 32]> {
         let owner = self.owner();
-        let writers = owner
-            .iter()
-            .chain(self.roster.iter().flat_map(|r| r.writers.iter()));
+        let writers = owner.iter().chain(
+            self.roster
+                .iter()
+                .flat_map(|r| r.writers.iter().chain(r.former_writers.iter())),
+        );
         let mut admitted = std::collections::BTreeSet::new();
         for writer in writers {
             admitted.insert(*writer);
@@ -408,14 +442,29 @@ impl RowReader {
         admitted
     }
 
-    /// The current writer the signed actor resolves to — ruling (8)(b). The
-    /// signed actor as a writer itself wins over any chain that claims it;
-    /// else the one writer it is a proven predecessor of; and where chains
-    /// ending at two different writers both claim it, the row is attributed to
-    /// the signed actor, to neither of them — so no served link can
-    /// re-attribute a row. `None`: it resolves to no writer.
+    /// The writer of record the signed actor resolves to — rulings (8)(b) and
+    /// (12)(d). Two passes, the current writers first, so every row the owner's
+    /// or a current writer's identity or chain placed before ruling (12) is
+    /// attributed exactly as before and a former writer only ever ADDS a
+    /// verdict: the first pass asks of the owner and the current writers, the
+    /// second of every writer of record. In each pass the signed actor as a
+    /// writer itself wins over any chain that claims it; else the one writer it
+    /// is a proven predecessor of; and where chains ending at two different
+    /// writers both claim it, the row is attributed to the signed actor, to
+    /// neither of them — so no served link can re-attribute a row. `None`: it
+    /// resolves to no writer of record.
     fn resolve_writer(&self, signed_as: &[u8; 32]) -> Option<[u8; 32]> {
-        if self.is_writer(signed_as) {
+        self.resolve_among(signed_as, |id| self.is_current_writer(id))
+            .or_else(|| self.resolve_among(signed_as, |id| self.is_writer_of_record(id)))
+    }
+
+    /// One pass of [`Self::resolve_writer`] over the writers `is_writer` names.
+    fn resolve_among(
+        &self,
+        signed_as: &[u8; 32],
+        is_writer: impl Fn(&[u8; 32]) -> bool,
+    ) -> Option<[u8; 32]> {
+        if is_writer(signed_as) {
             return Some(*signed_as);
         }
         let owner = self.owner();
@@ -428,7 +477,7 @@ impl RowReader {
         let mut claimants: Vec<[u8; 32]> = Vec::new();
         for writer in candidates {
             if !claimants.contains(writer)
-                && self.is_writer(writer)
+                && is_writer(writer)
                 && self.proven_predecessors_of(writer).any(|p| p == signed_as)
             {
                 claimants.push(*writer);
@@ -665,11 +714,14 @@ pub fn roster_member_is_writer(role: &str, access: Option<&str>) -> bool {
     role == "owner" || access == Some("writer")
 }
 
-/// The writers one actor-roster read (`fauna.folders.members.list_actors`)
-/// names, each with the predecessor ids its carried statements **prove** —
-/// what [`RowReader::install_roster`] takes. An undecodable actor id is no
-/// writer. The one reading of that reply for every roster leg (the engine's,
-/// the projection readers').
+/// The writers of record one actor-roster read
+/// (`fauna.folders.members.list_actors`) names — its `members`' current
+/// writers and its `former_writers` list (ruling (12)(c)) — each with the
+/// predecessor ids its carried statements **prove**: what
+/// [`RowReader::install_roster`] takes. An undecodable actor id is no writer.
+/// The one reading of that reply for every roster leg (the engine's, the
+/// projection readers', the share leg's cache); callers pass the reply's two
+/// lists, `&reply.members` and `&reply.former_writers`.
 ///
 /// Ruling (8)(b): the link from a retired identity to a writer is proven,
 /// never projected. A writer's
@@ -680,7 +732,10 @@ pub fn roster_member_is_writer(role: &str, access: Option<&str>) -> bool {
 /// broken, ends elsewhere, or carries a link another key signed proves
 /// nothing, and the writer simply has no predecessors here. The nest still
 /// decides who is a writer; it cannot decide whose predecessor anyone is.
-pub fn writer_roster(members: &[crate::folders::FolderActorMember]) -> WriterRoster {
+pub fn writer_roster(
+    members: &[crate::folders::FolderActorMember],
+    former_writers: &[crate::folders::FolderFormerWriter],
+) -> WriterRoster {
     let mut roster = WriterRoster::default();
     // The owner a marker-less reader takes (ruling (11)(c)): exactly one
     // owner row, or none.
@@ -704,6 +759,27 @@ pub fn writer_roster(members: &[crate::folders::FolderActorMember]) -> WriterRos
             roster
                 .predecessors
                 .insert(writer, proven.into_iter().map(|a| a.0).collect());
+        }
+    }
+    // The former writers, by the same statement walk a writer row gets: a
+    // former writer's predecessor-signed rows place under it too. A re-granted
+    // writer listed in both keeps the chain its writer row proved.
+    for former in former_writers {
+        let Ok(id) = fauna_core::hex32::decode(&former.actor_id) else {
+            continue;
+        };
+        roster.former_writers.insert(id);
+        if roster.predecessors.contains_key(&id) {
+            continue;
+        }
+        let proven = fauna_core::recovery::proven_predecessors_carried(
+            &fauna_core::identity::ActorId(id),
+            &former.succession_statements,
+        );
+        if !proven.is_empty() {
+            roster
+                .predecessors
+                .insert(id, proven.into_iter().map(|a| a.0).collect());
         }
     }
     roster
@@ -1230,12 +1306,15 @@ mod tests {
         assert_eq!(named(&verdict), verified(&s, &p0), "{verdict:?}");
         // The same proof carried on the roster's owner row, for a member.
         let mut member_reader = reader(&s);
-        member_reader.install_roster(writer_roster(&[member(
-            &s,
-            "owner",
-            None,
-            vec![link(&p0, &p, &p), link(&p, &s, &s)],
-        )]));
+        member_reader.install_roster(writer_roster(
+            &[member(
+                &s,
+                "owner",
+                None,
+                vec![link(&p0, &p, &p), link(&p, &s, &s)],
+            )],
+            &[],
+        ));
         let verdict = member_reader.judge(&moved_row(&p0, &s));
         assert_eq!(named(&verdict), verified(&s, &p0), "{verdict:?}");
     }
@@ -1282,7 +1361,7 @@ mod tests {
         let row = moved_row(&p, &w);
         let judge = |members: &[FolderActorMember]| {
             let mut r = reader(&owner);
-            r.install_roster(writer_roster(members));
+            r.install_roster(writer_roster(members, &[]));
             r.judge(&row)
         };
         let refused = RowVerdict::Refused(ChangeVerifyError::NotAWriter);
@@ -1378,34 +1457,40 @@ mod tests {
         let (owner, a, first, second) = (kp(1), kp(2), kp(3), kp(4));
         // A is a writer, and the first writer's (genuinely self-signed) chain claims it.
         let mut r = reader(&owner);
-        r.install_roster(writer_roster(&[
-            member(&a, "member", Some("writer"), vec![]),
-            member(
-                &first,
-                "member",
-                Some("writer"),
-                vec![link(&a, &first, &first)],
-            ),
-        ]));
+        r.install_roster(writer_roster(
+            &[
+                member(&a, "member", Some("writer"), vec![]),
+                member(
+                    &first,
+                    "member",
+                    Some("writer"),
+                    vec![link(&a, &first, &first)],
+                ),
+            ],
+            &[],
+        ));
         let verdict = r.judge(&signed_row(&a, NONCE));
         assert_eq!(named(&verdict), verified(&a, &a), "{verdict:?}");
 
         // A is no writer, and two writers both claim it.
         let mut r = reader(&owner);
-        r.install_roster(writer_roster(&[
-            member(
-                &first,
-                "member",
-                Some("writer"),
-                vec![link(&a, &first, &first)],
-            ),
-            member(
-                &second,
-                "member",
-                Some("writer"),
-                vec![link(&a, &second, &second)],
-            ),
-        ]));
+        r.install_roster(writer_roster(
+            &[
+                member(
+                    &first,
+                    "member",
+                    Some("writer"),
+                    vec![link(&a, &first, &first)],
+                ),
+                member(
+                    &second,
+                    "member",
+                    Some("writer"),
+                    vec![link(&a, &second, &second)],
+                ),
+            ],
+            &[],
+        ));
         let verdict = r.judge(&signed_row(&a, NONCE));
         assert_eq!(named(&verdict), verified(&a, &a), "{verdict:?}");
         assert!(verdict.admits());
@@ -1425,10 +1510,13 @@ mod tests {
         let mut r = successor_reader(&succ, &[&pred]);
         assert_eq!(r.admitted_signers(), ids(&[&succ, &pred]));
         // A roster read adds each writer and what its chain proves.
-        r.install_roster(writer_roster(&[
-            member(&w, "member", Some("writer"), vec![link(&w_pred, &w, &w)]),
-            member(&reader_member, "member", Some("reader"), vec![]),
-        ]));
+        r.install_roster(writer_roster(
+            &[
+                member(&w, "member", Some("writer"), vec![link(&w_pred, &w, &w)]),
+                member(&reader_member, "member", Some("reader"), vec![]),
+            ],
+            &[],
+        ));
         assert_eq!(r.admitted_signers(), ids(&[&succ, &pred, &w, &w_pred]));
         // A member that is no writer of the set admits nothing by its own
         // predecessors.
@@ -1482,12 +1570,15 @@ mod tests {
             member_reader.judge(&pseudo(&pred)),
             RowVerdict::Refused(ChangeVerifyError::Unsigned)
         );
-        member_reader.install_roster(writer_roster(&[member(
-            &succ,
-            "owner",
-            None,
-            vec![link(&pred, &succ, &succ)],
-        )]));
+        member_reader.install_roster(writer_roster(
+            &[member(
+                &succ,
+                "owner",
+                None,
+                vec![link(&pred, &succ, &succ)],
+            )],
+            &[],
+        ));
         assert_eq!(member_reader.judge(&pseudo(&pred)), RowVerdict::Exempt);
     }
 
@@ -1617,12 +1708,10 @@ mod tests {
     fn the_owners_and_a_members_rows_under_a_retired_nonce_stay_current() {
         let (pred, succ, writer) = (kp(1), kp(2), kp(3));
         let mut r = cut_reader(&succ, &[&pred], Some(&succ), Some(&pred));
-        r.install_roster(writer_roster(&[member(
-            &writer,
-            "member",
-            Some("writer"),
-            Vec::new(),
-        )]));
+        r.install_roster(writer_roster(
+            &[member(&writer, "member", Some("writer"), Vec::new())],
+            &[],
+        ));
         assert_eq!(
             named(&r.judge(&signed_row(&succ, OTHER_NONCE))),
             verified(&succ, &succ)
@@ -1645,12 +1734,10 @@ mod tests {
     fn a_predecessor_the_roster_lists_as_a_writer_is_still_cut() {
         let (pred, succ) = (kp(1), kp(2));
         let mut r = cut_reader(&succ, &[&pred], Some(&succ), Some(&pred));
-        r.install_roster(writer_roster(&[member(
-            &pred,
-            "member",
-            Some("writer"),
-            Vec::new(),
-        )]));
+        r.install_roster(writer_roster(
+            &[member(&pred, "member", Some("writer"), Vec::new())],
+            &[],
+        ));
         assert_eq!(
             r.judge(&signed_row(&pred, NONCE)),
             RowVerdict::Refused(ChangeVerifyError::HistoryEra)
@@ -1670,12 +1757,15 @@ mod tests {
             retired_set_nonces: vec![(OTHER_NONCE, Some(pred.actor_id().0))],
             ..Default::default()
         });
-        r.install_roster(writer_roster(&[member(
-            &succ,
-            "owner",
-            None,
-            vec![link(&pred, &succ, &succ)],
-        )]));
+        r.install_roster(writer_roster(
+            &[member(
+                &succ,
+                "owner",
+                None,
+                vec![link(&pred, &succ, &succ)],
+            )],
+            &[],
+        ));
         assert_eq!(
             r.judge(&signed_row(&pred, NONCE)),
             RowVerdict::Refused(ChangeVerifyError::HistoryEra)
@@ -1706,12 +1796,15 @@ mod tests {
             retired_set_nonces: vec![(OTHER_NONCE, Some(p.actor_id().0))],
             ..Default::default()
         });
-        r.install_roster(writer_roster(&[member(
-            &claimant,
-            "owner",
-            None,
-            vec![link(&p, &claimant, &claimant)],
-        )]));
+        r.install_roster(writer_roster(
+            &[member(
+                &claimant,
+                "owner",
+                None,
+                vec![link(&p, &claimant, &claimant)],
+            )],
+            &[],
+        ));
         assert_eq!(named(&r.judge(&signed_row(&p, NONCE))), verified(&p, &p));
         assert_eq!(
             named(&r.judge(&signed_row(&p, OTHER_NONCE))),
@@ -1751,10 +1844,13 @@ mod tests {
             r.judge(&signed_row(&succ, NONCE)),
             RowVerdict::Held(Held::RosterUnread)
         );
-        r.install_roster(writer_roster(&[
-            member(&succ, "owner", None, vec![link(&pred, &succ, &succ)]),
-            member(&writer, "member", Some("writer"), Vec::new()),
-        ]));
+        r.install_roster(writer_roster(
+            &[
+                member(&succ, "owner", None, vec![link(&pred, &succ, &succ)]),
+                member(&writer, "member", Some("writer"), Vec::new()),
+            ],
+            &[],
+        ));
         assert_eq!(
             r.judge(&signed_row(&pred, NONCE)),
             RowVerdict::Refused(ChangeVerifyError::HistoryEra)
@@ -1786,22 +1882,25 @@ mod tests {
     fn a_roster_names_an_owner_only_from_exactly_one_owner_row() {
         let (a, b) = (kp(1), kp(2));
         assert_eq!(
-            writer_roster(&[member(&a, "owner", None, Vec::new())]).owner,
+            writer_roster(&[member(&a, "owner", None, Vec::new())], &[]).owner,
             Some(a.actor_id().0)
         );
         assert_eq!(
-            writer_roster(&[
-                member(&a, "owner", None, Vec::new()),
-                member(&b, "owner", None, Vec::new()),
-            ])
+            writer_roster(
+                &[
+                    member(&a, "owner", None, Vec::new()),
+                    member(&b, "owner", None, Vec::new()),
+                ],
+                &[]
+            )
             .owner,
             None
         );
         let mut undecodable = member(&a, "owner", None, Vec::new());
         undecodable.actor_id = "not-hex".into();
-        assert_eq!(writer_roster(&[undecodable]).owner, None);
+        assert_eq!(writer_roster(&[undecodable], &[]).owner, None);
         assert_eq!(
-            writer_roster(&[member(&b, "member", Some("writer"), Vec::new())]).owner,
+            writer_roster(&[member(&b, "member", Some("writer"), Vec::new())], &[]).owner,
             None
         );
     }
@@ -1838,12 +1937,15 @@ mod tests {
             RowVerdict::Refused(ChangeVerifyError::Unsigned),
             "a row naming no device is no pseudo-device row"
         );
-        r.install_roster(writer_roster(&[member(
-            &succ,
-            "owner",
-            None,
-            vec![link(&pred, &succ, &succ)],
-        )]));
+        r.install_roster(writer_roster(
+            &[member(
+                &succ,
+                "owner",
+                None,
+                vec![link(&pred, &succ, &succ)],
+            )],
+            &[],
+        ));
         assert_eq!(r.judge(&pseudo(&succ)), RowVerdict::Exempt);
         assert_eq!(r.judge(&pseudo(&pred)), RowVerdict::Exempt);
         assert_eq!(
@@ -1860,6 +1962,179 @@ mod tests {
         assert_eq!(
             ownerless.judge(&pseudo(&succ)),
             RowVerdict::Refused(ChangeVerifyError::Unsigned)
+        );
+    }
+
+    // ── Ruling (12): writers of record — admission by present or former ─────
+
+    fn former(
+        who: &ActorKeypair,
+        statements: Vec<crate::ByteBuf>,
+    ) -> crate::folders::FolderFormerWriter {
+        crate::folders::FolderFormerWriter {
+            actor_id: who.actor_id().to_hex(),
+            succession_statements: statements,
+            ..Default::default()
+        }
+    }
+
+    /// Ruling (12)(a)/(d): a row a former writer signed is admitted and
+    /// attributed to them; a never-writer's row is still `NotAWriter`.
+    #[test]
+    fn a_former_writers_row_is_admitted_and_attributed_to_them() {
+        let (owner, demoted, stranger) = (kp(1), kp(2), kp(3));
+        let mut r = reader(&owner);
+        r.install_roster(writer_roster(
+            &[member(&owner, "owner", None, vec![])],
+            &[former(&demoted, vec![])],
+        ));
+        let verdict = r.judge(&signed_row(&demoted, NONCE));
+        assert_eq!(named(&verdict), verified(&demoted, &demoted), "{verdict:?}");
+        assert_eq!(
+            r.judge(&signed_row(&stranger, NONCE)),
+            RowVerdict::Refused(ChangeVerifyError::NotAWriter),
+            "a never-writer's row is no record of a writer of record"
+        );
+    }
+
+    /// Ruling (12)(c)/(d): a former writer's proven predecessor's row places
+    /// under the former writer, by the same statement walk a writer row gets;
+    /// an unproven chain proves nothing.
+    #[test]
+    fn a_former_writers_proven_predecessors_row_is_admitted() {
+        let (owner, pred, demoted, forger) = (kp(1), kp(2), kp(3), kp(4));
+        let mut r = reader(&owner);
+        r.install_roster(writer_roster(
+            &[member(&owner, "owner", None, vec![])],
+            &[former(&demoted, vec![link(&pred, &demoted, &demoted)])],
+        ));
+        let verdict = r.judge(&moved_row(&pred, &demoted));
+        assert_eq!(named(&verdict), verified(&demoted, &pred), "{verdict:?}");
+
+        let mut forged = reader(&owner);
+        forged.install_roster(writer_roster(
+            &[member(&owner, "owner", None, vec![])],
+            &[former(&demoted, vec![link(&pred, &demoted, &forger)])],
+        ));
+        assert_eq!(
+            forged.judge(&moved_row(&pred, &demoted)),
+            RowVerdict::Refused(ChangeVerifyError::NotAWriter),
+            "a link another key signed proves nothing"
+        );
+    }
+
+    /// Ruling (12)(d): admission and standing are two questions — a former
+    /// writer is a writer of record and stands as no writer; a current writer
+    /// is both; the owner is both; a never-writer is neither.
+    #[test]
+    fn standing_reads_the_current_writers_alone() {
+        let (owner, writer, demoted, stranger) = (kp(1), kp(2), kp(3), kp(4));
+        let mut r = reader(&owner);
+        r.install_roster(writer_roster(
+            &[
+                member(&owner, "owner", None, vec![]),
+                member(&writer, "member", Some("writer"), vec![]),
+                member(&demoted, "member", Some("reader"), vec![]),
+            ],
+            &[former(&demoted, vec![])],
+        ));
+        let id = |k: &ActorKeypair| k.actor_id().0;
+        for (who, record, current) in [
+            (&owner, true, true),
+            (&writer, true, true),
+            (&demoted, true, false),
+            (&stranger, false, false),
+        ] {
+            assert_eq!(r.is_writer_of_record(&id(who)), record);
+            assert_eq!(r.is_current_writer(&id(who)), current);
+        }
+    }
+
+    /// Ruling (12)(d)'s union invariant: moving an id from the writers to the
+    /// former writers — a demotion — leaves `admitted_signers` unchanged, so
+    /// the head re-judge of (8)(f) never sees a demotion at all; and the build
+    /// that ships the former writers is a gain over a roster without them.
+    #[test]
+    fn a_demotion_leaves_admitted_signers_unchanged() {
+        let (owner, w, w_pred) = (kp(1), kp(2), kp(3));
+        let chain = || vec![link(&w_pred, &w, &w)];
+        let mut before = reader(&owner);
+        before.install_roster(writer_roster(
+            &[
+                member(&owner, "owner", None, vec![]),
+                member(&w, "member", Some("writer"), chain()),
+            ],
+            &[],
+        ));
+        let mut after = reader(&owner);
+        after.install_roster(writer_roster(
+            &[
+                member(&owner, "owner", None, vec![]),
+                member(&w, "member", Some("reader"), vec![]),
+            ],
+            &[former(&w, chain())],
+        ));
+        assert_eq!(before.admitted_signers(), after.admitted_signers());
+        assert!(after.admitted_signers().contains(&w_pred.actor_id().0));
+
+        let mut blind = reader(&owner);
+        blind.install_roster(writer_roster(
+            &[
+                member(&owner, "owner", None, vec![]),
+                member(&w, "member", Some("reader"), vec![]),
+            ],
+            &[],
+        ));
+        assert!(
+            blind
+                .admitted_signers()
+                .is_subset(&after.admitted_signers())
+                && blind.admitted_signers() != after.admitted_signers(),
+            "the former writers are a gain"
+        );
+    }
+
+    /// Ruling (12)(d): attribution is unchanged — a row a current writer's
+    /// chain places stays attributed to that writer even when its signed actor
+    /// is also a former writer (the retired identity, demoted before it
+    /// succeeded); the former writer only ever adds a verdict.
+    #[test]
+    fn a_current_writers_chain_outranks_a_former_writer_entry() {
+        let (owner, pred, succ) = (kp(1), kp(2), kp(3));
+        let mut r = reader(&owner);
+        r.install_roster(writer_roster(
+            &[
+                member(&owner, "owner", None, vec![]),
+                member(
+                    &succ,
+                    "member",
+                    Some("writer"),
+                    vec![link(&pred, &succ, &succ)],
+                ),
+            ],
+            &[former(&pred, vec![])],
+        ));
+        let verdict = r.judge(&moved_row(&pred, &succ));
+        assert_eq!(named(&verdict), verified(&succ, &pred), "{verdict:?}");
+    }
+
+    /// The pre-ruling shapes cover the new set: `without_predecessors` keeps
+    /// the former writers and drops their chains, `From<HashSet>` names none.
+    #[test]
+    fn the_roster_conversions_cover_the_former_writers() {
+        let (owner, pred, demoted) = (kp(1), kp(2), kp(3));
+        let roster = writer_roster(
+            &[member(&owner, "owner", None, vec![])],
+            &[former(&demoted, vec![link(&pred, &demoted, &demoted)])],
+        );
+        assert!(roster.predecessors.contains_key(&demoted.actor_id().0));
+        let bare = roster.without_predecessors();
+        assert!(bare.former_writers.contains(&demoted.actor_id().0));
+        assert!(bare.predecessors.is_empty());
+        assert!(
+            WriterRoster::from(HashSet::from([owner.actor_id().0]))
+                .former_writers
+                .is_empty()
         );
     }
 }

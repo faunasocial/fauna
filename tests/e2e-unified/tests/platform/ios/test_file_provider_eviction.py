@@ -103,9 +103,11 @@ def _fauna(udid: str, *args: str) -> str:
 @pytest.fixture(scope="session")
 def fauna_ios_fp_app():
     """The Debug simulator `Fauna-iOS` app, built at collection time
-    (`conftest._ensure_ios_fp_app_built`; here a replay of that build). Requires
-    `just apple-ffi-test-sim` (or `apple-ffi-test`) to have built the xcframework's
-    simulator slice; the test never triggers that build itself."""
+    (`conftest._ensure_ios_fp_app_built`; here a replay of that build), after
+    the xcframework's simulator slice, which the prebuild builds too when the
+    run's app set has no iOS (`just apple-ffi-test-sim`). The test never
+    triggers either build itself; a slice still missing skips with the
+    recipe to run."""
     from conftest import _ensure_ios_fp_app_built
 
     if not _SIM_SLICE.exists():
@@ -119,22 +121,32 @@ def fauna_ios_fp_app():
 
 @pytest.fixture
 def fp_device(fauna_ios_fp_app):
-    """A throwaway booted simulator with the app installed; deleted after.
+    """A booted simulator of its own with the app installed; deleted after.
 
-    Registered with the run's lane note (`register_simulator`) so the fleet
-    agent charges the device's boot — 11 to 23 cores for a minute — to this
-    run rather than to the desktop, as it does for the conftest's own devices."""
-    from conftest import register_simulator
+    Every boot is HELD (`conftest._boot_simulator_held`, under a `sim_boot`
+    grant; mac-simulator-hold.md § Per-core tokens, *The e2e lane's simulator
+    boot*). The warm pass boots one device per `fp_device` test ahead, before
+    the run's lane and with no bound on the wait (`_prewarm_ios_fp_seat`, up to
+    `_IOS_FP_SEATS_MAX`), and this fixture takes one (`take_ios_fp_seat`); a
+    test past the cap creates its own here and boots it with the in-test bound,
+    past which it runs unheld with a loud line. Each device is registered with
+    the run's lane note (`register_simulator`) so the fleet agent charges its
+    boot — 11 to 23 cores for a minute — to this run rather than the desktop.
+    It used to `simctl boot` bare — three boots of 8 to 12 cores on 2026-11-06
+    held only at the lane's figure — and then inside each test, where one boot
+    in three missed the 120 s bound."""
+    from conftest import _boot_simulator_held, create_ios_fp_device, take_ios_fp_seat
 
-    created = _sim("create", f"fauna-fp-evict-{os.getpid()}", "iPhone 17 Pro")
-    assert created.returncode == 0, f"simctl create failed: {created.stderr}"
-    udid = created.stdout.strip()
-    register_simulator(udid)
-    print(f"[fp_device] {udid}: {_device_runtime(udid)}")
+    udid = take_ios_fp_seat()
+    prebooted = udid is not None
+    if not prebooted:
+        udid = create_ios_fp_device()
+        assert udid, "simctl create of the File Provider device failed (its line is above)"
+    print(f"[fp_device] {udid}: {_device_runtime(udid)}"
+          f"{' (booted in the warm pass)' if prebooted else ''}")
     try:
-        _sim("boot", udid)
-        booted = _sim("bootstatus", udid, "-b", timeout=600)
-        assert booted.returncode == 0, f"simulator never booted: {booted.stderr}"
+        if not prebooted:
+            _boot_simulator_held(udid, in_test=True)
         _sim(
             "spawn", udid, "log", "config", "--subsystem", "social.fauna.fileprovider",
             "--mode", "level:debug,persist:debug",

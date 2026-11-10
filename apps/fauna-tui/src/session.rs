@@ -240,6 +240,54 @@ pub fn session_display_handle(app: &App) -> Option<String> {
     )
 }
 
+/// The Settings identity cell's two values — `settings-handle-label` (the
+/// display twin [`session_display_handle`]) and `settings-tier-label` (the bare
+/// cached tier) — both from the account registry's server-data cache, never the
+/// quota reply (`settings.md` § Layout & flow item 1). Both `None` while the
+/// cache holds no handle: the cell is absent, not empty, until the nest has
+/// answered. Seeded at session attach, re-read on every `SelfAddressRefreshed`.
+pub fn session_identity_cell(app: &App) -> crate::settings::IdentityCell {
+    let Some(session) = app.session.as_ref() else {
+        return crate::settings::IdentityCell::default();
+    };
+    let Some(entry) = registry(app)
+        .list()
+        .into_iter()
+        .find(|a| a.actor_id == session.actor_id)
+    else {
+        return crate::settings::IdentityCell::default();
+    };
+    if entry
+        .handle
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return crate::settings::IdentityCell::default();
+    }
+    crate::settings::IdentityCell {
+        handle: fauna_client_accounts::display_handle(
+            &session.handle,
+            entry.handle.as_deref(),
+            entry.domain.as_deref(),
+        ),
+        tier: entry
+            .tier
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty()),
+    }
+}
+
+/// The launch surfaces' `launch-identity-label` — the bound account's cached
+/// `handle@domain · tier` (`fauna_client_accounts::identity_line`), read from
+/// the registry entry the launch binds (the same `resolve_launch_binding` →
+/// active fallback [`stored_account`] reads). `None` while that entry's cache
+/// holds no handle (a first launch, an import): the label is then absent.
+pub fn launch_identity_line(app: &App) -> Option<String> {
+    registry(app).launch_identity_line()
+}
+
 /// The signed-in account's handle as the nest knows it — the registry entry the
 /// self-identity follower keeps current ([`spawn_self_identity_follow`]) — for a
 /// surface that names something after the user at the moment of a gesture (the
@@ -557,7 +605,7 @@ pub fn establish(
     crate::account_scope::become_session_instance_or_exit(&actor_id);
     // A signed-in user is not the one a sign-out residue was reported to; its
     // record stays on disk for the next signed-out launch to re-check
-    // (`account_scope::recheck_residue_at_launch`), but the view goes.
+    // (`account_scope::finish_at_launch`), but the view goes.
     app.sign_out_residue = None;
     // The `FeedManager` builds + signs posts itself, so it needs the raw signing
     // secret. Read it before the keypair moves into the client.
@@ -633,7 +681,7 @@ pub fn establish(
     // A fresh wake per identity, so the e2e poke can only ever reach THIS
     // session's loop (`critical_alerts::SweepWake`).
     app.alert_sweep_wake = crate::critical_alerts::SweepWake::default();
-    crate::critical_alerts::spawn_session_start_sweep(
+    crate::critical_alerts::spawn_post_auth_sweep(
         Arc::clone(&client),
         // Feeder #1 reads the held rotation keyring from this session's
         // account runtime — the slot the assembly below fills.
@@ -801,6 +849,9 @@ pub fn establish(
         tx,
         app.session_generation,
     );
+    // A store that came up before this manager lends its outbox now; the
+    // `AccountStoreReady` edge lends it when the store comes up later.
+    lend_offline_outbox(app);
     // Draft-persistence v2, posts rail (`reserved-folders.md` § Drafts Sync):
     // restore the user's half-written post from the `__drafts` reserved folder
     // on launch, and autosave (debounced) after each compose edit, so an unsent
@@ -926,6 +977,9 @@ pub fn establish(
             .collect(),
         runtime,
     );
+    // The conversations manager composes MLS sends offline through the same
+    // outbox once the session is up (a store that came up first lends now).
+    lend_offline_outbox(app);
     // Surface the standing conversations-engine-role refusal (if any) NOW:
     // an engine-less session may never emit the `ConversationsChanged` tick
     // that otherwise bridges it onto `error-message`, and a refusal that only
@@ -963,6 +1017,9 @@ pub fn establish(
         tx,
         app.session_generation,
     );
+    // The identity composer is built from the contacts page's identity, so
+    // seat it now that it exists (a store that came up first lends now).
+    lend_offline_outbox(app);
     app.notifications = crate::notifications::init(Arc::clone(&client), tx, app.session_generation);
     app.moderation = crate::moderation::init(Arc::clone(&client));
     app.report = crate::report::init(Arc::clone(&client));
@@ -1033,6 +1090,15 @@ pub fn establish(
         &handle,
         app.settings.mail_store(),
     );
+    // Its own address is the session's live one, not the attach-time handle:
+    // seeded here and pushed again by the `SelfAddressRefreshed` handler.
+    let events_self_address = session_self_address(app);
+    crate::events::set_self_address(&mut app.events, events_self_address);
+    // The Settings identity cell paints from the registry's cache on the first
+    // frame, no fetch (`settings.md` § Layout & flow item 1); the
+    // `SelfAddressRefreshed` handler re-reads it after every verify reply.
+    let identity = session_identity_cell(app);
+    app.settings.set_identity_cell(identity);
     // Draft-persistence v2, events rail (`reserved-folders.md` § Drafts Sync) —
     // the third and last rail of the wire's closed enumeration, and tui is its
     // first app leg. Restores the user's half-written event from `__drafts` on
@@ -1221,12 +1287,12 @@ pub fn establish(
         // installed — "cannot tell right now", which the runtime holds the last
         // set through rather than reading as "left every channel".
         let conversations = app.conversations.real_session.clone();
-        let memberships: fauna_sync_engine::account_runtime::MembershipSource =
-            Arc::new(move || {
+        let memberships =
+            fauna_sync_engine::account_runtime::MembershipSource::Engine(Arc::new(move || {
                 conversations
                     .as_ref()
                     .map(|session| session.joined_conv_channels())
-            });
+            }));
         // The assembly itself is shared — `fauna-client-account-runtime`, one
         // implementation of the eleven non-app params for every native app
         // (priority #2; linux is the other consumer). Its two phases are what
@@ -1261,23 +1327,9 @@ pub fn establish(
                 // provenance, the runtime's node-info read): attached to the
                 // builder it makes the relay *available* to the dial cascade and
                 // the endpoint reachable at the URL its published facts
-                // advertise. The other apps pass `None` until they take the dep.
-                peer_transport: Some(std::sync::Arc::new(
-                    |inputs: fauna_sync_engine::account_runtime::PeerLegFactoryInputs| {
-                        Box::pin(async move {
-                            let (transport, bound_addrs) = fauna_iroh::peer_leg_transport(
-                                inputs.writer_key.to_bytes(),
-                                inputs.relay_url.as_deref(),
-                            )
-                            .await?;
-                            Ok(fauna_sync_engine::account_runtime::PeerLegBinding {
-                                transport,
-                                bound_addrs,
-                                file_sync: None,
-                            })
-                        })
-                    },
-                )),
+                // advertise. The shared factory every in-process app host hands
+                // the runtime (the UniFFI apps take the same one in `fauna-ffi`).
+                peer_transport: Some(fauna_iroh::peer_leg_factory()),
                 // Desktop: the per-OS constant. Only a sandboxed mobile shell
                 // supplies its own container.
                 store_container: None,
@@ -1850,6 +1902,91 @@ pub(crate) fn ledger_seam(app: &App) -> Arc<dyn fauna_client_config::SuccessionL
 /// ([`crate::settings::nests::backup_door`]).
 pub(crate) fn backup_seam(app: &App) -> Arc<dyn fauna_client_config::BackupStateStore> {
     crate::settings::nests::backup_door(app.settings.account_runtime.clone())
+}
+
+/// Lend the device's offline outbox ([`App::account_outbox`]) to every manager
+/// that composes an `OfflineQueued` kind — the feed's interactions
+/// (`fauna_feed::FeedManager::set_offline_intent_queue`) and the conversations
+/// manager's MLS sends (`ConversationsManager::set_offline_queue`,
+/// `devices.md` § Offline compose) — and seat the session's identity composer
+/// on it (`fauna_client_contacts::knock::KnockComposer`, the identity drain:
+/// `account-offline-mutation.md` § The offline-mutation contract →
+/// *Identity-bound intents compose at drain*), built from the identity, node
+/// url and nest the contacts page holds, so a queued knock is signed by the
+/// identity signed in at drain. Called from every edge whose order is not
+/// fixed: the `AccountStoreReady` arm (the outbox appears), the feed's init,
+/// the conversations session's start and the contacts page's init at login
+/// (the managers and the identity appear). A no-op for a manager until both
+/// exist. Whatever an earlier run left queued drains now
+/// ([`spawn_outbox_drain`]).
+pub(crate) fn lend_offline_outbox(app: &App) {
+    let Some(outbox) = app.account_outbox.as_ref() else {
+        return;
+    };
+    if let Some(feed) = app.feed.manager.as_ref() {
+        feed.set_offline_intent_queue(Arc::clone(outbox) as _);
+    }
+    if let (Some(nest), Some(secret)) = (app.contacts.nest.as_ref(), app.contacts.secret) {
+        outbox.set_identity_sender(Some(Arc::new(
+            fauna_client_contacts::knock::KnockComposer::new(
+                Arc::clone(nest),
+                secret,
+                app.contacts.node_url.clone(),
+            ),
+        )));
+    }
+    if let Some(session) = app.conversations.real_session.as_ref() {
+        session
+            .manager()
+            .set_offline_queue(Some(Arc::clone(outbox) as _));
+    }
+    // A retry or discard of an MLS or identity intent (the unsent-changes
+    // doors) drains the released scope now — through the conversations
+    // session too when one is up. Both held weakly: a released session or
+    // outbox drains nothing of its own.
+    let weak_outbox = Arc::downgrade(outbox);
+    let weak_session = app.conversations.real_session.as_ref().map(Arc::downgrade);
+    outbox.set_drain_wake(Arc::new(move || {
+        let (Some(outbox), Ok(rt)) = (weak_outbox.upgrade(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        let session = match weak_session.as_ref() {
+            Some(weak) => match weak.upgrade() {
+                Some(session) => Some(session),
+                None => return,
+            },
+            None => None,
+        };
+        rt.spawn(async move {
+            outbox
+                .drain_until_settled(session.as_deref().map(|s| s as _))
+                .await;
+        });
+    }));
+    spawn_outbox_drain(app);
+}
+
+/// Drain this device's app-only outbox intents — queued MLS sends through the
+/// live conversations session (the one process that hosts the account's
+/// conversations engine, `devices.md` § Offline compose → *Drain*) and
+/// identity-bound ones through the seated composer. Run at the lend (whatever
+/// a previous run queued) and on every reconnect; a no-op while offline or
+/// before the outbox exists. The bounded retry is the shared loop every app
+/// runs (`AccountOutbox::drain_until_settled`); the outbox serializes drains.
+pub(crate) fn spawn_outbox_drain(app: &App) {
+    let Some(outbox) = app.account_outbox.clone() else {
+        return;
+    };
+    if !fauna_protocol::offline_class::is_online(app.connection_state_word()) {
+        return;
+    }
+    let session = app.conversations.real_session.clone();
+    tokio::spawn(async move {
+        outbox
+            .drain_until_settled(session.as_deref().map(|s| s as _))
+            .await;
+    });
 }
 
 /// Run the post-store-ready half of the aftermath
@@ -2468,6 +2605,32 @@ pub fn stored_account(app: &App) -> Option<(Option<String>, SecretString, String
     Some((stored.nest_url, stored.secret_hex, handle))
 }
 
+/// "Use a different nest": walk the launch-target account away from its nest,
+/// keeping the identity — the registry-routed shape linux and apple ship
+/// (`account-scoping.md` § Concurrent instances, the delete corollary).
+///
+/// Reads the account's secret FIRST (the wizard seed needs it), then clears
+/// the `(nest_url, device_id)` binding through
+/// [`AccountRegistry::clear_nest_binding`]. Without the clear the stale
+/// binding survives an abandoned re-onboard and the next launch silently
+/// retries the same unreachable nest instead of starting at the handle step
+/// (connect-and-sign-in outcome 16). The target is the bound account on a
+/// bound launch and the active one otherwise — the same account
+/// [`stored_account`] resolves, so the seed and the clear never name two
+/// accounts. Best-effort, as linux's: a failed clear is logged and the seed
+/// still goes ahead. `None` = no stored identity to seed.
+pub(crate) fn walk_away_from_nest(app: &App) -> Option<SecretString> {
+    let registry = registry(app);
+    let actor = registry
+        .resolve_launch_binding()
+        .or_else(|| registry.active())?;
+    let secret = registry.secrets(&actor)?.secret_hex;
+    if let Err(e) = registry.clear_nest_binding(&actor) {
+        tracing::warn!("[launch] use-a-different-nest could not clear the nest binding: {e}");
+    }
+    Some(secret)
+}
+
 /// Derive an [`ActorKeypair`] from the SAME secret [`stored_account`] handed
 /// back — the one seam `verify_superseded_successor` (launch.rs) and
 /// `run_silent_sign_in` both go through, so neither can independently
@@ -2726,6 +2889,12 @@ pub fn apply_session_patch(
         sign_out(app, fauna_client_account_runtime::StopReason::AccountSwitch);
         return true;
     }
+    // This patch IS the session now, so a launch still in flight is superseded:
+    // retire it, and its verdict is dropped when it lands rather than rendered
+    // over the session built below (`onboarding.md` § App-launch routing → *A
+    // verdict renders only while its own launch is still the current one*; the
+    // apple twins clear their `LaunchMachineBox` at the same point).
+    crate::launch::retire_in_flight(app);
     // An authenticated→authenticated patch naming the SAME actor and nest is
     // the driver replaying a login the app already holds — the CR-1
     // relaunch-with-pinned-store shape, where launch auto-restored this very
@@ -2813,7 +2982,7 @@ pub fn apply_session_patch(
 /// `ConnectionState`/reconnect pumps, the drafts rails, the subscriptions
 /// author pump) are NOT re-run: they are still alive on this very client, and
 /// a second copy would duplicate every event they carry. The sweep is the same
-/// distinction drawn one level down — [`crate::critical_alerts::spawn_one_shot_sweep`]
+/// distinction drawn one level down — [`crate::critical_alerts::spawn_post_auth_sweep`]
 /// runs a single pass rather than a second `run_alert_sweep_loop`, whose first
 /// copy is still looping (that function's doc carries the reasoning, and
 /// windows' e2e seam ratified the same one-shot posture).
@@ -2868,11 +3037,12 @@ fn reconverge_post_auth(app: &App, secret_hex: &str, node_url: &str) {
     // The actor is unchanged by construction on this arm, so the alert keys the
     // pass posts under are the ones already on screen.
     match ActorKeypair::from_secret_hex(secret_hex) {
-        Ok(keypair) => crate::critical_alerts::spawn_one_shot_sweep(
+        Ok(keypair) => crate::critical_alerts::spawn_post_auth_sweep(
             client,
             Arc::clone(&app.settings.account_runtime),
             Arc::clone(&app.alerts),
             keypair.actor_id(),
+            app.alert_sweep_wake.clone(),
         ),
         Err(e) => tracing::warn!(error = %e, "[agent] session patch: converge sweep skipped"),
     }
@@ -2989,7 +3159,7 @@ pub fn sign_out(app: &mut App, reason: fauna_client_account_runtime::StopReason)
     let store_stop = (settled.is_some() || assembling.is_some()).then(|| {
         // WAITED FOR, never merely spawned — bounded, with a loud elapse. A
         // spawned shutdown with nothing sequenced behind it is a race the erase
-        // wins: `account_scope::erase_all_known_accounts` is entirely
+        // wins: the sign-out finish (`account_scope::finish`) is entirely
         // synchronous, so the sweep would run before the task had even reached
         // the assembly's channel. On Windows that is not untidiness, it is a
         // leak: an open file cannot be deleted (`os error 32`), so the
@@ -3410,9 +3580,14 @@ pub(crate) mod tests {
     ///
     /// The observable is the sweep's own causal barrier — the started counter,
     /// bumped by `run_session_start_sweep_at` before any feeder reads anything,
-    /// so this test needs no reachable nest and no clock: it asserts a pass
-    /// **began**, which is exactly the property the e2e barrier asserts.
-    #[tokio::test]
+    /// so this test needs no reachable nest: it asserts a pass **began**,
+    /// which is exactly the property the e2e barrier asserts.
+    ///
+    /// The fixture mounts no account runtime, so the one-shot's wait for the
+    /// custody door (`fauna_client_alert_sweep::run_one_shot_sweep`) runs to
+    /// its bound before the pass begins; tokio's paused clock steps that bound
+    /// in virtual time, so the test still reads no wall clock.
+    #[tokio::test(start_paused = true)]
     async fn the_converge_arm_dispatches_another_sweep_pass() {
         let mut app = crate::app::tests::authed_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3431,15 +3606,21 @@ pub(crate) mod tests {
         });
         assert!(apply_session_patch(&mut app, &tx, &patch), "patch applies");
 
-        // The spawned pass bumps the counter before its first read; yield until
-        // it has been scheduled rather than sleeping for a duration
-        // (`e2e-latency-independent-assertions.md` § point 14 — the same
-        // discipline off the e2e path).
-        for _ in 0..1_000 {
+        // The spawned pass bumps the counter before its first read, once the
+        // custody door opens or its wait's bound passes. Step the paused clock
+        // a little past that bound, checking at every step, rather than
+        // sleeping for a wall-clock duration (`e2e-latency-independent-assertions.md`
+        // § point 14 — the same discipline off the e2e path).
+        let bound =
+            std::time::Duration::from_secs(fauna_client_alert_sweep::ONE_SHOT_READY_WAIT_SECS + 5);
+        let step = std::time::Duration::from_millis(100);
+        let mut waited = std::time::Duration::ZERO;
+        while waited <= bound {
             if app.alerts.sweep_passes_started() > before {
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(step).await;
+            waited += step;
         }
         panic!(
             "the converge arm must dispatch a sweep pass: started stayed at {before} — \

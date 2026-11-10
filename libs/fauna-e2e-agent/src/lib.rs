@@ -552,6 +552,30 @@ fn describe(v: Option<&Value>) -> String {
 /// turning the assert vacuous in the one direction that matters.
 pub const SESSION_GENERATION_KEY: &str = "session_generation";
 
+/// The state key carrying how many asynchronously delivered **launch verdicts**
+/// this app process has accounted for — `{"routed": n, "superseded": m}`, built
+/// by [`launch_verdicts_json`].
+///
+/// **What it is for.** `onboarding.md` § App-launch routing → *A verdict renders
+/// only while its own launch is still the current one*: a verdict computed by a
+/// launch that a newer session has since superseded is dropped whole. A test
+/// proving that drop needs a causal barrier for its negative assert ("the newer
+/// session still stands"), and the dropped verdict paints nothing to wait for.
+/// So every verdict that reaches the app's verdict handler bumps exactly one of
+/// the two counters — `routed` when it was rendered, `superseded` when it was
+/// dropped — and a test awaits `routed + superseded` growing past its read
+/// before asserting (convention 14, mechanism (b)).
+///
+/// **Contract, identical on every app that publishes it.** Both counters start
+/// at 0 for a fresh app process and only ever increase; a bump happens in the
+/// verdict handler synchronously, before the verdict is rendered or dropped.
+/// Only verdicts that arrive *after* their launch's await are counted — a
+/// gesture that drives the launch machine and renders inline, with nothing able
+/// to supersede it in between, is not a delivered verdict. An app that does not
+/// publish the key has not built the currency check's observable, and a test
+/// reading it refuses rather than passing (convention 11).
+pub const LAUNCH_VERDICTS_KEY: &str = "launch_verdicts";
+
 /// The state key carrying a monotonic count of **completed account-activation
 /// gestures** — one tap on an `account-switcher-item` row, counted when the
 /// handler that evaluates the activation gate has returned, whatever it decided
@@ -623,6 +647,19 @@ pub const ACTIVATION_GESTURES_KEY: &str = "activation_gestures";
 /// finished". Comparing against `started` settles that by pigeonhole without
 /// counting the loops.
 pub const ALERT_SWEEP_PASSES_KEY: &str = "alert_sweep_passes";
+
+/// The critical-alert registry's standing alerts, `{"count": N, "keys": [..]}`
+/// (`fauna_client_alerts::CriticalAlerts::active_keys`). TOP-level, one
+/// key at one depth on every app.
+///
+/// **Contract.** A live read of the shared registry, so a witness can tell a
+/// SURVIVING alert from one a fresh session re-raised, which the banner cannot
+/// (`critical-alerts.md` § Mechanism → *Lifetime*: a factory reset re-claims as
+/// the same identity). Read it in the same snapshot as
+/// [`ALERT_SWEEP_PASSES_KEY`]: while `completed` has not moved past the
+/// pre-teardown value, no new pass has posted or cleared anything, so the count
+/// is the teardown's own.
+pub const ALERT_REGISTRY_KEY: &str = "alert_registry";
 
 /// The critical-alert re-sweep loop's **poke** — convention 14's `run_now` for
 /// the six-hour clock (`fauna_client_alert_sweep::RE_SWEEP_INTERVAL_SECS`), the
@@ -962,7 +999,10 @@ pub const PHOTO_BACKUP_KEY: &str = "photo_backup";
 /// `passes_completed`, not this ack, so a poke arriving before the session has an
 /// engine is a quiet, honoured no-op rather than a dropped command
 /// (convention 11) and the consumer's own deadline poll is what fails, naming the
-/// app and the key. apple-only, like the key.
+/// app and the key. On android the command enqueues one `PhotoBackupWorker`
+/// through WorkManager — the worker its 15-minute periodic schedule runs — so the
+/// poke constructs and runs the identical `doWork` the schedule does
+/// ([`WIDGET_REFRESH_SCHEDULED_PASS_NOW`]'s android shape). iOS and android.
 pub const PHOTO_BACKUP_SCHEDULED_PASS_NOW: &str = "photo_backup_scheduled_pass_now";
 
 /// Photo backup's **library seed** — the macOS venue's stand-in for "a photo was
@@ -1233,6 +1273,30 @@ pub const SHARE_SERVE_TALLY_KEY: &str = "share_serve_tally";
 /// which would turn every unbuilt column's *absence* of a banner into a pass.
 pub const MESSAGE_BANNERS_KEY: &str = "message_banners";
 
+/// State key: the **knock toasts this app process actually raised**, as
+/// `{"seen": N, "fired": [{"key", "text", "replace_id"}, …]}`, built by
+/// [`KnockNotices::json`] — the shared log every app's firing arm feeds.
+///
+/// **What it witnesses.** `notifications` outcome 15 — *a knock from a stranger
+/// shows one notice in your language, and a flood replaces it rather than
+/// piling up* (`behavior/notifications.md` § Localized body, the knock toast).
+/// The text is the shared `fauna_client_notifications::knock_push_text`
+/// decision resolved through the app's catalog (`key` names the catalog key it
+/// resolved from, `null` for a verbatim text); `replace_id` is the one
+/// notification id the app raises every knock toast under (`null` on an arm
+/// that has no replace id), so "a flood replaces one toast" reads as every
+/// entry sharing one id. Nothing else reports that a toast went out — the OS
+/// notification centre is not readable from a test.
+///
+/// **Contract, identical on every app that publishes it.** `seen` counts every
+/// knock push the firing arm received, before the muted-word gate (rule 6);
+/// an entry is appended at the firing site after every suppression, so the
+/// list means "the user was shown this". Both only grow for the process
+/// lifetime. An app that has not built the knock toast publishes nothing, and
+/// the consumer refuses loudly (convention 11) rather than reading an empty
+/// list as a proven negative — exactly as for [`MESSAGE_BANNERS_KEY`].
+pub const KNOCK_NOTICES_KEY: &str = "knock_notices";
+
 /// State key: this app's **transport connection**, as
 /// `{"state": "<lowercase wire word>", "online": <bool>}` — built by
 /// [`connection_json`], the one shared derivation.
@@ -1343,6 +1407,11 @@ pub fn clock_json(offset_secs: i64, now_secs: i64) -> Value {
     json!({ "offset_secs": offset_secs, "now_secs": now_secs })
 }
 
+/// Build [`LAUNCH_VERDICTS_KEY`]'s value from the app's two verdict counters.
+pub fn launch_verdicts_json(routed: u64, superseded: u64) -> Value {
+    json!({ "routed": routed, "superseded": superseded })
+}
+
 /// Build [`CONNECTION_KEY`]'s value from the app's lowercase transport word.
 ///
 /// Every app's leg is this one call, so the polarity cannot drift per app:
@@ -1420,13 +1489,13 @@ pub const RECONNECT_BACKOFF: &str = "reconnect_backoff";
 /// failure message (convention 6).
 pub const PAINTED_ERRORS_KEY: &str = "painted_errors";
 
-/// The pure halves of [`CONNECTION_REPORTS_KEY`], [`RECONNECT_BACKOFF`] and
-/// [`PAINTED_ERRORS_KEY`] — the counters, the payload parser and the
+/// The pure halves of [`CONNECTION_REPORTS_KEY`], [`KNOCK_NOTICES_KEY`],
+/// [`RECONNECT_BACKOFF`] and [`PAINTED_ERRORS_KEY`] — the counters, the payload parser and the
 /// error-surface predicate. They live in the wasm-safe `fauna-e2e-contract` so
 /// the web leg counts with the same code as the native ones; re-exported here so
 /// a native host names them where it always has.
 pub use fauna_e2e_contract::{
-    ConnectionReports, PaintedErrorTally, is_error_surface, reconnect_backoff_bounds,
+    ConnectionReports, KnockNotices, PaintedErrorTally, is_error_surface, reconnect_backoff_bounds,
 };
 
 /// A request forwarded to the client's UI thread, with the one-shot reply

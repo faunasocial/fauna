@@ -114,6 +114,38 @@ pub struct KnockActionReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── the knock send's queued inputs ─────────────────────────────────────
+
+/// The kind a queued knock send drains as.
+pub const KNOCK_SEND_KIND: &str = "fauna.inbox.send";
+
+/// A knock send queued with no nest — its INPUTS, never the signed
+/// `(ContactRequest, Post)` tuple (`account-offline-mutation.md` § The
+/// offline-mutation contract → *Identity-bound intents compose at
+/// drain*). The tuple is signed by the actor key, and the home nest refuses
+/// content authored by a superseded identity, so the app's identity composer
+/// builds and signs it at drain from these fields and the identity and node
+/// url it holds then. Stored in the outbox as canonical CBOR — an at-rest
+/// shape, never on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnockSendIntent {
+    /// The recipient's actor id, hex.
+    pub recipient_actor_id: String,
+    /// The recipient's home-nest url when the lookup found them on a peer;
+    /// `None` delivers on the sender's own nest (`InboxSendRequest`'s axis).
+    pub recipient_nest_url: Option<String>,
+    /// Rule 4's catch-all (transport.md § Schema and forward-compat
+    /// discipline): a field a newer build added survives this one.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The FIFO scope a queued knock send drains in — one per recipient, so a
+/// refused knock to one actor never holds another's.
+pub fn knock_send_scope(recipient_actor_id: &str) -> String {
+    format!("inbox.send:{recipient_actor_id}")
+}
+
 // ── fauna.contacts.list ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

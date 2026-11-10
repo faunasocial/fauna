@@ -498,6 +498,7 @@ impl RailBackend for MockRailBackend {
             subject: msg.subject.clone(),
             in_reply_to: msg.in_reply_to.clone(),
             message: MessageSnapshot {
+                queued_send: None,
                 message_id: msg.message_id,
                 sender: msg.sender,
                 sender_display: String::new(),
@@ -519,6 +520,7 @@ impl RailBackend for MockRailBackend {
                 // not on the plane at all.
                 plane_ref: msg.plane_ref,
                 can_delete: false,
+                can_remove: false,
                 undelivered: false,
                 warmup_hold: None,
                 scan_result_lines: Vec::new(),

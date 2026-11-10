@@ -113,6 +113,12 @@ internal fun openSearchResult(
             )
         }
     }
+    // The Events page; opening the hit's `event_detail` by its `uidHash` (the
+    // Events rows' id) is tui's shape and lifts here with the events
+    // trickle-down — until then the jump lands on the page itself.
+    is SearchNav.Event -> {
+        { navController.navigate("events") }
+    }
 }
 
 /** Icon for a result row's raw `content_type`, mirroring the shared kind-class

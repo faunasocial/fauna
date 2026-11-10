@@ -38,6 +38,8 @@ Stamped 2026-09-19 at 0bb8814071.
 | ios | ✅ full | 0.1.5-dev+2e009c0f standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+fa773d19.dirty standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

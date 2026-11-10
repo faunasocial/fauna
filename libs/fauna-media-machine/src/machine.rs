@@ -128,6 +128,18 @@ const FOLLOWED_UNAVAILABLE_ERROR_KEY: &str = "media.error_followed_unavailable";
 /// unavailable wording because a dropped connection must never render as the
 /// revoke (`folders.md` § Publicly-synced follow).
 const FOLLOWED_FETCH_ERROR_KEY: &str = "media.error_followed_fetch";
+/// i18n key for a foreign browse scope whose home nest refused the member's
+/// relayed read — the member was removed (`ui/media.md` § Cross-nest shared
+/// sets, *Removal is loud*). The scope enters empty and the option stays
+/// listed until the member's custody record goes. No `{message}` arg.
+const FOREIGN_REMOVED_ERROR_KEY: &str = "media.error_foreign_removed";
+/// The `{message}` a write into a set homed on another nest reports through
+/// [`UPLOAD_ERROR_KEY`] / [`DELETE_ERROR_KEY`] on a platform that wired no
+/// member write door ([`crate::folder_keys::ForeignBlobFetcherFactory::member_uploader_for`])
+/// — refused loudly, never sent to the own nest, which holds none of the set's
+/// bytes (`ui/media.md` § Cross-nest shared sets, *Upload*).
+const FOREIGN_WRITE_UNSUPPORTED: &str =
+    "writing to a folder homed on another nest is not supported on this platform";
 
 /// One page read's custody view ([`fauna_core::folder_keys::read_scope`]):
 /// opened at the first set the read's label render needs custody for, then
@@ -177,6 +189,15 @@ struct State {
     view_grid: bool,
     /// Last page-level error (the `error-message` element); `None` when clear.
     error: Option<LocalizedText>,
+    /// The page error [`MediaMachine::report_error`] put up — an answer to a
+    /// press (no file chosen, no folder to upload into, a file the app could
+    /// not read), not to a read. A read that succeeds clears `error` only when
+    /// it is NOT this one: the page re-reads on its own (a sync push while the
+    /// page shows, the first-load settle), and such a read landing a beat after
+    /// the press would wipe the answer before anyone read it. The next gesture
+    /// ([`MediaMachine::upload_selected`], [`MediaMachine::set_filter`]) drops
+    /// the hold.
+    held_error: Option<LocalizedText>,
     /// Whether a refresh has ever returned successfully — surfaced as
     /// [`MediaPageSnapshot::loaded`], which owns the full rationale. Set in the
     /// `Ok` arm of [`MediaMachine::refresh_with_owner`] and never cleared.
@@ -209,6 +230,11 @@ struct State {
     /// `filter` carries the scope's minted value
     /// (`media.md` § Followed public folders).
     followed_active: Option<FollowedActive>,
+    /// The active **foreign** browse scope (`ui/media.md` § Cross-nest shared
+    /// sets — the foreign browse scope), `None` outside it. While `Some`, the
+    /// snapshot's `items` renders its judged heads and `filter` carries its
+    /// `foreign:` ref. Never both this and [`Self::followed_active`].
+    foreign_active: Option<ForeignActive>,
     /// The open share-link create surface (`share-link-create-modal`).
     share_create: Option<ShareCreate>,
     /// The share-link list surface (`share-link-list`).
@@ -368,6 +394,27 @@ fn manifest_digest(hex_hash: &str, what: &str) -> Result<[u8; 32], MediaApiError
         })
 }
 
+/// The error a shared set's byte walk fails with. A cross-nest member the
+/// set's home nest refused its read token — removed from the set
+/// (`relay-serving.md` § Relay serving → *A member on another nest*, step (5))
+/// — gets a `NotFound` naming the removal (`media.md` § Implementation status
+/// today, the cross-nest download entry): it is permanent, and dressed as the
+/// walk's other failures it would read as a blip to retry. Every other failure
+/// stays the one transient detail string the page shows verbatim.
+fn shared_read_error(what: &str, e: &anyhow::Error) -> MediaApiError {
+    if fauna_core::file_download::is_membership_refused(e) {
+        return MediaApiError::NotFound {
+            detail: format!(
+                "{what} refused: you are no longer a member of this shared folder, so its \
+                 home nest no longer serves you its files"
+            ),
+        };
+    }
+    MediaApiError::Transient {
+        detail: format!("{what} failed: {e:#}"),
+    }
+}
+
 /// Seal a rendered thumbnail through the one whole-file pipeline under
 /// `seal_root` — the root its file just sealed under — and post it chunks
 /// first, manifest last (a manifest never rests pointing at chunks the nest
@@ -416,6 +463,46 @@ fn share_facts(
     }
 }
 
+/// Render one listed item's path under its set's `keys`, bounded to who signed
+/// its row — `false` when the label does not render and the item omits (the
+/// ratified degrade). The one per-item render the aggregate and the foreign
+/// browse scope share, so a name renders alike in both.
+///
+/// Salt selection + the sealed-first policy both live in the shared seam
+/// (`fauna_core::label_custody`), so this surface cannot drift from snapshot
+/// browse/diff or the conflict list on either. Ruling (8)(c): a row signed
+/// under a retired identity (or by another writer) is never offered this
+/// account's CURRENT owner root on the label arm — else a predecessor's
+/// signature could render, in this set, the sealed path of a file the
+/// successor created in another.
+fn render_item_path(keys: &FileDownloadKeys, signer: RecordSigner, item: &mut MediaItem) -> bool {
+    let label_keys;
+    let keys = if signer.offers_current() {
+        keys
+    } else {
+        label_keys = FileDownloadKeys {
+            record_signer: signer,
+            ..keys.clone()
+        };
+        &label_keys
+    };
+    match fauna_core::label_custody::render_path(
+        keys,
+        item.path_sealed.as_ref().map(|b| &b[..]),
+        &item.path,
+        item.path_hash.as_ref().map(|b| &b[..]),
+        path_crypto::LabelField::SyncChangePath,
+    ) {
+        path_crypto::SealedLabelRender::Sealed(path) => {
+            item.path = path;
+            true
+        }
+        // Already the plaintext we were handed — nothing to rewrite.
+        path_crypto::SealedLabelRender::Plaintext(_) => true,
+        path_crypto::SealedLabelRender::Omit => false,
+    }
+}
+
 /// An own-set item's summary with its share-link verdict filled in — the one
 /// place `share_link_eligible` is set, so an item the browse lists and an item a
 /// deep link locates ([`MediaMachine::locate_file`] / [`MediaMachine::locate_path`])
@@ -453,7 +540,36 @@ impl FollowedActive {
     }
 }
 
+/// The active foreign browse scope: the set as the option offered it, plus
+/// its judged heads with their labels rendered under the scope's custody.
+/// The set's identity lives HERE, never on an item (`ui/media.md` § Cross-nest
+/// shared sets, *Identity lives on the scope*): every gesture on one of
+/// `items` resolves its set as `SetKey::Ref(FolderRef::Foreign(channel))`.
+struct ForeignActive {
+    set: fauna_client_media::MediaForeignSet,
+    items: Vec<MediaItem>,
+    /// Heads the last read held for want of a roster — re-read on the page's
+    /// settle ([`MediaMachine::reread_held_foreign_scope`]).
+    held: usize,
+}
+
+impl ForeignActive {
+    fn set_key(&self) -> SetKey {
+        SetKey::Ref(self.set.folder_ref())
+    }
+}
+
 impl State {
+    /// A new gesture began: the held press answer (`held_error`) stops
+    /// standing, and leaves the page if it is still the one shown.
+    fn drop_held_error(&mut self) {
+        if let Some(held) = self.held_error.take()
+            && self.error.as_ref() == Some(&held)
+        {
+            self.error = None;
+        }
+    }
+
     fn new() -> Self {
         Self {
             raw: MediaSnapshot::default(),
@@ -462,12 +578,14 @@ impl State {
             filter: None,
             view_grid: false,
             error: None,
+            held_error: None,
             loaded: false,
             complete: false,
             committed_gen: 0,
             first_load_spent: std::time::Duration::ZERO,
             followed_options: Vec::new(),
             followed_active: None,
+            foreign_active: None,
             share_create: None,
             share_links: ShareLinksSnapshot::default(),
         }
@@ -599,6 +717,12 @@ pub struct MediaMachine {
     share_author: Mutex<Option<Arc<fauna_client_share::ShareAuthor>>>,
     /// The first-load settle schedule ([`SettlePolicy`]); a test shortens it.
     settle: Mutex<SettlePolicy>,
+    /// Browse-scope generation — bumped by every scope change
+    /// ([`Self::set_filter`], [`Self::select_followed_scope`],
+    /// [`Self::select_foreign_scope`]) and checked before a foreign scope's
+    /// fetch commits, so a selection the user has already moved past never
+    /// lands over a newer one.
+    scope_gen: std::sync::atomic::AtomicU64,
 }
 
 impl MediaMachine {
@@ -641,6 +765,7 @@ impl MediaMachine {
             signed_as: Mutex::new(SignedAsLedger::default()),
             share_author: Mutex::new(None),
             settle: Mutex::new(SettlePolicy::default()),
+            scope_gen: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -672,6 +797,22 @@ impl MediaMachine {
         *self.mls_query.lock().unwrap() = Some(mls_query);
     }
 
+    /// Enter the foreign browse scope `value` names (`foreign:<channel hex>`,
+    /// as `folder_options` offered it) and return once its listing has landed
+    /// or failed — the awaitable form of what [`Self::set_filter`] runs on the
+    /// background executor for the same value, for a caller that holds a
+    /// runtime and wants the answer in order (tui's `Op`, a test). A value
+    /// that is not a foreign ref reports and changes nothing.
+    pub async fn select_foreign_scope(&self, value: String) {
+        let generation = self.next_scope();
+        match FolderFilter::parse(&value) {
+            FolderFilter::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) => {
+                self.enter_foreign_scope(channel, generation).await;
+            }
+            _ => self.set_error(REFRESH_ERROR_KEY, "that is not a folder on another nest"),
+        }
+    }
+
     /// Shorten the first-load settle ([`SettlePolicy`]) — tests only, so a
     /// settle that never completes spends milliseconds, not its real budget.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -696,6 +837,64 @@ impl MediaMachine {
                 )
             })
             .collect())
+    }
+
+    /// The member's cross-nest sets as browse scopes (`ui/media.md`
+    /// § Cross-nest shared sets → *Which sets are offered*): the live
+    /// foreign-set records the custody resolver already opens, behind the same
+    /// MLS join-filter the member rows pass (unwired, every one is dropped —
+    /// fail-safe), dropping a record whose group a control-plane row already
+    /// carries (a set is never in both planes). No resolver → none; a failed
+    /// custody read keeps the options the last read offered, never reading as
+    /// a removal.
+    async fn read_foreign_sets(
+        &self,
+        known: &[fauna_client_media::MediaFolder],
+    ) -> Vec<fauna_client_media::MediaForeignSet> {
+        let Some(resolver) = self.folder_keys.as_ref() else {
+            return Vec::new();
+        };
+        let records = match resolver.foreign_sets().await {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::warn!(
+                    target: "fauna_media",
+                    error = %e,
+                    "reading the foreign shared sets failed; keeping the last read's options",
+                );
+                return self.state.lock().unwrap().raw.foreign_sets.clone();
+            }
+        };
+        let query = self.mls_query.lock().unwrap().clone();
+        records
+            .into_iter()
+            .filter_map(|record| {
+                let group = hex::encode(&record.mls_group_id);
+                let joined = fauna_client_media::member_rows::admits(
+                    query.as_deref(),
+                    true,
+                    Some(group.as_str()),
+                );
+                let listed = known.iter().any(|f| {
+                    f.mls_group_id
+                        .as_deref()
+                        .is_some_and(|g| g.eq_ignore_ascii_case(&group))
+                });
+                (joined && !listed).then(|| fauna_client_media::MediaForeignSet {
+                    channel: record.channel_id,
+                    name: record.set_name.clone().unwrap_or_default(),
+                    owner: fauna_core::format::qualified_handle(
+                        record.owner_handle.as_deref(),
+                        record.owner_domain.as_deref(),
+                    )
+                    .unwrap_or_default(),
+                    mls_group_id: group,
+                    home_nest_url: record.home_nest_url.clone(),
+                    writer: record.access.as_deref() == Some("writer"),
+                    metadata_only: record.metadata_only_residency() == Some(true),
+                })
+            })
+            .collect()
     }
 
     /// Whether a builder handed this machine the folder custody resolver — the
@@ -899,42 +1098,9 @@ impl MediaMachine {
                 );
             }
 
-            // Salt selection + the sealed-first policy both live in the shared
-            // seam (`fauna_core::label_custody`), so this surface cannot drift
-            // from snapshot browse/diff or the conflict list on either.
-            // Ruling (8)(c): a row signed under a retired identity (or by
-            // another writer) is never offered this account's CURRENT owner
-            // root on the label arm — else a predecessor's signature could
-            // render, in this set, the sealed path of a file the successor
-            // created in another.
-            let label_keys;
-            let keys = if signer.offers_current() {
-                keys
-            } else {
-                label_keys = FileDownloadKeys {
-                    record_signer: signer,
-                    ..keys.clone()
-                };
-                &label_keys
-            };
-            match fauna_core::label_custody::render_path(
-                keys,
-                item.path_sealed.as_ref().map(|b| &b[..]),
-                &item.path,
-                item.path_hash.as_ref().map(|b| &b[..]),
-                path_crypto::LabelField::SyncChangePath,
-            ) {
-                path_crypto::SealedLabelRender::Sealed(path) => {
-                    item.path = path;
-                    item.folder = set_name;
-                    rendered.push(item);
-                }
-                // Already the plaintext we were handed — nothing to rewrite.
-                path_crypto::SealedLabelRender::Plaintext(_) => {
-                    item.folder = set_name;
-                    rendered.push(item);
-                }
-                path_crypto::SealedLabelRender::Omit => {}
+            if render_item_path(keys, signer, &mut item) {
+                item.folder = set_name;
+                rendered.push(item);
             }
         }
         // An omitted row is a *correct* degrade for a genuine non-audience reader
@@ -1041,6 +1207,14 @@ impl MediaMachine {
                     .is_some_and(|h| hex::encode(h).eq_ignore_ascii_case(m))
             })
         };
+        // Inside a foreign browse scope an item's set is the scope's — by its
+        // `foreign:` ref, never by name (`ui/media.md` § Cross-nest shared
+        // sets: identity lives on the scope).
+        if let Some(active) = s.foreign_active.as_ref()
+            && active.items.iter().any(|it| at_path(&it))
+        {
+            return active.set_key();
+        }
         let items = &s.raw.items;
         let found = items
             .iter()
@@ -1091,6 +1265,14 @@ impl MediaMachine {
     /// degrade ([`Self::target_set_key`]).
     fn resolve_target(&self, filter: &FolderFilter) -> Option<(String, SetKey)> {
         match filter {
+            // A foreign set has no row on this nest: it resolves to the set the
+            // options offer (`ui/media.md` § Cross-nest shared sets), its name
+            // the one the record carries — the channel form is its address.
+            FolderFilter::Ref(r @ fauna_core::folder_keys::FolderRef::Foreign(channel)) => {
+                let s = self.state.lock().unwrap();
+                let set = s.raw.foreign_set(channel)?;
+                Some((set.name.clone(), SetKey::Ref(*r)))
+            }
             FolderFilter::Ref(r) => {
                 let s = self.state.lock().unwrap();
                 let row = s.raw.row_for(filter)?;
@@ -1239,6 +1421,9 @@ impl MediaMachine {
             let generation = self.refresh_gen.fetch_add(1, Ordering::SeqCst) + 1;
             let read_owner = self.read_owner.lock().unwrap().clone().or(owner.clone());
             let (result, complete) = self.read_page(read_owner).await;
+            // A foreign scope whose last read held heads is re-read on the
+            // same settle, and holds the page's completeness like a held row.
+            let complete = self.reread_held_foreign_scope().await && complete;
             let budget = SettleBudget {
                 first_load_spent: self.state.lock().unwrap().first_load_spent >= policy.budget,
                 this_settle_spent: waited >= policy.budget,
@@ -1331,6 +1516,10 @@ impl MediaMachine {
                         false
                     }
                 };
+                // The foreign browse scopes ride every read beside the
+                // control-plane rows (`ui/media.md` § Cross-nest shared sets
+                // → *Which sets are offered*).
+                snap.foreign_sets = self.read_foreign_sets(&snap.known_folders).await;
                 let complete = folders_read && snap.held == 0;
                 (Ok(snap), complete)
             }
@@ -1395,7 +1584,11 @@ impl MediaMachine {
                         budget.first_load_spent
                     };
                     s.raw = snap;
-                    s.error = None;
+                    // A press's answer outlives a read that merely re-lists
+                    // the page (`held_error`'s doc).
+                    if s.error != s.held_error {
+                        s.error = None;
+                    }
                     s.complete = complete;
                     if settling && exhausted {
                         tracing::warn!(
@@ -1567,57 +1760,59 @@ impl MediaMachine {
         // form comes from the item itself, so a reader's own same-named set
         // never shadows the shared set the item belongs to.
         let hint = fauna_core::file_download::FolderHint::new(folder).with_ref(set.folder_ref());
-        if keys.mls_group_id.is_some() {
+        if let Some(group_id) = keys.mls_group_id.as_deref() {
             // A FOREIGN (cross-nest) set's bytes live on its home nest — fetch
-            // through the factory-built fetcher bound to that base URL (Phase 2
-            // client read-side; the byte routes are public + CORS-open and
-            // integrity is by content address), verified against the
-            // grant-delivered home identity. A same-nest set uses the
-            // machine's own injected fetcher, hinted. The foreign read carries
-            // no hint: this session holds no bearer the home nest can name
-            // (its reader's door is § Relay serving → *A member on another
-            // nest*'s byte-plane token).
-            let fetcher: Arc<dyn fauna_core::file_download::BlobFetcher> = match foreign_home
-                .as_ref()
-            {
-                Some(home) => self
-                    .foreign_fetchers
-                    .get()
-                    .ok_or_else(|| MediaApiError::Transient {
-                        detail: "cross-nest file download is not yet supported on this \
-                                     platform"
-                            .to_string(),
-                    })?
-                    .fetcher_for(&home.nest_url, home.nest_actor_id.as_deref()),
-                None => self
-                    .download_fetcher
-                    .clone()
-                    .ok_or_else(|| MediaApiError::Transient {
-                        detail: "media file download is not yet supported on this platform"
-                            .to_string(),
-                    })?,
-            };
-            let hinted = fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint);
-            let walk: &dyn fauna_core::file_download::BlobFetcher = if foreign_home.is_some() {
-                fetcher.as_ref()
-            } else {
-                &hinted
-            };
+            // through the factory's MEMBER door bound to that base URL,
+            // verified against the grant-delivered home identity, its folder
+            // reads under the read token the member's own nest mints for this
+            // set's channel and hinted by the set's `foreign:<channel>` ref:
+            // the bearer and the row the home nest's store-miss arm resolves
+            // against its cross-nest roster at every read, so a metadata-only
+            // folder's chunk is relayed from a seat and a removal ends the
+            // reads (`relay-serving.md` § Relay serving → *A member on another
+            // nest*, step (5)). A same-nest set uses the machine's own
+            // injected fetcher, hinted by the item's own ref.
+            let (fetcher, hint): (Arc<dyn fauna_core::file_download::BlobFetcher>, _) =
+                match foreign_home.as_ref() {
+                    Some(home) => {
+                        let channel = fauna_core::folder_keys::channel_id_for_group(group_id);
+                        let fetcher = self
+                            .foreign_fetchers
+                            .get()
+                            .ok_or_else(|| MediaApiError::Transient {
+                                detail: "cross-nest file download is not yet supported on \
+                                         this platform"
+                                    .to_string(),
+                            })?
+                            .member_fetcher_for(home, channel);
+                        let hint = hint
+                            .with_ref(Some(fauna_core::folder_keys::FolderRef::Foreign(channel)));
+                        (fetcher, hint)
+                    }
+                    None => (
+                        self.download_fetcher
+                            .clone()
+                            .ok_or_else(|| MediaApiError::Transient {
+                                detail: "media file download is not yet supported on this \
+                                         platform"
+                                    .to_string(),
+                            })?,
+                        hint,
+                    ),
+                };
             // The owner key rides in `keys` for a bound set too, but
             // `effective_backup_key` suppresses it on every chunk site
             // (FS-5DC) — a bound set's chunks stay content-keyed, exactly as
             // before this factor.
             return fauna_core::file_download::download_file_bytes_by_manifest(
-                walk,
+                &fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint),
                 &keys,
                 fauna_core::data::ContentHash::from_digest_raw(digest),
                 content_key_version.map(fauna_core::blob_seal::SealStamp::Version),
                 relative_path,
             )
             .await
-            .map_err(|e| MediaApiError::Transient {
-                detail: format!("{what} failed: {e:#}"),
-            });
+            .map_err(|e| shared_read_error(what, &e));
         }
 
         // Owner-only path — the chunk-store walk under the owner key.
@@ -1864,6 +2059,27 @@ impl MediaMachine {
                     Some(option),
                 )
             }
+            // A foreign browse scope, while active, IS the page's item list
+            // too — its judged heads through the same view sort, each item's
+            // `filter_value` the scope's own ref (`ui/media.md` § Cross-nest
+            // shared sets: identity lives on the scope).
+            None if s.foreign_active.is_some() => {
+                let active = s.foreign_active.as_ref().expect("checked above");
+                let value = active.set.option_value();
+                let view = MediaSnapshot {
+                    items: active.items.clone(),
+                    ..MediaSnapshot::default()
+                };
+                let items = view
+                    .view(None, s.sort, s.descending)
+                    .into_iter()
+                    .map(|item| MediaItemSummary {
+                        filter_value: value.clone(),
+                        ..MediaItemSummary::from(item)
+                    })
+                    .collect();
+                (items, Some(value), Some(active.set.option_label()), None)
+            }
             None => {
                 let value = s.filter.as_ref().map(FolderFilter::value);
                 (
@@ -2065,8 +2281,14 @@ impl MediaMachine {
                 .map(FolderFilter::value)
                 .or_else(|| s.raw.default_upload_target())
         };
+        // Inside a foreign browse scope the filter holds the scope's
+        // `foreign:` ref, so the upload targets the set the user is looking at;
+        // a reader's or a metadata-only set's refusal is `upload_into`'s
+        // (`ui/media.md` § Cross-nest shared sets, *Upload*).
         let (followed_active, mut target) = {
-            let s = self.state.lock().unwrap();
+            let mut s = self.state.lock().unwrap();
+            // A new press: the previous press's answer no longer stands.
+            s.drop_held_error();
             (s.followed_active.is_some(), pick(&s))
         };
         // A followed browse scope is structurally read-only, and while one is
@@ -2432,6 +2654,47 @@ impl MediaMachine {
             return;
         };
         let path_sealed = self.seal_record_path(target, &path).await;
+        // A writer member's delete in a set homed on another nest is the same
+        // relayed record door the upload uses — a tombstone (`ui/media.md`
+        // § Cross-nest shared sets, *Upload*); the home nest's writer gate
+        // decides it.
+        if let SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) = target {
+            let home = self
+                .state
+                .lock()
+                .unwrap()
+                .raw
+                .foreign_set(&channel)
+                .map(|f| f.home_nest_url.clone());
+            let Some(home) = home else {
+                self.set_error(DELETE_ERROR_KEY, &format!("no listed set is {folder}"));
+                return;
+            };
+            match self
+                .nest_api
+                .record_foreign(
+                    channel,
+                    &home,
+                    &name,
+                    &device_id,
+                    &path,
+                    None,
+                    0,
+                    "delete",
+                    None,
+                    None,
+                    path_sealed,
+                )
+                .await
+            {
+                Ok(()) => {
+                    self.refresh_with_owner(self.owner_key()).await;
+                    self.reread_foreign_scope_of(target).await;
+                }
+                Err(e) => self.set_error(DELETE_ERROR_KEY, e.detail()),
+            }
+            return;
+        }
         let folder_id = target.local_row();
         match self
             .nest_api
@@ -2472,6 +2735,17 @@ impl MediaMachine {
         path: String,
         include_pruned: bool,
     ) -> Result<Vec<FileVersionSummary>, MediaApiError> {
+        // Inside a foreign browse scope the history is the home nest's,
+        // relayed through the member's own nest and judged under the scope's
+        // custody (`ui/media.md` § Cross-nest shared sets): every version is
+        // noted under the scope's `SetKey`, so the detail's download and a
+        // writer's restore name exactly a manifest the judge admitted, never
+        // one the own nest could answer for a namesake.
+        if let FolderFilter::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) =
+            FolderFilter::parse(&folder)
+        {
+            return self.foreign_versions(channel, &path).await;
+        }
         let Some((folder, target)) = self.resolve_target(&FolderFilter::parse(&folder)) else {
             return Err(MediaApiError::NotFound {
                 detail: format!("no listed set is {folder}"),
@@ -2535,19 +2809,52 @@ impl MediaMachine {
         path: String,
         version: FileVersionSummary,
     ) {
+        // A version of a set homed on another nest (`ui/media.md` § Cross-nest
+        // shared sets): read under the scope's custody and verdicts — the key
+        // `Self::foreign_versions` noted it under — and re-pointed through the
+        // relayed record door the upload and delete use; a reader member is
+        // refused here, as its upload is, before anything is sealed or sent.
+        let foreign = match FolderFilter::parse(&folder) {
+            FolderFilter::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) => {
+                let s = self.state.lock().unwrap();
+                match s.raw.foreign_set(&channel) {
+                    Some(f) if !f.writer => {
+                        drop(s);
+                        let err = LocalizedText::key(READ_ONLY_SHARED_FOLDER_ERROR_KEY);
+                        tracing::warn!(target: "fauna_media", "{}", err.log_line());
+                        self.state.lock().unwrap().error = Some(err);
+                        self.observer.on_changed();
+                        return;
+                    }
+                    Some(f) => Some((channel, f.home_nest_url.clone(), f.name.clone())),
+                    None => {
+                        drop(s);
+                        self.set_error(RESTORE_ERROR_KEY, &format!("no listed set is {folder}"));
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
         // The version is read under its own row's custody and verdicts, and
         // re-pointed into that row (`Self::version_set_key`): a writer
         // member's restore of a shared set's version lands there, never in a
         // same-named own set the name resolves to first.
-        let set = self.version_set_key(&folder, &path, &version);
+        let set = match &foreign {
+            Some((channel, _, _)) => {
+                SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(*channel))
+            }
+            None => self.version_set_key(&folder, &path, &version),
+        };
         let folder_id = version.folder_id;
         // Same seal contract as `delete` — the re-point row is append-only
         // nest-side, so the gesture is this row's only chance to seal. A
-        // version naming its row seals under that row's custody; one without
-        // goes by name, so it seals for the set the name writes into.
-        let path_sealed = match folder_id {
-            Some(_) => self.seal_record_path(set, &path).await,
-            None => self.seal_gesture_path(&folder, &path).await,
+        // version naming its row (or its foreign scope) seals under that
+        // set's custody; one without goes by name, so it seals for the set the
+        // name writes into.
+        let path_sealed = match (folder_id, &foreign) {
+            (_, Some(_)) | (Some(_), None) => self.seal_record_path(set, &path).await,
+            (None, None) => self.seal_gesture_path(&folder, &path).await,
         };
         // Ruling (8)(d): a restore re-signs the historical manifest under the
         // CURRENT identity, and a head so signed is offered the current owner
@@ -2589,6 +2896,34 @@ impl MediaMachine {
                     version.thumbnail_hash,
                 ),
             };
+        if let Some((channel, home, name)) = foreign {
+            // `SyncClient::restore_version`'s shape over the relayed door: a
+            // `modify` naming the historical manifest, its generation verbatim.
+            match self
+                .nest_api
+                .record_foreign(
+                    channel,
+                    &home,
+                    &name,
+                    &device_id,
+                    &path,
+                    Some(manifest_hash),
+                    size_bytes,
+                    "modify",
+                    content_key_version,
+                    thumbnail_hash,
+                    path_sealed,
+                )
+                .await
+            {
+                Ok(()) => {
+                    self.refresh_with_owner(self.owner_key()).await;
+                    self.reread_foreign_scope_of(set).await;
+                }
+                Err(e) => self.set_error(RESTORE_ERROR_KEY, e.detail()),
+            }
+            return;
+        }
         match self
             .nest_api
             .restore_member(
@@ -2649,8 +2984,11 @@ impl MediaMachine {
         thumbnail_hash: String,
         backup_key: Vec<u8>,
     ) -> Result<Vec<u8>, MediaApiError> {
-        // Fail fast if no download fetcher is wired on this platform — before any work.
-        if self.download_fetcher.is_none() {
+        // Fail fast if no download fetcher is wired on this platform — before
+        // any work. A foreign set's thumbnail rides the member door, so the
+        // foreign factory alone is a wired leg (`open_manifest` refuses a row
+        // whose own leg is missing).
+        if self.download_fetcher.is_none() && self.foreign_fetchers.get().is_none() {
             return Err(MediaApiError::Transient {
                 detail: "media thumbnail fetch is not yet supported on this platform".to_string(),
             });
@@ -2671,17 +3009,22 @@ impl MediaMachine {
         // is addressed by its row*), its path, its stamp and its signer.
         let rows: Vec<(SetKey, String, String, Option<u64>, RecordSigner)> = {
             let st = self.state.lock().unwrap();
-            st.raw
-                .items
-                .iter()
-                .filter(|it| {
+            // The active foreign scope's heads first — their set is the
+            // scope's ref, and their thumbnails open under its custody
+            // through the member door, exactly as their files do.
+            let foreign = st.foreign_active.as_ref().map(|a| (a.set_key(), &a.items));
+            foreign
+                .into_iter()
+                .flat_map(|(set, items)| items.iter().map(move |it| (Some(set), it)))
+                .chain(st.raw.items.iter().map(|it| (None, it)))
+                .filter(|(_, it)| {
                     it.thumbnail_hash
                         .as_deref()
                         .is_some_and(|h| h.eq_ignore_ascii_case(&thumbnail_hash))
                 })
-                .map(|it| {
+                .map(|(set, it)| {
                     (
-                        SetKey::of(it.folder_id, &it.folder),
+                        set.unwrap_or_else(|| SetKey::of(it.folder_id, &it.folder)),
                         it.folder.clone(),
                         it.path.clone(),
                         it.content_key_version,
@@ -2809,11 +3152,31 @@ impl MediaMachine {
     /// Always leaves any active followed browse scope — a set value (or the
     /// all-media `None`) addresses the own-set browse; entering a followed
     /// scope is [`Self::select_followed_scope`]'s job.
-    pub fn set_filter(&self, folder: Option<String>) {
+    ///
+    /// A **foreign** set's value (`foreign:<channel hex>`, an option
+    /// `folder_options` offered) enters that set's browse scope with no face
+    /// work (`ui/media.md` § Cross-nest shared sets): its listing is fetched on
+    /// the machine's own background executor ([`fauna_sleep::spawn_background`]
+    /// — the caller may hold no runtime, or one that dies on return) and lands
+    /// through the observer. Nothing changes until it answers, so a transport
+    /// fault keeps the prior browse ([`Self::select_foreign_scope`]).
+    pub fn set_filter(self: Arc<Self>, folder: Option<String>) {
+        let generation = self.next_scope();
+        let filter = folder.as_deref().map(FolderFilter::parse);
+        if let Some(FolderFilter::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel))) =
+            filter
+        {
+            fauna_sleep::spawn_background(async move {
+                self.enter_foreign_scope(channel, generation).await;
+            });
+            return;
+        }
         {
             let mut s = self.state.lock().unwrap();
-            s.filter = folder.as_deref().map(FolderFilter::parse);
+            s.drop_held_error();
+            s.filter = filter;
             s.followed_active = None;
+            s.foreign_active = None;
         }
         self.observer.on_changed();
     }
@@ -2831,6 +3194,8 @@ impl MediaMachine {
     /// `value` (a follow removed since the options rendered) also reports
     /// rather than silently no-opping (e2e convention 11).
     pub async fn select_followed_scope(&self, value: String) {
+        // A foreign scope's fetch still in flight must not land over this one.
+        self.next_scope();
         let Some(source) = self.followed_source.get().map(Arc::clone) else {
             self.set_error(
                 FOLLOWED_FETCH_ERROR_KEY,
@@ -2859,6 +3224,7 @@ impl MediaMachine {
             Ok(entries) => {
                 {
                     let mut s = self.state.lock().unwrap();
+                    s.foreign_active = None;
                     s.followed_active = Some(FollowedActive { scope, entries });
                     s.error = None;
                 }
@@ -2879,6 +3245,7 @@ impl MediaMachine {
                     }
                     let mut scope = scope;
                     scope.available = false;
+                    s.foreign_active = None;
                     s.followed_active = Some(FollowedActive {
                         scope,
                         entries: Vec::new(),
@@ -2990,6 +3357,240 @@ impl MediaMachine {
 // Private helpers (not UniFFI-exported — kept out of the `#[uniffi::export]`
 // impl above).
 impl MediaMachine {
+    /// Claim a new browse-scope generation ([`Self::scope_gen`]).
+    fn next_scope(&self) -> u64 {
+        self.scope_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    /// Whether `generation` is still the newest scope change.
+    fn scope_is_current(&self, generation: u64) -> bool {
+        self.scope_gen.load(std::sync::atomic::Ordering::SeqCst) == generation
+    }
+
+    /// Enter the foreign browse scope of the set whose channel is `channel`
+    /// (`ui/media.md` § Cross-nest shared sets — the foreign browse scope):
+    /// one relayed listing, on demand, committed only while `generation` is
+    /// still the newest scope change. The two failure families stay apart —
+    /// the home nest's refusal of the membership enters the scope EMPTY with
+    /// the removal on `error-message` (the option stays listed); a transport
+    /// fault keeps the prior browse and reports itself. A channel no option
+    /// offers (a set left since the options rendered) reports rather than
+    /// silently no-opping (e2e convention 11).
+    async fn enter_foreign_scope(&self, channel: [u8; 32], generation: u64) {
+        let set = self
+            .state
+            .lock()
+            .unwrap()
+            .raw
+            .foreign_set(&channel)
+            .cloned();
+        let Some(set) = set else {
+            if self.scope_is_current(generation) {
+                self.set_error(
+                    REFRESH_ERROR_KEY,
+                    "that shared folder is no longer in the list",
+                );
+            }
+            return;
+        };
+        let read = self.read_foreign_scope(&set).await;
+        if !self.scope_is_current(generation) {
+            return;
+        }
+        match read {
+            Ok((items, held)) => {
+                let mut s = self.state.lock().unwrap();
+                s.filter = Some(FolderFilter::Ref(set.folder_ref()));
+                s.followed_active = None;
+                s.foreign_active = Some(ForeignActive { set, items, held });
+                s.error = None;
+            }
+            Err(MediaApiError::NotFound { detail }) => {
+                let err = LocalizedText::key(FOREIGN_REMOVED_ERROR_KEY);
+                tracing::warn!(target: "fauna_media", detail = %detail, "{}", err.log_line());
+                let mut s = self.state.lock().unwrap();
+                s.filter = Some(FolderFilter::Ref(set.folder_ref()));
+                s.followed_active = None;
+                s.foreign_active = Some(ForeignActive {
+                    set,
+                    items: Vec::new(),
+                    held: 0,
+                });
+                s.error = Some(err);
+            }
+            Err(e) => {
+                self.set_error(REFRESH_ERROR_KEY, e.detail());
+                return;
+            }
+        }
+        self.observer.on_changed();
+    }
+
+    /// One read of a foreign scope: the seam's judged heads, each label
+    /// rendered under the scope's custody (`LabelCustody::keys_for_ref(Foreign)`
+    /// — the custody its download opens under, so a name and its bytes never
+    /// open under different keys), each signer noted for the gestures, each
+    /// item stamped with the home nest's reachability. Answers the rendered
+    /// items and how many heads the judge held.
+    async fn read_foreign_scope(
+        &self,
+        set: &fauna_client_media::MediaForeignSet,
+    ) -> Result<(Vec<MediaItem>, usize), MediaApiError> {
+        let listing = self
+            .nest_api
+            .foreign_listing(set.channel, &set.home_nest_url)
+            .await?;
+        let source_online = listing.source_online();
+        let set_key = SetKey::Ref(set.folder_ref());
+        let owner = self
+            .read_owner
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| self.owner_key());
+        let (keys, _) = self.folder_keys_for_key(&set_key, owner).await;
+        let name = if set.name.is_empty() {
+            set.option_label()
+        } else {
+            set.name.clone()
+        };
+        let chain = self.predecessor_keys();
+        let total = listing.items.len();
+        let mut items = Vec::with_capacity(total);
+        for mut item in listing.items {
+            let signer = self.signer_of(item.signed_as_current, item.signed_as);
+            if let Some(manifest) = item.manifest_hash.as_ref() {
+                self.signed_as.lock().unwrap().note(
+                    set_key,
+                    &hex::encode(&manifest[..]),
+                    signer,
+                    &chain,
+                );
+            }
+            if render_item_path(&keys, signer, &mut item) {
+                item.folder = name.clone();
+                item.source_online = source_online;
+                items.push(item);
+            }
+        }
+        if items.len() < total {
+            tracing::warn!(
+                target: "fauna_media",
+                dropped = total - items.len(),
+                total,
+                "foreign scope rows omitted: their labels could not be rendered under the \
+                 scope's custody",
+            );
+        }
+        Ok((items, listing.held))
+    }
+
+    /// A foreign scope item's version history ([`Self::file_versions`]): the
+    /// seam's relayed, judged versions, each signer noted under the scope's
+    /// [`SetKey`] — the key the scope's listing notes its heads under and the
+    /// restore reads ([`Self::restore_version`]). `NotFound` when the page
+    /// lists no such foreign set, or when the home nest refused the membership.
+    async fn foreign_versions(
+        &self,
+        channel: [u8; 32],
+        path: &str,
+    ) -> Result<Vec<FileVersionSummary>, MediaApiError> {
+        let home = self
+            .state
+            .lock()
+            .unwrap()
+            .raw
+            .foreign_set(&channel)
+            .map(|f| f.home_nest_url.clone());
+        let Some(home) = home else {
+            return Err(MediaApiError::NotFound {
+                detail: "no listed shared folder homed on another nest is this one".to_string(),
+            });
+        };
+        let listed = self.nest_api.foreign_versions(channel, &home, path).await?;
+        let set = SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel));
+        let chain = self.predecessor_keys();
+        let signers: Vec<RecordSigner> = listed
+            .iter()
+            .map(|v| self.signer_of(v.signed_as_current, v.signed_as))
+            .collect();
+        let mut ledger = self.signed_as.lock().unwrap();
+        Ok(listed
+            .into_iter()
+            .zip(signers)
+            .map(|(version, signer)| {
+                ledger.note(set, &version.summary.manifest_hash, signer, &chain);
+                version.summary
+            })
+            .collect())
+    }
+
+    /// The page's settle re-reads a foreign scope whose last read HELD heads
+    /// (custody not synced yet), exactly as it re-reads held aggregate rows
+    /// (`ui/media.md` § Cross-nest shared sets, *Verification*). Answers
+    /// whether the scope holds nothing back now — `true` with no scope, or one
+    /// whose read held nothing. A failed re-read changes nothing.
+    async fn reread_held_foreign_scope(&self) -> bool {
+        self.reread_foreign_scope(true).await
+    }
+
+    /// Re-read the active foreign scope after a write into the set `target`
+    /// names — the upload's new head, the delete's tombstone — so the browse
+    /// shows what the home nest now lists. A no-op for any other set, or when
+    /// the scope moved on.
+    async fn reread_foreign_scope_of(&self, target: SetKey) {
+        let SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) = target else {
+            return;
+        };
+        let active = self
+            .state
+            .lock()
+            .unwrap()
+            .foreign_active
+            .as_ref()
+            .is_some_and(|a| a.set.channel == channel);
+        if active {
+            self.reread_foreign_scope(false).await;
+        }
+    }
+
+    /// One re-read of the active foreign scope — only one whose last read held
+    /// heads when `held_only` (the settle's re-read). Answers whether the
+    /// scope holds nothing back now — `true` with no scope. A failed re-read
+    /// changes nothing.
+    async fn reread_foreign_scope(&self, held_only: bool) -> bool {
+        let (set, generation) = {
+            let s = self.state.lock().unwrap();
+            match s.foreign_active.as_ref() {
+                Some(active) if !held_only || active.held > 0 => (
+                    active.set.clone(),
+                    self.scope_gen.load(std::sync::atomic::Ordering::SeqCst),
+                ),
+                _ => return true,
+            }
+        };
+        let Ok((items, held)) = self.read_foreign_scope(&set).await else {
+            return false;
+        };
+        if !self.scope_is_current(generation) {
+            return true;
+        }
+        {
+            let mut s = self.state.lock().unwrap();
+            match s.foreign_active.as_mut() {
+                Some(active) if active.set.channel == set.channel => {
+                    active.items = items;
+                    active.held = held;
+                }
+                _ => return true,
+            }
+        }
+        self.observer.on_changed();
+        held == 0
+    }
+
     /// [`MediaMachine::upload`] into the set `target` names — the row the
     /// upload's custody, declassification verdict and seal key by. `folder` is
     /// the set's name, which the record request still carries. A caller that
@@ -3010,15 +3611,30 @@ impl MediaMachine {
     ) {
         let refusal = {
             let s = self.state.lock().unwrap();
-            target.row_in(&s.raw.known_folders).and_then(|f| {
-                if f.metadata_only {
-                    Some(METADATA_ONLY_FOLDER_ERROR_KEY)
-                } else if f.member && !f.writer {
-                    Some(READ_ONLY_SHARED_FOLDER_ERROR_KEY)
-                } else {
-                    None
+            match target {
+                // A foreign set refuses on the same two readings, off its
+                // custody record, the metadata-only one first.
+                SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)) => {
+                    s.raw.foreign_set(&channel).and_then(|f| {
+                        if f.metadata_only {
+                            Some(METADATA_ONLY_FOLDER_ERROR_KEY)
+                        } else if !f.writer {
+                            Some(READ_ONLY_SHARED_FOLDER_ERROR_KEY)
+                        } else {
+                            None
+                        }
+                    })
                 }
-            })
+                _ => target.row_in(&s.raw.known_folders).and_then(|f| {
+                    if f.metadata_only {
+                        Some(METADATA_ONLY_FOLDER_ERROR_KEY)
+                    } else if f.member && !f.writer {
+                        Some(READ_ONLY_SHARED_FOLDER_ERROR_KEY)
+                    } else {
+                        None
+                    }
+                }),
+            }
         };
         if let Some(key) = refusal {
             let err = LocalizedText::key(key);
@@ -3042,8 +3658,12 @@ impl MediaMachine {
             // notifies once — the new item then appears via `fauna.media.list`.
             // The gesture's own key renders the sealed labels: an upload is the
             // one Media gesture that already holds one, which is why it is also
-            // the one that seals on the way in.
-            Ok(()) => self.refresh(Some(backup_key)).await,
+            // the one that seals on the way in. A foreign set's listing is
+            // its scope's, so the scope re-reads too.
+            Ok(()) => {
+                self.refresh(Some(backup_key)).await;
+                self.reread_foreign_scope_of(target).await;
+            }
             Err(e) => {
                 // A `path_seal_required` refusal means the nest's view of the
                 // folder's audience differs from what this upload assumed:
@@ -3092,13 +3712,19 @@ impl MediaMachine {
         backup_key: Vec<u8>,
     ) -> Result<(), MediaApiError> {
         // 1. Fail fast if no blob uploader is wired on this platform — before
-        //    any sealing work.
-        let uploader = self
-            .blob_uploader
-            .as_ref()
-            .ok_or_else(|| MediaApiError::Transient {
+        //    any sealing work. A foreign set's bytes go to its home nest
+        //    through the member write door, chosen in step 3.
+        let own_uploader = self.blob_uploader.as_ref();
+        if own_uploader.is_none()
+            && !matches!(
+                target,
+                SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(_))
+            )
+        {
+            return Err(MediaApiError::Transient {
                 detail: "media upload is not yet supported on this platform".to_string(),
-            })?;
+            });
+        }
 
         // 2. A wrong key length is a caller bug → BadRequest (no seal
         //    attempted); the key is parsed either way because the owner-only
@@ -3116,20 +3742,62 @@ impl MediaMachine {
         //    so the seal root can never diverge from the root the readers
         //    hold — by the TARGET row, the one the record lands in.
         let (keys, foreign_home) = self.folder_keys_for_key(&target, Some(owner.clone())).await;
+        // A cross-nest set (`ui/media.md` § Cross-nest shared sets, *Upload*):
+        // addressed by its channel, its bytes POSTed DIRECT to its home nest
+        // through the member write door, its record relayed through this
+        // nest. Never the own nest's uploader, which would rest the bytes on
+        // a nest that holds none of the set.
+        let foreign = match (target, foreign_home) {
+            (SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(channel)), Some(home)) => {
+                Some((channel, home))
+            }
+            (SetKey::Ref(fauna_core::folder_keys::FolderRef::Foreign(_)), None) => {
+                return Err(MediaApiError::Transient {
+                    detail: "this shared folder's home nest is not in this device's custody \
+                             yet — try again once the folder's custody has synced"
+                        .to_string(),
+                });
+            }
+            (_, Some(_)) => {
+                return Err(MediaApiError::Transient {
+                    detail: FOREIGN_WRITE_UNSUPPORTED.to_string(),
+                });
+            }
+            (_, None) => None,
+        };
+        let member_uploader = match &foreign {
+            Some((channel, home)) => Some(
+                self.foreign_fetchers
+                    .get()
+                    .and_then(|f| f.member_uploader_for(home, *channel))
+                    .ok_or_else(|| MediaApiError::Transient {
+                        detail: FOREIGN_WRITE_UNSUPPORTED.to_string(),
+                    })?,
+            ),
+            None => None,
+        };
+        let uploader: &dyn crate::blob_uploader::MediaBlobUploader = match &member_uploader {
+            Some(u) => u.as_ref(),
+            None => own_uploader
+                .expect("checked in step 1 for every non-foreign target")
+                .as_ref(),
+        };
+        // A foreign set is content-keyed or nothing: its members open it
+        // under its content keys alone, so an owner-keyed seal would rest
+        // bytes no member could read.
+        if foreign.is_some() && !keys.is_content_keyed() {
+            return Err(MediaApiError::Transient {
+                detail: "this shared folder's content keys are not on this device yet — try \
+                         again once the folder's custody has synced"
+                    .to_string(),
+            });
+        }
         let custody = if keys.is_content_keyed() {
             // A content-keyed set fails CLOSED, never owner-keyed: with the
             // set's content keys not in this device's custody yet (the
             // serve-enable or join custody write racing this device) the
             // gesture refuses and uploads nothing — the read-side twin of the
-            // engine's `ServedKeysMissing`/`BoundKeysMissing` refusal. A
-            // foreign (cross-nest) set's bytes live on its home nest, which
-            // this session holds no write token for; refused likewise.
-            if foreign_home.is_some() {
-                return Err(MediaApiError::Transient {
-                    detail: "uploading into a folder homed on another nest is not supported yet"
-                        .to_string(),
-                });
-            }
+            // engine's `ServedKeysMissing`/`BoundKeysMissing` refusal.
             let Some(content_keys) = keys.content_keys.as_ref() else {
                 return Err(MediaApiError::Transient {
                     detail: "this folder's content keys are not on this device yet (a served \
@@ -3190,8 +3858,7 @@ impl MediaMachine {
         //    the member without one (the item renders the placeholder).
         let thumbnail_hash = match processed.thumbnail_bytes {
             Some(thumbnail_bytes) => {
-                match seal_and_post_thumbnail(uploader.as_ref(), &thumbnail_bytes, seal_root).await
-                {
+                match seal_and_post_thumbnail(uploader, &thumbnail_bytes, seal_root).await {
                     Ok(hash) => Some(hash),
                     Err(e) => {
                         tracing::warn!(
@@ -3245,6 +3912,26 @@ impl MediaMachine {
         //    resolves by id and never by the name forms (`media.md`
         //    § Encryption at rest → *The filter and the upload target address
         //    the row*, (e)); an item-only name records by name alone.
+        if let Some((channel, home)) = foreign {
+            return self
+                .nest_api
+                .record_foreign(
+                    channel,
+                    &home.nest_url,
+                    folder,
+                    device_id,
+                    path,
+                    Some(hex::encode(sealed.manifest_hash.digest())),
+                    sealed.manifest.total_size as i64,
+                    "create",
+                    sealed
+                        .content_stamp
+                        .and_then(fauna_core::blob_seal::SealStamp::version),
+                    thumbnail_hash,
+                    path_sealed,
+                )
+                .await;
+        }
         let folder_id = match target {
             SetKey::Ref(fauna_core::folder_keys::FolderRef::Local(id)) => Some(id),
             _ => None,
@@ -3413,9 +4100,26 @@ impl MediaMachine {
     /// valid target and never reaches it. A pure client-side condition → a
     /// no-arg localized banner (no `{message}`).
     fn set_error_no_upload_target(&self) {
-        let err = LocalizedText::key(NO_SET_ERROR_KEY);
+        self.report_error(LocalizedText::key(NO_SET_ERROR_KEY));
+    }
+
+    /// Put an app-glue page error into the snapshot — a guard the shared
+    /// gestures cannot see (an Upload pressed with no file chosen, a picked
+    /// file the app could not read). It must live HERE, not be painted beside
+    /// the snapshot: a shell repaints `error-message` from
+    /// [`MediaPageSnapshot::error`] on every wake, so an error written straight
+    /// to the label is wiped by the next unrelated repaint (a thumbnail
+    /// landing, a refresh) before anyone reads it. HELD, too: a read that
+    /// succeeds does not clear it (the page re-reads on its own, a sync push
+    /// a beat after the press included); the next gesture does
+    /// (`State::held_error`).
+    pub fn report_error(&self, err: LocalizedText) {
         tracing::warn!(target: "fauna_media", "{}", err.log_line());
-        self.state.lock().unwrap().error = Some(err);
+        {
+            let mut s = self.state.lock().unwrap();
+            s.held_error = Some(err.clone());
+            s.error = Some(err);
+        }
         self.observer.on_changed();
     }
 }

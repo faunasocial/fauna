@@ -248,10 +248,13 @@ internal sealed class PostCardHost
             // authenticated blob GET the list-card image already performs also returns
             // the `x-c2pa` header (BlobImageLoader.LoadWithC2paAsync shares its cache
             // with the plain LoadAsync the image binding calls below — no extra
-            // request). Fire-once via FeedPostItem's own checked flag: unlike every
+            // request). Gated on FeedPostItem's own checked flag: unlike every
             // trigger above, there is no manager/snapshot-side signal to gate on — this
             // is pure client render glue, the same class as linux/android/apple's own
-            // per-app c2pa-badge wiring. Looked up post-Reconcile so the check lands on
+            // per-app c2pa-badge wiring. The flag flips only when the verdict lands, so
+            // every sync until then asks again; each repeat shares the loader's one load
+            // still in flight for the hash (SingleFlightCache), never a fetch of its own.
+            // Looked up post-Reconcile so the check lands on
             // the STABLE row instance a content-unchanged tick kept (never the
             // throwaway `target` item Reconcile may have discarded).
             if (p.hasMedia && p.mediaHash is { Length: > 0 } mediaHash && PostCardBind.GetImageLoader() is { } imgLoader)

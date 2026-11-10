@@ -112,6 +112,23 @@ def this_device_card(app) -> int | None:
     return None
 
 
+def device_limit_text() -> str:
+    """The device-cap refusal as the launched app words it: a release build's
+    own commit's string when the run launched one (the drives against a kept
+    box run the release's app, `helpers/release_app.py`), else the tip's."""
+    from helpers import release_app
+    return (release_app.app_string("error.sync.device_limit_exceeded")
+            or S.error.sync.device_limit_exceeded)
+
+
+def unverified_removal_text() -> str:
+    """The removal refusal for a row whose fleet member this replica has not
+    verified yet, as the launched app words it (see :func:`device_limit_text`)."""
+    from helpers import release_app
+    return (release_app.app_string("devices.error_remove_unverified_device")
+            or S.devices.error_remove_unverified_device)
+
+
 def read_devices(app) -> dict:
     """One fresh visit to Settings → Devices, by clicks (tui hydrates the
     roster on the nav edge, so every read re-enters the page): which card is
@@ -122,8 +139,46 @@ def read_devices(app) -> dict:
     notice = (drv.get_text("error-message") or "") if drv.is_visible("error-message") else ""
     return {"this": this,
             "stale": [i for i in range(drv.count("device-card")) if i != this],
-            "capped": S.error.sync.device_limit_exceeded in notice,
+            "capped": device_limit_text() in notice,
             "notice": notice}
+
+
+def _page_notice(app) -> str:
+    drv = app.driver
+    return (drv.get_text("error-message") or "") if drv.is_visible("error-message") else ""
+
+
+def _remove_one_stale(app, seen: dict) -> bool:
+    """Take one stale row off Settings → Devices; ``False`` when none left
+    within :data:`DEVICE_REMOVE_TIMEOUT_S`.
+
+    A removal refused as unverified (`devices.error_remove_unverified_device`:
+    this replica has not verified the row's fleet member) is retried on the
+    NEXT stale row in turn: the refusal is per row — a row can still be
+    genuinely unverifiable. The pre-build record, measured 2026-11-09 on
+    dev.fauna.build before a cap-refused pass listed the fleet scope over the
+    app session: a cap-refused machine removed a principal-less row and
+    refused one carrying a principal on every one of 22 clicks; once a slot
+    freed, this machine enrolled ~30 s later. Since that build the capped
+    machine verifies a dead enrolled seat and removes it. The refusal is read
+    before the re-visit that clears it."""
+    before = len(seen["stale"])
+    deadline = time.monotonic() + DEVICE_REMOVE_TIMEOUT_S
+    clicks, refused = 0, True
+    while True:
+        if refused and seen["stale"]:
+            await_device_removal_ready(app.driver)
+            app.driver.click("device-remove-button",
+                             index=seen["stale"][clicks % len(seen["stale"])])
+            clicks += 1
+        time.sleep(2.0)  # sleep-ok: poll interval inside a deadline poll on observable state (convention 14)
+        refused = unverified_removal_text() in _page_notice(app)
+        seen.update(read_devices(app))
+        seen["clicks"] = clicks
+        if len(seen["stale"]) < before:
+            return True
+        if time.monotonic() >= deadline:
+            return False
 
 
 def clear_stale_devices(app, who: str) -> None:
@@ -161,17 +216,17 @@ def clear_stale_devices(app, who: str) -> None:
         assert removed < MAX_STALE_REMOVALS, (
             f"{who}: still {len(seen['stale'])} stale devices after removing {removed}: {seen}"
         )
-        before = len(seen["stale"])
-        await_device_removal_ready(app.driver)
-        app.driver.click("device-remove-button", index=seen["stale"][0])
-
-        def _gone(before=before):
-            seen.update(read_devices(app))
-            return len(seen["stale"]) < before, f"{seen} error={app.error_text()!r}"
-
-        poll(_gone, f"{who}: a stale device leaving the roster", DEVICE_REMOVE_TIMEOUT_S,
-             interval=2.0)
-        removed += 1
+        if _remove_one_stale(app, seen):
+            removed += 1
+            continue
+        if seen["this"] is None:
+            pytest.fail(f"{who}: no stale device left the roster within "
+                        f"{DEVICE_REMOVE_TIMEOUT_S:.0f}s while this machine is refused at "
+                        f"the cap (last: {seen} error={app.error_text()!r})")
+        # Enrolled, so the leg can go on; what is left is refused from here.
+        print(f"[org-account] {who}: {len(seen['stale'])} stale device(s) refused as "
+              f"unverified, left on the roster")
+        break
     if seen["this"] is None:
         # The freed slot is taken by the pump's next pass, on its own cadence.
         def _marked():
@@ -182,6 +237,38 @@ def clear_stale_devices(app, who: str) -> None:
              DEVICE_ENROLL_TIMEOUT_S, interval=2.0)
     app.settings.leave_sub_page_by_click()
     print(f"[org-account] {who}: removed {removed} stale device(s); this machine enrolled")
+
+
+#: The words the app's account store refuses a read with while it is not
+#: ready — the first listing still owed, or the unkeyed hold standing
+#: (`account-client-lifecycle.md` § The first listing, clauses (3) and (5)).
+#: Rust's `LEDGER_NOT_READY` (`libs/fauna-client-config/src/store_seam.rs`),
+#: which the release's app spells the same way.
+STORE_NOT_READY_TEXT = "the account store is not ready yet"
+#: A store held for the escrow holder's answer clears at the pass that asks,
+#: and the pump's backstop pass comes at most 300 s apart: one full backstop
+#: and the page re-reading it.
+STORE_READY_TIMEOUT_S = 420
+
+
+def store_not_ready(error_text: str | None) -> bool:
+    """Whether the page's error says the account store refused its read as not
+    ready — a gesture refused that way is retried, never awaited: the refused
+    write is gone, and polling its effect could never succeed."""
+    return STORE_NOT_READY_TEXT in (error_text or "")
+
+
+def store_hold_lines(log_text: str, limit: int = 12) -> list[str]:
+    """The app log's own account of the store's hold — the read gate's verdict
+    lines (which sources stand: device, holder, sibling) and the escrow
+    recovery's — first and last kept, so a failure says what the store waited
+    on even when the report's tail has rolled past the start."""
+    marks = ("unkeyed hold", "escrow", "still held reads")
+    hits = [ln for ln in log_text.splitlines() if any(m in ln for m in marks)]
+    if len(hits) <= limit:
+        return hits
+    half = limit // 2
+    return [*hits[:half], f"<{len(hits) - limit} more>", *hits[-half:]]
 
 
 def sign_out(app) -> None:
@@ -226,14 +313,16 @@ ACCOUNT_TIMEOUT_S = 120
 MESSAGE_TIMEOUT_S = 120
 
 
-def admit_accounts(app, accounts: dict[str, dict]) -> None:
+def admit_accounts(app, accounts: dict[str, dict]) -> list[str]:
     """As the nest's admin: admit each account's public key under its handle at
     the free tier, through Admin → Users → Admit. An account already admitted
     (a rerun) is left as it is. An account may carry its seed (the drive's
     org accounts) or only its public key (``actor_hex`` — a witness host's
-    tester from the tracked registry, `staging_box.witness_testers_for`)."""
+    tester from the tracked registry, `staging_box.witness_testers_for`).
+    Returns the local parts this call had to admit, in order."""
     from helpers.staging_box import account_actor
 
+    admitted: list[str] = []
     app.admin.navigate_users()
     for localpart, account in accounts.items():
         actor = account_actor(account)
@@ -249,6 +338,8 @@ def admit_accounts(app, accounts: dict[str, dict]) -> None:
         poll(_admitted, f"{localpart} ({actor[:12]}…) admitted", ACCOUNT_TIMEOUT_S,
              interval=2.0)
         print(f"[org-account] {localpart}: admitted")
+        admitted.append(localpart)
+    return admitted
 
 
 def wait_reachable(app, localpart: str) -> None:
@@ -276,8 +367,85 @@ def wait_reachable(app, localpart: str) -> None:
          interval=2.0)
 
 
+def seed_sales(app) -> tuple[str, str]:
+    """As the signed-in tester, on a full build: the priced tier
+    (``SEED_TIER``) and the post sold on its own (``SEED_SOLD_POST``), each a
+    user's gesture — the Tiers tab's create form, compose's "Sell this post…"
+    answer. Returns what happened to each, ``created``/``kept`` and
+    ``sold``/``kept``, so a rerun on a seeded box adds nothing.
+
+    The store build's buyer half reads these (the iOS store driver's priced-tier
+    and sold-post nodes, `docs/features/store-install.md` outcomes 2 and 3); a
+    store build cannot make either, its editor having no money fields
+    (`dynamic-features.md` § Platform-family surface excision, the
+    price-and-route class).
+
+    Idempotent without a fixed wait (convention 14): a tier name is unique per
+    author, so the create always runs and resolves into one of two observable
+    states — the row painted, or the nest's refusal of a duplicate on the page
+    (the form is then cancelled) — and either way the row must show. The sold
+    post is looked for on the tester's own Posts tab once the tab has painted
+    the plain ``SEED_POSTS``, which every seeding posts first — the read that
+    proves the tab loaded."""
+    from helpers.staging_box import SEED_POSTS, SEED_SOLD_POST, SEED_TIER
+
+    subs = app.subscriptions
+    subs.navigate()
+    subs.open_tiers_tab()
+    name = SEED_TIER["name"]
+    before = list(subs.tier_names())
+    tier = "kept" if name in before else None
+    if tier is None:
+        subs.create_tier(name, price_hint=SEED_TIER["price_hint"],
+                         asking_price=SEED_TIER["asking_price"],
+                         payment_url=SEED_TIER["payment_url"])
+        poll(lambda: (name in subs.tier_names() or app.has_error(),
+                      f"tiers={subs.tier_names()} error={app.error_text()!r}"),
+             f"the tester's tier {name!r} saved or refused", ACCOUNT_TIMEOUT_S, interval=1.0)
+        tier = "created"
+        if name not in subs.tier_names():
+            # The duplicate refusal: the row exists, the list had not painted it.
+            subs.cancel_tier_form()
+            tier = "kept"
+    poll(lambda: (subs.tier_names().count(name) == 1, f"tiers={subs.tier_names()}"),
+         f"the tester's tier {name!r} listed once", ACCOUNT_TIMEOUT_S, interval=1.0)
+
+    def sold_cards() -> list[int]:
+        texts = app.profile._post_card_texts_safe()
+        return [i for i, t in enumerate(texts)
+                if SEED_SOLD_POST["preview"] in t or SEED_SOLD_POST["full_text"] in t]
+
+    def own_posts_loaded():
+        app.profile.open_posts_tab()
+        texts = app.profile.wait_for_post_cards([SEED_POSTS[-1]], timeout=10.0)
+        return any(SEED_POSTS[-1] in t for t in texts), f"cards={texts}"
+
+    subs.navigate()
+    poll(own_posts_loaded, "the tester's Posts tab painting the seeded posts",
+         ACCOUNT_TIMEOUT_S, interval=1.0)
+    sold = "kept" if sold_cards() else None
+    if sold is None:
+        app.feed.navigate()
+        app.feed.sell_post(SEED_SOLD_POST["full_text"], SEED_SOLD_POST["preview"],
+                           SEED_SOLD_POST["price"])
+        sold = "sold"
+
+    def badged_once():
+        subs.navigate()
+        app.profile.open_posts_tab()
+        cards = sold_cards()
+        badges = [app.profile.post_card_badge(i) for i in cards]
+        return len(cards) == 1 and all(badges), f"sold cards={cards} badges={badges}"
+
+    poll(badged_once, "the tester's sold post on their Posts tab, once, with its badge",
+         ACCOUNT_TIMEOUT_S, interval=2.0)
+    print(f"[org-account] tester: tier {name!r} {tier}, sold post {sold}")
+    return tier, sold
+
+
 def seed_accounts(app, accounts: dict[str, dict], where: str, *,
-                  signed_in: bool = True, bare_localparts: bool = False) -> None:
+                  signed_in: bool = True, bare_localparts: bool = False,
+                  sales: bool | None = None) -> None:
     """Seed the reviewers' first run on the nest at ``where`` (the handle
     domain every account signs in under), every step a user's gesture: the
     tester signs in, asks each reviewer to connect and posts; each reviewer
@@ -298,6 +466,12 @@ def seed_accounts(app, accounts: dict[str, dict], where: str, *,
     reaches the same nest only by accident in standalone, and reaches nothing
     from inside a container (the docker run of 2026-11-04: the knock never
     arrived). A local test passes True.
+
+    ``sales`` adds the tester's priced tier and sold post (:func:`seed_sales`)
+    after the plain posts. ``None`` decides by where: on the two staging boxes
+    (``nest_mode.DISPOSABLE_BOX_HOSTS``) yes, anywhere else no — never on the
+    acceptance nest ``fauna.build``, whose content is a store reviewer's first
+    run, where a payment link buys nothing and no store-build witness reads it.
 
     The contact request goes tester → reviewer, so each reviewer's accept is a
     gesture of the reviewer's own. The other direction works too since the
@@ -331,6 +505,11 @@ def seed_accounts(app, accounts: dict[str, dict], where: str, *,
         app.feed.create_post(text, timeout=ACCOUNT_TIMEOUT_S)
     print(f"[org-account] {SEEDING_ACCOUNT}: asked {len(reviewers)} reviewers to connect, "
           f"posted {len(SEED_POSTS)}")
+    if sales is None:
+        from helpers.nest_mode import DISPOSABLE_BOX_HOSTS
+        sales = where in DISPOSABLE_BOX_HOSTS
+    if sales:
+        seed_sales(app)
 
     def knock_index():
         # The knock row names a sender by short id, or by handle once the

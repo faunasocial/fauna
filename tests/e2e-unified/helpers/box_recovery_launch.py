@@ -27,6 +27,7 @@ from conftest import (
     browser_origins_to_allow,
 )
 from helpers import nest_mode as nm
+from helpers.indexed_rows import click_row
 
 
 # The client's own tracing target, for RUST_LOG — linux's crate is
@@ -224,7 +225,7 @@ def rewrite_stored_node_url(creds_dir: str, keyring_app: str, new_url: str) -> s
 
 
 def wait_for_authed_app_or_fail(app, markers=LOGGED_IN_MARKERS) -> None:
-    """Click through nat_mode_choice / launch-retry until a main-view landmark
+    """Click through nat_mode_choice / trust_prompt / launch-retry until a main-view landmark
     renders, or fail with the launch error + accessibility tree. Mirrors
     test_mail_enable_at_admin_claim.py's `_drive_admin_claim_to_logged_in`
     tail loop (shared prior art, not re-derived).
@@ -237,6 +238,14 @@ def wait_for_authed_app_or_fail(app, markers=LOGGED_IN_MARKERS) -> None:
             return
         try:
             app.onboarding.finish_nat_mode()
+        except Exception:
+            pass
+        # The one-tap trust offer (onboarding.md § 3b-ter) can stand on its
+        # own, with no NAT page before it: a sign-in to a box that has
+        # something to trust it with (a box claimed onto a mail domain) lands
+        # straight on it, so `finish_nat_mode`'s chained answer never runs.
+        try:
+            app.onboarding.finish_trust_prompt()
         except Exception:
             pass
         for btn in ("launch-retry-button",):
@@ -357,3 +366,74 @@ def claim_fresh_identity(app, secret_hex: str, typed_handle: str,
     ob.navigate_to_status()
     ob.import_key(secret_hex)  # -> handle_entry
     drive_handle_check_and_claim(app, typed_handle, claim_code)
+
+
+# The `nest_recovery` hub's indexed box rows (ui.yaml
+# `onboarding.nest_recovery`), read via `helpers.indexed_rows`.
+RECOVER_BOX_ITEM = "recover-box-item"
+
+
+def enter_nest_recovery(app, secret_hex: str, handle: str) -> None:
+    """On a fresh device: recovery intent, import the identity, check `handle`
+    and land on `nest_recovery`."""
+    app.onboarding.navigate_to_status()
+    app.click("recover-lost-box-button")
+    app.driver.wait_for("paste-secret-field", timeout=15)
+    app.driver.type_text("paste-secret-field", secret_hex)
+    app.click("import-submit-button")
+    recheck_into_nest_recovery(app, handle)
+
+
+def recheck_into_nest_recovery(app, handle: str) -> None:
+    """From handle_entry under recovery intent: check `handle` and land on
+    `nest_recovery`, whose page entry re-reads the box list."""
+    app.driver.wait_for("handle-input", timeout=15)
+    app.onboarding.fill_handle(handle)
+    app.onboarding.run_handle_check(timeout=45)
+    app.onboarding.submit_handle()
+    app.driver.wait_for("recover-back-button", timeout=30)
+
+
+def selfhosted_command_seeds(app) -> list[str]:
+    """Every 64-hex token the `recover-selfhosted-command` line now reads —
+    the `FAUNA_DEPLOYMENT_SEED=<seed>` value once the command has resolved,
+    none while the pending placeholder is up."""
+    command = app.driver.get_text("recover-selfhosted-command") or ""
+    return [
+        token for token in command.replace("=", " ").split()
+        if len(token) == 64
+        and all(c in "0123456789abcdef" for c in token.lower())
+    ]
+
+
+def wait_for_selfhosted_seed(app, what: str) -> str:
+    """On `recover_selfhosted_instructions`: wait until the command carries
+    exactly one seed, and return it (hex). The page paints a placeholder until
+    the resolver answers the selected box's seed: a state poll, bounded only
+    against a hang (`e2e-conventions.md` point 14)."""
+    deadline = time.monotonic() + 60.0
+    seeds = selfhosted_command_seeds(app)
+    while not seeds and time.monotonic() < deadline:
+        time.sleep(0.5)
+        seeds = selfhosted_command_seeds(app)
+    assert len(seeds) == 1, (
+        f"{what}'s self-hosted command should carry exactly one seed: "
+        f"{len(seeds)} found ({app.driver.diagnose('recover-selfhosted-command')})"
+    )
+    return seeds[0]
+
+
+def nest_id_of_seed(seed_hex: str) -> str:
+    """The nest id (hex) a deployment seed derives to."""
+    from nacl.signing import SigningKey
+
+    return bytes(SigningKey(bytes.fromhex(seed_hex)).verify_key).hex()
+
+
+def resolve_row_nest_id(app, row: int) -> str:
+    """On `nest_recovery`: pick row `row`, resolve its self-hosted command and
+    return the nest id (hex) the command's seed derives to."""
+    click_row(app.driver, RECOVER_BOX_ITEM, row)
+    app.click("recover-method-selfhosted-button")
+    app.driver.wait_for("recover-selfhosted-command", timeout=30)
+    return nest_id_of_seed(wait_for_selfhosted_seed(app, f"row {row}"))

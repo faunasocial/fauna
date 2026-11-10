@@ -77,19 +77,22 @@ function nowSecs(): number {
 
 /** Advance the heartbeat clock by `secs`, in the accrual steps a real caller
  *  ticks in — the engine caps a single gap, so one big jump would credit only
- *  one step. Test-only; see `testClockSkewSecs`. */
-export function advanceTestClock(secs: number): void {
+ *  one step. `focused = false` moves the clock with the app out of front, so
+ *  the advanced time bills nothing (`family-client-enforcement.md` §
+ *  Implementation status today, decision (b)). Test-only; see
+ *  `testClockSkewSecs`. */
+export function advanceTestClock(secs: number, focused = true): void {
   const step = 120; // fauna_core::screen_time::MAX_ACCRUAL_STEP_SECS
   // Prime the engine's reference point first: it accrues from the GAP between
   // calls, so with no prior call the first step would credit nothing and the
   // poke would silently deliver less use than asked for.
-  usage().setActive(true, nowSecs());
+  usage().setActive(focused, nowSecs());
   let remaining = Math.max(0, Math.floor(secs));
   while (remaining > 0) {
     const bump = Math.min(remaining, step);
     testClockSkewSecs += bump;
     remaining -= bump;
-    usage().setActive(true, nowSecs());
+    usage().setActive(focused, nowSecs());
   }
 }
 
@@ -161,11 +164,13 @@ export function usedTodayMinutes(): number | undefined {
  *
  *  Best-effort: a failed report re-credits its minutes (the delta is defined
  *  against the last *successful* report) and retries on the next tick. */
-export async function tickUsageHeartbeat(secretHex: string): Promise<void> {
+export async function tickUsageHeartbeat(secretHex: string, focused = true): Promise<void> {
   const h = usage();
   if (!h.isAccounting()) return;
+  // `focused = false` is the e2e agent's statement that the ward is not in
+  // front (`#lib/screen-time-e2e`); production always passes the default.
   const active = typeof document !== 'undefined' && document.visibilityState === 'visible';
-  h.setActive(active && currentLockMessage() === null, nowSecs());
+  h.setActive(focused && active && currentLockMessage() === null, nowSecs());
   const minutes = h.takeDue(nowSecs());
   if (minutes === undefined) return;
   try {

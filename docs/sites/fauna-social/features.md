@@ -24,5 +24,9 @@ and simply not have been re-tested on that platform since we started keeping thi
 record. A **—** is different again: it means the feature is deliberately absent there,
 because the platform has no such thing.
 
+The two Fauna Kids columns are the kids edition of the Android and iOS apps, which is
+planned and not yet available anywhere. The kids edition leaves some features out by
+design, and its columns will mark those **—** too.
+
 We would rather show you a page with blanks in it than a page of green ticks we cannot
 back up.

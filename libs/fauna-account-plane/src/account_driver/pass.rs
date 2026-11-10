@@ -103,6 +103,12 @@ pub struct PumpReport {
     /// The fleet-only scope walk — how this replica learns the device set,
     /// mints, wraps and escrow receipts its siblings wrote.
     pub fleet_walk: Option<WalkReport>,
+    /// The cap-refused pass's one full listing of `state-fleet` over the app
+    /// session ([`cap_refused_fleet_listing`]; `account-client-lifecycle.md`
+    /// § The client-side lifecycle → *A cap-refused pass lists the fleet
+    /// scope over the app session*). `None` on every pass the enrollment step
+    /// did not answer `DeviceLimitExceeded`, and when the listing failed.
+    pub cap_refused_fleet_listing: Option<WalkReport>,
     /// The capability reconcile sweep (`super::capability_sweep`): enumerated
     /// before the fleet walk, judged after it — in every full pass, and in no
     /// other unit. `None` when no full pass ran this far.
@@ -310,7 +316,8 @@ pub struct PassTimings {
     pub publish: Duration,
     /// The account-state scope walk (`walk`).
     pub walk: Duration,
-    /// The fleet-only scope walk (`fleet_walk`).
+    /// The fleet-only scope walk (`fleet_walk`) — on a cap-refused pass, its
+    /// one listing over the app session (`cap_refused_fleet_listing`).
     pub fleet_walk: Duration,
     /// The device-endpoints ensure step.
     pub device_endpoints: Duration,
@@ -829,6 +836,59 @@ where
     report
 }
 
+/// A cap-refused pass's one full listing of the fleet-only scope over the
+/// app session (`account-client-lifecycle.md` § The client-side lifecycle →
+/// *A cap-refused pass lists the fleet scope over the app session*). The
+/// refused machine has no data path, so without this its fleet view verifies
+/// nobody and every principal-carrying roster row is refused `NotAMember` —
+/// an account whose cap dead devices fill would be recoverable off-box alone.
+/// The listing rides [`FleetWriter::session_rpc`] against the bound nest
+/// through a [session-listing plane](AccountStatePlane::new_session_listing):
+/// rows applied as any walk's, the scope's `listed` fact and unkeyed set
+/// recorded, the runtime's first-listing gate notified; no watermark, no
+/// serve coordinate, no walker mark, nothing published. The delegable scope
+/// is not listed: nothing a removal resolves reads it.
+async fn cap_refused_fleet_listing<B, R>(
+    store: &AccountStore<B>,
+    planes: Planes<'_, B, R>,
+    fleet_writer: FleetWriter<'_, R>,
+    report: &mut PumpReport,
+) where
+    B: StoreBackend,
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    let plane = match AccountStatePlane::new_session_listing(
+        store,
+        fleet_writer.session_rpc,
+        fleet_writer.schedule,
+        fleet_writer.key,
+        fleet_writer.trust,
+        ACCOUNT_STATE_FLEET_SCOPE,
+    ) {
+        Ok(p) => p.with_generation_custody(fleet_writer.slot),
+        Err(e) => {
+            push_step_error(report, format!("cap-refused fleet listing: {e:#}"), &e);
+            return;
+        }
+    };
+    let plane = match planes.fleet.first_listings() {
+        Some(l) => plane.with_first_listings(l),
+        None => plane,
+    };
+    match plane.reconcile().await {
+        Ok(walk) => report.cap_refused_fleet_listing = Some(walk),
+        Err(e) => {
+            push_step_error(report, format!("cap-refused fleet listing: {e:#}"), &e);
+            return;
+        }
+    }
+    if let Err(e) = plane.pass_ended().await {
+        push_step_error(report, format!("cap-refused fleet listing: {e:#}"), &e);
+    }
+    crate::pass_breath::pass_breath().await;
+}
+
 /// [`PumpReport::parked`], read once the pass's last step has run.
 async fn note_parked<B, R>(planes: Planes<'_, B, R>, report: &mut PumpReport)
 where
@@ -921,6 +981,9 @@ where
     // serves that remedy at once. The next pass retries the register first,
     // and once a slot frees it runs in full again.
     if report.enrollment == Some(EnrollmentPass::DeviceLimitExceeded) {
+        let step = now_ms();
+        cap_refused_fleet_listing(store, planes, fleet_writer, &mut report).await;
+        report.timings.fleet_walk = since(step);
         report.timings.total = since(pass_started);
         if let Some(b) = &bind {
             report.bind = Some(b.pass(false));
@@ -1815,6 +1878,9 @@ where
     // so the legs below would wait out their deadlines on a connection that
     // cannot come.
     if report.enrollment == Some(EnrollmentPass::DeviceLimitExceeded) {
+        let step = now_ms();
+        cap_refused_fleet_listing(store, planes, fleet_writer, &mut report).await;
+        report.timings.fleet_walk = since(step);
         report.timings.total = since(pass_started);
         return report;
     }

@@ -140,7 +140,7 @@ def test_docker_browser_onboarding(nest):
         # `domcontentloaded`, not `networkidle`: the SPA keeps sockets open, so
         # "idle" is a timing fact; the testid waits below are the state waits.
         page.goto(f"{url}/app/onboarding", wait_until="domcontentloaded",
-                  timeout=int(budgets.UI_SETTLE_S * 1000))
+                  timeout=int(budgets.SPA_FIRST_PAINT_S * 1000))
 
         # A shipped build seals the identity store, so a fresh browser lands on
         # the unlock page's CREATE mode before onboarding (apps/web.md § Identity store
@@ -164,7 +164,7 @@ def test_docker_browser_onboarding(nest):
         # the bundled wasm keygen executed inside the image.
         create = page.locator('[data-testid="create-identity-button"]')
         try:
-            create.wait_for(state="visible", timeout=30000)
+            create.wait_for(state="visible", timeout=int(budgets.SPA_FIRST_PAINT_S * 1000))
         except Exception:
             painted = page.eval_on_selector_all(
                 "[data-testid]", "els => els.map(e => e.getAttribute('data-testid'))"
@@ -179,7 +179,7 @@ def test_docker_browser_onboarding(nest):
             )
         create.click()
         expect(page.locator('[data-testid="secret-key-display"]')).to_be_visible(
-            timeout=15000
+            timeout=int(budgets.UI_SETTLE_S * 1000)
         )
         page.click('[data-testid="identity-continue-button"]')
 
@@ -189,5 +189,5 @@ def test_docker_browser_onboarding(nest):
 
         # Cross-stage navigation works: the wizard advances to handle entry.
         expect(page.locator('[data-testid="handle-input"]')).to_be_visible(
-            timeout=15000
+            timeout=int(budgets.UI_SETTLE_S * 1000)
         )

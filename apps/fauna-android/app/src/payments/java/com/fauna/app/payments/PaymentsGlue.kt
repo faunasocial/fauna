@@ -40,12 +40,20 @@ suspend fun ApiClient.paymentsProvidersList(): List<ProviderItem> =
             createdAt = it.createdAt,
             lastVerifiedAt = it.lastVerifiedAt,
             lastRejectedAt = it.lastRejectedAt,
+            productRef = it.productRef,
         )
     }
 
-/** §4 add — upsert one provider config (kind + webhook-verification secret + entitled tier). */
-suspend fun ApiClient.paymentsProvidersSet(kind: String, webhookSecret: String, tier: String) {
-    paymentsClient().providersSet(kind, webhookSecret, tier)
+/** §4 add — upsert one provider config (kind + webhook-verification secret + entitled tier +
+ *  the optional product). The product is sent as shown — empty included — so the saved mapping
+ *  is always what the creator last saw (an emptied field clears it; `null` would keep it). */
+suspend fun ApiClient.paymentsProvidersSet(
+    kind: String,
+    webhookSecret: String,
+    tier: String,
+    product: String,
+) {
+    paymentsClient().providersSet(kind, webhookSecret, tier, product)
 }
 
 /** §4 remove — delete the config for one provider kind (idempotent). */

@@ -32,8 +32,8 @@ pub mod ws_device_handshake_bearer;
 pub use auth_client::HeldBearerForTest;
 pub use auth_client::{AuthClient, BearerIdentityMismatch, pinned_http_client};
 pub use chunk_download::{
-    ForeignPublicChunkFetcher, GraduatedHome, NestAuthedByteStream, NestPublicChunkFetcher,
-    graduate_home_nest_pin, open_authed_stream,
+    ForeignPublicChunkFetcher, ForeignReadBearer, GraduatedHome, NestAuthedByteStream,
+    NestPublicChunkFetcher, graduate_home_nest_pin, open_authed_stream,
 };
 pub use client::{NestClient, SelfConnecting};
 pub use error::{NestClientError, SessionEndingVerdict};

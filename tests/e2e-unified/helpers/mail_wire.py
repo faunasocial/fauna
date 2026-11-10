@@ -969,3 +969,39 @@ def submit_one_message(handle, rcpt: str, token: str, extra_rcpts=()) -> None:
         conn.send_raw(body.encode())
         conn.cmd(".", "250", deadline)
         conn.cmd("QUIT", "221", deadline)
+
+
+class ImapSession:
+    """One signed-in IMAPS connection to an MDA bridge with a running tag
+    counter — the mail app a reporter moves their copy to Junk in. `recipient`
+    is a provisioned MSEK recipient (`.username` / `.password`)."""
+
+    def __init__(self, handle, recipient, deadline: float):
+        self.deadline = deadline
+        self.sock, self.buf = _imaps_connect(handle, deadline)
+        self.n = 0
+        assert _imap_auth_plain(self.sock, self.buf, self._tag(), recipient.username,
+                                recipient.password, deadline) == "OK", "AUTH PLAIN must succeed"
+
+    def _tag(self) -> str:
+        self.n += 1
+        return f"r{self.n}"
+
+    def ok(self, cmd: str) -> str:
+        status, text = _imap_cmd(self.sock, self.buf, self._tag(), cmd, self.deadline)
+        assert status == "OK", f"{cmd!r} must succeed; got {status}: {text}"
+        return text
+
+    def find(self, mailbox: str, nonce: str) -> list:
+        """The sorted UIDs in `mailbox` whose body carries `nonce`."""
+        self.ok(f"SELECT {mailbox}")
+        status, hits = _imap_uid_search(self.sock, self.buf, self._tag(),
+                                        f'BODY "{nonce}"', self.deadline)
+        assert status == "OK", f"UID SEARCH in {mailbox} must succeed; got {status}"
+        return sorted(hits)
+
+    def close(self) -> None:
+        try:
+            self.sock.sendall(b"zz LOGOUT\r\n")
+        finally:
+            self.sock.close()

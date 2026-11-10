@@ -343,6 +343,126 @@ mod native {
         }
     }
 
+    /// The **member write door** on native (`ui/media.md` § Cross-nest shared
+    /// sets, *Upload*): chunk and manifest POSTs addressed to a cross-nest
+    /// set's HOME nest, under the write token the member's own nest mints
+    /// (`fauna.folders.write_token.get`), over the pin-or-WebPKI plane the
+    /// home's TLS is graduated on against the grant-delivered identity
+    /// ([`fauna_client::post_blob::PinnedHomes`], the read door's and the
+    /// conversation rail's plane). The session's own bearer never reaches the
+    /// home nest. The home's client is resolved at the first POST, since the
+    /// graduation is async.
+    pub struct NativeMemberUploader {
+        home: fauna_client::ForeignHome,
+        homes: Arc<fauna_client::post_blob::PinnedHomes>,
+        bearer: Arc<dyn BearerSource>,
+    }
+
+    impl NativeMemberUploader {
+        /// The door over `home` for the set whose channel is `channel_id`,
+        /// minting through `own_nest`.
+        pub fn new(
+            own_nest: Arc<NestClient>,
+            home: &fauna_core::folder_keys::ForeignHome,
+            channel_id: [u8; 32],
+            homes: Arc<fauna_client::post_blob::PinnedHomes>,
+        ) -> Self {
+            let home_nest_url = home.nest_url.clone();
+            let channel = hex::encode(channel_id);
+            let bearer =
+                fauna_client::write_token_bearer::WriteTokenBearer::from_minter(move || {
+                    let own_nest = Arc::clone(&own_nest);
+                    let nest_url = home_nest_url.clone();
+                    let channel_id = channel.clone();
+                    async move {
+                        crate::nest_api::ws_rpc::mint_member_write_token(
+                            own_nest.as_ref(),
+                            nest_url,
+                            channel_id,
+                        )
+                        .await
+                        .map_err(|e| match e {
+                            crate::nest_api::ws_rpc::WriteMintError::Refused(message) => {
+                                ApiError::Status { code: 403, message }
+                            }
+                            crate::nest_api::ws_rpc::WriteMintError::Transport(detail) => {
+                                ApiError::Transport(detail)
+                            }
+                        })
+                    }
+                });
+            Self {
+                home: fauna_client::ForeignHome::new(&home.nest_url, home.nest_actor_id.as_deref()),
+                homes,
+                bearer: Arc::new(bearer),
+            }
+        }
+
+        async fn content(
+            &self,
+        ) -> Result<ReqwestNestContentApi<Arc<dyn BearerSource>>, MediaApiError> {
+            use fauna_client::post_blob::ForeignHomeHttp;
+            let http = self.homes.client(&self.home).await.map_err(map_api_err)?;
+            Ok(ReqwestNestContentApi::new(
+                self.home.url.clone(),
+                http,
+                Arc::clone(&self.bearer),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MediaBlobUploader for NativeMemberUploader {
+        async fn post_blob(
+            &self,
+            _sidecar_cbor: Vec<u8>,
+            _sealed_bytes: Vec<u8>,
+        ) -> Result<String, MediaApiError> {
+            // A folder file is chunks behind a manifest; the single sealed
+            // blob is the attachment plane's and never crosses this door.
+            Err(MediaApiError::BadRequest {
+                detail: "a folder homed on another nest takes chunks, not a single blob"
+                    .to_string(),
+            })
+        }
+
+        async fn post_chunk(
+            &self,
+            store_key: [u8; 32],
+            body: Vec<u8>,
+        ) -> Result<(), MediaApiError> {
+            let reply = self
+                .content()
+                .await?
+                .post_bytes_keyed(
+                    fauna_nest_http::paths::chunk_store::CHUNKS_UPLOAD,
+                    &hex::encode(store_key),
+                    body,
+                )
+                .await
+                .map_err(|e| crate::nest_api::map_content_api_err(e, "chunk upload"))?;
+            super::verify_stored_under(&reply, store_key, "chunk")
+        }
+
+        async fn post_manifest(
+            &self,
+            manifest_hash: [u8; 32],
+            manifest_bytes: Vec<u8>,
+        ) -> Result<(), MediaApiError> {
+            let reply = self
+                .content()
+                .await?
+                .post_bytes(
+                    fauna_nest_http::paths::chunk_store::MANIFESTS_UPLOAD,
+                    "application/octet-stream",
+                    manifest_bytes,
+                )
+                .await
+                .map_err(|e| crate::nest_api::map_content_api_err(e, "manifest upload"))?;
+            super::verify_stored_under(&reply, manifest_hash, "manifest")
+        }
+    }
+
     /// Map the HTTP content-API error onto the page's [`MediaApiError`] — see
     /// [`crate::nest_api::map_content_api_err`], the shared taxonomy this and
     /// [`NativeBlobFetcher`](crate::blob_fetcher) both use.
@@ -386,7 +506,7 @@ mod native {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "rpc-glue"))]
-pub use native::NativeBlobUploader;
+pub use native::{NativeBlobUploader, NativeMemberUploader};
 
 // ── Wasm production impl (LEG B) ─────────────────────────────────────────────
 //
@@ -475,7 +595,92 @@ mod wasm {
             super::verify_stored_under(reply.as_bytes(), manifest_hash, "manifest")
         }
     }
+
+    /// The **member write door** in the browser (`ui/media.md` § Cross-nest
+    /// shared sets, *Upload*): chunk and manifest POSTs addressed to a
+    /// cross-nest set's HOME nest under the write token the member's own nest
+    /// mints per POST (`fauna.folders.write_token.get`) — never the session
+    /// bearer. The browser owns TLS, so the grant-delivered home identity
+    /// cannot be pinned here (WebPKI only, as the read door).
+    pub struct WasmMemberUploader {
+        nest: WsRpcClient,
+        home_nest_url: String,
+        channel_id: String,
+    }
+
+    impl WasmMemberUploader {
+        /// The door over `home_nest_url` for the set whose channel is
+        /// `channel_id`, minting through `nest`.
+        pub fn new(nest: WsRpcClient, home_nest_url: &str, channel_id: [u8; 32]) -> Self {
+            Self {
+                nest,
+                home_nest_url: home_nest_url.trim_end_matches('/').to_string(),
+                channel_id: hex::encode(channel_id),
+            }
+        }
+
+        async fn token(&self) -> Result<String, MediaApiError> {
+            crate::nest_api::ws_rpc::mint_member_write_token(
+                &self.nest,
+                self.home_nest_url.clone(),
+                self.channel_id.clone(),
+            )
+            .await
+            .map(|(token, _)| token)
+            .map_err(crate::nest_api::ws_rpc::WriteMintError::into_media)
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl MediaBlobUploader for WasmMemberUploader {
+        async fn post_blob(
+            &self,
+            _sidecar_cbor: Vec<u8>,
+            _sealed_bytes: Vec<u8>,
+        ) -> Result<String, MediaApiError> {
+            Err(MediaApiError::BadRequest {
+                detail: "a folder homed on another nest takes chunks, not a single blob"
+                    .to_string(),
+            })
+        }
+
+        async fn post_chunk(
+            &self,
+            store_key: [u8; 32],
+            body: Vec<u8>,
+        ) -> Result<(), MediaApiError> {
+            let token = self.token().await?;
+            let reply = fauna_rpc_wasm::post_octets_keyed_with_bearer(
+                &self.home_nest_url,
+                &token,
+                fauna_rpc_wasm::CHUNKS_UPLOAD_PATH,
+                Some(&hex::encode(store_key)),
+                &body,
+            )
+            .await
+            .map_err(|e| crate::nest_api::map_blob_http_err(e, "chunk upload"))?;
+            super::verify_stored_under(reply.as_bytes(), store_key, "chunk")
+        }
+
+        async fn post_manifest(
+            &self,
+            manifest_hash: [u8; 32],
+            manifest_bytes: Vec<u8>,
+        ) -> Result<(), MediaApiError> {
+            let token = self.token().await?;
+            let reply = fauna_rpc_wasm::post_octets_keyed_with_bearer(
+                &self.home_nest_url,
+                &token,
+                fauna_rpc_wasm::MANIFESTS_UPLOAD_PATH,
+                None,
+                &manifest_bytes,
+            )
+            .await
+            .map_err(|e| crate::nest_api::map_blob_http_err(e, "manifest upload"))?;
+            super::verify_stored_under(reply.as_bytes(), manifest_hash, "manifest")
+        }
+    }
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "rpc-glue"))]
-pub use wasm::WasmBlobUploader;
+pub use wasm::{WasmBlobUploader, WasmMemberUploader};

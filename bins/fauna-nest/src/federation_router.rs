@@ -283,11 +283,15 @@ mod tests {
         let expected = [
             // A delivery appends an inbox row and charges the invitee's quota
             // per call — see the declaration site.
+            // The foreign admin's keying acts claim no idempotence (the
+            // same-nest doors' flag) — see the declaration site.
+            "fauna.federation.conversation.room.backfill_generations",
             "fauna.federation.conversation.room.invite",
             // The foreign-inviter leg: records a row and delivers a knock per
             // call, so the same verdict as `room.invite` — see the declaration
             // site.
             "fauna.federation.conversation.room.invite_issue",
+            "fauna.federation.conversation.room.publish_generation",
             // Appends a fresh inbox row + charges `inbox_bytes_used` per call
             // (shared core with `fauna.inbox.send`) — see the declaration site.
             "fauna.federation.inbox.deliver",

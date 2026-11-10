@@ -55,6 +55,7 @@ use fauna_client_family::family::{
     FamilyApprovalEntry, FamilyIncomingTransferInfo, FamilyWardDeviceInfo, FamilyWardInfo,
     ReachPolicy,
 };
+use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 
 use crate::async_helper::{hydrate_with_retry, spawn_with_snapshot};
 use crate::client::FaunaClient;
@@ -654,7 +655,8 @@ fn build_page_widgets() -> (adw::PreferencesPage, Widgets) {
     // one-click flip back. Inside the per-ward editor, beside the device list,
     // for the same reason: the `family-blocked-peer-item[i]` index space then
     // belongs to exactly one ward. Not batched behind Save — the flip is its own
-    // `approvals_decide` call and re-reads.
+    // `approvals_decide` call and re-reads (or, with no nest, rests in the
+    // device's outbox).
     let blocked_heading = gtk::Label::new(Some(S::BLOCKED_PEERS_HEADING));
     blocked_heading.add_css_class("heading");
     blocked_heading.set_halign(gtk::Align::Start);
@@ -1150,9 +1152,9 @@ fn submit_incoming_decision(ctx: &Rc<Ctx>, index: usize, accept: bool) {
     dispatch(ctx, mutation, false);
 }
 
-/// Approve/deny one queue row. `decide` passes the entry's identifying fields
-/// straight through: a `contact` is named by `peer_actor_id`, a `mail_hold` by
-/// `message_id` (family-safety.md § Reach approvals).
+/// Approve/deny one queue row. The whole entry travels: each kind names its
+/// item with a different key, and the shared `decide_request_for` passes every
+/// key through (family-safety.md § Reach approvals).
 fn submit_decide(ctx: &Rc<Ctx>, index: usize, approve: bool) {
     let Some(entry) = ctx.approvals.borrow().get(index).cloned() else {
         return;
@@ -1160,21 +1162,7 @@ fn submit_decide(ctx: &Rc<Ctx>, index: usize, approve: bool) {
     dispatch(
         ctx,
         Mutation::Decide {
-            ward: entry.supervised_actor_id.to_vec(),
-            kind: entry.kind.clone(),
-            peer: entry.peer_actor_id.to_vec(),
-            message_id: entry.message_id.to_vec(),
-            // A `feed_source` item's key is this triple; empty for every other
-            // kind, exactly as `peer`/`message_id` are empty for the kinds they
-            // do not name.
-            bridge_id: entry.bridge_id.clone(),
-            operation: entry.operation.clone(),
-            target: entry.target.clone(),
-            // A `dm_hold` item's key is `(bridge_id, peer_address)` — the
-            // external peer is not an actor on this nest, so it cannot ride
-            // `peer`. Empty for every other kind except `mail_hold`, which
-            // renders (but does not key on) the sender address.
-            peer_address: entry.peer_address.clone(),
+            entry: Box::new(entry),
             approve,
         },
         false,
@@ -1183,22 +1171,19 @@ fn submit_decide(ctx: &Rc<Ctx>, index: usize, approve: bool) {
 
 // ── Async plumbing ──────────────────────────────────────────────────────────
 
-/// The mutations the page dispatches. Each is followed by a full re-read, so
-/// every render comes from nest-confirmed state.
+/// The mutations the page dispatches. Each sent one is followed by a full
+/// re-read, so every render comes from nest-confirmed state; the three
+/// `OfflineQueued` ones settle as [`Settled::Queued`] with no nest.
 enum Mutation {
     SavePolicy {
         ward: Vec<u8>,
         policy: ReachPolicy,
     },
+    /// Approve/deny one approvals-queue item — with no nest it rests in the
+    /// device's outbox (`account-offline-mutation.md` § The offline-mutation
+    /// contract).
     Decide {
-        ward: Vec<u8>,
-        kind: String,
-        peer: Vec<u8>,
-        message_id: Vec<u8>,
-        bridge_id: String,
-        operation: String,
-        target: String,
-        peer_address: String,
+        entry: Box<FamilyApprovalEntry>,
         approve: bool,
     },
     ContactAdd {
@@ -1257,53 +1242,72 @@ fn refresh(ctx: &Rc<Ctx>) {
     );
 }
 
+/// What a mutation settles to: the re-read page, or — with no nest — the
+/// gesture resting in the device's outbox, nothing re-read (there is no nest
+/// to read). A queued approvals decision carries its entry, which leaves the
+/// local queue (`fauna_client_family::approvals_after_queued_decision`); a
+/// queued pre-approval or un-deny folds nothing.
+enum Settled {
+    Loaded(Box<FamilyView>),
+    Queued {
+        decided: Option<Box<FamilyApprovalEntry>>,
+    },
+}
+
+type MutationResult = Result<Settled, String>;
+
 /// Run a mutation on the tokio runtime, re-read, then render on the GTK thread.
 fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation, clear_contact_input: bool) {
     ctx.w.save_button.set_sensitive(false);
     let nest = ctx.nest.clone();
+    let queue = crate::offline_outbox::queue();
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
         &ctx.rt,
-        move || async move { run_mutation(nest, mutation).await },
-        move |result| apply(&ctx_render, result, clear_contact_input),
+        move || async move { run_mutation(nest, Some(queue), mutation).await },
+        move |result| apply_mutation(&ctx_render, result, clear_contact_input),
     );
 }
 
-async fn run_mutation(nest: Nest, mutation: Mutation) -> LoadResult {
+/// The send half of a mutation. `queue` is the device's outbox
+/// (`crate::offline_outbox::queue`): the three `OfflineQueued` gestures —
+/// decide, un-deny, pre-approve — rest there while there is no nest.
+async fn run_mutation(
+    nest: Nest,
+    queue: Option<Arc<dyn OfflineIntentQueue>>,
+    mutation: Mutation,
+) -> MutationResult {
     let client = FamilyClient::new(nest.clone());
+    let queue = queue.as_deref();
     match mutation {
         Mutation::SavePolicy { ward, policy } => client
             .policy_update(ward, policy)
             .await
             .map_err(|e| e.to_string())?,
-        Mutation::Decide {
-            ward,
-            kind,
-            peer,
-            message_id,
-            bridge_id,
-            operation,
-            target,
-            peer_address,
-            approve,
-        } => client
-            .approvals_decide(
-                ward,
-                kind,
-                peer,
-                message_id,
-                bridge_id,
-                operation,
-                target,
-                peer_address,
-                approve,
-            )
-            .await
-            .map_err(|e| e.to_string())?,
-        Mutation::ContactAdd { ward, peer } => client
-            .contact_add(ward, peer)
-            .await
-            .map_err(|e| e.to_string())?,
+        Mutation::Decide { entry, approve } => {
+            let request = fauna_client_family::decide_request_for(&entry);
+            match client
+                .approvals_decide_or_queue(queue, request, approve)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Composed::Sent(()) => {}
+                Composed::Queued(_) => {
+                    return Ok(Settled::Queued {
+                        decided: Some(entry),
+                    });
+                }
+            }
+        }
+        Mutation::ContactAdd { ward, peer } => {
+            if let Composed::Queued(_) = client
+                .contact_add_or_queue(queue, ward, peer)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                return Ok(Settled::Queued { decided: None });
+            }
+        }
         Mutation::Graduate { ward } => client.graduate(ward).await.map_err(|e| e.to_string())?,
         Mutation::Transfer { ward, target } => client
             .transfer(ward, target)
@@ -1333,12 +1337,17 @@ async fn run_mutation(nest: Nest, mutation: Mutation) -> LoadResult {
             ward,
             bridge_id,
             peer_id,
-        } => client
-            .allow_blocked_dm_peer(ward, bridge_id, peer_id)
-            .await
-            .map_err(|e| e.to_string())?,
+        } => {
+            if let Composed::Queued(_) = client
+                .allow_blocked_dm_peer_or_queue(queue, ward, bridge_id, peer_id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                return Ok(Settled::Queued { decided: None });
+            }
+        }
     }
-    load(nest).await
+    load(nest).await.map(|view| Settled::Loaded(Box::new(view)))
 }
 
 /// The one read that fills BOTH sections: `fauna.family.status` (guardian +
@@ -1394,6 +1403,30 @@ fn apply(ctx: &Rc<Ctx>, result: LoadResult, clear_contact_input: bool) {
             render(ctx, view);
         }
         Err(msg) => show_error(ctx, &msg),
+    }
+}
+
+/// Render a mutation's outcome (GTK main thread): a re-read renders as a load;
+/// a queued gesture clears the error, and a queued decision takes its item out
+/// of the rendered approvals queue.
+fn apply_mutation(ctx: &Rc<Ctx>, result: MutationResult, clear_contact_input: bool) {
+    match result {
+        Ok(Settled::Loaded(view)) => apply(ctx, Ok(*view), clear_contact_input),
+        Err(msg) => apply(ctx, Err(msg), clear_contact_input),
+        Ok(Settled::Queued { decided }) => {
+            ctx.w.save_button.set_sensitive(true);
+            crate::settings::render_error_label(&ctx.w.error_label, None);
+            if clear_contact_input {
+                ctx.w.contact_input.set_text("");
+            }
+            if let Some(entry) = decided {
+                let approvals = std::mem::take(&mut *ctx.approvals.borrow_mut());
+                let approvals =
+                    fauna_client_family::approvals_after_queued_decision(approvals, &entry);
+                render_approvals(ctx, &approvals);
+                *ctx.approvals.borrow_mut() = approvals;
+            }
+        }
     }
 }
 
@@ -2572,6 +2605,114 @@ mod tests {
         assert_eq!(
             approval_row_text(&null_path_hold, 1_000, 0),
             S::APPROVAL_NO_SENDER
+        );
+    }
+
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn dummy_nest() -> Nest {
+        fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        )
+    }
+
+    fn run(
+        queue: &Arc<fauna_client_testkit::RecordingQueue>,
+        mutation: Mutation,
+    ) -> MutationResult {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run_mutation(
+                dummy_nest(),
+                Some(Arc::clone(queue) as Arc<dyn OfflineIntentQueue>),
+                mutation,
+            ))
+    }
+
+    fn held_mail(id: u8) -> FamilyApprovalEntry {
+        FamilyApprovalEntry {
+            supervised_actor_id: vec![3u8; 32].into(),
+            kind: "mail_hold".into(),
+            message_id: vec![id; 32].into(),
+            ..Default::default()
+        }
+    }
+
+    /// With no nest, a guardian's decision rests in the outbox (not sent into
+    /// the dead connection), settles without a re-read, and its item leaves
+    /// the local queue through the shared fold.
+    #[test]
+    fn a_decision_with_no_nest_is_queued_and_leaves_the_local_queue() {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new("disconnected"));
+        let settled = run(
+            &queue,
+            Mutation::Decide {
+                entry: Box::new(held_mail(9)),
+                approve: true,
+            },
+        );
+        let Ok(Settled::Queued {
+            decided: Some(entry),
+        }) = settled
+        else {
+            panic!("a decision with no nest settles queued with its entry");
+        };
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, "fauna.family.approvals.decide");
+        assert_eq!(
+            fauna_client_family::approvals_after_queued_decision(
+                vec![held_mail(9), held_mail(8)],
+                &entry
+            ),
+            vec![held_mail(8)]
+        );
+    }
+
+    /// Connected, the decision is sent as before (to this dummy nest it fails
+    /// on the transport) and nothing is queued.
+    #[test]
+    fn a_decision_with_the_nest_connected_is_sent_not_queued() {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new("connected"));
+        let settled = run(
+            &queue,
+            Mutation::Decide {
+                entry: Box::new(held_mail(9)),
+                approve: false,
+            },
+        );
+        assert!(settled.is_err(), "the send was attempted");
+        assert!(queue.queued().is_empty());
+    }
+
+    /// The pre-approval and the un-deny queue the same way, folding nothing.
+    #[test]
+    fn a_pre_approval_and_an_un_deny_with_no_nest_are_queued() {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new("unreachable"));
+        let added = run(
+            &queue,
+            Mutation::ContactAdd {
+                ward: vec![3u8; 32],
+                peer: vec![4u8; 32],
+            },
+        );
+        assert!(matches!(added, Ok(Settled::Queued { decided: None })));
+        let allowed = run(
+            &queue,
+            Mutation::AllowBlockedPeer {
+                ward: vec![3u8; 32],
+                bridge_id: "telegram".into(),
+                peer_id: "peer-1".into(),
+            },
+        );
+        assert!(matches!(allowed, Ok(Settled::Queued { decided: None })));
+        let kinds: Vec<_> = queue.queued().into_iter().map(|q| q.0).collect();
+        assert_eq!(
+            kinds,
+            vec!["fauna.family.contact.add", "fauna.family.approvals.decide"]
         );
     }
 }

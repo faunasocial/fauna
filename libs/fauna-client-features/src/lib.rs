@@ -42,6 +42,7 @@
 //! affordance decision below is courtesy on top of that floor, never a
 //! substitute for it.
 
+pub mod calendar_labels;
 pub mod editor;
 pub mod row;
 #[cfg(feature = "test-fixtures")]

@@ -788,13 +788,29 @@ pub trait StoreBackend {
 
     /// Permanent failure: set the intent's status to `failed` (parked,
     /// user-visible, never re-attempted without user action). The row stays —
-    /// a park is not a drop. `false` if no such intent.
-    async fn outbox_mark_failed(&self, intent_id: &[u8; 16]) -> Result<bool>;
+    /// a park is not a drop. `reason` is stored as the row's
+    /// `failure_reason`: a stable code, never free text. `false` if no such
+    /// intent.
+    async fn outbox_mark_failed(&self, intent_id: &[u8; 16], reason: &str) -> Result<bool>;
 
     /// One drain attempt did not conclude: bump `retry_count`, stamp
     /// `last_attempt_at` (the `transfer_queue` backoff pair). `false` if no
     /// such intent.
     async fn outbox_record_attempt(&self, intent_id: &[u8; 16]) -> Result<bool>;
+
+    /// The user's retry of a parked intent (`account-offline-mutation.md`
+    /// § The unsent-changes surface, point 3): a `failed` row returns to
+    /// `pending`, `retry_count` 0, `last_attempt_at` and `failure_reason`
+    /// cleared, its `channel_seq` kept so it drains first in its scope.
+    /// `false` on an unknown or already-pending intent, which is left
+    /// untouched.
+    async fn outbox_retry(&self, intent_id: &[u8; 16]) -> Result<bool>;
+
+    /// The user's discard of a parked intent: delete a `failed` row and
+    /// nothing else, the one sanctioned destroy of an undrained intent. A
+    /// `pending` row may be in flight at the drain, so it is never deleted
+    /// here. `false` on an unknown or pending intent.
+    async fn outbox_discard(&self, intent_id: &[u8; 16]) -> Result<bool>;
 }
 
 /// One `(scope, item_class)` family's relay-plane meter — the physical half of

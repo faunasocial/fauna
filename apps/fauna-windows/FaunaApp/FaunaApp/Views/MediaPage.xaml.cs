@@ -65,6 +65,12 @@ public sealed partial class MediaPage : Page
     // shared Rust returned them. Kept so a restore click resolves its row's
     // version_num back to the full FileVersionSummary the machine needs.
     private IReadOnlyList<FileVersionSummary> _versions = Array.Empty<FileVersionSummary>();
+    // The connected-apps machine that names a deposited version's app on its
+    // file-version-author line (folder-deposit.md ruling 3; FileVersionFormat.Author).
+    // Built the first time a listed version names a depositor and kept for the page's
+    // life, so its once-per-key roster read (DepositorReadWanted) holds across detail
+    // opens; null until then, and on a failed build (the generic wording paints).
+    private uniffi.fauna_client_connected_apps.IConnectedAppsMachine? _depositorApps;
     private FileVersionSummary? _restoreTarget;
     // Recovery browse (file-versions.md § Retention (3)): ON
     // re-lists with include_pruned so soft-pruned rows appear with their badge +
@@ -125,29 +131,18 @@ public sealed partial class MediaPage : Page
 
         // Sort ComboBox — name / size / date, label sourced from shared Rust
         // (fauna-core::format::media_sort_label, media.md § Layout & flow).
-        // AutomationProperties.Name = tag value so FlaUI Select-by-value works;
-        // the machine's SetSort takes the same tag.
+        // Each item is keyed by its tag (PickerOption), which the machine's SetSort
+        // takes and driver.select names.
         foreach (var tag in new[] { "name", "size", "date" })
-        {
-            var item = new ComboBoxItem { Content = S.Resolve(FaunaFfiMethods.MediaSortLabel(tag)), Tag = tag };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, tag);
-            SortCombo.Items.Add(item);
-        }
+            SortCombo.Items.Add(PickerOption.Create(S.Resolve(FaunaFfiMethods.MediaSortLabel(tag)), tag));
         SortCombo.SelectedIndex = 0;
 
         // Sort-direction ComboBox — ascending (default) / descending; label from
-        // shared Rust (fauna-core::format::media_sort_direction_label). The tag is
-        // the stable option value (also the automation name, as for SortCombo).
+        // shared Rust (fauna-core::format::media_sort_direction_label), keyed by the
+        // stable option value as SortCombo is.
         foreach (var tag in new[] { "ascending", "descending" })
-        {
-            var item = new ComboBoxItem
-            {
-                Content = S.Resolve(FaunaFfiMethods.MediaSortDirectionLabel(tag == "descending")),
-                Tag = tag,
-            };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, tag);
-            SortDirectionCombo.Items.Add(item);
-        }
+            SortDirectionCombo.Items.Add(PickerOption.Create(
+                S.Resolve(FaunaFfiMethods.MediaSortDirectionLabel(tag == "descending")), tag));
         SortDirectionCombo.SelectedIndex = 0;
 
         // The two share gestures the offline gate can desensitize — create and
@@ -430,30 +425,15 @@ public sealed partial class MediaPage : Page
         // Mirror linux: rebuild only when an option's value or label changed, so a
         // newly-populated set appears without clobbering an in-flight selection,
         // and a shared set whose owner label resolves later repaints. media.md § O-4.
-        var current = FilterCombo.Items
-            .OfType<ComboBoxItem>()
-            .Select(it => (it.Tag as string, it.Content as string))
-            .ToList();
-
-        if (!current.SequenceEqual(desired.Select(e => ((string?)e.Value, (string?)e.Label))))
-        {
-            // A WinUI ComboBoxItem carries the display and the drive-key on
-            // separate properties — Content is the minted label, Tag and the UIA
-            // AutomationId the value the cross-app select(id, value) contract
-            // addresses (the bridge matches the AutomationId first), the UIA Name
-            // the label the options attr lists — so windows needs no value→label
-            // side map of the sort GTK and Compose keep.
-            FilterCombo.Items.Clear();
-            foreach (var entry in desired)
-            {
-                var item = new ComboBoxItem { Content = entry.Label, Tag = entry.Value };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, entry.AutomationName);
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(item, entry.Value);
-                FilterCombo.Items.Add(item);
-            }
-        }
-
-        SelectComboByTag(FilterCombo, activeFilter ?? MediaFilterOptions.AllValue);
+        // A WinUI ComboBoxItem carries the display and the drive-key on separate
+        // properties (PickerOption: the minted label painted and named, the value as
+        // the key the cross-app select(id, value) contract addresses) — so windows
+        // needs no value→label side map of the sort GTK and Compose keep. Called under
+        // _rendering, so the selection it makes never re-enters the machine.
+        PickerOption.Reconcile(
+            FilterCombo,
+            desired.Select(e => (e.Label, e.Value)).ToList(),
+            activeFilter ?? MediaFilterOptions.AllValue);
     }
 
     // ── Explorer chrome event handlers (gestures → machine) ─────────────────
@@ -608,14 +588,62 @@ public sealed partial class MediaPage : Page
         // download paints once it exists (linux's render_versions).
         _latest = versions.LastOrDefault();
         DownloadBtn.Visibility = _latest is null ? Visibility.Collapsed : Visibility.Visible;
+
+        // A version a connected app deposited names its app through the shared
+        // connected-apps machine; the roster is read again when it cannot name a listed
+        // depositor yet, and the rows repaint once it has (FileVersionFormat
+        // .ReadDepositorRosterAsync — tui's depositor_roster_op, linux's
+        // read_depositor_roster).
+        var depositors = FileVersionFormat.DepositorKeys(versions);
+        var apps = depositors.Length > 0 ? await DepositorAppsAsync() : null;
+        if (!ReferenceEquals(_detailItem, item) || !ReferenceEquals(_versions, versions)) return;
+        PaintVersions(versions, apps);
+        VersionsStatus.Visibility = Visibility.Collapsed;
+
+        bool reread;
+        try
+        {
+            reread = await FileVersionFormat.ReadDepositorRosterAsync(apps, depositors);
+        }
+        catch (Exception)
+        {
+            // A failed roster read leaves the generic wording already painted.
+            return;
+        }
+        if (reread && ReferenceEquals(_detailItem, item) && ReferenceEquals(_versions, versions))
+            PaintVersions(versions, apps);
+    }
+
+    private void PaintVersions(
+        FileVersionSummary[] versions,
+        uniffi.fauna_client_connected_apps.IConnectedAppsMachine? apps)
+    {
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         // FileVersionFormat owns the row projection — and with it the millis-vs-seconds
-        // unit contract — so FaunaApp.Tests can pin it; this code-behind is unreachable
-        // from that assembly (the NestTrustFormat precedent).
+        // unit contract and the author line — so FaunaApp.Tests can pin it; this
+        // code-behind is unreachable from that assembly (the NestTrustFormat precedent).
         VersionsList.ItemsSource = versions
-            .Select(v => FileVersionFormat.MapRow(v, nowMs))
+            .Select(v => FileVersionFormat.MapRow(v, nowMs, apps))
             .ToList();
-        VersionsStatus.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>The page's connected-apps machine for the version author line, built
+    /// on this session's nest connection the first time it is wanted (the bridges
+    /// page's plugin cards build theirs the same way). <c>null</c> when the build
+    /// fails: the rows then read the generic depositor wording.</summary>
+    private async System.Threading.Tasks.Task<uniffi.fauna_client_connected_apps.IConnectedAppsMachine?>
+        DepositorAppsAsync()
+    {
+        if (_depositorApps is not null || _rpc is null) return _depositorApps;
+        try
+        {
+            _depositorApps ??= await _rpc.BuildConnectedAppsMachineAsync(new UnobservedConnectedApps(), null);
+        }
+        catch (Exception)
+        {
+            // No machine: FileVersionFormat.Author paints the generic wording.
+        }
+        return _depositorApps;
     }
 
     private void RestoreVersion_Click(object sender, RoutedEventArgs e)
@@ -911,25 +939,15 @@ public sealed partial class MediaPage : Page
     }
 
     /// <summary>The <c>share-link-expiry-select</c> options, rebuilt only when the
-    /// machine's option list changed; each item's UIA Name is the option VALUE (the
-    /// cross-app <c>select(id, "7d")</c> contract) and its Content the shared label.
+    /// machine's option list changed; each item paints the shared label and is keyed
+    /// by the option VALUE (the cross-app <c>select(id, "7d")</c> contract).
     /// Called under <see cref="_rendering"/>, so the selection it makes never
     /// re-enters the machine.</summary>
     private void RebuildExpiryCombo(IReadOnlyList<string> options, string selected)
-    {
-        var current = ShareExpiryCombo.Items.OfType<ComboBoxItem>().Select(it => it.Tag as string);
-        if (!current.SequenceEqual(options))
-        {
-            ShareExpiryCombo.Items.Clear();
-            foreach (var value in options)
-            {
-                var item = new ComboBoxItem { Content = ShareLinkFormat.ExpiryLabel(value), Tag = value };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, value);
-                ShareExpiryCombo.Items.Add(item);
-            }
-        }
-        SelectComboByTag(ShareExpiryCombo, selected);
-    }
+        => PickerOption.Reconcile(
+            ShareExpiryCombo,
+            options.Select(value => (ShareLinkFormat.ExpiryLabel(value), value)).ToList(),
+            selected);
 
     private void ShareLinkBtn_Click(object sender, RoutedEventArgs e)
     {

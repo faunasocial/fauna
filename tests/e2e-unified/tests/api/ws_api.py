@@ -404,6 +404,58 @@ def add_pairing(
     client.call("fauna.pair.add", payload)
 
 
+def revoke_pairing(port: int, actor: dict, private_nest_id: bytes) -> None:
+    """``fauna.pair.revoke`` — the user unlinks a nest from their account.
+
+    Owner-implicit like ``add_pairing``: the connection actor scopes the
+    delete, so this removes only ``actor``'s own row naming
+    ``private_nest_id``. On a private home nest that row is what makes the
+    nest forward the user's posts (``private-mode.md`` § Post Forwarding), so
+    revoking it stops new forwards.
+    """
+    client = _client_for(_base_url(port), actor)
+    client.call("fauna.pair.revoke", {"private_nest_id": bytes(private_nest_id)})
+
+
+def list_pairings(port: int, actor: dict) -> dict:
+    """``fauna.pair.list`` — returns ``{"pairings": [...], "forward_queue": {...}}``.
+
+    ``forward_queue`` is the caller's own outbox on this nest: ``queued`` (every
+    entry still waiting, backed-off ones included), ``stuck`` and
+    ``last_error`` — what the Nests page renders.
+    """
+    client = _client_for(_base_url(port), actor)
+    return client.call("fauna.pair.list", {})
+
+
+# ── generation escrow ──────────────────────────────────────────────────────
+
+
+def escrow_put(
+    port: int, actor: dict, generation_id: bytes, wrap: bytes, target_key: str
+) -> bytes:
+    """``fauna.generation.escrow.put`` — deposit one escrow wrap for ``actor``
+    at this nest; returns the holder-signed receipt bytes. Opaque to the
+    holder: any 32-byte ``generation_id`` and non-empty ``wrap`` are kept."""
+    client = _client_for(_base_url(port), actor)
+    reply = client.call(
+        "fauna.generation.escrow.put",
+        {
+            "generation_id": bytes(generation_id),
+            "wrap": bytes(wrap),
+            "target_key": target_key,
+        },
+    )
+    return reply["receipt"]
+
+
+def escrow_wraps(port: int, actor: dict) -> list[dict]:
+    """``fauna.generation.escrow.get`` with no filter — every wrap this nest
+    holds for ``actor`` (``generation_id``, ``wrap``, ``deposited_at_ms``)."""
+    client = _client_for(_base_url(port), actor)
+    return client.call("fauna.generation.escrow.get", {}).get("wraps", [])
+
+
 # ── feeds ──────────────────────────────────────────────────────────────────
 
 

@@ -86,6 +86,32 @@ pub async fn peer_leg_transport_trusting(
     .await
 }
 
+/// The account runtime's peer-leg [`PeerTransportFactory`](fauna_sync_engine::account_runtime::PeerTransportFactory)
+/// over [`peer_leg_transport`]: the endpoint's secret is the runtime's own
+/// resolved writer key (R5 — NodeId = writer key, so the QUIC handshake proves
+/// the identity the admission witness names) and the relay URL the runtime's
+/// own node-info read hands it (own-nest provenance). It carries no file-sync
+/// engines — only the sync agent, which holds the bodies, binds those — so
+/// every app host that runs the leg in-process (tui; the UniFFI apps through
+/// `fauna-ffi`'s account runtime, iOS and android among them, which run no
+/// agent) hands the runtime this one factory rather than its own closure.
+pub fn peer_leg_factory() -> fauna_sync_engine::account_runtime::PeerTransportFactory {
+    Arc::new(
+        |inputs: fauna_sync_engine::account_runtime::PeerLegFactoryInputs| {
+            Box::pin(async move {
+                let (transport, bound_addrs) =
+                    peer_leg_transport(inputs.writer_key.to_bytes(), inputs.relay_url.as_deref())
+                        .await?;
+                Ok(fauna_sync_engine::account_runtime::PeerLegBinding {
+                    transport,
+                    bound_addrs,
+                    file_sync: None,
+                })
+            })
+        },
+    )
+}
+
 /// The body [`peer_leg_transport`] and [`peer_leg_transport_trusting`] share.
 async fn peer_leg_build(
     mut builder: IrohTransportBuilder,
@@ -120,6 +146,10 @@ async fn peer_leg_build(
 /// reports back only a relay it could use: a URL that does not parse binds
 /// direct-only (as [`peer_leg_transport`] does) and the binding says `None`,
 /// so the seat never advertises a relay it does not hold.
+///
+/// Behind the `ceremony` feature: its types are `fauna-sync-engine/p2p-share`'s,
+/// which a store-safe flavor excises while keeping the peer leg above.
+#[cfg(feature = "ceremony")]
 pub fn ceremony_transport() -> fauna_sync_engine::offline_share::CeremonyTransportFactory {
     Arc::new(|inputs| {
         Box::pin(async move {
@@ -475,6 +505,40 @@ mod tests {
     /// interface addresses (`fauna_core::device_endpoints`); a port that only an
     /// IPv6 socket holds is unreachable over IPv4 wherever that socket is
     /// v6-only, and a send to it draws ICMP port-unreachable.
+    /// The shared in-process factory binds the endpoint from the runtime's own
+    /// writer key (R5: NodeId = writer key, so the handshake proves the
+    /// identity the admission witness names), reports the addresses it bound,
+    /// and hands over no file-sync engines — those are the agent's alone.
+    #[tokio::test]
+    async fn peer_leg_factory_binds_the_writer_key_and_carries_no_file_sync() {
+        let writer_key = ed25519_dalek::SigningKey::from_bytes(&[0x4c; 32]);
+        let factory = peer_leg_factory();
+        let binding = factory(fauna_sync_engine::account_runtime::PeerLegFactoryInputs {
+            writer_key: writer_key.clone(),
+            relay_url: None,
+            device_authorization: fauna_core::encoding::EmbedAsBytes {
+                envelope: Vec::new(),
+                bytes: Vec::new(),
+                signer_auth: None,
+            },
+        })
+        .await
+        .expect("the factory binds");
+        assert_eq!(
+            binding.transport.local_identity().as_bytes(),
+            &writer_key.verifying_key().to_bytes(),
+            "the endpoint's identity must be the writer key's"
+        );
+        assert!(
+            !binding.bound_addrs.is_empty(),
+            "the factory reports what it bound"
+        );
+        assert!(
+            binding.file_sync.is_none(),
+            "file-sync engines are the agent's to bind"
+        );
+    }
+
     #[tokio::test]
     async fn peer_leg_candidates_only_name_ipv4_listening_ports() {
         let (_transport, bound) = peer_leg_transport([0x51; 32], None).await.expect("bind");

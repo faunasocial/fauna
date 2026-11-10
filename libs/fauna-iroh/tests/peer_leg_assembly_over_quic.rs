@@ -123,6 +123,60 @@ fn epoch_secs() -> u64 {
     fauna_core::data::Timestamp::now_secs_or_zero() as u64
 }
 
+/// The dialer's verified enrollment as the SERVING replica holds it: the
+/// admission seam admits only a verified member of this replica's own fleet
+/// view (`account-sync-plane.md` § The admission seam → *Validity and
+/// severance*), and production replicas hold every sibling's enrollment row.
+fn enrollment_row(dialer: &SigningKey) -> fauna_account_store::types::StateEntry {
+    let device_key = dialer.verifying_key().to_bytes();
+    let authorization = fauna_core::encoding::canonical_encode(&witness_for(&root(), device_key))
+        .expect("encode witness");
+    let kind = fauna_protocol::merge_policy::KIND_DEVICE_SET;
+    fauna_account_store::types::StateEntry {
+        kind: kind.into(),
+        key: fauna_core::hex32::encode(&device_key),
+        scope: fauna_protocol::merge_policy::home_scope_for_kind(kind)
+            .unwrap()
+            .into(),
+        value: fauna_core::encoding::canonical_encode(
+            &fauna_core::generation::sign_device_enrollment(dialer, authorization, 5_000),
+        )
+        .expect("encode enrollment"),
+        merge_meta: None,
+        entry_version: 0,
+        tombstone: false,
+    }
+}
+
+/// Pre-mint the serving runtime's writer key (the sanctioned pre-assembly
+/// resolver) and stage `rows` into its store before it starts, so the staging
+/// never races an assembly.
+async fn premint_and_stage(
+    store_root: &StoreRoot,
+    creds: &CredentialStore,
+    rows: &[fauna_account_store::types::StateEntry],
+) {
+    let writer_key = fauna_sync_engine::account_runtime::resolve_writer_key_serialized(
+        store_root,
+        &root().actor_id_hex(),
+        creds,
+    )
+    .expect("pre-mint writer key");
+    let dir = store_root
+        .store_dir(&root().actor_id_hex())
+        .expect("store dir");
+    let store = fauna_account_store::store::AccountStore::open(
+        fauna_account_store::sqlite::SqliteBackend::open(&dir).unwrap(),
+        &root().actor_id_hex(),
+        fauna_account_store::types::WriterId(writer_key.verifying_key().to_bytes()),
+    )
+    .await
+    .unwrap();
+    for row in rows {
+        store.put_state(row.clone()).await.unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_runtime_assembled_listener_admits_and_refuses_over_real_quic() {
     let tmp = tempfile::tempdir().unwrap();
@@ -155,6 +209,17 @@ async fn the_runtime_assembled_listener_admits_and_refuses_over_real_quic() {
             },
         )
     };
+
+    // The dialer is a verified member of the serving replica's fleet view.
+    let dialer_secret = [0x44u8; 32];
+    let dialer_sk = SigningKey::from_bytes(&dialer_secret);
+    let dialer_pub = dialer_sk.verifying_key().to_bytes();
+    premint_and_stage(
+        &StoreRoot::at(base.join("state")),
+        &CredentialStore::with_file_backend(CRED_NAMESPACE, base.join("creds")),
+        &[enrollment_row(&dialer_sk)],
+    )
+    .await;
 
     let runtime = AccountStoreRuntime::start(AccountRuntimeParams {
         store_backup_exclusion:
@@ -217,10 +282,6 @@ async fn the_runtime_assembled_listener_admits_and_refuses_over_real_quic() {
 
     // Raw iroh dial: the QUIC handshake proves the listener's NodeId is the
     // writer key the slot's witness names — R5 end to end.
-    let dialer_secret = [0x44u8; 32];
-    let dialer_pub = SigningKey::from_bytes(&dialer_secret)
-        .verifying_key()
-        .to_bytes();
     let endpoint = Endpoint::builder(presets::Empty)
         .secret_key(SecretKey::from_bytes(&dialer_secret))
         .alpns(vec![DEFAULT_ALPN.to_vec()])

@@ -387,6 +387,27 @@ def alert_sweep_passes(driver):
     return started, completed
 
 
+ALERT_REGISTRY_KEY = "alert_registry"
+
+
+def alert_state_snapshot(driver):
+    """One ``get_state()`` read of ``(registry_count, sweep_started, sweep_completed)``.
+
+    The registry observable (``fauna_e2e_agent::ALERT_REGISTRY_KEY``) and the
+    pass counters come from ONE snapshot so a caller can reason "no pass has
+    finished since X, so the count is the teardown's own". ``None`` is a refusal,
+    not a zero (same contract as ``alert_sweep_passes``).
+    """
+    state = driver.get_state() or {}
+    reg, passes = state.get(ALERT_REGISTRY_KEY), state.get(ALERT_SWEEP_PASSES_KEY)
+    if not isinstance(reg, dict) or not isinstance(passes, dict):
+        return None
+    count, started, completed = reg.get("count"), passes.get("started"), passes.get("completed")
+    if not all(isinstance(v, int) for v in (count, started, completed)):
+        return None
+    return count, started, completed
+
+
 def await_sweep_pass_after(driver, planted, *, budget_s, what="the planted condition"):
     """Wait until a critical-alert sweep pass that began AFTER ``planted`` ran.
 

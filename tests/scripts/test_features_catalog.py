@@ -90,7 +90,9 @@ def test_parse_page_front_matter(tmp_path):
     assert page.section == "everyday"
     assert page.goal == "docs/goal/ui/feed.md § Reading"
     assert page.guide == "docs/guides/app-tour.md § Feed"
-    assert page.absences == {"android": "docs/goal/ui/feed.md § Platform notes"}
+    # android's absence carries to its kids channel (§ Cell semantics).
+    assert page.absences == {"android": "docs/goal/ui/feed.md § Platform notes",
+                             "android-kids": "docs/goal/ui/feed.md § Platform notes"}
 
 
 def test_parse_page_contract(tmp_path):
@@ -695,15 +697,17 @@ def test_a_nest_outcome_is_never_narrowed_by_the_column(tmp_path):
 
 def test_the_app_marker_vocabulary_is_the_columns_and_the_runs_alike():
     """Three lists of the seven apps would drift; this is one, pinned BY EQUALITY to
-    both of the others — the render's columns and the authority the run itself
-    deselects on (`conftest._KNOWN_APPS`). Read out of conftest by `ast` rather than
-    by import, because importing a pytest conftest outside its own session is not a
-    thing this test may do."""
+    both of the others — the catalog's seven app columns (`APP_COLUMNS`; a kids column
+    is never a mark) and the marks the run itself deselects on (`conftest.
+    _APP_MARKERS`, whose app-axis values add the kids channels from the catalog's own
+    `COLUMN_PARENT`). Read out of conftest by `ast` rather than by import, because
+    importing a pytest conftest outside its own session is not a thing this test may
+    do."""
     import ast
 
     import features_scan
 
-    assert features_scan.APP_MARKERS == set(fc.APPS)
+    assert features_scan.APP_MARKERS == set(fc.APP_COLUMNS)
 
     conftest = (Path(__file__).resolve().parent.parent
                 / "e2e-unified" / "conftest.py")
@@ -711,9 +715,12 @@ def test_the_app_marker_vocabulary_is_the_columns_and_the_runs_alike():
     known = None
     for node in ast.walk(tree):
         if (isinstance(node, ast.Assign)
-                and any(getattr(t, "id", None) == "_KNOWN_APPS" for t in node.targets)):
-            known = ast.literal_eval(node.value)
-    assert known is not None, "conftest no longer defines _KNOWN_APPS — repoint this pin"
+                and any(getattr(t, "id", None) == "_APP_MARKERS" for t in node.targets)):
+            value = node.value
+            if isinstance(value, ast.Call) and getattr(value.func, "id", "") == "frozenset":
+                value = value.args[0]
+            known = ast.literal_eval(value)
+    assert known is not None, "conftest no longer defines _APP_MARKERS — repoint this pin"
     assert features_scan.APP_MARKERS == set(known)
 
 
@@ -1027,7 +1034,8 @@ def test_the_render_reads_the_registry_and_markers_beside_the_catalog(tmp_path):
     assert cells["web"]["state"] == "none"
     status = (features / "feed-read.md").read_text(encoding="utf-8")
     assert ("`tests/e2e-unified/tests/test_feed.py::test_refresh` — requires "
-            "`feed-refresh` (not built: windows, macos, ios, android, tui)") in status
+            "`feed-refresh` (not built: windows, macos, ios, android, tui, android-kids, "
+            "ios-kids)") in status
 
 
 def test_an_unmarked_test_is_scanned_as_speaking_for_every_column(tmp_path):
@@ -1273,7 +1281,7 @@ def test_completable_is_the_parse_only_half_of_the_cell_question(tmp_path):
         "tests/e2e-unified/tests/test_feed.py::test_tui_own_post_appears"])
     page = fc.load_pages(features)[0]
     assert page.completable(MARKS_PER_APP) == ["windows", "tui"]
-    assert page.completable() == [a for a in fc.APPS if a != "android"], (
+    assert page.completable() == [a for a in fc.APPS if fc.parent_app(a) != "android"], (
         "unmarked witnesses speak for every column the page has")
 
 
@@ -1371,15 +1379,16 @@ def test_a_nest_blocker_is_never_owed_by_one_column(tmp_path):
 
 def test_gap_reach_is_one_entry_per_outcome_however_many_columns_are_short(tmp_path):
     """The whole point of the transpose's transpose. Outcome 1 is witnessed on tui and
-    windows, so it is short on four other columns (android is declared absent) — and
-    that is ONE gap with a reach of four, never four separate pieces of work."""
+    windows, so it is short on five other columns (android is declared absent, and its
+    kids channel with it; ios's kids channel is short beside ios) — and that is ONE gap
+    with a reach of five, never five separate pieces of work."""
     features = _per_app_catalog(tmp_path, [])
     gaps = fc.gap_reach(fc.load_pages(features), MARKS_PER_APP)
     assert list(gaps) == [("feed-read", 1)]
     gap = gaps[("feed-read", 1)]
     assert gap.witnesses == ("windows", "tui")
-    assert gap.short == ("web", "linux", "macos", "ios")
-    assert gap.reach == 4
+    assert gap.short == ("web", "linux", "macos", "ios", "ios-kids")
+    assert gap.reach == 5
 
 
 def test_a_declared_absent_column_is_neither_witness_nor_short(tmp_path):
@@ -1414,18 +1423,18 @@ def test_reach_agrees_with_every_columns_backlog(tmp_path):
 
 def test_a_columns_trickle_down_is_its_owed_gaps_under_a_reach_cap(tmp_path):
     """What ONE app queue's batched pass receives: the gaps this column owes whose reach
-    is at most the cap. The fixture's one gap reaches four columns, so a cap of 4 hands
-    it to linux's pass with its reference columns named, and a cap of 3 leaves it to a
+    is at most the cap. The fixture's one gap reaches five columns, so a cap of 5 hands
+    it to linux's pass with its reference columns named, and a cap of 4 leaves it to a
     wider row — the same gap is never in both."""
     features = _per_app_catalog(tmp_path, [])
     pages = fc.load_pages(features)
-    at_four = fc.column_trickle_down(pages, "linux", 4, MARKS_PER_APP)
-    assert [(g.page.slug, g.outcome.number, g.witnesses) for g in at_four] == [
+    at_five = fc.column_trickle_down(pages, "linux", 5, MARKS_PER_APP)
+    assert [(g.page.slug, g.outcome.number, g.witnesses) for g in at_five] == [
         ("feed-read", 1, ("windows", "tui"))]
-    assert fc.column_trickle_down(pages, "linux", 3, MARKS_PER_APP) == []
+    assert fc.column_trickle_down(pages, "linux", 4, MARKS_PER_APP) == []
     # A witnessing column owes nothing, and neither does a declared-absent one.
-    assert fc.column_trickle_down(pages, "tui", 4, MARKS_PER_APP) == []
-    assert fc.column_trickle_down(pages, "android", 4, MARKS_PER_APP) == []
+    assert fc.column_trickle_down(pages, "tui", 5, MARKS_PER_APP) == []
+    assert fc.column_trickle_down(pages, "android", 5, MARKS_PER_APP) == []
 
 
 def test_a_trickle_down_never_carries_an_outcome_nobody_witnesses(tmp_path):
@@ -1504,8 +1513,10 @@ def _outcome_absent(tmp_path, text=OUTCOME_ABSENT_PAGE, web_tests=(REFRESH,)):
 
 def test_an_outcome_absence_parses_beside_the_page_level_map(tmp_path):
     page = fc.parse_page(_outcome_absent(tmp_path) / "feed-read.md")
-    assert page.absences == {"android": "docs/goal/ui/feed.md § Platform notes"}, (
-        "the page-level map keeps its meaning: `—` on the whole column")
+    assert page.absences == {"android": "docs/goal/ui/feed.md § Platform notes",
+                             "android-kids": "docs/goal/ui/feed.md § Platform notes"}, (
+        "the page-level map keeps its meaning: `—` on the whole column (and its kids "
+        "channel's)")
     assert page.outcome_absences == {"web": {1: "docs/goal/ui/feed.md § Platform notes"}}
     assert page.absent_from("web", page.outcomes[0])
     assert not page.absent_from("web", page.outcomes[1])
@@ -1570,8 +1581,8 @@ def test_an_absent_outcome_is_nobodys_backlog_on_that_column(tmp_path):
     pages = fc.load_pages(_outcome_absent(tmp_path))
     assert fc.column_backlog(pages, "web", marks) == []
     gap = fc.gap_reach(pages, marks)[("feed-read", 1)]
-    assert gap.short == ("linux", "windows", "macos", "ios"), (
-        "web is excused from the outcome, android from the page")
+    assert gap.short == ("linux", "windows", "macos", "ios", "ios-kids"), (
+        "web is excused from the outcome, android (and its kids channel) from the page")
 
 
 def test_the_columns_cell_is_judged_without_the_absent_outcomes_witnesses(tmp_path):
@@ -1600,7 +1611,8 @@ def test_the_status_table_and_the_json_say_where_an_outcome_is_absent(tmp_path):
     data = json.loads((features / "matrix.json").read_text(encoding="utf-8"))
     entry = data["sections"][0]["features"][0]
     assert entry["outcome_absences"] == {"web": {"1": "docs/goal/ui/feed.md § Platform notes"}}
-    assert entry["absences"] == {"android": "docs/goal/ui/feed.md § Platform notes"}
+    assert entry["absences"] == {"android": "docs/goal/ui/feed.md § Platform notes",
+                                 "android-kids": "docs/goal/ui/feed.md § Platform notes"}
 
 
 # ── the last-green reader (delayed-testing.md § The last-green directory) ───
@@ -1894,3 +1906,142 @@ def test_no_snapshot_reads_the_ledger_alone(tmp_path):
         "linux": ledger_file("linux", {"feed-read": {"cell": cell_entry(), "tests": {
             OWN: _ledger_rec("failed")}}})})
     assert fc.load_ledger(features) == fc.load_ledger(features, last_green=False)
+
+
+# ── the kids channels as columns (feature-catalog.md § Cell semantics, *A second store
+# identity of an app … is a COLUMN*) ──────────────────────────────────────────
+def test_the_kids_channels_are_columns_after_the_seven_each_with_its_parent():
+    assert fc.APPS == fc.APP_COLUMNS + ("android-kids", "ios-kids")
+    assert len(fc.APPS) == 9
+    assert fc.COLUMN_PARENT == {"android-kids": "android", "ios-kids": "ios"}
+    assert fc.parent_app("android-kids") == "android" and fc.parent_app("tui") == "tui"
+    # It runs where its parent runs, from its parent's tree.
+    assert fc.COLUMN_PLATFORMS["android-kids"] == fc.COLUMN_PLATFORMS["android"]
+    assert fc.COLUMN_PLATFORMS["ios-kids"] == fc.COLUMN_PLATFORMS["ios"]
+    assert fc.app_tree("ios-kids") == fc.app_tree("ios") == "apps/fauna-apple/"
+
+
+def test_a_kids_column_can_have_its_parents_marked_witnesses_and_the_unmarked():
+    marks = {"a": ("android",), "b": ("ios",), "c": ("tui", "android")}
+    assert fc.applicable("a", "android-kids", marks)
+    assert not fc.applicable("b", "android-kids", marks)
+    assert fc.applicable("c", "android-kids", marks)
+    assert fc.applicable("unmarked", "ios-kids", marks)
+    assert fc.applicable("b", "ios-kids", marks)
+
+
+KIDS_ABSENT_PAGE = PAGE.replace(
+    "  android: docs/goal/ui/feed.md § Platform notes\n",
+    "  android: docs/goal/ui/feed.md § Platform notes\n"
+    "  ios-kids: docs/goal/behavior/account-age-band.md § The account age band\n")
+
+
+def test_a_page_declaring_a_kids_column_absent_parses_and_renders_a_dash(tmp_path):
+    features = write_catalog(tmp_path, {"feed-read": KIDS_ABSENT_PAGE})
+    page = fc.parse_page(features / "feed-read.md")
+    assert page.absences["ios-kids"] == \
+        "docs/goal/behavior/account-age-band.md § The account age band"
+    assert "ios-kids" not in page.inherited_absences
+    assert fc.compute_cell(page, "ios-kids", {}).state == "absent"
+    fc.write_all(features)
+    matrix = (features / "MATRIX.md").read_text(encoding="utf-8")
+    header = next(line for line in matrix.splitlines() if line.startswith("| Feature |"))
+    assert header == "| Feature | " + " | ".join(fc.APPS) + " |"
+    row = next(line for line in matrix.splitlines() if line.startswith("| [Read your feed]"))
+    cells = [c.strip() for c in row.strip("|").split("|")][1:]
+    assert dict(zip(fc.APPS, cells))["ios-kids"] == fc.MARKS["absent"]
+    data = json.loads((features / "matrix.json").read_text(encoding="utf-8"))
+    assert data["apps"] == list(fc.APPS)
+    assert data["parents"] == fc.COLUMN_PARENT
+    status = (features / "feed-read.md").read_text(encoding="utf-8")
+    assert "| ios-kids | — absent |" in status
+
+
+def test_a_parents_absence_carries_to_its_kids_column(tmp_path):
+    page = fc.parse_page(write_catalog(tmp_path, {"feed-read": PAGE}) / "feed-read.md")
+    assert page.absences["android-kids"] == page.absences["android"]
+    assert page.inherited_absences == frozenset({"android-kids"})
+    assert fc.compute_cell(page, "android-kids", {}).state == "absent"
+    assert "ios-kids" not in page.absences
+
+
+def test_a_parents_outcome_absence_excuses_its_kids_column_from_that_outcome(tmp_path):
+    text = OUTCOME_ABSENT_PAGE.replace("web (outcome 1):", "ios (outcome 1):")
+    page = fc.parse_page(write_catalog(tmp_path, {"feed-read": text}) / "feed-read.md")
+    assert page.absent_from("ios-kids", page.outcomes[0])
+    assert not page.absent_from("ios-kids", page.outcomes[1])
+    assert page.inherited_absences == frozenset({"android-kids", "ios-kids (outcome 1)"})
+
+
+def test_kids_owed_keeps_a_kids_column_owed_beside_an_absent_parent(tmp_path):
+    # The `kids-app` page: absent on android and ios, owed on their kids columns.
+    text = PAGE.replace("absences:\n", "kids-owed: android-kids\nabsences:\n")
+    page = fc.parse_page(write_catalog(tmp_path, {"feed-read": text}) / "feed-read.md")
+    assert "android-kids" not in page.absences and "android-kids" not in page.inherited_absences
+    assert fc.compute_cell(page, "android-kids", {}).state != "absent"
+    assert fc.compute_cell(page, "android", {}).state == "absent"
+
+
+def test_kids_owed_names_only_kids_columns_and_never_one_it_also_excuses(tmp_path):
+    bad = PAGE.replace("absences:\n", "kids-owed: android\nabsences:\n")
+    with pytest.raises(fc.CatalogError, match="not kids columns"):
+        fc.parse_page(write_catalog(tmp_path, {"feed-read": bad}) / "feed-read.md")
+    both = KIDS_ABSENT_PAGE.replace("absences:\n", "kids-owed: ios-kids\nabsences:\n")
+    with pytest.raises(fc.CatalogError, match="also excuses"):
+        fc.parse_page(write_catalog(tmp_path, {"feed-read": both}) / "feed-read.md")
+
+
+def test_a_kids_outcome_absence_on_a_page_its_parent_is_absent_from_is_refused(tmp_path):
+    text = PAGE.replace(
+        "  android: docs/goal/ui/feed.md § Platform notes\n",
+        "  android: docs/goal/ui/feed.md § Platform notes\n"
+        "  android-kids (outcome 1): docs/goal/ui/feed.md § Platform notes\n")
+    features = write_catalog(tmp_path, {"feed-read": text})
+    with pytest.raises(fc.CatalogError, match="absent from the whole page"):
+        fc.parse_page(features / "feed-read.md")
+
+
+def test_a_kids_column_reads_its_own_ledger_file_never_its_parents(tmp_path):
+    text = PAGE.replace("absences:\n  android: docs/goal/ui/feed.md § Platform notes\n",
+                        "").replace("   - (none)", f"   - `{DELETE}`")
+    green = {"cell": cell_entry(), "tests": {OWN: rec(), REFRESH: rec()}}
+    nest = {"cell": cell_entry(), "tests": {DELETE: rec()}}
+    features = write_catalog(tmp_path, {"feed-read": text}, {
+        "android": ledger_file("android", {"feed-read": green}),
+        "nest": ledger_file("nest", {"feed-read": nest})})
+    pages, ledger = fc.load_pages(features), fc.load_ledger(features)
+    assert fc.compute_cell(pages[0], "android", ledger).state == "full"
+    assert fc.compute_cell(pages[0], "android-kids", ledger).state == "none"
+
+
+def test_a_kids_directory_key_answers_the_kids_column_and_never_its_parent():
+    candidates = _seat_candidates("android-kids")
+    assert fc.token_columns(candidates[0][0]) == {"android-kids"}
+    assert _answering(candidates, "android-kids", "linux") == ["android-kids"]
+    assert _answering(candidates, "android", "linux") == []
+    assert _answering(candidates, fc.NEST, "linux") == []
+
+
+def test_the_surface_registry_accepts_the_kids_columns_in_built(tmp_path):
+    path = tmp_path / "surfaces.toml"
+    path.write_text('[events-day-cell]\nkind = "product"\n'
+                    'built = ["ios", "ios-kids"]\n', encoding="utf-8")
+    entry = fc.load_surface_registry(path)["events-day-cell"]
+    assert entry.built == frozenset({"ios", "ios-kids"})
+    path.write_text('[events-day-cell]\nkind = "product"\nbuilt = ["wear-kids"]\n',
+                    encoding="utf-8")
+    with pytest.raises(fc.CatalogError, match="names no app"):
+        fc.load_surface_registry(path)
+
+
+def test_a_kids_column_has_its_parents_driver_but_not_its_parents_product_surfaces(tmp_path):
+    """A harness surface is the e2e driver's, and the kids build is driven by its
+    parent's driver — so the reader gives the kids column the parent's answer. A product
+    surface is the app's, which the kids build may excise: only a hand listing counts."""
+    path = tmp_path / "surfaces.toml"
+    path.write_text('[app-log-reader]\nkind = "harness"\nbuilt = ["android", "tui"]\n\n'
+                    '[events-day-cell]\nkind = "product"\nbuilt = ["android", "ios"]\n',
+                    encoding="utf-8")
+    registry = fc.load_surface_registry(path)
+    assert registry["app-log-reader"].built == frozenset({"android", "android-kids", "tui"})
+    assert registry["events-day-cell"].built == frozenset({"android", "ios"})

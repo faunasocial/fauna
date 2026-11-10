@@ -58,6 +58,14 @@ ADB_SERVER_PORT = 18509
 #: What `--adb-server` is given for a venue run.
 ADB_SERVER_SPEC = f"tcp:127.0.0.1:{ADB_SERVER_PORT}"
 
+#: The serial of the venue's standing AVD, the one its `launchd` agents keep up
+#: (the first console port, so the first emulator the host starts). A run that
+#: names no other device drives this one: with a second AVD up beside it, adb
+#: with no `-s` refuses, so the verify queue's drain names it rather than
+#: relying on it being alone (delayed-testing.md § The verify queue, the device
+#: rule).
+VENUE_SERIAL = "emulator-5554"
+
 #: Local ports for `adb forward tcp:<p> tcp:18500`, one per device seat.
 BRIDGE_FORWARD_PORTS = range(18510, 18518)
 
@@ -69,6 +77,13 @@ TUNNEL_KEY = "~/.ssh/fauna_android_e2e_tunnel"
 
 #: The AVD the venue's setup creates.
 AVD_NAME = "fauna-e2e"
+
+#: The Play-image AVD of the store-install witness: its own console port, hence its own serial. Its agent is a fourth,
+#: printed by its own recipe, installed only after the owner's one windowed
+#: Play sign-in boot (an AVD runs in one instance).
+PLAY_AVD_NAME = "fauna-e2e-play"
+PLAY_CONSOLE_PORT = 5556
+PLAY_SERIAL = f"emulator-{PLAY_CONSOLE_PORT}"
 
 
 class AndroidVenueError(RuntimeError):
@@ -269,7 +284,7 @@ def tunnel_spec(login: str = "", dev_vm_address: str = "") -> str:
         " \\\n".join(lines),
         "",
         "# Then, on the dev VM, an android e2e run names the tunnelled adb server:",
-        f"#   --app android --adb-server {ADB_SERVER_SPEC} --device-serial emulator-5554",
+        f"#   --app android --adb-server {ADB_SERVER_SPEC} --device-serial {VENUE_SERIAL}",
     ])
 
 
@@ -314,6 +329,55 @@ def launch_agent_arguments(login: str, dev_vm_address: str) -> dict[str, list[st
     }
 
 
+def _plist_lines(label: str, arguments: list[str]) -> list[str]:
+    """The heredoc that writes one agent's plist."""
+    log = f"$HOME/Library/Logs/fauna-{label.removeprefix('social.fauna.')}.log"
+    body = plistlib.dumps({
+        "Label": label,
+        "ProgramArguments": arguments,
+        "EnvironmentVariables": {"ANDROID_HOME": _SDK},
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    }, sort_keys=False).decode()
+    # The heredoc is unquoted so `$HOME` expands; nothing else in it may be
+    # read by the shell, which the validated login and address guarantee.
+    if "`" in body or body.count("$") != body.count("$HOME"):
+        raise AndroidVenueError(f"plist for {label} carries shell syntax")
+    return [f"cat > ~/Library/LaunchAgents/{label}.plist <<EOF", body.rstrip(), "EOF"]
+
+
+#: The fourth agent's label: the Play AVD headless on its own port. Not in
+#: `AGENT_LABELS`, which is the set `launch_agents` installs together.
+PLAY_AGENT_LABEL = "social.fauna.android-emulator-play"
+
+
+def play_agent_arguments() -> list[str]:
+    return [f"{_SDK}/emulator/emulator", "-avd", PLAY_AVD_NAME,
+            "-port", str(PLAY_CONSOLE_PORT), "-no-window", "-no-audio",
+            "-no-boot-anim", "-no-snapshot"]
+
+
+def play_launch_agent() -> str:
+    """What `just android-venue-play-agent` prints: the script that writes and
+    loads the fourth agent. Separate from `launch_agents` because it is run only
+    AFTER the owner's one windowed Play sign-in boot: an AVD runs in one
+    instance, so an agent installed first would hold it and block that boot."""
+    return "\n".join([
+        "# Run on the emulator's machine, once, AFTER the Play AVD's one windowed",
+        "# sign-in boot (step 2 of the emulator machine's setup) has been closed with the",
+        "# emulator's own power-off: an AVD runs in one instance, so this agent",
+        "# would hold it and block that boot.",
+        "mkdir -p ~/Library/LaunchAgents ~/Library/Logs",
+        *_plist_lines(PLAY_AGENT_LABEL, play_agent_arguments()),
+        f"launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{PLAY_AGENT_LABEL}.plist",
+        "",
+        "# Then, on the dev VM, `just android-venue-probe --play` answers",
+        f"# `Play emulator up` once {PLAY_SERIAL} has booted (about a minute).",
+    ])
+
+
 def launch_agents(login: str = "", dev_vm_address: str = "") -> str:
     """What `just android-venue-agents` prints: the shell script the user runs on
     the emulator's machine, once, to write the three plists and load them."""
@@ -330,21 +394,7 @@ def launch_agents(login: str = "", dev_vm_address: str = "") -> str:
         "mkdir -p ~/Library/LaunchAgents ~/Library/Logs",
     ]
     for label, arguments in launch_agent_arguments(login, dev_vm_address).items():
-        log = f"$HOME/Library/Logs/fauna-{label.removeprefix('social.fauna.')}.log"
-        body = plistlib.dumps({
-            "Label": label,
-            "ProgramArguments": arguments,
-            "EnvironmentVariables": {"ANDROID_HOME": _SDK},
-            "RunAtLoad": True,
-            "KeepAlive": True,
-            "StandardOutPath": log,
-            "StandardErrorPath": log,
-        }, sort_keys=False).decode()
-        # The heredoc is unquoted so `$HOME` expands; nothing else in it may be
-        # read by the shell, which the validated login and address guarantee.
-        if "`" in body or body.count("$") != body.count("$HOME"):
-            raise AndroidVenueError(f"plist for {label} carries shell syntax")
-        lines += [f"cat > ~/Library/LaunchAgents/{label}.plist <<EOF", body.rstrip(), "EOF"]
+        lines += _plist_lines(label, arguments)
     lines += [
         f"for agent in {' '.join(AGENT_LABELS)}; do",
         "    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$agent.plist",
@@ -360,7 +410,28 @@ def launch_agents(login: str = "", dev_vm_address: str = "") -> str:
 
 
 def probe_venue(timeout: float = 5) -> tuple[bool, str]:
-    """`(up, one line saying why)`, asked of the venue's tunnelled adb server.
+    """`(up, one line saying why)` -- `venue_devices` read as up or down."""
+    ready, line = venue_devices(timeout)
+    return bool(ready), line
+
+
+def probe_play(timeout: float = 5) -> tuple[bool, str]:
+    """`(up, one line)` for the Play emulator alone: the venue answering is not
+    the Play AVD being up, so this names `PLAY_SERIAL` and says what it lacks."""
+    ready, line = venue_devices(timeout)
+    if PLAY_SERIAL in ready:
+        return True, f"Play emulator up: {ADB_SERVER_SPEC} serves {PLAY_SERIAL}"
+    if ready:
+        return False, (f"Play emulator down: the venue answers ({', '.join(ready)}) but "
+                       f"{PLAY_SERIAL} is not ready -- its agent is not installed or it "
+                       f"is still booting")
+    return False, f"Play emulator down: {line}"
+
+
+def venue_devices(timeout: float = 5) -> tuple[list, str]:
+    """`(the serials in state device, one line saying why)`, asked of the
+    venue's tunnelled adb server; no serial when it is down. The verify queue's
+    drain reads the serials to tell a set's declared device is attached.
 
     Built from `android_device.adb_argv` with the venue's spec, never a hand-
     written `-H/-P` form: only `-L tcp:127.0.0.1:<port>` makes a client facing a
@@ -373,31 +444,33 @@ def probe_venue(timeout: float = 5) -> tuple[bool, str]:
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, (f"emulator down: the adb server at {ADB_SERVER_SPEC} did not answer "
+        return [], (f"emulator down: the adb server at {ADB_SERVER_SPEC} did not answer "
                        f"in {timeout:g} s")
     except OSError as exc:
-        return False, f"emulator unknown: adb cannot run on this machine ({exc.strerror or exc})"
+        return [], f"emulator unknown: adb cannot run on this machine ({exc.strerror or exc})"
     if result.returncode != 0:
-        return False, (f"emulator down: nothing answers at {ADB_SERVER_SPEC} -- the venue on "
+        return [], (f"emulator down: nothing answers at {ADB_SERVER_SPEC} -- the venue on "
                        f"the emulator's machine is not installed, its tunnel is not up, or "
                        f"its adb server is stopped")
     rows = android_device.parse_adb_devices(result.stdout)
     ready = [serial for serial, state in rows if state == "device"]
     if not ready:
         seen = ", ".join(f"{serial} {state}" for serial, state in rows) or "none attached"
-        return False, (f"emulator down: the tunnel and adb server answer, but no device is "
+        return [], (f"emulator down: the tunnel and adb server answer, but no device is "
                        f"ready ({seen}) -- the emulator is stopped or still booting")
-    return True, f"emulator up: {ADB_SERVER_SPEC} serves {', '.join(ready)}"
+    return ready, f"emulator up: {ADB_SERVER_SPEC} serves {', '.join(ready)}"
 
 
 if __name__ == "__main__":
     # The recipes run this file as a script: make `helpers` importable.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if sys.argv[1:2] == ["--probe"]:
-        up, line = probe_venue()
+        up, line = probe_play() if sys.argv[2:3] == ["--play"] else probe_venue()
         print(line)
         sys.exit(0 if up else 1)
-    if sys.argv[1:2] == ["--agents"]:
+    if sys.argv[1:2] == ["--play-agent"]:
+        print(play_launch_agent())
+    elif sys.argv[1:2] == ["--agents"]:
         print(launch_agents(*sys.argv[2:4]))
     else:
         print(tunnel_spec(*sys.argv[1:3]))

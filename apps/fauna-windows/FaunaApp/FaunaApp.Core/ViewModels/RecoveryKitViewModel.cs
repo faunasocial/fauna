@@ -191,7 +191,37 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     /// <see cref="RetrySweepAsync"/>, both of which this mirror must reflect, and
     /// it outlives every hydrate (cleared only on a credential-namespace wipe).
     /// </summary>
-    public void HydrateSweep() => SweepView = SuccessionHandoff.Sweep;
+    public void HydrateSweep()
+    {
+        SweepView = SuccessionHandoff.Sweep;
+        MemberReviewDeferred = SuccessionHandoff.MemberReviewDeferred;
+    }
+
+    /// <summary>
+    /// <see cref="SuccessionHandoff.MemberReviewDeferred"/>, mirrored at hydrate the
+    /// way <see cref="SweepView"/> mirrors the carried sweep: the static is the
+    /// truth across a switch and a page rebuild, this is what the page observes.
+    /// </summary>
+    [ObservableProperty] private bool _memberReviewDeferred;
+
+    /// <summary>
+    /// Two of the ephemeral member-review pass's three gates (<c>settings.md</c>
+    /// § Recovery kit → <i>The ephemeral member-review pass</i>): a succession sweep
+    /// ran this app run, and the user has not deferred. The third, that items
+    /// remain, is the roster the page holds. ⚠ Dropping the sweep gate would paint
+    /// the pass on every ordinary session that carries an open item — the standing
+    /// clutter the two-surface ruling exists to prevent. apple's
+    /// <c>RecoveryKitVM.memberReviewPassOpen</c> is the twin.
+    /// </summary>
+    public bool MemberReviewPassOpen => SweepView is not null && !MemberReviewDeferred;
+
+    /// <summary><i>Review The Rest Later</i>: hides the pass and writes no verdict.
+    /// Purely local — "later" is not an answer about anybody.</summary>
+    public void DeferMemberReview()
+    {
+        SuccessionHandoff.DeferMemberReview();
+        MemberReviewDeferred = true;
+    }
 
     /// <summary>
     /// The sweep's outcome line — what it did, or silent for a succession over
@@ -332,7 +362,11 @@ internal partial class RecoveryKitViewModel : ViewModelBase
         OnPropertyChanged(nameof(SweepOutcomeLine));
         OnPropertyChanged(nameof(SweepUnattestedLine));
         OnPropertyChanged(nameof(SweepOwesWork));
+        OnPropertyChanged(nameof(MemberReviewPassOpen));
     }
+
+    partial void OnMemberReviewDeferredChanged(bool value) =>
+        OnPropertyChanged(nameof(MemberReviewPassOpen));
 
     partial void OnStolenConfirmInputChanged(string value) => OnPropertyChanged(nameof(StolenArmed));
 

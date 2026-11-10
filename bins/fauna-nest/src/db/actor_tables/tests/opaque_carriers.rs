@@ -832,6 +832,13 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          writer a `content.write` grant names; names an app, never an account",
     ),
     (
+        "third_party_former_writers",
+        "writer_ed25519",
+        "the same app's attested Ed25519 PUBLIC writer key, recorded when the roster \
+         row naming it ended; names an app, never an account. The account is the \
+         plain column `actor_id`",
+    ),
+    (
         "atproto_consent_requests",
         "holder_x25519",
         "the requesting app's attested X25519 PUBLIC key (32 bytes), carried on the \
@@ -846,10 +853,20 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
     (
         "plugin_state",
         "value",
-        "a hosted plugin's own working state behind its `state` import, opaque to the \
-         nest and deleted with the plugin's principal row; no production writer exists \
-         yet (only the store's own tests call `plugin_state_put`), so the host that \
-         wires the import re-rules this column if a plugin may keep actor ids in it",
+        "a hosted plugin's own working state, written by its `state` import \
+         (`plugin_runner.rs`), opaque to the nest and deleted with the plugin. It may \
+         hold actor ids -- the bound accounts `nest-api.bindings` lists -- but as the \
+         plugin's own cache of whom it serves, never as rows of theirs: the scope is \
+         the install's, an account's own entries live in `plugin_account_settings` and \
+         leave with the account, and nothing resolves through these bytes nest-side",
+    ),
+    (
+        "plugin_account_settings",
+        "value",
+        "one bound account's settings for a hosted plugin as `fauna.plugins.set_settings` \
+         wrote them: a JSON object of the keys the plugin's settings schema declares, \
+         values the user typed. FOLLOWS THE ROW (Purge; Burn with the binding) and names \
+         no account the nest resolves",
     ),
     (
         "folder_deposit_inbox",
@@ -1482,12 +1499,11 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
     (
         "content_links",
         "metadata",
-        "a JSON side-car: `{mailbox}` on an inbox delivery, the one live shape. A \
-         second, bridge shape `{external_id, sender, recipient, subject, …}` is \
-         written by `db/bridge.rs::insert_bridge_message`, which today has only test \
-         callers. No actor id in either -- but declared for what the bridge shape \
-         would be if a producer returns: a mail's addresses and subject in the clear, \
-         under a column called `metadata`",
+        "a JSON side-car: `{mailbox}` on an inbox delivery, the one shape. No \
+         actor id in it -- but declared because a side-car under a column called \
+         `metadata` is where a mail's addresses and subject would land in the clear \
+         if a producer ever wrote one (the test-only bridge-message writer that \
+         did was deleted)",
     ),
     ("content_meta", "content_id", "a CONTENT ID"),
     (
@@ -1832,6 +1848,11 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "folder_member_access",
         "channel_id",
         "the same derived channel id. The grantee is the plain column `actor_id`",
+    ),
+    (
+        "folder_former_writers",
+        "channel_id",
+        "the same derived channel id. The former writer is the plain column `actor_id`",
     ),
     //
     // RANDOM ids, nonces and constants.

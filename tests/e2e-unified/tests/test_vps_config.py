@@ -21,7 +21,6 @@ import json
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import require_surface
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -116,6 +115,7 @@ def test_vps_config_server_types_after_verify(app, fake_cloud):
     )
 
 
+@pytest.mark.feature("set-up-a-nest-from-the-app")
 def test_vps_server_types_follow_the_location(app, fake_cloud):
     """A location change re-lists the ``vps-server-type-radio`` for the new
     location (``registry.md`` § Server offers follow the location;
@@ -124,8 +124,8 @@ def test_vps_server_types_follow_the_location(app, fake_cloud):
     5.17 in Helsinki — so the first radio's price is the listing's witness.
 
     Drives the real ``verify_vps`` (the verified helper: web + linux + tui +
-    macos + ios + windows); web omits the location picker, so it runs on the
-    others (gate: ``require_offers_follow_the_location``)."""
+    macos + ios + windows); the gate ``require_offers_follow_the_location``
+    skips the apps that have not witnessed the re-list (android)."""
     app.onboarding.require_offers_follow_the_location()
     app.onboarding.go_to_vps_config_with_verified("hetzner",
                                                   {"api-token": "MOCK"},
@@ -154,7 +154,7 @@ def test_vps_location_picker_renders_and_selects(app):
     """The ``vps-location-picker`` dropdown renders the verified locations and
     ``select`` actuates it, persisting the choice in machine state.
 
-    Runs on linux today; web omits the picker. The locations are injected via
+    Runs on every app that paints the picker. The locations are injected via
     the cross-app ``set_vps_locations_for_test`` bridge (snapshot fixturing,
     like every other onboarding stage test) rather than the web-only fake-cloud
     verify probe — so this directly exercises the Linux ``gtk::DropDown``
@@ -168,7 +168,6 @@ def test_vps_location_picker_renders_and_selects(app):
     not ``'fsn1-dc14'`` (the name); the seam (``MacVpsConfigView``/``VpsConfigView``
     ``locationPicker``) now maps id<->name both directions. iOS shares the fix and
     is verified green here via a harness ``--client ios`` run."""
-    require_surface(app.driver, "vps-location-picker")
     locations = [
         {"id": "fsn1", "name": "fsn1-dc14", "city": "Falkenstein", "country": "DE"},
         {"id": "nbg1", "name": "nbg1-dc3", "city": "Nuremberg", "country": "DE"},

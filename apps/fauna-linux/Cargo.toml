@@ -73,6 +73,9 @@ zaps = ["payments", "fauna-client-nostr/zaps"]
 # doc's § Platform-family surface excision warning.
 p2p-share = [
     "fauna-client-capabilities/p2p-share",
+    # The ceremony half of `fauna-iroh` (`ceremony_transport()`), forwarded
+    # here so a store-safe build keeps only its peer-leg half.
+    "fauna-iroh/ceremony",
     "fauna-sync-engine/p2p-share",
     "fauna-client-folders/p2p-share",
     "dep:fauna-peer-share",
@@ -110,6 +113,9 @@ e2e-agent = [
     # drop it.
     "fauna-e2e-agent/e2e-agent",
     "fauna-client-backup/e2e-agent",
+    # The lowered log-cap seam and the `app_log_emit` burst
+    # (`fauna_log::rolling::E2E_TOTAL_CAP_ENV`, `emit_burst_for_test`).
+    "fauna-log/e2e-agent",
     "fauna-sync-engine/e2e-agent",
     # The `fake` payment provider in the provider form's kind select — compiled
     # out of a production build (`fauna-payments` src/lib.rs, the module gate).
@@ -165,6 +171,10 @@ e2e-agent = [
     "fauna-client-alert-sweep/test-helpers",
     "fauna-client/e2e-agent",
     "fauna-client-sync/test-helpers",
+    # `hold_author_drain_for_test` — the `subscriptions_hold_author_drain`
+    # command's anchor for a standing paid request (convention 14); a debug
+    # build reaches it through `debug_assertions` (tui's twin).
+    "fauna-client-subscriptions/test-helpers",
     "fauna-conversations/test-helpers",
     "fauna-feed/test-helpers",
     "fauna-ws-substrate/test-helpers",
@@ -749,6 +759,9 @@ uuid = { workspace = true }
 c2pa = { workspace = true, features = ["file_io"] }
 
 [dev-dependencies]
+# `RecordingQueue` — the outbox double the family page's composer tests
+# queue into (the same double fauna-tui's family tests use).
+fauna-client-testkit = { path = "../../libs/fauna-client-testkit" }
 # Test builds never reach the live OS keyring — see the `no-live-keyring`
 # feature in libs/fauna-credential-store/Cargo.toml (dev-dependencies ONLY).
 fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }

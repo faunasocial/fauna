@@ -9,6 +9,7 @@
   // UI is the error surface — no new element.
   import { onDestroy } from 'svelte';
   import { IDS } from '#lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
   import { notePlayback, notePlaying } from '#lib/feed-cues';
   interface Props {
     /** The blob URL whose first frame is the poster (`<video preload="metadata">`). Absent for a
@@ -18,6 +19,9 @@
     /** Text painted in a poster-less frame — a `ProxiedVideo`'s nest-relative path, the
      *  observable every app's `video-thumbnail` carries for it. */
     caption?: string;
+    /** The block's `alt`, or the shared `feed.post.video_alt_fallback` (render-model.md § D6c,
+     *  the `alt` paragraph). The slot element carries it as `data-alt` beside `aria-label`, so
+     *  the cross-app `get_attr("video-thumbnail", "alt")` reads it. */
     alt?: string;
     /** Resolve the playable URL for this video, `null` when nothing plays. Absent → the
      *  thumbnail stays inert (no host wired the projection). */
@@ -27,7 +31,7 @@
     postId?: string;
   }
 
-  let { src, caption, alt = 'video', resolveSource, postId }: Props = $props();
+  let { src, caption, alt = t.feed.post.video_alt_fallback, resolveSource, postId }: Props = $props();
 
   type PlayState = 'idle' | 'loading' | 'playing' | 'error';
   let playState = $state<PlayState>('idle');
@@ -78,7 +82,7 @@
 </script>
 
 {#if playSrc}
-  <div class="video-thumbnail" data-testid={IDS.VIDEO_THUMBNAIL} data-state={playState}>
+  <div class="video-thumbnail" data-testid={IDS.VIDEO_THUMBNAIL} data-state={playState} data-alt={alt}>
     <video
       bind:this={player}
       src={playSrc}
@@ -108,6 +112,7 @@
   <button
     class="video-thumbnail"
     data-testid={IDS.VIDEO_THUMBNAIL}
+    data-alt={alt}
     data-state={playState}
     type="button"
     aria-label={alt}

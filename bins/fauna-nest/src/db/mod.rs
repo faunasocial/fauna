@@ -410,8 +410,21 @@ pub struct NamespaceEntry {
     pub updated_at: i64,
 }
 
+/// The post-append observer at the own-actor content append seams: called with
+/// the actor's id after every mail, calendar or card mirror row is written
+/// (the one writer each append passes through — inbound ingest, IMAP APPEND,
+/// a CalDAV / CardDAV PUT, import, relay, compaction's re-append). The nest's
+/// materializer installs it to trickle new records into a granted actor's
+/// readable views (`encryption-at-rest.md` § Capability tiering → *The
+/// materialization grant*, part (c)). It must not block: the materializer's
+/// only queues a wake.
+pub type ContentAppendHook = std::sync::Arc<dyn Fn(&[u8; 32]) + Send + Sync>;
+
 pub struct CacheDb {
     conn: Mutex<Connection>,
+    /// The content append seams' observer ([`ContentAppendHook`]); `None`
+    /// until the materializer installs one.
+    content_append_hook: std::sync::RwLock<Option<ContentAppendHook>>,
     /// Test-only pause point between a pre-check and its guarded write (see
     /// `pending_actions::PrecheckGate`).
     #[cfg(test)]
@@ -1552,20 +1565,6 @@ pub struct DomainUserRow {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BridgeMessageRow {
-    pub id: i64,
-    pub bridge_type: String,
-    pub actor_id: Vec<u8>,
-    pub external_id: String,
-    pub sender: String,
-    pub recipient: String,
-    pub subject: String,
-    pub size_bytes: i64,
-    pub flags: i64,
-    pub received_at: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct BridgeFeedSubscription {
     pub id: i64,
     pub actor_id: Vec<u8>,
@@ -1748,6 +1747,10 @@ pub struct SubscribeRequestRow {
     /// The subscriber's home nest URL when the follow was relayed from another
     /// nest (`federated-follow.md` § Decision 2); `None` = a local subscriber.
     pub home_nest_url: Option<String>,
+    /// Whether the row is a request at all (`subscriptions::REQUEST_COMPLETE_SQL`):
+    /// `false` = a payment-entitled half-row whose buyer this nest neither
+    /// hosts nor holds a home for, which `requests.list` withholds.
+    pub complete: bool,
 }
 
 /// One configured payment provider for an author (monetization.md § Pillar 3).
@@ -1835,13 +1838,26 @@ pub struct MySubscriptionRow {
     pub since: i64,
 }
 
+/// The pragmas every nest connection runs before migrations.
+///
+/// - `foreign_keys`: FK enforcement (A1b).
+/// - `secure_delete`: SQLite zeroes the bytes a write frees, both in-page and
+///   on the freelist. Without it, a row rewrite leaves the old row image in the
+///   page's free space. A sealed set's name is blanked at runtime by every
+///   folders writer (`migrations::BLANK_SEALED_FOLDER_NAME`), and so is every
+///   other plaintext a later write replaces, so the old image would rest in
+///   `nest.db` and in each hot copy of it until SQLite happened to reuse the
+///   space. The boot scrub's `VACUUM` covers only a boot that cleared
+///   something (`encryption-at-rest.md` § Carve-outs: names and paths are
+///   content; pinned by `tests/conformance_at_rest_byte_scan.rs`).
+const CONNECTION_PRAGMAS: &str = "PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;";
+
 impl CacheDb {
     /// Open (or create) the database at `path` and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path.as_ref()).context("open sqlite")?;
-        // A1b: enable FK enforcement before running migrations
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .context("enable foreign_keys")?;
+        conn.execute_batch(CONNECTION_PRAGMAS)
+            .context("set the connection pragmas")?;
         // A database the genesis did not write is refused before anything
         // reads or writes it (`migrations.rs` § Genesis).
         migrations::check_genesis(&conn)?;
@@ -1870,6 +1886,7 @@ impl CacheDb {
         migrations::run_migrations(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            content_append_hook: std::sync::RwLock::new(None),
             #[cfg(test)]
             precheck_gate: std::sync::Mutex::new(None),
         })
@@ -1878,12 +1895,12 @@ impl CacheDb {
     /// Open an in-memory database (for tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("open in-memory sqlite")?;
-        // A1b: enable FK enforcement before running migrations
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .context("enable foreign_keys")?;
+        conn.execute_batch(CONNECTION_PRAGMAS)
+            .context("set the connection pragmas")?;
         migrations::run_migrations(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            content_append_hook: std::sync::RwLock::new(None),
             #[cfg(test)]
             precheck_gate: std::sync::Mutex::new(None),
         })
@@ -2026,7 +2043,91 @@ impl CacheDb {
             report_hash,
             continuation_role,
             stored_at,
-        )
+        )?;
+        drop(conn);
+        self.notify_content_appended(scope_id);
+        Ok(())
+    }
+
+    /// Install the content append seams' observer ([`ContentAppendHook`]) — the
+    /// materializer's, once, at boot. A later install replaces it.
+    pub fn set_content_append_hook(&self, hook: ContentAppendHook) {
+        *self
+            .content_append_hook
+            .write()
+            .expect("content append hook lock poisoned") = Some(hook);
+    }
+
+    fn notify_content_appended(&self, scope_id: &[u8; 32]) {
+        let hook = self
+            .content_append_hook
+            .read()
+            .expect("content append hook lock poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(scope_id);
+        }
+    }
+
+    /// Live mail heads (never a continuation part) for one actor with
+    /// `seq > after_seq`, oldest first, up to `limit`: `(seq, record_cid)` —
+    /// the materializer's catch-up walk and retire sweep.
+    pub async fn segment_records_list_mail_heads_after_seq(
+        &self,
+        scope_id: &[u8; 32],
+        after_seq: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<(i64, fauna_cbor::Cid)>> {
+        let conn = self.conn.lock().await;
+        crate::segments::records_db::list_mail_heads_after_seq(&conn, scope_id, after_seq, limit)
+    }
+
+    /// How many live mail heads one actor holds.
+    pub async fn segment_records_count_live_mail_heads(
+        &self,
+        scope_id: &[u8; 32],
+    ) -> anyhow::Result<i64> {
+        let conn = self.conn.lock().await;
+        crate::segments::records_db::count_live_mail_heads(&conn, scope_id)
+    }
+
+    /// Every live calendar event (`calendar == true`) or card of one actor, as
+    /// `(uid_hash, record_cid)` across every collection — the materializer's
+    /// corpus walk for a DAV kind. A row with no record or a malformed id is
+    /// left out (a record-absent row, as every reader treats it).
+    pub async fn materializer_dav_corpus(
+        &self,
+        actor: &[u8; 32],
+        calendar: bool,
+    ) -> anyhow::Result<Vec<([u8; 32], fauna_cbor::Cid)>> {
+        let sql = if calendar {
+            "SELECT uid_hash, record_cid FROM bridge_caldav_events \
+             WHERE actor_id = ?1 AND record_cid IS NOT NULL"
+        } else {
+            "SELECT uid_hash, record_cid FROM bridge_carddav_cards \
+             WHERE actor_id = ?1 AND record_cid IS NOT NULL"
+        };
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(sql).context("prepare the DAV corpus walk")?;
+        let rows = stmt
+            .query_map(rusqlite::params![&actor[..]], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .context("walk the DAV corpus")?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (uid, cid) = row.context("read a DAV corpus row")?;
+            let (Ok(uid), Ok(cid)) = (
+                <[u8; 32]>::try_from(uid.as_slice()),
+                <[u8; 36]>::try_from(cid.as_slice()),
+            ) else {
+                continue;
+            };
+            if let Ok(cid) = fauna_cbor::Cid::from_bytes(cid) {
+                out.push((uid, cid));
+            }
+        }
+        Ok(out)
     }
 
     /// Next per-actor mail `seq` for a scope (`MAX(seq)+1`, 1 when empty).
@@ -2498,7 +2599,10 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         crate::segments::records_db::insert_calendar(
             &conn, scope_id, segment_id, cid, bucket, created_at,
-        )
+        )?;
+        drop(conn);
+        self.notify_content_appended(scope_id);
+        Ok(())
     }
 
     /// Insert a card-kind `segment_records` row (S6.5). Twin of
@@ -2516,7 +2620,10 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         crate::segments::records_db::insert_card(
             &conn, scope_id, segment_id, cid, bucket, created_at,
-        )
+        )?;
+        drop(conn);
+        self.notify_content_appended(scope_id);
+        Ok(())
     }
 
     /// Resolve a record's `(scope_id, segment_id)` from `(kind, record_cid)`
@@ -2583,6 +2690,18 @@ impl CacheDb {
     ) -> anyhow::Result<i64> {
         let conn = self.conn.lock().await;
         crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, kind)
+    }
+
+    /// [`crate::db::snapshots::refuse_a_squatted_rail_address`] for a mint that
+    /// runs outside the snapshot DAO — the two custody-copy provisioners, whose
+    /// create found no row of its reserved `name` afterwards.
+    pub async fn refuse_a_squatted_rail_address(
+        &self,
+        name: &str,
+        actor_id: &[u8; 32],
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
+        crate::db::snapshots::refuse_a_squatted_rail_address(&conn, name, &actor_id[..])
     }
 
     /// Get or create the per-channel `__conv/<channel_hex>` pseudo folder
@@ -5500,7 +5619,7 @@ mod tests {
         db.create_folder("documents-abc", &actor).await.unwrap();
         // … alongside reserved internal sets the actor accumulates from
         // config/index/mail writes.
-        db.get_or_create_reserved_folder(&actor, "config")
+        db.get_or_create_reserved_folder(&actor, "drafts")
             .await
             .unwrap();
         db.get_or_create_reserved_folder(&actor, "index")
@@ -5972,138 +6091,6 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    #[tokio::test]
-    async fn bridge_messages_crud() {
-        let db = CacheDb::open_in_memory().unwrap();
-        let actor = [9u8; 32];
-
-        let id = db
-            .insert_bridge_message(
-                "imap",
-                &actor,
-                "msg-001",
-                "alice@example.com",
-                "bob@example.com",
-                "Hello Subject",
-                1024,
-                0,
-                1_700_000_000,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(id > 0);
-
-        // Duplicate external_id should upsert
-        let id2 = db
-            .insert_bridge_message(
-                "imap",
-                &actor,
-                "msg-001",
-                "alice@example.com",
-                "bob@example.com",
-                "Updated Subject",
-                1024,
-                0,
-                1_700_000_000,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(id2 > 0);
-
-        // List bridge messages for actor
-        let msgs = db
-            .list_bridge_messages("imap", &actor, None, 10)
-            .await
-            .unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].subject, "Updated Subject");
-
-        // Delete
-        db.delete_bridge_message("imap", &actor, "msg-001")
-            .await
-            .unwrap();
-        let msgs = db
-            .list_bridge_messages("imap", &actor, None, 10)
-            .await
-            .unwrap();
-        assert!(msgs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn search_scoping_hides_other_users_bridge_messages() {
-        let db = CacheDb::open_in_memory().unwrap();
-        let alice = [10u8; 32];
-        let bob = [11u8; 32];
-
-        // Alice's email
-        db.insert_bridge_message(
-            "imap",
-            &alice,
-            "msg-a1",
-            "sender@x.test",
-            "alice@x.test",
-            "Alice Invoice",
-            100,
-            0,
-            1000,
-            Some("payment due"),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Bob's email
-        db.insert_bridge_message(
-            "imap",
-            &bob,
-            "msg-b1",
-            "sender@x.test",
-            "bob@x.test",
-            "Bob Invoice",
-            100,
-            0,
-            1000,
-            Some("payment due"),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // A public post
-        db.index_document(
-            "post",
-            "post001",
-            "",
-            "public post about invoices",
-            "",
-            "",
-            1000,
-        )
-        .await
-        .unwrap();
-
-        // Alice searching "invoice" should see her email + the post, but NOT Bob's email
-        let results = db
-            .search_with_scoping("invoice", &alice, None, None, None, 10, 0)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 2);
-        let types: Vec<&str> = results.iter().map(|r| r.content_type.as_str()).collect();
-        assert!(types.contains(&"post"));
-        assert!(types.contains(&"imap"));
-
-        // Bob searching should see his email + the post
-        let results = db
-            .search_with_scoping("invoice", &bob, None, None, None, 10, 0)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 2);
-    }
-
     #[test]
     fn sanitize_fts_query_basic() {
         assert_eq!(
@@ -6189,29 +6176,12 @@ mod tests {
         .await
         .unwrap();
 
-        // 3. Index an email via bridge_messages
-        db.insert_bridge_message(
-            "imap",
-            &actor,
-            "email-1",
-            "alice@fauna.social",
-            "user@fauna.social",
-            "Welcome to Fauna",
-            500,
-            0,
-            1_000_000,
-            Some("Welcome aboard the fauna network"),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Search "fauna" should find all three (with scoping for the actor)
+        // Search "fauna" should find both (with scoping for the actor)
         let results = db
             .search_with_scoping("fauna", &actor, None, None, None, 10, 0)
             .await
             .unwrap();
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 2);
 
         // Filter by type — post schema is now "post/text"
         let posts = db
@@ -6220,19 +6190,13 @@ mod tests {
             .unwrap();
         assert_eq!(posts.len(), 1);
 
-        let emails = db
-            .search_with_scoping("fauna", &actor, Some("imap"), None, None, 10, 0)
-            .await
-            .unwrap();
-        assert_eq!(emails.len(), 1);
-
         let profiles = db
             .search_with_scoping("fauna", &actor, Some("profile"), None, None, 10, 0)
             .await
             .unwrap();
         assert_eq!(profiles.len(), 1);
 
-        // Different user can't see the email
+        // A different user sees the same public post + profile
         let other = [14u8; 32];
         let results = db
             .search_with_scoping("fauna", &other, None, None, None, 10, 0)
@@ -7631,7 +7595,7 @@ mod tests {
         db.insert_subscribe_request(&author, &gone, "gold", "subscribe", Some(&[7u8; 1184]))
             .await
             .unwrap();
-        db.upsert_payment_entitled_request(&author, &gone, "silver", Some(i64::MAX))
+        db.upsert_payment_entitled_request(&author, &gone, "silver", Some(i64::MAX), None)
             .await
             .unwrap();
         db.insert_subscribe_request(&author, &gone, "gold", "unsubscribe", None)
@@ -7659,6 +7623,117 @@ mod tests {
             ],
             "the deleted reader's subscribe requests (manual and paid) go; their \
              unsubscribe and every other reader's request stay"
+        );
+    }
+
+    /// The Q13 ruling's two halves meet on ONE request row, in either order
+    /// (`monetization.md` § Pillar 3 → *A checkout-bound buyer homed on another
+    /// nest*). A webhook's upsert for a buyer this nest does not host opens a
+    /// half-row: not complete. The relayed subscribe's home stamp completes
+    /// it, and a later payment upsert (no home: the provider's reference
+    /// carries none) keeps the stamped home and never touches the ek the
+    /// subscribe carried. A hosted buyer's payment row, a home-carrying redeem
+    /// row and a subscriber-initiated row are complete from the start.
+    #[tokio::test]
+    async fn a_payment_half_row_completes_when_the_buyers_home_is_stamped() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (author, remote, local, redeemer) =
+            ([0xA1u8; 32], [0xB2u8; 32], [0xC3u8; 32], [0xD4u8; 32]);
+        let (home, ek) = ([0x5Eu8; 32], [9u8; 1184]);
+        db.create_subscription_tier(
+            &author, "gold", 1, None, None, None, false, None, None, false,
+        )
+        .await
+        .unwrap();
+        db.create_user(&local, "free", "local").await.unwrap();
+        async fn complete_of(db: &CacheDb, author: [u8; 32], sub: [u8; 32]) -> bool {
+            db.list_subscribe_requests(&author)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.subscriber_id == sub.to_vec())
+                .expect("the row")
+                .complete
+        }
+
+        // Payment first: a half-row, refused by id too.
+        let half = db
+            .upsert_payment_entitled_request(&author, &remote, "gold", Some(i64::MAX), None)
+            .await
+            .unwrap();
+        assert!(
+            !complete_of(&db, author, remote).await,
+            "a half-row is not a request"
+        );
+        assert_eq!(
+            db.subscribe_request_is_complete(half).await.unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.subscribe_request_is_complete(half + 1000).await.unwrap(),
+            None
+        );
+
+        // The relayed subscribe stamps the home (and its ek): complete.
+        db.update_subscribe_request_mlkem_ek(&author, &remote, &ek)
+            .await
+            .unwrap();
+        db.set_subscribe_request_home(half, &home, Some("https://f.example"))
+            .await
+            .unwrap();
+        assert!(complete_of(&db, author, remote).await);
+
+        // A renewal's upsert names no home: the stamp and the ek survive.
+        let again = db
+            .upsert_payment_entitled_request(&author, &remote, "gold", Some(i64::MAX - 1), None)
+            .await
+            .unwrap();
+        assert_eq!(again, half, "one row, both halves");
+        assert_eq!(db.subscribe_request_home(half).await.unwrap(), Some(home));
+        let row = db
+            .list_subscribe_requests(&author)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == half)
+            .unwrap();
+        assert_eq!(row.home_nest_url.as_deref(), Some("https://f.example"));
+        assert_eq!(row.mlkem_encaps_key.as_deref(), Some(&ek[..]));
+        assert_eq!(row.valid_until, Some(i64::MAX - 1));
+        assert!(row.complete);
+
+        // Complete from the start: a hosted buyer, a home-carrying redeem, and
+        // a subscriber-initiated row for an actor the fixture never hosted.
+        db.upsert_payment_entitled_request(&author, &local, "gold", None, None)
+            .await
+            .unwrap();
+        assert!(
+            complete_of(&db, author, local).await,
+            "a hosted buyer's payment row"
+        );
+        db.upsert_payment_entitled_request(
+            &author,
+            &redeemer,
+            "gold",
+            None,
+            Some(crate::subscription_handlers::SubscriberHome {
+                nest_id: &home,
+                url: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            complete_of(&db, author, redeemer).await,
+            "a cross-nest redeem's row"
+        );
+        let manual = [0xE5u8; 32];
+        db.insert_subscribe_request(&author, &manual, "gold", "subscribe", None)
+            .await
+            .unwrap();
+        assert!(
+            complete_of(&db, author, manual).await,
+            "only a payment row can be half"
         );
     }
 

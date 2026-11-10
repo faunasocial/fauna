@@ -251,3 +251,111 @@ def test_a_shared_verdict_enough_people_agree_on_reaches_the_peer_nest_as_a_coun
         "nest B holds per-person verdict rows for A's people — the count must arrive "
         "anonymous"
     )
+
+
+@pytest.mark.feature("spam")
+def test_reports_gathered_on_another_nest_nudge_your_copy_by_a_capped_amount(
+    two_report_nests,
+):
+    """`spam` outcome 27: another nest's report aggregate nudges the score of
+    your copy by the flat peer bucket and no more (`report-sharing.md`
+    § Federation exchange; the curve's `+ 100` in § The aggregate).
+
+    Six opted-in people on nest A report two public posts, so A exports a
+    count of 6 for each — twice the k floor. On nest B, one post already has
+    its own k=3 local reports (200 per-mille) and the other has none. With no
+    federation call from the test, B ends with exactly 300 on the first (its
+    own 200 + the capped 100) and exactly 100 on the second: A's larger count
+    buys nothing beyond the flat bucket.
+    """
+    nest_a, nest_b = two_report_nests
+    port_a, port_b = nest_a["port"], nest_b["port"]
+    admin_a = nest_a["admin"]["signing_key"]
+    admin_b = nest_b["admin"]["signing_key"]
+    b_url = nest_b["peer_url"]
+
+    author = create_actor_and_register(port_a, admin_signing_key=admin_a)
+    author_b = register_same_actor_on(port_b, author, admin_signing_key=admin_b)
+    now_us = int(time.time() * 1_000_000)
+    bodies = {
+        "scored_on_b": "Final notice: verify your account at http://verify.example.test",
+        "peer_only": "Final notice: claim your refund at http://refund.example.test",
+    }
+    posts = {}
+    for i, (name, body) in enumerate(bodies.items()):
+        post_bytes = sign_and_encode_post(author["signing_key"], now_us + i, body, tags=[])
+        post_id = ws_api.create_post(port_a, author, post_bytes)
+        assert ws_api.create_post(port_b, author_b, post_bytes) == post_id
+        posts[name] = post_id
+
+    def bus_score(db_path, post_id):
+        row = _query_one(
+            db_path,
+            "SELECT score FROM content_scores WHERE content_id = ? AND factor = 'report:spam'",
+            (bytes.fromhex(post_id),),
+        )
+        return None if row is None else row[0]
+
+    # B's own k=3 reporters on the first post: B's local score 200.
+    for _ in range(3):
+        person = create_actor_and_register(port_b, admin_signing_key=admin_b)
+        assert ws_api.report_share_set(port_b, person, True)["share"] is True
+        ws_api.moderation_train(port_b, person, posts["scored_on_b"], "spam")
+    assert wait_until(
+        lambda: bus_score(nest_b["db_path"], posts["scored_on_b"]), 10.0,
+        diagnose=lambda: "B's own k=3 reports never scored its copy",
+    ) == 200
+
+    # Six reporters on A, both posts: A exports a count of 6 for each.
+    for _ in range(6):
+        person = create_actor_and_register(port_a, admin_signing_key=admin_a)
+        assert ws_api.report_share_set(port_a, person, True)["share"] is True
+        for post_id in posts.values():
+            ws_api.moderation_train(port_a, person, post_id, "spam")
+    published = {
+        e["content_hash"]: e["count"]
+        for e in ws_api.report_share_status(port_a, author)["published"]
+    }
+    assert all(published.get(p) == 6 for p in posts.values()), published
+
+    # The peering event; from here the test makes no mutation.
+    ws_api.create_feed(
+        port_a,
+        author,
+        "cross-nest discovery",
+        rules=[{"BodyContains": {"terms": ["notice"]}}],
+        scope="discovery",
+        contributor_seeds=[b_url],
+    )
+
+    def peer_counts():
+        counts = {}
+        for name, post_id in posts.items():
+            row = _query_one(
+                nest_b["db_path"],
+                "SELECT claimed_count FROM peer_content_reports "
+                "WHERE content_hash = ? AND factor = 'report:spam'",
+                (bytes.fromhex(post_id),),
+            )
+            if row is None:
+                return None
+            counts[name] = row[0]
+        return counts
+
+    # Budget: transition debounce (10 s) + one possible min-peer-interval
+    # backoff (60 s) + slack — the report journey's.
+    counts = wait_until(
+        peer_counts, 120.0, interval=1.0,
+        diagnose=lambda: "nest B never received A's aggregates — the exchange did not fire",
+    )
+    assert counts == {"scored_on_b": 6, "peer_only": 6}, (
+        f"A's local count of 6 crossed for both posts (got {counts})"
+    )
+
+    # The recompute is synchronous with the import.
+    assert bus_score(nest_b["db_path"], posts["peer_only"]) == 100, (
+        "peer-only: exactly the flat 100 per-mille, however large A's count"
+    )
+    assert bus_score(nest_b["db_path"], posts["scored_on_b"]) == 300, (
+        "B's own 200 plus the capped 100 — A's count of 6 buys no more"
+    )

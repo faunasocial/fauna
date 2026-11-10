@@ -38,6 +38,7 @@ import pytest
 from common.auth import create_actor_and_register
 from tests.api import ws_api
 from tests.api.bare import sign_and_encode_post
+from helpers.waiting import wait_until
 
 pytestmark = pytest.mark.tier_3
 
@@ -179,3 +180,122 @@ def test_report_sharing_k_gate_opt_in_transparency_and_opt_out(report_nest):
     assert _bus_report_score(db_path, post_id) is None, (
         "opt-out withdraws the report:spam bus row"
     )
+
+
+# Not yet cited by a `spam` outcome: it witnesses the not-spam half of
+# outcome 26, whose "scores as spam against your own threshold" half has no
+# consumer yet — an outcome is cited
+# only by witnesses that prove all of it.
+def test_a_not_spam_mark_withdraws_the_report_and_the_aggregate_with_it(report_nest):
+    """Three opted-in reporters raise the shared aggregate to the k=3 score;
+    one of them then marks the same post NOT spam — their report is withdrawn,
+    the count falls under the gate and the score leaves the bus and the
+    published list; marking it spam again restores both.
+
+    The ham-correction leg of ``report-sharing.md`` § Report capture →
+    *Symmetry* over the real binary (the opt-out leg is the test above). A
+    fourth person who never reported reads the same published entry: the
+    aggregate is the nest's, not any reporter's.
+    """
+    port = report_nest["port"]
+    db_path = report_nest["db_path"]
+    admin_sk = report_nest["admin"]["signing_key"]
+
+    author = create_actor_and_register(port, admin_signing_key=admin_sk)
+    reporters = [create_actor_and_register(port, admin_signing_key=admin_sk)
+                 for _ in range(3)]
+    fourth = create_actor_and_register(port, admin_signing_key=admin_sk)
+
+    now_us = int(time.time() * 1_000_000)
+    body = "Act now! Your parcel is held. Pay the fee at http://parcel.example.test"
+    post_bytes = sign_and_encode_post(author["signing_key"], now_us, body, tags=[])
+    post_id = ws_api.create_post(port, author, post_bytes)
+
+    for reporter in reporters:
+        assert ws_api.report_share_set(port, reporter, True)["share"] is True
+        assert ws_api.moderation_train(port, reporter, post_id, "spam")["status"] == "trained"
+
+    def settled_score():
+        # The bus write is synchronous with the train call; the wait only
+        # covers the post settling into content_meta (state, not timing).
+        return wait_until(lambda: _bus_report_score(db_path, post_id), 10.0,
+                          diagnose=lambda: "k=3 report:spam bus row never landed")
+
+    assert settled_score() == 200, "k=3 opted-in reports score the post at 200 per-mille"
+    entry = _published_entry(port, fourth, post_id)
+    assert entry is not None and entry["count"] == 3, (
+        f"a non-reporter reads the same aggregate (got {entry})"
+    )
+
+    # One reporter corrects themselves: a not-spam mark on the same post.
+    assert ws_api.moderation_train(port, reporters[0], post_id, "ham")["status"] == "trained"
+    assert _published_entry(port, fourth, post_id) is None, (
+        "a not-spam mark withdraws the report: 2 < k, nothing published"
+    )
+    assert _bus_report_score(db_path, post_id) is None, (
+        "a not-spam mark withdraws the report:spam bus row below k"
+    )
+    # The correction is the report's, not the opt-in's: sharing stays on.
+    assert ws_api.report_share_status(port, reporters[0])["share"] is True
+
+    # Changing their mind back re-adds the report: the aggregate returns.
+    ws_api.moderation_train(port, reporters[0], post_id, "spam")
+    assert _published_entry(port, fourth, post_id)["count"] == 3
+    assert _bus_report_score(db_path, post_id) == 200
+
+
+def _served_labels(port: int, viewer: dict, post_id_hex: str):
+    """The ``labels`` the viewer's local feed serves on ``post_id_hex``."""
+    posts = {p["post_id"]: p for p in ws_api.local_feed_posts(port, viewer, limit=50)}
+    assert post_id_hex in posts, f"post {post_id_hex} not in the local feed: {list(posts)}"
+    return posts[post_id_hex].get("labels", [])
+
+
+# Not yet cited by a `spam` outcome, like the test above: outcome 26's mail
+# half is still unbuilt, and a new posts outcome is a feature-page change for
+# the public-texts queue.
+def test_the_shared_aggregate_reaches_the_post_as_its_spam_label(report_nest):
+    """``report-sharing.md`` § Applying the aggregate — posts: the post's
+    ``report:spam`` bus row is folded into its ``spam`` label on the feed read
+    every app's own-threshold collapse reads, at the score's own confidence
+    (200 per-mille at k=3); a sibling post carries nothing; a not-spam mark
+    that drops the count under k takes the entry away with the row."""
+    port = report_nest["port"]
+    db_path = report_nest["db_path"]
+    admin_sk = report_nest["admin"]["signing_key"]
+
+    author = create_actor_and_register(port, admin_signing_key=admin_sk)
+    reporters = [create_actor_and_register(port, admin_signing_key=admin_sk)
+                 for _ in range(3)]
+    viewer = create_actor_and_register(port, admin_signing_key=admin_sk)
+
+    now_us = int(time.time() * 1_000_000)
+    reported_bytes = sign_and_encode_post(
+        author["signing_key"], now_us,
+        "Limited offer! Claim your prize at http://prize.example.test", tags=[])
+    reported_id = ws_api.create_post(port, author, reported_bytes)
+    sibling_bytes = sign_and_encode_post(
+        author["signing_key"], now_us + 1_000_000, "An ordinary update.", tags=[])
+    sibling_id = ws_api.create_post(port, author, sibling_bytes)
+
+    assert _served_labels(port, viewer, reported_id) == []
+
+    for reporter in reporters:
+        assert ws_api.report_share_set(port, reporter, True)["share"] is True
+        assert ws_api.moderation_train(port, reporter, reported_id, "spam")["status"] == "trained"
+    assert wait_until(lambda: _bus_report_score(db_path, reported_id), 10.0,
+                      diagnose=lambda: "k=3 report:spam bus row never landed") == 200
+
+    labels = _served_labels(port, viewer, reported_id)
+    assert labels == [{"category": "spam", "confidence_per_mille": 200}], (
+        f"the k=3 aggregate must reach the post as spam@200 (got {labels})"
+    )
+    assert _served_labels(port, viewer, sibling_id) == [], (
+        "the aggregate must not leak onto a sibling post"
+    )
+
+    # One reporter's not-spam mark: 2 < k, the bus row and the label go.
+    assert ws_api.moderation_train(port, reporters[0], reported_id, "ham")["status"] == "trained"
+    assert _bus_report_score(db_path, reported_id) is None
+    labels = _served_labels(port, viewer, reported_id)
+    assert labels == [], f"below k the post carries no spam entry (got {labels})"

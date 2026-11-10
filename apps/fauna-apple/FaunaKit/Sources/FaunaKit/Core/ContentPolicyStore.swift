@@ -56,6 +56,17 @@ public struct ContentPolicyInputs: Equatable {
         ).reported
     }
 
+    /// The reporter's show-again for a reported item (`moderation.md` §
+    /// Corollary — the reporter's hide is theirs to undo): the shared
+    /// `reported_show_again` fold answers the ids to un-hide and the button's
+    /// label, or `nil` when nothing in the hide list matches. Short-circuits
+    /// for an empty list, like [`isReported`].
+    public func showAgainFor(itemId: String?, authorId: String?) -> FfiShowAgain? {
+        guard !hiddenContent.isEmpty, itemId != nil || authorId != nil else { return nil }
+        return reportedShowAgain(
+            hiddenContent: hiddenContent, itemId: itemId ?? "", authorId: authorId)
+    }
+
 #if !FAUNA_KIDS
     /// The post body the card PAINTS, for the e2e state read — `""` for a post
     /// the viewer's own report hides (the card paints "You reported this" and no
@@ -231,6 +242,21 @@ public final class ContentPolicyStore {
         inputs.hiddenContent = ids
     }
 
+    /// The post ids the viewer marked as spam — the `spam_marked` list on the
+    /// same sealed record (`report-sharing.md` § Report capture → *The post's
+    /// mark-as-spam verb*). Not a render input here: the feed hands it to the
+    /// shared manager (`FeedVM.setSpamMarked`), whose snapshot folds
+    /// `spam`@1000 into each marked post's labels, so the verdict these inputs
+    /// drive collapses it.
+    public private(set) var spamMarked: [String] = []
+
+    /// Replace the spam marks (a `mark_spam`/`unmark_spam` reply, or the
+    /// `load_spam_marked` read) — the stored list is the whole truth.
+    @MainActor
+    public func setSpamMarked(_ ids: [String]) {
+        spamMarked = ids
+    }
+
     /// Restore (or clear) the guardian half from the persisted last-known
     /// supervision snapshot, ahead of the first `refresh` landing
     /// (`family-safety.md` § Content policy, clause 2 — "loaded at launch
@@ -254,6 +280,7 @@ public final class ContentPolicyStore {
         // never hide, or be acknowledged on, the next one. The incoming
         // account's list arrives with its `refresh`.
         inputs.hiddenContent = []
+        spamMarked = []
         report.reset()
         GuardianNotifyCadence.shared.setEnabled(inputs.contentNotify)
     }
@@ -277,6 +304,29 @@ public final class ContentPolicyStore {
     /// `APIClient`.
     static func guardianHalf(of status: FfiFamilyStatus) -> (policy: FfiContentPolicy?, notify: Bool) {
         guardianHalf(of: status.supervision)
+    }
+
+    /// Re-read the reporter-side hide list and the post spam marks off the
+    /// account store — keep-on-failure: a failed read leaves the last-known
+    /// list in force. Runs inside `refresh` and on every store-change notice
+    /// (the shells' root `.onStoreChange`): the hide list is per-account
+    /// state, so a report or a show-again on another device of the same
+    /// account reaches this one through the pump (moderation.md § Corollary
+    /// — the reporter's hide is theirs to undo; tui re-reads it on
+    /// `AccountStoreChanged` the same way).
+    @MainActor
+    public func resyncReported() async {
+        let generation = scopeGeneration
+        let hiddenResult = try? await loadHiddenContent()
+        guard generation == scopeGeneration else { return }
+        if let hidden = hiddenResult, hidden != inputs.hiddenContent {
+            inputs.hiddenContent = hidden
+        }
+        let spamResult = try? await loadSpamMarked()
+        guard generation == scopeGeneration else { return }
+        if let spam = spamResult, spam != spamMarked {
+            spamMarked = spam
+        }
     }
 
     @MainActor
@@ -317,15 +367,11 @@ public final class ContentPolicyStore {
         guard generation == scopeGeneration else { return }
         inputs = Self.merged(previous: inputs, policy: policyResult, own: ownResult)
 
-        // The reporter-side hide list, keep-on-failure like the halves above:
-        // a failed read leaves the last-known list in force. Awaited HERE, on
-        // the refresh trigger — never on a surface's mount path (web's first
-        // run hung the feed behind it).
-        let hiddenResult = try? await loadHiddenContent()
+        // The reporter-side hide list and its spam marks. Awaited HERE, on the
+        // refresh trigger — never on a surface's mount path (web's first run
+        // hung the feed behind it).
+        await resyncReported()
         guard generation == scopeGeneration else { return }
-        if let hidden = hiddenResult {
-            inputs.hiddenContent = hidden
-        }
 
         // Guardian Notify's ward-side counting (family-safety.md § Guardian
         // Notify) — the SAME post-auth + reconnect trigger as this refresh,
@@ -376,7 +422,13 @@ public enum ContentPolicyTestState {
     nonisolated(unsafe) static weak var store: ContentPolicyStore?
 
     public static var wardRuleDocumentRules: Int? {
+        #if FAUNA_KIDS
+        // The shared editor is excised from the kids build, so there is no view to
+        // count through (never counted in Swift): the witness reads absent.
+        return nil
+        #else
         guard let policy = store?.inputs.contentPolicy, policy.document != nil else { return nil }
         return FfiRuleEditor.forGuardian(policy: policy).view().rows.count
+        #endif
     }
 }

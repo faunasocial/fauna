@@ -73,8 +73,8 @@ fun VpsConfigScreen(
     val mailOn = remember(tick) { vm.host.machine.provisionMailModeEnabled() }
     val sshDoorOn = remember(tick) { vm.host.machine.provisionSshDoorEnabled() }
     val updateChannel = remember(tick) { vm.host.machine.provisionUpdateChannel() }
-    val channelDescriptionKeys = remember(tick) {
-        UpdateChannel.entries.associateWith { vm.host.machine.updateChannelDescriptionKeyForRow(it) }
+    val channelRows = remember(tick) {
+        vm.host.machine.updateChannelRows()
     }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -280,23 +280,21 @@ fun VpsConfigScreen(
                 stringResource(R.string.onboarding_vps_config_update_channel_heading),
                 style = MaterialTheme.typography.titleSmall,
             )
-            UpdateChannel.entries.forEach { channel ->
-                val label = when (channel) {
-                    UpdateChannel.STABLE -> stringResource(R.string.onboarding_vps_config_update_channel_stable_label)
-                    UpdateChannel.TEST -> stringResource(R.string.onboarding_vps_config_update_channel_test_label)
-                    UpdateChannel.DEV -> stringResource(R.string.onboarding_vps_config_update_channel_dev_label)
-                }
-                // The shared row getter picks the description key (the no-build
-                // wording when the registry has no build on the channel, else the
-                // compat-line wording for Test / Dev while the product major is
-                // 0); the screen only resolves it.
-                val desc = localized(LocalizedText(channelDescriptionKeys.getValue(channel), emptyMap())) ?: ""
+            channelRows.forEach { row ->
+                val channel = row.channel
+                // The shared row list (`update_channel_rows`) owns each row's id,
+                // label key and description key (the no-build wording when the
+                // registry has no build on the channel, else the compat-line
+                // wording for Test / Dev while the product major is 0); the
+                // screen only resolves the keys.
+                val label = localized(LocalizedText(row.labelKey, emptyMap())) ?: ""
+                val desc = localized(LocalizedText(row.descriptionKey, emptyMap())) ?: ""
                 val selected = channel == updateChannel
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .selectable(selected = selected, onClick = { vm.setUpdateChannel(channel) })
-                        .testTag("vps-config-update-channel-row[${channel.name.lowercase()}]")
+                        .testTag("vps-config-update-channel-row[${row.id}]")
                         .semantics { stateDescription = if (selected) "on" else "off" },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

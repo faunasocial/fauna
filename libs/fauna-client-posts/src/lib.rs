@@ -20,7 +20,21 @@ use fauna_protocol::posts::{
     PostsListRequest,
 };
 
+use fauna_protocol::offline_intent::{ComposeError, Composed, OfflineIntentQueue, send_or_queue};
 pub use fauna_protocol::posts;
+
+/// The one `fauna.posts.interact` request shape — the online send and the
+/// queued intent carry the same bytes, so a drained intent is exactly the
+/// request the gesture would have sent.
+fn interact_request(post_id: String, action: String, body: Option<String>) -> PostInteractRequest {
+    PostInteractRequest {
+        post_id,
+        action,
+        body,
+        media: None,
+        extra: std::collections::BTreeMap::new(),
+    }
+}
 
 /// Typed `fauna.posts.*` call surface, generic over the WS-RPC transport
 /// (`R: RpcRequester`): native call sites pass `Arc<NestClient>`, the wasm SPA
@@ -198,15 +212,36 @@ impl<R: RpcRequester> PostsClient<R> {
         self.nest
             .request(
                 "fauna.posts.interact",
-                PostInteractRequest {
-                    post_id: post_id.into(),
-                    action: action.into(),
-                    body,
-                    media: None,
-                    extra: std::collections::BTreeMap::new(),
-                },
+                interact_request(post_id.into(), action.into(), body),
             )
             .await
+    }
+
+    /// [`posts_interact`](Self::posts_interact) through the `OfflineQueued`
+    /// composer (`fauna_protocol::offline_intent::send_or_queue`): sent now
+    /// while the app has a nest, or — when `queue` is wired and reports no
+    /// nest — appended to the device's outbox, drained once the nest is back
+    /// with the intent id as its idempotency key. The drain FIFO scope is the
+    /// target post (`posts.interact:<post_id>`), so a like and a later unlike
+    /// of one post keep their order while a rejected act on one post never
+    /// holds acts on another.
+    pub async fn posts_interact_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        post_id: impl Into<String>,
+        action: impl Into<String>,
+        body: Option<String>,
+    ) -> Result<Composed<PostInteractReply>, ComposeError<R::Error>> {
+        let post_id = post_id.into();
+        let scope = format!("posts.interact:{post_id}");
+        send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.posts.interact",
+            &scope,
+            interact_request(post_id, action.into(), body),
+        )
+        .await
     }
 
     /// `fauna.posts.list` — one page of the calling actor's **own** posts,

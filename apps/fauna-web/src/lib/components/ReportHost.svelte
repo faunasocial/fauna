@@ -6,7 +6,7 @@
   //
   // Every decision here is shared Rust's (`fauna_client_moderation::report` over
   // wasm): the reason list, the submit gate, the include-text rule, the words.
-  // The sheet paints `reportSheetView`; the send is `moderationAbuseReportSubmit`
+  // The sheet paints `reportSheetView`; the send is `moderationAbuseReportSubmitOrQueue`
   // (built from the sheet by the shared `report_request`); the follow-ups mirror
   // tui's `report.rs`: submit → `knocksBlock(author)` when ticked → the
   // reporter-side hide (`hideReported`) → the stored list into the render state.
@@ -16,8 +16,16 @@
   import { identity } from '#lib/store';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { IDS } from '#lib/generated/uiIds';
-  import { reportSheetView, reportFailed, type ReportTarget, type ReportForm } from '#lib/wasm';
-  import { moderationAbuseReportSubmit, knocksBlock, hideReported } from '#lib/rpc';
+  import {
+    reportSheetView,
+    reportFailed,
+    reportQueued,
+    reportBlockNotSent,
+    type ReportTarget,
+    type ReportForm,
+  } from '#lib/wasm';
+  import { moderationAbuseReportSubmitOrQueue, knocksBlock, hideReported } from '#lib/rpc';
+  import { submitReport } from '#lib/report-submit';
   import { setHiddenContent } from '#lib/contentPolicy.svelte';
 
   interface Props {
@@ -70,31 +78,28 @@
     const sent = target;
     if (!secret || !sent || !view?.can_submit || sending) return;
     sending = true;
-    let reply;
+    const author = form.block_author ? sent.author : null;
+    let settled;
     try {
-      reply = await moderationAbuseReportSubmit(secret, sent, form);
+      // With no nest the report is queued (account-offline-mutation.md): the
+      // sheet closes on `reportQueued`, the hide still lands, and a ticked
+      // block is not tried — `reportBlockNotSent` says so.
+      settled = await submitReport({
+        submitOrQueue: () => moderationAbuseReportSubmitOrQueue(secret, sent, form),
+        block: author ? () => knocksBlock(secret, author) : undefined,
+        hide: () => hideReported(secret, subjectId(sent)),
+        blockNotSent: () => resolveLocalized(reportBlockNotSent()),
+      });
     } catch (e) {
       // The sheet stays open for a retry.
       onerror(resolveLocalized(reportFailed(detail(e))));
       sending = false;
       return;
     }
-    let followup: string | null = null;
-    if (form.block_author && sent.author) {
-      try {
-        await knocksBlock(secret, sent.author);
-        onblocked?.(sent.author);
-      } catch (e) {
-        followup = `block: ${detail(e)}`;
-      }
-    }
-    try {
-      setHiddenContent(await hideReported(secret, subjectId(sent)));
-    } catch (e) {
-      followup ??= `hide: ${detail(e)}`;
-    }
-    status = resolveLocalized(reply.acknowledgement);
-    onerror(followup ?? '');
+    if (settled.blocked && author) onblocked?.(author);
+    if (settled.hidden) setHiddenContent(settled.hidden);
+    status = resolveLocalized(settled.reply ? settled.reply.acknowledgement : reportQueued());
+    onerror(settled.followup ?? '');
     sending = false;
     target = null;
   }

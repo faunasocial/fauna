@@ -157,8 +157,11 @@ public struct FeedPostActionsButton: View {
                 Divider()
                 deleteRow
             }
-            if !isOwn, reportTarget != nil {
+            if !isOwn {
                 Divider()
+                markSpamRow
+            }
+            if !isOwn, reportTarget != nil {
                 reportRow
             }
         }
@@ -191,6 +194,33 @@ public struct FeedPostActionsButton: View {
         .buttonStyle(.borderless)
         .accessibilityIdentifier(id)
         .automationActivate(id, value: { marked ? "on" : "off" }, perform: action)
+    }
+
+    /// The mark-as-spam verb (`report-sharing.md` § Report capture → *The
+    /// post's mark-as-spam verb*): another author's post only, beside the
+    /// report verb — the conversation pair's twin. A toggle whose `state`
+    /// (on/off) is the shared manager's `is_spam_marked`; a press dismisses
+    /// the overflow (a marked post collapses at once) and runs
+    /// ``FeedVM/markPostSpam(_:contentPolicy:)``.
+    private var markSpamRow: some View {
+        let marked = vm.isSpamMarked(postId)
+        let press: () -> Void = {
+            showActions = false
+            Task { await vm.markPostSpam(postId, contentPolicy: contentPolicy) }
+        }
+        return Button(action: press) {
+            Label(L.feed.markAsSpam, systemImage: marked ? "xmark.octagon.fill" : "xmark.octagon")
+                .font(.caption)
+                .fontWeight(marked ? .bold : .regular)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier(Ids.feedPostMarkAsSpamButton)
+        .accessibilityValue(marked ? "on" : "off")
+        .automationActivate(
+            Ids.feedPostMarkAsSpamButton,
+            text: { L.feed.markAsSpam },
+            value: { vm.isSpamMarked(postId) ? "on" : "off" },
+            perform: press)
     }
 
     /// The report verb (moderation.md § User-initiated reporting → *App surface*):
@@ -533,6 +563,29 @@ public struct FeedPostMutedPlaceholder: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The reader's post spam marks (``ContentPolicyStore/spamMarked``, loaded
+/// beside the hide list) reach the feed manager the page paints off
+/// (`report-sharing.md` § Report capture → *The post's mark-as-spam verb*).
+/// One shared modifier both platform feed pages mount — android's
+/// `contentPolicyStore.spamMarked.collect { host.setSpamMarked(it) }`.
+private struct FeedSpamMarkSync: ViewModifier {
+    let vm: FeedVM
+    @Environment(ContentPolicyStore.self) private var contentPolicy: ContentPolicyStore?
+
+    func body(content: Content) -> some View {
+        content.onChange(of: contentPolicy?.spamMarked ?? [], initial: true) { _, ids in
+            vm.setSpamMarked(ids)
+        }
+    }
+}
+
+public extension View {
+    /// Keep `vm`'s manager fed with the reader's spam marks (``FeedSpamMarkSync``).
+    func feedSpamMarkSync(vm: FeedVM) -> some View {
+        modifier(FeedSpamMarkSync(vm: vm))
     }
 }
 #endif // !FAUNA_KIDS

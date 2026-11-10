@@ -1474,14 +1474,6 @@ mod tests {
             CreatedAt::Unbounded("an `inbox/message` row, stamped with the nest's clock"),
         ),
         (
-            "db/bridge.rs",
-            "insert_bridge_message",
-            CreatedAt::Unbounded(
-                "a bridge message row: its schema is the bridge type, and it gets no \
-                 `content_meta` row, which every feed query joins",
-            ),
-        ),
-        (
             "profile_handlers.rs",
             "ingest_profile_write",
             CreatedAt::Unbounded(

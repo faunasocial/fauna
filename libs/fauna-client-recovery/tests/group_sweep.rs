@@ -621,6 +621,53 @@ async fn an_identity_with_no_groups_sweeps_clean() {
     assert_eq!(client.transport().total_sent(), 0);
 }
 
+/// A community room has no MLS group, so the per-group loop never touches it;
+/// only its community marker lists it in a replica. The successor's engine
+/// must carry that marker (and the chat and scheduling markers beside it) out
+/// of the sweep, or the snapshot web publishes before its reload lists no
+/// room and the successor's app loses every community room it held.
+#[tokio::test]
+async fn a_sweep_carries_the_channel_kind_markers_onto_the_successor() {
+    let (old, old_kp) = keyed_engine(1);
+    let bob = engine();
+    let (successor, successor_kp) = keyed_engine(2);
+    let (statement, _head) = signed_statement(&old_kp, &successor_kp);
+
+    let room = ChannelId([41u8; 32]);
+    old.mark_channel_chat(&room);
+    old.mark_channel_community(&room);
+    let chat = shared_group(&old, &bob);
+    old.mark_channel_chat(&chat);
+    let scheduling = ChannelId([42u8; 32]);
+    old.mark_channel_scheduling(&scheduling);
+
+    let client = RecoveryClient::new(ChannelNest::new(vec![Arc::clone(&bob)]));
+    let report = sweep_groups(&client, &old, &successor, &statement).await;
+    assert!(
+        report
+            .outcomes
+            .iter()
+            .all(|o| o.state == GroupSweepState::Swept),
+        "{report:?}"
+    );
+
+    assert!(
+        successor.is_channel_community(&room),
+        "the room's marker moved"
+    );
+    assert!(successor.is_channel_chat(&room));
+    assert!(
+        successor.is_channel_chat(&chat),
+        "the swept group stays chat"
+    );
+    assert!(successor.is_channel_scheduling(&scheduling));
+    let snapshot = fauna_mls::state_replica::ProviderReplica::from_engine(&successor);
+    assert!(
+        snapshot.history_channel_ids().contains(&room),
+        "the successor's own snapshot lists the room's slice"
+    );
+}
+
 // ── what the ceremony does NOT settle ────────────────────────────────
 
 /// The finding this pin exists for: the thief

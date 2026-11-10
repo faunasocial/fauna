@@ -59,6 +59,7 @@ pytestmark = [
     pytest.mark.android,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.windows,
 ]
 
 _MUA_PASSWORD = "token-refresh-plain-pw-1"
@@ -132,7 +133,7 @@ def test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired(
     sender = alias_admin_to_address(nest, handle.domain)
     app.mail_settings.navigate()
     app.mail_settings.enable_mail_plain(_MUA_PASSWORD)
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must flip the page to enabled; "
         f"status={app.mail_settings.status_text()!r}, "
         f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"

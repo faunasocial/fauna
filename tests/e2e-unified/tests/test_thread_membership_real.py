@@ -486,3 +486,350 @@ def test_in_place_mls_remove_through_the_ui(real_faunamls_app, nest_instance, te
     assert len(conv_api.channel_fetch(port, bob, channel, after=0)) > envelopes_before, (
         "the removal should post a Commit envelope on the group's channel"
     )
+
+
+@pytest.mark.feature("group-conversations")
+def test_re_adding_a_member_whose_welcome_never_arrived_heals_and_a_duplicate_add_changes_nothing(
+    real_faunamls_app, nest_instance, test_user
+):
+    """Adding someone again whose earlier join never arrived brings them in,
+    and re-adding a member who is already in changes nothing
+    (`mls-group-key-material.md` § M2 *Admitting a member*, the chat bullet;
+    the heal itself is `FaunaMlsBackend::add_participant`).
+
+    **How the join gets lost, with no seam.** An in-place add stages and posts
+    its Add commit first and delivers the newcomer's Welcome second, so a
+    Welcome the nest refuses leaves the newcomer seated in the group's MLS
+    state with no way to join: the *phantom leaf* the heal exists for, the same
+    state a crash between the two steps leaves. dave publishes key packages but
+    has no contact edge toward the adder, so under the default `allow_knock`
+    inbox mode the nest refuses his Welcome (`direct-messages.md` § Reach
+    policy) — the arrangement :func:`test_in_place_add_of_an_unreachable_person_is_refused`
+    pins as a refusal. The UI rolls its optimistic chip back; the MLS leaf
+    stays. Once dave accepts the adder, the second add through the same
+    controls must evict the ghost leaf and admit him fresh. Before the heal
+    landed that second add failed on MLS's duplicate-signature-key check.
+
+    **What separates a heal from a no-op**, both read off the nest, never the
+    UI alone: the heal consumes a second key package, delivers dave a Welcome
+    and puts him on the channel's routing roster (`channel.actors`); the
+    duplicate add that follows consumes nothing, posts no Commit and delivers
+    no second Welcome. The roster is read as bob, never fetched as dave —
+    `channel.fetch` auto-registers its caller, which would make the phantom
+    look healthy (`conv_api.channel_actors`).
+    """
+    app = real_faunamls_app
+    port = nest_instance["port"]
+    base = nest_instance["url"]
+    admin_sk = nest_instance["admin"]["signing_key"]
+    alice_hex = test_user["actor_id_hex"]
+
+    bob = create_actor_and_register(port, admin_signing_key=admin_sk)
+    carol = create_actor_and_register(port, admin_signing_key=admin_sk)
+    dave = create_actor_and_register(port, admin_signing_key=admin_sk)
+    # erin is reachable from the start: the barrier add of step 3.
+    erin = create_actor_and_register(port, admin_signing_key=admin_sk)
+    for peer in (bob, carol, dave, erin):
+        conv_api.keypackage_upload(port, peer, _mint_keypackages(bytes(peer["signing_key"]), 3))
+    for peer in (bob, carol, erin):
+        conv_api.accept_contact(port, peer, alice_hex)
+    assert erin["handle"], "the barrier peer must have a handle to type into the picker"
+    dave_hex = dave["actor_id_hex"].lower()
+    dave_handle = dave["handle"]
+    assert dave_handle, "the UI-added peer must have a handle to type into the picker"
+
+    # ── setup (convention 8 carve-out (b)) — a REAL bound MLS group ──────────
+    app.conversations.real_resolve_send_new(bob["actor_id_hex"], "hi bob heal")
+    one = _wait_thread_snippet(app, "hi bob heal", timeout=20.0)
+    assert one is not None, "the 1:1 with bob should surface its own echo"
+
+    before_ids = {t.thread_id for t in app.conversations.list_threads()}
+    app.conversations.real_add(one.thread_id, carol["actor_id_hex"], "carol")
+    fresh = [
+        t
+        for t in app.conversations.list_threads()
+        if t.thread_id not in before_ids and t.flavor == "MlsGroup"
+    ]
+    assert len(fresh) == 1, (
+        f"adding carol to the 1:1 should fork exactly one group; got {len(fresh)}"
+    )
+    group_id = fresh[0].thread_id
+    app.conversations.real_send(group_id, "hi group heal")
+
+    group = _thread_by_id(app, group_id)
+    assert group is not None and group.channel_id_hex, (
+        "the group must be bound to a channel before the in-place add"
+    )
+    channel = group.channel_id_hex
+    before_count = group.participant_count
+    assert before_count >= 2, (
+        f"setup should leave at least [bob, carol] as peers; got {before_count}"
+    )
+    threads_before = len(app.conversations.list_threads())
+
+    def envelopes() -> int:
+        return len(conv_api.channel_fetch(port, bob, channel, after=0))
+
+    prefix = S.conversations.unified.error_add_participant(message="")
+
+    # ── 1. the join that never arrives ───────────────────────────────────────
+    envelopes_before_lost = envelopes()
+    app.conversations.open_thread_by_id(group_id)
+    app.conversations.add_participant_to_thread(dave_handle)
+    wait_until(
+        lambda: prefix in (app.error_text() or ""),
+        30.0,
+        diagnose=lambda: (
+            f"the first add of dave was expected to be refused at his Welcome "
+            f"(no contact edge yet), but no add-participant error appeared "
+            f"(error={app.error_text()!r}); dave's inbox holds "
+            f"{len(_inbox(base, dave))} Welcome(s)"
+        ),
+    )
+    assert _inbox(base, dave) == [], "the refused add must not have delivered a Welcome"
+    assert conv_api.keypackage_count(port, dave, dave["actor_id_hex"]) == 2, (
+        "the refused add must have consumed one of dave's key packages — it staged "
+        "a real Add commit before its Welcome was refused"
+    )
+    assert envelopes() > envelopes_before_lost, (
+        "the refused add must have posted its Add commit (dave is now seated in "
+        "the group's MLS state with no way to join — the lost join under test)"
+    )
+    assert dave_hex not in conv_api.channel_actors(port, bob, channel), (
+        "dave must be OFF the routing roster: it is what tells the heal his "
+        "Welcome never landed"
+    )
+
+    # ── 2. the add again brings him in ───────────────────────────────────────
+    conv_api.accept_contact(port, dave, alice_hex)
+    envelopes_before_heal = envelopes()
+    app.conversations.open_thread_by_id(group_id)
+    app.conversations.add_participant_to_thread(dave_handle)
+
+    # The barrier is the nest's Welcome, never the list: the optimistic chip
+    # lands before the wire op runs, so a count read first would pass on an
+    # add the backend is about to refuse and roll back. A failed heal rolls
+    # the chip back and its error names why (pre-heal: MLS's
+    # duplicate-signature-key refusal), so the diagnosis reads the page.
+    welcomes = wait_until(
+        lambda: _inbox(base, dave),
+        30.0,
+        diagnose=lambda: (
+            f"the re-add must deliver dave a Welcome; his inbox is empty and "
+            f"the page says {app.error_text()!r}"
+        ),
+    )
+    want = before_count + 1
+    after = _wait_participant_count(app, group_id, want, timeout=30.0)
+    error = app.error_text() or ""
+    assert prefix not in error, f"the re-add must succeed; the page says {error!r}"
+    assert after is not None and after.participant_count == want, (
+        f"dave must be listed after the re-add: wanted {want}, got "
+        f"{after.participant_count if after else None}, error={error!r}"
+    )
+    assert len(app.conversations.list_threads()) == threads_before, (
+        "neither add may fork a new thread"
+    )
+    assert len(welcomes) == 1, f"exactly one Welcome for dave, got {len(welcomes)}"
+    assert conv_api.keypackage_count(port, dave, dave["actor_id_hex"]) == 1, (
+        "the heal re-admits with a FRESH key package (a Welcome cannot be "
+        "re-minted for the old leaf), so a second one must be consumed"
+    )
+    assert dave_hex in conv_api.channel_actors(port, bob, channel), (
+        "the delivered Welcome must put dave on the routing roster"
+    )
+    assert envelopes() >= envelopes_before_heal + 2, (
+        "the heal is two commits — evicting the ghost leaf, then the fresh Add "
+        f"(envelopes {envelopes_before_heal} → {envelopes()})"
+    )
+
+    # ── 3. re-adding a member who is already in changes nothing ──────────────
+    envelopes_before_dup = envelopes()
+    app.conversations.open_thread_by_id(group_id)
+    app.conversations.add_participant_to_thread(dave_handle)
+    # The barrier. A no-op leaves nothing to wait on, and reading straight
+    # after the overlay closes would race the wire op (the confirm runs it
+    # after the dialog goes) — a vacuous pass. So a REAL add follows on the
+    # same group: every membership gesture on a channel runs under that
+    # channel's one lock, in turn, so once erin's Add has landed the duplicate
+    # has had its turn, and the envelope delta must be erin's commit alone.
+    app.conversations.open_thread_by_id(group_id)
+    app.conversations.add_participant_to_thread(erin["handle"])
+    wait_until(
+        lambda: _inbox(base, erin),
+        30.0,
+        diagnose=lambda: (
+            f"the barrier add of erin never delivered her Welcome "
+            f"(error={app.error_text()!r})"
+        ),
+    )
+    want += 1
+    _wait_participant_count(app, group_id, want, timeout=30.0)
+    dup = _wait_participant_actor_ids(app, group_id)
+    error = app.error_text() or ""
+    assert prefix not in error, f"a duplicate add must not fail; the page says {error!r}"
+    assert dup is not None and dup.participant_count == want, (
+        f"a duplicate add must leave the list as it was ({want}, dave once, "
+        f"plus the barrier's erin); got "
+        f"{dup.participant_count if dup else None}"
+    )
+    assert (dup.participant_actor_ids or []).count(dave["actor_id_hex"]) == 1, (
+        f"dave must be listed exactly once: {dup.participant_actor_ids!r}"
+    )
+    assert conv_api.keypackage_count(port, dave, dave["actor_id_hex"]) == 1, (
+        "a duplicate add must not consume a key package"
+    )
+    assert len(_inbox(base, dave)) == 1, "a duplicate add must not deliver a second Welcome"
+    assert envelopes() == envelopes_before_dup + 1, (
+        "a duplicate add must post no Commit — re-admitting a healthy member "
+        "would cut him off and re-invite him; the one new envelope is the "
+        f"barrier's Add of erin (envelopes {envelopes_before_dup} → {envelopes()})"
+    )
+
+
+@pytest.mark.feature("group-conversations")
+def test_re_adding_a_member_whose_join_cannot_be_judged_says_so_and_touches_nothing(
+    real_faunamls_app, nest_instance, test_user
+):
+    """An add the app cannot judge — the person is already seated in the
+    group, and the roster that would say whether their invitation arrived
+    cannot be read — refuses and says so, never guessing
+    (`mls-group-key-material.md` § M2 *Admitting a member*, the chat bullet's
+    refuse-to-guess arm; `FaunaMlsBackend::add_participant`'s ``None`` arm).
+
+    **The lost join** is made exactly as in
+    :func:`test_re_adding_a_member_whose_welcome_never_arrived_heals_and_a_duplicate_add_changes_nothing`:
+    with no contact edge, the nest refuses dave's Welcome after the Add commit
+    was posted, which seats a phantom leaf.
+
+    **The unreadable roster** is the nest's own refusal of the one read the
+    heal discriminates on, ``fauna.conversations.channel.actors``
+    (`rpc_hold_test_hook.rs` § Refusal), so the client needs no seam of its own:
+    the app's adapter reads every failure of that read as "roster unreadable",
+    which is the production path. In one nest nothing else reaches that state.
+    dave accepts alice BEFORE the second add, so his Welcome would now be
+    delivered: the roster read is the one thing standing between this add and
+    the heal of the sibling test.
+
+    **What refusing to guess means**, read off the nest: no Commit is posted,
+    no key package is consumed and no Welcome is delivered. And the page says
+    what to do, in the localized sentence. Before 2026-11-07 the arm returned
+    a diagnostic, which the page renders as the generic sentence, so the
+    instruction never reached the user.
+    """
+    from helpers.rpc_hold import release_rpc_hold, refuse_rpc, wait_for_refused_rpc
+
+    app = real_faunamls_app
+    port = nest_instance["port"]
+    base = nest_instance["url"]
+    admin_sk = nest_instance["admin"]["signing_key"]
+    alice_hex = test_user["actor_id_hex"]
+    roster_kind = "fauna.conversations.channel.actors"
+
+    bob = create_actor_and_register(port, admin_signing_key=admin_sk)
+    carol = create_actor_and_register(port, admin_signing_key=admin_sk)
+    dave = create_actor_and_register(port, admin_signing_key=admin_sk)
+    for peer in (bob, carol, dave):
+        conv_api.keypackage_upload(port, peer, _mint_keypackages(bytes(peer["signing_key"]), 3))
+    for peer in (bob, carol):
+        conv_api.accept_contact(port, peer, alice_hex)
+    dave_hex = dave["actor_id_hex"].lower()
+    dave_handle = dave["handle"]
+    assert dave_handle, "the UI-added peer must have a handle to type into the picker"
+
+    # ── setup (convention 8 carve-out (b)) — a REAL bound MLS group ──────────
+    app.conversations.real_resolve_send_new(bob["actor_id_hex"], "hi bob unjudged")
+    one = _wait_thread_snippet(app, "hi bob unjudged", timeout=20.0)
+    assert one is not None, "the 1:1 with bob should surface its own echo"
+
+    before_ids = {t.thread_id for t in app.conversations.list_threads()}
+    app.conversations.real_add(one.thread_id, carol["actor_id_hex"], "carol")
+    fresh = [
+        t
+        for t in app.conversations.list_threads()
+        if t.thread_id not in before_ids and t.flavor == "MlsGroup"
+    ]
+    assert len(fresh) == 1, (
+        f"adding carol to the 1:1 should fork exactly one group; got {len(fresh)}"
+    )
+    group_id = fresh[0].thread_id
+    app.conversations.real_send(group_id, "hi group unjudged")
+
+    group = _thread_by_id(app, group_id)
+    assert group is not None and group.channel_id_hex, (
+        "the group must be bound to a channel before the in-place add"
+    )
+    channel = group.channel_id_hex
+    before_count = group.participant_count
+
+    def envelopes() -> int:
+        return len(conv_api.channel_fetch(port, bob, channel, after=0))
+
+    prefix = S.conversations.unified.error_add_participant(message="")
+    refusal = S.conversations.unified.error_add_participant_unconfirmed
+
+    # ── 1. the join that never arrives (the sibling test's step 1) ───────────
+    envelopes_before_lost = envelopes()
+    app.conversations.open_thread_by_id(group_id)
+    app.conversations.add_participant_to_thread(dave_handle)
+    wait_until(
+        lambda: prefix in (app.error_text() or ""),
+        30.0,
+        diagnose=lambda: (
+            f"the first add of dave was expected to be refused at his Welcome "
+            f"(no contact edge yet), but no add-participant error appeared "
+            f"(error={app.error_text()!r})"
+        ),
+    )
+    assert refusal not in (app.error_text() or ""), (
+        "the first add is refused at the Welcome, not by the roster arm"
+    )
+    assert _inbox(base, dave) == [], "the refused add must not have delivered a Welcome"
+    assert envelopes() > envelopes_before_lost, (
+        "the refused add must have posted its Add commit, seating dave as a phantom"
+    )
+    assert dave_hex not in conv_api.channel_actors(port, bob, channel), (
+        "dave must be OFF the routing roster — a readable roster would heal him"
+    )
+    kps_before = conv_api.keypackage_count(port, dave, dave["actor_id_hex"])
+
+    # ── 2. the add again, with the roster unreadable ─────────────────────────
+    conv_api.accept_contact(port, dave, alice_hex)
+    envelopes_before = envelopes()
+    refuse_rpc(port, roster_kind)
+    try:
+        app.conversations.open_thread_by_id(group_id)
+        app.conversations.add_participant_to_thread(dave_handle)
+        wait_for_refused_rpc(port, roster_kind)
+        # The barrier is the page's refusal: the backend returns it after the
+        # roster read and before any commit could be staged, so once it shows,
+        # every nest-side "nothing happened" below is final, not early.
+        wait_until(
+            lambda: refusal in (app.error_text() or ""),
+            30.0,
+            diagnose=lambda: (
+                f"the add must say it cannot confirm dave's invitation; the page "
+                f"says {app.error_text()!r}"
+            ),
+        )
+    finally:
+        release_rpc_hold(port, roster_kind)
+
+    error = app.error_text() or ""
+    assert error == S.conversations.unified.error_add_participant(message=refusal), (
+        f"the page carries exactly the add-participant refusal: {error!r}"
+    )
+    assert dave_hex not in error.lower(), f"never a raw actor id on the page: {error!r}"
+    assert envelopes() == envelopes_before, (
+        "refusing to guess posts no Commit — neither an evict nor an Add "
+        f"(envelopes {envelopes_before} → {envelopes()})"
+    )
+    assert conv_api.keypackage_count(port, dave, dave["actor_id_hex"]) == kps_before, (
+        "refusing to guess consumes no key package"
+    )
+    assert _inbox(base, dave) == [], "refusing to guess delivers no Welcome"
+    after = _thread_by_id(app, group_id)
+    assert after is not None and after.participant_count == before_count, (
+        f"the optimistic chip must roll back: wanted {before_count}, got "
+        f"{after.participant_count if after else None}"
+    )

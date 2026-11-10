@@ -99,9 +99,9 @@ public sealed partial class NostrPage : Page, IAsyncLoadedPage
 
     /// <summary>The 3 native link-request modes — generate / import / remote. NIP-07
     /// is a browser-extension boundary and is web-only (nostr.md § Architectural rules
-    /// #4), matching apple/android/linux/tui. Each item's automation Name is the stable
-    /// wire mode, never the localized label: the windows driver's <c>select</c> matches
-    /// <c>ComboBoxItem.Name</c> EXACTLY (reference_windows_flaui_select_exact_name).
+    /// #4), matching apple/android/linux/tui. Each item paints the localized label and
+    /// is keyed by the stable wire mode (<see cref="PickerOption"/>), what the
+    /// cross-app <c>select</c> names.
     ///
     /// <para>The label itself comes from the shared
     /// <c>fauna_client_bridges::nostr_link_mode_label</c> map (nostr.md § Account
@@ -111,15 +111,8 @@ public sealed partial class NostrPage : Page, IAsyncLoadedPage
     private void BuildLinkModes()
     {
         foreach (var mode in new[] { NostrViewModel.ModeGenerate, NostrViewModel.ModeImport, NostrViewModel.ModeRemote })
-        {
-            var item = new ComboBoxItem
-            {
-                Content = Strings.Resolve(FaunaFfiMethods.NostrLinkModeLabel(mode)),
-                Tag = mode,
-            };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, mode);
-            LinkModeCombo.Items.Add(item);
-        }
+            LinkModeCombo.Items.Add(PickerOption.Create(
+                Strings.Resolve(FaunaFfiMethods.NostrLinkModeLabel(mode)), mode));
         LinkModeCombo.SelectedIndex = 0;
     }
 

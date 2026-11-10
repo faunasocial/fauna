@@ -68,9 +68,12 @@ UNSCANNED_DIRS = frozenset({"drivers", "web-bridge", "web-notes-harness", "node_
 #: The seed writer and the conftest functions that call it: the inline form a
 #: self-launch builds its environment with, and `_build_app_config`, which calls
 #: it in every app branch
-#: (`test_r14_trust_seed_default.py::test_every_seeded_app_branch_applies_the_trust_env`).
+#: (`test_r14_trust_seed_default.py::test_every_seeded_app_branch_applies_the_trust_env`),
+#: and `_second_seat_config`, the one more seat's config, built FROM
+#: `_build_app_config` (a test module imports it, so the in-module walk cannot
+#: see what it reaches; `test_every_seed_call_reaches_the_writer` pins it).
 WRITER = "_apply_r14_trust_env"
-SEED_CALLS = frozenset({WRITER, "_seeded_environment", "_build_app_config"})
+SEED_CALLS = frozenset({WRITER, "_seeded_environment", "_build_app_config", "_second_seat_config"})
 
 #: App binaries started without a driver: (file, function) → what it starts.
 PROCESS_LAUNCHES = {

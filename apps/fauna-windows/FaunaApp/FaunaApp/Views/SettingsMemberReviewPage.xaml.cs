@@ -15,10 +15,10 @@ namespace FaunaApp.Views;
 /// <summary>
 /// The Settings → Members To Review sub-page (docs/goal/behavior/
 /// succession-aftermath.md § Propagation) —
-/// a dumb renderer of the testable <see cref="MemberReviewViewModel"/>. windows
-/// was the last of 7 apps still owing this permanent page; the ephemeral
-/// kit-side pass is a separate, NOT-built-here arm (gated behind windows' own
-/// identity-stolen ceremony legs).
+/// a dumb renderer of the testable <see cref="MemberReviewViewModel"/>. The rows
+/// are <see cref="FaunaApp.Controls.MemberReviewList"/>, the same control the
+/// ephemeral kit-side pass on <see cref="SettingsAccountPage"/>'s Recovery Kit
+/// section renders — the two surfaces differ in their gate, not their markup.
 ///
 /// <para>The manager resolution mirrors <c>ProfilePage.StartDm_Click</c>
 /// exactly: the login session's wired manager in production,
@@ -40,6 +40,8 @@ public sealed partial class SettingsMemberReviewPage : Page, IAsyncLoadedPage
     public SettingsMemberReviewPage()
     {
         this.InitializeComponent();
+        ReviewList.KeepRequested += Keep;
+        ReviewList.RemoveRequested += Remove;
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -105,21 +107,21 @@ public sealed partial class SettingsMemberReviewPage : Page, IAsyncLoadedPage
         // row's admin-custody-hosting sibling pins).
         Intro.Visibility = !_vm.IsLoading && hasReviews ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = !_vm.IsLoading && !hasReviews ? Visibility.Visible : Visibility.Collapsed;
-        ReviewList.ItemsSource = _vm.Reviews.ToList();
+        ReviewList.Show(_vm.Reviews.ToList());
 
         ShowError(_vm.ErrorMessage);
     }
 
-    private async void Keep_Click(object sender, RoutedEventArgs e)
+    private async void Keep(byte[] person)
     {
-        if (_vm is null || sender is not Button btn || btn.Tag is not byte[] person) return;
+        if (_vm is null) return;
         await _vm.KeepAsync(person, Manager);
         RenderState();
     }
 
-    private async void Remove_Click(object sender, RoutedEventArgs e)
+    private async void Remove(byte[] person)
     {
-        if (_vm is null || sender is not Button btn || btn.Tag is not byte[] person) return;
+        if (_vm is null) return;
         if (Manager is not { } manager) return;
         await _vm.RemoveAsync(person, manager);
         RenderState();

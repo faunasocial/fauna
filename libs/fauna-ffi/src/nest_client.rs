@@ -746,6 +746,16 @@ pub fn knock_text_for(knock: FfiKnock) -> crate::FfiNotificationText {
     fauna_client_notifications::knock_push_text(&knock.into()).into()
 }
 
+/// The one notification id every knock toast is raised under — the UniFFI
+/// face of `fauna_client_notifications::KNOCK_TOAST_REPLACE_ID`
+/// (`behavior/notifications.md` § Localized body, the knock toast: one id per
+/// app, never one per sender). A native app tags its knock toast with this,
+/// never a value of its own, so the seven apps cannot drift apart.
+#[uniffi::export]
+pub fn knock_toast_replace_id() -> u32 {
+    fauna_client_notifications::KNOCK_TOAST_REPLACE_ID
+}
+
 /// A knock-push subscription for the UniFFI apps — the UniFFI-friendly twin of
 /// consuming the shared broker's `subscribe_kind("fauna.knock")` directly (as the
 /// Rust-native Linux app does in `apps/fauna-linux`, see `app.rs`
@@ -2650,6 +2660,13 @@ impl FfiNestClient {
             },
         );
         crate::account_runtime::start_conversations_door();
+        // The device's offline outbox (`devices.md` § Offline compose): this
+        // session's manager queues an MLS send made with no nest, and whatever
+        // an earlier run queued drains through this engine — here, at the
+        // store's ready edge and on each offline→online word
+        // (`crate::offline_outbox`).
+        #[cfg(feature = "feed-manager")]
+        crate::offline_outbox::DEVICE.lend_to_session(&session);
         *self.index_arm.lock().unwrap() = Some(crate::index_launch::IndexArm {
             launcher: index_launcher,
             lookup: session.manager(),
@@ -3582,6 +3599,33 @@ impl FfiNestClient {
         .await
         .to_string()
     }
+
+    /// The `folder_set_custody` e2e reader — the FFI twin of tui's and linux's
+    /// `folder_set_custody` arm, the succession journeys' cross-seat custody
+    /// comparison (`succession-aftermath.md` § Re-key scope): which
+    /// content-key generations THIS app's folder custody holds for one set,
+    /// `{"found", "channel_id_hex", "generations": [{"version", "key_fp"}]}`
+    /// or `{"found": false, "error"}` when the custody is unreadable. The set
+    /// is named by `set_name` (an owner's live entry) or `channel_id_hex` (a
+    /// member's). A refused selector is an `Err`, for the shell's loud
+    /// refusal (convention 11). Same gate and block as
+    /// [`Self::device_set_state_json`]; serves every native app over UniFFI.
+    pub async fn folder_set_custody_json(
+        &self,
+        set_name: Option<String>,
+        channel_id_hex: Option<String>,
+    ) -> Result<String, FfiError> {
+        fauna_client_account_runtime::folder_set_custody_json(
+            crate::account_runtime::handle(),
+            set_name.as_deref(),
+            channel_id_hex.as_deref(),
+        )
+        .await
+        .map(|value| value.to_string())
+        .map_err(|why| FfiError::General {
+            msg: format!("folder_set_custody: {why}"),
+        })
+    }
 }
 
 /// The custody owner's send-again poke — the FFI twin of tui's and linux's
@@ -3876,6 +3920,7 @@ mod tests {
                     "fauna.bridges.push.export_progress",
                     "fauna.bridges.push.export_error",
                     "fauna.bridges.push.export_complete",
+                    "fauna.bridges.push.export_session_changed",
                 ],
                 FfiStaleSurfaces {
                     mail_export: true,
@@ -3887,6 +3932,7 @@ mod tests {
                     "fauna.bridges.push.import_progress",
                     "fauna.bridges.push.import_error",
                     "fauna.bridges.push.import_complete",
+                    "fauna.bridges.push.import_session_changed",
                 ],
                 FfiStaleSurfaces {
                     mail_import: true,

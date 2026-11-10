@@ -102,11 +102,18 @@ class FamilyVMTest {
     @Test
     fun `allowing a denied peer un-denies that row's own peer`() {
         val api = mock(ApiClient::class.java)
+        val ward = ByteArray(32) { 9 }
         runBlocking {
             whenever(api.familyStatus()).thenReturn(status(supervisedBy = null))
             whenever(api.familyApprovalsList()).thenReturn(emptyList())
+            // Connected: the un-deny is sent, so the page re-reads.
+            whenever(
+                api.familyAllowBlockedPeerOrQueue(
+                    ward,
+                    com.fauna.ffi.FfiFamilyBlockedPeer(bridgeId = "nostr", peerId = "npub1bbb"),
+                ),
+            ).thenReturn(false)
         }
-        val ward = ByteArray(32) { 9 }
         FamilyVM(api, mock(ScreenTimeStore::class.java), mock(ContentPolicyStore::class.java), mock(android.content.Context::class.java))
             .allowBlockedPeer(
                 com.fauna.app.core.UndenyDecide(
@@ -116,7 +123,7 @@ class FamilyVMTest {
             )
 
         val invocations = org.mockito.Mockito.mockingDetails(api).invocations
-        val allow = invocations.single { it.method.name == "familyAllowBlockedPeer" }.arguments
+        val allow = invocations.single { it.method.name == "familyAllowBlockedPeerOrQueue" }.arguments
         assertArrayEquals(ward, allow[0] as ByteArray)
         assertEquals(com.fauna.ffi.FfiFamilyBlockedPeer(bridgeId = "nostr", peerId = "npub1bbb"), allow[1])
         assertEquals(
@@ -125,6 +132,70 @@ class FamilyVMTest {
             invocations.count { it.method.name == "familyApprovalsDecide" },
         )
         runBlocking { verify(api).familyStatus() }
+    }
+
+    private fun heldMail(id: Byte) = com.fauna.ffi.FfiFamilyApprovalEntry(
+        supervisedActorId = ByteArray(32) { 3 },
+        supervisedHandle = "kid",
+        kind = "mail_hold",
+        peerActorId = ByteArray(0),
+        peerAddress = "",
+        messageId = ByteArray(32) { id },
+        summary = "",
+        peerHandle = "",
+        bridgeId = "",
+        operation = "",
+        target = "",
+        createdAt = 0,
+    )
+
+    private fun vmOver(api: ApiClient) =
+        FamilyVM(api, mock(ScreenTimeStore::class.java), mock(ContentPolicyStore::class.java), mock(android.content.Context::class.java))
+
+    /** With no nest the decision QUEUES (account-offline-mutation.md): the
+     *  item leaves the local list through the shared fold and nothing is
+     *  re-read — there is no nest to read. */
+    @Test
+    fun `a decision with no nest is queued and leaves the local list`() {
+        val api = mock(ApiClient::class.java)
+        val decided = heldMail(9)
+        val other = heldMail(8)
+        runBlocking {
+            whenever(api.familyStatus()).thenReturn(status(supervisedBy = null))
+            whenever(api.familyApprovalsList()).thenReturn(listOf(decided, other))
+            whenever(api.familyApprovalsDecideOrQueue(decided, true)).thenReturn(true)
+        }
+        whenever(api.familyApprovalsAfterQueuedDecision(listOf(decided, other), decided)).thenReturn(listOf(other))
+        val vm = vmOver(api)
+        vm.refresh()
+        vm.decideApproval(decided, true)
+
+        assertEquals(listOf(other), vm.approvals.value)
+        runBlocking { verify(api, org.mockito.Mockito.times(1)).familyApprovalsList() }
+        assertEquals(null, vm.errorMessage.value)
+    }
+
+    /** Connected, the decision is sent and the list re-read from the nest. */
+    @Test
+    fun `a decision with the nest connected is sent and re-read`() {
+        val api = mock(ApiClient::class.java)
+        val decided = heldMail(9)
+        runBlocking {
+            whenever(api.familyStatus()).thenReturn(status(supervisedBy = null))
+            whenever(api.familyApprovalsList()).thenReturn(listOf(decided), emptyList())
+            whenever(api.familyApprovalsDecideOrQueue(decided, false)).thenReturn(false)
+        }
+        val vm = vmOver(api)
+        vm.refresh()
+        vm.decideApproval(decided, false)
+
+        assertEquals(emptyList<com.fauna.ffi.FfiFamilyApprovalEntry>(), vm.approvals.value)
+        runBlocking { verify(api, org.mockito.Mockito.times(2)).familyApprovalsList() }
+        assertEquals(
+            0,
+            org.mockito.Mockito.mockingDetails(api).invocations
+                .count { it.method.name == "familyApprovalsAfterQueuedDecision" },
+        )
     }
 
     @Test

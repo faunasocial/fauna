@@ -248,6 +248,64 @@ const STALE_BUMP_MICROS: u64 = 1_000_000;
 // caller's own sleep fn (never importing `tokio` itself) precisely so this
 // crate's wasm-clean contract is untouched by the lift.
 
+// ── The e2e drain hold (convention 14's anchor for a standing request) ───────
+//
+// The drain grants every `payment_entitled` subscribe row with no judgment, so
+// a paid request stands in the author's own requests list only until the next
+// pump tick — there is no product state that keeps it queued. A test that must
+// read that row (the §2 paid badge, `subscription-request-paid-badge`) holds
+// the drain, enqueues, reads, and releases; a clock never decides it. One flag
+// per process because each app runs one author pump per signed-in session;
+// thread-local under `cfg(test)` so this crate's own parallel drain tests
+// cannot see each other's hold. Compiled out of release builds (convention 15:
+// `e2e-automation-surface-gating.md`, rule (a)); consumers forward
+// `test-helpers` from their own `e2e-agent` feature, never a dep line.
+
+#[cfg(all(not(test), any(debug_assertions, feature = "test-helpers")))]
+static AUTHOR_DRAIN_HOLD: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    static AUTHOR_DRAIN_HOLD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: hold this process's author drain — every later
+/// [`SubscriptionsAuthor::drain_auto_approvals`] pass reads the queue and
+/// commits nothing, until [`release_author_drain_for_test`]. Takes effect for
+/// every row enqueued after this returns (the check sits after the queue read).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub fn hold_author_drain_for_test() {
+    #[cfg(test)]
+    AUTHOR_DRAIN_HOLD.with(|h| h.set(true));
+    #[cfg(not(test))]
+    AUTHOR_DRAIN_HOLD.store(true, Ordering::SeqCst);
+}
+
+/// Test-only: release a [`hold_author_drain_for_test`] hold; the next pump tick
+/// drains as usual. A no-op when nothing is held.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub fn release_author_drain_for_test() {
+    #[cfg(test)]
+    AUTHOR_DRAIN_HOLD.with(|h| h.set(false));
+    #[cfg(not(test))]
+    AUTHOR_DRAIN_HOLD.store(false, Ordering::SeqCst);
+}
+
+fn author_drain_held() -> bool {
+    #[cfg(test)]
+    {
+        AUTHOR_DRAIN_HOLD.with(|h| h.get())
+    }
+    #[cfg(all(not(test), any(debug_assertions, feature = "test-helpers")))]
+    {
+        AUTHOR_DRAIN_HOLD.load(Ordering::SeqCst)
+    }
+    #[cfg(all(not(test), not(any(debug_assertions, feature = "test-helpers"))))]
+    {
+        false
+    }
+}
+
 /// The author pump's backstop cadence — `monetization.md` § Pillar 1's matrix
 /// row names it by value ("`drain_auto_approvals` on connect + **30 s**
 /// backstop"). There is no subscribe-request push kind, so this is the delivery
@@ -1298,6 +1356,14 @@ where
             .requests_list()
             .await
             .map_err(AuthorError::Transport)?;
+        // The e2e hold ([`hold_author_drain_for_test`]) is read AFTER the queue
+        // read, never before it: a pass already past a pre-read check would
+        // drain a row enqueued after the hold was acked. Read here, a row the
+        // test enqueues after its hold is either absent from this list or met
+        // by a held check — so it stands. Always `false` in a release build.
+        if author_drain_held() {
+            return Ok(0);
+        }
         if requests.is_empty() {
             return Ok(0);
         }
@@ -1376,10 +1442,22 @@ where
     /// roster), then clear the queue row (`requests.reject` is the row-delete
     /// primitive; best-effort — a missed delete self-heals next pass, where the
     /// removal no-ops and this delete retries).
+    ///
+    /// A leave of the reserved `followers` tier first takes the approve path's
+    /// heal ([`Self::approve_subscriber`]): the nest auto-provisions that tier,
+    /// so a follower's leave may arrive before this client ever minted its
+    /// period key, and the removal rotation needs a `current` to rotate past
+    /// (`subscriptions.md` § The free followers tier — follow and unfollow,
+    /// rule 3). Any other tier missing its key stays a real `NoPeriodKey`.
     async fn commit_unsubscribe(
         &self,
         request: &PendingRequest,
     ) -> Result<(), AuthorError<R::Error>> {
+        if request.tier_name == FOLLOWERS_TIER
+            && custody::current_period(&self.custody().await?, FOLLOWERS_TIER).is_none()
+        {
+            self.record_tier_period(FOLLOWERS_TIER).await?;
+        }
         self.remove_subscriber(&request.tier_name, request.subscriber_id)
             .await?;
         let _ = self.subs.requests_reject(request.request_id).await;
@@ -4365,6 +4443,38 @@ mod tests {
         );
     }
 
+    /// An unfollow of a nest-provisioned `followers` tier whose period key the
+    /// author's client never minted (the follower's leave arrives before any
+    /// approval this client made): the leave path heals the key first, as the
+    /// approve path does, then runs the removal rotation over it — never a
+    /// `NoPeriodKey` that strands the leave (`subscriptions.md` § The free
+    /// followers tier — follow and unfollow, rule 3).
+    #[test]
+    fn an_unfollow_heals_a_missing_followers_key_then_rotates() {
+        let nest = Arc::new(FakeNest::default());
+        let a = author(nest.clone());
+        nest.set_tiers(&[tier_item(FOLLOWERS_TIER, 0, true)]);
+        nest.set_roster(&[actor(8)]);
+        nest.set_requests(&[pending(9, actor(8), FOLLOWERS_TIER, "unsubscribe")]);
+        assert!(custody::current_period(&held_custody(&a), FOLLOWERS_TIER).is_none());
+
+        let n = block_on(a.drain_auto_approvals()).expect("drain");
+        assert_eq!(n, 1, "the unfollow committed");
+        assert_eq!(
+            nest.remove_uploads.lock().unwrap().len(),
+            1,
+            "the removal rotation uploaded a post-removal KeyBlob"
+        );
+        assert_eq!(*nest.reject_calls.lock().unwrap(), vec![9]);
+        assert!(nest.roster.lock().unwrap().is_empty());
+        let period = custody::current_period(&held_custody(&a), FOLLOWERS_TIER)
+            .expect("the healed key's rotation is in custody");
+        assert_eq!(
+            period.version, 2,
+            "healed at v1, then rotated past the leaver to v2"
+        );
+    }
+
     #[test]
     fn approve_subscriber_refuses_a_non_subscribe_request() {
         // The approve handler discards the row's `kind`, so feeding it an
@@ -4493,6 +4603,33 @@ mod tests {
             expect_set(&[actor(5)]),
             "the mint covers the paying subscriber"
         );
+    }
+
+    #[test]
+    fn a_held_drain_leaves_a_paid_request_standing_until_released() {
+        // The e2e anchor for the §2 paid badge: while held, a pass reads the
+        // queue and commits nothing, so the paid row stays queued for the
+        // author's UI to render; released, the next pass grants it as usual.
+        let nest = Arc::new(FakeNest::default());
+        let a = author(nest.clone());
+        block_on(a.create_tier("gold", 1, None, None, None, false, None, None, false))
+            .expect("create gold");
+        nest.set_tiers(&[tier_item("gold", 1, false)]);
+        nest.set_roster(&[]);
+        nest.set_requests(&[pending_paid(1, actor(5), "gold")]);
+
+        hold_author_drain_for_test();
+        let held = block_on(a.drain_auto_approvals());
+        release_author_drain_for_test();
+        assert_eq!(held.expect("held drain"), 0, "a held drain commits nothing");
+        assert!(
+            nest.approve_uploads.lock().unwrap().is_empty(),
+            "no mint while held: the paid request must stand"
+        );
+
+        let n = block_on(a.drain_auto_approvals()).expect("released drain");
+        assert_eq!(n, 1, "released, the paid request drains");
+        assert_eq!(nest.approve_uploads.lock().unwrap().len(), 1);
     }
 
     #[test]

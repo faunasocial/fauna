@@ -25,17 +25,21 @@ internal static class KnockToastText
     /// knocker's args arrive already reduced to plain, capped single-line text
     /// by the shared decision (<c>sanitize_plain_line</c>), so nothing here
     /// re-sanitizes.
+    ///
+    /// <para><c>BodyKey</c> is the catalog key the body resolved from (<c>null</c>
+    /// for a verbatim body) — what the knock-toast log records as <c>key</c>
+    /// (<c>fauna_e2e_agent::KNOCK_NOTICES_KEY</c>).</para>
     /// </summary>
-    public static (string Title, string Body) For(FfiKnock knock)
+    public static (string Title, string Body, string? BodyKey) For(FfiKnock knock)
     {
         var title = Strings.Get("notifications/knock_title");
-        var body = FaunaFfiMethods.KnockTextFor(knock) switch
+        var (body, key) = FaunaFfiMethods.KnockTextFor(knock) switch
         {
-            FfiNotificationText.Localized l => Strings.Resolve(l.text),
-            FfiNotificationText.Verbatim v => v.text,
-            _ => Strings.Get("notifications/knock_body"),
+            FfiNotificationText.Localized l => (Strings.Resolve(l.text), l.text.@key),
+            FfiNotificationText.Verbatim v => (v.text, (string?)null),
+            _ => (Strings.Get("notifications/knock_body"), "notifications.knock_body"),
         };
-        return (title, body);
+        return (title, body, key);
     }
 
     /// <summary>

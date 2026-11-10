@@ -167,16 +167,26 @@ owns mail's constants, enforcement points, and reply codes.
     so the read leg needs no token at all. It **fails closed**: the chunk contents are
     self-verifying (content-addressed) but the chunk *list* is not, so the rejoin is
     pinned against the reference's declared total, exactly as nest pins it on the way up.
-  - **Built (the perimeter + EHLO).** `clampToInlineCeiling` is **deleted**. The `Data`
-    paths and the EHLO `SIZE` advertisement now both read
-    `fauna_mail::transport_limits::effective_max_raw_message_bytes` — one shared-Rust
-    rule, so enforcement can never drift from the at-rest limit backing it. EHLO
-    previously advertised go-smtp's 1 GiB backstop, ~120× the truth. It advertises the
-    **boot** snapshot's value deliberately: go-smtp reads `srv.MaxMessageBytes` live
-    per-EHLO off a non-atomic field it owns, so hot-applying a later admin change would
-    be a data race; both staleness directions are safe (a stale-high `SIZE` costs one
-    wasted transfer then the permanent `552` the live guard raises; a stale-low one makes
-    the sender self-limit), so we advertise boot rather than race it.
+  - **Built (the perimeter + EHLO).** `clampToInlineCeiling` is **deleted**. The live
+    admin cap — `fauna_mail::transport_limits::effective_max_raw_message_bytes` over the
+    current `max_message_bytes`, one shared-Rust rule — is enforced by our own hooks on
+    **both** doors, read per connection from the hot-swapped config, so a change in either
+    direction applies at the next connection with **no bridge restart**
+    ([`mail-policy-config.md`](mail-policy-config.md) § Architectural rules): a declared
+    `MAIL FROM … SIZE=` above it is refused `552 5.3.4` before any transfer
+    (`checkDeclaredSize`, RFC 1870), and the `Data` guard refuses an undeclared body past it
+    with the same reply. go-smtp's own `srv.MaxMessageBytes` — which it both advertises as
+    EHLO `SIZE` and enforces itself, ahead of our hooks — holds the product ceiling
+    `MAX_MESSAGE_BYTES_CEILING`, the one value no admin change can move: go-smtp reads the
+    field live off a non-atomic int64 it owns, so writing a later admin change into it
+    would be a data race. EHLO `SIZE` is therefore an upper bound, never the live cap; a
+    sender that declares its size learns the live cap at `MAIL FROM`, and one that does not
+    spends one transfer before the `Data` guard's `552`. *Corrected 2026-11-07:* this
+    field used to hold the **boot** snapshot's cap, on the reading that a stale-low value
+    only made senders self-limit — but go-smtp enforces the field, so a cap the admin
+    raised above the boot value was refused `552` until a restart (found by the
+    `mail-abuse-refused` 28 api witness). EHLO before that advertised go-smtp's 1 GiB
+    backstop.
   - **The size failures are one permanent class.** `mailstage.ErrMessageTooLarge` →
     `552 5.3.4` on **both** the inbound and submission ladders (the submission ladder previously had
     no size branch at all and would have deferred `451`). At the time it had two causes: a
@@ -274,7 +284,7 @@ owns mail's constants, enforcement points, and reply codes.
     full relay wire tuple fits the 2 MiB federation frame with headroom.
   - **Ceiling retirement — LANDED 2026-07-18 (its own slice, after the write flip).**
     `MAX_SEALED_BODY_AT_REST_BYTES` / `MAX_RAW_MESSAGE_BYTES_AT_REST` are **deleted** — the
-    effective ceiling is `max_message_bytes` *alone* (the SMTP `Data` clamp, EHLO `SIZE`,
+    effective ceiling is `max_message_bytes` *alone* (the SMTP `MAIL FROM`/`Data` clamps,
     nest import/APPEND admission, and `fauna.email.send` all follow from the one shared-Rust
     `effective_max_raw_message_bytes` rule), the `552` at-rest refusal is gone (any admitted
     size now rests as continuation records), and the S8 size probes retarget accordingly.
@@ -294,8 +304,9 @@ owns mail's constants, enforcement points, and reply codes.
       (`DEFAULT_MAX_MESSAGE_BYTES`, 50 MB), not the deleted at-rest ceiling — never
       uncapped, because go-smtp treats a `0` `MaxMessageBytes` as unlimited.
     - **Wire/binding.** Both deleted constants were uniffi-exported and read by the Go
-      bridge (`EffectiveMaxRawMessageBytes` sets go-smtp's `MaxMessageBytes` and the EHLO
-      `SIZE` advertisement at `internal/mta/server.go` + `internal/mta/submission.go`), so
+      bridge (`EffectiveMaxRawMessageBytes` then set go-smtp's `MaxMessageBytes` and the EHLO
+      `SIZE` advertisement at `internal/mta/server.go` + `internal/mta/submission.go` — since
+      2026-11-07 those hold `MaxMessageBytesCeiling`, the perimeter + EHLO bullet above), so
       the retirement regenerated the **tracked** `libs/fauna-mail-go` binding.
   - Ingest keeps the S1–S4 staging flow unchanged: staged chunks resolve to one verified
     `SealedRecordBytes`, and the continuation writer splits *after* verification, at the

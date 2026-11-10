@@ -31,6 +31,7 @@ internal static class PostSummaryFixture
         string? repostedPostId = null,
         string? viewerRepostId = null,
         bool viewerLiked = false,
+        LikeState? likeState = null,
         string? mediaHash = null,
         VerificationStatus verification = VerificationStatus.Unchecked,
         AuthoringOriginStatus authoringOrigin = AuthoringOriginStatus.Unknown,
@@ -70,6 +71,9 @@ internal static class PostSummaryFixture
             repostedPostId: repostedPostId,
             viewerRepostId: viewerRepostId,
             viewerLiked: viewerLiked,
+            // The manager derives the word from viewerLiked when nothing of the
+            // post is queued; a test about queued/unsent names it.
+            likeState: likeState ?? (viewerLiked ? LikeState.On : LikeState.Off),
             mediaHash: mediaHash,
             verification: verification,
             authoringOrigin: authoringOrigin,

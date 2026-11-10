@@ -128,6 +128,8 @@ public struct PostCardBody: View {
     @State private var contentRevealed = false
     /// The tapped `post-image`'s lightbox item.
     @State private var lightboxItem: LightboxItem?
+    /// The body's painted lines, measured for `get_attr(feed-post-text, painted)`.
+    @State private var paintedLines = DocumentPaintedLines()
 
     /// This post's render decision — the strictest-wins compose of the region
     /// content policy, the guardian floor and the viewer's own thresholds,
@@ -167,7 +169,14 @@ public struct PostCardBody: View {
                 contentRevealed = true
             }.padding(.vertical, verticalPadding))
         } else if contentVerdict == "block" {
-            postCardId(ContentPolicyBlockedNotice(reported: decision.reported, reason: decision.guardianReason)
+            postCardId(ContentPolicyBlockedNotice(
+                reported: decision.reported, reason: decision.guardianReason,
+                showAgain: appState.contentPolicy.inputs.showAgainFor(itemId: post.postId, authorId: post.author),
+                onShowAgain: { ids in
+                    let store = appState.contentPolicy
+                    Task { await store.report.showAgain(ids, contentPolicy: store) }
+                }
+            )
                 .padding(.vertical, verticalPadding))
         } else if contentVerdict == "collapse" && !contentRevealed {
             postCardId(ContentPolicyCollapsedPlaceholder(reason: decision.guardianReason) { contentRevealed = true }
@@ -178,7 +187,11 @@ public struct PostCardBody: View {
                 FeedVM.revealedMutedPostIds.insert(post.postId)
             }).padding(.vertical, verticalPadding))
         } else {
-            cardContent
+            // The one arm that shows the post: only it marks the post a cue
+            // subject, so the feed's cue capture never measures a placeholder
+            // (`CueCardMark.subject`; linux's `cue-subject`, android's
+            // `CueSubjectMark`).
+            cardContent.cueSubject(postId: post.postId)
         }
     }
 
@@ -213,9 +226,9 @@ public struct PostCardBody: View {
     @ViewBuilder
     private var documentBody: some View {
         if let bodyFont {
-            DocumentBodyView(document: post.document).font(bodyFont)
+            DocumentBodyView(document: post.document, painted: paintedLines).font(bodyFont)
         } else {
-            DocumentBodyView(document: post.document)
+            DocumentBodyView(document: post.document, painted: paintedLines)
         }
     }
 
@@ -273,7 +286,11 @@ public struct PostCardBody: View {
                 documentBody
                     .lineLimit(bodyLineLimit)
                     .accessibilityIdentifier(Ids.feedPostText)
-                    .automationValue(Ids.feedPostText, text: { renderDocumentToPlaintext(document: post.document) })
+                    // `painted` is the body as laid out — boxes and nesting kept
+                    // (`DocumentPaintedLines`, the `document-painted-read` surface).
+                    .automationValue(Ids.feedPostText,
+                                     text: { renderDocumentToPlaintext(document: post.document) },
+                                     attributes: { ["painted": paintedLines.text] })
 
                 // Per-card reveal when the body carries ≥1 still-blocked remote image (D3). Tapping
                 // dispatches to the manager, which re-emits with `revealed = true`; the ForEach rebuilds
@@ -288,47 +305,21 @@ public struct PostCardBody: View {
                     .automationActivate(Ids.loadRemoteContentButton) { vm.revealRemoteImages(post.postId) }
                 }
 
-                // Media — the document's folded `Image` block (render-model.md § D6), painted via
-                // `post-image`; replaces the sibling `post.mediaHash` read. Tapping opens the
-                // `image-lightbox` (ui.yaml `image-lightbox`; mirrors web's `C2paImage` onclick
-                // wiring on the same list-card surface). The image's own `.onTapGesture` takes
-                // priority over the card's outer `.onTapGesture` (post-detail push); the same
-                // action handed to `PostImage` is what the in-process e2e driver actually
-                // invokes (apple-e2e-automation.md rule 1 — the driver performs no real gestures),
-                // registered by the leaf together with its paint read.
-                //
-                // Which source this is, is not a judgment the card makes: `vm.documentPostImage`
-                // takes the blob image first — asking the shared manager, which holds the keys,
-                // whether it is sealed (`ui/media.md` § Encryption at rest) — else a bridged
-                // post's `ProxiedImage` (render-model.md § D6c), never an absolute URL.
-                // The post's `postBlobHome` is handed to every byte leg unchanged — a post homed on
-                // another nest is read from there through the shared plane, never from this nest.
-                let blobHome = postBlobHome(post: post)
-                if let source = vm.documentPostImage(post.document, home: blobHome), !source.isUnavailable {
-                    let openLightbox = { lightboxItem = LightboxItem(source: source) }
-                    PostImage(source: source, activate: openLightbox)
-                        .frame(maxHeight: 200)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .contentShape(Rectangle())
-                        .onTapGesture(perform: openLightbox)
-                    // Provenance is a blob's (`ui/media.md` § C2PA provenance); a proxied
-                    // picture carries no badge, as on tui.
-                    if let hash = documentMediaImageHash(post.document) {
-                        PostImageC2paBadge(hash: hash, check: { await vm.hasC2pa($0, home: blobHome) })
-                    }
-                }
-                // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md § D6b);
-                // mutually exclusive with the image branch above, same fold. A tap plays it in
-                // place off the shared `playback_source` (§ D6c → Inline playback).
-                if let hash = documentMediaVideoHash(post.document) {
-                    VideoThumbnailView(hash: hash, resolve: { await vm.videoPlayback(hash, home: postBlobHome(post: post)) },
-                                       onPlayed: notePlayed, onPlaying: notePlaying)
-                } else if let path = documentMediaProxiedVideoPath(post.document) {
-                    // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path; a tap
-                    // plays it through the nest's media proxy on the shared ticket.
-                    VideoThumbnailView(proxiedPath: path, resolve: { await vm.proxiedVideoPlayback(path) },
-                                       onPlayed: notePlayed, onPlaying: notePlaying)
-                }
+                // Media — every folded `Image` / `ProxiedImage` / `Video` / `ProxiedVideo` block
+                // (render-model.md § D6b), in body order: one `post-image` per picture, one
+                // `video-thumbnail` per video, each carrying its `alt` (§ D6c, the `alt` paragraph).
+                // Tapping a picture opens the `image-lightbox` (ui.yaml `image-lightbox`; mirrors
+                // web's `C2paImage` onclick wiring); the image's own `.onTapGesture` takes priority
+                // over the card's outer one (post-detail push), and the same action handed to
+                // `PostImage` is what the in-process e2e driver invokes (apple-e2e-automation.md
+                // rule 1). A tap on a video plays it in place off the shared `playback_source`
+                // (§ D6c → Inline playback). Which source a picture is, is the view model's pick
+                // (`FeedVM.postImage(for:home:)`, `ui/media.md` § Encryption at rest); the post's
+                // `postBlobHome` is handed to every byte leg unchanged.
+                PostMediaList(vm: vm, document: post.document, home: postBlobHome(post: post),
+                              maxImageHeight: 200, showC2pa: true,
+                              openLightbox: { lightboxItem = LightboxItem(source: $0) },
+                              onPlayed: notePlayed, onPlaying: notePlaying)
 
                 // Quoted post — the document's folded `QuotedPost` block (render-model.md § D6);
                 // replaces the sibling `post.quotedPostId` + client-side resolve decode.
@@ -485,9 +476,7 @@ public struct PostCardBody: View {
                 await vm.resolveLinkPreview(url)
             }
         }
-        .fullScreenCover(item: $lightboxItem) { item in
-            ImageLightbox(source: item.source, onDismiss: { lightboxItem = nil })
-        }
+        .imageLightbox(item: $lightboxItem)
     }
 }
 

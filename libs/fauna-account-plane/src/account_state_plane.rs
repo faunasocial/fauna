@@ -512,6 +512,15 @@ pub struct AccountStatePlane<'a, B: StoreBackend, R: RpcRequester> {
     /// refused; and its writer key is ephemeral, so a row it sealed would
     /// serve no one. Its reads are what it is for.
     fold_only: bool,
+    /// `true` for a **cap-refused pass's session listing**
+    /// ([`Self::new_session_listing`] — `account-client-lifecycle.md` § The
+    /// client-side lifecycle → *A cap-refused pass lists the fleet scope over
+    /// the app session*): a pull-only plane over the app-session requester
+    /// against the bound nest, whose full-state reconcile records the scope
+    /// listed and its unkeyed set as the bound plane's full listing does —
+    /// and nothing else: no watermark, no serve coordinate, no walker mark,
+    /// nothing published.
+    session_listing: bool,
     /// Single-flight for the **first-need mint** (trigger (a)). Concurrent
     /// `GenerationTip` originations on one plane would otherwise each find no
     /// tip and each mint, forking the DAG on the first write of a fresh
@@ -1002,6 +1011,28 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
         Ok(plane)
     }
 
+    /// The **cap-refused pass's** constructor (`account-client-lifecycle.md`
+    /// § The client-side lifecycle → *A cap-refused pass lists the fleet scope
+    /// over the app session*): a pull-only plane whose [`Self::reconcile`] is
+    /// a full listing of `scope` against the bound nest over `rpc`, the app
+    /// session — rows applied as any walk's, the scope's `listed` fact and
+    /// unkeyed set recorded as the bound plane's full listing records them.
+    /// No watermark is sent or banked, no serve coordinate stamped, no walker
+    /// mark left and nothing published: a machine refused at its device cap
+    /// has no data path, and this listing is not one.
+    pub fn new_session_listing(
+        store: &'a AccountStore<B>,
+        rpc: &'a R,
+        schedule: &'a AccountStateKeySchedule,
+        writer_key: &'a SigningKey,
+        trust: &'a GenerationTrust,
+        scope: impl Into<String>,
+    ) -> Result<Self> {
+        let mut plane = Self::new_pull_only(store, rpc, schedule, writer_key, trust, scope)?;
+        plane.session_listing = true;
+        Ok(plane)
+    }
+
     #[allow(clippy::too_many_arguments)] // the two constructors' one seam
     fn build(
         store: &'a AccountStore<B>,
@@ -1029,6 +1060,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
             publish_to_feed,
             linked: false,
             fold_only: false,
+            session_listing: false,
             mint_lock: tokio::sync::Mutex::new(()),
             custody: None,
             predecessors: &[],
@@ -1529,10 +1561,11 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     /// scope **listed** (`account-client-lifecycle.md` § The client-side
     /// lifecycle → *The first listing*, clause (1)) at once when it left no
     /// row unopened, otherwise owe it to the end of the pass
-    /// ([`Self::pass_ended`]). The bound nest's plane only: a peer or a
-    /// linked nest is not held complete, so its listing records nothing.
+    /// ([`Self::pass_ended`]). The bound nest's plane only — or a cap-refused
+    /// pass's session listing of it ([`Self::new_session_listing`]): a peer or
+    /// a linked nest is not held complete, so its listing records nothing.
     async fn listing_ran(&self, report: &WalkReport, full: bool) -> Result<()> {
-        if !self.bound() {
+        if !self.bound() && !self.session_listing {
             return Ok(());
         }
         // The unkeyed set (clause (5), *The fact*): a full listing replaces it
@@ -3299,6 +3332,15 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
     /// as the walk opens, set only when it completes.
     pub async fn reconcile(&self) -> Result<WalkReport> {
         if !self.publish_to_feed {
+            if self.session_listing {
+                // A cap-refused pass's listing of the bound nest: the whole
+                // frontier with no watermark, recorded as a full listing.
+                self.listing_owed
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                let report = self.run(BTreeMap::new()).await?;
+                self.listing_ran(&report, true).await?;
+                return Ok(report);
+            }
             return self.run(BTreeMap::new()).await;
         }
         *self

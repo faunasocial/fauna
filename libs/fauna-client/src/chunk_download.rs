@@ -140,6 +140,22 @@ pub struct ForeignPublicChunkFetcher {
     /// caller-supplied client).
     home: GraduatedHome,
     http: reqwest::Client,
+    /// The member door's bearer ([`Self::with_read_bearer`]): `Some` sends it,
+    /// with the folder hint, on every folder read; `None` reads plainly.
+    read_bearer: Option<Arc<dyn ForeignReadBearer>>,
+}
+
+/// The byte-plane bearer a cross-nest **member** presents on its set's home
+/// nest: the short-lived read token its own nest mints for it
+/// (`relay-serving.md` § Relay serving → *A member on another nest*, step (5)).
+/// The member holds no session there, so the home nest names it by this token
+/// alone, at the store-miss arm of the chunk route. A refused mint (the member
+/// was removed) answers an error carrying
+/// [`fauna_core::file_download::MembershipRefused`].
+#[async_trait::async_trait]
+pub trait ForeignReadBearer: Send + Sync {
+    /// A current token for the home nest's chunk route.
+    async fn bearer(&self) -> anyhow::Result<String>;
 }
 
 impl ForeignPublicChunkFetcher {
@@ -162,6 +178,7 @@ impl ForeignPublicChunkFetcher {
         Self {
             home: GraduatedHome::new(base_url, home_nest_actor_id),
             http: crate::pinned_http_client(base_url),
+            read_bearer: None,
         }
     }
 
@@ -172,16 +189,42 @@ impl ForeignPublicChunkFetcher {
         Self {
             home: GraduatedHome::new(base_url, None),
             http,
+            read_bearer: None,
         }
+    }
+
+    /// Send `bearer`'s token, with the folder hint, on every folder read —
+    /// the member door of a cross-nest shared set, whose metadata-only chunks
+    /// the home nest relays from a seat only for a caller it can name. Plain
+    /// reads (the manifest, an unhinted chunk) stay bearer-less.
+    #[must_use]
+    pub fn with_read_bearer(mut self, bearer: Arc<dyn ForeignReadBearer>) -> Self {
+        self.read_bearer = Some(bearer);
+        self
     }
 
     /// GET `path`, reading at most `max_bytes` of the body (the home is a
     /// stranger's nest, so it does not choose how much this client allocates;
     /// the content-address check runs only after the read).
     async fn get(&self, path: &str, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+        self.get_as(path, &[], None, max_bytes).await
+    }
+
+    /// [`Self::get`] with `query` appended and under `bearer` when one is given.
+    async fn get_as(
+        &self,
+        path: &str,
+        query: &[(&'static str, String)],
+        bearer: Option<&str>,
+        max_bytes: u64,
+    ) -> anyhow::Result<Vec<u8>> {
         self.home.ensure_graduated().await?;
         let url = format!("{}{path}", self.home.url());
-        let resp = self.http.get(&url).send().await?;
+        let mut req = self.http.get(&url).query(query);
+        if let Some(token) = bearer {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await?;
         anyhow::ensure!(resp.status().is_success(), "GET {url}: {}", resp.status());
         let max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
         fauna_nest_http::capped::read_capped(resp, max)
@@ -307,6 +350,36 @@ impl BlobFetcher for ForeignPublicChunkFetcher {
             let path = paths::chunk_store::chunk_by_hash(&hex::encode(key.digest()));
             let bytes = self
                 .get(&path, MAX_STORED_CHUNK_BODY)
+                .await
+                .with_context(|| format!("GET {path} (chunk of {relative_path})"))?;
+            out.push(bytes);
+        }
+        Ok(out)
+    }
+
+    async fn fetch_folder_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+        folder: &FolderHint,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        // A hint without a bearer only turns the home nest's miss into a
+        // `401`, so the plain door reads plainly.
+        let Some(source) = &self.read_bearer else {
+            return self.fetch_chunks(store_keys, relative_path).await;
+        };
+        // Minted before the first byte: a refusal (the member was removed)
+        // fails the read here, `MembershipRefused` in its chain.
+        let token = source
+            .bearer()
+            .await
+            .with_context(|| format!("read token for {relative_path}"))?;
+        let query = folder.query_pairs();
+        let mut out = Vec::with_capacity(store_keys.len());
+        for key in store_keys {
+            let path = paths::chunk_store::chunk_by_hash(&hex::encode(key.digest()));
+            let bytes = self
+                .get_as(&path, &query, Some(&token), MAX_STORED_CHUNK_BODY)
                 .await
                 .with_context(|| format!("GET {path} (chunk of {relative_path})"))?;
             out.push(bytes);
@@ -441,6 +514,114 @@ mod tests {
                 .expect_err("an over-cap manifest reply must be refused");
             assert!(format!("{err:?}").contains("size cap"), "got: {err:?}");
         }
+    }
+
+    /// A one-shot HTTP server that answers every request `200` with `body` and
+    /// hands back each request's head (request line + headers), in order.
+    async fn serve_recording(
+        body: Vec<u8>,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let tx = tx.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    struct FixedBearer(&'static str);
+
+    #[async_trait::async_trait]
+    impl ForeignReadBearer for FixedBearer {
+        async fn bearer(&self) -> anyhow::Result<String> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    struct RefusedBearer;
+
+    #[async_trait::async_trait]
+    impl ForeignReadBearer for RefusedBearer {
+        async fn bearer(&self) -> anyhow::Result<String> {
+            Err(anyhow::Error::new(
+                fauna_core::file_download::MembershipRefused,
+            ))
+        }
+    }
+
+    /// The member door (`relay-serving.md` § Relay serving → *A member on
+    /// another nest*, step (5)): a folder read carries the member's read token
+    /// as its bearer and the folder hint, ref form included, so the home
+    /// nest's store-miss arm can name the member and relay the chunk; a plain
+    /// read and the manifest stay bearer-less.
+    #[tokio::test]
+    async fn a_member_doors_folder_read_carries_its_token_and_the_hint() {
+        let (url, mut heads) = serve_recording(b"chunk".to_vec()).await;
+        let fetcher = ForeignPublicChunkFetcher::with_http(&url, reqwest::Client::new())
+            .with_read_bearer(Arc::new(FixedBearer("member-read-token")));
+        let channel = [0xabu8; 32];
+        let hint = FolderHint::new("their-docs")
+            .with_ref(Some(fauna_core::folder_keys::FolderRef::Foreign(channel)));
+        let got = fetcher
+            .fetch_folder_chunks(&[ContentHash::of_raw(b"c")], "a.bin", &hint)
+            .await
+            .expect("the hinted read is served");
+        assert_eq!(got, vec![b"chunk".to_vec()]);
+        let head = heads.recv().await.unwrap().to_ascii_lowercase();
+        assert!(
+            head.contains("authorization: bearer member-read-token"),
+            "the read carries the member's token: {head}"
+        );
+        assert!(
+            head.contains(&format!("folder_ref=foreign%3a{}", hex::encode(channel))),
+            "the read names the folder by its channel ref: {head}"
+        );
+
+        fetcher
+            .fetch_chunks(&[ContentHash::of_raw(b"c")], "a.bin")
+            .await
+            .expect("the plain read is served");
+        let head = heads.recv().await.unwrap().to_ascii_lowercase();
+        assert!(
+            !head.contains("authorization") && !head.contains("folder_ref"),
+            "a plain read carries neither: {head}"
+        );
+    }
+
+    /// A refused mint fails the read before anything is dialed, with
+    /// `MembershipRefused` in its chain for the reader to name.
+    #[tokio::test]
+    async fn a_refused_mint_fails_the_member_doors_read_naming_the_refusal() {
+        let fetcher =
+            ForeignPublicChunkFetcher::with_http("http://192.0.2.1:1", reqwest::Client::new())
+                .with_read_bearer(Arc::new(RefusedBearer));
+        let err = fetcher
+            .fetch_folder_chunks(
+                &[ContentHash::of_raw(b"c")],
+                "a.bin",
+                &FolderHint::new("their-docs"),
+            )
+            .await
+            .expect_err("a refused member reads nothing");
+        assert!(
+            fauna_core::file_download::is_membership_refused(&err),
+            "the refusal survives in the chain: {err:?}"
+        );
     }
 
     /// `fauna-core` cannot name the nest's parameter constants, so the hint

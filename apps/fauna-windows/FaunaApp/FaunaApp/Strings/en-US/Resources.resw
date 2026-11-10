@@ -677,6 +677,8 @@
     <data name="feed/delete_post_confirm_title" xml:space="preserve"><value>Delete post?</value></data>
     <data name="feed/error_delete" xml:space="preserve"><value>Failed to delete post: {message}</value></data>
     <data name="feed/report_post" xml:space="preserve"><value>Report post</value></data>
+    <data name="feed/mark_as_spam" xml:space="preserve"><value>Mark as spam</value></data>
+    <data name="feed/error_mark_spam" xml:space="preserve"><value>Could not mark the post as spam: {message}</value></data>
     <data name="feed/error_muted_keywords" xml:space="preserve"><value>Your muted words are not being applied: {message}</value></data>
     <data name="feed/unverified_source" xml:space="preserve"><value>Unverified</value></data>
     <data name="feed/unverified_source_tooltip" xml:space="preserve"><value>This device could not verify the author's signature on this post.</value></data>
@@ -719,6 +721,7 @@
     <data name="feed/create/factor_trending" xml:space="preserve"><value>Trending</value></data>
     <data name="feed/create/factor_watch_complete" xml:space="preserve"><value>Watched to the end</value></data>
     <data name="feed/create/factor_skip" xml:space="preserve"><value>Skipped past</value></data>
+    <data name="feed/create/factor_reported_spam" xml:space="preserve"><value>Reported as spam</value></data>
     <data name="feed/create/factor_weight_placeholder" xml:space="preserve"><value>1.0</value></data>
     <data name="feed/create/factor_global_toggle" xml:space="preserve"><value>Apply to all feeds</value></data>
     <data name="feed/create/add_factor" xml:space="preserve"><value>Add Factor</value></data>
@@ -730,6 +733,8 @@
     <data name="feed/post/add_comment" xml:space="preserve"><value>Add your comment...</value></data>
     <data name="feed/post/whats_on_your_mind" xml:space="preserve"><value>What's on your mind?</value></data>
     <data name="feed/post/has_media" xml:space="preserve"><value>[media]</value></data>
+    <data name="feed/post/image_alt_fallback" xml:space="preserve"><value>Picture</value></data>
+    <data name="feed/post/video_alt_fallback" xml:space="preserve"><value>Video</value></data>
     <data name="feed/post/view_thread" xml:space="preserve"><value>View Thread</value></data>
     <data name="feed/post/thread" xml:space="preserve"><value>Thread</value></data>
     <data name="feed/post/no_thread_data" xml:space="preserve"><value>No thread data</value></data>
@@ -833,9 +838,13 @@
     <data name="conversations/unified/attachment_remove" xml:space="preserve"><value>Remove attachment</value></data>
     <data name="conversations/unified/error_add_participant" xml:space="preserve"><value>Could not add them to this conversation: {message}</value></data>
     <data name="conversations/unified/error_add_participant_after_heal" xml:space="preserve"><value>their undelivered earlier invitation was removed first, so they are no longer in the group — adding them again starts cleanly. The re-invitation failed: {reason}</value></data>
+    <data name="conversations/unified/error_add_participant_unconfirmed" xml:space="preserve"><value>they are already in this group, but whether their invitation reached them cannot be confirmed right now. If they never received it, remove them from the group and add them again.</value></data>
     <data name="conversations/unified/error_remove_participant" xml:space="preserve"><value>Could not remove them from this conversation: {message}</value></data>
+    <data name="conversations/unified/error_remove_participant_unsevered" xml:space="preserve"><value>{name} is out of this room, but the room's key has not been changed yet, so they can still read new messages until the next owner's or admin's app finishes the removal. Nothing for you to do.</value></data>
     <data name="conversations/unified/error_rename_thread" xml:space="preserve"><value>Could not rename this conversation: {message}</value></data>
     <data name="conversations/unified/error_leave_room" xml:space="preserve"><value>Could not leave this conversation: {message}</value></data>
+    <data name="conversations/unified/error_remove_message" xml:space="preserve"><value>Could not remove this message from your nest: {message}</value></data>
+    <data name="conversations/unified/error_remove_thread" xml:space="preserve"><value>Could not remove this conversation from your nest: {message}</value></data>
     <data name="conversations/unified/error_set_room_policy" xml:space="preserve"><value>Could not change this room's settings: {message}</value></data>
     <data name="conversations/unified/error_room_invitation" xml:space="preserve"><value>Could not answer this invitation: {message}</value></data>
     <data name="conversations/unified/error_withdraw_room_invite" xml:space="preserve"><value>Could not withdraw this invitation: {message}</value></data>
@@ -1403,6 +1412,7 @@
     <data name="media/error_followed_unavailable" xml:space="preserve"><value>This folder is no longer shared publicly. Its owner may have stopped sharing it, or removed it.</value></data>
     <data name="media/error_followed_fetch" xml:space="preserve"><value>Couldn't read that followed folder: {message}</value></data>
     <data name="media/error_followed_read_only" xml:space="preserve"><value>You follow this folder — it's read-only here. Switch to one of your own folders to upload.</value></data>
+    <data name="media/error_foreign_removed" xml:space="preserve"><value>You no longer have access to this shared folder. Its owner may have removed you, or stopped sharing it.</value></data>
     <data name="media/error_metadata_only_folder" xml:space="preserve"><value>This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it.</value></data>
     <data name="media/error_read_only_shared_folder" xml:space="preserve"><value>This folder was shared with you to read, not to add to. Ask its owner for write access, or pick one of your own folders.</value></data>
     <data name="media/versions_title" xml:space="preserve"><value>Version history</value></data>
@@ -2005,6 +2015,7 @@
     <data name="devices/error_set_member_access" xml:space="preserve"><value>Failed to change member access: {message}</value></data>
     <data name="devices/shared_with_you" xml:space="preserve"><value>Shared with you</value></data>
     <data name="devices/shared_by" xml:space="preserve"><value>Shared by {who}</value></data>
+    <data name="devices/shared_by_owner_changed" xml:space="preserve"><value>Shared by {who} · owner changed, ask them to share it again</value></data>
     <data name="devices/error_accept_share" xml:space="preserve"><value>Failed to accept share: {message}</value></data>
     <data name="devices/error_decline_share" xml:space="preserve"><value>Failed to decline share: {message}</value></data>
     <data name="devices/error_leave_share" xml:space="preserve"><value>Failed to leave share: {message}</value></data>
@@ -2046,6 +2057,8 @@
     <data name="devices/wizard/review_devices" xml:space="preserve"><value>Devices</value></data>
     <data name="devices/wizard/create_error" xml:space="preserve"><value>Failed to create folder: {message}</value></data>
     <data name="devices/wizard/create_member_error" xml:space="preserve"><value>Folder created, but some devices could not be enrolled: {message}</value></data>
+    <data name="devices/wizard/review_audience" xml:space="preserve"><value>Who can see it</value></data>
+    <data name="devices/wizard/create_attest_error" xml:space="preserve"><value>Folder created, but making it public did not finish: {message}. Choose Public again on the folder to finish.</value></data>
     <data name="devices/wizard/no_devices_available" xml:space="preserve"><value>No devices available. Register a device first.</value></data>
     <data name="devices/wizard/next" xml:space="preserve"><value>Next</value></data>
     <data name="devices/wizard/back" xml:space="preserve"><value>Back</value></data>
@@ -2364,10 +2377,37 @@
     <data name="settings/pending_actions/change_handle_to" xml:space="preserve"><value>Change handle to {handle}</value></data>
     <data name="settings/pending_actions/delete_account" xml:space="preserve"><value>Delete this account</value></data>
     <data name="settings/pending_actions/delete_snapshot" xml:space="preserve"><value>Delete snapshot {snapshot}</value></data>
+    <data name="settings/pending_actions/prune_versions_in" xml:space="preserve"><value>Remove old versions in {folder}</value></data>
+    <data name="settings/pending_actions/prune_versions" xml:space="preserve"><value>Remove old versions in a folder</value></data>
+    <data name="settings/pending_actions/prune_snapshots_of" xml:space="preserve"><value>Remove old snapshots of {folder}</value></data>
+    <data name="settings/pending_actions/prune_snapshots" xml:space="preserve"><value>Remove old snapshots of a folder</value></data>
     <data name="settings/pending_actions/admin_delete_user" xml:space="preserve"><value>Delete the account {target}</value></data>
     <data name="settings/pending_actions/admin_add" xml:space="preserve"><value>Grant {target} the admin role</value></data>
     <data name="settings/pending_actions/admin_remove" xml:space="preserve"><value>Revoke the admin role of {target}</value></data>
     <data name="settings/pending_actions/admin_change_role" xml:space="preserve"><value>Change the admin role of {target}</value></data>
+    <data name="settings/unsent_changes/kind_like" xml:space="preserve"><value>Like on a post</value></data>
+    <data name="settings/unsent_changes/kind_unlike" xml:space="preserve"><value>Removed like on a post</value></data>
+    <data name="settings/unsent_changes/kind_post_interaction" xml:space="preserve"><value>Interaction on a post</value></data>
+    <data name="settings/unsent_changes/kind_message" xml:space="preserve"><value>Message: {excerpt}</value></data>
+    <data name="settings/unsent_changes/kind_approval_approve" xml:space="preserve"><value>Approval of a request</value></data>
+    <data name="settings/unsent_changes/kind_approval_deny" xml:space="preserve"><value>Refusal of a request</value></data>
+    <data name="settings/unsent_changes/kind_contact_pre_approve" xml:space="preserve"><value>Pre-approved contact</value></data>
+    <data name="settings/unsent_changes/kind_email_filter_create" xml:space="preserve"><value>New email filter: {name}</value></data>
+    <data name="settings/unsent_changes/kind_bridge_follow_add" xml:space="preserve"><value>Follow: {account}</value></data>
+    <data name="settings/unsent_changes/kind_bridge_follow_remove" xml:space="preserve"><value>Unfollow: {account}</value></data>
+    <data name="settings/unsent_changes/kind_knock_accept" xml:space="preserve"><value>Accepted contact request</value></data>
+    <data name="settings/unsent_changes/kind_knock_send" xml:space="preserve"><value>Contact request: {recipient}</value></data>
+    <data name="settings/unsent_changes/kind_abuse_report" xml:space="preserve"><value>Report to the admins</value></data>
+    <data name="settings/unsent_changes/kind_other" xml:space="preserve"><value>{kind}</value></data>
+    <data name="settings/unsent_changes/state_waiting" xml:space="preserve"><value>Waiting to send</value></data>
+    <data name="settings/unsent_changes/state_held" xml:space="preserve"><value>Waiting behind a change that was not sent</value></data>
+    <data name="settings/unsent_changes/state_unsent" xml:space="preserve"><value>Not sent</value></data>
+    <data name="settings/unsent_changes/reason_unknown_kind" xml:space="preserve"><value>This version of the app cannot send this change</value></data>
+    <data name="settings/unsent_changes/reason_undecodable" xml:space="preserve"><value>This change could not be read</value></data>
+    <data name="settings/unsent_changes/reason_mls_no_channel" xml:space="preserve"><value>The conversation could not be found</value></data>
+    <data name="settings/unsent_changes/reason_mls_not_a_member" xml:space="preserve"><value>You are no longer a member of this conversation</value></data>
+    <data name="settings/unsent_changes/reason_mls_send_failed" xml:space="preserve"><value>The message could not be sent</value></data>
+    <data name="settings/unsent_changes/reason_fallback" xml:space="preserve"><value>Your nest refused this change ({code})</value></data>
     <data name="settings/member_review_page/title" xml:space="preserve"><value>Members To Review</value></data>
     <data name="settings/member_review_page/intro" xml:space="preserve"><value>These are the people you have not decided about since you recovered your account. Keep the ones you recognise, and remove anyone you do not from your groups.</value></data>
     <data name="settings/member_review_page/empty" xml:space="preserve"><value>There is nobody waiting for you to review.</value></data>
@@ -2549,6 +2589,7 @@
     <data name="nests/trusted_to_read" xml:space="preserve"><value>Trusted to read:</value></data>
     <data name="nests/scope_mail" xml:space="preserve"><value>Mail — and the spam-filter model and training history derived from it</value></data>
     <data name="nests/scope_calendar" xml:space="preserve"><value>Calendar</value></data>
+    <data name="nests/scope_card" xml:space="preserve"><value>Contacts</value></data>
     <data name="nests/scope_posts" xml:space="preserve"><value>Posts</value></data>
     <data name="nests/scope_spam_labels" xml:space="preserve"><value>Write spam labels</value></data>
     <data name="nests/scope_mail_labeler" xml:space="preserve"><value>Mail — only to run community labeler {labeler} over it</value></data>
@@ -3966,8 +4007,12 @@
     <data name="moderation/report/blocked_note_too_long" xml:space="preserve"><value>The note is too long. Shorten it before sending the report.</value></data>
     <data name="moderation/report/sent_local" xml:space="preserve"><value>Report sent to the admins of {nest}.</value></data>
     <data name="moderation/report/sent_forwarded" xml:space="preserve"><value>Report sent to the admins of {nest} and forwarded, without your name, to the admins of {home_nest}.</value></data>
+    <data name="moderation/report/queued" xml:space="preserve"><value>Report saved. It will be sent when you are back online.</value></data>
+    <data name="moderation/report/block_not_sent" xml:space="preserve"><value>The block was not sent because you are offline. Block this person again once you are back online.</value></data>
     <data name="moderation/report/failed" xml:space="preserve"><value>The report could not be sent: {error}</value></data>
     <data name="moderation/report/hidden_placeholder" xml:space="preserve"><value>You reported this</value></data>
+    <data name="moderation/report/show_again_item" xml:space="preserve"><value>Show it again</value></data>
+    <data name="moderation/report/show_again_account" xml:space="preserve"><value>Show this account again</value></data>
     <data name="moderation/report/ledger_title" xml:space="preserve"><value>Your reports</value></data>
     <data name="moderation/report/ledger_empty" xml:space="preserve"><value>You have not reported anything.</value></data>
     <data name="moderation/report/ledger_routed_to" xml:space="preserve"><value>Sent to {destinations}</value></data>
@@ -4357,6 +4402,7 @@
     <data name="profile/tiers" xml:space="preserve"><value>Tiers</value></data>
     <data name="profile/edit" xml:space="preserve"><value>Edit Profile</value></data>
     <data name="profile/follow" xml:space="preserve"><value>Follow</value></data>
+    <data name="profile/unfollow_confirm" xml:space="preserve"><value>Unfollow and end your paid subscription?</value></data>
     <data name="profile/copy_id" xml:space="preserve"><value>Copy ID</value></data>
     <data name="profile/start_dm" xml:space="preserve"><value>Message</value></data>
     <data name="profile/block" xml:space="preserve"><value>Block</value></data>
@@ -4430,12 +4476,16 @@
     <data name="subscriptions/provider_kind_label" xml:space="preserve"><value>Provider:</value></data>
     <data name="subscriptions/provider_tier_label" xml:space="preserve"><value>Tier:</value></data>
     <data name="subscriptions/webhook_secret" xml:space="preserve"><value>Webhook secret</value></data>
+    <data name="subscriptions/product_label" xml:space="preserve"><value>Payment Link (optional)</value></data>
+    <data name="subscriptions/product_hint" xml:space="preserve"><value>Only payments through this link grant the tier. Leave empty to grant it for every payment on the account.</value></data>
     <data name="subscriptions/webhook_url_label" xml:space="preserve"><value>Webhook URL:</value></data>
     <data name="subscriptions/return_url_label" xml:space="preserve"><value>Return URL:</value></data>
     <data name="subscriptions/return_url_unavailable" xml:space="preserve"><value>Turn on your public web address (Settings, Web) to get a return URL</value></data>
     <data name="subscriptions/redeem_claim_title" xml:space="preserve"><value>Redeem a claim code</value></data>
     <data name="subscriptions/claim_code" xml:space="preserve"><value>Claim code</value></data>
     <data name="subscriptions/redeem" xml:space="preserve"><value>Redeem</value></data>
+    <data name="subscriptions/claim_delivery_dm" xml:space="preserve"><value>Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.</value></data>
+    <data name="subscriptions/claim_delivery_dm_link" xml:space="preserve"><value>Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.</value></data>
     <data name="subscriptions/offer_status_none" xml:space="preserve"><value>Not subscribed</value></data>
     <data name="subscriptions/offer_status_pending" xml:space="preserve"><value>Pending approval</value></data>
     <data name="subscriptions/offer_status_active" xml:space="preserve"><value>Subscribed</value></data>
@@ -4504,6 +4554,7 @@
     <data name="error/rate_limited" xml:space="preserve"><value>This is happening too quickly. Please wait a moment and try again.</value></data>
     <data name="error/conversations/forbidden" xml:space="preserve"><value>This person isn't accepting new conversations right now. You can send them a contact request instead.</value></data>
     <data name="error/conversations/rate_limited" xml:space="preserve"><value>This is happening too quickly. Please wait a moment and try again.</value></data>
+    <data name="error/conversations/invitee_inbox_full" xml:space="preserve"><value>This person's inbox is full, so the invitation couldn't be delivered. Try again later.</value></data>
     <data name="error/profile/handle_taken" xml:space="preserve"><value>That handle already belongs to someone else on your nest. Choose a different one.</value></data>
     <data name="error/profile/handle_cooldown" xml:space="preserve"><value>That handle was released recently and can't be taken yet. Choose a different one, or try again later.</value></data>
     <data name="error/bridges/recipient_on_local_domain" xml:space="preserve"><value>That address is on your own server, so it can't be a list member. Add it as an alias instead.</value></data>
@@ -4536,6 +4587,8 @@
     <data name="error/nostr/no_custodial_key" xml:space="preserve"><value>Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.</value></data>
     <data name="error/nostr/no_relays_configured" xml:space="preserve"><value>You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.</value></data>
     <data name="error/nostr/replies_off" xml:space="preserve"><value>Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.</value></data>
+    <data name="error/nostr/not_sold" xml:space="preserve"><value>Only a post you sell can be advertised on Nostr. Sell this post first.</value></data>
+    <data name="error/nostr/no_asking_price" xml:space="preserve"><value>This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.</value></data>
     <data name="error/nest/outdated" xml:space="preserve"><value>This nest is running an outdated version and must be updated before you can connect.</value></data>
     <data name="error/nest/schema_mismatch" xml:space="preserve"><value>This nest's database does not match its software version and must be updated.</value></data>
     <data name="error/backup/writer_seat_held" xml:space="preserve"><value>This destination already keeps your account's backup from another box. Nothing was added.</value></data>
@@ -4568,6 +4621,7 @@
     <data name="error/send/room_policy_unavailable" xml:space="preserve"><value>This room has no room settings, so there is nothing to change here.</value></data>
     <data name="error/send/room_owner_cannot_leave" xml:space="preserve"><value>Hand the room over to someone else before you leave — a room always has an owner.</value></data>
     <data name="error/send/room_leave_failed" xml:space="preserve"><value>Leaving this room did not go through. Try again.</value></data>
+    <data name="error/send/room_awaiting_key" xml:space="preserve"><value>You can't send in this room until an owner or admin keys you in.</value></data>
     <data name="error/send/attachment_upload_foreign_failed" xml:space="preserve"><value>The attachment couldn't be uploaded to this conversation's home server. Try sending it again.</value></data>
     <data name="error/send/attachment_missing" xml:space="preserve"><value>Attach {filename} again — the file is not on this device.</value></data>
     <data name="errors/auth_failed" xml:space="preserve"><value>Sign-in failed</value></data>
@@ -4608,6 +4662,7 @@
     <data name="errors/recovery_malformed" xml:space="preserve"><value>The nest sent back something unexpected: {detail}</value></data>
     <data name="errors/recovery_prior_kit_required" xml:space="preserve"><value>A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead.</value></data>
     <data name="errors/recovery_prior_kit_mismatch" xml:space="preserve"><value>That kit does not match the one currently registered for this identity.</value></data>
+    <data name="errors/recovery_kit_for_another_account" xml:space="preserve"><value>That recovery kit belongs to a different account, not this one. Nothing was changed.</value></data>
     <data name="errors/recovery_prior_escrow_unreadable" xml:space="preserve"><value>Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it.</value></data>
     <data name="errors/recovery_group_ceremony" xml:space="preserve"><value>Updating your groups failed: {detail}</value></data>
     <data name="registrar/step/title" xml:space="preserve"><value>Register a new domain</value></data>
@@ -4786,6 +4841,7 @@
     <data name="connected_apps/not_connected" xml:space="preserve"><value>Not connected right now</value></data>
     <data name="connected_apps/signer_revoked" xml:space="preserve"><value>Access revoked — connect this signer app again with a new connection</value></data>
     <data name="connected_apps/paused" xml:space="preserve"><value>Paused — turn Allow external apps back on to let this app work again</value></data>
+    <data name="connected_apps/paused_suspended" xml:space="preserve"><value>Paused — turn Bluesky back on, then sign in to this app again</value></data>
     <data name="connected_apps/created" xml:space="preserve"><value>Added {time}</value></data>
     <data name="connected_apps/last_used" xml:space="preserve"><value>Last used {time}</value></data>
     <data name="connected_apps/never_used" xml:space="preserve"><value>Never used</value></data>

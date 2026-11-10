@@ -156,7 +156,7 @@ const (
 //
 // Returns nil on clean shutdown (ctx.Done() drained), or an error if
 // Serve fails for a reason other than the listener being closed.
-func runListenerWithBackend(ctx context.Context, l net.Listener, backend gosmtp.Backend, tlsConfig *tls.Config, domain string, maxMessageBytes uint32, grace time.Duration, drain *drainTracker, logger *slog.Logger) error {
+func runListenerWithBackend(ctx context.Context, l net.Listener, backend gosmtp.Backend, tlsConfig *tls.Config, domain string, grace time.Duration, drain *drainTracker, logger *slog.Logger) error {
 	srv := gosmtp.NewServer(backend)
 	srv.Domain = domain
 	if tlsConfig != nil {
@@ -167,22 +167,21 @@ func runListenerWithBackend(ctx context.Context, l net.Listener, backend gosmtp.
 	// listener still rejects pathological inputs at the protocol
 	// layer.
 	srv.MaxRecipients = 100
-	// go-smtp advertises `SIZE` in EHLO straight from this field, so it must be
-	// the *effective* ceiling — the admin knob, a 0 knob mapped to the product
-	// default (smtp-server.md § Message size limits; the at-rest ceiling that used to
-	// bound this is retired — no body is too large to rest at any size since
-	// ceiling retirement, 2026-07-18). It used to be a 1 GiB backstop,
-	// which meant every EHLO told senders a number ~120× the truth; a sender that
-	// believed it transferred a message we were always going to refuse.
-	//
-	// This is the BOOT snapshot's value, deliberately: go-smtp reads the field
-	// live per-EHLO off a non-atomic int64 it owns, so hot-applying a later admin
-	// change here would be a data race. Both staleness directions are safe — a
-	// stale-high SIZE costs the sender one wasted transfer and then the permanent
-	// 552 the live `Data` guard raises; a stale-low SIZE just makes the sender
-	// self-limit — so we advertise boot and let enforcement stay live rather than
-	// race it (decision D4).
-	srv.MaxMessageBytes = int64(mailfauna.EffectiveMaxRawMessageBytes(maxMessageBytes))
+	// go-smtp both advertises `SIZE` in EHLO from this field and enforces it
+	// itself — on a declared `MAIL FROM … SIZE=` and on the DATA stream — before
+	// any of our hooks run. It reads the field live off a non-atomic int64 it
+	// owns, so a later admin change cannot be written into it without a data
+	// race. It therefore holds the one value no admin change can move: the
+	// product ceiling on the admin's knob (mail-message-size.md § Message size
+	// limits). The admin's cap itself is enforced live, per connection, by our
+	// own hooks — `checkDeclaredSize` at MAIL FROM and the `Data` guard — so a
+	// raised cap applies at the next connection with no restart, and a lowered
+	// one too. The EHLO `SIZE` this advertises is the ceiling, an upper bound:
+	// a sender that declares its size learns the live cap's 552 5.3.4 at MAIL
+	// FROM, before it transfers anything (mail-message-size.md, the
+	// perimeter + EHLO bullet). A boot-snapshot value used to sit here, and a
+	// cap raised above it was refused by go-smtp until a restart.
+	srv.MaxMessageBytes = int64(mailfauna.MaxMessageBytesCeiling())
 	// Per-command read timeout — the inbound-MX slowloris defense
 	// (smtp-server.md § Connection-time limits, "Per-command read timeout | 30s",
 	// the `mail.inbound.read_timeout_s` target). go-smtp resets this deadline
@@ -846,7 +845,7 @@ func tlsParamsForReceived(conn *gosmtp.Conn) (version, cipher string) {
 	return version, tls.CipherSuiteName(state.CipherSuite)
 }
 
-func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
+func (s *inboundSession) Mail(from string, opts *gosmtp.MailOptions) error {
 	// Graceful shutdown (mail-bridge-lifecycle.md § Shutting down step 2):
 	// once the bridge is draining, refuse new transactions with 421 4.3.2 so
 	// the sending MTA retries against a healthy instance. Fires before every
@@ -885,6 +884,15 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 				Message:      "STARTTLS required (RFC 3207)",
 			})
 		}
+	}
+	// A declared size over the live cap is refused before the transfer, the
+	// same permanent 552 5.3.4 the `Data` guard raises after one.
+	if err := checkDeclaredSize(opts, s.maxMessageBytes); err != nil {
+		if s.logger != nil {
+			s.logger.Info("smtp: declared size exceeds size limit",
+				"client_ip", s.clientIP, "from", from, "declared", opts.Size, "cap", s.maxMessageBytes)
+		}
+		return s.reject(err)
 	}
 	s.from = from
 	s.rcpts = nil
@@ -3122,4 +3130,20 @@ func (s *inboundSession) Logout() error {
 		s.loggedOut.Do(s.drain.leave)
 	}
 	return nil
+}
+
+// checkDeclaredSize refuses a `MAIL FROM … SIZE=` declaration above the live
+// admin cap with the permanent 552 5.3.4 (RFC 1870 § 6.1). go-smtp's own check
+// at this point is against its backstop, the product ceiling (see
+// runListenerWithBackend), so the admin's cap is ours to enforce here. A zero
+// cap (tests that do not exercise the guard) or no declaration passes.
+func checkDeclaredSize(opts *gosmtp.MailOptions, maxMessageBytes uint32) *gosmtp.SMTPError {
+	if opts == nil || maxMessageBytes == 0 || opts.Size <= int64(maxMessageBytes) {
+		return nil
+	}
+	return &gosmtp.SMTPError{
+		Code:         552,
+		EnhancedCode: gosmtp.EnhancedCode{5, 3, 4},
+		Message:      "Message exceeds fixed size limit",
+	}
 }

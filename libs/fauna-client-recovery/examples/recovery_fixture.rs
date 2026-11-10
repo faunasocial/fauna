@@ -60,6 +60,13 @@
 //! → recovery_secret=<64 hex>          # the key that WOULD be registered
 //!   registration=<hex>                # submit via fauna.recovery.replacement.request
 //!
+//! recovery_fixture mint-cosigned-replacement \
+//!   --identity-seed <64 hex> \
+//!   --prior-recovery-secret <64 hex> \  # the kit registered at the head
+//!   --registration <hex> [--registration <hex> ...]
+//! → recovery_secret=<64 hex>          # the new kit
+//!   registration=<hex>                # submit via fauna.recovery.registration.submit
+//!
 //! recovery_fixture sign-veto \
 //!   --old-actor-id <64 hex> \
 //!   --recovery-secret <64 hex> \
@@ -96,10 +103,10 @@
 //! registration record.
 //!
 //! `register-kit` deliberately supports only a **first** registration (empty
-//! chain, `seq` 1). Re-keying an existing chain needs the prior kit and has
-//! real arm-selection rules (`kit.rs::next_seq`); a fixture that guessed at
-//! them would be a second, wrong implementation of a ceremony that already
-//! exists.
+//! chain, `seq` 1). Re-keying an existing chain is `mint-cosigned-replacement`,
+//! which takes exactly `kit.rs::next_seq`'s replacement arm — the prior kit
+//! co-signs, `seq` advances the head by one — and refuses a prior kit that is
+//! not the head's rather than guessing at the other arms.
 
 use fauna_core::data::Timestamp;
 use fauna_core::encoding::{canonical_decode, canonical_encode};
@@ -121,6 +128,7 @@ struct Args {
     identity_seed: Option<String>,
     old_actor_id: Option<String>,
     recovery_secret: Option<String>,
+    prior_recovery_secret: Option<String>,
     successor_seed: Option<String>,
     old_seed: Option<String>,
     nonce: Option<String>,
@@ -134,7 +142,7 @@ fn run() -> Result<(), String> {
     let mut argv = std::env::args().skip(1);
     let subcommand = argv.next().ok_or(
         "expected a subcommand: register-kit | mint-succession | \
-         mint-seed-alone-replacement | sign-veto | sign-profile | decode-profile",
+         mint-seed-alone-replacement | mint-cosigned-replacement | sign-veto | sign-profile | decode-profile",
     )?;
 
     let mut args = Args::default();
@@ -144,6 +152,7 @@ fn run() -> Result<(), String> {
             "--identity-seed" => args.identity_seed = Some(value),
             "--old-actor-id" => args.old_actor_id = Some(value),
             "--recovery-secret" => args.recovery_secret = Some(value),
+            "--prior-recovery-secret" => args.prior_recovery_secret = Some(value),
             "--successor-seed" => args.successor_seed = Some(value),
             "--old-seed" => args.old_seed = Some(value),
             "--nonce" => args.nonce = Some(value),
@@ -159,12 +168,13 @@ fn run() -> Result<(), String> {
         "register-kit" => register_kit(args),
         "mint-succession" => mint_succession(args),
         "mint-seed-alone-replacement" => mint_seed_alone_replacement(args),
+        "mint-cosigned-replacement" => mint_cosigned_replacement(args),
         "sign-veto" => sign_veto(args),
         "sign-profile" => sign_profile(args),
         "decode-profile" => decode_profile(args),
         other => Err(format!(
             "unknown subcommand {other}: expected register-kit | mint-succession | \
-             mint-seed-alone-replacement | sign-veto | sign-profile | decode-profile"
+             mint-seed-alone-replacement | mint-cosigned-replacement | sign-veto | sign-profile | decode-profile"
         )),
     }
 }
@@ -312,6 +322,49 @@ fn mint_seed_alone_replacement(args: Args) -> Result<(), String> {
         .map_err(|e| format!("signing the seed-alone registration: {e}"))?;
     let bytes = canonical_encode(&signed)
         .map_err(|e| format!("encoding the seed-alone registration: {e}"))?;
+
+    println!("recovery_secret={}", recovery.to_hex());
+    println!("registration={}", encode_hex(&bytes));
+    Ok(())
+}
+
+/// Mirrors `create_kit_with_root`'s record construction, replacement arm
+/// (`kit.rs::next_seq` with a prior kit): the kit registered at the head
+/// co-signs the new record, so the strict `verify` accepts it and
+/// `fauna.recovery.registration.submit` lands it as the new head at once.
+fn mint_cosigned_replacement(args: Args) -> Result<(), String> {
+    let identity_seed = args.identity_seed.ok_or("--identity-seed is required")?;
+    let identity = ActorKeypair::from_secret_hex(identity_seed.trim())
+        .map_err(|e| format!("--identity-seed: {e}"))?;
+    let prior = args
+        .prior_recovery_secret
+        .ok_or("--prior-recovery-secret is required (the kit registered at the head)")?;
+    let prior =
+        RecoveryKey::from_hex(prior.trim()).map_err(|e| format!("--prior-recovery-secret: {e}"))?;
+
+    let head = args.registrations.last().ok_or(
+        "at least one --registration is required — a co-signed replacement \
+         replaces the kit registered at the chain's head",
+    )?;
+    let head_bytes = decode_hex(head).map_err(|e| format!("--registration: {e}"))?;
+    let head: SignedRecoveryKeyRegistration = canonical_decode(&head_bytes)
+        .map_err(|e| format!("decoding the head registration record: {e}"))?;
+    if head.registration.recovery_pubkey != prior.public() {
+        return Err("--prior-recovery-secret is not the kit registered at the head".to_string());
+    }
+
+    let recovery = RecoveryKey::generate();
+    let registration = RecoveryKeyRegistration {
+        actor_id: identity.actor_id(),
+        recovery_pubkey: recovery.public(),
+        seq: head.registration.seq + 1,
+        created_at: Timestamp::now(),
+    };
+    let signed = registration
+        .sign(identity.signing_key(), &recovery, Some(&prior))
+        .map_err(|e| format!("signing the co-signed registration: {e}"))?;
+    let bytes = canonical_encode(&signed)
+        .map_err(|e| format!("encoding the co-signed registration: {e}"))?;
 
     println!("recovery_secret={}", recovery.to_hex());
     println!("registration={}", encode_hex(&bytes));

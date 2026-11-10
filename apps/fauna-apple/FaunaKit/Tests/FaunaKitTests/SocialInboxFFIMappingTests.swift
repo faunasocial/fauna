@@ -172,6 +172,10 @@ private let knockSenderId = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293
     let second = NotificationManager.knockRequest(
         for: FfiKnock(senderId: other, summary: "hello", body: nil))
     #expect(first.identifier == second.identifier)
+    // The id is the SHARED one every app raises the toast under
+    // (`KNOCK_TOAST_REPLACE_ID`), spelled as web's tag spells it.
+    #expect(first.identifier == "fauna-knock-\(knockToastReplaceId())")
+    #expect(NotificationManager.knockReplaceId == 1003)
     #expect(first.content.userInfo[NotificationManager.knockSenderIdKey] as? String == knockSenderId)
     #expect(second.content.userInfo[NotificationManager.knockSenderIdKey] as? String == other)
 }

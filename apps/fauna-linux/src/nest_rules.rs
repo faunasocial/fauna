@@ -455,7 +455,13 @@ pub fn paint_joining(rows: &gtk::Box, summary: Option<&NestRulesSummary>) {
     };
     rows.append(&line(ids::ONBOARDING_NEST_RULES, &text));
     for rule in &summary.rules {
-        rows.append(&line(ids::ONBOARDING_NEST_RULES_ITEM, &rule_line(rule)));
+        // A rule this device cannot apply carries its not-applied note on a
+        // second line of the same item, as tui `joining_rule_line` does.
+        let text = match &rule.inert {
+            Some(inert) => format!("{}\n{}", rule_line(rule), resolve(inert)),
+            None => rule_line(rule),
+        };
+        rows.append(&line(ids::ONBOARDING_NEST_RULES_ITEM, &text));
     }
 }
 

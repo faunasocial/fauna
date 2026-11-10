@@ -85,7 +85,7 @@ class CustodianPushKick @Inject constructor(
      * The identity seam. The loop's native resources are held HERE rather than
      * only as locals inside [serveOneActor], so [dropForIdentityChange] can end
      * the Rust loop **synchronously** on the caller's thread — which is what a
-     * sign-out needs, since [AccountStores.eraseAllAccounts] deletes the very
+     * sign-out needs, since [AccountStores.finishSignOut] deletes the very
      * directory this store has open, and a teardown that merely rode the
      * coroutine's `finally` would still be in flight when the delete ran.
      *

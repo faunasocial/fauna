@@ -228,11 +228,12 @@ def test_a_restored_device_finds_the_identity_from_the_circle_copy(
     2. A cold relaunch on that keychain → the app finds the identity at first
        launch: the feed, the handle, no onboarding.
     3. The launch reconcile has re-landed the device-bound working copy, carrying
-       the secret, so the device no longer depends on the circle row.
-
-    The circle copy's fate after that relaunch is deliberately not asserted: with no preference on the device the reconcile
-    reads an opt-out, and whether a restore may delete the circle row is an owner's
-    ruling."""
+       the secret, so the device no longer depends on the circle row — and has
+       left the circle copy where it found it, writing no preference: a device
+       with no preference row has made no choice, and only a person's own toggle
+       deletes a circle copy (ruled 2026-11-08; before
+       it the launch read the missing row as an opt-out and deleted the circle
+       copy, a restore on one device undoing a choice made on another)."""
     with _signed_in_seat(
         request, smoke_handled_nest, tmp_path, handle="cloudcopyrestore"
     ) as seat:
@@ -257,9 +258,12 @@ def test_a_restored_device_finds_the_identity_from_the_circle_copy(
 
         _relaunch_on_the_kept_keychain(seat)
         _assert_the_app_finds_the_identity(seat)
-        copies = _copies(seat.driver, seat.account)
-        assert copies.count(DEVICE_BOUND) == 1, (
-            f"the launch re-landed no device-bound working copy: {copies}"
+        _await_copies(
+            seat.driver, seat.account, [DEVICE_BOUND, CIRCLE],
+            what="after the restored device's first launch (working copy landed, circle copy kept)",
+        )
+        assert _copies(seat.driver, PREFERENCE_ROW) == [], (
+            "the launch wrote a backup preference the person never chose"
         )
         _assert_holds_the_identity(seat)
 
@@ -277,10 +281,9 @@ def test_the_copy_carries_the_identity_and_a_restored_device_is_a_new_device(
        the T10 store-principal slot have one, device-bound.
     2. Drop → the identity's circle copy stays and no device row is left at all.
     3. A cold relaunch on that keychain → signed in as the identity, with a device
-       id and an install secret of its own.
-
-    The identity circle copy's fate after that relaunch is not asserted, as in the
-    restore test above."""
+       id and an install secret of its own; the identity row holds its working
+       copy beside the kept circle copy, as in the restore test above (a device
+       row has no circle copy to keep)."""
     with _signed_in_seat(
         request, smoke_handled_nest, tmp_path, handle="cloudcopyscope"
     ) as seat:
@@ -315,6 +318,10 @@ def test_the_copy_carries_the_identity_and_a_restored_device_is_a_new_device(
 
         _relaunch_on_the_kept_keychain(seat)
         _assert_the_app_finds_the_identity(seat)
+        _await_copies(
+            driver, seat.account, [DEVICE_BOUND, CIRCLE],
+            what="after the relaunch (the identity's circle copy is kept)",
+        )
 
         device_id_after = _await_digest(driver, device_id_row, what="after the relaunch")
         assert device_id_after != device_id_before, (

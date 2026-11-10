@@ -77,14 +77,18 @@ impl HostServices for Recorder {
         Box::pin(async move { Ok(self.state(&key)) })
     }
 
-    fn state_put(&self, key: String, value: Vec<u8>) -> BoxFut<'_, anyhow::Result<()>> {
+    fn state_put(
+        &self,
+        key: String,
+        value: Vec<u8>,
+    ) -> BoxFut<'_, anyhow::Result<Result<(), String>>> {
         self.state.lock().unwrap().insert(key, value);
-        Box::pin(async { Ok(()) })
+        Box::pin(async { Ok(Ok(())) })
     }
 
-    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<()>> {
+    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<Result<(), String>>> {
         self.state.lock().unwrap().remove(&key);
-        Box::pin(async { Ok(()) })
+        Box::pin(async { Ok(Ok(())) })
     }
 
     fn holder_key(&self) -> &HolderKey {
@@ -280,6 +284,25 @@ async fn memory_growth_over_the_cap_is_refused() {
     assert!(!plugin.is_poisoned());
 }
 
+/// A guest asking a table for far more elements than
+/// [`fauna_plugin_host::PLUGIN_MAX_TABLE_ELEMENTS`] sees a failed
+/// `table.grow` — the nest allocates nothing for it — and the instance lives.
+#[tokio::test]
+async fn table_growth_over_the_cap_is_refused() {
+    let rec = Recorder::new(vec![]);
+    let mut plugin = instance(rec, OutboundPolicy::none()).await;
+    let reply = plugin
+        .handle_ingress(IngressRequest {
+            method: "GET".into(),
+            path: "/table".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply.status, 507, "the grow was refused, not trapped");
+    assert!(!plugin.is_poisoned());
+}
+
 #[tokio::test]
 async fn the_identity_assertion_reaches_the_plugin() {
     let rec = Recorder::new(vec![]);
@@ -303,4 +326,28 @@ fn a_component_over_the_size_cap_is_refused_before_compiling() {
     let engine = PluginEngine::new().unwrap();
     let too_big = vec![0u8; fauna_plugin_host::PLUGIN_MODULE_MAX_BYTES + 1];
     assert!(engine.compile(&too_big).is_err());
+}
+
+/// The refusing variant (`fixture::refusing_plugin`) does the hello plugin's
+/// whole `start` and then answers its own refusal — the `Err(msg)` the nest's
+/// runner lists `stopped` with that reason, which the tier_3 witness of a
+/// stopped plugin installs.
+#[tokio::test]
+async fn the_refusing_variant_answers_its_reason_from_start() {
+    use fauna_plugin_host::fixture::{REFUSING_PLUGIN_REASON, refusing_plugin};
+    let rec = Recorder::new(vec![ACCOUNT]);
+    let engine = PluginEngine::new().unwrap();
+    let compiled = engine.compile(&refusing_plugin().unwrap()).unwrap();
+    let mut plugin =
+        PluginInstance::instantiate(&engine, &compiled, rec.clone(), OutboundPolicy::none())
+            .await
+            .unwrap();
+    assert_eq!(
+        plugin.start().await.unwrap(),
+        Err(REFUSING_PLUGIN_REASON.to_string())
+    );
+    assert!(
+        rec.state("pub").is_some(),
+        "the variant still ran the hello start"
+    );
 }

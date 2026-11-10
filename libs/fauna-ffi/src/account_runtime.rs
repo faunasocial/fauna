@@ -220,9 +220,14 @@ pub(crate) fn install(
                     // The registry walk above (`HostInputs::accounts`). Empty for
                     // an identity that never succeeded, which is fail-safe.
                     attested_predecessors,
-                    // The peer leg (W5.7) is a separate tranche: it needs the
-                    // `fauna-iroh` dependency, which only tui carries today.
-                    peer_transport: None,
+                    // The peer leg (W5.7): the shared factory tui hands its
+                    // runtime too. The runtime binds it only as the elected
+                    // engine-singleton with every gate open (enrollment witness,
+                    // the nest's `peer-sync` brake, per-device participation),
+                    // so iOS and android — no agent beside them — serve and dial
+                    // their siblings while the nest is down
+                    // (`account-sync-plane.md` § The peer leg).
+                    peer_transport: Some(fauna_iroh::peer_leg_factory()),
                     store_container,
                     device_label: Some(device_label),
                 },
@@ -399,6 +404,16 @@ pub(crate) fn mail_import_source_store()
 static STORE_RUNTIME: std::sync::Mutex<Option<tokio::runtime::Handle>> =
     std::sync::Mutex::new(None);
 
+/// The runtime the installed store's assembly ran on, once one was — where
+/// the offline outbox's MLS drain spawns (`crate::offline_outbox`).
+#[cfg(feature = "feed-manager")]
+pub(crate) fn store_runtime() -> Option<tokio::runtime::Handle> {
+    STORE_RUNTIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// The store edge, run once a store is installed (on the runtime its assembly
 /// ran on): start the store-change relay to the app's listener
 /// (`crate::store_change` — it ends with this runtime), record that runtime,
@@ -419,6 +434,11 @@ fn on_store_installed(sessions: &crate::caldav_client::SchedulingSessionHolder) 
     // store staged it with no runtime to start on.
     #[cfg(feature = "conversations-session")]
     start_conversations_door();
+    // The MLS sends queued while the runtime was not up (or by an earlier
+    // run) drain now that the outbox's store answers (`devices.md` § Offline
+    // compose → *Drain*).
+    #[cfg(feature = "feed-manager")]
+    crate::offline_outbox::DEVICE.drain();
     #[cfg(not(feature = "conversations-session"))]
     let _ = sessions;
     #[cfg(feature = "contact-overlays")]
@@ -654,10 +674,10 @@ pub(crate) async fn teardown(reason: StopReason) {
 pub(crate) fn membership_source(
     holder: crate::caldav_client::SchedulingSessionHolder,
 ) -> MembershipSource {
-    Arc::new(move || {
+    MembershipSource::Engine(Arc::new(move || {
         let session = holder.lock().ok()?.clone()?;
         Some(session.joined_conv_channels())
-    })
+    }))
 }
 
 /// A build with no conversations rail cannot tell, ever — the same `None` the
@@ -666,7 +686,7 @@ pub(crate) fn membership_source(
 pub(crate) fn membership_source(
     _holder: crate::caldav_client::SchedulingSessionHolder,
 ) -> MembershipSource {
-    Arc::new(|| None)
+    MembershipSource::Engine(Arc::new(|| None))
 }
 
 #[cfg(test)]
@@ -696,9 +716,11 @@ pub(crate) mod tests {
     #[test]
     fn no_session_cannot_tell_rather_than_answering_empty() {
         let holder: crate::caldav_client::SchedulingSessionHolder = Arc::new(Mutex::new(None));
-        let source = membership_source(holder);
+        let MembershipSource::Engine(engine) = membership_source(holder) else {
+            panic!("an app host wires its engine, never the record");
+        };
         assert_eq!(
-            source(),
+            engine(),
             None,
             "an app with no stashed session must answer `cannot tell`, never `left every \
              channel`"
@@ -850,11 +872,13 @@ pub(crate) mod tests {
                 labels: vec![],
                 plane_ref: None,
                 can_delete: false,
+                can_remove: false,
                 undelivered: false,
                 warmup_hold: None,
                 scan_result_lines: Vec::new(),
                 delivered_to: None,
                 withheld: None,
+                queued_send: None,
             };
             let thread = manager.restore_channel_slice(&ChannelHistorySlice {
                 channel_id_hex: CHANNEL.to_string(),

@@ -131,6 +131,7 @@ struct OutboxStored {
     retry_count: u32,
     created_at: u64,
     last_attempt_at: Option<u64>,
+    failure_reason: Option<String>,
 }
 
 /// The medium: every table the trait names, keyed exactly as the SQLite arm's
@@ -1250,6 +1251,7 @@ impl StoreBackend for MemoryBackend {
                 retry_count: 0,
                 created_at: now_epoch_secs(),
                 last_attempt_at: None,
+                failure_reason: None,
             },
         );
         Ok(true)
@@ -1271,6 +1273,7 @@ impl StoreBackend for MemoryBackend {
                 retry_count: o.retry_count,
                 created_at: o.created_at,
                 last_attempt_at: o.last_attempt_at,
+                failure_reason: o.failure_reason.clone(),
             })
             .collect();
         out.sort_by(|a, b| (&a.scope, a.channel_seq).cmp(&(&b.scope, b.channel_seq)));
@@ -1281,14 +1284,36 @@ impl StoreBackend for MemoryBackend {
         Ok(self.tx()?.outbox.remove(intent_id).is_some())
     }
 
-    async fn outbox_mark_failed(&self, intent_id: &[u8; 16]) -> Result<bool> {
+    async fn outbox_mark_failed(&self, intent_id: &[u8; 16], reason: &str) -> Result<bool> {
         Ok(match self.tx()?.outbox.get_mut(intent_id) {
             Some(o) => {
                 o.status = IntentStatus::Failed;
+                o.failure_reason = Some(reason.to_owned());
                 true
             }
             None => false,
         })
+    }
+
+    async fn outbox_retry(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        Ok(match self.tx()?.outbox.get_mut(intent_id) {
+            Some(o) if o.status == IntentStatus::Failed => {
+                o.status = IntentStatus::Pending;
+                o.retry_count = 0;
+                o.last_attempt_at = None;
+                o.failure_reason = None;
+                true
+            }
+            _ => false,
+        })
+    }
+
+    async fn outbox_discard(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        let mut t = self.tx()?;
+        if t.outbox.get(intent_id).map(|o| o.status) != Some(IntentStatus::Failed) {
+            return Ok(false);
+        }
+        Ok(t.outbox.remove(intent_id).is_some())
     }
 
     async fn outbox_record_attempt(&self, intent_id: &[u8; 16]) -> Result<bool> {

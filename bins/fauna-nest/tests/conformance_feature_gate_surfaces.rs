@@ -51,6 +51,8 @@ fn build_router() -> RpcRouter {
     folder_handlers::register_folders_handlers(&mut b);
     #[cfg(all(feature = "zaps", feature = "nostr"))]
     fauna_nest::nostr::zap_signer_handlers::register_nostr_zap_signer_handlers(&mut b);
+    #[cfg(feature = "nostr")]
+    fauna_nest::nostr::advertise::register_nostr_advertise_handlers(&mut b);
     b.build()
 }
 
@@ -62,7 +64,7 @@ fn author_kp() -> ActorKeypair {
 
 async fn harness() -> (RpcRouter, Arc<AppState>, [u8; 32]) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    #[cfg(all(feature = "zaps", feature = "nostr"))]
+    #[cfg(feature = "nostr")]
     fauna_nest::nostr::init_db(&db).await.unwrap();
     let state = Arc::new(AppState::for_test(db));
     let author = author_kp().actor_id().0;
@@ -586,4 +588,70 @@ async fn zap_signer_designation_is_gated_through_the_subset_edge() {
         signers.is_empty(),
         "the empty roster is load-bearing: a denied account must not be able to arm it"
     );
+}
+
+// ── zaps.advertise ───────────────────────────────────────────────
+
+/// The payee's one send-side act on the zaps plane — advertising a sold post
+/// on Nostr with its price (`monetization.md` § The Nostr advertisement of a
+/// sold post → *The gate*). A `zaps`-only deny (the Damus shape) refuses it
+/// at `set`, before anything about the post is read; `clear` is de-escalation
+/// and stays open under the same deny (ruling (i)), so a denied payee can
+/// always withdraw an offer already in the wild.
+#[cfg(all(feature = "zaps", feature = "nostr"))]
+#[tokio::test]
+async fn nostr_advertise_is_gated_but_clearing_it_is_not() {
+    use fauna_protocol::nostr::{AdvertiseClearReply, AdvertiseClearRequest, AdvertiseSetRequest};
+
+    let (router, state, author) = harness().await;
+    // An own post, so `clear` reaches past its ownership check.
+    let post = fauna_core::data::Post {
+        author: fauna_core::identity::ActorId(author),
+        created_at: fauna_core::data::Timestamp(1_700_000_000_000_000),
+        body: fauna_core::data::PostBody::Text {
+            content: "teaser".into(),
+            facets: vec![],
+        },
+        references: vec![],
+        expires_at: None,
+        gated: None,
+        content_warning: None,
+        origin: None,
+    };
+    let cid = fauna_core::encoding::compute_post_id(&post).unwrap();
+    let digest: [u8; 32] = cid.as_bytes()[4..].try_into().unwrap();
+    let bytes = fauna_core::encoding::canonical_encode(&post).unwrap();
+    state.db.put_post(&digest, &bytes, None).await.unwrap();
+    let post_id = hex::encode(digest);
+
+    deny(&state, &author, GatedFeature::Zaps).await;
+
+    let error = encode_call(
+        &router,
+        state.clone(),
+        "fauna.nostr.advertise.set",
+        author,
+        AdvertiseSetRequest {
+            post_id: post_id.clone(),
+            extra: Default::default(),
+        },
+    )
+    .await
+    .expect_err("a zaps deny refuses the advertisement");
+    refused_at(&error, "zaps.advertise");
+
+    let reply = encode_call(
+        &router,
+        state.clone(),
+        "fauna.nostr.advertise.clear",
+        author,
+        AdvertiseClearRequest {
+            post_id,
+            extra: Default::default(),
+        },
+    )
+    .await
+    .expect("clearing an advertisement is never gated");
+    let reply: AdvertiseClearReply = fauna_protocol::decode_strict(&reply).unwrap();
+    assert!(!reply.cleared, "nothing was advertised");
 }

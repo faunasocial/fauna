@@ -424,6 +424,20 @@ pub fn open_result(
             )
             .map(PageOp::Media)
         }
+        // The Events page's `event_detail` for the event the hit names. tui's
+        // event rows are keyed by the hex `uid_hash` already (`EventRow::id` —
+        // the CalDAV dedup key `event_target` hands every per-event op), so the
+        // index's spelling IS the detail's key: no locate read is owed, unlike
+        // `Contact`'s `card_id`. The detail opens at once and the page's own
+        // nav-entry hydration fills its row in — `apply_outcome`'s load arm
+        // never resets `mode`, so the detail survives the load.
+        SearchNav::Event { uid_hash } => {
+            app.page = Page::Events;
+            crate::events::on_nav_enter(&mut app.events);
+            crate::events::open_event_detail(app, uid_hash);
+            crate::events::nav_enter_op(&app.events, app.settings.account_store.clone())
+                .map(PageOp::Events)
+        }
     }
 }
 
@@ -615,7 +629,8 @@ fn navigable(
         | Some(n @ SearchNav::Draft { .. })
         | Some(n @ SearchNav::Mail { .. })
         | Some(n @ SearchNav::Contact { .. })
-        | Some(n @ SearchNav::File { .. }) => Some(n.clone()),
+        | Some(n @ SearchNav::File { .. })
+        | Some(n @ SearchNav::Event { .. }) => Some(n.clone()),
     }
 }
 
@@ -1283,6 +1298,27 @@ mod tests {
         assert_eq!(app.page, Page::Media);
     }
 
+    /// `Event` opens the Events page's `event_detail` keyed by the hit's own
+    /// `uid_hash` — the Events rows' id — and leaves the page in that detail
+    /// even though the nav-entry reset ran first.
+    #[test]
+    fn activating_an_event_result_opens_its_event_detail() {
+        let mut app = app_ready_to_navigate();
+        let uid_hash = hex::encode([0xCD; 32]);
+        let _ = open_result(
+            &mut app,
+            fauna_client_search::SearchNav::Event {
+                uid_hash: uid_hash.clone(),
+            },
+        );
+        assert_eq!(app.page, Page::Events);
+        assert_eq!(
+            app.events.mode,
+            crate::events::Mode::EventDetail(uid_hash),
+            "the detail is keyed by the uid_hash verbatim"
+        );
+    }
+
     /// The dispatcher-level twin of the above: `Gesture::OpenSearchResult`
     /// must actually reach `open_result` through the one gesture door
     /// (`app::gesture_work`), the same door `search-result-item`'s click
@@ -1322,6 +1358,9 @@ mod tests {
                 folder_id: 1,
                 path_hash: "ph1".into(),
             }),
+            row_with_nav(fauna_client_search::SearchNav::Event {
+                uid_hash: "cafe".into(),
+            }),
             row("post", "no target"),
         ]));
         let roles: Vec<bool> = elements(&app)
@@ -1331,7 +1370,7 @@ mod tests {
             .collect();
         assert_eq!(
             roles,
-            vec![true, true, true, false],
+            vec![true, true, true, true, false],
             "every targeted row is clickable; only the target-less row is inert"
         );
     }

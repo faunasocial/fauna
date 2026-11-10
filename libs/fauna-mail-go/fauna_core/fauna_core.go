@@ -396,6 +396,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_core_checksum_func_checkout_url_for_buyer()
+		})
+		if checksum != 23948 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_core: uniffi_fauna_core_checksum_func_checkout_url_for_buyer: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_core_checksum_func_is_safe_payment_url()
 		})
 		if checksum != 4734 {
@@ -1604,6 +1613,52 @@ func (_ FfiDestroyerInboundAuthOutcome) Destroy(value InboundAuthOutcome) {
 	value.Destroy()
 }
 
+// An unsent change in user words: the label the list row shows and, when the
+// describer could read one, its target.
+type IntentDescription struct {
+	Label  LocalizedText
+	Target *IntentTarget
+}
+
+func (r *IntentDescription) Destroy() {
+	FfiDestroyerLocalizedText{}.Destroy(r.Label)
+	FfiDestroyerOptionalIntentTarget{}.Destroy(r.Target)
+}
+
+type FfiConverterIntentDescription struct{}
+
+var FfiConverterIntentDescriptionINSTANCE = FfiConverterIntentDescription{}
+
+func (c FfiConverterIntentDescription) Lift(rb RustBufferI) IntentDescription {
+	return LiftFromRustBuffer[IntentDescription](c, rb)
+}
+
+func (c FfiConverterIntentDescription) Read(reader io.Reader) IntentDescription {
+	return IntentDescription{
+		FfiConverterLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalIntentTargetINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterIntentDescription) Lower(value IntentDescription) C.RustBuffer {
+	return LowerIntoRustBuffer[IntentDescription](c, value)
+}
+
+func (c FfiConverterIntentDescription) LowerExternal(value IntentDescription) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[IntentDescription](c, value))
+}
+
+func (c FfiConverterIntentDescription) Write(writer io.Writer, value IntentDescription) {
+	FfiConverterLocalizedTextINSTANCE.Write(writer, value.Label)
+	FfiConverterOptionalIntentTargetINSTANCE.Write(writer, value.Target)
+}
+
+type FfiDestroyerIntentDescription struct{}
+
+func (_ FfiDestroyerIntentDescription) Destroy(value IntentDescription) {
+	value.Destroy()
+}
+
 // Owned `(url, state name)` pair from [`RenderDocument::link_previews`], for the
 // FFI/wasm face every non-Rust app's e2e state dump publishes as
 // `data.feed.posts[].link_previews` (`{url, state}`, `state` being
@@ -2745,6 +2800,75 @@ func (_ FfiDestroyerTaskItem) Destroy(value TaskItem) {
 	value.Destroy()
 }
 
+// One unsent change — a row of the unsent-changes list.
+type UnsentChange struct {
+	// The intent id (lowercase hex) — its idempotency key, and what retry
+	// and discard take ([`parse_intent_id`]).
+	IntentId string
+	Kind     string
+	Scope    string
+	State    UnsentState
+	// Seconds since the epoch at compose.
+	CreatedAt uint64
+	// Attempts that did not conclude.
+	Attempts    uint32
+	Description IntentDescription
+}
+
+func (r *UnsentChange) Destroy() {
+	FfiDestroyerString{}.Destroy(r.IntentId)
+	FfiDestroyerString{}.Destroy(r.Kind)
+	FfiDestroyerString{}.Destroy(r.Scope)
+	FfiDestroyerUnsentState{}.Destroy(r.State)
+	FfiDestroyerUint64{}.Destroy(r.CreatedAt)
+	FfiDestroyerUint32{}.Destroy(r.Attempts)
+	FfiDestroyerIntentDescription{}.Destroy(r.Description)
+}
+
+type FfiConverterUnsentChange struct{}
+
+var FfiConverterUnsentChangeINSTANCE = FfiConverterUnsentChange{}
+
+func (c FfiConverterUnsentChange) Lift(rb RustBufferI) UnsentChange {
+	return LiftFromRustBuffer[UnsentChange](c, rb)
+}
+
+func (c FfiConverterUnsentChange) Read(reader io.Reader) UnsentChange {
+	return UnsentChange{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterUnsentStateINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint32INSTANCE.Read(reader),
+		FfiConverterIntentDescriptionINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterUnsentChange) Lower(value UnsentChange) C.RustBuffer {
+	return LowerIntoRustBuffer[UnsentChange](c, value)
+}
+
+func (c FfiConverterUnsentChange) LowerExternal(value UnsentChange) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[UnsentChange](c, value))
+}
+
+func (c FfiConverterUnsentChange) Write(writer io.Writer, value UnsentChange) {
+	FfiConverterStringINSTANCE.Write(writer, value.IntentId)
+	FfiConverterStringINSTANCE.Write(writer, value.Kind)
+	FfiConverterStringINSTANCE.Write(writer, value.Scope)
+	FfiConverterUnsentStateINSTANCE.Write(writer, value.State)
+	FfiConverterUint64INSTANCE.Write(writer, value.CreatedAt)
+	FfiConverterUint32INSTANCE.Write(writer, value.Attempts)
+	FfiConverterIntentDescriptionINSTANCE.Write(writer, value.Description)
+}
+
+type FfiDestroyerUnsentChange struct{}
+
+func (_ FfiDestroyerUnsentChange) Destroy(value UnsentChange) {
+	value.Destroy()
+}
+
 // An in-app route (module doc).
 type AppRoute interface {
 	Destroy()
@@ -3771,6 +3895,91 @@ func (FfiConverterInline) Write(writer io.Writer, value Inline) {
 type FfiDestroyerInline struct{}
 
 func (_ FfiDestroyerInline) Destroy(value Inline) {
+	value.Destroy()
+}
+
+// What an unsent change is about, for the surfaces that mark the affordance
+// in place (point 2 of the ruling) and the list row's target.
+type IntentTarget interface {
+	Destroy()
+}
+
+// An interaction on a post (`fauna.posts.interact`): `action` is the
+// wire action (`like`, `unlike`, `repost`, …).
+type IntentTargetPost struct {
+	PostId string
+	Action string
+}
+
+func (e IntentTargetPost) Destroy() {
+	FfiDestroyerString{}.Destroy(e.PostId)
+	FfiDestroyerString{}.Destroy(e.Action)
+}
+
+// A message on a conversation's MLS channel (hex); `excerpt` is the
+// body's head, for the list row.
+type IntentTargetConversation struct {
+	ChannelId string
+	Excerpt   string
+}
+
+func (e IntentTargetConversation) Destroy() {
+	FfiDestroyerString{}.Destroy(e.ChannelId)
+	FfiDestroyerString{}.Destroy(e.Excerpt)
+}
+
+type FfiConverterIntentTarget struct{}
+
+var FfiConverterIntentTargetINSTANCE = FfiConverterIntentTarget{}
+
+func (c FfiConverterIntentTarget) Lift(rb RustBufferI) IntentTarget {
+	return LiftFromRustBuffer[IntentTarget](c, rb)
+}
+
+func (c FfiConverterIntentTarget) Lower(value IntentTarget) C.RustBuffer {
+	return LowerIntoRustBuffer[IntentTarget](c, value)
+}
+
+func (c FfiConverterIntentTarget) LowerExternal(value IntentTarget) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[IntentTarget](c, value))
+}
+func (FfiConverterIntentTarget) Read(reader io.Reader) IntentTarget {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return IntentTargetPost{
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	case 2:
+		return IntentTargetConversation{
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterIntentTarget.Read()", id))
+	}
+}
+
+func (FfiConverterIntentTarget) Write(writer io.Writer, value IntentTarget) {
+	switch variant_value := value.(type) {
+	case IntentTargetPost:
+		writeInt32(writer, 1)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.PostId)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Action)
+	case IntentTargetConversation:
+		writeInt32(writer, 2)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.ChannelId)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Excerpt)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterIntentTarget.Write", value))
+	}
+}
+
+type FfiDestroyerIntentTarget struct{}
+
+func (_ FfiDestroyerIntentTarget) Destroy(value IntentTarget) {
 	value.Destroy()
 }
 
@@ -4981,6 +5190,92 @@ type FfiDestroyerSyncDisplayState struct{}
 func (_ FfiDestroyerSyncDisplayState) Destroy(value SyncDisplayState) {
 }
 
+// Where an unsent change stands — the three states of
+// `account-offline-mutation.md` § The offline-mutation contract →
+// *The unsent-changes surface*, derived exactly as the drain derives its hold
+// ([`derive_unsent_states`]).
+type UnsentState interface {
+	Destroy()
+}
+
+// Pending, its scope free: the next drain pass sends it.
+type UnsentStateWaiting struct {
+}
+
+func (e UnsentStateWaiting) Destroy() {
+}
+
+// Pending behind its scope's parked head: it waits for the user to retry
+// or discard that head.
+type UnsentStateHeld struct {
+}
+
+func (e UnsentStateHeld) Destroy() {
+}
+
+// Parked by the drain. `reason_code` is the stored stable code (the
+// nest's error code, or one of [`park_code`]'s); empty when the store
+// recorded none.
+type UnsentStateUnsent struct {
+	ReasonCode string
+}
+
+func (e UnsentStateUnsent) Destroy() {
+	FfiDestroyerString{}.Destroy(e.ReasonCode)
+}
+
+type FfiConverterUnsentState struct{}
+
+var FfiConverterUnsentStateINSTANCE = FfiConverterUnsentState{}
+
+func (c FfiConverterUnsentState) Lift(rb RustBufferI) UnsentState {
+	return LiftFromRustBuffer[UnsentState](c, rb)
+}
+
+func (c FfiConverterUnsentState) Lower(value UnsentState) C.RustBuffer {
+	return LowerIntoRustBuffer[UnsentState](c, value)
+}
+
+func (c FfiConverterUnsentState) LowerExternal(value UnsentState) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[UnsentState](c, value))
+}
+func (FfiConverterUnsentState) Read(reader io.Reader) UnsentState {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return UnsentStateWaiting{}
+	case 2:
+		return UnsentStateHeld{}
+	case 3:
+		return UnsentStateUnsent{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterUnsentState.Read()", id))
+	}
+}
+
+func (FfiConverterUnsentState) Write(writer io.Writer, value UnsentState) {
+	switch variant_value := value.(type) {
+	case UnsentStateWaiting:
+		writeInt32(writer, 1)
+	case UnsentStateHeld:
+		writeInt32(writer, 2)
+	case UnsentStateUnsent:
+		writeInt32(writer, 3)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.ReasonCode)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterUnsentState.Write", value))
+	}
+}
+
+type FfiDestroyerUnsentState struct{}
+
+func (_ FfiDestroyerUnsentState) Destroy(value UnsentState) {
+	value.Destroy()
+}
+
 // Whether a rendered post/quote's signed envelope was cryptographically
 // verified by *this client* (`security.md` § Client display of unverified
 // content; review findings F-CL2/F-CL3). Three honest states, **not** a bool —
@@ -5250,6 +5545,47 @@ type FfiDestroyerOptionalRspamdScore struct{}
 func (_ FfiDestroyerOptionalRspamdScore) Destroy(value *RspamdScore) {
 	if value != nil {
 		FfiDestroyerRspamdScore{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalIntentTarget struct{}
+
+var FfiConverterOptionalIntentTargetINSTANCE = FfiConverterOptionalIntentTarget{}
+
+func (c FfiConverterOptionalIntentTarget) Lift(rb RustBufferI) *IntentTarget {
+	return LiftFromRustBuffer[*IntentTarget](c, rb)
+}
+
+func (_ FfiConverterOptionalIntentTarget) Read(reader io.Reader) *IntentTarget {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterIntentTargetINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalIntentTarget) Lower(value *IntentTarget) C.RustBuffer {
+	return LowerIntoRustBuffer[*IntentTarget](c, value)
+}
+
+func (c FfiConverterOptionalIntentTarget) LowerExternal(value *IntentTarget) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*IntentTarget](c, value))
+}
+
+func (_ FfiConverterOptionalIntentTarget) Write(writer io.Writer, value *IntentTarget) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterIntentTargetINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalIntentTarget struct{}
+
+func (_ FfiDestroyerOptionalIntentTarget) Destroy(value *IntentTarget) {
+	if value != nil {
+		FfiDestroyerIntentTarget{}.Destroy(*value)
 	}
 }
 
@@ -5903,6 +6239,16 @@ func PerimeterMailScoreRows(spamScoreMilli int32, clamav ClamavVerdict, rspamd *
 	return FfiConverterSequenceScoreEntryINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_core_fn_func_perimeter_mail_score_rows(FfiConverterInt32INSTANCE.Lower(spamScoreMilli), FfiConverterClamavVerdictINSTANCE.Lower(clamav), FfiConverterOptionalRspamdScoreINSTANCE.Lower(rspamd), FfiConverterAuthVerdictsINSTANCE.Lower(verdicts), _uniffiStatus),
+		}
+	}))
+}
+
+// The foreign-language face of [`checkout_url`]: the buyer named by its
+// 64-hex actor id; `None` for an unsafe URL or a malformed id.
+func CheckoutUrlForBuyer(paymentUrl string, buyerActorHex string) *string {
+	return FfiConverterOptionalStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_core_fn_func_checkout_url_for_buyer(FfiConverterStringINSTANCE.Lower(paymentUrl), FfiConverterStringINSTANCE.Lower(buyerActorHex), _uniffiStatus),
 		}
 	}))
 }

@@ -18,6 +18,13 @@ IMAGE_PAINT_S = 30.0
 """A client fetches a media blob by hash over HTTP, opens it when it is sealed,
 decodes it, and repaints the image element that shows it."""
 
+HANDLE_CHECK_S = 60.0
+"""A typed handle's check completes and the onboarding page paints its verdict
+(enabling Continue): the app's state machine runs the DoH probe for the handle's
+domain over real HTTP, then asks the nest whether the identity is admitted there.
+Two real requests, one of them to a resolver outside the nest — slower and less
+predictable than a single in-house round trip."""
+
 PROVIDER_VERIFY_S = 60.0
 """An admin action verifies or publishes against an external DNS-provider API
 (real HTTP, a fake-provider test double, or the web app's CORS-proxied
@@ -276,6 +283,12 @@ ROUTER_CHANNEL_S = 60.0
 after health has answered. The router may be refused once and restarted by s6 before
 the nest has minted its token; a current image that never logs the line is a defect,
 not a reason to carry on."""
+
+SIDECAR_LISTENING_S = 60.0
+"""A test-double sidecar container (a fake clamd / rspamd / DNS server in a
+mounted python image) prints its listener-ready line: the container starts, the
+interpreter imports the fake and binds its sockets. Sized for a loaded docker
+daemon; a green run returns at the line."""
 
 SPA_FIRST_PAINT_S = 60.0
 """The image's bundled web app, loaded in a fresh browser, paints its first

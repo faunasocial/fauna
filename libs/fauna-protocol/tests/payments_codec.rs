@@ -110,8 +110,34 @@ fn provider_remove_reply_roundtrip() {
 fn claim_redeem_request_roundtrip() {
     roundtrip(ClaimRedeemRequest {
         code: "ABCD2345EF".into(),
+        ..Default::default()
+    });
+    // The cross-nest redeem's additive fields (`monetization.md` § Pillar 3 →
+    // *Which nest an in-app redeem binds on*) ride and round-trip.
+    roundtrip(ClaimRedeemRequest {
+        code: "ABCD2345EF".into(),
+        author_home_url: Some("https://author.example".into()),
+        intent: Some(fauna_core::encoding::EmbedAsBytes {
+            envelope: vec![7u8; 100],
+            bytes: vec![1, 2, 3],
+            signer_auth: None,
+        }),
         extra: Default::default(),
     });
+}
+
+#[test]
+fn claim_redeem_request_without_the_cross_nest_fields_omits_them() {
+    let bytes = fauna_protocol::encode_canonical(&ClaimRedeemRequest {
+        code: "ABCD2345EF".into(),
+        ..Default::default()
+    })
+    .expect("encodes");
+    let v: fauna_protocol::Value = fauna_protocol::decode_strict(&bytes).expect("decodes");
+    let fauna_protocol::Value::Map(m) = v else {
+        panic!("a map")
+    };
+    assert_eq!(m.len(), 1, "only `code` rides: {m:?}");
 }
 
 #[test]

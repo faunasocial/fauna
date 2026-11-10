@@ -370,6 +370,14 @@ class AccountSettingsVM @Inject constructor(
      * identical to succeeding.
      */
     fun signOut(onComplete: (com.fauna.ffi.FfiSignOutResidue?) -> Unit) {
+        // The decision first, durably, before anything awaits: the sign-out
+        // record names every account the registry lists plus the one this
+        // process serves and owes the wipe, so a process killed anywhere after
+        // this line — inside the stop's budget included — is finished by the
+        // next launch (`account-scoping.md` § Erasure follows scope → *The
+        // sign-out record is on all 7 apps*, decisions 1 and 7). The confirm
+        // asked the serving question before calling this.
+        val recorded = accountStores.recordSignOut(accountStores.activeActorHex())
         viewModelScope.launch {
             // Await the shared account-runtime stop BEFORE anything below —
             // while [api]'s client still names the departing account
@@ -388,36 +396,32 @@ class AccountSettingsVM @Inject constructor(
             // linux/tui/macOS/iOS/windows.
             api.stopAccountRuntimeForSignOutAwaited()
 
-            // Erase every account's per-actor slots and the index
-            // (long-term-store.md § Cleanup contract) — not just the active
-            // account's. Delete-only, so a crash mid-clear cannot resurrect the
-            // identity being erased.
-            // `clearAll` reads back what it deleted — the only witness this seat
-            // has, since the store's delete is best-effort — and `reverifyErase`
-            // re-asks after `secureStorage.clear()`, the platform store's own
-            // wholesale reset, so a key that reset took is not reported. Carried to
-            // the residue below: dropping it painted a clean "Signed out" over
-            // surviving credentials (`account-scoping.md` § Erasure follows scope).
-            // The same sequence the residue retry re-runs ([SignOutCredentialEraser]).
-            val credentials = SignOutCredentialEraser(registry, secureStorage).eraseCredentials()
             // Drop BEFORE the erase, not merely before returning: the drop is what
             // ends the custodian push loop and closes the sealed store it holds
             // open, and deleting that directory out from under a live handle is the
             // deleted-inode hazard AccountStores.closeOpenStores documents.
             actorScope.dropActorScopedState()
-            // ...and every account-scoped CONTENT store, not only the credential
-            // namespace (account-scoping.md § Erasure follows scope). Credentials
-            // first: if the erase dies partway, the identity is already unreachable,
-            // whereas the reverse order could leave readable content with live
-            // credentials. Install-scoped state (logs, host-keyed nest pins) survives.
-            // What the sweep could not remove goes to the log by path and to the
-            // user by count, on the onboarding surface this hands them
-            // (`principles.md` § The user always controls their data puts the delete
-            // affordance in the app, and a log is not one). Every word of the line
-            // is the shared projection's.
-            val residue = accountStores.recordResidue(accountStores.eraseAllAccounts(), credentials)
+            // The one routine the launch and Remove Again run too, over the
+            // record written above: the wipe first — the registry's own store,
+            // then `secureStorage.clear()`, read back — so if the erase dies
+            // partway the identity is already unreachable; then every recorded
+            // account's scopes under both roots and the account-store container,
+            // with its slots in the shared account-store namespace; the residue
+            // record written before the sign-out record clears (decisions 2–6).
+            // The sync agent was dismissed by the stop above. Install-scoped
+            // state (logs, host-keyed nest pins) survives. What the erase could
+            // not remove goes to the log by path and to the user by count, on the
+            // onboarding surface this hands them (`principles.md` § The user
+            // always controls their data); every word of the line is shared.
+            // On the caller's dispatcher, as the erase it replaces ran: no agent
+            // exchange (`dismissAgent = false`), only the sweep.
+            val outcome = accountStores.finishSignOut(
+                SignOutCredentialEraser(registry, secureStorage),
+                dismissAgent = false,
+                written = recorded,
+            )
             WidgetDataWorker.refoldForAccountSwitch(context)
-            onComplete(residue)
+            onComplete(outcome.residue)
         }
     }
 

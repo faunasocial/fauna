@@ -1384,11 +1384,17 @@ public class FaunaClient {
         let api = self.api
         let notificationManager = self.notificationManager
         knockObserverTask = Task {
+            // Subscribe FIRST: a knock pushed before the subscription exists has
+            // no receiver and is gone (the broker fans out to live subscribers
+            // only), and the muted-word read below waits on the account store,
+            // which on a fresh launch can take seconds. Once subscribed, a knock
+            // arriving during that read waits in the subscription's buffer.
+            guard let sub = await logTryAsync(.warn, "fauna.client", "subscribeKnocks", { try await api.subscribeKnocks() }) else { return }
             // The knock toast asks the muted-word list before it fires, and no
             // screen is mounted to have loaded it — so the process-held list
-            // loads where the pump arms (both `start()` and the macOS e2e path).
+            // loads where the pump arms (both `start()` and the macOS e2e path),
+            // before the first knock is read off the subscription.
             await MutedWordsHolder.shared.refresh(api: api)
-            guard let sub = await logTryAsync(.warn, "fauna.client", "subscribeKnocks", { try await api.subscribeKnocks() }) else { return }
             while !Task.isCancelled {
                 guard let knock = await sub.next() else { break }  // nil ⇒ client torn down
                 // No toast for a knock whose row would collapse
@@ -1396,8 +1402,25 @@ public class FaunaClient {
                 // same relayed text and cannot be revealed. The roster refresh
                 // below still fires: the mute is a render verb.
                 let muted = await MutedWordsHolder.shared.words
+                // Counted BEFORE the muted gate: `seen` is every push the arm
+                // received (`fauna_e2e_agent::KNOCK_NOTICES_KEY`).
+                E2eLoudSurfaces.observeKnockNotice()
                 if !knockPushMutedFor(knock: knock, mutedKeywords: muted) {
-                    notificationManager.postKnockNotification(knock)
+                    // Recorded at the FIRING site, after the gate, and only for
+                    // a toast actually handed to the platform — the log means
+                    // "the user was shown this".
+                    if let raised = notificationManager.postKnockNotification(knock) {
+                        E2eLoudSurfaces.recordKnockNotice(
+                            key: raised.key, text: raised.text,
+                            replaceId: NotificationManager.knockReplaceId
+                        )
+                    } else {
+                        logMessage(
+                            level: .warn, target: "fauna.notifications.knock",
+                            message: "[knock] toast not raised: no notification host in "
+                                + "this build (NotificationHost.isAvailable == false)"
+                        )
+                    }
                 }
                 NotificationCenter.default.post(name: .faunaKnockReceived, object: nil)
             }
@@ -1432,6 +1455,9 @@ public class FaunaClient {
             while !Task.isCancelled {
                 guard let state = await sub.next() else { break }  // nil ⇒ client torn down
                 self?.connectionState = state
+                // The word the offline gate reads, to the feed manager's
+                // offline outbox (`ConnectionWordFeed`).
+                ConnectionWordFeed.shared.publish(state)
                 // Every value, repeats included — the `connection_reports`
                 // stickiness counter (a no-op outside the test flavor).
                 E2eLoudSurfaces.observeConnectionReport(state)

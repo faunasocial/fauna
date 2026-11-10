@@ -638,6 +638,11 @@ pub enum SelectTarget {
     FolderAudience {
         row: usize,
     },
+    /// `wizard-audience-select` — the create wizard's audience on its Name
+    /// step (`private` | `public`, raw wire values like
+    /// [`Self::FolderAudience`]). Picking `public` commits nothing either: the
+    /// choice rides the machine until Create arms the declassify confirm.
+    WizardAudience,
     /// `folder-nest-residency-select` — the nest place's content residency on
     /// the expanded owner row (phase 5). A raw-value picker over the wire values
     /// `full` / `metadata_only` (`fauna_folders_machine::residency_options`).
@@ -1078,6 +1083,9 @@ impl SelectTarget {
                     row,
                     audience: value,
                 })
+            }
+            SelectTarget::WizardAudience => {
+                Gesture::Settings(crate::settings::Action::WizardSetAudience(value))
             }
             SelectTarget::FolderNestResidency { row } => {
                 Gesture::Settings(crate::settings::Action::SetFolderResidency {

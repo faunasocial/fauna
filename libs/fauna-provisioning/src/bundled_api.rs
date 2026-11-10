@@ -116,7 +116,14 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
-    host == "127.0.0.1" || host == "::1" || host == "localhost"
+    // The IP side stays the two exact literals the spec names (above); the
+    // name side is the shared no-DNS reading — reqwest resolves the name, so
+    // only what no resolver forwards (`localhost`) passes, never `x.localhost`
+    // or `localhost.`. An IP literal other than the two is not a name.
+    host == "127.0.0.1"
+        || host == "::1"
+        || (host.parse::<std::net::IpAddr>().is_err()
+            && fauna_core::resolve::is_loopback_host_without_dns(host))
 }
 
 /// The authenticated client every adapter holds: base URL + Bearer token.
@@ -420,6 +427,10 @@ mod tests {
         "http://[::1]@evil.example",
         "http://localhost@evil.example",
         "http://localhost:8080@evil.example/bundled",
+        // reqwest resolves the name: a resolver with no local answer for these
+        // forwards the query, and whoever answers gets the bearer in cleartext.
+        "http://x.localhost:8080",
+        "http://localhost.:8080",
     ];
 
     #[test]

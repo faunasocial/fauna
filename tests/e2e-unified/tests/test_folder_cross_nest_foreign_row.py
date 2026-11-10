@@ -67,43 +67,15 @@ import pytest
 pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 
 
-# apple legs proved the FaunaKit wiring; linux/web/tui widened in
-# 2026-08-11. The test body is client-generic (no per-app
-# branching). tui was wired the same session
-# (`settings/devices.rs::DevicesState::build`, mirroring linux); web
-# followed — a two-part fix (read-side wasm export +
-# `setForeignSetsSource` wiring in `FoldersSection.svelte`, PLUS the write-side
-# `FolderCustodySink` web never registered at all, without which
-# `join_folder_welcome` never persisted a `ForeignFolder` to read back).
-# linux IS wired (`views/devices_folders/mod.rs`). Its leg was xfailed for one
-# day (2026-08-11) over a row whose title read back as the literal mode string
-# "sync": not a nest bug at all, but linux's automation agent reading an
-# `adw::ActionRow`'s *subtitle* — the read-only member row is the only
-# `folder-row` shape that is a plain ActionRow rather than an `ExpanderRow`, so
-# it was also the only one whose title no test had ever asserted. linux now
-# declares the row's automation text explicitly, as apple and tui always have
-# (`testid::set_test_text`; pinned by `automation::find`'s
-# `a_content_row_reads_its_declared_text_not_its_subtitle`).
-#
-# windows and android wire the same source too (windows
-# `DevicesMachineHost` → `NestRpcClient.WireDevicesForeignSetsAsync`, android
-# `DevicesVM` → `ApiClient`), so the seat takes the fixture's own seven-app
-# default rather than a narrower override. Until 2026-10-08 a five-app override
-# left windows and android out, and no windows run could collect this witness
-# while the catalog still counted it for the windows column.
-@pytest.mark.feature("share-a-folder")
-def test_cross_nest_shared_folder_renders_as_a_foreign_row(
-    folder_share_recipient_app, cross_nest_foreign
-):
-    """A set shared from nest A appears in the recipient's folders list on nest B
-    once accepted — sourced ONLY from their own `fauna.state.folder-keys` foreign-set row."""
+def _relay_a_strangers_share(nest_a, nest_b, recipient):
+    """Precondition setup (convention 8): a stranger owner on nest A creates a
+    set, binds it to a real MLS group and relays its folder Welcome to the
+    recipient on nest B over the federation channel. Returns
+    ``(owner_handle, set_name)``; the recipient's app is not touched."""
     from helpers.admin_wire import admit_adult
     from tests.api import conv_api
 
-    recipient_app, nest_b, recipient = folder_share_recipient_app
-    nest_a = cross_nest_foreign  # the sharer's HOME nest (https, loopback authority)
     recipient_id = recipient["actor_id_hex"]
-    b = recipient_app.backups
 
     # ── 1. A stranger owner on nest A, with a real set bound to a real MLS group ──
     owner_handle = "xnowner" + secrets.token_hex(3)
@@ -157,6 +129,43 @@ def test_cross_nest_shared_folder_renders_as_a_foreign_row(
         nest_url=nest_b["peer_url"],
         scheme="https",
     )
+    return owner_handle, set_name
+
+
+# apple legs proved the FaunaKit wiring; linux/web/tui widened in
+# 2026-08-11. The test body is client-generic (no per-app
+# branching). tui was wired the same session
+# (`settings/devices.rs::DevicesState::build`, mirroring linux); web
+# followed — a two-part fix (read-side wasm export +
+# `setForeignSetsSource` wiring in `FoldersSection.svelte`, PLUS the write-side
+# `FolderCustodySink` web never registered at all, without which
+# `join_folder_welcome` never persisted a `ForeignFolder` to read back).
+# linux IS wired (`views/devices_folders/mod.rs`). Its leg was xfailed for one
+# day (2026-08-11) over a row whose title read back as the literal mode string
+# "sync": not a nest bug at all, but linux's automation agent reading an
+# `adw::ActionRow`'s *subtitle* — the read-only member row is the only
+# `folder-row` shape that is a plain ActionRow rather than an `ExpanderRow`, so
+# it was also the only one whose title no test had ever asserted. linux now
+# declares the row's automation text explicitly, as apple and tui always have
+# (`testid::set_test_text`; pinned by `automation::find`'s
+# `a_content_row_reads_its_declared_text_not_its_subtitle`).
+#
+# windows and android wire the same source too (windows
+# `DevicesMachineHost` → `NestRpcClient.WireDevicesForeignSetsAsync`, android
+# `DevicesVM` → `ApiClient`), so the seat takes the fixture's own seven-app
+# default rather than a narrower override. Until 2026-10-08 a five-app override
+# left windows and android out, and no windows run could collect this witness
+# while the catalog still counted it for the windows column.
+@pytest.mark.feature("share-a-folder")
+def test_cross_nest_shared_folder_renders_as_a_foreign_row(
+    folder_share_recipient_app, cross_nest_foreign
+):
+    """A set shared from nest A appears in the recipient's folders list on nest B
+    once accepted — sourced ONLY from their own `fauna.state.folder-keys` foreign-set row."""
+    recipient_app, nest_b, recipient = folder_share_recipient_app
+    nest_a = cross_nest_foreign  # the sharer's HOME nest (https, loopback authority)
+    b = recipient_app.backups
+    _owner_handle, set_name = _relay_a_strangers_share(nest_a, nest_b, recipient)
 
     # ── 3. The recipient's UI: the stranger's cross-nest share knocks ──────────
     b.navigate_devices()
@@ -209,4 +218,78 @@ def test_cross_nest_shared_folder_renders_as_a_foreign_row(
     )
     assert not recipient_app.has_error(), (
         f"rendering the foreign row surfaced an error: {recipient_app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("share-a-folder")
+def test_a_cross_nest_share_names_the_sharer_by_full_handle(
+    folder_share_recipient_app, cross_nest_foreign
+):
+    """A folder shared from another nest names who shared it by their full
+    ``handle@domain`` — on the pending-share knock and on the accepted folder row.
+
+    `federation-shared-folders.md` § Cross-nest shared folders + channel append →
+    *The cross-nest owner label*: the home nest stamps ``owner_handle`` /
+    ``owner_domain`` on the folder Welcome relay, the receiving nest verifies the
+    domain binding, and the pair lands on ``WelcomeInbox`` (the knock's
+    ``shared_by_display``) and on the member's ``ForeignFolder`` custody record.
+    The folder row reads that record through ``CustodyForeignSetsSource`` →
+    ``ForeignSetRow`` → ``DevicesMachine::foreign_rows``, which joins the pair
+    with ``qualified_handle`` into ``owner_display`` — the "Shared by ‹who›"
+    badge. The recipient's own nest holds no ``users`` row for the sharer, so a
+    bare handle (or the short-id fallback) is what a missing stamp would show;
+    the domain half is what proves the stamp crossed.
+
+    RED-prove: drop the ``owner_handle``/``owner_domain`` mapping in
+    ``CustodyForeignSetsSource::foreign_sets`` and the badge assertion fails
+    while the knock assertion still holds.
+    """
+    recipient_app, nest_b, recipient = folder_share_recipient_app
+    nest_a = cross_nest_foreign
+    b = recipient_app.backups
+    owner_handle, set_name = _relay_a_strangers_share(nest_a, nest_b, recipient)
+    qualified = f"{owner_handle}@{nest_a['authority']}"
+
+    # ── The knock names the sharer by full handle ────────────────────────────
+    b.navigate_devices()
+    b.navigate_folders()
+    count = b.wait_for_pending_shares(1)
+    assert count == 1, (
+        "the relayed cross-nest folder welcome should surface as exactly one "
+        f"pending-share knock; count={count} error={recipient_app.error_text()!r}"
+    )
+    knock = b.pending_share_text(0)
+    assert qualified in knock, (
+        f"the pending share should name its sharer as {qualified!r} — the home "
+        "nest's stamped owner label joined with its domain; got "
+        f"{knock!r} error={recipient_app.error_text()!r}"
+    )
+
+    # ── Accept; the folder row names the sharer the same way ─────────────────
+    b.accept_pending_share(0)
+    pending = b.wait_for_pending_shares(0)
+    assert pending == 0, (
+        f"accepting should consume the knock; still {pending} pending "
+        f"error={recipient_app.error_text()!r}"
+    )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if b.folder_count() >= 1:
+            break
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline poll (convention 14 mechanism 1) — paced re-fire of the page-visible refresh; the assertion is the row count, never elapsed time
+        b.navigate_devices()
+        b.navigate_folders()
+    assert b.folder_count() == 1, (
+        f"the accepted cross-nest set {set_name!r} should render as one row; saw "
+        f"{b.folder_count()} error={recipient_app.error_text()!r}"
+    )
+    badge = b.shared_badge_text()
+    assert qualified in badge, (
+        f"the foreign folder row's shared badge should name its sharer as "
+        f"{qualified!r} (the ForeignFolder's stamped owner label, joined by "
+        f"`DevicesMachine::foreign_rows`); got {badge!r} "
+        f"error={recipient_app.error_text()!r}"
+    )
+    assert not recipient_app.has_error(), (
+        f"the cross-nest share surfaced an error: {recipient_app.error_text()!r}"
     )

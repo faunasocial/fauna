@@ -49,7 +49,9 @@ pub enum RecoveryKitStatus {
     /// surfaced on a signed-in surface because a signed-in device is the only
     /// party that can repair it.
     RegisteredNoEscrow,
-    /// A seed-alone replacement is in its 30-day window.
+    /// A seed-alone replacement is in its 30-day window — at the bound nest,
+    /// or at a linked nest alone (the leg's linked readings; the window that
+    /// lands first is the one carried).
     ///
     /// Takes precedence over the escrow states: it is the one state that means
     /// *someone may hold your identity secret*, and it is the only one with a
@@ -158,7 +160,16 @@ impl RecoveryKitStatus {
 ///    about an account with no kit, so they are not made.
 /// 2. **A pending replacement** outranks the escrow question. It is the only
 ///    state carrying a deadline and the only one that implies someone else may
-///    hold the identity secret.
+///    hold the identity secret. The bound nest's answer is unioned with the
+///    windows the account runtime's secondary leg last read at each linked
+///    nest (`fauna_client_core::recovery_pending`, this process's linked
+///    readings): a seed thief opens the window at a nest no device is bound
+///    to, and the veto this state offers is the one gesture that contests it
+///    (`identity-succession.md` § Enforcement on the home nest → *Every nest
+///    the identity is linked to*, clause (c)). The window that lands first is
+///    the one carried, so the countdown here and the banner's agree. A
+///    process with no readings — web, in a tab whose account runtime has not
+///    run the leg — reads the bound nest alone.
 /// 3. **Escrow presence** separates the two registered states.
 ///
 /// Every read's refusal is an error — including `unknown_kind` on (3), whose
@@ -176,7 +187,8 @@ where
         return Ok(RecoveryKitStatus::NeverCreated);
     }
 
-    if let Some(pending) = crate::replacement::pending_replacement(client).await? {
+    let bound = crate::replacement::pending_replacement(client).await?;
+    if let Some(pending) = soonest_window(bound, actor_id) {
         return Ok(RecoveryKitStatus::ReplacementPending(pending));
     }
 
@@ -184,6 +196,20 @@ where
         Ok(Some(_)) => Ok(RecoveryKitStatus::Registered),
         Ok(None) => Ok(RecoveryKitStatus::RegisteredNoEscrow),
         Err(e) => Err(e),
+    }
+}
+
+/// The pending window Settings carries: the bound nest's, or the soonest of
+/// the linked readings, whichever lands first — the alert's own rule
+/// (`fauna_client_core::recovery_pending::sync_pending_replacement_from`).
+fn soonest_window(
+    bound: Option<PendingReplacement>,
+    actor_id: &ActorId,
+) -> Option<PendingReplacement> {
+    let linked = crate::alerts::earliest_linked_window(actor_id).map(|(_, window)| window);
+    match (bound, linked) {
+        (Some(b), Some(l)) => Some(if l.lands_at < b.lands_at { l } else { b }),
+        (bound, linked) => bound.or(linked),
     }
 }
 
@@ -218,21 +244,28 @@ where
 /// kit the user pasted, contest the pending window at the bound nest **and at
 /// every linked nest** (`dial`; `identity-succession.md` § Enforcement on the
 /// home nest → *Every nest the identity is linked to*, clause (c) —
-/// [`crate::linked_fanout::veto_everywhere`]), then re-read the status in the
-/// SAME call — the re-read status is the gesture's only receipt (the countdown
-/// line and the button disappear), so a second async hop would leave an
-/// awaited click asserting the old state (testing.md convention 14).
+/// [`crate::linked_fanout::veto_everywhere`]), settle the device's banner
+/// from the answers (`alerts`, the app's critical-alerts registry — the
+/// nests the veto reached hold no window now, the ones it could not reach
+/// stay loud), then re-read the status in the SAME call — the re-read status
+/// is the gesture's only receipt (the countdown line and the button
+/// disappear), so a second async hop would leave an awaited click asserting
+/// the old state (testing.md convention 14). `now` is unix seconds, the
+/// caller's clock.
 ///
 /// The account is passed explicitly rather than left to the payload: Settings
 /// always knows whose account it is, and a bare 64-hex phrase names none.
 /// Returns whether anything was pending to cancel at any nest, beside the
 /// fresh status. The bound nest's refusal is the gesture's error; a linked
-/// nest that could not be asked is logged, never a failure.
+/// nest that could not be asked is logged, never a failure — and its window,
+/// if the leg had read one, keeps the status pending and the button offered.
 pub async fn veto_with_status<R, D>(
     client: &RecoveryClient<R>,
     actor_id: ActorId,
     held_kit_input: &str,
     dial: &D,
+    alerts: &fauna_client_alerts::CriticalAlerts,
+    now: i64,
 ) -> std::result::Result<(bool, RecoveryKitStatus), String>
 where
     R: RpcRequester,
@@ -242,7 +275,8 @@ where
 {
     // Parse first: a malformed phrase costs no round trip.
     let kit = crate::restore::parse_kit(held_kit_input).map_err(|e| e.to_string())?;
-    let (bound, linked) = crate::linked_fanout::veto_everywhere(client, &kit, actor_id, dial).await;
+    let (bound, linked) =
+        crate::linked_fanout::veto_everywhere(client, &kit, actor_id, dial, alerts, now).await;
     let cancelled = bound.map_err(|e| e.to_string())?
         || linked.nests.iter().any(|n| {
             matches!(
@@ -396,6 +430,36 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), keys.len(), "keys collide: {keys:?}");
+    }
+
+    /// The window Settings carries is the soonest-landing one across the bound
+    /// nest and the linked readings — and a linked nest's alone pends.
+    #[test]
+    fn the_soonest_window_across_the_bound_nest_and_the_linked_readings_pends() {
+        use fauna_client_core::recovery_pending::{LinkedReading, record_linked_readings};
+        // A distinct identity: the readings are process-wide.
+        let actor = ActorId([0xc1; 32]);
+        assert_eq!(soonest_window(None, &actor), None);
+        assert_eq!(
+            soonest_window(Some(pending(100)), &actor),
+            Some(pending(100))
+        );
+
+        record_linked_readings(
+            &actor,
+            &[([0x4c; 32], LinkedReading::Read(Some(pending(50))))],
+        );
+        assert_eq!(
+            soonest_window(None, &actor),
+            Some(pending(50)),
+            "a linked nest's window alone pends"
+        );
+        assert_eq!(
+            soonest_window(Some(pending(100)), &actor),
+            Some(pending(50))
+        );
+        assert_eq!(soonest_window(Some(pending(10)), &actor), Some(pending(10)));
+        record_linked_readings(&actor, &[]);
     }
 
     /// The countdown rounds **up**: a window with any time left never reads

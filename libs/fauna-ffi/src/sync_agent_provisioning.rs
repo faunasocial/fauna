@@ -1388,31 +1388,6 @@ impl FfiSyncAgentProvisioner {
     }
 }
 
-/// What one poked custodian pull pass did — the FFI twin of
-/// [`fauna_ipc::sync::CustodianPassReport`], field-for-field, and the reply
-/// [`FfiSyncAgentProvisioner::custodian_run_pass_now`] returns. **Test-only**,
-/// same gate as its sole producer below: a shipped build carries neither the
-/// record nor the call that fills it.
-#[cfg(any(test, feature = "test-helpers"))]
-#[derive(uniffi::Record)]
-pub struct FfiCustodianPassReport {
-    /// Whether this process was hosting a custodian replica at all. `false` is
-    /// a meaningful negative, not an error — the device is not enrolled, or the
-    /// host loop has not yet re-read the registry.
-    pub hosting: bool,
-    /// How many backed-up kinds the pass drove.
-    pub kinds_run: u32,
-    /// Bytes this device holds after the pass, as reported to the nest.
-    pub held_bytes: u64,
-    /// The pass's own cap verdict (`CAP_STATE_OK` / `CAP_STATE_REACHED`).
-    pub cap_state: Option<String>,
-    /// The self-audit verdict this pass reported, when it ran one. `None` is
-    /// *not audited on this pass*, never a failed audit.
-    pub audit_state: Option<String>,
-    /// Whether the pass's check-in reached the source nest.
-    pub checked_in: bool,
-}
-
 /// Run ONE custodian pull pass on this device's hosted replica and report what
 /// it did (`CustodianRunPassNow`) — the windows/desktop twin of linux's
 /// (`apps/fauna-linux/src/lib.rs`'s `custodian_pull_run_now` arm) and tui's
@@ -1438,16 +1413,16 @@ pub struct FfiCustodianPassReport {
 /// build fail the flavor-diff seam witness (e2e-conventions.md point 15),
 /// since that flavor is never built `--release`. `any(test, feature =
 /// "test-helpers")` still keeps a shipped `--release` build from exporting
-/// either the call or [`FfiCustodianPassReport`].
+/// either the call or [`FfiCustodianPassReport`](crate::FfiCustodianPassReport).
 #[cfg(all(feature = "backup-destinations", any(test, feature = "test-helpers")))]
 #[fauna_uniffi_async::export]
 impl FfiSyncAgentProvisioner {
     pub async fn custodian_run_pass_now(
         &self,
         now_offset_secs: i64,
-    ) -> Result<FfiCustodianPassReport, FfiError> {
+    ) -> Result<crate::FfiCustodianPassReport, FfiError> {
         let report = self.inner.custodian_run_pass_now(now_offset_secs).await?;
-        Ok(FfiCustodianPassReport {
+        Ok(crate::FfiCustodianPassReport {
             hosting: report.hosting,
             kinds_run: report.kinds_run,
             held_bytes: report.held_bytes,

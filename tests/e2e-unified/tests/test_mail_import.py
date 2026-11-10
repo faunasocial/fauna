@@ -2014,6 +2014,18 @@ def test_losing_the_nest_connection_mid_import_loses_nothing(
 _ALREADY_HELD = "a message the nest already holds"
 
 
+def _set_import_duplicates(wizard, on: bool) -> None:
+    """Set "Import duplicates anyway" on the Scope step and wait for it to take."""
+    if wizard.import_duplicates_on() != on:
+        wizard.toggle_import_duplicates()
+        assert wait_until(
+            lambda: wizard.import_duplicates_on() == on,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"the option never turned {'on' if on else 'off'}; "
+            f"error {wizard.error_text()!r}",
+        )
+
+
 def _import_a_message_held_twice(app, handle, request, *, import_duplicates: bool):
     """The same message twice over — once in INBOX, once in Archive, the shape
     a Gmail label or a copied folder gives it — imported with "Import
@@ -2035,14 +2047,7 @@ def _import_a_message_held_twice(app, handle, request, *, import_duplicates: boo
         assert wizard.import_duplicates_label() == S.mail_import.scope_import_duplicates_label, (
             f"the option's label reads {wizard.import_duplicates_label()!r}"
         )
-        if wizard.import_duplicates_on() != import_duplicates:
-            wizard.toggle_import_duplicates()
-            assert wait_until(
-                lambda: wizard.import_duplicates_on() == import_duplicates,
-                budgets.UI_SETTLE_S,
-                diagnose=lambda: f"the option never turned {'on' if import_duplicates else 'off'}; "
-                f"error {wizard.error_text()!r}",
-            )
+        _set_import_duplicates(wizard, import_duplicates)
         assert wizard.import_duplicates_label() == S.mail_import.scope_import_duplicates_label
         wizard.scope_next()
         wait_until(
@@ -2104,6 +2109,96 @@ def test_import_duplicates_anyway_stores_mail_already_in_the_mailbox_a_second_ti
     assert copies == {"INBOX": 1, "Archive": 1}, f"a mail app sees the message in {copies}"
     sessions = import_session_counts(dedicated_mail_nest.nest)
     assert [s[2:] for s in sessions] == [(2, 0, 0)], f"the nest's record is {sessions}"
+
+
+@pytest.mark.feature("mailbox-import")
+def test_import_duplicates_anyway_still_holds_after_the_app_closes_mid_import(
+    app, dedicated_mail_nest, request
+):
+    """§ Resume protocol step 3 (outcome 59): the session's import-duplicates
+    choice is recorded on the session row and re-applied on resume, so an
+    import started with "Import duplicates anyway" on and closed part way
+    through stores a message the nest already holds a second time after the
+    reopen too — the reopened app never falls back to the default (skip).
+
+    The copy the nest already holds is INBOX's, handed over before the close;
+    Archive's copy is fetched only by the resumed run.
+    """
+    _tui_first(app, also_apple=True, also_windows=True)
+    require_relaunchable(app.driver)
+    mailboxes = [
+        SourceMailbox(name="INBOX", messages=[sample_message(_ALREADY_HELD)]),
+        SourceMailbox(
+            name="Archive",
+            messages=[sample_message("an archived message"), sample_message(_ALREADY_HELD)],
+        ),
+    ]
+    with FakeImapSource(mailboxes, cert=session_cert(), password=SOURCE_PASSWORD) as source:
+        wizard = _connect_journey(app, dedicated_mail_nest, request, source)
+        _set_import_duplicates(wizard, True)
+        wizard.scope_next()
+        wait_until(
+            wizard.confirm_summary,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"no Confirm summary; error was {wizard.error_text()!r}",
+        )
+
+        # INBOX's copy is in before Archive is opened; the close lands while
+        # Archive's first body is on its way.
+        source.hold("Archive", 1)
+        wizard.start()
+        _wait_at(source, "Archive", 1, wizard)
+        assert wait_until(
+            lambda: wizard.progress_summary().startswith(_progress(1, 3, 0)),
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"progress {wizard.progress_summary()!r}, "
+            f"error {wizard.error_text()!r}",
+        ), "INBOX's copy is not in before the close"
+
+        relaunch(app.driver, crash=True)
+        source.release("Archive", 1)
+        assert wait_until(lambda: ("Archive", 1) in source.fetched_uids, budgets.UI_SETTLE_S)
+        fetched_before = len(source.fetched_uids)
+
+        # ── Reopened on the same import's Progress; resumed with the password
+        # (it lived only in the closed app's memory — outcome 28).
+        wizard = MailImportActions(app.driver)
+        wizard.navigate()
+        assert wait_until(
+            lambda: wizard.progress_summary().startswith(_progress(1, 3, 0)) or None,
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: "the reopened app did not come back to the import's "
+            f"progress: summary {wizard.progress_summary()!r}, "
+            f"error {wizard.error_text()!r}",
+        ), "the reopened app is not on the same import's Progress"
+        type_until_it_takes(wizard.set_port, wizard.port_value, str(source.port))
+        wizard.set_password(SOURCE_PASSWORD)
+        wizard.resume()
+        done = wait_until(
+            lambda: wizard.done_summary() or None,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"the reopened import never reached Done; progress "
+            f"{wizard.progress_summary()!r}, error {wizard.error_text()!r}, "
+            f"fetched {source.fetched_uids[fetched_before:]}",
+        )
+        assert ("Archive", 2) in source.fetched_uids[fetched_before:], (
+            "the resumed run never read Archive's copy of the held message: "
+            f"{source.fetched_uids[fetched_before:]}"
+        )
+
+    # Had the resume fallen back to skipping duplicates, Archive's copy would
+    # read as skipped and a mail app would find the message in INBOX alone.
+    assert done.startswith(
+        S.mail_import.done_summary_fmt(imported="3", skipped="0", errored="0")
+    ), f"Done reads {done!r}; the resumed run should have stored the held message again"
+    address = alias_admin_to_address(dedicated_mail_nest.nest, dedicated_mail_nest.domain)
+    landed = mailboxes_over_imap(dedicated_mail_nest, address, MAIL_PASSWORD)
+    copies = {
+        name: n
+        for name, msgs in landed.items()
+        if (n := sum(1 for m in msgs if m.subject == _ALREADY_HELD))
+    }
+    assert copies == {"INBOX": 1, "Archive": 1}, f"a mail app sees the message in {copies}"
 
 
 @pytest.mark.feature("mailbox-import")

@@ -302,6 +302,31 @@ mod tests {
     }
 
     #[test]
+    fn inbound_bold_italic_and_a_code_like_name_round_trip() {
+        // htmd writes `<strong><em>` as `**_x_**` and escapes a text underscore as
+        // `\_`; the shared renderer must read the first as bold-italic and the
+        // second as a literal underscore (email-in-conversations outcome 22 — the
+        // e2e that first caught both painting their markers as text).
+        let md = html_to_markdown(
+            "<blockquote><p>q</p></blockquote><ol><li>one</li><li>two</li></ol>\
+             <p><strong><em>both</em></strong> and keep_snake_case</p>",
+        );
+        let html = fauna_core::markdown::markdown_to_html(&md);
+        for want in [
+            "<blockquote>",
+            "<ol>",
+            "<strong><em>both</em></strong>",
+            "keep_snake_case",
+        ] {
+            assert!(html.contains(want), "{want:?}: md={md:?} html={html:?}");
+        }
+        assert!(
+            !html.contains('\\'),
+            "an escape painted as text: md={md:?} html={html:?}"
+        );
+    }
+
+    #[test]
     fn empty_html_is_empty_plain_text_passes_through() {
         assert_eq!(html_to_markdown(""), "");
         // Tag-less text is inert content — html5ever treats it as a text node.

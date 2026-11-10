@@ -1302,6 +1302,132 @@ pub fn content_keys(cfg: &FoldersConfig, channel_id: &[u8; 32]) -> Option<Folder
     joined_keys(cfg, channel_id)
 }
 
+/// One content-key generation as a test may see it: its version and a
+/// one-way fingerprint of its key, never the key ([`held_generations`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldGeneration {
+    pub version: u64,
+    /// The first 16 bytes (hex) of the key's keyed BLAKE3 derivation under
+    /// [`KEY_FINGERPRINT_CONTEXT`]: equal across two holders exactly when they
+    /// hold the same key, and no help in recovering it.
+    pub key_fp: String,
+}
+
+/// What a holder's custody holds for the live set called `name`: the set's
+/// channel and every content-key generation it can open, most-recent first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldSetCustody {
+    pub found: bool,
+    pub channel_id_hex: Option<String>,
+    pub generations: Vec<HeldGeneration>,
+}
+
+/// The derivation context of [`HeldGeneration::key_fp`].
+pub const KEY_FINGERPRINT_CONTEXT: &str = "fauna.e2e.content-key-fingerprint.v1";
+
+/// The generations this custody can open for the live set called `name` — the
+/// reading a journey compares across two holders to show which one can open a
+/// file sealed under a given generation (`succession-aftermath.md` § Re-key
+/// scope, the MLS groups row: a seat still holding a retired seed must hold
+/// no key for the generation a succession rotated in). `found: false` when no
+/// live entry carries the name or the entry is not yet bound to a channel.
+pub fn held_generations(cfg: &FoldersConfig, name: &str) -> HeldSetCustody {
+    match live_set_by_name(cfg, name).and_then(|s| s.channel_id) {
+        Some(channel) => held_generations_on(cfg, &channel),
+        None => HeldSetCustody {
+            found: false,
+            channel_id_hex: None,
+            generations: Vec::new(),
+        },
+    }
+}
+
+/// [`held_generations`] by the set's channel — the form a member's custody
+/// answers, whose entry for another owner's set need carry no name.
+/// `found: false` when this custody holds no key for the channel.
+pub fn held_generations_on(cfg: &FoldersConfig, channel: &[u8; 32]) -> HeldSetCustody {
+    let Some(keys) = content_keys(cfg, channel) else {
+        return HeldSetCustody {
+            found: false,
+            channel_id_hex: Some(hex::encode(channel)),
+            generations: Vec::new(),
+        };
+    };
+    let generations = Some(keys)
+        .map(|keys| {
+            keys.generations()
+                .map(|g| HeldGeneration {
+                    version: g.version,
+                    key_fp: hex::encode(
+                        &blake3::derive_key(KEY_FINGERPRINT_CONTEXT, &*g.key)[..16],
+                    ),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    HeldSetCustody {
+        found: true,
+        channel_id_hex: Some(hex::encode(channel)),
+        generations,
+    }
+}
+
+/// The selector the e2e custody reader takes: the set by its channel
+/// (`channel_id_hex`, 64 hex — a member's form) when given, else by the live
+/// entry's `set_name` (an owner's). `Err` names what is wrong with the
+/// selector — neither given, or a channel that is not 32 bytes of hex — so a
+/// reader can refuse it loudly rather than answer "nothing held" for a typo.
+/// One home for every app's `folder_set_custody` arm (priority #2).
+pub fn held_generations_for(
+    cfg: &FoldersConfig,
+    set_name: Option<&str>,
+    channel_id_hex: Option<&str>,
+) -> Result<HeldSetCustody, &'static str> {
+    match (channel_id_hex, set_name) {
+        (Some(h), _) => {
+            let channel = hex::decode(h)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .ok_or("`channel_id_hex` must be 64 hex characters")?;
+            Ok(held_generations_on(cfg, &channel))
+        }
+        (None, Some(name)) => Ok(held_generations(cfg, name)),
+        (None, None) => Err("needs a `set_name` string or a 64-hex `channel_id_hex`"),
+    }
+}
+
+/// What the e2e custody reader answers: the generations held for the
+/// selected set, or the custody could not be read at all (the reason, for a
+/// `{"found": false, "error"}` answer — never folded into "nothing held").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetCustodyReading {
+    Held(HeldSetCustody),
+    Unreadable(String),
+}
+
+/// The e2e custody reader's whole body, over any custody source: load the
+/// fold through `keys`, then select with [`held_generations_for`]. `Err` is a
+/// refused selector (neither given, or a malformed channel), for the caller's
+/// loud refusal. The one body every app's `folder_set_custody` arm runs — the
+/// native apps through `fauna_client_account_runtime::folder_set_custody_json`,
+/// web through `fauna-wasm`'s `accountFolderSetCustodyJsonForTest` — each
+/// over its own `PlaneFolderKeys` (priority #2).
+pub async fn read_held_generations(
+    keys: &dyn crate::FolderKeyReader,
+    set_name: Option<&str>,
+    channel_id_hex: Option<&str>,
+) -> Result<SetCustodyReading, &'static str> {
+    if set_name.is_none() && channel_id_hex.is_none() {
+        return Err("needs a `set_name` string or a 64-hex `channel_id_hex`");
+    }
+    match keys.load().await {
+        Ok(cfg) => {
+            held_generations_for(&cfg, set_name, channel_id_hex).map(SetCustodyReading::Held)
+        }
+        Err(e) => Ok(SetCustodyReading::Unreadable(e.to_string())),
+    }
+}
+
 /// Record (upsert) a **foreign** (cross-nest) shared-set membership in this
 /// member's own folder-keys custody — the accept-time write that makes a set whose home
 /// is another nest listable and readable from this client (Phase 2 client
@@ -1675,6 +1801,74 @@ pub fn forget_foreign_set(cfg: &mut FoldersConfig, channel_id: &[u8; 32], now_mi
     }
 }
 
+/// Record a forked SAME-nest seat's member-side row
+/// ([`fauna_core::data::ForkedFolderSeat`]), stamped `forked_at = now_micros`
+/// (kept above any earlier clear, so the record reads live) — the custody
+/// sink's write just before the seat's self-unlist. A record already standing
+/// keeps its display fields where the new one carries none (a list read that
+/// failed this time). Returns whether the custody changed.
+pub fn record_forked_seat(
+    cfg: &mut FoldersConfig,
+    mut record: fauna_core::data::ForkedFolderSeat,
+    now_micros: u64,
+) -> bool {
+    let existing = cfg
+        .forked_seats
+        .iter()
+        .position(|f| f.channel_id == record.channel_id);
+    let floor = existing
+        .and_then(|i| cfg.forked_seats[i].cleared_at)
+        .map_or(0, |c| c.saturating_add(1));
+    record.forked_at = now_micros.max(floor);
+    record.cleared_at = existing.and_then(|i| cfg.forked_seats[i].cleared_at);
+    match existing {
+        Some(i) => {
+            let held = &cfg.forked_seats[i];
+            if held.is_live() {
+                record.set_name = record.set_name.or_else(|| held.set_name.clone());
+                if record.owner_handle.is_none() && record.owner_actor_id.is_none() {
+                    record.owner_handle = held.owner_handle.clone();
+                    record.owner_actor_id = held.owner_actor_id.clone();
+                }
+                record.access = record.access.or_else(|| held.access.clone());
+            }
+            let changed = cfg.forked_seats[i] != record;
+            cfg.forked_seats[i] = record;
+            changed
+        }
+        None => {
+            cfg.forked_seats.push(record);
+            true
+        }
+    }
+}
+
+/// Clear a forked seat's record when a fresh Welcome replaces the seat or
+/// the member leaves the set: `cleared_at` is stamped at `now_micros`, never
+/// before the record's `forked_at`, and the record is never removed (a
+/// removed record returns from any stale device). Returns whether a live
+/// record was cleared (idempotent).
+pub fn clear_forked_seat(cfg: &mut FoldersConfig, channel_id: &[u8; 32], now_micros: u64) -> bool {
+    match cfg
+        .forked_seats
+        .iter_mut()
+        .find(|f| &f.channel_id == channel_id && f.is_live())
+    {
+        Some(record) => {
+            record.cleared_at = Some(now_micros.max(record.forked_at));
+            true
+        }
+        None => false,
+    }
+}
+
+/// The live forked-seat records — what the Folders page unions in.
+pub fn live_forked_seats(
+    cfg: &FoldersConfig,
+) -> impl Iterator<Item = &fauna_core::data::ForkedFolderSeat> {
+    cfg.forked_seats.iter().filter(|f| f.is_live())
+}
+
 /// Retire every live entry holding `channel_id` when its holder leaves the
 /// set — a member's leave retires its received copy (ruling (e)): the entry
 /// keeps its keys (no-data-loss) and is never removed, since the union merge
@@ -1971,6 +2165,66 @@ mod tests {
 
     fn chan(b: u8) -> [u8; 32] {
         [b; 32]
+    }
+
+    fn forked_seat(b: u8, name: Option<&str>) -> fauna_core::data::ForkedFolderSeat {
+        fauna_core::data::ForkedFolderSeat {
+            channel_id: chan(b),
+            mls_group_id: vec![b; 16],
+            set_name: name.map(str::to_string),
+            owner_handle: Some("alice".into()),
+            access: Some("writer".into()),
+            ..Default::default()
+        }
+    }
+
+    /// A forked seat's durable row: written live, kept (with its display
+    /// fields) by a repeat whose list read named nothing, cleared to a
+    /// tombstone by a leave or a fresh Welcome, revived by a later fork past
+    /// the clear — and the merge of a cleared replica with a stale live one
+    /// stays cleared.
+    #[test]
+    fn a_forked_seat_record_is_written_kept_cleared_and_revived() {
+        let mut c = FoldersConfig::default();
+        assert!(record_forked_seat(
+            &mut c,
+            forked_seat(0xAA, Some("photos")),
+            100
+        ));
+        assert_eq!(live_forked_seats(&c).count(), 1);
+        assert_eq!(c.forked_seats[0].forked_at, 100);
+
+        // A repeat with no list row keeps the name, owner and access.
+        let bare = fauna_core::data::ForkedFolderSeat {
+            channel_id: chan(0xAA),
+            mls_group_id: vec![0xAA; 16],
+            ..Default::default()
+        };
+        record_forked_seat(&mut c, bare, 120);
+        assert_eq!(c.forked_seats[0].set_name.as_deref(), Some("photos"));
+        assert_eq!(c.forked_seats[0].owner_handle.as_deref(), Some("alice"));
+        assert_eq!(c.forked_seats[0].access.as_deref(), Some("writer"));
+        let stale = c.clone();
+
+        assert!(clear_forked_seat(&mut c, &chan(0xAA), 200));
+        assert_eq!(c.forked_seats.len(), 1, "a tombstone, never removed");
+        assert_eq!(live_forked_seats(&c).count(), 0);
+        assert!(!clear_forked_seat(&mut c, &chan(0xAA), 300), "idempotent");
+        assert_eq!(
+            live_forked_seats(&c.merge(&stale)).count(),
+            0,
+            "a stale live replica never revives a cleared record"
+        );
+
+        // A later fork, even on a clock behind the clear, revives it.
+        assert!(record_forked_seat(
+            &mut c,
+            forked_seat(0xAA, Some("photos-2")),
+            150
+        ));
+        assert_eq!(live_forked_seats(&c).count(), 1);
+        assert!(c.forked_seats[0].forked_at > 200, "stamped past the clear");
+        assert_eq!(c.forked_seats[0].set_name.as_deref(), Some("photos-2"));
     }
 
     fn foreign(b: u8, url: &str, name: Option<&str>) -> fauna_core::data::ForeignFolder {
@@ -3342,6 +3596,73 @@ mod tests {
             1,
             "idempotent — no extra prior entry"
         );
+    }
+
+    /// The held-generation reading a journey compares across two holders: a
+    /// custody snapshotted before a rotation fingerprints generation 1 the same
+    /// as the rotated custody does, and holds nothing for generation 2.
+    #[test]
+    fn held_generations_fingerprints_each_key_and_a_stale_snapshot_lacks_the_rotation() {
+        let mut c = cfg();
+        assert!(
+            !held_generations(&c, "docs").found,
+            "no entry, nothing held"
+        );
+        key_named_set(&mut c, "docs", chan(1), [0x11; 32], 1000);
+        let before = held_generations(&c, "docs");
+        assert!(before.found);
+        assert_eq!(before.channel_id_hex, Some(hex::encode(chan(1))));
+        assert_eq!(before.generations.len(), 1);
+        rotate_set(&mut c, &chan(1), [0x22; 32], 2000).expect("rotates");
+        let after = held_generations(&c, "docs");
+        assert_eq!(
+            after
+                .generations
+                .iter()
+                .map(|g| g.version)
+                .collect::<Vec<_>>(),
+            vec![2, 1],
+            "most-recent first"
+        );
+        assert_eq!(
+            after.generations[1], before.generations[0],
+            "same key, same print"
+        );
+        assert_ne!(after.generations[0].key_fp, after.generations[1].key_fp);
+        assert_eq!(after.generations[0].key_fp.len(), 32);
+        assert!(
+            !before
+                .generations
+                .iter()
+                .any(|g| g.key_fp == after.generations[0].key_fp),
+            "the snapshot holds no key for the rotated generation"
+        );
+        // A member's custody answers by channel: the same prints for the keys
+        // it ingested, nothing for a channel it holds no key for.
+        let mut member = cfg();
+        merge_received_keys(&mut member, chan(1), content_keys(&c, &chan(1)).unwrap());
+        assert_eq!(
+            held_generations_on(&member, &chan(1)).generations,
+            after.generations
+        );
+        assert!(!held_generations_on(&member, &chan(2)).found);
+    }
+
+    /// The reader's selector: a channel wins over a name, a name reads the
+    /// owner's live entry, and a missing or malformed selector is refused —
+    /// never folded into "nothing held".
+    #[test]
+    fn held_generations_for_selects_by_channel_then_name_and_refuses_a_bad_selector() {
+        let mut c = cfg();
+        key_named_set(&mut c, "docs", chan(1), [0x11; 32], 1000);
+        let by_name = held_generations_for(&c, Some("docs"), None).expect("by name");
+        assert_eq!(by_name, held_generations(&c, "docs"));
+        let by_channel = held_generations_for(&c, Some("other"), Some(&hex::encode(chan(1))))
+            .expect("by channel");
+        assert_eq!(by_channel, held_generations_on(&c, &chan(1)));
+        assert!(held_generations_for(&c, None, None).is_err());
+        assert!(held_generations_for(&c, None, Some("abcd")).is_err());
+        assert!(held_generations_for(&c, None, Some("zz")).is_err());
     }
 
     #[test]

@@ -132,7 +132,7 @@ def _listed_bodies(nest: dict, reader: dict, author_hex: str) -> list[str]:
     return [str(p) for p in timeline + by_author]
 
 
-@pytest.mark.feature("subscriptions-and-tiers")
+@pytest.mark.feature("subscriptions-and-tiers", "feed-images-and-video")
 def test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed(
     follow_seats, cross_nest_foreign, cross_nest_foreign_ephemeral
 ):

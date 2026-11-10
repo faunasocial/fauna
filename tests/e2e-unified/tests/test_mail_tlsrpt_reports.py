@@ -26,6 +26,7 @@ import time
 
 import pytest
 
+from helpers.fixture_closure import MAIL_VENUE_BINARIES, resolves_lazily
 from helpers.mail_wire import _connect_smtp_starttls, _open_mail_gate_and_wait_for_the_mta
 
 pytestmark = pytest.mark.tier_3
@@ -43,6 +44,7 @@ def _admin_ws(nest):
 
 
 @pytest.fixture(scope="module")
+@resolves_lazily(*MAIL_VENUE_BINARIES)
 def tlsrpt_venue(request, nest_mode, tmp_path_factory):
     """A claimed mail nest of this module's own, its mail gate open."""
     from conftest import _start_mail_venue
@@ -234,20 +236,20 @@ def test_tlsrpt_report_is_kept_inside_ninety_days_and_pruned_past_them(tlsrpt_ve
 
     _mail(handle, rcpt, _report_message(rcpt, _report_json(domain, kept_id), kept_id))
 
-    def mine(ws) -> list:
+    def _the_kept_report(ws) -> list:
         listed = ws.call("fauna.bridges.list_tlsrpt_inbound_reports", {"window_days": 1})
         return [r for r in listed["reports"] if r["report_id"] == kept_id]
 
     day = 86_400
     with _admin_ws(handle.nest) as ws:
-        stored = mine(ws)
+        stored = _the_kept_report(ws)
         assert len(stored) == 1, f"the report {kept_id} was not stored: {stored}"
         received_at = stored[0]["received_at"]
 
         # Inside the window: the report stays.
         _nest_hook(handle, "/api/v1/test/tlsrpt/prune_now", {"now": received_at + 89 * day})
-        assert len(mine(ws)) == 1, "a report 89 days old must be kept"
+        assert len(_the_kept_report(ws)) == 1, "a report 89 days old must be kept"
 
         # Past the 90-day retention: it is removed.
         _nest_hook(handle, "/api/v1/test/tlsrpt/prune_now", {"now": received_at + 91 * day})
-        assert mine(ws) == [], "a report past 90 days must be pruned"
+        assert _the_kept_report(ws) == [], "a report past 90 days must be pruned"

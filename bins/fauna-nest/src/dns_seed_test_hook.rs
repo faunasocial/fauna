@@ -83,7 +83,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
 /// seeded through `POST /api/v1/test/dns/record` resolves from the seed, every
 /// other domain through `inner` (the live DNSSEC resolver). It answers
 /// `fauna.bridges.resolve_mx` the way
-/// [`fauna_mail::outbound::mx::lookup_mx_secure`] would for the same DNS
+/// [`fauna_mail::outbound::mx::lookup_mx_on_path`] would on a DNSSEC-capable path for the same DNS
 /// (`smtp-server.md` § MX resolution + IPv4/IPv6 mixed handling, item 1):
 ///
 /// - seeded records (`"<pref> <exchange>"`) → those hosts, `secure: false` (a

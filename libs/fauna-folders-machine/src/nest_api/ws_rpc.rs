@@ -20,7 +20,9 @@ use fauna_protocol::folders::{FolderCreateRequest, PlacesSetRequest};
 use fauna_protocol::{RpcErrorClass, RpcRequester};
 
 use super::FolderNestApi;
-use super::types::{CreateFolderRequest, FolderApiError, FolderRow, SetPlaceRequest};
+use super::types::{
+    CreateFolderRequest, CreatedFolder, FolderApiError, FolderRow, SetPlaceRequest,
+};
 use crate::machine::FolderWizardMachine;
 use crate::observer::FolderWizardObserver;
 use crate::state::DeviceOption;
@@ -77,6 +79,21 @@ where
         self
     }
 
+    /// Wire the owner's identity key, so a born-public create is attested by
+    /// the shared create site and the wizard offers the choice at all
+    /// (`ui/folders.md` § Audience and website serving → *Born public*).
+    pub fn with_audience_attestor(
+        mut self,
+        keypair: Arc<fauna_core::identity::ActorKeypair>,
+    ) -> Self {
+        self.folders = self.folders.with_audience_attestor(keypair);
+        self
+    }
+
+    fn do_can_attest_public(&self) -> bool {
+        self.folders.can_attest_public()
+    }
+
     /// Owner-scoped on purpose (`list`, not `list_owned_and_shared`): the photo
     /// ingress writes into the user's OWN set, and the nest's `changes.record`
     /// gate (`owned_folder`) is owner-scoped too — so a set shared *with* the
@@ -120,7 +137,7 @@ where
         Ok(rows)
     }
 
-    async fn do_create(&self, req: CreateFolderRequest) -> Result<(), FolderApiError> {
+    async fn do_create(&self, req: CreateFolderRequest) -> Result<CreatedFolder, FolderApiError> {
         // The machine seam carries a typed `RetentionPolicy`; the wire kind takes
         // the opaque JSON string the nest stores (`folders.retention_policy`
         // is a TEXT column the nest treats opaquely). Serialize before send.
@@ -132,6 +149,7 @@ where
             name: req.name,
             retention_policy,
             conflict_policy: req.conflict_policy,
+            audience: req.audience,
             ..Default::default()
         };
         let Some(custody) = &self.custody else {
@@ -147,10 +165,19 @@ where
         )
         .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(CreatedFolder::default()),
+            // The folder exists: its attestation is what failed. Reported as a
+            // landed create, so the wizard marks it created and never re-sends
+            // the create; the owner row's re-confirm door heals the row.
+            Err(SetLifecycleError::Unattested { error, .. }) => Ok(CreatedFolder {
+                unattested: Some(map_err(error).detail().to_string()),
+            }),
             Err(SetLifecycleError::Nest(e)) => Err(map_err(e)),
             Err(SetLifecycleError::Custody(e)) => Err(FolderApiError::Transient {
                 detail: format!("{e:#}"),
+            }),
+            Err(e @ SetLifecycleError::Unattestable) => Err(FolderApiError::BadRequest {
+                detail: e.to_string(),
             }),
         }
     }
@@ -201,7 +228,13 @@ mod native {
         async fn list_folder_rows(&self) -> Result<Vec<FolderRow>, FolderApiError> {
             self.do_list_rows().await
         }
-        async fn create_folder(&self, req: CreateFolderRequest) -> Result<(), FolderApiError> {
+        fn can_attest_public(&self) -> bool {
+            self.do_can_attest_public()
+        }
+        async fn create_folder(
+            &self,
+            req: CreateFolderRequest,
+        ) -> Result<CreatedFolder, FolderApiError> {
             self.do_create(req).await
         }
         async fn set_place(
@@ -229,9 +262,18 @@ mod native {
             .auth()
             .keypair()
             .map(|kp| fauna_core::crypto::BackupKey::derive(kp.secret_bytes()));
+        // …and attests a born-public one with the same identity.
+        let attestor = nest.auth().keypair().map(|kp| {
+            Arc::new(fauna_core::identity::ActorKeypair::from_secret(
+                *kp.secret_bytes(),
+            ))
+        });
         let mut seam = WsRpcFolderNest::new(nest, custody);
         if let Some(owner) = owner {
             seam = seam.with_owner_seal_key(owner);
+        }
+        if let Some(keypair) = attestor {
+            seam = seam.with_audience_attestor(keypair);
         }
         let api: Arc<dyn FolderNestApi> = Arc::new(seam);
         FolderWizardMachine::new(observer, available_devices, api)
@@ -251,7 +293,13 @@ mod wasm {
         async fn list_folder_rows(&self) -> Result<Vec<FolderRow>, FolderApiError> {
             self.do_list_rows().await
         }
-        async fn create_folder(&self, req: CreateFolderRequest) -> Result<(), FolderApiError> {
+        fn can_attest_public(&self) -> bool {
+            self.do_can_attest_public()
+        }
+        async fn create_folder(
+            &self,
+            req: CreateFolderRequest,
+        ) -> Result<CreatedFolder, FolderApiError> {
             self.do_create(req).await
         }
         async fn set_place(
@@ -269,17 +317,23 @@ mod wasm {
     /// The browser connection carries no keypair, so the caller hands in the
     /// owner's seal root (`BackupKey::derive` of the actor secret) — the twin
     /// of what the native builder reads off the connection — and every set the
-    /// wizard creates is sealed from birth.
+    /// wizard creates is sealed from birth. `attestor` is the same identity's
+    /// keypair, which attests a born-public create (`None`: the wizard does
+    /// not offer the choice).
     pub fn build_folder_wizard_machine(
         nest: WsRpcClient,
         custody: Option<Arc<dyn FolderKeyStore>>,
         owner_seal: Option<fauna_core::crypto::BackupKey>,
+        attestor: Option<Arc<fauna_core::identity::ActorKeypair>>,
         observer: Arc<dyn FolderWizardObserver>,
         available_devices: Vec<DeviceOption>,
     ) -> Arc<FolderWizardMachine> {
         let mut seam = WsRpcFolderNest::new(nest, custody);
         if let Some(owner) = owner_seal {
             seam = seam.with_owner_seal_key(owner);
+        }
+        if let Some(keypair) = attestor {
+            seam = seam.with_audience_attestor(keypair);
         }
         let api: Arc<dyn FolderNestApi> = Arc::new(seam);
         FolderWizardMachine::new(observer, available_devices, api)
@@ -302,6 +356,7 @@ mod tests {
                 max_age_days: 90,
             }),
             conflict_policy: None,
+            audience: None,
         }
     }
 
@@ -456,6 +511,34 @@ mod tests {
             Some(sent),
             "the nest gets the nonce custody holds"
         );
+    }
+
+    /// A born-public create puts `audience: public` and the plaintext name on
+    /// the wire through an attesting seam; a seam with no attestor cannot
+    /// attest, says so, and refuses before any call.
+    #[tokio::test]
+    async fn a_public_create_reaches_the_wire_only_through_an_attesting_seam() {
+        let public = CreateFolderRequest {
+            audience: Some("public".into()),
+            ..create_req()
+        };
+        let req = Arc::new(CapturingRequester::transport_fault());
+        let seam = WsRpcFolderNest::new(Arc::clone(&req), Some(custody())).with_audience_attestor(
+            Arc::new(fauna_core::identity::ActorKeypair::from_secret([3; 32])),
+        );
+        assert!(seam.do_can_attest_public());
+        let _ = seam.do_create(public.clone()).await;
+        let (kind, payload) = &req.calls()[0];
+        assert_eq!(*kind, "fauna.folders.create");
+        assert_eq!(payload.get("audience").unwrap(), "public");
+        assert_eq!(payload.get("name").unwrap(), "docs");
+
+        let req = Arc::new(CapturingRequester::transport_fault());
+        let seam = WsRpcFolderNest::new(Arc::clone(&req), Some(custody()));
+        assert!(!seam.do_can_attest_public());
+        let r = seam.do_create(public).await;
+        assert!(matches!(r, Err(FolderApiError::BadRequest { .. })), "{r:?}");
+        assert!(req.calls().is_empty());
     }
 
     #[tokio::test]

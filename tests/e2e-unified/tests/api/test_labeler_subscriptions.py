@@ -122,10 +122,13 @@ def test_a_text_model_subscription_leaves_the_nest_nothing_to_score_with(
         assert ws.call("fauna.labelers.unsubscribe", {"labeler_id": labeler_id}).get("ok") is True
 
 
+@pytest.mark.feature("community-labelers")
 def test_a_post_kind_wasm_subscription_leaves_the_nest_nothing_to_score_with(
     nest_instance, run_seal_helper,
 ):
-    """The `wasm` twin of the text-model witness above: a labeler over public
+    """`community-labelers` outcome 24: a code labeler for public posts runs
+    only on your device, and your nest keeps nothing of it but the
+    subscription. The `wasm` twin of the text-model witness above: a labeler over public
     posts runs at the subscriber's own app, in the feed manager's sealed-scorer
     seam, so its subscription leaves the nest a `labeler_subscriptions` row ONLY
     (§ Tier-3 → *Where it runs*, position (1) and invariant (f)) — no
@@ -470,3 +473,65 @@ def test_publishing_a_listed_topic_again_as_a_model_keeps_the_labeler_and_its_su
 
     with _ws(nest_instance, subscriber) as ws:
         ws.call("fauna.labelers.unsubscribe", {"labeler_id": labeler_id})
+
+
+def _refused_publish(run_seal_helper, nest_instance, labeler_id, pub_seed, artifact) -> RpcCallError:
+    """Publish ``artifact`` as a text model and return the nest's refusal."""
+    with pytest.raises(RpcCallError) as refused:
+        publish_labeler_version(
+            run_seal_helper, nest_instance["url"], labeler_id, pub_seed, artifact,
+            version=1, content_kind="post", artifact_kind="text-model",
+        )
+    return refused.value
+
+
+@pytest.mark.feature("trained-topics")
+def test_the_nest_refuses_a_text_model_below_the_document_floor_or_quoting_a_sentence(
+    nest_instance, run_seal_helper,
+):
+    """`trained-topics` outcome 28 (`topic-factors.md` § Publishing a trained
+    factor — the prune floor and the version-1 n-gram shape, enforced at the
+    nest publish gate by `validate_text_model_artifact`): an artifact whose
+    entry claims fewer than `TEXT_MODEL_PUBLISH_MIN_DOCS` (3) documents is
+    refused, and so is one carrying a phrase of more than three tokens — it
+    could match no subscriber's tokenizer and would only quote the publisher's
+    marked posts. A well-formed model from the same publisher is accepted.
+
+    The two bad artifacts are built by decoding a well-formed one and changing
+    the one field under test, re-encoded canonically (sorted, shortest-first
+    keys, the dag-cbor form): the gate is the subject, so the bytes must reach it
+    unvalidated by any client-side builder. Each other rule stays satisfied, so
+    the named rule is the only thing refusing it."""
+    labeler_id, pub_seed = new_publisher(nest_instance)
+    good = run_seal_helper(
+        "encode-text-model-artifact",
+        {
+            "version": 1,
+            "name": "small orange cats",
+            "more_docs": 3,
+            "less_docs": 0,
+            "ngrams": [{"ngram": "orange", "more": 3, "less": 0}],
+        },
+    )
+    shape = cbor2.loads(good)
+
+    thin = dict(shape, ngrams=[dict(shape["ngrams"][0], more=2, less=0)])
+    refused = _refused_publish(run_seal_helper, nest_instance, labeler_id, pub_seed,
+                               cbor2.dumps(thin, canonical=True))
+    said = f"{refused.code} {refused.details} {refused.message_args}"
+    assert refused.code.endswith("malformed"), said
+    assert "prune floor" in said, f"the refusal must name the document floor: {said}"
+
+    quote = "the small orange cat sat down"  # six tokens: a sentence, not a 1-3 token phrase
+    quoting = dict(shape, ngrams=[dict(shape["ngrams"][0], ngram=quote)])
+    refused = _refused_publish(run_seal_helper, nest_instance, labeler_id, pub_seed,
+                               cbor2.dumps(quoting, canonical=True))
+    said = f"{refused.code} {refused.details} {refused.message_args}"
+    assert refused.code.endswith("malformed"), said
+    assert "1-3 token n-gram" in said, f"the refusal must name the n-gram shape: {said}"
+
+    # Neither refusal took a version: the well-formed model publishes as v1.
+    publish_labeler_version(
+        run_seal_helper, nest_instance["url"], labeler_id, pub_seed, good,
+        version=1, content_kind="post", artifact_kind="text-model",
+    )

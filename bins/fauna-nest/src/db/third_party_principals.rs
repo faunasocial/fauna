@@ -186,13 +186,37 @@ pub enum BindRefused {
     Changed,
 }
 
-/// The key a bound account's settings rest under in the plugin's state scope
-/// (`third-party.md` § The principal model → *Hosted principals*): one entry
-/// per account, `settings/<actor hex>`, which the plugin reads through its
-/// `state` import. Written only by the account's own
+/// The reserved prefix of the plugin's state keys under which each bound
+/// account's settings are read (they rest in `plugin_account_settings`, the
+/// account's own table, never in the plugin's scope). The plugin's own `state.put` / `state.delete`
+/// refuse it ([`PluginStateRefused::Reserved`]).
+pub const PLUGIN_SETTINGS_PREFIX: &str = "settings/";
+
+/// The key a bound account's settings are read under through the plugin's
+/// `state` import (`third-party.md` § The principal model → *Hosted
+/// principals*): `settings/<actor hex>`. Written only by the account's own
 /// `fauna.plugins.set_settings`, deleted with the account's binding.
 pub fn plugin_settings_key(actor_id: &[u8; 32]) -> String {
-    format!("settings/{}", hex::encode(actor_id))
+    format!("{PLUGIN_SETTINGS_PREFIX}{}", hex::encode(actor_id))
+}
+
+/// Why a plugin's own `state.put` / `state.delete` wrote nothing — answered
+/// to the plugin as the import's `err`, never a fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PluginStateRefused {
+    /// The key is under [`PLUGIN_SETTINGS_PREFIX`]: a bound account's
+    /// settings, which only that account writes.
+    #[error("keys under \"settings/\" hold the bound accounts' own settings and are read-only")]
+    Reserved,
+    /// The write would take the plugin's state scope past
+    /// [`fauna_plugin_host::PLUGIN_STATE_MAX_BYTES`].
+    #[error("the plugin's state scope is full")]
+    Quota,
+    /// No install row names the principal — it was uninstalled (the plugin's
+    /// best-effort `stop` export runs after the uninstall commit), so a write
+    /// would land under a deleted principal id.
+    #[error("the plugin is no longer installed")]
+    NotInstalled,
 }
 
 /// What one uninstall ended.
@@ -311,9 +335,15 @@ pub enum HolderKeyRefused {
     /// would each be authorized as the other.
     #[error("the attested writer key is already held by another connected app")]
     WriterHeldByAnotherPrincipal,
-    /// A key this nest has already seen sign one of the account's own rows (a
-    /// device's, the account's own) or an enrolled bridge's. A principal
-    /// attesting it would be granted write authority as that writer.
+    /// A key that writes for this account as someone else: the account's own
+    /// identity key, a device's (any `writer_id` on the account's state feeds
+    /// the nest has seen), or an enrolled bridge's. A principal attesting it
+    /// would be granted write authority as that writer. Not a key this same
+    /// `client_id` attested before under a roster row since ended — revoked,
+    /// replaced, or burned by a succession: that is the app's own signer, and
+    /// the app authorized again keeps it (`third-party-kinds.md` § Principal
+    /// write authority → *A reconnecting app keeps its writer*). A different
+    /// `client_id` attesting that key is still refused here.
     #[error("the attested writer key already writes for this account or a bridge on this nest")]
     WriterKnown,
     /// Another of this account's principals already declares the document's
@@ -547,6 +577,11 @@ pub(crate) fn upsert_principal_in_tx(
             adopt_bridged_rooms(tx, actor_id, &principal_id, bridge, serving_key)?;
         }
         Some((principal_id, old_holder, old_writer, _)) => {
+            // The replaced writer is the app's own former signer: recorded,
+            // so the app attesting it again later keeps its journal.
+            if writer_changes && let Some(old) = &old_writer {
+                record_former_writer(tx, &actor_id[..], client_id, old, now)?;
+            }
             if holder_changes && let Some(old) = &old_holder {
                 end_capability_grants_held_by(tx, actor_id, old)?;
             } else if writer_changes
@@ -672,12 +707,61 @@ fn refuse_foreign_holder(
     Ok(())
 }
 
-/// The writer key must be this principal's alone, and not one the nest has
-/// already seen write for the account: not another principal's writer, not the
-/// account's own identity key, not any `writer_id` on the account's state
-/// feeds (cleartext to the nest — every device that ever put a row), not an
-/// enrolled bridge's signing key (`third-party-kinds.md` § Principal write
-/// authority). See [`HolderKeyRefused`]'s writer variants.
+/// Record `writer` as a key `client_id` attested on `actor_id` under a roster
+/// row that has ended — the revoke, the writer replacement and the succession
+/// share it (`third-party-kinds.md` § Principal write authority → *A
+/// reconnecting app keeps its writer*). `INSERT OR IGNORE`: a key ended twice
+/// keeps its first record, and nothing but the account's purge deletes one.
+fn record_former_writer(
+    tx: &rusqlite::Transaction<'_>,
+    actor_id: &[u8],
+    client_id: &str,
+    writer: &[u8],
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO third_party_former_writers
+            (actor_id, client_id, writer_ed25519, ended_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![actor_id, client_id, writer, now],
+    )
+    .context("record a principal's former writer")?;
+    Ok(())
+}
+
+/// The succession's leg: every roster row of `actor_id` that attested a writer
+/// is recorded as ended, under `actor_id` itself, before the roster burns —
+/// the registry's plain move of `third_party_former_writers` then carries the
+/// records to the successor beside the account's `sync_changes`, so the
+/// successor authorizing the same app finds the app's own key
+/// (`record_succession`, step 4b). `now` is epoch milliseconds.
+pub(crate) fn record_former_writers_before_burn(
+    tx: &rusqlite::Transaction<'_>,
+    actor_id: &[u8],
+    now: i64,
+) -> Result<usize> {
+    tx.execute(
+        "INSERT OR IGNORE INTO third_party_former_writers
+            (actor_id, client_id, writer_ed25519, ended_at)
+         SELECT actor_id, client_id, writer_ed25519, ?2 FROM third_party_principals
+          WHERE actor_id = ?1 AND writer_ed25519 IS NOT NULL",
+        rusqlite::params![actor_id, now],
+    )
+    .context("record the burning roster's writers")
+}
+
+/// The writer key must be this principal's alone, and not a key that writes
+/// for the account as anyone else: not another live principal's writer
+/// ([`HolderKeyRefused::WriterHeldByAnotherPrincipal`]), and not the account's
+/// own identity key, an enrolled bridge's signing key, or a `writer_id` on the
+/// account's state feeds (cleartext to the nest — every device that ever put a
+/// row) ([`HolderKeyRefused::WriterKnown`]) — EXCEPT a key this same
+/// `client_id` attested before under a roster row that has since ended
+/// (revoked, replaced, burned by a succession), whose rows on the feed are the
+/// app's own: that app attesting it again keeps its writer and its journal
+/// (`third-party-kinds.md` § Principal write authority → *A reconnecting app
+/// keeps its writer*). A key a DIFFERENT `client_id`'s ended row attested is
+/// still refused: a key is reclaimed only by the app that declared it.
 fn refuse_foreign_writer(
     tx: &rusqlite::Transaction<'_>,
     actor_id: &[u8; 32],
@@ -698,10 +782,13 @@ fn refuse_foreign_writer(
     let known: bool = key == actor_id
         || tx
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM sync_changes
-                                 WHERE actor_id = ?1 AND origin_writer = ?2)
+                "SELECT (EXISTS (SELECT 1 FROM sync_changes
+                                  WHERE actor_id = ?1 AND origin_writer = ?2)
+                         AND NOT EXISTS (SELECT 1 FROM third_party_former_writers
+                                          WHERE actor_id = ?1 AND client_id = ?3
+                                            AND writer_ed25519 = ?2))
                      OR EXISTS (SELECT 1 FROM bridge_service_users WHERE ed25519_pubkey = ?2)",
-                rusqlite::params![&actor_id[..], &key[..]],
+                rusqlite::params![&actor_id[..], &key[..], client_id],
                 |r| r.get(0),
             )
             .context("check known writer collision")?;
@@ -1894,9 +1981,10 @@ impl CacheDb {
             return Err(anyhow!(BindRefused::NotBound));
         }
         tx.execute(
-            "INSERT INTO plugin_state (principal_id, key, value) VALUES (?1, ?2, ?3)
-             ON CONFLICT (principal_id, key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![install_id, plugin_settings_key(actor_id), value],
+            "INSERT INTO plugin_account_settings (actor_id, principal_id, value)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (actor_id, principal_id) DO UPDATE SET value = excluded.value",
+            rusqlite::params![&actor_id[..], install_id, value],
         )
         .context("write plugin settings")?;
         tx.commit().context("commit put plugin settings")?;
@@ -1910,8 +1998,15 @@ impl CacheDb {
         actor_id: &[u8; 32],
         install_id: &[u8],
     ) -> Result<Option<Vec<u8>>> {
-        self.plugin_state_get(install_id, &plugin_settings_key(actor_id))
-            .await
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT value FROM plugin_account_settings
+              WHERE actor_id = ?1 AND principal_id = ?2",
+            rusqlite::params![&actor_id[..], install_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("read plugin settings")
     }
 
     /// Uninstall — the admin's one verb over a hosted plugin
@@ -1972,6 +2067,13 @@ impl CacheDb {
                 rusqlite::params![principal_id],
             )
             .context("delete plugin state")?;
+        // Every binding's settings went with its revoke above; a row no
+        // binding backs any longer goes with the plugin all the same.
+        tx.execute(
+            "DELETE FROM plugin_account_settings WHERE principal_id = ?1",
+            rusqlite::params![principal_id],
+        )
+        .context("delete plugin settings")?;
         ended.state_entries_deleted = u32::try_from(n).unwrap_or(u32::MAX);
         tx.execute(
             "DELETE FROM hosted_plugins WHERE principal_id = ?1",
@@ -1985,12 +2087,23 @@ impl CacheDb {
         Ok(Some(ended))
     }
 
-    /// `state.get` for a hosted plugin.
+    /// `state.get` for a hosted plugin. A key under
+    /// [`PLUGIN_SETTINGS_PREFIX`] reads that account's settings for the
+    /// plugin (`settings/<actor hex>`), anything else the plugin's own scope.
     pub async fn plugin_state_get(
         &self,
         principal_id: &[u8],
         key: &str,
     ) -> Result<Option<Vec<u8>>> {
+        if let Some(hex_actor) = key.strip_prefix(PLUGIN_SETTINGS_PREFIX) {
+            let Some(actor) = hex::decode(hex_actor)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            else {
+                return Ok(None);
+            };
+            return self.get_plugin_account_settings(&actor, principal_id).await;
+        }
         let conn = self.conn.lock().await;
         conn.query_row(
             "SELECT value FROM plugin_state WHERE principal_id = ?1 AND key = ?2",
@@ -2001,33 +2114,82 @@ impl CacheDb {
         .context("read plugin state")
     }
 
-    /// `state.put` for a hosted plugin — upsert.
+    /// `state.put` for a hosted plugin — upsert, refused under the reserved
+    /// settings prefix and past the scope's byte quota (keys plus values,
+    /// [`fauna_plugin_host::PLUGIN_STATE_MAX_BYTES`]), with nothing written.
     pub async fn plugin_state_put(
         &self,
         principal_id: &[u8],
         key: &str,
         value: &[u8],
-    ) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
+    ) -> Result<std::result::Result<(), PluginStateRefused>> {
+        if key.starts_with(PLUGIN_SETTINGS_PREFIX) {
+            return Ok(Err(PluginStateRefused::Reserved));
+        }
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin plugin state write")?;
+        if !plugin_installed_in_tx(&tx, principal_id)? {
+            return Ok(Err(PluginStateRefused::NotInstalled));
+        }
+        let others: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0)
+                   FROM plugin_state WHERE principal_id = ?1 AND key != ?2",
+                rusqlite::params![principal_id, key],
+                |r| r.get(0),
+            )
+            .context("measure plugin state")?;
+        let total = usize::try_from(others)
+            .unwrap_or(usize::MAX)
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+        if total > fauna_plugin_host::PLUGIN_STATE_MAX_BYTES {
+            return Ok(Err(PluginStateRefused::Quota));
+        }
+        tx.execute(
             "INSERT INTO plugin_state (principal_id, key, value) VALUES (?1, ?2, ?3)
              ON CONFLICT (principal_id, key) DO UPDATE SET value = excluded.value",
             rusqlite::params![principal_id, key, value],
         )
         .context("write plugin state")?;
-        Ok(())
+        tx.commit().context("commit plugin state write")?;
+        Ok(Ok(()))
     }
 
-    /// `state.delete` for a hosted plugin.
-    pub async fn plugin_state_delete(&self, principal_id: &[u8], key: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
+    /// `state.delete` for a hosted plugin, refused under the reserved
+    /// settings prefix.
+    pub async fn plugin_state_delete(
+        &self,
+        principal_id: &[u8],
+        key: &str,
+    ) -> Result<std::result::Result<(), PluginStateRefused>> {
+        if key.starts_with(PLUGIN_SETTINGS_PREFIX) {
+            return Ok(Err(PluginStateRefused::Reserved));
+        }
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin plugin state delete")?;
+        if !plugin_installed_in_tx(&tx, principal_id)? {
+            return Ok(Err(PluginStateRefused::NotInstalled));
+        }
+        tx.execute(
             "DELETE FROM plugin_state WHERE principal_id = ?1 AND key = ?2",
             rusqlite::params![principal_id, key],
         )
         .context("delete plugin state")?;
-        Ok(())
+        tx.commit().context("commit plugin state delete")?;
+        Ok(Ok(()))
     }
+}
+
+/// Whether an install row still names `principal_id` — read inside the
+/// caller's transaction, so it serializes against uninstall's.
+fn plugin_installed_in_tx(tx: &rusqlite::Transaction<'_>, principal_id: &[u8]) -> Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM hosted_plugins WHERE principal_id = ?1)",
+        rusqlite::params![principal_id],
+        |r| r.get(0),
+    )
+    .context("check plugin install row")
 }
 
 /// The revoke cascade inside the caller's transaction — what
@@ -2039,25 +2201,32 @@ fn revoke_principal_in_tx(
     principal_id: &[u8],
     now: i64,
 ) -> Result<Option<PrincipalRevoked>> {
-    let found: Option<(String, Option<Vec<u8>>)> = tx
+    let found: Option<(String, Option<Vec<u8>>, Option<Vec<u8>>)> = tx
         .query_row(
-            "SELECT client_id, holder_x25519 FROM third_party_principals
+            "SELECT client_id, holder_x25519, writer_ed25519 FROM third_party_principals
               WHERE actor_id = ?1 AND principal_id = ?2",
             rusqlite::params![&actor_id[..], principal_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
         .context("read principal to revoke")?;
-    let Some((client_id, holder)) = found else {
+    let Some((client_id, holder, writer)) = found else {
         return Ok(None);
     };
+    // The row's writer outlives the row as a record: the same app authorized
+    // again keeps it (`third-party-kinds.md` § Principal write authority → *A
+    // reconnecting app keeps its writer*).
+    if let Some(writer) = &writer {
+        record_former_writer(tx, &actor_id[..], &client_id, writer, now)?;
+    }
     // A binding to a hosted plugin leaves no settings behind: the account's
-    // entry in the plugin's state scope goes with the row.
+    // settings row for the plugin goes with the binding row. (Account deletion
+    // and succession reach the same row through the actor-table registry.)
     tx.execute(
-        "DELETE FROM plugin_state
-          WHERE key = ?1
+        "DELETE FROM plugin_account_settings
+          WHERE actor_id = ?1
             AND principal_id IN (SELECT principal_id FROM hosted_plugins WHERE client_id = ?2)",
-        rusqlite::params![plugin_settings_key(actor_id), client_id],
+        rusqlite::params![&actor_id[..], client_id],
     )
     .context("delete the binding's plugin settings")?;
 
@@ -2785,9 +2954,11 @@ mod tests {
         );
     }
 
-    /// A bound account's settings rest in the plugin's state scope under the
-    /// account's own key, written only while the account is bound, and its
-    /// revoke deletes them with the binding.
+    /// A bound account's settings rest in the account's own row, read through
+    /// the plugin's state scope under the account's reserved key, written
+    /// only while the account is bound, and its revoke deletes them with the
+    /// binding.  The plugin's own `state.put` / `state.delete` refuse
+    /// the reserved prefix — for a bound account and one not yet bound.
     #[tokio::test]
     async fn an_accounts_plugin_settings_follow_its_binding() {
         let db = CacheDb::open_in_memory().unwrap();
@@ -2823,10 +2994,198 @@ mod tests {
             Some(br#"{"room":"x"}"#.to_vec())
         );
 
+        for target in [&ALICE, &BOB] {
+            let forged = plugin_settings_key(target);
+            assert_eq!(
+                db.plugin_state_put(&pid, &forged, br#"{"room":"forged"}"#)
+                    .await
+                    .unwrap(),
+                Err(PluginStateRefused::Reserved)
+            );
+            assert_eq!(
+                db.plugin_state_delete(&pid, &forged).await.unwrap(),
+                Err(PluginStateRefused::Reserved)
+            );
+        }
+        assert_eq!(
+            db.get_plugin_account_settings(&ALICE, &pid).await.unwrap(),
+            Some(br#"{"room":"x"}"#.to_vec())
+        );
+        assert_eq!(
+            db.get_plugin_account_settings(&BOB, &pid).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            db.plugin_state_put(&pid, "settings", b"x").await.unwrap(),
+            Ok(()),
+            "only the prefix is reserved"
+        );
+
         db.revoke_third_party_principal(&ALICE, &binding)
             .await
             .unwrap();
         assert_eq!(db.plugin_state_get(&pid, &key).await.unwrap(), None);
+    }
+
+    ///  The plugin's state scope holds at most
+    /// `PLUGIN_STATE_MAX_BYTES` of keys and values: a put past it is refused
+    /// and writes nothing; overwriting an entry counts its new size only.
+    #[tokio::test]
+    async fn a_put_past_the_state_quota_is_refused() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        let max = fauna_plugin_host::PLUGIN_STATE_MAX_BYTES;
+        let big = vec![7u8; max - 1 - 1];
+        assert_eq!(db.plugin_state_put(&pid, "a", &big).await.unwrap(), Ok(()));
+        assert_eq!(
+            db.plugin_state_put(&pid, "b", b"xx").await.unwrap(),
+            Err(PluginStateRefused::Quota)
+        );
+        assert_eq!(db.plugin_state_get(&pid, "b").await.unwrap(), None);
+        assert_eq!(db.plugin_state_put(&pid, "b", b"").await.unwrap(), Ok(()));
+        assert_eq!(
+            db.plugin_state_put(&pid, "a", &big[1..]).await.unwrap(),
+            Ok(()),
+            "an overwrite counts the entry's new size, not both"
+        );
+    }
+
+    ///  A `state.put` / `state.delete` after the uninstall commit —
+    /// the plugin's best-effort `stop` export runs after it — writes nothing:
+    /// no install row names the principal, so the store refuses.
+    #[tokio::test]
+    async fn a_state_write_after_the_uninstall_commit_is_refused() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        db.uninstall_hosted_plugin(&pid).await.unwrap().unwrap();
+        assert_eq!(
+            db.plugin_state_put(&pid, "late", b"x").await.unwrap(),
+            Err(PluginStateRefused::NotInstalled)
+        );
+        assert_eq!(
+            db.plugin_state_delete(&pid, "late").await.unwrap(),
+            Err(PluginStateRefused::NotInstalled)
+        );
+        assert_eq!(db.plugin_state_get(&pid, "late").await.unwrap(), None);
+    }
+
+    ///  The refusal keys on the install row, so a live
+    /// install writes, and the developer reinstall — same principal id, row
+    /// updated in place — keeps its state scope writable.
+    #[tokio::test]
+    async fn a_live_and_a_reinstalled_plugin_still_write_their_state() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        db.plugin_state_put(&pid, "before", b"1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            db.replace_hosted_plugin(&pid, &plugin_mint([0x11; 32]))
+                .await
+                .unwrap()
+        );
+        db.plugin_state_put(&pid, "after", b"2")
+            .await
+            .unwrap()
+            .unwrap();
+        db.plugin_state_delete(&pid, "before")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.plugin_state_get(&pid, "before").await.unwrap(), None);
+        assert_eq!(
+            db.plugin_state_get(&pid, "after").await.unwrap().as_deref(),
+            Some(&b"2"[..])
+        );
+    }
+
+    /// A bound account with settings, for the deletion and succession legs.
+    async fn bound_with_settings(db: &CacheDb) -> Vec<u8> {
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        db.bind_account_to_plugin(&ALICE, PLUGIN, "atproto", None, None, None)
+            .await
+            .unwrap();
+        db.put_plugin_account_settings(&ALICE, &pid, br#"{"room":"x"}"#)
+            .await
+            .unwrap();
+        pid
+    }
+
+    ///  Account deletion takes the account's plugin settings with
+    /// its binding row: nothing of the account's stays for the plugin to read.
+    #[tokio::test]
+    async fn account_deletion_deletes_the_accounts_plugin_settings() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = bound_with_settings(&db).await;
+        db.purge_orphaned_actor_rows(&ALICE).await.unwrap();
+        assert!(
+            db.list_third_party_principals(&ALICE)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.get_plugin_account_settings(&ALICE, &pid).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            db.plugin_state_get(&pid, &plugin_settings_key(&ALICE))
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    ///  Identity succession burns the binding row, and the
+    /// settings with it — on neither the retired id nor the successor.
+    #[tokio::test]
+    async fn succession_burns_the_accounts_plugin_settings() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = bound_with_settings(&db).await;
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "INSERT OR IGNORE INTO tiers (name, max_inbox_bytes, max_storage_bytes, max_devices, max_blob_size)
+                 VALUES ('free', 1, 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (actor_id, tier, label, created_at, handle)
+                 VALUES (?1, 'free', 'the label', 1, 'alice')",
+                rusqlite::params![&ALICE[..]],
+            )
+            .unwrap();
+        }
+        db.record_succession(&ALICE, &BOB, b"s", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        for actor in [&ALICE, &BOB] {
+            assert_eq!(
+                db.get_plugin_account_settings(actor, &pid).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                db.plugin_state_get(&pid, &plugin_settings_key(actor))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     /// Uninstall ends every binding through the revoke cascade, the state,
@@ -2843,14 +3202,23 @@ mod tests {
         db.put_capability_grant(&ALICE, &[1; 16], &key, NEVER, b"g1")
             .await
             .unwrap();
-        db.plugin_state_put(&id, "cursor", b"42").await.unwrap();
-        db.plugin_state_put(&id, "cursor", b"43").await.unwrap();
+        db.plugin_state_put(&id, "cursor", b"42")
+            .await
+            .unwrap()
+            .unwrap();
+        db.plugin_state_put(&id, "cursor", b"43")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             db.plugin_state_get(&id, "cursor").await.unwrap(),
             Some(b"43".to_vec())
         );
-        db.plugin_state_put(&id, "other", b"x").await.unwrap();
-        db.plugin_state_delete(&id, "other").await.unwrap();
+        db.plugin_state_put(&id, "other", b"x")
+            .await
+            .unwrap()
+            .unwrap();
+        db.plugin_state_delete(&id, "other").await.unwrap().unwrap();
         assert_eq!(db.plugin_state_get(&id, "other").await.unwrap(), None);
 
         let ended = db
@@ -3137,7 +3505,12 @@ mod tests {
             .iter()
             .chain(BRIDGE_CAPABILITY_OPTIONAL)
             .copied()
-            .chain(["encryption", "can_search_room", "can_send"])
+            .chain([
+                "encryption",
+                "can_search_room",
+                "can_send",
+                "supports_local_remove",
+            ])
             .collect();
         want.sort_unstable();
         assert_eq!(got, want);
@@ -3438,6 +3811,135 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// One row on ALICE's account-state feed signed by `writer` — what a
+    /// principal's `ext:<kind>` put leaves in `sync_changes`.
+    async fn put_as_writer(db: &CacheDb, entry: u8, writer: [u8; 32], seq: i64) {
+        let fs = db
+            .get_or_create_state_scope(&ALICE, fauna_protocol::account_state::ACCOUNT_STATE_SCOPE)
+            .await
+            .unwrap();
+        db.record_account_state_entry(
+            &ALICE,
+            fs,
+            &[entry; 32],
+            &writer,
+            seq,
+            "state-put",
+            b"e",
+            None,
+            &[],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    async fn former_writers(db: &CacheDb, actor: &[u8; 32]) -> Vec<(String, Vec<u8>)> {
+        let conn = db.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT client_id, writer_ed25519 FROM third_party_former_writers
+                  WHERE actor_id = ?1 ORDER BY client_id, writer_ed25519",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![&actor[..]], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap()
+    }
+
+    /// `third-party-kinds.md` § Principal write authority → *A reconnecting
+    /// app keeps its writer*: the same `client_id` attesting again, after a
+    /// revoke, the writer key its own earlier rows carry is admitted — and a
+    /// DIFFERENT `client_id` attesting that key is still refused.
+    #[tokio::test]
+    async fn an_app_authorized_again_after_a_revoke_keeps_its_writer() {
+        let db = CacheDb::open_in_memory().unwrap();
+        consent_as(&db, b"family-1", CLIENT, both(WRITER), None)
+            .await
+            .unwrap();
+        put_as_writer(&db, 1, WRITER, 1).await;
+        let principal = db.list_third_party_principals(&ALICE).await.unwrap()[0]
+            .principal_id
+            .clone();
+        db.revoke_third_party_principal(&ALICE, &principal)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            former_writers(&db, &ALICE).await,
+            vec![(CLIENT.to_string(), WRITER.to_vec())],
+            "the revoke records the ended row's writer"
+        );
+
+        // Another app attesting the revoked app's key: a collision.
+        let other = AttestedKeys {
+            holder_x25519: Some([6; 32]),
+            writer_ed25519: Some(WRITER),
+        };
+        let err = consent_as(
+            &db,
+            b"family-2",
+            "https://other.example/c.json",
+            other,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<HolderKeyRefused>(),
+            Some(&HolderKeyRefused::WriterKnown)
+        );
+
+        // The same app, the same key: admitted, the row carries it.
+        consent_as(&db, b"family-3", CLIENT, both(WRITER), None)
+            .await
+            .unwrap();
+        let rows = db.list_third_party_principals(&ALICE).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].writer_ed25519.as_deref(), Some(&WRITER[..]));
+    }
+
+    /// The same clause across a writer replacement: the replaced key is
+    /// recorded, and the app attesting it again later is admitted.
+    #[tokio::test]
+    async fn an_app_attesting_its_replaced_writer_again_is_admitted() {
+        const LATER: [u8; 32] = [0x5A; 32];
+        let db = CacheDb::open_in_memory().unwrap();
+        consent_as(&db, b"family-1", CLIENT, both(WRITER), None)
+            .await
+            .unwrap();
+        put_as_writer(&db, 1, WRITER, 1).await;
+        consent_as(&db, b"family-2", CLIENT, both(LATER), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            former_writers(&db, &ALICE).await,
+            vec![(CLIENT.to_string(), WRITER.to_vec())],
+            "the replacement records the old writer"
+        );
+        put_as_writer(&db, 2, LATER, 1).await;
+        consent_as(&db, b"family-3", CLIENT, both(WRITER), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.list_third_party_principals(&ALICE).await.unwrap()[0]
+                .writer_ed25519
+                .as_deref(),
+            Some(&WRITER[..])
+        );
+        assert_eq!(
+            former_writers(&db, &ALICE).await,
+            vec![
+                (CLIENT.to_string(), WRITER.to_vec()),
+                (CLIENT.to_string(), LATER.to_vec()),
+            ],
+            "a record is never deleted; the key replaced in turn joins it"
         );
     }
 

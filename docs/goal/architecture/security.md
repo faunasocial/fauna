@@ -412,6 +412,8 @@ ownership, and container split — no human config knob, per `principles.md` § 
 configuration surface), the same bucket as the existing `caldav_listen_https=127.0.0.1:8444`
 loopback split.
 
+**A refused header forfeits loopback trust (ruled 2026-11-07).** A loopback TCP peer that sent the PROXY-v2 signature but whose header nest does not honour — the router-auth TLV missing or mismatched, the prefix or address block unparseable, the declared length past the defensive cap, the header stalled past the parse timeout — resolves to a constant non-loopback source (`read_optional_proxy_header` → `UNTRUSTED_PROXIED_SOURCE`, `0.0.0.0:0`), never to the conveyed address and never back to the loopback peer: the conveyed address is unauthenticated, so honouring it would let a forger pick its own rate-limit bucket, and the loopback peer carries a trust — the `request_enrollment` gate, the loopback connection ceiling and request-rate aggregate — that only a headerless same-box dial has earned. The rule closes a latent fail-open, not a live one: a router provisioned with a secret this nest does not hold would otherwise have delivered every internet client as `127.0.0.1`, straight through the loopback-only enrollment gate (the image reads one file for router and nest, so it cannot produce the mismatch today). The connection is still served, as one shared untrusted remote source under the admin's per-IP cap and the remote rate budgets — bounded, isolated from the bridges' own loopback bucket, and visible, since the accept loop warns rate-limited and names the secret's provisioning — so a misprovisioned box degrades rather than failing open or stranding its users; a sentinel rather than a flag because every consumer reads `is_loopback()` off the one resolved source, so none can be fooled and none has to learn a second field. Every backend with its own peel point owes the same rule, and the Go bridges' shared peel keeps it too (built 2026-11-08): `proxyproto.Conn` — the MDA's CalDAV listener and the PDS bridge's XRPC listener, the two router-fronted Go listeners (the MTA's are published directly and take no header) — resolves a refused header to `proxyproto.UntrustedProxiedSource`, the same `0.0.0.0:0`, and warns rate-limited naming the secret's provisioning. Before it, a refused header there kept the loopback peer: the per-IP connection cap metered every such client under the loopback ceiling instead of the admin's cap — a bounded fail-open — and the CalDAV AUTH lockout, its audit and the XRPC source-IP limiter collapsed them onto the loopback key a same-box dial uses; now they share the one untrusted bucket under the admin's cap.
+
 **Hosted third-party code (ratified 2026-09-05, the third-party integration chain — TP3/TP11; what is built: § Implementation status today).** A plugin the nest hosts ([`third-party.md`](third-party.md) § Execution forms) is a co-resident process under exactly this posture and never a peer of trust: a curated-catalog **container** runs under its own UID with the kernel-enforced default-deny above (Landlock + seccomp), network-restricted to the hosts its document declares; a **WASM component** gets only the capability imports the host links (named outbound hosts, the nest API, a state scope, a clock) and the labeler runtime's fuel/memory caps. Neither ever holds a **certificate key**: the nest terminates TLS for any path or SNI name a plugin's document claims (`ingress`) and proxies plaintext to the plugin over the sidecar channel with a **nest-signed identity assertion** — the identity-aware-proxy shape, never a bare forwarded header (the same class of forgery the PROXY-header secret above closes). **The path half as built (ruled 2026-10-10; refutable until the first plugin declaring ingress is installed):** a declared prefix is served only on the nest's OWN host — the apex domain, or any non-custom host of a domainless box — never on a user's custom domain or `<handle>` subdomain, so a plugin never shadows a user's published site (the admin's apex site yields to the plugins the same admin installed); it is matched in the public router's fallback, so a path the nest routes never reaches a plugin, and install refuses a prefix under one of the nest's own subtrees (`plugin_ingress::NEST_RESERVED_INGRESS_PREFIXES`, pinned against every route literal) or overlapping another installed plugin's. The plugin receives the method, the full path, the query, the headers minus `authorization` and the hop-by-hop set, a body under the router's 10 MB limit, and `actor` — filled from the request's bearer through the one bearer validator (`auth::check_bearer_session`), none when absent, the nest's 401 when it does not validate — a record field the nest fills, so no header names an identity. The reply always carries `Content-Security-Policy: sandbox` and `nosniff`: the plugin answers on the nest's own origin, where the web app holds the user's secret, so nothing it serves may script that origin (a hosted plugin is headless — `third-party.md` § The runner contract, TP2). **Of the plugin's own reply headers it keeps only an allowlist** (`plugin_ingress::NEST_HOST_REPLY_HEADERS`: the representation headers a headless plugin needs — `content-type`, `cache-control`, `etag`, `last-modified`, `expires`, `vary`, `content-language`, `content-disposition`, `content-encoding`, `location`, `retry-after`, `www-authenticate` — and `access-control-*`; ruled 2026-11-04): a header the browser applies to the whole origin is withheld even under the sandbox, because the sandbox governs the document and not the fetch — `Clear-Site-Data` alone would wipe the web app's identity store (`apps/web.md` § Identity store at rest) on one click of a link under the prefix, and `Alt-Svc`, `Strict-Transport-Security`, `cross-origin-*`, `NEL`/`Report-To` and the like reach the same origin-wide state; a header joins the allowlist only if it describes the one response. A fault, or a plugin not running, answers 502. The PDS bridge's own cert fetch (`apps/bridges.md` § Bridge-kind catalogue, `fetch_tls_cert_blob`) is the first-party exception TP11 migrates last. The sandbox profiles are owned here; the runner contract is `third-party.md`'s.
 
 **The whole-name (`sni`) half as built (ruled 2026-10-10; refutable until the first plugin claiming a name is installed).** A plugin claims a whole name as **one lowercase DNS label under the installing nest's apex** — `{ "sni": "matrix" }` is `matrix.<apex>` on every nest that installs the document (the member's grammar is `third-party.md` § The manifest's): a publisher's document installs on many nests, so a name can only be relative to the nest, and an apex sub-name is exactly what the deployment already routes and resolves — `fauna-sni-router` is an L4 passthrough whose default backend is the nest, so **it needs no change**; the three labels it routes elsewhere (`mail`, `relay`, `pds`) are reserved labels no document may claim, and the admin's wildcard `*.<primary>` row (`../behavior/dns-management.md`) already points the name at the nest, with the name's own `A`/`AAAA` row surfaced beside `relay.`/`pds.` in the DNS matrix (`fauna_mail::dns::host`, `HostDnsInput::plugin_labels`) for an admin without the wildcard. **On a claimed name the nest answers nothing:** `plugin_ingress::whole_name_gate` is layered ahead of every route, merge and the credentialed CORS layer, so a request whose normalized `Host` is `<label>.<apex>` of an installed plugin is that plugin's on every path — no API, no `/app/`, no web content, no stacked CORS header — and a stopped plugin's name answers 502 like its paths. The name is therefore a whole origin holding no Fauna secret, the posture a user's `<handle>.<apex>` site already has (`../behavior/web-content-hosting.md` § Same-origin security model), so the reply **keeps `nosniff` and the dropped `set-cookie` but forces no `Content-Security-Policy: sandbox`** — the sandbox exists because the path half shares the web app's origin, and a separate name is a separate origin. **The certificate is the nest's, never the plugin's:** the name joins the per-domain web cert reconcile (`web_content::cert`, the sole authority over the per-SNI map — same HTTP-01 flow and account as a user's subdomain, issued within the loop's cadence, dropped after uninstall) and is served by `MultiDomainCertResolver` under the per-SNI floor rule (`nest/tls-certificates.md` § A); it stays out of the apex ACME order and out of the bridge fan-out by construction. **Exclusivity is first-come on the web name, in both directions:** install refuses a label whose `<label>.<apex>` is a live user site (an opted-in subdomain or a registered custom domain, `HostResolver::user_site_for`), one another installed plugin holds, and any label on a domainless box (no apex, no name to give — the install card lists each claimed name in full, `ConsentInstallInfo::ingress_names`); `fauna.web.set_subdomain_enabled` and `fauna.web.domain.set` refuse a name an installed plugin claims, and the boot seed of the host resolver skips such a subdomain. A handle equal to a plugin's label stays a valid handle — it is an address, not a web name — only its subdomain opt-in is refused, with the reason. Proven tier_3 in `bins/fauna-nest/tests/plugin_runner.rs` (the name reaches `ingress.handle` with the nest-asserted actor on a routed nest path too, host normalization, no sandbox on the name and the sandbox kept on the nest's host, the opt-in refusal, the install refusals) and unit-tested at the grammar, the gate's host match, the cert reconcile and the DNS row.
@@ -472,14 +474,15 @@ and the MDA-RCE-blast-radius items.
   root-only 0600) to **every** backend it proxies, not just nest
   (`fauna-sni-router` `encode_v2_authed`). Each peel point verifies it:
   - **nest** — `read_optional_proxy_header` honours a PROXY header only with a
-    matching TLV on a router-fronted box (`is_fronted_by_router`), else falls
-    back to the genuine loopback peer; shared `fauna_proxy_protocol` carries the
-    TLV encode/parse.
+    matching TLV on a router-fronted box (`is_fronted_by_router`), else resolves
+    to `UNTRUSTED_PROXIED_SOURCE` (*A refused header forfeits loopback trust*,
+    above); shared `fauna_proxy_protocol` carries the TLV encode/parse.
   - **the Go bridges** — the MDA's shared **DAV-443** listener and the ATProto
     **PDS bridge's XRPC** listener both peel PROXY-v2 on their own loopback
     binds, so both apply the same check via `internal/proxyproto`'s
-    `WithRouterAuth` (constant-time compare, fallback to the genuine loopback
-    peer on a missing/wrong TLV). Without it the MDA's CalDAV **AUTH lockout +
+    `WithRouterAuth` (constant-time compare; a missing/wrong TLV or any other
+    refused header resolves to `proxyproto.UntrustedProxiedSource`, never the
+    loopback peer — *A refused header forfeits loopback trust*, above). Without it the MDA's CalDAV **AUTH lockout +
     `report_auth_event` audit** — which key on the MDA's *own* peel, not nest's —
     and the PDS bridge's per-IP XRPC rate limits stayed spoofable by any
     co-resident UID (closed 2026-08-14; the asymmetry was graded in a security
@@ -953,23 +956,29 @@ file that resolves `App.MainWindow`'s HWND. **The Bluesky reveal has no hide pat
 view-model never clears its revealed-secrets map — so a hold keyed on "the secret
 went away" would never release; its release is `OnNavigatedFrom`, which is rule 2's
 "or navigate-away" arm doing the whole job rather than half of it. **Rule 1's
-windows coverage is one screen, stated rather than implied:** windows renders
-`secret-key-display` (`Views/Onboarding/IdentityCreatedView.xaml`) and has **no
-`recovery-kit-secret-display` surface at all**, so the pin covers the identity
-secret today and gains the recovery kit when that screen lands. Witnesses:
+windows coverage, stated rather than implied:** windows renders
+`secret-key-display` (`Views/Onboarding/IdentityCreatedView.xaml`) and
+`recovery-kit-secret-display` (Settings → Account, `Views/SettingsAccountPage.xaml`,
+and the onboarding kit step, `Views/Onboarding/RecoveryKitView.xaml`); neither
+takes a hold, the source pin scans all three screens, and the running-app witness
+below asserts the settings kit stays capturable. Witnesses:
 `FaunaApp.Tests/ScreenCaptureGuardTests.cs` for the refcount arithmetic against a
 fake seam, and `ScreenCaptureAffinityTests.cs` for the **real** platform bit, read
 back with `GetWindowDisplayAffinity` off a window the test process owns
 (`SetWindowDisplayAffinity` accepts no other kind).
 
 **apple's two halves, and the iOS option it took.** *macOS* is the real thing:
-`NSWindow.sharingType = .none`, reached from SwiftUI through a zero-size
-`NSViewRepresentable` in the reveal's background, behind a **refcounted per-window
-guard** that restores the *previous* sharing type when the last holder leaves —
-refcounted because several credential rows can be revealed on one window and a
-navigation transition can briefly hold two screens, and a leaked hold leaves the
-whole app unscreenshottable, which users experience as a broken machine rather
-than as security. *iOS* has no per-window equivalent, and this leg took the
+`NSWindow.sharingType = .none`, reached from SwiftUI through an
+`NSViewRepresentable` in the reveal's background. As built on 2026-08-16 the bit
+goes on the app window itself, behind a **refcounted per-window guard** that
+restores the *previous* sharing type when the last holder leaves — refcounted
+because several credential rows can be revealed on one window and a navigation
+transition can briefly hold two screens, and a leaked hold leaves the whole app
+unscreenshottable, which users experience as a broken machine rather than as
+security. macOS 27 broke that shape (the one-way bit, below): the ratified
+mechanism puts the bit on a disposable reveal window instead and never writes the
+app window's — built 2026-11-08, which retired the guard. *iOS* has no per-window
+equivalent, and this leg took the
 section's **`UIScreen.isCaptured` option**, extended to the foreground transition:
 the revealed value is blanked while a capture is live **and** while the app is
 leaving the foreground, the second arm covering the app-switcher snapshot — iOS's
@@ -1019,6 +1028,119 @@ forced the scan unit to widen from a file to a **screen**: it keeps ids in `.xam
 markup and calls in `.xaml.cs` code-behind, so a file-level scan would have found
 no windows file that both paints a root secret and suppresses — vacuous in both
 directions while green.
+
+**The running-app witness (apple, 2026-11-07).** The source pin proves each reveal
+*calls* its suppression; tier_3 `tests/e2e-unified/tests/test_screen_capture_suppression.py`
+proves the call takes effect and lets go, against the running app, through one
+state observable every app with a primitive publishes the same way:
+`capture_posture` = `{mechanism, holds, window_excluded?}` (reader
+`tests/e2e-unified/helpers/capture_posture.py`; apple's publisher
+`ScreenCapturePosture` in FaunaKit). `mechanism` is `window-exclusion` where the
+platform excludes the window from every capture, `blank-on-capture` for iOS's
+partial control; `holds` counts the reveals holding a suppression; `window_excluded`
+is the real platform bit read back off the window, published only where one exists
+— macOS's `sharingType`, windows' display affinity (`GetWindowDisplayAffinity` off
+the main window, `App.CapturePostureForSerialization` over the shared guard's
+`TotalHolds` / `WindowExcluded`, 2026-11-07) and android's `FLAG_SECURE` — and
+absent on iOS rather than a stand-in `false`. Each minted reveal is asserted suppressed while shown and released on hide
+(mail) or navigate-away (all three); the recovery kit secret is asserted
+unsuppressed (rule 1); `secret-key-display` lives in onboarding and is held by the
+source pin alone. **On iOS the witness is of the blanking being ARMED, never of a
+blocked screenshot**: nothing outside the process can start a capture or move
+`scenePhase` in the simulator, so the decision stays with
+`ScreenCaptureBlankPolicy`'s host tests. android and windows publish the observable
+too, and the module carries both apps' marks; windows' four tests (the three reveals
+and rule 1's recovery kit) await their first windows run.
+
+⚠ **macOS 27 made the window bit one-way, and the running-app witness is what
+found it (2026-11-07).** Measured on macOS 27.2 (26B123): once an `NSWindow` is set
+to `sharingType = .none`, no later assignment sticks — not `.readOnly`, not the
+deprecated `.readWrite`, on screen or offscreen. The guard's release was correct
+(one acquire, one release, `.readOnly` written) and the window still read `.none`,
+so before the fix **the first credential reveal left the whole Fauna window
+uncapturable until relaunch** — rule 2's named failure, on every mac running that
+release. The unit tests could not see it because their windows were DEFERRED
+(`defer: true`): a deferred window has no window-server counterpart yet, so its
+`sharingType` round-trips in memory and reads as restorable where every real window
+is one-way — they now use real windows. The guard now measures, once per process
+on a throwaway offscreen non-deferred window, whether the bit comes back
+(`ScreenCaptureGuard.restoreSupported`), and where it does not takes **no hold at
+all**: an app the user can no longer screenshot is the harm they cannot undo, a
+missing defense-in-depth control is not. On such a release macOS is therefore,
+until the mechanism below landed (2026-11-08), a rule-3 declared absence: `capture_posture`
+reads `mechanism: unavailable`, and the witness asserts the no-harm half (no hold,
+no excluded window with the secret on screen) and records an environment skip,
+never a pass.
+
+**Ratified 2026-11-08 — on every macOS release the mechanism is a disposable
+excluded REVEAL WINDOW, and the app window's bit is never written.**
+Each revealed minted credential is painted in a borderless, non-activating
+`NSPanel` that is a child of the app window (`addChildWindow(_:ordered: .above)`),
+created non-deferred with `sharingType = .none` set before it is first shown, and
+torn down the moment the reveal ends — removed from its parent, closed, every
+reference dropped; `isReleasedWhenClosed` stays `false`. The bit lands on a window
+that is thrown away, so it never has to come back, and nothing is refcounted: one
+reveal, one window. *What a capture shows.* An excluded window is left out of a
+screenshot, a recording and a screen share, and the capture shows what the app
+window paints beneath it — so the slot in the app window paints the value at
+opacity 0 (it keeps its layout and its accessibility value) under a `••••••••` mask
+in the value's font, the blank shape iOS's half already uses, and a capture shows
+the mask exactly where the value is while the user sees the value in the reveal
+window above it. This is not rule 3's simulated suppression: the exclusion is the
+real per-window platform API, the mask is only what lies under the excluded
+window, and were the exclusion ever to stop working the value would show in the
+capture — the control fails open and visibly, and the posture reads the reveal
+window's real bit, so the witness would see it. *Why one mechanism rather than the
+bit flip where it still restores:* the fleet's one mac runs the one-way release,
+so a restorable-bit arm is code no test can exercise, and two mechanisms inside one
+app are a divergence with nothing to pay for it; `ScreenCaptureGuard.restoreSupported`,
+its `measureRestore()` probe and the refcounted hold retire with the build.
+*Geometry.* The slot is the source of truth: it reports its frame in window space
+on every layout pass (`onGeometryChange(for:)`; the deployment target is macOS
+15), converted through `convertToScreen`, and the reveal window is re-placed on
+each change — scroll, resize, sidebar and full-screen are one path; a parent move
+needs nothing, since AppKit moves a child window with its parent and orders it
+with the parent across Spaces, into full screen and through miniaturization. While
+the slot is not wholly inside its enclosing scroll view's visible rect and the
+window's content rect, the reveal window is ordered out and the mask stays; it
+returns when the slot is back in view. *Focus, selection, copy.* The panel may
+become key, so text in it is selectable as today's is, but never main, and the
+parent regains key when it closes; Copy stays in the app window, reading the
+secret on demand as it does today. *One identity.* The reveal window hosts the
+same SwiftUI content the modifier wraps, with no automation id and hidden from
+accessibility; call sites apply `.suppressScreenCapture` innermost and register
+their id outside it, so each of the three ids registers once, in the app window,
+exactly where convention 1 puts it — no ui.yaml change, and the e2e reads the
+value off the slot's registration as before. *Posture.* `mechanism` is
+`window-exclusion` on every macOS; `holds` counts live reveal windows;
+`window_excluded` is the strict read — any app window reading `.none` — so a
+reveal window that lingers after its reveal is a leak the witness catches;
+`excluded_windows` names them; the apple publisher's `unavailable` arm retires.
+The witness is unchanged and loses its macOS skip, and the catalog's "as far as
+the device allows" wording already covers both states. *Measured (macOS 27.2,
+26B123, 2026-11-08):* a child window set to `.none` before or after it is shown
+reads `0` in `NSWindow.sharingType` and in the window server's
+`kCGWindowSharingState` while its parent reads `1` in both, so the exclusion is
+per window and the parent stays capturable; the child follows a parent move
+exactly; after `removeChildWindow`, `close` and the references dropped it
+deallocates on the next run-loop turn and `NSApp.windows` lists no `.none` window
+— in a script whose autorelease pool never drained it lingered closed and
+invisible, which is why the strict posture read rests on the dealloc; and
+`isReleasedWhenClosed = true` under a live Swift reference crashed the probe with
+SIGSEGV, the ARC over-release AppKit documents. *iOS is unchanged:* UIKit has no
+window sharing bit, so the reveal-window shape does not transfer, and the
+`UIScreen.isCaptured` half stands. *The bunker QR:* the one-time bunker reveal
+also paints the connect string as a QR code, which encodes the whole credential,
+so the QR takes a reveal window of its own beside the string's — two holds on
+that page while it shows. **BUILT 2026-11-08**: `ScreenCaptureGuard`, `restoreSupported` and `measureRestore()` are gone
+and the macOS environment skip with them. Witnessed on macOS 27.2 (26B123) the
+same day: `test_screen_capture_suppression.py --app macos` passes all four tests
+with no skip (each reveal reads `window-exclusion` suppressed while shown and
+released after hide or navigate-away; the recovery kit stays released), and
+FaunaKit's `ScreenCaptureTests` read a reveal window at `0` in both
+`NSWindow.sharingType` and `kCGWindowSharingState` while its parent reads `1`,
+follows a parent move, and deallocates after its reveal ends. The "macOS is the
+real thing" sentence above holds on every release again.
 
 ## Reading list
 

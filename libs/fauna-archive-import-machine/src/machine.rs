@@ -109,12 +109,21 @@ pub(crate) enum TestAnchor {
     /// so the pause/cancel journey presses the real buttons against a run
     /// that cannot finish before the click lands.
     HoldAfter(u64),
+    /// Fail the run once the marker has learned the zip's length + BLAKE3
+    /// and before the raw copy is written — the crash window that leaves a
+    /// folder a resume cannot read the archive from, so the user must hand
+    /// it back (§ Storage — the folder is the session). Fires at the raw
+    /// phase, not after a record count.
+    StopBeforeRawCopy,
 }
 
 impl TestAnchor {
-    fn records(self) -> u64 {
+    /// The settled-record count a counting anchor fires at; `None` for the
+    /// raw-phase anchor, which no record count reaches.
+    fn records(self) -> Option<u64> {
         match self {
-            Self::PauseAfter(n) | Self::HoldAfter(n) => n,
+            Self::PauseAfter(n) | Self::HoldAfter(n) => Some(n),
+            Self::StopBeforeRawCopy => None,
         }
     }
 }
@@ -299,6 +308,17 @@ impl ArchiveImportMachine {
     pub fn set_hold_after_records_for_test(&self, records: u64) {
         *self.test_anchor.lock().expect("test anchor mutex") = Some(TestAnchor::HoldAfter(records));
     }
+
+    /// Arm the one-shot stop between the marker learning the zip's length +
+    /// hash and the raw copy being written ([`TestAnchor::StopBeforeRawCopy`]):
+    /// the run fails there, `Errored`, leaving a folder whose resume on
+    /// another device finds no raw copy and asks for the archive back. The
+    /// automation surfaces' `archive_import_stop_before_raw_copy` command is
+    /// its one caller. A run resumed past the raw phase never fires it, and
+    /// arming replaces any other armed anchor.
+    pub fn set_stop_before_raw_copy_for_test(&self) {
+        *self.test_anchor.lock().expect("test anchor mutex") = Some(TestAnchor::StopBeforeRawCopy);
+    }
 }
 
 /// The claim [`index_archive`] is written to protect, pinned at compile time:
@@ -364,8 +384,20 @@ impl ArchiveImportMachine {
     pub(crate) fn test_anchor_due(&self, settled: u64) -> Option<TestAnchor> {
         let mut slot = self.test_anchor.lock().expect("test anchor mutex");
         match *slot {
-            Some(anchor) if settled >= anchor.records() => slot.take(),
+            Some(anchor) if anchor.records().is_some_and(|n| settled >= n) => slot.take(),
             _ => None,
+        }
+    }
+
+    /// The raw-phase anchor ([`TestAnchor::StopBeforeRawCopy`]), exactly
+    /// once: `true` spends it.
+    pub(crate) fn stop_before_raw_copy_due(&self) -> bool {
+        let mut slot = self.test_anchor.lock().expect("test anchor mutex");
+        if *slot == Some(TestAnchor::StopBeforeRawCopy) {
+            *slot = None;
+            true
+        } else {
+            false
         }
     }
 

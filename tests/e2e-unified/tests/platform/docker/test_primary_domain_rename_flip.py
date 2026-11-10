@@ -118,9 +118,13 @@ SENDER_DOMAIN = "sender.test"
 # The list members' domain (outcome 46), relayed to the stub external MX.
 EXTERNAL_DOMAIN = "external.test"
 
-# The loop's steady poll (five minutes, `acme_http01.rs`) plus pebble's
-# validation of the widened order and one paced retry.
-_FLIP_CEILING_S = 480
+# Two steady polls in series plus slack: once `mail.<new>` resolves, the HTTP-01
+# loop re-issues at its next five-minute tick (`acme_http01.rs`), the install
+# wakes the rename driver, which stamps `cert_ready`, and the anchor flip comes
+# on the driver's NEXT tick — its five-minute cadence (`rename_driver.rs`
+# `RENAME_DRIVER_CADENCE`), nothing waking it sooner. Worst case ~610 s, so 480
+# could not cover it; the slack is pebble's validation and one paced retry.
+_FLIP_CEILING_S = 2 * 300 + 180
 
 
 @pytest.fixture(scope="module")
@@ -130,12 +134,15 @@ def docker_image():
 
 
 @contextmanager
-def _rename_stack(*, mail: bool):
+def _rename_stack(*, mail: bool, new_mail_host: bool = True):
     """pebble + ``fake_dns`` + a fresh claimed nest ordering from pebble and
     resolving through the sidecar, with the old primary and the new domain
     both hosted and published. Yields the nest dict, carrying the sidecar's
     ``records_dir`` and the ``nest_ip`` its records point at; tears the whole
     stack down after.
+
+    ``new_mail_host=False`` leaves ``mail.<new>`` out of the zone, so a rename
+    onto the new domain has a mail host that does not resolve yet.
 
     ``mail`` adds the four mail ports (``nest["mail_ports"]``), the fake
     clamd/rspamd scanners, and a stub external MX on the same network that the
@@ -217,7 +224,7 @@ def _rename_stack(*, mail: bool):
         started.append(nest_name)
 
         nest_ip = container_ip(nest_name)
-        _publish(records_dir, nest_ip, [OLD, NEW])
+        _publish(records_dir, nest_ip, [OLD, NEW], new_mail_host=new_mail_host)
 
         wait_for_health(api_port, nest_name)
         admin = claim_admin_api(api_port, CLAIM_CODE, handle="admin")
@@ -250,17 +257,27 @@ def rename_stack(docker_image):
 
 
 @pytest.fixture()
+def rename_stack_new_mail_host_unpublished(docker_image):
+    with _rename_stack(mail=False, new_mail_host=False) as nest:
+        yield nest
+
+
+@pytest.fixture()
 def rename_mail_stack(docker_image):
     with _rename_stack(mail=True) as nest:
         yield nest
 
 
-def _publish(records_dir: str, nest_ip: str, domains: list[str]) -> None:
+def _publish(records_dir: str, nest_ip: str, domains: list[str], *,
+             new_mail_host: bool = True) -> None:
     """The zone as the sidecar serves it: each domain and its ``mail.`` host
-    point at the nest; a domain left out does not resolve at all. The outside
+    point at the nest; a domain left out does not resolve at all, and
+    ``new_mail_host=False`` leaves ``mail.<new>`` alone out. The outside
     sender's passing SPF and DMARC policy ride along on every write (the
     sidecar reloads the file whole)."""
     a = {name: nest_ip for domain in domains for name in (domain, f"mail.{domain}")}
+    if not new_mail_host:
+        a.pop(f"mail.{NEW}", None)
     write_dns_records(
         records_dir,
         a={**a, SENDER_DOMAIN: "127.0.0.1"},
@@ -451,6 +468,175 @@ def test_a_rename_away_from_a_dead_primary_completes(rename_stack):
         rename_id = _start_rename(ws, grace_days=1)
     _wait_for_grace(nest)
     with admin_ws(nest) as ws:
+        done = ws.call("fauna.bridges.complete_primary_domain_rename", {
+            "rename_id": rename_id, "force": True,
+        })["rename"]
+        assert done["state"] == "completed", done
+        assert _primary(ws) == NEW, _domains(ws)
+
+
+# The cert-lifecycle loop's line for a rename whose `mail.<new>` does not
+# resolve to the mail address yet (`acme_http01.rs`, the `RenameSanGate::Reachable`
+# arm of the desired-SAN builder): the
+# observable that the loop has evaluated the rename's SAN gate and deferred it.
+_DEFERRED_LINE = "a rename MX host does not resolve to the mail address"
+
+
+def _nest_log(nest) -> str:
+    logs = subprocess.run(
+        ["docker", "logs", nest["name"]], capture_output=True, text=True, timeout=30)
+    return logs.stdout + logs.stderr
+
+
+def _rename_status(nest) -> dict | None:
+    with admin_ws(nest) as ws:
+        return ws.call("fauna.bridges.get_primary_domain_rename_status", {})["rename"]
+
+
+def _primary_anchored_records(ws, domain: str) -> dict[str, list[str]]:
+    """The records of ``domain``'s matrix (``fauna.dns.list_records``) whose
+    value is drawn from the primary (``mail-primary-domain-rename.md`` § Data —
+    Mutations to per-domain DNS records): MX, the CalDAV SRV target, the
+    TLSRPT and DMARC report addresses, and the MTA-STS policy id."""
+    (row,) = [d for d in ws.call("fauna.dns.list_records", {"domain": domain})["domains"]
+              if d["domain"] == domain]
+    records = row["records"]
+
+    def values(pred) -> list[str]:
+        return sorted(r["expected"] for r in records if pred(r))
+
+    found = {
+        "mx": values(lambda r: r["record_type"] == "MX"),
+        "caldav": values(lambda r: r["record_type"] == "SRV"
+                         and r["name"] == f"_caldavs._tcp.{domain}"),
+        "tlsrpt": values(lambda r: r["name"] == f"_smtp._tls.{domain}"),
+        "dmarc": values(lambda r: r["name"] == f"_dmarc.{domain}"),
+        "mta_sts": values(lambda r: r["name"] == f"_mta-sts.{domain}"),
+    }
+    # The CalDAV SRV is emitted only where the deployment serves CalDAV
+    # directly, so it is checked where present and never required.
+    required = {k: v for k, v in found.items() if k != "caldav"}
+    assert all(required.values()), f"{domain}'s matrix lacks a primary-anchored record: " \
+        f"{found!r}\nfull matrix={records!r}"
+    return found
+
+
+def _assert_anchored_on(found: dict[str, list[str]], primary: str, other: str, domain: str):
+    """Every primary-anchored record of ``domain`` names ``primary``'s mail host
+    or report addresses, and none names ``other``'s."""
+    assert f"10 mail.{primary}." in found["mx"], (domain, found)
+    assert all(f"mail.{other}" not in v for v in found["mx"]), (domain, found)
+    assert all(v.endswith(f"mail.{primary}.") for v in found["caldav"]), (domain, found)
+    assert all(f"tlsrpt@{primary}" in v for v in found["tlsrpt"]), (domain, found)
+    assert all(f"dmarc-report@{primary}" in v and f"@{other};" not in v
+               for v in found["dmarc"]), (domain, found)
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_a_rename_waits_for_its_new_mail_host_then_retargets_every_domains_records(
+        rename_stack_new_mail_host_unpublished):
+    """Outcomes 71 and 72.
+
+    71 — a rename onto a domain whose ``mail.<new>`` does not resolve yet
+    waits: the loop defers that one name, the rename stays in
+    ``cert_issuance``, the old primary keeps the very certificate it was
+    served, and the old domain stays the primary; once ``mail.<new>`` resolves,
+    the certificate is re-issued to cover it and the rename flips.
+    72 — after the flip, both domains' primary-anchored records (MX, the
+    CalDAV SRV target, the TLSRPT and DMARC report addresses) name the new
+    primary, and each domain's MTA-STS policy id has rotated."""
+    nest = rename_stack_new_mail_host_unpublished
+    _poll("a trusted certificate for the old primary", 180, lambda: _old_primary_trusted(nest))
+    before = served_leaf("127.0.0.1", nest["port"], OLD)
+    assert f"mail.{NEW}" not in _sans(before), _sans(before)
+
+    with admin_ws(nest) as ws:
+        pre_flip = {d: _primary_anchored_records(ws, d) for d in (OLD, NEW)}
+        for domain, found in pre_flip.items():
+            _assert_anchored_on(found, OLD, NEW, domain)
+        _start_rename(ws, grace_days=7)
+
+    # The start wakes the loop, which evaluates the rename's SAN gate and
+    # defers `mail.<new>`; the line is the witness that the gate ran.
+    wait_until(
+        lambda: _DEFERRED_LINE in _nest_log(nest), 180, interval=3,
+        diagnose=lambda: f"the loop never deferred mail.{NEW}; row={_rename_status(nest)!r}\n"
+                         f"--- nest cert-lifecycle log ---\n{_lifecycle_log(nest)}",
+    )
+    status = _rename_status(nest)
+    assert status["state"] == "cert_issuance", status
+    still = served_leaf("127.0.0.1", nest["port"], OLD)
+    assert still.serial_number == before.serial_number, (
+        "a rename whose new mail host does not resolve must leave the current "
+        f"certificate alone: before={_sans(before)!r} now={_sans(still)!r}")
+    with admin_ws(nest) as ws:
+        assert _primary(ws) == OLD, _domains(ws)
+
+    _publish(nest["records_dir"], nest["nest_ip"], [OLD, NEW])
+    _wait_for_grace(nest)
+    # Read the leaf under the new primary's own name, never under `mail.<new>`:
+    # the image's SNI router hands every `mail.*` SNI on :443 to the mail
+    # bridge's CalDAV listener (`fauna-sni-router --route mail.*=…`), which this
+    # mail-less stack does not run — the router drops the dial, and the
+    # handshake ends in a bare EOF. The nest's one certificate carries both
+    # mail hosts, so the leaf it serves for the primary is the one to check.
+    after = served_leaf("127.0.0.1", nest["port"], NEW)
+    assert _leaf_is_pebble(after) and f"mail.{NEW}" in _sans(after), _sans(after)
+    assert f"mail.{OLD}" in _sans(after), _sans(after)
+
+    with admin_ws(nest) as ws:
+        assert _primary(ws) == NEW, _domains(ws)
+        for domain in (OLD, NEW):
+            found = _primary_anchored_records(ws, domain)
+            _assert_anchored_on(found, NEW, OLD, domain)
+            assert found["mta_sts"] != pre_flip[domain]["mta_sts"], (
+                f"{domain}'s MTA-STS policy names the new mail host, so its id must "
+                f"rotate: before={pre_flip[domain]['mta_sts']!r} after={found['mta_sts']!r}")
+
+
+def _restart_nest(nest) -> None:
+    """Restart the nest's container — its process ends and boots again on the
+    same data — and wait until it answers. A container may come back on another
+    network address; the zone and the persisted host address follow it."""
+    subprocess.run(["docker", "restart", "-t", "20", nest["name"]],
+                   capture_output=True, timeout=120, check=True)
+    wait_for_health(nest["port"], nest["name"])
+    ip = container_ip(nest["name"])
+    if ip != nest["nest_ip"]:
+        nest["nest_ip"] = ip
+        _publish(nest["records_dir"], ip, [OLD, NEW])
+        with admin_ws(nest) as ws:
+            set_host_address(ws, nest_ipv4=ip, mail_ipv4=ip)
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_a_rename_carries_on_across_nest_restarts(rename_stack):
+    """Outcome 73: a rename under way carries on after the nest restarts.
+    Restarted while it rests at ``cert_ready`` (the certificate already covers
+    the new mail host), the rename flips on the booted nest; restarted again
+    mid-grace, it is still in grace with the same row and the same grace end,
+    the new domain is still the primary, and it finishes."""
+    nest = rename_stack
+    with admin_ws(nest) as ws:
+        rename_id = _start_rename(ws, grace_days=7)
+
+    # `cert_ready` rests until the loop's next tick, which nothing wakes; the
+    # poll reads past it if that tick has already flipped the row.
+    seen = _poll("the rename past cert_issuance", _FLIP_CEILING_S,
+                 lambda: ((s := _rename_status(nest)) and s["state"] != "cert_issuance", s))
+    assert seen["state"] in ("cert_ready", "grace"), seen
+    if seen["state"] == "cert_ready":
+        _restart_nest(nest)
+    grace = _wait_for_grace(nest)
+    assert bytes(grace["rename_id"]) == rename_id, grace
+
+    _restart_nest(nest)
+    resumed = _rename_status(nest)
+    assert resumed is not None and bytes(resumed["rename_id"]) == rename_id, resumed
+    assert resumed["state"] == "grace", resumed
+    assert resumed["grace_ends_at"] == grace["grace_ends_at"], (grace, resumed)
+    with admin_ws(nest) as ws:
+        assert _primary(ws) == NEW, _domains(ws)
         done = ws.call("fauna.bridges.complete_primary_domain_rename", {
             "rename_id": rename_id, "force": True,
         })["rename"]

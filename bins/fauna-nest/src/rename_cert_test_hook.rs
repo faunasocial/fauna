@@ -8,17 +8,19 @@
 //!
 //! A rename leaves `cert_issuance` only when the managed cert covers
 //! `mail.<new-primary>` (`mail-primary-domain-rename.md` § Lifecycle), and that
-//! takes a CA validating HTTP-01 against a name that resolves to the nest. A
-//! standalone test nest listens on `127.0.0.1:<port>` and never spawns the
-//! ACME loop at all, so its rename stays in `cert_issuance` for ever and the
-//! grace-period controls and the post-flip identity are unreachable. The
-//! issuance half is pinned elsewhere: the unit tests in
-//! [`crate::acme_http01`] drive `cert_issuance → cert_ready → grace` with a
-//! fake issuer, and the tier_4 pebble journey issues a real cert through the
-//! nest's own HTTP-01 client. So the seam is cut at the CA: this hook stamps
-//! the rename `cert_ready` as the loop would on seeing a covering cert, then
-//! runs the loop's own post-cert steps
-//! ([`crate::acme_http01::rename_post_cert_steps`] — the anchor flip, the
+//! takes a CA (over HTTP-01, or the admin's client over DNS-01) issuing a cert
+//! for a name that resolves to the nest. A standalone test nest listens on
+//! `127.0.0.1:<port>` and has no CA to ask, so although its rename driver
+//! ([`crate::rename_driver`]) runs, the rename stays in `cert_issuance` for
+//! ever and the grace-period controls and the post-flip identity are
+//! unreachable. The issuance half is pinned elsewhere: the unit tests in
+//! [`crate::acme_http01`] and [`crate::rename_driver`] drive
+//! `cert_issuance → cert_ready → grace` with a fake issuer or an installed
+//! cert, and the tier_4 pebble journey issues a real cert through the nest's
+//! own HTTP-01 client. So the seam is cut at the CA: this hook stamps the
+//! rename `cert_ready` as the driver would on seeing a covering cert, then
+//! runs the driver's own post-cert steps
+//! ([`crate::rename_driver::rename_post_cert_steps`] — the anchor flip, the
 //! identity reconcile and its `config_changed` push), so everything from the
 //! flip onwards is the production code against a real nest binary.
 //!
@@ -64,7 +66,7 @@ async fn handle_cert_issued(State(state): State<Arc<AppState>>) -> impl IntoResp
     {
         return ApiError::internal(format!("mark cert_ready: {e}")).into_response();
     }
-    crate::acme_http01::rename_post_cert_steps(&state, Some(rename.rename_id)).await;
+    crate::rename_driver::rename_post_cert_steps(&state, Some(rename.rename_id)).await;
     match state.db.get_active_rename().await {
         Ok(Some(r)) => Json(json!({ "ok": true, "state": r.state })).into_response(),
         Ok(None) => ApiError::internal("rename vanished after the flip").into_response(),

@@ -109,9 +109,14 @@ WINDOW = 180.0
 
 
 @contextlib.contextmanager
-def _owner_seats(nest, request, folder: str, mode: str = "tui"):
-    """The consent nest's owner on two seats of ``mode`` bound to ``folder`` —
-    the same account, two devices. Yields ``(seat_a, seat_b)``."""
+def _owner_seats(nest, request, folder: str, mode="tui", *, spa_url: str | None = None):
+    """The consent nest's owner on two seats bound to ``folder`` — the same
+    account, two devices. ``mode`` is one seat mode for both seats, or a seat
+    pair (``(mode_a, mode_b)``, ``sync_seats.make_seat``'s modes — a ``phone``
+    seat binds no folder and hosts no engine, so only the other adopts; a
+    ``web`` seat likewise, signing in through ``spa_url``, the nest's SPA
+    proxy). Yields ``(seat_a, seat_b)``."""
+    modes = (mode, mode) if isinstance(mode, str) else tuple(mode)
     from tests.test_filesync_seats import harness_sign_in
 
     alice = nest["user"]
@@ -128,7 +133,7 @@ def _owner_seats(nest, request, folder: str, mode: str = "tui"):
             seats = [
                 stack.enter_context(
                     sync_seats.make_seat(
-                        mode,
+                        seat_mode,
                         name=name,
                         run_token=run_token,
                         root=tmp / name,
@@ -136,12 +141,13 @@ def _owner_seats(nest, request, folder: str, mode: str = "tui"):
                         node_port=nest["port"],
                         folder=folder,
                         sign_in=harness_sign_in(
-                            nest["url"], secret_key, actor_id, f"alice.{HANDLE_DOMAIN}"
+                            nest["url"], secret_key, actor_id, f"alice.{HANDLE_DOMAIN}",
+                            spa_url=spa_url if seat_mode == sync_seats.WEB_MODE else None,
                         ),
                         request=request,
                     )
                 )
-                for name in ("a", "b")
+                for name, seat_mode in zip(("a", "b"), modes)
             ]
             for seat in seats:
                 seat.await_ready(STARTUP_WINDOW)

@@ -34,9 +34,10 @@
 //!    missing: the driver's [`elect_at_start`] owns what that means; web has
 //!    no sync agent, so its presence probe answers absent without asking);
 //! 7. [`AccountDriver::serve`] with [`WebLegs`] — web has no iroh and hosts no
-//!    custody, so its legs run nothing per pass; they carry the SPA's
-//!    custodian dial for the restore gesture — looping on [`ServeEnd`] as the
-//!    native worker does.
+//!    custody, so its legs run one thing per pass — the custodian dial pass's
+//!    nest arm, on a pass whose own-nest walk did not answer — over the SPA's
+//!    custodian dial, which the restore gesture rides too — looping on
+//!    [`ServeEnd`] as the native worker does.
 //!
 //! Steps 3 and 4 restart assembly exactly as the native worker's
 //! `'assembly` loop does: the probe's one-rotation cap is the driver's
@@ -125,11 +126,14 @@ impl EngineElection for WebElection {
 }
 
 /// Web's host legs ([`HostLegs`]): no peer leg (no iroh) and no custody leg
-/// (web hosts no custody), so a pass runs nothing here; the restore gesture
-/// dials a custodian nest through the SPA's dial
+/// (web hosts no custody); a pass runs one leg here, the custodian dial
+/// pass's NEST arm, through the SPA's dial on a pass whose own-nest walk did
+/// not answer ([`crate::custodian_restore::pass_arm_with_derived_view`]), and
+/// the restore gesture dials a custodian nest through the same dial
 /// ([`crate::custodian_restore::restore_with_derived_view`] — the shared walk,
 /// the revocation view derived from the store at the gesture).
-/// `custodian_dial: None` answers the gesture `Err`, as [`NoLegs`] does.
+/// `custodian_dial: None` runs no arm and answers the gesture `Err`, as
+/// [`NoLegs`] does.
 ///
 /// [`NoLegs`]: crate::account_driver::NoLegs
 pub struct WebLegs<D> {
@@ -145,7 +149,45 @@ where
     R: fauna_protocol::RpcRequester,
     D: CustodianDial,
 {
-    async fn run(&mut self, _ctx: LegsCtx<'_, B, R>, _report: &mut PumpReport) -> LegsOutput {
+    async fn run(&mut self, ctx: LegsCtx<'_, B, R>, report: &mut PumpReport) -> LegsOutput {
+        // The custodian dial pass's NEST arm (the custodian-NEST serve door,
+        // ruling 6) — the one leg web runs per pass: only on a pass whose
+        // own-nest walk did not answer, never standing, and only on an
+        // enrolled slot; the revocation view derived from the store at the
+        // pass. Counted into `peer_dial` exactly as the native pump counts it.
+        if let Some(dial) = self.custodian_dial.as_ref() {
+            let witness = ctx.slot.device_authorization();
+            let id = witness
+                .as_ref()
+                .map(|w| crate::custodian_restore::FleetDialIdentity {
+                    owner: self.actor_id.0,
+                    schedule: ctx.schedule,
+                    trust: ctx.trust,
+                    writer_key: ctx.writer_key,
+                    authorization: &w.wire,
+                    generation_custody: Some(ctx.slot),
+                    // Inside a pass the pass's own escrow-recovery step keys what
+                    // the walk brought back, as natively.
+                    seed: None,
+                });
+            match crate::custodian_restore::pass_arm_with_derived_view(
+                ctx.store,
+                dial,
+                id,
+                crate::custodian_restore::own_nest_answered(report),
+                ctx.content_scopes,
+            )
+            .await
+            {
+                Ok(Some(arm)) => crate::custodian_restore::count_nest_arm(report, arm),
+                Ok(None) => {}
+                Err(e) => crate::account_driver::push_step_error(
+                    report,
+                    format!("custodian nest restore: {e:#}"),
+                    &e,
+                ),
+            }
+        }
         LegsOutput::default()
     }
 

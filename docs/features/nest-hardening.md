@@ -4,6 +4,9 @@ title: Each part of the nest is walled off
 section: your nest
 goal: docs/goal/architecture/security.md § Co-resident process trust boundary (UID isolation)
 guide: docs/guides/your-own-cloud.md § The trust model, in plain words
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -66,6 +69,8 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | ios | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | android | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

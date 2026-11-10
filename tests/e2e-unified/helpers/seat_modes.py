@@ -40,11 +40,13 @@ def native_app_for_platform(sys_platform: str) -> str | None:
 # A PHONE seat: the account's mobile app, signed in as one more device of the
 # account and bound to no folder. It is deliberately NOT in :data:`SEAT_MODES` —
 # those are the folder-syncing modes the convergence matrix multiplies over, and
-# a phone keeps no same-account peer leg and syncs no folder through an agent
-# (`p2p.md` § Implementation status today: phones are excused from the
-# peer-leg outcomes). What a phone seat is for is a journey about the DEVICE
-# rather than its files — the Devices page's participation switch, whose
-# outcomes the phones still owe — paired with a desktop seat that is.
+# a phone syncs no folder through an agent. Its app hosts the account runtime
+# in-process, whose same-account peer leg carries the account plane (since
+# 2026-11-09, `fauna-ffi`'s account runtime) but gives the harness no plane
+# reading — there is no agent to ask. What a phone seat is for is a journey
+# about the DEVICE rather than its files — the Devices page's participation
+# switch, and the account's settings and read state staying in step with the
+# nest down — paired with a desktop seat that is.
 PHONE_MODE = "phone"
 
 # Which phone app a `phone` seat means on each platform: the iOS simulator on

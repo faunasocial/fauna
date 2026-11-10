@@ -809,6 +809,63 @@ async fn pending_poll_typed_verdicts_end_on_the_terminal_error() {
     }
 }
 
+/// A nest the poll cannot reach keeps the request pending and the poll going
+/// (`onboarding.md` § The pending-invite surface; `join-a-nest.md` outcome 15):
+/// a transient failure of the status call itself — the nest stopped, the
+/// connection refused — restores `PendingReview` exactly like the not-found
+/// probe's unreachable arm. A transient `Error` here would strand the request:
+/// `recheck_invite_status` proceeds only from `PendingReview`, so the poll would
+/// never ask again.
+#[tokio::test]
+async fn pending_poll_transient_status_call_keeps_the_request_pending() {
+    use fauna_onboarding_machine::InviteRequestState;
+    use fauna_onboarding_machine::nest_api::{FakeNestApi, InviteRequestError, NestApi};
+
+    let observer: Arc<dyn OnboardingObserver> = Arc::new(NullObserver);
+    let fake = Arc::new(FakeNestApi::new());
+    let m = OnboardingMachine::with_nest_api(observer, fake.clone() as Arc<dyn NestApi>);
+    m.seed_identity("0".repeat(64));
+    let pending_status = serde_json::json!({
+        "PendingReview": { "request_id": "REQ1", "last_checked_ms": 0 }
+    });
+    m.seed_pending_invite(
+        "https://a.example".into(),
+        "alice@a.example".into(),
+        "REQ1".into(),
+        pending_status.to_string(),
+    );
+    fake.set_recheck_invite_request_response(Err(InviteRequestError::Transient {
+        cause: "connection refused".into(),
+    }));
+
+    let step = m.recheck_invite_status().await;
+
+    assert_eq!(step, OnboardingStep::InviteRequest);
+    let snap = m.invite_request_snapshot();
+    match &snap.state {
+        InviteRequestState::PendingReview { request_id, .. } => assert_eq!(request_id, "REQ1"),
+        other => panic!("an unreachable nest must leave the request pending, got {other:?}"),
+    }
+    assert!(snap.recheck_visible, "the recheck stays offered");
+    assert!(m.wizard_outcome().is_none(), "no outcome");
+
+    // The poll keeps going: the next tick asks the nest again.
+    fake.set_recheck_invite_request_response(Err(InviteRequestError::Transient {
+        cause: "connection refused".into(),
+    }));
+    m.recheck_invite_status().await;
+    let rechecks = fake
+        .calls()
+        .iter()
+        .filter(|c| c.as_str() == "recheck_invite_request")
+        .count();
+    assert_eq!(rechecks, 2, "a second tick must reach the nest again");
+    assert!(matches!(
+        m.invite_request_snapshot().state,
+        InviteRequestState::PendingReview { .. }
+    ));
+}
+
 /// A cancel raised while the not-found probe is in flight must not route the
 /// page anywhere: `Success` means the nest admitted this identity, but the user
 /// asked to stop, so the snapshot stays at its pending state (`cancel_invite_op`).

@@ -80,8 +80,12 @@ struct NestDouble {
     list_since: Mutex<Vec<i64>>,
     roster_reads: Mutex<usize>,
     /// The `path` of every `changes.record` asked of the double (each one
-    /// answered with an error: nothing lands).
+    /// answered with an error — nothing lands — unless [`Self::record_seq`]
+    /// names the row to answer with).
     records: Mutex<Vec<String>>,
+    /// Answer each `changes.record` with this `seq` instead of an error: one
+    /// no newer than the head re-recorded is a swallowed record.
+    record_seq: Mutex<Option<i64>>,
 }
 
 impl NestDouble {
@@ -159,7 +163,16 @@ impl NestDouble {
                 let request: fauna_protocol::sync::SyncChangeRecordRequest =
                     fauna_protocol::decode_strict(&bytes).expect("a well-formed record");
                 self.records.lock().unwrap().push(request.path);
-                error("fauna.test.unavailable")
+                match *self.record_seq.lock().unwrap() {
+                    Some(seq) => (
+                        true,
+                        value_of(&fauna_protocol::sync::SyncChangeRecordReply {
+                            seq,
+                            extra: Default::default(),
+                        }),
+                    ),
+                    None => error("fauna.test.unavailable"),
+                }
             }
             "fauna.folders.members.list_actors" => {
                 *self.roster_reads.lock().unwrap() += 1;
@@ -1329,5 +1342,92 @@ async fn one_pull_walks_every_page_of_a_paged_log() {
         *nest.list_since.lock().unwrap(),
         vec![0, 20, 40, 50],
         "three pages of rows, then the empty page that ends the walk"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// (11)(d) — the take-over's adoption is bound to its first pass
+// ─────────────────────────────────────────────────────────────────────
+
+/// A fresh successor device adopting the nest's history heads adopts only
+/// what its first adopting pass saw (`succession-cut.md` ruling (11)(j),
+/// residual (3)). A nest that swallows one record holds the adoption open,
+/// but a retired-nonce head it serves afterwards is not adopted; the
+/// swallowed candidate is retried, and once it lands the marker is spent.
+#[tokio::test]
+async fn the_take_over_adopts_only_what_its_first_pass_saw() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().mount(&server).await;
+    let first = stored(&store, 1, &predecessor_key());
+    let later = stored(&store, 2, &predecessor_key());
+    let nest = NestDouble::serving(vec![row_under(
+        &predecessor(),
+        OTHER_NONCE,
+        5,
+        "first.bin",
+        Some(first),
+        &predecessor_key(),
+    )]);
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_on(
+        &nest,
+        &server.uri(),
+        watch.path(),
+        SyncDb::open_in_memory().unwrap(),
+        &[(&predecessor(), predecessor_key())],
+    );
+    engine.set_change_signer(
+        Some(Arc::new(ChangeSigner::direct(&owner()))),
+        Some(SET_NONCE),
+    );
+    engine.set_retired_set_nonces(vec![OTHER_NONCE]);
+    engine.set_reader_binding(cut_binding(Some(&owner())));
+    // The marker arrives on a device holding no local state: adoption begins.
+    let marker = [0x4d; 32];
+    engine.set_adoption_marker(Some(marker));
+    assert_eq!(
+        engine.db().adoption_state(&marker).unwrap(),
+        Some(crate::db::AdoptionState::Begun)
+    );
+
+    // Pass one: the door swallows the record (a row no newer than the head).
+    *nest.record_seq.lock().unwrap() = Some(5);
+    engine.rerecord_under_live_nonce().await.expect("pass one");
+    assert_eq!(*nest.records.lock().unwrap(), vec!["first.bin".to_string()]);
+    assert_eq!(
+        engine.db().adoption_state(&marker).unwrap(),
+        Some(crate::db::AdoptionState::Begun),
+        "a swallowed record keeps the adoption open"
+    );
+
+    // The nest then serves a NEW retired-nonce head for a fresh path.
+    nest.log.lock().unwrap().push(row_under(
+        &predecessor(),
+        OTHER_NONCE,
+        6,
+        "later.bin",
+        Some(later),
+        &predecessor_key(),
+    ));
+    nest.records.lock().unwrap().clear();
+    engine.rerecord_under_live_nonce().await.expect("pass two");
+    assert_eq!(
+        *nest.records.lock().unwrap(),
+        vec!["first.bin".to_string()],
+        "the swallowed candidate is retried; the head served after the first pass is not adopted"
+    );
+
+    // The retry lands: every first-pass candidate is done, the marker spent.
+    *nest.record_seq.lock().unwrap() = Some(100);
+    nest.records.lock().unwrap().clear();
+    engine
+        .rerecord_under_live_nonce()
+        .await
+        .expect("pass three");
+    assert_eq!(*nest.records.lock().unwrap(), vec!["first.bin".to_string()]);
+    assert_eq!(
+        engine.db().adoption_state(&marker).unwrap(),
+        Some(crate::db::AdoptionState::Spent),
+        "every first-pass candidate landed: the adoption is spent"
     );
 }

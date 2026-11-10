@@ -1191,16 +1191,18 @@ mod tests {
             Use::Serve(
                 Gate::Via {
                     hops: &[
-                        ("nostr/store.rs", "unmaterialized_exposed_post_ids"),
+                        ("nostr/store.rs", "unmaterialized_post_ids"),
                         ("nostr/store.rs", "unmaterialized_posts_sql"),
                     ],
-                    gates: &["PUBLIC_POST_SERVABLE"],
+                    gates: &["PUBLIC_POST_SERVABLE", "ADVERTISED_TEASER_SERVABLE"],
                 },
-                "reads only the ids `unmaterialized_exposed_post_ids` returns \
-                 (PUBLIC_POST_SERVABLE + the permanent TakenDown-obligation exclusion). \
-                 `unmaterialized_exposed_post_ids` is itself a seam — the SQL predicate lives \
-                 one hop below it, in `unmaterialized_posts_sql` — so both links are held, not \
-                 only the door's own call of the seam",
+                "reads only the ids `unmaterialized_post_ids` returns (the public class \
+                 under PUBLIC_POST_SERVABLE, the advertised class under \
+                 ADVERTISED_TEASER_SERVABLE, both behind the permanent TakenDown-obligation \
+                 exclusion). `unmaterialized_post_ids` is itself a seam — the SQL predicate \
+                 lives one hop below it, in `unmaterialized_posts_sql` — so both links are \
+                 held, not only the door's own call of the seam\
+                 ",
             ),
         ),
         (

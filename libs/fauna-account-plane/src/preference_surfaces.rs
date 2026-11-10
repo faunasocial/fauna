@@ -331,6 +331,35 @@ pub async fn unhide_reported(store: &impl AccountStoreAccess, id: &str) -> Resul
     Ok(moderation.hidden_content)
 }
 
+/// The post ids the user marked as spam (`report-sharing.md` § Report capture
+/// → *The post's mark-as-spam verb*) — what the app hands the shared
+/// `FeedManager`'s spam fold and reads the verb's `state` from.
+pub async fn load_spam_marked(store: &impl AccountStoreAccess) -> Result<Vec<String>> {
+    Ok(load_moderation(store).await?.spam_marked)
+}
+
+/// Mark a post as spam: one row put
+/// (`preference_records::mark_spam_content`), so the lists beside it and a
+/// post another device marked meanwhile both survive. The mark-as-spam verb's
+/// plane half — it never waits on the nest; returns the stored list.
+pub async fn mark_spam(store: &impl AccountStoreAccess, id: &str) -> Result<Vec<String>> {
+    let moderation = update_moderation(store, |moderation| {
+        preference_records::mark_spam_content(moderation, id)
+    })
+    .await?;
+    Ok(moderation.spam_marked)
+}
+
+/// Un-mark a post — [`mark_spam`]'s inverse, one row tombstone; returns the
+/// stored list.
+pub async fn unmark_spam(store: &impl AccountStoreAccess, id: &str) -> Result<Vec<String>> {
+    let moderation = update_moderation(store, |moderation| {
+        preference_records::unmark_spam_content(moderation, id)
+    })
+    .await?;
+    Ok(moderation.spam_marked)
+}
+
 // ── sync prefs: the default conflict policy for new folders ──
 
 /// Read the owner's default conflict policy for new folders: the canonical

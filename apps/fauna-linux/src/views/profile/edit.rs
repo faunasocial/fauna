@@ -481,22 +481,18 @@ fn populate(ctx: &Rc<EditCtx>, result: Option<(EditBase, ProfileDisplay)>) {
     clear_error(&ctx.w);
 }
 
-/// Collect the non-empty link rows still attached to the list (removed rows are
-/// detached, so `parent()` is `None`).
+/// Collect the link rows still attached to the list (removed rows are
+/// detached, so `parent()` is `None`). Trimming and dropping blank rows is the
+/// shared builder's job (`fauna_client_profile::build_edited_profile_with_images`).
 fn collect_links(ctx: &Rc<EditCtx>) -> Vec<ProfileLink> {
     ctx.w
         .link_rows
         .borrow()
         .iter()
         .filter(|r| r.container.parent().is_some())
-        .filter_map(|r| {
-            let label = r.label.text().trim().to_string();
-            let uri = r.url.text().trim().to_string();
-            if label.is_empty() && uri.is_empty() {
-                None
-            } else {
-                Some(ProfileLink { label, uri })
-            }
+        .map(|r| ProfileLink {
+            label: r.label.text().to_string(),
+            uri: r.url.text().to_string(),
         })
         .collect()
 }

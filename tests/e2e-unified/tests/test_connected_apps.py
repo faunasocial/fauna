@@ -31,6 +31,18 @@ starts are built*):
   approving there ends that key's capability grant on the nest before the app
   redeems (``third-party.md`` § The principal model → *Key replacement*).
   tui first; the other apps' markers ride their witness lift.
+- **An assistant's card** — the cli app (``fauna-cli``) connects by typed code
+  under its published document; its card names it *Fauna for AI assistants*
+  and says that what is approved reaches whichever assistant is connected
+  (``docs/goal/architecture/apps/cli.md`` § Hosting cases). The assistant's
+  reach itself is the cli page's ``[nest]`` witness (``test_cli_mcp.py``),
+  approved app-less; this case is the card's own claim, on the app (tui first).
+- **Key continuity** — an approved app whose document is re-published signed
+  by a different publisher key, or without its manifest, is refused at its
+  next refresh until the user approves a new card for it (tui first).
+- **The records card** — a ``fauna:records:`` card names the publisher, the
+  manifest's kind count, and *read only* when no writer key was attested
+  (tui first).
 - **The same-device handoff** — a device app pushes a PAR and opens
   ``fauna://consent/<request_uri>``; the user's app takes the route onto this
   page (``fauna.oauth.consent.open_handoff`` through the shared machine) and
@@ -59,6 +71,7 @@ builds its own mail machine for the app-password rows.
 
 import sqlite3
 import time
+import urllib.parse
 import uuid
 
 import pytest
@@ -66,6 +79,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 from actions.connected_apps import ConnectedAppsActions
+from drivers.cli_mcp import CliMcpSession
 from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_nest_env/consent_bridge are pytest fixtures adopted by import
     HANDLE_DOMAIN,
     PERMISSION_SET_AUDIENCE,
@@ -77,13 +91,16 @@ from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_nes
     open_first_emit_gate,
 )
 from helpers.client_metadata_server import (
+    CLI_CLIENT_ID,
+    CLI_CLIENT_NAME,
+    CLI_DOCUMENT_FILE,
     DOCUMENT_PATH,
     ClientMetadataServer,
     client_document,
     manifest_payload,
     sign_manifest,
 )
-from helpers.budgets import RPC_ROUNDTRIP_S
+from helpers.budgets import ORCHESTRATION_STEP_S, RPC_ROUNDTRIP_S
 from helpers.waiting import wait_until
 from helpers.xrpc_client import xrpc_post
 from helpers.oauth_client import (
@@ -127,9 +144,21 @@ def _key_replacement_document_path(app_name: str) -> str:
     return f"/client-metadata-key-replacement-{app_name}.json"
 
 
+#: The cli app's published document, served beside the publisher's on the same
+#: mapped server (its host is an extra name on the server's certificate), so the
+#: assistant's card resolves the cli's real identity without the internet.
+_CLI_URL = urllib.parse.urlsplit(CLI_CLIENT_ID)
+
+
 @pytest.fixture(scope="module")
 def metadata_server(tmp_path_factory):
-    server = ClientMetadataServer(_ORACLE_PUBLISHER, tmp_path_factory.mktemp("client-metadata"))
+    server = ClientMetadataServer(
+        _ORACLE_PUBLISHER,
+        tmp_path_factory.mktemp("client-metadata"),
+        extra_hosts=(_CLI_URL.hostname,),
+    )
+    server.serve_file(_CLI_URL.path, CLI_DOCUMENT_FILE.read_bytes())
+    assert server.client_id(_CLI_URL.path, host=_CLI_URL.hostname) == CLI_CLIENT_ID
     publisher_key = ed25519.Ed25519PrivateKey.generate()
     payload = manifest_payload(_ORACLE_PUBLISHER, publisher_key, ["notes"])
     payload["service_auth"] = [{"aud": _ORACLE_AUD, "lxm": [_ORACLE_LXM]}]
@@ -164,8 +193,12 @@ def consent_nest_binary(bluesky_nest_binary):
 
 @pytest.fixture(scope="module")
 def consent_nest_env(metadata_server):
-    """The consent nest's metadata fetcher pointed at ``metadata_server``."""
-    return metadata_server.nest_env()
+    """The consent nest's metadata fetcher pointed at ``metadata_server``, with
+    positive caching of fetched documents off (``test-hooks`` only): the
+    key-continuity case re-publishes a document and the very next refresh
+    must read it, never a cached copy (convention 14 forbids waiting out the
+    TTL)."""
+    return {**metadata_server.nest_env(), "FAUNA_TEST_CLIENT_METADATA_NO_CACHE": "1"}
 
 
 # Distinct loopback redirect ports → distinct client ids (the loopback
@@ -417,6 +450,55 @@ def test_declining_a_quiet_push_tells_the_app_no(connected_app, consent_nest):
     assert ca.request_index_for_client(stranger.client_id) is None, (
         "a declined request leaves the tray"
     )
+
+
+@pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.feature("connected-apps")
+def test_an_assistants_card_names_it_and_says_its_grant_reaches_the_assistant(
+    connected_app, consent_nest, cli_binary, tmp_path
+):
+    """An assistant's approval card (``apps/cli.md`` § Hosting cases;
+    ``ui/connected-apps.md`` § Layout & flow): the cli app's ``connect``
+    answers a typed code; typed into *Connect an app*, it opens a card naming
+    the cli by its published document — *Fauna for AI assistants* — with the
+    line saying that what is approved reaches whichever assistant the user
+    connects; approving it connects the cli, whose next tool call is served."""
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    cli = CliMcpSession(cli_binary, consent_nest["url"], tmp_path)
+    try:
+        cli.initialize()
+        started = cli.call("connect", {"handle": "alice"}, timeout=RPC_ROUNDTRIP_S)
+        assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
+        code = started["structuredContent"]["user_code"]
+
+        ca.connect_with_code(code)
+        index = ca.wait_for_request_code(code)
+        assert index is not None, (
+            f"typing the assistant's code must open its card. cards: {_cards_seen(ca)} "
+            f"error: {ca.current_error_text()!r}"
+        )
+        card = ca.request_text(index)
+        assert CLI_CLIENT_NAME in card, f"the card names the published client: {card!r}"
+        assert S.connected_apps.consent_assistant_reach in card, (
+            f"the assistant's card says the grant reaches the assistant: {card!r}"
+        )
+
+        ca.approve_request(index)
+        assert ca.current_error_text() == "", ca.current_error_text()
+        served = wait_until(
+            lambda: (lambda r: r if not r["isError"] else None)(cli.call("feed_local")),
+            ORCHESTRATION_STEP_S,
+            interval=1.0,
+            diagnose=lambda: f"{cli.call('feed_local')!r}\n{cli.diagnostics()}",
+        )
+        assert isinstance(served["structuredContent"].get("posts"), list), served
+    finally:
+        cli.close()
 
 
 @pytest.mark.tui
@@ -1019,6 +1101,198 @@ def test_a_re_request_with_a_new_key_says_what_it_ends_and_approving_ends_it(
     )
 
 
+# The key-continuity and records-card cases serve their own documents per app,
+# written by the case itself: key continuity re-publishes a document mid-case,
+# and the module's nest re-reads it at once because positive caching is off
+# for this module (`consent_nest_env`).
+_CONTINUITY_REDIRECT_URI = "http://127.0.0.1:17803/callback"
+_RECORDS_CARD_REDIRECT_URI = "http://127.0.0.1:17804/callback"
+
+
+def _continuity_document_path(app_name: str, case: str) -> str:
+    return f"/client-metadata-continuity-{case}-{app_name}.json"
+
+
+def _records_card_document_path(app_name: str, case: str) -> str:
+    return f"/client-metadata-records-card-{case}-{app_name}.json"
+
+
+def _publish(metadata_server, path: str, redirect_uri: str, scope: str, manifest_jws) -> str:
+    """Serve ``path``'s client document carrying ``manifest_jws`` (``None``:
+    no ``fauna`` member) and return its client id."""
+    client_id = metadata_server.client_id(path)
+    metadata_server.documents[path] = client_document(
+        client_id, redirect_uri, scope, manifest_jws=manifest_jws
+    )
+    return client_id
+
+
+def _signed_manifest(publisher_key, kind_names: list[str]) -> str:
+    return sign_manifest(
+        publisher_key, manifest_payload(_ORACLE_PUBLISHER, publisher_key, kind_names)
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.feature("connected-apps")
+@pytest.mark.parametrize("change", ["rotated-key", "dropped-manifest"])
+def test_a_changed_publisher_key_or_a_vanished_manifest_refuses_until_a_new_card_is_approved(
+    request, connected_app, consent_nest, metadata_server, change
+):
+    """Outcome 44 (``connected-apps.md`` § User actions; ``third-party.md``
+    § Implementation status today, key continuity; ``third-party-kinds.md``
+    § The manifest): an app the user approved from a signed document has its
+    publisher key pinned on its roster row. When the document is re-published
+    signed by a different publisher key — or with its manifest gone — the
+    app's next refresh is refused with ``invalid_grant``
+    (``oauth_as_client::manifest_key_continues``), never a silent swap; the
+    app's next request opens a new card on the user's app, and approving that
+    card brings the app back: its new grant refreshes.
+
+    The re-published document is served before the refresh and the module's
+    nest caches no fetched document (``FAUNA_TEST_CLIENT_METADATA_NO_CACHE``),
+    so the refresh reads the changed document — the refusal's description is
+    asserted, naming which of the two continuity failures it was."""
+    from helpers.principal_session import redeem
+
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    app_name = request.node.callspec.params["app"]
+    path = _continuity_document_path(app_name, change)
+    first_key = ed25519.Ed25519PrivateKey.generate()
+    client_id_url = _publish(
+        metadata_server,
+        path,
+        _CONTINUITY_REDIRECT_URI,
+        "atproto",
+        _signed_manifest(first_key, ["notes"]),
+    )
+
+    def consent() -> tuple[OAuthClient, dict]:
+        client = OAuthClient(
+            base=consent_nest["url"],
+            htu_origin=f"https://{HANDLE_DOMAIN}",
+            redirect_uri=_CONTINUITY_REDIRECT_URI,
+            scope="atproto",
+            client_id_url=client_id_url,
+        )
+        request_uri = client.push_authorization_request()
+        browser_code, flow_token = client.open_consent_page(request_uri)
+        index = ca.wait_for_request_code(browser_code)
+        assert index is not None, (
+            "the request must open its card in the tray. "
+            f"error: {ca.current_error_text()!r} code: {browser_code!r} "
+            f"cards: {_cards_seen(ca)}"
+        )
+        ca.approve_request(index)
+        tokens = redeem(client, flow_token)
+        assert tokens.get("refresh_token"), f"the approve must grant a refresh: {tokens!r}"
+        return client, tokens
+
+    # ── Approved under the first publisher key: the grant refreshes. ──
+    first, tokens = consent()
+    tokens = first.refresh(tokens["refresh_token"])
+    assert ca.wait_for_item_containing(first.client_id) is not None, (
+        f"the approved app must be on the roster. error: {ca.current_error_text()!r}"
+    )
+
+    # ── The publisher's document changes under the existing grant. ──
+    if change == "rotated-key":
+        manifest = _signed_manifest(ed25519.Ed25519PrivateKey.generate(), ["notes"])
+        why = "signed by a different publisher key"
+    else:
+        manifest = None
+        why = "is gone"
+    _publish(metadata_server, path, _CONTINUITY_REDIRECT_URI, "atproto", manifest)
+
+    status, body = first.token_request_expecting_refusal(
+        {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}
+    )
+    assert status == 400 and body.get("error") == "invalid_grant", (
+        f"a {change} must refuse the refresh until the user re-approves: {status} {body!r}"
+    )
+    assert why in body.get("error_description", ""), (
+        f"the refusal must come from key continuity ({why!r}): {body!r}"
+    )
+
+    # ── A new card on the user's app; approving it brings the app back. ──
+    second, tokens = consent()
+    assert second.client_id == first.client_id, "the same document is the same app"
+    second.refresh(tokens["refresh_token"])
+    assert ca.current_error_text() == "", ca.current_error_text()
+    row = ca.wait_for_item_status(second.client_id, "connected")
+    assert row is not None, (
+        "the one roster row is connected again after the new approve. "
+        f"error: {ca.current_error_text()!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.feature("connected-apps")
+@pytest.mark.parametrize("writer", [False, True], ids=["read-only", "with-writer-key"])
+def test_a_records_consent_card_names_the_publisher_the_kind_count_and_read_only(
+    request, connected_app, consent_nest, metadata_server, writer
+):
+    """Outcome 46 (``connected-apps.md`` § Coverage contract;
+    ``third-party-kinds.md`` § Implementation status today): a
+    ``fauna:records:`` consent card is worded from the request itself — the
+    publisher, how many kinds of records its verified manifest declares under
+    the scope, and *read only* when the request attests no writer key. One
+    owner words the row for every app (``fauna_scope::records_card_row``,
+    through the shared settings machine); the strings asserted are that
+    function's, not i18n entries. The card is declined afterwards, so it
+    leaves nothing behind for a later case."""
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    app_name = request.node.callspec.params["app"]
+    case = "writer" if writer else "read-only"
+    client_id_url = _publish(
+        metadata_server,
+        _records_card_document_path(app_name, case),
+        _RECORDS_CARD_REDIRECT_URI,
+        _RECORDS_SCOPE,
+        _signed_manifest(ed25519.Ed25519PrivateKey.generate(), ["notes", "tasks"]),
+    )
+    client = OAuthClient(
+        base=consent_nest["url"],
+        htu_origin=f"https://{HANDLE_DOMAIN}",
+        redirect_uri=_RECORDS_CARD_REDIRECT_URI,
+        scope=_RECORDS_SCOPE,
+        holder_x25519=_raw_public(x25519.X25519PrivateKey.generate()),
+        writer_ed25519=_raw_public(ed25519.Ed25519PrivateKey.generate()) if writer else None,
+        client_id_url=client_id_url,
+    )
+    request_uri = client.push_authorization_request()
+    browser_code, _flow_token = client.open_consent_page(request_uri)
+    index = ca.wait_for_request_code(browser_code)
+    assert index is not None, (
+        "the request must open its card in the tray. "
+        f"error: {ca.current_error_text()!r} code: {browser_code!r} "
+        f"cards: {_cards_seen(ca)}"
+    )
+    card = ca.request_text(index)
+    assert f"2 kinds of records published by {_ORACLE_PUBLISHER}" in card, (
+        f"the card must name the publisher and the manifest's kind count: {card!r}"
+    )
+    if writer:
+        assert "Read and write" in card and "read only" not in card, (
+            f"a request attesting a writer key may write, so it is not read only: {card!r}"
+        )
+    else:
+        assert "read only" in card, (
+            f"a request attesting no writer key must say read only: {card!r}"
+        )
+    ca.decline_request(index)
+
+
 def _app_password_rows(ca: ConnectedAppsActions) -> list[int]:
     """The roster rows that are ATProto app-password SESSIONS: the app-password
     badge without the mail leaves a mail app password adds (the two share the
@@ -1437,4 +1711,116 @@ def test_a_revoke_bites_at_the_very_next_write_and_each_session_is_ceilinged(
     )
     assert status == 401 and body.get("error") == "AuthenticationRequired", (
         f"a revoked session's next write must be refused at once: {status} {body!r}"
+    )
+
+
+_STEP_DOWN_PORT = 17805
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.feature("atproto")
+def test_after_stepping_down_a_connected_app_reads_suspended_until_a_fresh_sign_in(
+    connected_app, consent_nest
+):
+    """After you step down from hosting, each connected Bluesky app stays listed
+    as suspended, with no expiry, and can still be revoked one by one; a fresh
+    sign-in clears the mark (`atproto-oauth-provider.md` § Detailed design, the
+    OAuth-grant suspension bullet; `ui/atproto.md`'s downward matrix: "grants
+    suspended; rows kept, listed, individually revocable").
+
+    The journey: at hosted_full an app signs in through the nest's own
+    authorization server (a device code typed into Connected apps, approved
+    there), so its row reads connected. The user steps down to hosted_visible
+    through the selector's card: the step-down revokes the app's live session
+    and leaves its grant at rest. The row must stay listed, read paused — the
+    roster's one not-working-but-reversible state, the status value the
+    external-apps switch already uses, worded with the step-down's own undo
+    (`connected_apps.paused_suspended`) — and carry no lasts-until. Stepping
+    back up and signing the app in afresh reads connected again; Revoke on the
+    row ends it.
+
+    The nest's `live_grants` counts a suspended grant (its session revoked,
+    the grant not), so the shared composition derives the paused state from
+    each grant's `suspended` flag (`connected-apps.md` § State & data shape)
+    and every app paints that composition unchanged.
+    """
+    app = connected_app
+    ca: ConnectedAppsActions = app.connected_apps
+    bs = app.atproto_settings
+    bs.ensure_hosted_full()
+
+    # A name only this module uses: the reach scan merges private names called
+    # off an attribute (`sync_seats`' `self._sign_in(...)`), so a `_sign_in`
+    # here that presses the admin approve carried the admin shell onto every
+    # seat journey (helpers/kind_reach.py; test_nest_mode_axis's admin pins).
+    def _approve_a_device_code_sign_in() -> tuple[OAuthClient, dict]:
+        client = _client(consent_nest, _STEP_DOWN_PORT)
+        status, started = client.start_polled(DEVICE_AUTHORIZATION_PATH, {})
+        assert status == 200, f"device authorization start refused: {status} {started!r}"
+        ca.navigate()
+        ca.connect_with_code(started["user_code"])
+        index = ca.wait_for_request_from(client.client_id)
+        assert index is not None, (
+            f"typing a live code must open its card. error: {ca.current_error_text()!r} "
+            f"cards: {_cards_seen(ca)}"
+        )
+        ca.approve_request(index)
+        status, tokens = client.poll_until_answered(
+            GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"], timeout=RPC_ROUNDTRIP_S
+        )
+        assert status == 200 and tokens.get("refresh_token"), (
+            f"approving must release the app's poll: {status} {tokens!r}"
+        )
+        return client, tokens
+
+    client, tokens = _approve_a_device_code_sign_in()
+    assert ca.wait_for_item_status(client.client_id, "connected") is not None, (
+        f"the signed-in app reads connected. error: {ca.current_error_text()!r}"
+    )
+
+    bs.navigate()
+    bs.select_depth("hosted_visible")
+    assert bs.wait_for_card(), "stepping down from full PDS must stage a card"
+    bs.confirm_transition()
+    assert bs.wait_for_depth_level("hosted_visible"), (
+        f"confirm must step down. level={bs.depth_level()!r} error={bs.page_error_text()!r}"
+    )
+    status, body = client.token_request_expecting_refusal(
+        {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}
+    )
+    assert status == 400, (
+        f"precondition: the step-down ends the app's live session: {status} {body!r}"
+    )
+
+    ca.navigate()
+    row = ca.wait_for_item_status(client.client_id, "paused")
+    assert row is not None, (
+        "after the step-down the app stays listed and reads paused, not connected. "
+        f"row: {ca.item_text(ca.item_index_containing(client.client_id) or 0)!r} "
+        f"error: {ca.current_error_text()!r}"
+    )
+    text = ca.item_text(row)
+    assert S.connected_apps.paused_suspended in text, f"suspended, in words: {text!r}"
+    assert S.connected_apps.lasts_until(time="").strip() not in text, (
+        f"a suspended app's row carries no expiry: {text!r}"
+    )
+
+    bs.ensure_hosted_full()
+    _approve_a_device_code_sign_in()
+    ca.navigate()
+    row = ca.wait_for_item_status(client.client_id, "connected")
+    assert row is not None, (
+        "a fresh sign-in clears the suspended mark. "
+        f"row: {ca.item_text(ca.item_index_containing(client.client_id) or 0)!r}"
+    )
+
+    ca.revoke_item(row)
+    assert ca.wait_for_no_item_containing(client.client_id), (
+        f"Revoke on the row ends it. error: {ca.current_error_text()!r}"
     )

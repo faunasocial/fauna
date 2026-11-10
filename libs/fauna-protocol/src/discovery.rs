@@ -199,6 +199,15 @@ pub mod capability {
     /// Never a human knob.
     pub const ZAPS: &str = "zaps";
 
+    /// This nest serves `fauna.nostr.advertise.{set,clear}` — the Nostr
+    /// advertisement of a sold post (`monetization.md` § The Nostr
+    /// advertisement of a sold post → *Wire compat*). The apps show the
+    /// *Advertise on Nostr* verb only when it is advertised; an older nest
+    /// shows none. Advertised iff the build compiles both the `zaps` member
+    /// (the `set` gate) and the Nostr bridge (the materializer that publishes),
+    /// on the [`ZAPS`] shape. Never a human knob.
+    pub const NOSTR_ADVERTISE: &str = "nostr-advertise";
+
     /// Hidden subscription tiers are honored end to end (`monetization.md`
     /// § The unifying model → *A tier may be hidden*, ruled 2026-09-06): a
     /// `hidden` tier is excluded from every offer surface AND

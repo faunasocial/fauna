@@ -54,22 +54,43 @@ fn tier_not_found(reason: &str) -> RpcError {
     crate::rpc_errors::tier_not_found_ns("payments", reason)
 }
 
-fn claim_not_found() -> RpcError {
+pub(crate) fn claim_not_found() -> RpcError {
     RpcError::new(
         "fauna.payments.claim_not_found",
         "error.payments.claim_not_found",
     )
 }
 
-fn claim_already_redeemed() -> RpcError {
+pub(crate) fn claim_already_redeemed() -> RpcError {
     RpcError::new(
         "fauna.payments.claim_already_redeemed",
         "error.payments.claim_already_redeemed",
     )
 }
 
-fn claim_voided() -> RpcError {
+pub(crate) fn claim_voided() -> RpcError {
     RpcError::new("fauna.payments.claim_voided", "error.payments.claim_voided")
+}
+
+/// A membership tier's code redeemed from another nest (`monetization.md`
+/// § Pillar 3 → *Which nest an in-app redeem binds on*): admission is
+/// registration on the author's nest, with the code as the invite code.
+pub(crate) fn claim_admits_elsewhere() -> RpcError {
+    RpcError::new(
+        "fauna.payments.claim_admits_elsewhere",
+        "error.payments.claim_admits_elsewhere",
+    )
+}
+
+/// The typed refusal every redeem door answers a [`RedeemError`] with.
+pub(crate) fn redeem_error(e: RedeemError) -> RpcError {
+    match e {
+        RedeemError::NotFound => claim_not_found(),
+        RedeemError::AlreadyRedeemed => claim_already_redeemed(),
+        RedeemError::Voided => claim_voided(),
+        RedeemError::AdmitsElsewhere => claim_admits_elsewhere(),
+        RedeemError::Grant(g) => grant_error(g),
+    }
 }
 
 use crate::rpc_errors::internal;
@@ -247,6 +268,60 @@ fn claims_redeem_handler() -> RpcHandler {
                 return Err(malformed("code must not be empty"));
             }
 
+            // The cross-nest arm (`monetization.md` § Pillar 3 → *Which nest an
+            // in-app redeem binds on*): an intent naming an author this nest
+            // does not host, with that author's home named, is relayed there.
+            // No intent, or an author hosted here whatever home was named (a
+            // stale hint costs nothing), is the local redeem below.
+            if let Some(wire) = req.intent.as_ref() {
+                let intent = crate::follow_federation::check_own_redeem_intent(
+                    &state,
+                    wire,
+                    &redeemer_id,
+                    code,
+                )?;
+                let home = fauna_protocol::normalize_home_nest_url(req.author_home_url.clone());
+                if let Some(home) = home
+                    && state
+                        .db
+                        .get_user(&intent.author.0)
+                        .await
+                        .map_err(internal)?
+                        .is_none()
+                {
+                    // The redeemer's own quota is gated here, on their nest, as
+                    // a local redeem's is: an author they already follow across
+                    // nests is a standing counterparty.
+                    let standing = state
+                        .db
+                        .remote_follows_of(&redeemer_id, &intent.author.0)
+                        .await
+                        .map_err(internal)?
+                        .iter()
+                        .any(|f| f.state != crate::db::remote_follows::RemoteFollowState::Removed);
+                    crate::feature_gate::gate(
+                        &state,
+                        &redeemer_id,
+                        &GateOp {
+                            feature: GatedFeature::Payments,
+                            surface: SURFACE_PAYMENTS_CLAIM_REDEEM,
+                            new_counterparties: u64::from(!standing),
+                            magnitude: 0,
+                        },
+                    )
+                    .await?;
+                    let reply = crate::follow_federation::remote_redeem(
+                        &state,
+                        redeemer_id,
+                        &req,
+                        &intent,
+                        &home,
+                    )
+                    .await?;
+                    return encode_reply(&reply);
+                }
+            }
+
             // Resolve the claim's author BEFORE the gate, for two reasons that
             // both matter. (1) The counterparty this operation may newly
             // introduce is that author, and the gate needs the newness delta,
@@ -301,25 +376,25 @@ fn claims_redeem_handler() -> RpcHandler {
 
             let redeemed = payment_core::redeem_claim(&state, &redeemer_id, code)
                 .await
-                .map_err(|e| match e {
-                    RedeemError::NotFound => claim_not_found(),
-                    RedeemError::AlreadyRedeemed => claim_already_redeemed(),
-                    RedeemError::Voided => claim_voided(),
-                    RedeemError::Grant(g) => grant_error(g),
-                })?;
-
-            encode_reply(&ClaimRedeemReply {
-                author: ActorId(redeemed.author_id),
-                tier: redeemed.tier,
-                // valid_until is epoch seconds in storage; micros on the wire.
-                valid_until: redeemed
-                    .valid_until
-                    .map(|s| Timestamp((s as u64).saturating_mul(1_000_000))),
-                queued: redeemed.queued,
-                extra: Default::default(),
-            })
+                .map_err(redeem_error)?;
+            encode_reply(&redeemed_reply(redeemed))
         })
     })
+}
+
+/// The `claims.redeem` reply for a redemption — one shape for the local door
+/// and the redeem twin.
+pub(crate) fn redeemed_reply(redeemed: payment_core::Redeemed) -> ClaimRedeemReply {
+    ClaimRedeemReply {
+        author: ActorId(redeemed.author_id),
+        tier: redeemed.tier,
+        // valid_until is epoch seconds in storage; micros on the wire.
+        valid_until: redeemed
+            .valid_until
+            .map(|s| Timestamp((s as u64).saturating_mul(1_000_000))),
+        queued: redeemed.queued,
+        extra: Default::default(),
+    }
 }
 
 /// `fauna.payments.claims.mint` — the author mints a claim code manually,

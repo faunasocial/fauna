@@ -9,6 +9,8 @@ absences:
   linux: "docs/goal/ui/folders.md § Photo backup (apple + android)"
   windows: "docs/goal/ui/folders.md § Photo backup (apple + android)"
   tui: "docs/goal/architecture/apps/tui.md § Declared platform absences"
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -19,7 +21,7 @@ up its own copies.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at f62a5e4e1c.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] A photo taken on the phone reaches the nest and shows in Media — `docs/goal/ui/folders.md` § Photo backup (apple + android)
    - `tests/e2e-unified/tests/test_photo_backup_library_ingest.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media`
@@ -48,6 +50,12 @@ Stamped 2026-09-19 at f62a5e4e1c.
 8. [app] The copy your nest keeps is the picture the phone took, not a re-encoded one — `docs/goal/behavior/sync-engine-deployments.md` § Apple apps — convergence design (ratified 2026-07-12)
    - `tests/e2e-unified/tests/test_photo_backup_byte_fidelity.py::test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone`
    - `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone`
+9. [app] Your backed-up photos rest on the nest sealed; the nest never holds a readable copy — `docs/goal/behavior/sync-engine-deployments.md` § Implementation status today (android byte-sync)
+   - `tests/e2e-unified/tests/test_photo_backup_sealed_and_stripped.py::test_a_backed_up_photo_rests_on_the_nest_sealed`
+   - `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_backed_up_photo_rests_on_the_nest_sealed`
+10. [app] A backed-up photo's location and camera metadata are stripped before it leaves the phone, without re-encoding the picture — `docs/goal/behavior/sync-engine-deployments.md` § Apple apps — convergence design (ratified 2026-07-12)
+   - `tests/e2e-unified/tests/test_photo_backup_sealed_and_stripped.py::test_a_photos_location_and_camera_never_leave_the_phone`
+   - `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photos_location_and_camera_never_leave_the_phone`
 
 ## Status
 
@@ -58,9 +66,11 @@ Stamped 2026-09-19 at f62a5e4e1c.
 | linux | — absent | |
 | windows | — absent | |
 | macos | ❌ failing | 0.1.6-dev+8438e5ce standalone |
-| ios | ✅ full | 0.1.5-dev+b88bb52f standalone |
+| ios | ✅ full | 0.1.6-dev+7d9eb18f standalone |
 | android |  no run recorded | |
 | tui | — absent | |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -83,4 +93,8 @@ Stamped 2026-09-19 at f62a5e4e1c.
 | 7 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_deleting_the_backed_up_copy_leaves_the_camera_roll_alone` | macos (macos): error |
 | 8 | app | `tests/e2e-unified/tests/test_photo_backup_byte_fidelity.py::test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone` | ios (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone` | macos (macos): error |
+| 9 | app | `tests/e2e-unified/tests/test_photo_backup_sealed_and_stripped.py::test_a_backed_up_photo_rests_on_the_nest_sealed` | ios (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_backed_up_photo_rests_on_the_nest_sealed` | — |
+| 10 | app | `tests/e2e-unified/tests/test_photo_backup_sealed_and_stripped.py::test_a_photos_location_and_camera_never_leave_the_phone` | ios (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photos_location_and_camera_never_leave_the_phone` | — |
 <!-- features-render:end -->

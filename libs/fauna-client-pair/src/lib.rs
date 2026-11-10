@@ -69,9 +69,10 @@ pub use trust::{
     TrustFolder, TrustFolderNames, TrustGenerationRow, TrustGenerationStatus, TrustGrantDuration,
     TrustGrantRow, TrustHistoryRow, TrustLens, TrustLiveness, TrustMintOption, TrustMintUseCase,
     TrustPlatform, TrustRestoreOutcome, TrustScope, TrustSeams, auto_renew_check_secs,
-    backup_status_label, duration_label, grant_scope_labels, history_line_text,
-    mint_duration_options, mint_option_label, scope_label, scope_label_in_folder, status_label,
-    trust_scope_is_bounded_mail_grant,
+    backup_status_label, duration_label, grant_bound_note, grant_scope_labels, history_line_text,
+    mint_duration_options, mint_option_default_duration, mint_option_label, mint_option_note,
+    scope_label, scope_label_in_folder, status_label, trust_scope_is_bounded_mail_grant,
+    trust_scope_is_materialization_grant,
 };
 // `HolderInfo` + `discover_holders` now live in `fauna-client-bridges` (the home
 // of `MailAdminClient`); re-exported here so `fauna_client_pair::HolderInfo` keeps
@@ -1376,10 +1377,13 @@ impl LinkedNestsMachine {
         // catalog's derived holder is not the only guard: a scope must belong
         // with the holder's role (`nests.md` § Mint), checked before any side
         // effect against the same mapping the catalog derives from.
-        if let Some(stray) = event_scopes
-            .iter()
-            .find(|s| view_model::holder_role_for_scope(s) != Some(holder.role.as_str()))
-        {
+        if let Err(stray) = view_model::scope_belongs_with_holder(
+            &event_scopes,
+            &view_model::MintHolder {
+                bridge_id: holder.bridge_id.clone(),
+                role: holder.role.clone(),
+            },
+        ) {
             return Err(PairDispatchError::InvalidState(format!(
                 "scope {stray:?} does not belong with holder {holder_bridge_id:?} (role {:?})",
                 holder.role
@@ -1498,7 +1502,9 @@ impl LinkedNestsMachine {
         // behind it — it is the only way to reach these bytes.
         let mut pending: Vec<grant_log::UndepositedGrant> = Vec::new();
         let mut intents = SuccessionLedger::events_replica(ActorId(seams.actor_id), Vec::new());
-        for option in options {
+        // The materialization option is its own opt-in, read after its
+        // mint-time note — never part of the one-tap set.
+        for option in options.into_iter().filter(|o| o.use_case.in_default_set()) {
             // Every catalog option carries at least one candidate by
             // construction, and the holder it names is one the roster just
             // reported — both `continue`s are unreachable today and are here so
@@ -6493,6 +6499,100 @@ mod tests {
                 .any(|s| s.class == "content.label-write"),
             "mail is minted in its production bundled shape (read{{mail}} + \
              label-write), never read{{mail}} alone"
+        );
+    }
+
+    /// The materialization option (`encryption-at-rest.md` § Capability
+    /// tiering → *The materialization grant*, part (f)) on the home row: the
+    /// one-tap default set never mints it (it is its own opt-in, read after
+    /// its note), the home row offers it with the materializer as its one
+    /// candidate, a `Mint` of it to the materializer lands as a
+    /// materialization grant, and the same scope to the MDA is refused
+    /// before any side effect.
+    #[tokio::test]
+    async fn the_materialization_option_is_offered_on_the_home_row_and_never_in_the_default_set() {
+        let materializer = HolderInfo {
+            pubkey: [11u8; 32],
+            mlkem_ek: None,
+            role: fauna_client_bridges::CONTENT_PROCESSOR_ROLE.into(),
+            bridge_id: fauna_client_bridges::MATERIALIZER_HOLDER_ID.into(),
+        };
+        let kp = ActorKeypair::generate();
+        let nest = Arc::new(FakeNest::default());
+        nest.state.lock().unwrap().holders = vec![mda_holder(), materializer];
+        let (machine, store, _plat) = trust_machine_with_mail(nest.clone(), &kp);
+
+        machine
+            .dispatch(LinkedNestsAction::MintDefaultSet)
+            .await
+            .unwrap();
+        assert_eq!(nest.state.lock().unwrap().minted_blobs.len(), 2);
+        assert!(
+            stored_events(&store)
+                .iter()
+                .all(|e| e.holder != vec![11u8; 32]),
+            "the tap never trusts the materializer"
+        );
+
+        let home = machine.snapshot().home.expect("home row");
+        let option = home
+            .mint_options
+            .iter()
+            .find(|o| o.use_case == TrustMintUseCase::MaterializeMail)
+            .expect("offered on the home row")
+            .clone();
+        assert_eq!(option.holder_candidates, vec!["materializer".to_string()]);
+        assert!(
+            home.mint_options
+                .iter()
+                .filter(|o| {
+                    !matches!(
+                        o.use_case,
+                        TrustMintUseCase::MaterializeMail
+                            | TrustMintUseCase::MaterializeCalendar
+                            | TrustMintUseCase::MaterializeCard
+                    )
+                })
+                .all(|o| o.holder_candidates == vec!["mda-1".to_string()]),
+            "no other option lists the materializer"
+        );
+
+        let refused = machine
+            .dispatch(LinkedNestsAction::Mint {
+                nest_id: "home".into(),
+                holder_bridge_id: "mda-1".into(),
+                scope: option.scope.clone(),
+                duration: None,
+            })
+            .await;
+        assert!(
+            refused.is_err(),
+            "the MDA never takes a materialization grant"
+        );
+        assert_eq!(nest.state.lock().unwrap().minted_blobs.len(), 2);
+
+        machine
+            .dispatch(LinkedNestsAction::Mint {
+                nest_id: "home".into(),
+                holder_bridge_id: "materializer".into(),
+                scope: option.scope.clone(),
+                duration: Some(trust::mint_option_default_duration(
+                    &option,
+                    home.mint_default_duration,
+                )),
+            })
+            .await
+            .unwrap();
+        assert_eq!(nest.state.lock().unwrap().minted_blobs.len(), 3);
+        let event = stored_events(&store)
+            .into_iter()
+            .find(|e| e.holder == vec![11u8; 32])
+            .expect("the materialization mint is recorded");
+        assert!(fauna_client_capabilities::grant_log::is_materialization_grant(&event.scope));
+        assert_eq!(
+            event.window_end - event.window_start,
+            fauna_client_capabilities::DEFAULT_GRANT_WINDOW_SECS,
+            "the standard window, pre-selected"
         );
     }
 

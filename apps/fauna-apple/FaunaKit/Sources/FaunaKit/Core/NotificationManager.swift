@@ -91,16 +91,31 @@ public class NotificationManager {
     /// sentence naming the sender's 8-hex prefix — never the knocker's raw
     /// `summary` on its own. `FaunaClient.startKnockObserver` is the only
     /// caller.
-    public func postKnockNotification(_ knock: FfiKnock) {
-        guard notificationsAvailable else { return }
+    ///
+    /// **Returns the catalog key and text it handed `UNUserNotificationCenter`,
+    /// or `nil` when nothing was handed anywhere** (a build with no notification
+    /// host — `NotificationHost`), which keeps the fired-knock log honest: an
+    /// entry there means "a toast was raised", the `postMessageNotification`
+    /// rule.
+    @discardableResult
+    public func postKnockNotification(_ knock: FfiKnock) -> (key: String?, text: String)? {
+        guard notificationsAvailable else { return nil }
+        let text = knockToastText(for: knock)
         UNUserNotificationCenter.current().add(Self.knockRequest(for: knock))
+        return (text.key, text.body)
     }
+
+    /// The shared knock-toast replace id (`fauna_client_notifications::
+    /// KNOCK_TOAST_REPLACE_ID`), the one every app raises the knock toast under.
+    public static var knockReplaceId: UInt32 { knockToastReplaceId() }
 
     /// Every knock toast is posted under this one identifier, never one per
     /// sender (`behavior/notifications.md` § Localized body → the knock toast):
-    /// a flood of fresh keys replaces one toast instead of stacking. The sender
-    /// rides in `userInfo[knockSenderIdKey]`, which the tap hand-off reads.
-    static let knockRequestIdentifier = "knock"
+    /// a flood of fresh keys replaces one toast instead of stacking. It spells
+    /// the shared replace id, as web's `fauna-knock-<id>` tag does, so every app
+    /// raises the toast under the same id. The sender rides in
+    /// `userInfo[knockSenderIdKey]`, which the tap hand-off reads.
+    static var knockRequestIdentifier: String { "fauna-knock-\(knockReplaceId)" }
 
     /// The request build, pulled out of ``postKnockNotification(_:)`` so a test
     /// can pin the identifier without a `UNUserNotificationCenter`.

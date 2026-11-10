@@ -38,7 +38,7 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
     // `postsWindow` alone (which lists every loaded post, not just realized rows).
     let rows = CueViewportObserver.buildRows(
         frames: ["a": frame(y: 0, height: 50)],
-        postsWindow: ["a": false, "b": false])
+        postsWindow: ["a": false, "b": false], subjects: ["a", "b"])
     #expect(rows.map(\.postId) == ["a"])
 }
 
@@ -49,7 +49,7 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
     // a non-positive-height row as unmeasurable), so the probe just passes the
     // real height through unfiltered.
     let rows = CueViewportObserver.buildRows(
-        frames: ["a": frame(y: 0, height: 0)], postsWindow: ["a": false])
+        frames: ["a": frame(y: 0, height: 0)], postsWindow: ["a": false], subjects: ["a"])
     #expect(rows.count == 1)
     #expect(rows[0].height == 0)
 }
@@ -64,16 +64,72 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
     #expect(raw.height == 20)
     #expect(raw.minY == -10)
 
-    let rows = CueViewportObserver.buildRows(frames: ["a": raw], postsWindow: ["a": false])
+    let rows = CueViewportObserver.buildRows(frames: ["a": raw], postsWindow: ["a": false], subjects: ["a"])
     #expect(rows[0].top == -10)
     #expect(rows[0].height == 20)
+}
+
+// MARK: - buildRows: only a cue subject is measured
+
+@Test func aCardThatShowsAPlaceholderInsteadOfThePostProducesNoRow() {
+    // "b"'s row published a frame, but its card is a muted, blocked or
+    // collapsed placeholder: only `PostCardBody`'s post-body arm marks a post
+    // as a cue subject, so "b" is absent from `subjects` and must not be
+    // measured — lingering on a placeholder is no exposure of the post it hides
+    // (`engagement-cues.md` § Cue vocabulary & derivation). Twin of linux's
+    // `cue-subject` class and android's `CueSubjectMark`.
+    let rows = CueViewportObserver.buildRows(
+        frames: ["a": frame(y: 0, height: 50), "b": frame(y: 50, height: 50)],
+        postsWindow: ["a": false, "b": false],
+        subjects: ["a"])
+    #expect(rows.map(\.postId) == ["a"])
+}
+
+@Test func aSubjectWithNoPublishedFrameStillProducesNoRow() {
+    // The mark alone is not a measurement: the row's frame is.
+    let rows = CueViewportObserver.buildRows(
+        frames: [:], postsWindow: ["a": false], subjects: ["a"])
+    #expect(rows.isEmpty)
+}
+
+// MARK: - one delivery carries the frame and its subject mark
+
+/// The preference key's `reduce`, as SwiftUI folds sibling and descendant
+/// values: `marks` in order.
+private func reduced(_ marks: [[String: CueCardMark]]) -> [String: CueCardMark] {
+    var value = CueFramePreferenceKey.defaultValue
+    for mark in marks { CueFramePreferenceKey.reduce(value: &value) { mark } }
+    return value
+}
+
+@Test func aRowWhoseFrameArrivesWithoutItsSubjectMarkIsNeverMeasured() {
+    // The row's `cueCard` background published its frame; the card paints a
+    // placeholder, so no `cueSubject` mark rides with it. One delivery, no
+    // row — never a frame measured against a subject set from an earlier pass.
+    let marks = reduced([["a": CueCardMark(frame: frame(y: 0, height: 50))]])
+    #expect(CueViewportObserver.buildRows(marks: marks, postsWindow: ["a": false]).isEmpty)
+}
+
+@Test func theFrameAndTheSubjectMarkMergeInEitherOrder() {
+    let framed = ["a": CueCardMark(frame: frame(y: 10, height: 50))]
+    let marked = ["a": CueCardMark(subject: true)]
+    for order in [[framed, marked], [marked, framed]] {
+        let rows = CueViewportObserver.buildRows(marks: reduced(order), postsWindow: ["a": false])
+        #expect(rows.map(\.postId) == ["a"])
+        #expect(rows.first?.top == 10)
+    }
+}
+
+@Test func aSubjectMarkAloneIsNoMeasurement() {
+    let marks = reduced([["a": CueCardMark(subject: true)]])
+    #expect(CueViewportObserver.buildRows(marks: marks, postsWindow: ["a": false]).isEmpty)
 }
 
 // MARK: - buildRows: field mapping
 
 @Test func topAndHeightRideStraightThroughFromTheFramesGlobalRect() {
     let rows = CueViewportObserver.buildRows(
-        frames: ["a": frame(y: 42, height: 100)], postsWindow: ["a": false])
+        frames: ["a": frame(y: 42, height: 100)], postsWindow: ["a": false], subjects: ["a"])
     #expect(rows[0].top == 42)
     #expect(rows[0].height == 100)
 }
@@ -81,7 +137,7 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
 @Test func isMediaIsResolvedFromThePostsWindow() {
     let rows = CueViewportObserver.buildRows(
         frames: ["a": frame(y: 0, height: 50), "b": frame(y: 0, height: 50)],
-        postsWindow: ["a": true, "b": false])
+        postsWindow: ["a": true, "b": false], subjects: ["a", "b"])
     let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.postId, $0.isMedia) })
     #expect(byId["a"] == true)
     #expect(byId["b"] == false)
@@ -92,7 +148,7 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
     // that's in the loaded window), but the lookup is a plain dictionary read,
     // so the fallback is worth pinning rather than left to force-unwrap.
     let rows = CueViewportObserver.buildRows(
-        frames: ["a": frame(y: 0, height: 50)], postsWindow: [:])
+        frames: ["a": frame(y: 0, height: 50)], postsWindow: [:], subjects: ["a"])
     #expect(rows[0].isMedia == false)
 }
 
@@ -100,7 +156,7 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
     // The player notes its progress into the shared tracker, which takes the
     // peak itself — the probe never carries one (`CueViewportObserver.emit`).
     let rows = CueViewportObserver.buildRows(
-        frames: ["a": frame(y: 0, height: 50)], postsWindow: ["a": true])
+        frames: ["a": frame(y: 0, height: 50)], postsWindow: ["a": true], subjects: ["a"])
     #expect(rows[0].mediaPlayedPm == nil)
 }
 
@@ -111,3 +167,25 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
 // have to carry a `RenderDocument` + `VerificationStatus` and would break on
 // every unrelated field the shared snapshot grows. The end-to-end path is
 // covered by the tier_3 dwell test instead.
+
+// MARK: - A feed switch ends every exposure
+
+@Test func everyFeedSelectionHasItsOwnKey() {
+    let keys = [
+        CueViewportObserver.selectionKey(feedId: nil, trending: false, imported: nil),
+        CueViewportObserver.selectionKey(feedId: "a", trending: false, imported: nil),
+        CueViewportObserver.selectionKey(feedId: "b", trending: false, imported: nil),
+        CueViewportObserver.selectionKey(feedId: nil, trending: true, imported: nil),
+        CueViewportObserver.selectionKey(feedId: nil, trending: false, imported: "facebook"),
+        CueViewportObserver.selectionKey(feedId: nil, trending: false, imported: "instagram"),
+    ]
+    #expect(Set(keys).count == keys.count)
+}
+
+@Test func aSwitchIsReadOnlyBetweenTwoDifferentSelections() {
+    // A run's first sample never drains: nothing it tracks came from another feed.
+    #expect(!CueViewportObserver.feedSwitched(from: nil, to: "feed:a"))
+    #expect(!CueViewportObserver.feedSwitched(from: "feed:a", to: "feed:a"))
+    #expect(CueViewportObserver.feedSwitched(from: "feed:a", to: "local"))
+    #expect(CueViewportObserver.feedSwitched(from: "local", to: "feed:a"))
+}

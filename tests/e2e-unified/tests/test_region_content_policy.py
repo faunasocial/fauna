@@ -44,7 +44,7 @@ from helpers.app_surface import app_name
 from helpers.authenticated_shell import wait_for_authenticated_shell
 from i18n.strings import S
 
-pytestmark = pytest.mark.tier_3
+pytestmark = [pytest.mark.tier_3, pytest.mark.feature("region-rules")]
 
 SEALED_NOTE_APPS = ("tui", "linux", "web", "android", "macos", "ios", "windows")
 """The apps that paint the sealed-item sentence (``region.sealed_note``) on a
@@ -283,6 +283,108 @@ def test_region_policy_reaches_the_render_and_the_settings_surface(logged_in_app
         _seed_feed(app)
         assert app.driver.count("region-blocked-notice") == 0, "an inert document blocks nothing"
         assert app.driver.count("feed-post-text", scope="post-card[1]") >= 1
+    finally:
+        app.driver.clear_region_declaration()
+        app.driver.recover()
+
+
+def _enter_region_with_policy(app, nest_url: str) -> None:
+    """Seed the synthetic policy, relaunch declaring its region, and wait for
+    the relay fetch to land it on the settings surface — the shared opening of
+    the journeys below (each its own node, so each outcome has an id)."""
+    if not app.driver.preserve_state_across_relaunch():
+        pytest.skip("driver cannot preserve the device store across a relaunch")
+    registry_hex = _seed_region_policy(nest_url, sequence=1)
+    _relaunch_in_region(app, registry_hex)
+    _wait_policy_row(app)
+
+
+def _assert_detail_notice(app, notice: str, reason: str) -> None:
+    detail = "feed-post-detail-dialog"
+    try:
+        app.driver.wait_for("region-blocked-notice", scope=detail, timeout=15)
+    except TimeoutError as exc:
+        raise AssertionError(
+            f"{exc}; the post opened in full painted no region placeholder "
+            f"(detail open: {app.feed.post_detail_visible()}, "
+            f"{app.driver.diagnose('region-blocked-notice')}); error={app.error_text()!r}"
+        ) from exc
+    assert app.driver.get_text("region-blocked-notice", scope=detail) == notice
+    assert app.driver.get_text("region-blocked-authority", scope=detail) == AUTHORITY
+    assert app.driver.get_text("region-blocked-reason", scope=detail) == reason
+    assert app.driver.count("feed-post-detail-body") == 0, (
+        "the post opened in full renders no body in place of the notice"
+    )
+
+
+def test_a_region_withheld_post_opened_in_full_shows_the_notice(logged_in_app, nest_instance):
+    """Outcome 3: a post a region rule withholds, opened in its full view,
+    shows the notice — authority and reason — in place of the body; a collapsed
+    post's full view still offers the reveal (`region-blocking.md` § The
+    blocked render and the transparency surface)."""
+    app = logged_in_app
+    try:
+        _enter_region_with_policy(app, nest_instance["url"])
+        _seed_feed(app)
+        _assert_feed_block(app)
+
+        app.feed.open_post_detail(1)
+        _assert_detail_notice(
+            app, S.region.blocked_notice(region=REGION, authority=AUTHORITY), BLOCK_REASON
+        )
+        assert app.driver.count(
+            "region-collapsed-reveal-button", scope="feed-post-detail-dialog"
+        ) == 0, "a region block has no reveal in the full view either"
+        _assert_block_render_witness(app, "post detail block")
+        app.feed.close_post_detail()
+
+        app.feed.open_post_detail(2)
+        _assert_detail_notice(
+            app, S.region.collapsed_notice(region=REGION, authority=AUTHORITY), COLLAPSE_REASON
+        )
+        assert app.driver.count(
+            "region-collapsed-reveal-button", scope="feed-post-detail-dialog"
+        ) == 1, "a collapsed post opened in full offers the reveal"
+        app.feed.close_post_detail()
+    finally:
+        app.driver.clear_region_declaration()
+        app.driver.recover()
+
+
+def test_settings_warns_when_the_rules_could_not_be_checked_lately(logged_in_app, nest_instance):
+    """Outcome 7: when the rules have not been checked for longer than the
+    shared staleness bound, Settings warns — and the rules last seen stay in
+    force (`region-blocking.md` § Fail posture, § How an app obtains its
+    region's policy). The relay's log stamp is back-dated past
+    `STALE_AFTER_SECS` through the test hook, never waited out (convention 14)."""
+    app = logged_in_app
+    try:
+        _enter_region_with_policy(app, nest_instance["url"])
+        assert app.driver.count("settings-region-stale-warning") == 0, (
+            "a freshly checked policy must not warn"
+        )
+
+        _region_hook(nest_instance["url"], "content-policy/log-silent", {"region": REGION})
+        # The relaunch's login refresh folds the relay's stale answer.
+        assert app.driver.recover(), "relaunch after silencing the log failed"
+        wait_for_authenticated_shell(app)
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            _open_region_settings(app)
+            if app.driver.count("settings-region-stale-warning") >= 1:
+                break
+            time.sleep(0.5)
+        assert app.driver.count("settings-region-stale-warning") == 1, (
+            "the stale relay answer raised no warning: "
+            f"last_checked={app.driver.get_text('settings-region-last-checked')!r} "
+            f"error={app.error_text()!r}"
+        )
+        assert app.driver.get_text("settings-region-stale-warning") == S.region.stale_warning
+
+        # Never relaxes: the policy is still listed and still blocks.
+        assert app.driver.count("settings-region-policy-item") == 1
+        _seed_feed(app)
+        _assert_feed_block(app)
     finally:
         app.driver.clear_region_declaration()
         app.driver.recover()

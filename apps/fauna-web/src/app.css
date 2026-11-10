@@ -29,6 +29,27 @@ a {
   text-decoration: none;
 }
 
+/* Document markup (`#lib/document` `documentToHtml`, rendered through `{@html}` on
+ * the feed card and the conversation bubble, so out of reach of any component's scoped
+ * styles). The `*` reset above zeroes every element's padding, which flattened a nested
+ * list onto its parent and left a quote with no bar (render-model.md § D7, § D2): these
+ * restore what the user must see — each list level indents, a task list paints its own
+ * box instead of a bullet, and a quote paints behind a bar. */
+.doc-list,
+.task-list {
+  padding-left: 1.5em;
+}
+
+.task-list {
+  list-style: none;
+}
+
+.doc-quote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.75em;
+  color: var(--text-muted);
+}
+
 /* Attachment & media-preview image size caps.
    Restores cross-app uniformity: Windows (DmMessageBubble.xaml MaxHeight=200)
    and Android (ConversationDetailScreen.kt height 200.dp) cap inline attachment

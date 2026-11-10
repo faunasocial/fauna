@@ -231,6 +231,56 @@ pub async fn subscriptions_subscribe_across_nests(
         .try_into()
 }
 
+/// What [`subscriptions_subscribe_and_checkout`] hands the shell — the FFI
+/// mirror of [`fauna_client_subscriptions::CheckoutOpen`]: the subscribe's own
+/// reply (the optimistic pending transient reads it) and the checkout URL to
+/// open.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiCheckoutOpen {
+    pub reply: FfiSubscribeReply,
+    pub url: String,
+}
+
+/// The payment-link gesture (`subscription-offer-payment-link`) — the native twin of
+/// [`fauna_client_subscriptions::SubscriptionsClient::subscribe_and_checkout`]
+/// (the web SPA's twin is `fauna-wasm`'s `subscriptionsSubscribeAndCheckout`):
+/// the subscribe to the tier the link sells goes first, through
+/// [`subscriptions_subscribe_across_nests`]'s dispatch, then the checkout URL
+/// composed by `fauna_core::subscription::checkout_url` comes back for the
+/// shell to open (`monetization.md` § Pillar 3 → *Buyer↔actor binding (Q4)*,
+/// the Q13 rules (1) and (2)). `None` — and no subscribe — for a URL the
+/// safety guard refuses; a refused subscribe is the error and opens nothing.
+// The feed's twin id is gated, never reworded: UniFFI embeds the docstring, and
+// the store-safe flavor carries no payments element id (`ffi-store-safe-check`).
+#[cfg_attr(
+    feature = "payments",
+    doc = " The feed's twin of the gesture is `gated-post-payment-link`."
+)]
+#[fauna_uniffi_async::export]
+pub async fn subscriptions_subscribe_and_checkout(
+    nest: Arc<FfiNestClient>,
+    subscriber_secret: Vec<u8>,
+    author_id: Vec<u8>,
+    tier: String,
+    payment_url: String,
+    home_nest_url: Option<String>,
+) -> Result<Option<FfiCheckoutOpen>, FfiError> {
+    let subscriber = keypair_from_bytes(&subscriber_secret)?;
+    let author = bytes_to_actor_id(&author_id)?;
+    let subs = SubscriptionsClient::new(nest.nest_arc());
+    let Some(open) = subs
+        .subscribe_and_checkout(author, tier, &payment_url, &subscriber, home_nest_url)
+        .await
+        .map_err(general_err)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(FfiCheckoutOpen {
+        reply: open.reply.try_into()?,
+        url: open.url,
+    }))
+}
+
 /// The leave twin of [`subscriptions_subscribe_across_nests`] —
 /// [`fauna_client_subscriptions::SubscriptionsClient::unsubscribe_across_nests`];
 /// `tier` is the tier being left.

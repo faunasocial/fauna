@@ -4,6 +4,9 @@ title: Your nests and what each may read
 section: your data and devices
 goal: docs/goal/ui/nests.md § What this page is
 guide: docs/guides/nest-relay-setup.md § Step 1 — Link the two nests
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,7 +18,7 @@ generations show there too, and the admin can refuse linking altogether.
 
 ## Coverage contract
 
-Stamped 2026-11-01 at a6047fbd8b.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] Link a nest, see it listed, unlink it; one action links both ends — `docs/goal/behavior/linked-nests.md` § The surface
    - `tests/e2e-unified/tests/test_linked_nests.py::test_linked_nests_page_renders`
@@ -45,7 +48,7 @@ Stamped 2026-11-01 at a6047fbd8b.
    - `tests/e2e-unified/tests/test_nest_trust_grants.py::test_revoking_a_grant_leaves_now_stays_in_history_and_darkens_the_nest`
 11. [app] You choose a grant's length and which nests you bless; a blessed nest's grants renew themselves and a one-off grant lasts hours — `docs/goal/ui/nests.md` § Expiry / renewal — first-class states
    - `tests/e2e-unified/tests/test_nest_trust_grants.py::test_a_blessed_nests_trust_renews_itself_and_a_one_off_trust_lasts_hours`
-12. [app] From the same picker you can let a nest read and filter your mail, or read your calendar — `docs/goal/ui/nests.md` § Trust facet — grants (Now lens)
+12. [app] From the same picker you can let a nest read and filter your mail, or read your calendar — and a calendar grant opens calendar records and never your mail — `docs/goal/ui/nests.md` § Trust facet — grants (Now lens)
    - `tests/e2e-unified/tests/test_nest_trust_grants.py::test_the_picker_mints_mail_and_calendar_trust_to_the_mail_holder`
    - `tests/e2e-unified/tests/test_nest_trust_grants.py::test_a_calendar_grant_opens_calendar_records_and_never_mail`
 13. [app] You are offered only trust that can actually be given; with nothing to give, no mint control shows — `docs/goal/ui/nests.md` § Trust facet — grants (Now lens)
@@ -82,19 +85,28 @@ Stamped 2026-11-01 at a6047fbd8b.
    - `tests/e2e-unified/tests/api/test_nest_trust_content_keys.py::test_a_calendar_trust_opens_only_calendar_records_and_a_mail_trust_no_event_or_card`
 27. [app] A live grant whose holder the nest leaves out of its roster, or whose roster could not be read, is still listed with its revoke control, and the page says the roster could not be read — `docs/goal/ui/nests.md` § Trust facet — grants (Now lens)
    - `tests/e2e-unified/tests/test_nest_trust.py::test_a_live_grant_stays_listed_with_revoke_when_the_roster_omits_or_fails`
+28. [app] While your own nest cannot be reached, your devices keep getting your account's records from a friend's nest that holds a copy, with nothing to do, and go back to your nest once it answers; a nest whose permission you took back is never asked — `docs/goal/architecture/account-data-plane.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_custody_custodian_nest_fallback.py::test_devices_fall_back_to_a_custodian_nest_only_while_the_home_nest_is_down`
+29. [app] A nest linked or a grant minted on another of your devices shows on an open Nests page without leaving it — `docs/goal/architecture/account-runtime.md` § Multi-instance concurrency
+   - `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_grant_minted_on_a_sibling_paints_on_an_open_nests_page`
+   - `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_nest_linked_on_a_sibling_paints_on_an_open_nests_page`
+30. [app] A linked nest's capability line says in plain words that it keeps a copy of your account; new links carry it by default, re-linking an old pairing adds it, and unlinking deletes your copy's key wraps there — `docs/goal/behavior/linked-nests.md` § The surface
+   - `tests/e2e-unified/tests/test_linked_nests.py::test_the_account_copy_capability_is_named_carried_on_relink_and_its_wraps_swept_on_unlink`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| linux | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| web | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| linux | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | windows | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | macos | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | ios | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
 | android | 🚧 unbuilt | 0.1.5-dev+3ef45f1b standalone |
 | tui | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -105,8 +117,8 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 3 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_nest_trust_facet_renders_empty` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_nest_trust_lens_toggle_switches_now_history` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_nest_trust_mint_paywalled_posts_grant` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_backup_trust_rows_render_and_revoke_lands_at_the_destination` — requires `backup-destination-trust-rows` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_retained_generations_render_and_restore_lands_at_the_destination` — requires `retained-generation-rows` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_backup_trust_rows_render_and_revoke_lands_at_the_destination` — requires `backup-destination-trust-rows` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_retained_generations_render_and_restore_lands_at_the_destination` — requires `retained-generation-rows` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_namespace_sync.py::test_sync_push_and_pull_roundtrip` | nest (linux): passed, nest (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_namespace_sync.py::test_sync_pull_rejected_when_not_paired` | nest (linux): passed, nest (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_nest_trust_facet_renders_empty` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
@@ -118,12 +130,12 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 12 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_the_picker_mints_mail_and_calendar_trust_to_the_mail_holder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_nest_trust_grants.py::test_a_calendar_grant_opens_calendar_records_and_never_mail` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_nest_trust_lens_toggle_switches_now_history` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 14 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_an_unreachable_destination_reads_unreachable_never_missing_or_nothing_to_recover` — requires `backup-destination-trust-rows` (test harness) (not built: android); `retained-generation-rows` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_stopping_the_seal_stops_new_backups_and_leaves_held_copies` — requires `backup-destination-trust-rows` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_an_unreachable_destination_reads_unreachable_never_missing_or_nothing_to_recover` — requires `backup-destination-trust-rows` (test harness) (not built: android); `retained-generation-rows` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_a_path_less_version_is_listed_and_a_restore_past_the_window_says_so` — requires `retained-generation-rows` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_a_path_less_version_is_listed_and_a_restore_past_the_window_says_so` — requires `retained-generation-rows` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_retained_generations_render_and_restore_lands_at_the_destination` — requires `retained-generation-rows` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 14 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_an_unreachable_destination_reads_unreachable_never_missing_or_nothing_to_recover` — requires `backup-destination-trust-rows` (test harness) (not built: android, android-kids); `retained-generation-rows` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_stopping_the_seal_stops_new_backups_and_leaves_held_copies` — requires `backup-destination-trust-rows` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_an_unreachable_destination_reads_unreachable_never_missing_or_nothing_to_recover` — requires `backup-destination-trust-rows` (test harness) (not built: android, android-kids); `retained-generation-rows` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_a_path_less_version_is_listed_and_a_restore_past_the_window_says_so` — requires `retained-generation-rows` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_nest_trust_backup_states.py::test_a_path_less_version_is_listed_and_a_restore_past_the_window_says_so` — requires `retained-generation-rows` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_retained_generations_render_and_restore_lands_at_the_destination` — requires `retained-generation-rows` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 19 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 19 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_custodian_nests_receipt_reads_never_fresh_then_stale_on_web` | web (linux): passed |
 | 20 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -132,8 +144,12 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 22 | nest | `tests/e2e-unified/tests/api/test_namespace_sync.py::test_the_relay_holds_only_sealed_bytes_it_cannot_read` | nest (linux): passed, nest (macos): passed |
 | 23 | app | `tests/e2e-unified/tests/test_forward_queue.py::test_a_refused_forward_shows_on_the_nests_page_and_linking_the_relay_delivers_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 23 | app | `tests/e2e-unified/tests/test_forward_queue.py::test_stop_forwarding_drops_the_queue_and_keeps_the_post` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_custody_cold_device_restore.py::test_a_cold_device_restores_its_account_state_from_a_custodian_nest` — requires `nests-custody-restore` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 24 | app | `tests/e2e-unified/tests/test_custody_cold_device_restore.py::test_a_cold_device_restores_its_account_state_from_a_custodian_nest` — requires `nests-custody-restore` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 25 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_the_post_option_names_only_tiers_the_author_created` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/api/test_nest_trust_content_keys.py::test_a_calendar_trust_opens_only_calendar_records_and_a_mail_trust_no_event_or_card` | nest (linux): passed |
 | 27 | app | `tests/e2e-unified/tests/test_nest_trust.py::test_a_live_grant_stays_listed_with_revoke_when_the_roster_omits_or_fails` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_custody_custodian_nest_fallback.py::test_devices_fall_back_to_a_custodian_nest_only_while_the_home_nest_is_down` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_grant_minted_on_a_sibling_paints_on_an_open_nests_page` | tui (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_nests_page_sibling_repaint.py::test_a_nest_linked_on_a_sibling_paints_on_an_open_nests_page` | tui (linux): passed |
+| 30 | app | `tests/e2e-unified/tests/test_linked_nests.py::test_the_account_copy_capability_is_named_carried_on_relink_and_its_wraps_swept_on_unlink` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

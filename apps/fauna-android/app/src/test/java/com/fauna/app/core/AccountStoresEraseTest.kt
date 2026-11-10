@@ -92,7 +92,7 @@ class AccountStoresEraseTest {
         val log = seed(filesRoot, "logs/app.log")
         val pins = seed(filesRoot, "some-install-scoped-file.json")
 
-        stores().eraseAllAccounts()
+        stores().signOutNow()
 
         assertFalse("MLS store survived sign-out", mls.exists())
         assertFalse("P2P store survived sign-out", p2p.exists())
@@ -115,16 +115,14 @@ class AccountStoresEraseTest {
         val ctx = ApplicationProvider.getApplicationContext<android.app.Application>()
         seed(File(ctx.filesDir, "aa11".repeat(16)), AccountStores.SCOPED_MLS_DB_NAME)
 
-        val s = stores()
-        val sweep = s.eraseAllAccounts()
+        val outcome = stores().signOutNow()
 
-        assertTrue("nothing should have survived: ${sweep.survivors}", sweep.survivors.isEmpty())
-        assertFalse("a clean sweep owes no work", sweep.residue.owesWork)
-        assertEquals(null, s.recordResidue(sweep, CLEAN_CREDENTIALS))
+        assertEquals("a clean sweep owes no line", null, outcome.residue)
         assertFalse(
             "a clean sweep keeps no record for the next launch to re-check",
             residueRecord(ctx).exists(),
         )
+        assertFalse("and the sign-out record is cleared", signOutRecord(ctx).exists())
     }
 
     /**
@@ -162,21 +160,16 @@ class AccountStoresEraseTest {
             return
         }
 
-        val s = stores()
-        val sweep = s.eraseAllAccounts()
+        val residue = stores().signOutNow().residue
         scope.setWritable(true)
 
         assertTrue("precondition: the read-only scope is what makes this survive", pinned.exists())
         assertFalse("the other scope must still have been erased", ordinary.exists())
-
-        assertEquals("one path survived: ${sweep.survivors}", 1, sweep.survivors.size)
         assertTrue(
-            "the log gets the PATH: ${sweep.survivors}",
-            sweep.survivors.single().contains(actorHex),
+            "the record (and the log) keep the PATH",
+            residueRecord(ctx).readText().contains(actorHex),
         )
-        assertTrue("the user is owed a line", sweep.residue.owesWork)
 
-        val residue = s.recordResidue(sweep, CLEAN_CREDENTIALS)
         assertNotNull("a survivor owes the user a line", residue)
         val line = resolveLocalized(ctx, residue!!.line())!!
         assertTrue("the line names how many items survived, got $line", line.contains("1"))
@@ -207,20 +200,19 @@ class AccountStoresEraseTest {
             return
         }
         val s = stores()
-        val residue = s.recordResidue(s.eraseAllAccounts(), CLEAN_CREDENTIALS)
-        assertNotNull("precondition: the erase left the scope", residue)
+        assertNotNull("precondition: the erase left the scope", s.signOutNow().residue)
 
-        val eraser = CountingEraser()
-        val stillThere = s.retryResidue(residue!!, eraser)
+        val host = TestHost()
+        val stillThere = s.finishSignOut(host, dismissAgent = true, written = null).residue
         assertNotNull("the fault still holds, so the view stays up", stillThere)
 
         scope.setWritable(true)
-        val after = s.retryResidue(stillThere!!, eraser)
+        val after = s.finishSignOut(host, dismissAgent = true, written = null).residue
 
         assertEquals("a clean re-sweep closes the view", null, after)
         assertFalse("the recorded scope is gone", scope.exists())
         assertFalse("and so is the record", residueRecord(ctx).exists())
-        assertEquals("a clean credential half is never re-erased", 0, eraser.calls)
+        assertEquals("a clean credential half is never re-erased", 0, host.erases)
     }
 
     /**
@@ -241,13 +233,13 @@ class AccountStoresEraseTest {
             println("skipping: this process can write through a read-only dir (root?)")
             return
         }
-        stores().let { it.recordResidue(it.eraseAllAccounts(), CLEAN_CREDENTIALS) }
+        stores().signOutNow()
         scope.setWritable(true)
 
         assertEquals(
             "a signed-in launch is not the user the residue was reported to",
             null,
-            stores(SECRET_A).recheckResidueAtLaunch(CountingEraser()),
+            stores(SECRET_A).launchFinish().residue,
         )
         assertTrue("so nothing was swept", pinned.exists())
         assertTrue("and the record waits", residueRecord(ctx).exists())
@@ -255,23 +247,107 @@ class AccountStoresEraseTest {
         assertEquals(
             "a residue that now goes is finished without a word",
             null,
-            stores().recheckResidueAtLaunch(CountingEraser()),
+            stores().launchFinish().residue,
         )
         assertFalse("the recorded scope is gone", scope.exists())
         assertFalse("and so is the record", residueRecord(ctx).exists())
     }
 
-    /** The seat's credential erase, counted — a clean credential half never runs it. */
-    private class CountingEraser : com.fauna.ffi.FfiResidueCredentialEraser {
-        var calls = 0
+    /**
+     * The sign-out's decision is on disk before anything awaits, and a launch
+     * after a kill finishes it (`account-scoping.md` § Erasure follows scope →
+     * *The sign-out record is on all 7 apps*, decisions 1, 3 and 7): the record
+     * names the account this process serves; the next launch's finish — before
+     * the machine reads the registry — wipes the credentials (the seat's own
+     * reset included), erases the recorded account's scope and clears the
+     * record, so the relaunch lands signed out.
+     */
+    @Test
+    fun aSignOutKilledAfterItsRecordIsFinishedByTheNextLaunch() {
+        val ctx = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val s = stores(SECRET_A)
+        val actor = actorOf(SECRET_A)
+        val store = seed(File(ctx.filesDir, actor), AccountStores.SCOPED_MLS_DB_NAME)
+
+        val recorded = s.recordSignOut(s.activeActorHex())
+        assertEquals(listOf(actor), recorded)
+        assertTrue("the record is on disk before the stop", signOutRecord(ctx).exists())
+        // …the process is killed inside the stop; nothing else ran.
+
+        val host = TestHost()
+        val outcome = s.launchFinish(host)
+
+        assertFalse(outcome.failsClosed)
+        assertTrue(outcome.foundRecord && outcome.credentialsWiped)
+        assertEquals("the seat's own store reset ran", 1, host.wipes)
+        assertTrue("the registry names nobody", s.activeActorHex() == null)
+        assertFalse("the recorded account's scope is erased", store.exists())
+        assertFalse("the record is cleared", signOutRecord(ctx).exists())
+        assertEquals(null, outcome.residue)
+    }
+
+    /**
+     * A finish asks the serving question first: an account another instance
+     * still serves refuses the whole run and the launch FAILS CLOSED onto the
+     * retry's refusal line — nothing wiped or erased, the record standing
+     * (`account-scoping.md` § Erasure follows scope → *The sign-out record is
+     * on all 7 apps*, decision 4).
+     */
+    @Test
+    fun aLaunchWhoseRecordedAccountIsServedElsewhereFailsClosed() {
+        val ctx = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val s = stores(SECRET_A)
+        val actor = actorOf(SECRET_A)
+        val store = seed(File(ctx.filesDir, actor), AccountStores.SCOPED_MLS_DB_NAME)
+        s.recordSignOut(actor)
+        val sibling = com.fauna.ffi.acquireAccountInstanceLockShared(
+            ctx.filesDir.absolutePath,
+            actor,
+            s.accountStoreContainerDir(),
+        )
+        assertNotNull("precondition: the sibling's acquire", sibling)
+        try {
+            val host = TestHost()
+            val outcome = s.launchFinish(host)
+
+            assertTrue("the launch fails closed", outcome.failsClosed)
+            assertNotNull("and paints the retry's refusal", outcome.residue)
+            assertEquals("nothing was wiped", 0, host.wipes)
+            assertEquals(actor, s.activeActorHex())
+            assertTrue("a served store is never touched", store.exists())
+            assertTrue("the record stands", signOutRecord(ctx).exists())
+        } finally {
+            sibling?.release()
+        }
+    }
+
+    /** The seat's own acts, counted — a clean credential half never re-erases. */
+    private class TestHost : com.fauna.ffi.FfiSignOutHost {
+        var wipes = 0
+        var erases = 0
+        override fun wipeOwnStore(): Boolean {
+            wipes++
+            return true
+        }
         override fun eraseCredentials(): com.fauna.ffi.FfiCredentialSweep {
-            calls++
+            erases++
             return CLEAN_CREDENTIALS
         }
     }
 
+    /** The sign-out gesture as `AccountSettingsVM.signOut` runs it, minus the stop. */
+    private fun AccountStores.signOutNow(host: TestHost = TestHost()): com.fauna.ffi.FfiSignOutFinish =
+        finishSignOut(host, dismissAgent = false, written = recordSignOut(activeActorHex()))
+
+    /** The cold launch's call (`AppLaunchVM.start`). */
+    private fun AccountStores.launchFinish(host: TestHost = TestHost()): com.fauna.ffi.FfiSignOutFinish =
+        finishSignOut(host, dismissAgent = true, written = null)
+
     private fun residueRecord(ctx: android.content.Context): File =
         File(ctx.filesDir, "sign-out-residue.json")
+
+    private fun signOutRecord(ctx: android.content.Context): File =
+        File(ctx.filesDir, "sign-out-record.json")
 
     /**
      * The reopen guarantee behind dropping the Hilt `@Singleton` on the database
@@ -296,7 +372,7 @@ class AccountStoresEraseTest {
         val first = s.database()
         assertNotNull(first)
 
-        s.eraseAllAccounts()
+        s.signOutNow()
 
         val second = s.database()
         assertNotNull(second)
@@ -479,7 +555,7 @@ class AccountStoresEraseTest {
      * The Rust twin (`fauna-ffi`'s `a_sandboxed_host_erases_under_the_container_
      * it_hosts_from`) proves the shared sweep reaches a container it is GIVEN.
      * What only android can prove is that android actually gives it one — that
-     * [AccountStores.eraseAllAccounts] passes [AccountStores.accountStoreContainerDir]
+     * [AccountStores.finishSignOut] passes [AccountStores.accountStoreContainerDir]
      * rather than letting it default to the unreachable platform root.
      */
     @Test
@@ -496,7 +572,7 @@ class AccountStoresEraseTest {
         val other = seed(File(container, actorOf(SECRET_B)), "account-store/store.db")
         assertTrue("seed did not land", store.exists() && other.exists())
 
-        stores(SECRET_A).eraseAllAccounts()
+        stores(SECRET_A).signOutNow()
 
         assertFalse(
             "the active account's W6 store survived sign-out — the container is a " +

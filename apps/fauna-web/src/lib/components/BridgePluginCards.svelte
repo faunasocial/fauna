@@ -113,7 +113,7 @@
 {#if cards !== null}
   {#each cards as card (card.principal_id_hex)}
     <div class="card" data-testid={IDS.BRIDGE_CARD}>
-      <h3>{card.name}</h3>
+      <h3 data-testid={IDS.BRIDGE_CARD_NAME}>{card.name}</h3>
       <p class="muted" style="white-space: pre-line">{resolveLocalized(card.badge)}{'\n'}{resolveLocalized(card.publisher)}</p>
       {#if card.bound}
         <BridgeSettingRows settings={card.settings} onSettingChange={(key, value) => setSetting(card, key, value)} />

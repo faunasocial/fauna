@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use fauna_account_store::backend::StoreBackend;
 use fauna_account_store::store::AccountStore;
-use fauna_account_store::types::{IntentDrainer, StateEntry};
+use fauna_account_store::types::{IntentDrainer, IntentStatus, StateEntry};
 use fauna_core::fleet_removal::{
     FleetMembersView, FleetRemovalRefusal, NestDeletion, PendingFleetRemoval,
 };
@@ -30,6 +30,25 @@ use super::e2e_readers::{EscrowWrapCoordinate, escrow_wrap_coordinates};
 use super::enrollment::EnrollmentRetirement;
 use super::now_ms;
 use super::pass::PumpReport;
+
+/// One transition of an outbox row over the handle: how an app-only drain
+/// settles an intent after its send ([`AccountStoreHandle::drain_mls_outbox`],
+/// [`AccountStoreHandle::drain_identity_outbox`]), or the user's retry or discard of a parked one
+/// ([`AccountStoreHandle::outbox_retry`], [`AccountStoreHandle::outbox_discard`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IntentSettle {
+    /// Accepted: delete it (completion is deletion).
+    Ack,
+    /// Permanent failure: park it with its stable reason code (its scope's
+    /// remainder waits behind it).
+    Park(String),
+    /// Retryable failure: count an attempt, keep it.
+    Attempt,
+    /// The user's retry: a parked intent back to pending.
+    Retry,
+    /// The user's discard: delete a parked intent, and only a parked one.
+    Discard,
+}
 
 pub(crate) enum Cmd {
     DataVersion {
@@ -63,6 +82,19 @@ pub(crate) enum Cmd {
         payload: Vec<u8>,
         drainer: IntentDrainer,
         reply: oneshot::Sender<Result<[u8; 16]>>,
+    },
+    /// Every undrained outbox row, `(scope, channel_seq)` ascending — the
+    /// unsent-changes read model's source ([`AccountStoreHandle::outbox_rows`])
+    /// and, filtered to [`IntentDrainer::Mls`], the MLS drain's read.
+    OutboxRows {
+        reply: oneshot::Sender<Result<Vec<fauna_account_store::types::OutboxIntent>>>,
+    },
+    /// One outbox row transition: the MLS drain's settle after a send, or the
+    /// user's retry or discard of a parked intent.
+    SettleIntent {
+        intent_id: [u8; 16],
+        settle: IntentSettle,
+        reply: oneshot::Sender<Result<bool>>,
     },
     SetEndpointFacts {
         facts: EndpointFacts,
@@ -556,7 +588,7 @@ impl Cmd {
     ///   status and grant, the cached nest facts, a caller-owned meta row) —
     ///   local: one store read or a slot read.
     /// - **`PutPreference`, `WriteModeration`, `EnqueueIntent`,
-    ///   `RegisterContentScope`** —
+    ///   `OutboxRows`, `SettleIntent`, `RegisterContentScope`** —
     ///   local: a store write of their own (the publish is the publish
     ///   step's), or app-fed state every pass re-derives from at its start.
     /// - **`MetaGet`, `MetaPut`** — local: one meta-table read or write on a
@@ -637,6 +669,8 @@ impl Cmd {
             | Cmd::WriteModeration { .. }
             | Cmd::RegisterContentScope { .. }
             | Cmd::EnqueueIntent { .. }
+            | Cmd::OutboxRows { .. }
+            | Cmd::SettleIntent { .. }
             | Cmd::PrincipalBundleStatus { .. }
             | Cmd::GroupCeremonyAuthority { .. }
             | Cmd::CachedNestFacts { .. }
@@ -1559,6 +1593,192 @@ impl AccountStoreHandle {
                 scope: scope.into(),
                 payload,
                 drainer,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Drain this device's MLS plaintext intents through `sender` — the
+    /// conversations engine's sealing send — per channel in compose order
+    /// (`devices.md` § Offline compose; `outbox` module docs § What this
+    /// drain refuses to touch, whose other half this is).
+    ///
+    /// Called only by a process hosting the account's conversations engine,
+    /// on reconnect and at startup; the runtime's own pump never calls it, so
+    /// the bearer-only sync agent never drains an MLS intent. The policy is
+    /// the generic drain's, applied to the MLS rows: a scope with a parked
+    /// intent holds everything behind it; [`MlsIntentOutcome::Park`](fauna_core::offline_intent::MlsIntentOutcome::Park) parks
+    /// the intent and its channel's remainder; [`MlsIntentOutcome::Retry`](fauna_core::offline_intent::MlsIntentOutcome::Retry)
+    /// counts an attempt and stops the pass (the next drain retries from
+    /// there — pass cadence is the backoff).
+    pub async fn drain_mls_outbox(
+        &self,
+        sender: &dyn fauna_core::offline_intent::MlsIntentSender,
+    ) -> crate::outbox::DrainReport {
+        self.drain_app_leg(IntentDrainer::Mls, MlsLeg(sender)).await
+    }
+
+    /// Drain this device's identity-bound intents through `sender` — the
+    /// app's composer, which builds and signs each wire request from the
+    /// stored inputs as the identity it holds NOW (`account-offline-mutation.md`
+    /// § The offline-mutation contract → *Identity-bound intents compose
+    /// at drain*), per scope in compose order.
+    ///
+    /// Called only by a process holding the identity seed — an app, in the
+    /// one shared app loop beside the MLS drain
+    /// (`AccountOutbox::drain_until_settled`); the runtime's own pump never
+    /// calls it, so the bearer-only sync agent never drains one. The policy
+    /// is the MLS drain's: a parked scope holds everything behind it,
+    /// [`IdentityIntentOutcome::Park`] parks the intent and its scope's
+    /// remainder under the nest's code, [`IdentityIntentOutcome::Retry`]
+    /// counts an attempt and stops the pass.
+    ///
+    /// [`IdentityIntentOutcome::Park`]: fauna_core::offline_intent::IdentityIntentOutcome::Park
+    /// [`IdentityIntentOutcome::Retry`]: fauna_core::offline_intent::IdentityIntentOutcome::Retry
+    pub async fn drain_identity_outbox(
+        &self,
+        sender: &dyn fauna_core::offline_intent::IdentityIntentSender,
+    ) -> crate::outbox::DrainReport {
+        self.drain_app_leg(IntentDrainer::Identity, IdentityLeg(sender))
+            .await
+    }
+
+    /// The app-only drains' one policy, over the rows of `drainer`: per-scope
+    /// FIFO, a parked scope held, a park parking the scope's remainder, a
+    /// retry stopping the pass.
+    async fn drain_app_leg(
+        &self,
+        drainer: IntentDrainer,
+        leg: impl AppLeg,
+    ) -> crate::outbox::DrainReport {
+        let label = drainer.as_str();
+        let mut report = crate::outbox::DrainReport::default();
+        let rows: Vec<_> = match self.outbox_rows().await {
+            Ok(rows) => rows.into_iter().filter(|i| i.drainer == drainer).collect(),
+            Err(e) => {
+                report.errors.push(format!("{label} outbox list: {e:#}"));
+                return report;
+            }
+        };
+        let mut parked: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter(|i| i.status == IntentStatus::Failed)
+            .map(|i| i.scope.clone())
+            .collect();
+        // Rows arrive (scope, channel_seq) ascending — scope-FIFO by iteration.
+        for intent in &rows {
+            if intent.status == IntentStatus::Failed {
+                continue;
+            }
+            if parked.contains(&intent.scope) {
+                report.held_behind_park += 1;
+                continue;
+            }
+            match leg.send(intent).await {
+                LegOutcome::Sent => {
+                    match self
+                        .settle_intent(intent.intent_id, IntentSettle::Ack)
+                        .await
+                    {
+                        Ok(_) => report.drained += 1,
+                        Err(e) => report.errors.push(format!("{label} outbox ack: {e:#}")),
+                    }
+                }
+                LegOutcome::Park { code, why } => {
+                    if let Err(e) = self
+                        .settle_intent(intent.intent_id, IntentSettle::Park(code))
+                        .await
+                    {
+                        report.errors.push(format!("{label} outbox park: {e:#}"));
+                    }
+                    parked.insert(intent.scope.clone());
+                    report.newly_parked += 1;
+                    report
+                        .errors
+                        .push(format!("{label} intent parked ({}): {why}", intent.scope));
+                }
+                LegOutcome::Retry(why) => {
+                    if let Err(e) = self
+                        .settle_intent(intent.intent_id, IntentSettle::Attempt)
+                        .await
+                    {
+                        report
+                            .errors
+                            .push(format!("{label} outbox record attempt: {e:#}"));
+                    }
+                    report.retried += 1;
+                    report.errors.push(format!(
+                        "{label} outbox drain stopped ({}): {why}",
+                        intent.scope
+                    ));
+                    break;
+                }
+            }
+        }
+        report
+    }
+
+    /// Every undrained outbox intent, `(scope, channel_seq)` ascending, with
+    /// its status and, on a parked one, its stable `failure_reason` — the
+    /// source of the unsent-changes read model (`account-offline-mutation.md`
+    /// § The offline-mutation contract → *The unsent-changes surface*,
+    /// point 4). A `Pending` row behind a `Failed` one of the same scope is
+    /// *held*; one with no such row ahead of it is *waiting*.
+    pub async fn outbox_rows(&self) -> Result<Vec<fauna_account_store::types::OutboxIntent>> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::OutboxRows { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// The user's retry of a parked intent: back to pending at its own place
+    /// in its scope, so the next drain pass (either drainer's) sends it first
+    /// and releases the scope's remainder behind it. `false` = no such parked
+    /// intent (unknown, or already pending).
+    pub async fn outbox_retry(&self, intent_id: [u8; 16]) -> Result<bool> {
+        self.settle_intent(intent_id, IntentSettle::Retry).await
+    }
+
+    /// The user's discard of a parked intent — the one user-initiated
+    /// deletion of a pending write, behind the surface's confirm. Deletes a
+    /// parked intent only; the next drain pass lets its scope's next intent
+    /// try. `false` = no such parked intent (unknown, or pending — which may
+    /// be in flight and is never deleted).
+    pub async fn outbox_discard(&self, intent_id: [u8; 16]) -> Result<bool> {
+        self.settle_intent(intent_id, IntentSettle::Discard).await
+    }
+
+    /// The unsent-changes read model over [`Self::outbox_rows`]
+    /// (`account-offline-mutation.md` § The offline-mutation contract →
+    /// *The unsent-changes surface*, point 4): every undrained intent in
+    /// scope order then compose order, its state derived exactly as the drain
+    /// derives its hold ([`fauna_core::offline_intent::derive_unsent_states`])
+    /// and its kind described in user words
+    /// ([`fauna_protocol::offline_describe::describe_intent`]).
+    pub async fn unsent_changes(&self) -> Result<Vec<fauna_core::offline_intent::UnsentChange>> {
+        Ok(unsent_changes_of(&self.outbox_rows().await?))
+    }
+
+    /// Start one full pump pass now, fire-and-forget — the drain of a scope a
+    /// retry or discard just released ([`Self::outbox_retry`],
+    /// [`Self::outbox_discard`]), so the user's gesture is sent without
+    /// waiting for the backstop ticker. A wake that cannot be queued (the
+    /// command channel full, the runtime gone) is dropped: the next pass
+    /// drains it. Callable from sync code; it never awaits.
+    pub fn wake_outbox_drain(&self) {
+        wake_chain_carry(&self.cmd);
+    }
+
+    async fn settle_intent(&self, intent_id: [u8; 16], settle: IntentSettle) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::SettleIntent {
+                intent_id,
+                settle,
                 reply,
             })
             .await
@@ -3559,8 +3779,7 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
-    /// The fleet ids this replica's merged device-set state excludes — the
-    /// same derivation the peer leg's removed-device snapshot runs
+    /// The fleet ids this replica's merged device-set state excludes
     /// (`fleet_removal::removed_device_ids` over this runtime's store and
     /// `GenerationTrust`). The custody witness's mint reads it through the
     /// ceremony's registry-writer seam. A local read.
@@ -5202,6 +5421,23 @@ where
                 return Served::Reassemble;
             }
         }
+        Cmd::OutboxRows { reply } => {
+            let _ = reply.send(local.store.outbox_undrained().await);
+        }
+        Cmd::SettleIntent {
+            intent_id,
+            settle,
+            reply,
+        } => {
+            let r = match settle {
+                IntentSettle::Ack => local.store.outbox_ack(&intent_id).await,
+                IntentSettle::Park(code) => local.store.outbox_mark_failed(&intent_id, &code).await,
+                IntentSettle::Attempt => local.store.outbox_record_attempt(&intent_id).await,
+                IntentSettle::Retry => local.store.outbox_retry(&intent_id).await,
+                IntentSettle::Discard => local.store.outbox_discard(&intent_id).await,
+            };
+            let _ = reply.send(r);
+        }
         Cmd::PrincipalBundleStatus { reply } => {
             let _ = reply.send(local.principal_slot.status());
         }
@@ -5481,6 +5717,35 @@ fn escrow_holders_of(entries: &[StateEntry]) -> Vec<[u8; 32]> {
 /// [`AccountStoreHandle::registration_chain_moved`]'s body: queue a
 /// reconcile-now whose reply receiver is already dropped (the store loop
 /// answers with `let _ =`), without awaiting.
+/// The unsent-changes rows of `rows` (the store's undrained intents,
+/// `(scope, channel_seq)` ascending), in the same order — the pure half of
+/// [`AccountStoreHandle::unsent_changes`].
+pub fn unsent_changes_of(
+    rows: &[fauna_account_store::types::OutboxIntent],
+) -> Vec<fauna_core::offline_intent::UnsentChange> {
+    use fauna_core::offline_intent::{OutboxRowFacts, UnsentChange, derive_unsent_states};
+    let facts: Vec<OutboxRowFacts<'_>> = rows
+        .iter()
+        .map(|r| OutboxRowFacts {
+            scope: &r.scope,
+            parked: (r.status == IntentStatus::Failed)
+                .then(|| r.failure_reason.as_deref().unwrap_or("")),
+        })
+        .collect();
+    rows.iter()
+        .zip(derive_unsent_states(&facts))
+        .map(|(r, state)| UnsentChange {
+            intent_id: hex::encode(r.intent_id),
+            kind: r.kind.clone(),
+            scope: r.scope.clone(),
+            state,
+            created_at: r.created_at,
+            attempts: r.retry_count,
+            description: fauna_protocol::offline_describe::describe_intent(&r.kind, &r.payload),
+        })
+        .collect()
+}
+
 fn wake_chain_carry(cmd: &mpsc::Sender<Cmd>) {
     let (reply, _unread) = oneshot::channel();
     match cmd.try_send(Cmd::ReconcileNow {
@@ -5575,4 +5840,59 @@ async fn held_group_roots_of<B: StoreBackend>(
         .states_of_kind(fauna_protocol::merge_policy::KIND_GROUP_MACHINERY_ROOT)
         .await?;
     Ok(crate::group_state_plane::held_group_roots(&held))
+}
+
+/// What one app-only drain leg made of one intent — [`MlsIntentOutcome`] and
+/// [`IdentityIntentOutcome`] in the one shape [`AccountStoreHandle::drain_app_leg`]
+/// settles.
+///
+/// [`MlsIntentOutcome`]: fauna_core::offline_intent::MlsIntentOutcome
+/// [`IdentityIntentOutcome`]: fauna_core::offline_intent::IdentityIntentOutcome
+enum LegOutcome {
+    Sent,
+    Park { code: String, why: String },
+    Retry(String),
+}
+
+/// One app-only drain's send: the MLS engine's sealing send, or the app's
+/// identity composer.
+trait AppLeg {
+    async fn send(&self, intent: &fauna_account_store::types::OutboxIntent) -> LegOutcome;
+}
+
+struct MlsLeg<'a>(&'a dyn fauna_core::offline_intent::MlsIntentSender);
+
+impl AppLeg for MlsLeg<'_> {
+    async fn send(&self, intent: &fauna_account_store::types::OutboxIntent) -> LegOutcome {
+        use fauna_core::offline_intent::MlsIntentOutcome;
+        match self
+            .0
+            .send_mls_intent(intent.intent_id, &intent.payload)
+            .await
+        {
+            MlsIntentOutcome::Sent => LegOutcome::Sent,
+            MlsIntentOutcome::Park { code, why } => LegOutcome::Park {
+                code: code.to_string(),
+                why,
+            },
+            MlsIntentOutcome::Retry(why) => LegOutcome::Retry(why),
+        }
+    }
+}
+
+struct IdentityLeg<'a>(&'a dyn fauna_core::offline_intent::IdentityIntentSender);
+
+impl AppLeg for IdentityLeg<'_> {
+    async fn send(&self, intent: &fauna_account_store::types::OutboxIntent) -> LegOutcome {
+        use fauna_core::offline_intent::IdentityIntentOutcome;
+        match self
+            .0
+            .send_identity_intent(intent.intent_id, &intent.kind, &intent.payload)
+            .await
+        {
+            IdentityIntentOutcome::Sent => LegOutcome::Sent,
+            IdentityIntentOutcome::Park { code, why } => LegOutcome::Park { code, why },
+            IdentityIntentOutcome::Retry(why) => LegOutcome::Retry(why),
+        }
+    }
 }

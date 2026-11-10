@@ -4,6 +4,9 @@ title: Mail filter rules
 section: mail, calendar and contacts
 goal: docs/goal/behavior/email-filters.md § Email filter rules
 guide: docs/guides/own-your-mail.md § Forwarding
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -14,7 +17,7 @@ with, and an auto-reply answers each sender once and never answers a machine.
 
 ## Coverage contract
 
-Stamped 2026-09-23 at 039e9619ca.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] Rules are created, edited in place and deleted from Settings — `docs/goal/behavior/email-filters.md` § Email filter rules
    - `tests/e2e-unified/tests/test_settings.py::test_email_filter_crud`
@@ -81,6 +84,14 @@ Stamped 2026-09-23 at 039e9619ca.
    - `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_failing_forward_bounces_to_its_owner_once_per_message_a_week`
 25. [nest] Forwarded mail keeps the original sender and its signature, so it still passes the destination's checks — `docs/goal/behavior/mail-forwarding.md` § Architectural rules
    - `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forwarded_mail_keeps_its_sender_and_signature`
+26. [nest] Mail that arrives forging one of your nest's own domains is never forwarded on — not by forward-all, a rule or an admin forwarder — while your own copy still arrives — `docs/goal/behavior/mail-forwarding.md` § Spoof floor
+   - `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_spoof_of_the_nests_own_domain_is_delivered_but_never_forwarded`
+27. [nest] Forwards count against your daily sending allowance and wait once it is spent, rather than being lost — `docs/goal/behavior/mail-forwarding.md` § Architectural rules
+   - `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forwards_draw_on_the_daily_allowance_and_wait_once_it_is_spent`
+28. [nest] A bounce to a forwarding address that was forged or has expired is refused, and one for a forward that no longer exists is dropped without reaching you — `docs/goal/behavior/mail-forwarding.md` § Bounce decode on inbound
+   - `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_forged_or_expired_bounce_is_refused_and_an_orphan_is_dropped`
+29. [nest] When the forward queue is full, mail a rule would have redirected is delivered to your own mailbox instead of being lost — `docs/goal/behavior/mail-forwarding.md` § Queue ceiling
+   - `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_redirect_the_full_forward_queue_cannot_take_lands_in_the_owners_mailbox`
 
 ## Status
 
@@ -93,14 +104,16 @@ Stamped 2026-09-23 at 039e9619ca.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_crud` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/platform/bridge/test_email_filter_crud.py::test_email_filter_create_and_delete` | web (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_email_filter_nav_readiness.py::test_filter_edit_visible_correct_under_slow_load` | windows (windows): failed |
+| 1 | app | `tests/e2e-unified/tests/test_email_filter_nav_readiness.py::test_filter_edit_visible_correct_under_slow_load` | windows (windows): passed |
 | 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed, nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_reject_single_recipient_refuses_at_data` | nest (linux): passed, nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_reject_multi_recipient_drops_without_dsn` | nest (linux): passed, nest (macos): passed |
@@ -137,4 +150,8 @@ Stamped 2026-09-23 at 039e9619ca.
 | 23 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forward_rate_cap_suppresses_over_cap_forward_and_notifies` | nest (linux): passed, nest (macos): passed |
 | 24 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_failing_forward_bounces_to_its_owner_once_per_message_a_week` | nest (linux): passed, nest (macos): passed |
 | 25 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forwarded_mail_keeps_its_sender_and_signature` | nest (linux): passed, nest (macos): passed |
+| 26 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_spoof_of_the_nests_own_domain_is_delivered_but_never_forwarded` | nest (linux): passed |
+| 27 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forwards_draw_on_the_daily_allowance_and_wait_once_it_is_spent` | nest (linux): passed |
+| 28 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_forged_or_expired_bounce_is_refused_and_an_orphan_is_dropped` | nest (linux): passed |
+| 29 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_redirect_the_full_forward_queue_cannot_take_lands_in_the_owners_mailbox` | nest (linux): passed |
 <!-- features-render:end -->

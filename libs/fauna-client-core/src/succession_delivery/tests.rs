@@ -4,6 +4,7 @@
 //! handlers.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fauna_core::data::Timestamp;
@@ -173,6 +174,8 @@ struct Reach {
     seeds: BTreeSet<[u8; 32]>,
     /// Identities the owed nest holds an account for.
     accounts: BTreeSet<[u8; 32]>,
+    /// How many anonymous dials were made.
+    dials: AtomicUsize,
 }
 
 impl Reach {
@@ -183,7 +186,11 @@ impl Reach {
             reachable: true,
             seeds: BTreeSet::new(),
             accounts: BTreeSet::new(),
+            dials: AtomicUsize::new(0),
         }
+    }
+    fn dials(&self) -> usize {
+        self.dials.load(Ordering::SeqCst)
     }
 }
 
@@ -193,6 +200,7 @@ impl OwedNestReach for Reach {
 
     async fn anonymous(&self, url: &str) -> Result<(Conn, [u8; 32]), String> {
         assert_eq!(url, URL);
+        self.dials.fetch_add(1, Ordering::SeqCst);
         if !self.reachable {
             return Err("unreachable".into());
         }
@@ -525,9 +533,10 @@ async fn the_list_is_delivered_entry_by_entry() {
         nest: home.clone(),
         actor: Some(id(2)),
     };
-    let delivered = deliver_owed_nests(&keeper_conn, &Reach::to(&owed))
-        .await
-        .unwrap();
+    let delivered =
+        deliver_owed_nests(&keeper_conn, &Reach::to(&owed), &ParkedOwedNests::default())
+            .await
+            .unwrap();
     let outcomes: Vec<_> = delivered.into_iter().map(|(_, d)| d).collect();
     assert_eq!(
         outcomes,
@@ -539,6 +548,78 @@ async fn the_list_is_delivered_entry_by_entry() {
             Delivery::Owed(OwedReason::NoAddress),
         ]
     );
+}
+
+// ── The park: an address answered by another nest is dialed once per runtime ─
+
+/// One pass of the list through `parked` — the deliverer's ledger, which
+/// outlives a pass.
+async fn pass(keeper: &Fake, reach: &Reach, parked: &ParkedOwedNests) -> Delivery {
+    let keeper_conn = Conn {
+        nest: keeper.clone(),
+        actor: Some(id(2)),
+    };
+    let mut delivered = deliver_owed_nests(&keeper_conn, reach, parked)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1);
+    delivered.remove(0).1
+}
+
+#[tokio::test]
+async fn an_address_answered_by_another_identity_is_dialed_once() {
+    let (home, owed) = (keeper(1, 2), owed_with(&[]));
+    let mut reach = Reach::to(&owed);
+    reach.presented = [0xee; 32];
+    let parked = ParkedOwedNests::default();
+    assert_eq!(
+        pass(&home, &reach, &parked).await,
+        Delivery::Owed(OwedReason::IdentityMismatch {
+            presented: [0xee; 32]
+        })
+    );
+    assert_eq!(
+        pass(&home, &reach, &parked).await,
+        Delivery::Owed(OwedReason::Parked {
+            presented: [0xee; 32]
+        })
+    );
+    assert_eq!(reach.dials(), 1, "a parked entry is not dialed again");
+    assert!(owed.calls().is_empty());
+    assert_eq!(home.settled(), 0, "nothing is settled on a mismatch");
+}
+
+#[tokio::test]
+async fn an_unreachable_entry_is_dialed_on_every_pass() {
+    let (home, owed) = (keeper(1, 2), owed_with(&[]));
+    let mut reach = Reach::to(&owed);
+    reach.reachable = false;
+    let parked = ParkedOwedNests::default();
+    for _ in 0..2 {
+        assert!(matches!(
+            pass(&home, &reach, &parked).await,
+            Delivery::Owed(OwedReason::Unreachable(_))
+        ));
+    }
+    assert_eq!(reach.dials(), 2);
+}
+
+#[tokio::test]
+async fn a_fresh_ledger_dials_a_parked_address_once_more() {
+    let (home, owed) = (keeper(1, 2), owed_with(&[]));
+    let mut reach = Reach::to(&owed);
+    reach.presented = [0xee; 32];
+    let first_runtime = ParkedOwedNests::default();
+    pass(&home, &reach, &first_runtime).await;
+    pass(&home, &reach, &first_runtime).await;
+    let relaunched = ParkedOwedNests::default();
+    assert_eq!(
+        pass(&home, &reach, &relaunched).await,
+        Delivery::Owed(OwedReason::IdentityMismatch {
+            presented: [0xee; 32]
+        })
+    );
+    assert_eq!(reach.dials(), 2);
 }
 
 /// The link action's half: submits, settles nothing, replays nothing.

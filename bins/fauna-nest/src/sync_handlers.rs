@@ -243,12 +243,23 @@ async fn writable_or_provisioned_backup_set(
         )
         .await;
 
-    let fs = state
+    let Some(fs) = state
         .db
         .get_folder_for_actor(name, actor_id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| internal("backup custody set missing immediately after create"))?;
+    else {
+        // The create lost to the owner's own set created by hash alone on
+        // this name's address: the coded, recoverable refusal.
+        state
+            .db
+            .refuse_a_squatted_rail_address(name, actor_id)
+            .await
+            .map_err(internal)?;
+        return Err(internal(
+            "backup custody set missing immediately after create",
+        ));
+    };
     // A live rail of this name already held the key: the role holding live
     // state wins, the newcomer is refused (`reserved-folders.md` § Destination
     // capability).
@@ -1037,12 +1048,14 @@ fn changes_list_handler() -> RpcHandler {
                         changes,
                         caller_access,
                         residency,
+                        reachable,
                         signer_certs,
                     })) => {
                         encode_reply(&SyncChangesListReply {
                             changes,
                             caller_access,
                             residency,
+                            reachable,
                             // The watermark echo is the class-2 arm's alone.
                             complete_through_seq: None,
                             retirable_through_seq: None,
@@ -1135,6 +1148,7 @@ fn changes_list_handler() -> RpcHandler {
                 // this caller lists from; the stamp is the cross-nest relay's.
                 caller_access: None,
                 residency: None,
+                reachable: None,
                 changes: changes.iter().map(change_to_wire).collect(),
                 // One writer, one scalar `since` — which already IS this
                 // arm's watermark; the echo is the class-2 arm's alone.
@@ -1395,6 +1409,7 @@ pub(crate) async fn serve_account_state_feed(
     encode_reply(&SyncChangesListReply {
         caller_access: None,
         residency: None,
+        reachable: None,
         changes: rows.iter().map(change_to_wire).collect(),
         complete_through_seq,
         retirable_through_seq,
@@ -1524,6 +1539,7 @@ async fn serve_content_scope_feed(
     encode_reply(&SyncChangesListReply {
         caller_access: None,
         residency: None,
+        reachable: None,
         changes,
         // One writer, one scalar `since` — which already IS this arm's
         // watermark; the echo is the class-2 arm's alone.
@@ -1867,10 +1883,14 @@ pub(crate) async fn put_state_entry(
     for row in &req.replaces {
         let writer = parse_device_id(&row.writer_id)
             .ok_or_else(|| state_coded("invalid_request", "invalid replaces writer_id hex"))?;
-        let item_key: [u8; 32] =
+        let row_item_key: [u8; 32] =
             row.item_key.as_ref().try_into().map_err(|_| {
                 state_coded("invalid_request", "replaces item_key must be 32 bytes")
             })?;
+        // No own-item check: a carry's put names the predecessor's row at the
+        // predecessor schedule's item key (part (2)), and keys are blinded, so
+        // the nest cannot tell it from any other item's. The no-gate supersede
+        // rests on the covering row landing in the same transaction.
         if row.writer_seq < 0 {
             return Err(state_coded(
                 "invalid_request",
@@ -1878,7 +1898,7 @@ pub(crate) async fn put_state_entry(
             ));
         }
         replaces.push(crate::db::account_state::ReplacedCoordinate {
-            item_key,
+            item_key: row_item_key,
             writer,
             writer_seq: row.writer_seq,
         });
@@ -2405,7 +2425,25 @@ pub(crate) async fn record_change_core(
         if let Some(floor) = floor {
             let fresh = content_key_version.is_some_and(|v| v as i64 >= floor);
             let declassified = content_key_version.is_none() && rests_plaintext_content;
-            if !fresh && !declassified {
+            // THE TOMBSTONE ARM (2026-11-07, KMH § M2): a strict delete (no
+            // manifest) seals no content, so it carries no content stamp by
+            // its shape (the engine's `handle_delete`, Media's
+            // `delete_member`) and `fresh` above can never hold for it. Its
+            // one piece of sealed material is its label, which names the
+            // generation it sealed under — so a tombstone is judged by that:
+            // at or above the floor it lands; below it, or naming no
+            // generation, it is refused like a stale content record and heals
+            // the same way (the engine keeps the row and re-seals the label
+            // under the advanced generation on retry). Before this arm every
+            // writer member's delete on a shared folder was refused, with no
+            // heal — the documented one re-seals content, and there is none.
+            let tombstone_fresh = change_type == "delete"
+                && manifest_hash.is_none()
+                && path_sealed
+                    .and_then(|b| fauna_core::path_crypto::SealedLabel::from_bytes(b).ok())
+                    .and_then(|l| l.generation)
+                    .is_some_and(|g| g as i64 >= floor);
+            if !fresh && !declassified && !tombstone_fresh {
                 return Err(coded(
                     "stale_content_key",
                     "record is stamped below the set's content-key floor — \
@@ -2974,6 +3012,23 @@ fn files_handler() -> RpcHandler {
     })
 }
 
+/// The roster nudge (`devices.md` § Listing Devices → *An open roster follows
+/// a sibling's write*): after a committed rename, removal or participation
+/// write, every connected socket of the actor hears `fauna.sync.devices.changed`
+/// so a Devices page open on another of the user's devices re-reads the
+/// roster. Hint-less and best-effort — the reconnect and `ResyncRequired`
+/// sweeps and the page's own re-read on a visit are the backstops. Sent after
+/// the write commits, never before: a device that re-reads early would find
+/// the old row and no second nudge.
+fn notify_devices_changed(state: &AppState, actor_id: &[u8; 32]) {
+    state.ws.notify_push(
+        actor_id,
+        fauna_protocol::PushEvent::DevicesChanged(
+            fauna_protocol::push_events::DevicesChangedPayload::default(),
+        ),
+    );
+}
+
 // ── fauna.sync.devices.list (≡ GET /api/v1/sync/devices) ─────────────────────
 
 fn devices_list_handler() -> RpcHandler {
@@ -3155,6 +3210,8 @@ fn devices_p2p_participation_set_handler() -> RpcHandler {
                 }
             }
 
+            notify_devices_changed(&state, &actor_id);
+
             let after = state
                 .db
                 .get_device_for_user(&device_id, &actor_id)
@@ -3240,6 +3297,9 @@ fn devices_delete_handler() -> RpcHandler {
                     if let Some(key) = revoked_key {
                         state.revoke_device_authority(&actor_id, &key).await;
                     }
+                    // After the revocation: the removed device's own sockets
+                    // are closed by now, so only its siblings hear the nudge.
+                    notify_devices_changed(&state, &actor_id);
                     encode_reply(&SyncDeviceDeleteReply {
                         deleted: true,
                         folders_removed_from: members_removed,
@@ -3298,6 +3358,7 @@ fn devices_rename_handler() -> RpcHandler {
                 .await
                 .map_err(internal)?
             {
+                notify_devices_changed(&state, &actor_id);
                 encode_reply(&SyncDeviceRenameReply::default())
             } else {
                 Err(coded("not_found", "device not found"))
@@ -4429,6 +4490,7 @@ mod change_page_budget_tests {
         encode_reply(&SyncChangesListReply {
             caller_access: None,
             residency: None,
+            reachable: None,
             changes: rows.iter().map(change_to_wire).collect(),
             complete_through_seq: Some(i64::MAX),
             retirable_through_seq: Some(i64::MAX),
@@ -4674,6 +4736,7 @@ mod change_page_budget_tests {
         let len = encode_reply(&SyncChangesListReply {
             caller_access: None,
             residency: None,
+            reachable: None,
             changes: page.iter().map(change_to_wire).collect(),
             complete_through_seq: None,
             retirable_through_seq: None,

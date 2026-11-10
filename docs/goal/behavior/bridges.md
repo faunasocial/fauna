@@ -141,6 +141,7 @@ The wire types live in `libs/fauna-protocol/src/bridges_ui.rs` (CDDL `libs/fauna
 |---|---|---|
 | `bridge-action-button` (unlinked) | Link via the selected mode; fill `bridge-link-field-*`. | `fauna.bridges.link` (`forbid_replay`; for `oauth_redirect` the reply `redirect_url` opens in the browser; for `nip07` the client invokes the platform extension). |
 | `bridge-action-button` (linked) | Unlink. | `fauna.bridges.unlink` (idempotent). |
+| `bridge-card-name` | Shows the card's title: a consented bridge app's declared glyph then its name (`🌐 Matrix`), the bare name on a first-party provider's or a plugin's card (id owner-approved 2026-11-08). | Read from the shared `fauna_client_bridges::bridge_card_title` over `BridgeStatus.name` + `.glyph` in the `fauna.bridges.list` snapshot. |
 | `bridge-identity` (linked) | Shows the linked account's identity, `<label>: <display>`. | Read from `BridgeStatus.identity` in the `fauna.bridges.list` snapshot. |
 | `bridge-setting[<key>]` — toggle / text / select / number, keyed by the setting key | Change a setting; **auto-save on change, 500 ms debounce** (no per-page Save button). | `fauna.bridges.set_settings`. |
 | `bridge-follow-id-input` + `bridge-follow-petname-input` + `bridge-add-follow-button` | Add follow (external ID + optional petname). | `fauna.bridges.add_follow` (`forbid_replay`). |

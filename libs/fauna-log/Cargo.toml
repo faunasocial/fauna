@@ -13,6 +13,11 @@ license.workspace = true
 # (wasm, which maps to a JS shape) consume the plain Rust types. Mirrors the
 # `fauna-core` / `fauna-conversations` optional-`uniffi` pattern.
 uniffi = ["dep:uniffi"]
+# The release-profile e2e build's route to the lowered log-cap seam
+# (`rolling::E2E_TOTAL_CAP_ENV`); a debug build reaches it through
+# `debug_assertions`, and a plain `--release` build compiles it out
+# (`docs/goal/architecture/testing.md` convention 15).
+e2e-agent = []
 
 [dependencies]
 # Reused for the wasm-safe millisecond clock (`Timestamp::now_millis`) so the

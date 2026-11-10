@@ -1830,3 +1830,163 @@ def test_folder_device_activity_reflects_recorded_changes(
     assert not app.has_error(), (
         f"device-activity refresh surfaced an unexpected error: {app.error_text()!r}"
     )
+
+
+# ── Two devices of one account (folders outcomes 15 and 16) ──────────────────
+#
+# Two seats of one account on this machine (convention 16): seat A is the app
+# under test, seat B the fleet's tui sibling (`helpers.fleet.SiblingSeats`).
+# A FRESH account per test, never `folder_seat`: the default conflict policy
+# and the folder list are per-account, so a seat of the module's account would
+# leave its state to every later test here. Every mutation is a UI gesture
+# (convention 8); every wait is a deadline poll on painted state with the pump
+# poked where each seat holds it (convention 14).
+
+#: A seat's own write: the page's round trip.
+SEAT_WRITE_S = 120.0
+
+#: Seat B's publish, the nest's relay, seat A's walk, then the notice and the
+#: open page's reload (`test_store_change_notice.py`'s budget).
+CONVERGE_S = 240.0
+
+
+@pytest.fixture
+def sibling_seats(request, nest_instance):
+    """Second enrolled seats on the session nest (`helpers.fleet.SiblingSeats`)."""
+    from helpers.fleet import SiblingSeats
+
+    seats = SiblingSeats(request, nest_instance)
+    try:
+        yield seats
+    finally:
+        seats.teardown()
+
+
+def _two_seats_of_a_fresh_account(app, request, nest_instance, sibling_seats):
+    """Sign the app under test in as a fresh account and launch that account's
+    second device; both enrolled before either is used."""
+    from conftest import _make_user
+    from helpers import enrollment
+
+    url = nest_instance["url"]
+    user = _make_user(nest_instance)
+    enrollment.sign_in(app, request, nest_instance, user)
+    enrollment.await_enrollment(app, url, user)
+    seat_b = sibling_seats.launch(user=user)
+    enrollment.await_enrollment(seat_b, url, user)
+    return seat_b
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("folders")
+def test_the_default_conflict_policy_is_the_same_on_another_of_your_devices(
+    app, request, nest_instance, sibling_seats
+):
+    """Outcome 15 — *the default conflict policy for new folders is the same on
+    every device of yours* (`account-runtime.md` § Implementation status today:
+    sync-prefs rides the account plane, `preference_surfaces::{load,save}_sync_prefs`).
+
+    Seat A picks the non-default `latest_wins_always` on its Folders page; seat
+    B, the same account's other device, reads it on its own page. Non-default
+    on purpose: an unchosen default renders `auto`, so a seat that never
+    received the choice would pass an assertion written against `auto`. B's
+    poll re-visits its page, so this states the "same everywhere" fact alone —
+    whether an OPEN page repaints is outcome 16's (and the store-change
+    notice's) question."""
+    from helpers.fleet import poked_pass
+
+    seat_b = _two_seats_of_a_fresh_account(app, request, nest_instance, sibling_seats)
+    a, b = app.backups, seat_b.backups
+
+    b.navigate_folders()
+    assert b.get_default_conflict_policy() == "auto", (
+        f"precondition: a fresh account's other device should read the unchosen "
+        f"default 'auto', got {b.get_default_conflict_policy()!r}"
+    )
+
+    a.navigate_folders()
+    a.set_default_conflict_policy("latest_wins_always")
+    wait_until(
+        lambda: a.get_default_conflict_policy() == "latest_wins_always",
+        SEAT_WRITE_S,
+        diagnose=lambda: (
+            f"seat A's own pick never took: it reads {a.get_default_conflict_policy()!r}; "
+            f"error={app.error_text()!r}"
+        ),
+    )
+
+    def b_reads_it():
+        poked_pass(app.driver, what="seat A's publish")
+        poked_pass(seat_b.driver, what="seat B's walk")
+        b.revisit_folders(settle=0)
+        return b.get_default_conflict_policy() == "latest_wins_always"
+
+    wait_until(
+        b_reads_it, CONVERGE_S, interval=1.0,
+        diagnose=lambda: (
+            f"seat B still reads {b.get_default_conflict_policy()!r}: the default "
+            f"conflict policy chosen on seat A never reached the same account's "
+            f"other device; error={seat_b.error_text()!r}"
+        ),
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("folders")
+def test_a_folder_made_on_another_of_your_devices_shows_on_an_open_folders_page(
+    app, request, nest_instance, sibling_seats
+):
+    """Outcome 16 — *a folder made or changed on another of your devices shows
+    on an open Folders page without leaving it* (`account-runtime.md`
+    § Multi-instance concurrency → *A runtime's own pump is a source of
+    the notice too*: an open store-backed surface shows what a fresh visit
+    would show, whichever process applied the change).
+
+    Seat A opens Folders ONCE and never leaves it; seat B makes a folder with
+    its own wizard. The folder must paint on seat A's open page. The failure
+    message re-visits A's page, so a red tells "the folder never reached A"
+    apart from "it reached A and the open page was never re-driven"."""
+    from helpers.fleet import poked_pass
+    from helpers.waiting import account_pump_role
+
+    seat_b = _two_seats_of_a_fresh_account(app, request, nest_instance, sibling_seats)
+    a, b = app.backups, seat_b.backups
+    name = f"other-device-{secrets.token_hex(4)}"
+
+    # Seat A opens the page once, and stays.
+    a.navigate_folders()
+    assert not any(name in t for t in a.folder_titles()), (
+        f"precondition: {name!r} cannot be listed before it is made"
+    )
+
+    b.navigate_folders()
+    b.create_folder_via_wizard(name)  # waits for B's own row
+
+    def a_shows_it():
+        poked_pass(seat_b.driver, what="seat B's publish")
+        poked_pass(app.driver, what="seat A's walk")
+        try:
+            return any(name in t for t in a.folder_titles())
+        except LookupError:
+            return False  # a row the list rebuilt away between the count and the read
+
+    wait_until(
+        a_shows_it, CONVERGE_S, interval=1.0,
+        diagnose=lambda: (
+            f"seat A's OPEN Folders page lists {a.folder_titles()} — {name!r}, made "
+            f"on the same account's other device, never painted without a re-visit; "
+            f"seat A's pump role = {account_pump_role(app.driver)}; a re-visit now "
+            f"reads {a.revisit_folders()} (if it lists the folder, the change reached "
+            f"A and the open page was never re-driven); error={app.error_text()!r}"
+        ),
+    )

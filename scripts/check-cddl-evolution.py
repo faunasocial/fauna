@@ -20,7 +20,12 @@ This is a coarse v1 — line-level heuristics. A future revision will use
 a CDDL parser. v1 catches common drift; non-trivial schema changes still
 require human review.
 
-Exit 0 = OK. Exit 1 = blocked drift detected. Exit 2 = `ratified-breaks.txt` malformed.
+`--base <rev>` names the base in place of `merge-base(HEAD, origin/main)`:
+a run against the last public sync passes the sync's source commit, in a
+tree where HEAD *is* origin/main and the default would self-diff.
+
+Exit 0 = OK. Exit 1 = blocked drift detected. Exit 2 = `ratified-breaks.txt`
+malformed, or an empty or unresolvable `--base`.
 """
 
 from __future__ import annotations
@@ -281,8 +286,34 @@ def check_breaks(
     return errors
 
 
-def main() -> int:
-    base = merge_base()
+def explicit_base(argv: list[str]) -> str | None:
+    """`--base <rev>` / `--base=<rev>` out of argv, else None. An empty or
+    missing value raises ValueError: git reads `""` as a revision without
+    failing, so it would silently diff against nothing."""
+    for i, a in enumerate(argv):
+        if a == "--base":
+            if i + 1 >= len(argv) or not argv[i + 1]:
+                raise ValueError("--base needs a revision")
+            return argv[i + 1]
+        if a.startswith("--base="):
+            if not a[len("--base="):]:
+                raise ValueError("--base needs a revision")
+            return a[len("--base="):]
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        base = explicit_base(sys.argv[1:] if argv is None else argv)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if base is None:
+        base = merge_base()
+    elif subprocess.run(["git", "rev-parse", "--verify", "-q", f"{base}^{{commit}}"],
+                        capture_output=True).returncode != 0:
+        print(f"error: --base {base}: not a commit here", file=sys.stderr)
+        return 2
     base_root = Path(SCHEMAS_DIR)
     if not base_root.exists():
         print(f"warn: {SCHEMAS_DIR} does not exist; skipping CDDL evolution check")

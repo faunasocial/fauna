@@ -25,6 +25,7 @@ import { nestBlockRenderForTest, nestRulesChangedNoticeText } from '#lib/nestRul
 import { silentSignIn, homeBearerScheduleForTest } from '#lib/api';
 import { accountsClearNestBinding, accountsTabSessionMaterial } from '#lib/accounts';
 import { clearTabPin } from '#lib/tabPin';
+import { launchVerdicts, retireInFlight } from '#lib/launch-currency';
 import {
   ensureWasm,
   recoveryBoxesLocal,
@@ -49,6 +50,7 @@ import { registerArchiveImportCommands } from '#lib/archive-import-e2e';
 import { registerBackupCustodianCommands } from '#lib/backup-custodian-e2e';
 import { registerAtprotoDelegationCommands } from '#lib/atproto-delegation-e2e';
 import { registerTrustClockCommands } from '#lib/trust-clock-e2e';
+import { registerSubscriptionsCommands } from '#lib/subscriptions-e2e';
 import { registerMailTokenRefreshCommands } from '#lib/mail-token-refresh-e2e';
 import { registerFeedCueCommands } from '#lib/feed-cues-e2e';
 import { registerFamilyNotifyCommands } from '#lib/family-notify-e2e';
@@ -71,7 +73,7 @@ import {
   recordSessionTeardown,
   clearSessionGeneration,
 } from '#lib/generation-e2e';
-import { criticalAlertSweepPasses, connectionIsOnline, renderDocumentLinkPreviews, type LinkPreviewState } from '#lib/wasm';
+import { criticalAlertSweepPasses, connectionIsOnline, knockNoticesForTest, renderDocumentLinkPreviews, type LinkPreviewState } from '#lib/wasm';
 import { get } from 'svelte/store';
 import {
   convReceiveCycles,
@@ -267,6 +269,20 @@ export function installAutomationSurface(): void {
   // fails closed for the incoming actor on the next read.
   (window as unknown as { __fauna_clearTabPinForTest?: () => void })
     .__fauna_clearTabPinForTest = clearTabPin;
+  // An authenticated `set_state` session patch IS the session now, so a launch
+  // still in flight on the onboarding page is superseded: `agent.js` calls this
+  // (a REQUIRED call — convention 11) and the launch's verdict is dropped when
+  // it lands rather than rendered over the patched session (`onboarding.md`
+  // § App-launch routing → *A verdict renders only while its own launch is
+  // still the current one*; tui's `apply_session_patch` and linux's patch
+  // handler retire at the same point). The patch is applied with NO reload,
+  // which is exactly why the in-flight launch survives it.
+  (window as unknown as { __fauna_retireInFlightLaunchForTest?: () => void })
+    .__fauna_retireInFlightLaunchForTest = retireInFlight;
+  // `fauna_e2e_agent::LAUNCH_VERDICTS_KEY`'s value — `{routed, superseded}`.
+  (
+    window as unknown as { __fauna_launchVerdicts?: () => { routed: number; superseded: number } }
+  ).__fauna_launchVerdicts = launchVerdicts;
   // ── The machine-free half of the E2E machine-method bridge ────────────────
   //
   // `driver.call_machine_method(name, json)` normally reaches
@@ -325,6 +341,9 @@ export function installAutomationSurface(): void {
   //   * trust facet: `trust_facet_advance_clock` → the Nests page's grant
   //     liveness render clock (a ~90-day window — convention 14's fake clock).
   registerTrustClockCommands();
+  //   * subscriptions: `subscriptions_hold_author_drain` / `_release_` → the
+  //     author pump's drain hold, so a paid request's badge can be read.
+  registerSubscriptionsCommands();
   //   * mail: `mail_token_refresh_advance_clock` → the submission-token
   //     refresh's clock (a 7-day cadence — convention 14's fake clock).
   registerMailTokenRefreshCommands();
@@ -484,6 +503,12 @@ export function installAutomationSurface(): void {
       };
     }
   ).__fauna_messageBanners = messageBanners;
+  // The knock toasts this tab raised (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, the
+  // witness for `notifications` outcome 15) — the shared `KnockNotices` log in
+  // the core wasm chunk, fed at `#lib/knock-toast`'s firing site. A bundle with
+  // no leg reads `null`, which the witness refuses loudly.
+  (window as unknown as { __fauna_knockNotices?: () => unknown }).__fauna_knockNotices =
+    knockNoticesForTest;
   // The transport's own state + the offline gate's verdict on it — the
   // connection barrier's observable (`fauna_e2e_agent::CONNECTION_KEY`), read
   // once per login by `helpers/connection.py::wait_until_online`. Absent hook

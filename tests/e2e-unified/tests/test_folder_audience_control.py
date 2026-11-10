@@ -283,3 +283,167 @@ def test_the_website_toggle_is_orthogonal_to_the_audience(
     assert row.get("audience") != "public", (
         f"serving the head must not publish the folder's contents: {row!r}"
     )
+
+
+@pytest.mark.feature("public-folders-and-websites")
+def test_a_public_website_folder_browses_in_media(
+    logged_in_app, nest_instance, test_user
+):
+    """A website folder is a folder: once it is public and served as the
+    owner's website, the Media page still offers it as a browse scope and
+    opens it like any other (`behavior/folders.md` § Implementation status
+    today, phase 4's first slice; `ui/media.md` — a website folder shows in
+    Media like any other folder). The shared rule is
+    `fauna-client-media`'s offerable-set predicate, which keeps a website set
+    browsable and uploadable while it keeps reserved sets out; this is that
+    rule seen through the app.
+
+    Outcome 1's public-confirm gesture (`make_public`) is the fixture, so the
+    folder reaches `public` through the one door a user has."""
+    app = logged_in_app
+    b = app.backups
+    b.navigate_folders()
+
+    name = f"site-browse-{secrets.token_hex(4)}"
+    b.create_folder_via_wizard(name)
+    client = _user_client(nest_instance, test_user)
+
+    b.make_public(name)
+    _await_folder_flags(client, name, audience="public")
+    if not b.website_toggle_visible():
+        b.find_and_expand_folder(name)
+    b.toggle_website()
+    _await_folder_flags(client, name, audience="public", website_enabled=True)
+
+    m = app.media
+    m.navigate()
+    m.ensure_loaded()
+    # `set_filter` retries until the frame OFFERS the folder and raises
+    # `SelectOptionNotOffered` with the page's forensics when it never does —
+    # a website set filtered out of the browse scopes fails right here.
+    m.set_filter(name)
+    labels = m.folder_filter_labels()
+    if labels is not None:
+        assert any(name in label for label in labels), (
+            f"the website folder {name!r} is selected but not among the "
+            f"painted browse scopes: {labels!r}"
+        )
+    assert not app.has_error(), (
+        f"browsing the website folder in Media raised an error: "
+        f"{app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("public-folders-and-websites")
+def test_a_folder_can_be_created_already_public(
+    logged_in_app, nest_instance, test_user
+):
+    """A folder may be BORN public — readable from its first row — rather than
+    created private and flipped (`ui/folders.md` § Audience and website
+    serving → *Born public*). The choice is a field of the wizard's Name step
+    (`wizard-audience-select`, ruling 1); on a Public wizard Create does not
+    create but arms the owner row's own declassify dialog, and answering it is
+    the gesture that creates (ruling 2). Three things are asserted, each where
+    it is true rather than as one end state:
+
+    1. Create ARMS and sends nothing — the nest has no row for the name while
+       the dialog asks, so a regression that created on the bare Create (an
+       unconsented public folder) fails here, not at the end.
+    2. The confirm creates the folder `public` WITH the owner's attestation
+       over the id the create minted — verified with the owner's key the way
+       a seat verifies it, so the folder is readable from its first row and
+       never a private row flipped afterwards.
+    3. The owner row then paints `public` with no `folder-audience-unattested`
+       line: this seat's own attestation verifies.
+
+    The gate reads the surface registry: an app joins by widening
+    `folder-create-public`'s `built` in `tests/e2e-unified/surfaces.toml`."""
+    from helpers.app_surface import require_surface
+
+    require_surface(logged_in_app.driver, "folder-create-public")
+    app = logged_in_app
+    b = app.backups
+    b.navigate_folders()
+    client = _user_client(nest_instance, test_user)
+
+    name = f"born-public-{secrets.token_hex(4)}"
+    b.add_folder()
+    b._wait_visible("wizard-name-input")
+    b.wizard_set_name(name)
+    b._wait_visible("wizard-audience-select")
+    b.wizard_set_audience("public")
+    wait_until(
+        lambda: app.driver.get_text("wizard-audience-select") == "public",
+        _UI_WINDOW_SECS,
+        diagnose=lambda: (
+            f"the wizard's select reads "
+            f"{app.driver.get_text('wizard-audience-select')!r}; "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    assert app.driver.is_visible("wizard-audience-hint"), (
+        "wizard-audience-hint must paint beside the select — it is where the "
+        "user learns a public folder's name is its URL segment"
+    )
+    b.wizard_next()
+    b.wizard_next()
+    b._wait_visible("wizard-create-button")
+
+    # ── 1. Create ARMS the declassify dialog and sends nothing. ──
+    b.wizard_create()
+    wait_until(
+        b.declassify_confirm_visible,
+        _UI_WINDOW_SECS,
+        diagnose=lambda: f"Create did not arm the confirm; error={app.error_text()!r}",
+    )
+    assert _folder_row(client, name) is None, (
+        "Create on a Public wizard must create NOTHING until the declassify "
+        "confirm is answered — the confirm is the owner's consent to a folder "
+        f"that rests unsealed. Nest row: {_folder_row(client, name)!r}"
+    )
+    names, reseal = b.declassify_warnings()
+    assert names and reseal, (
+        "the wizard's dialog is the owner row's SAME dialog — both consequence "
+        f"lines paint with it: names={names!r} reseal={reseal!r}"
+    )
+
+    # ── 2. The confirm creates the folder public, attested. ──
+    b.confirm_public()
+    row = _await_folder_flags(client, name, audience="public")
+    attestation = row.get("audience_attestation")
+    assert attestation is not None, (
+        "the folder was born public with NO attestation — every verifying "
+        f"seat keeps it sealed. Nest row: {row!r}"
+    )
+    owner = bytes(test_user["signing_key"].verify_key)
+    assert bytes(attestation["owner"]) == owner, (
+        f"attested by {bytes(attestation['owner']).hex()}, not the owner {owner.hex()}"
+    )
+    assert attestation["folder_id"] == row["id"], (
+        f"attests folder {attestation['folder_id']}, the row is {row['id']}"
+    )
+    from nacl.exceptions import BadSignatureError
+    from nacl.signing import VerifyKey
+
+    message = attestation_message(owner, row["id"], name, attestation["counter"])
+    try:
+        VerifyKey(owner).verify(message, bytes(attestation["sig"]))
+    except BadSignatureError:
+        pytest.fail(
+            "the born-public attestation does not verify under the owner's key "
+            f"over (id={row['id']}, name={name!r}, counter={attestation['counter']})"
+        )
+
+    # ── 3. The owner row paints it public, attested for this seat. ──
+    b.wait_for_folder_row(name)
+    b.find_and_expand_folder(name)
+    app.driver.wait_for("folder-audience-select", timeout=_UI_WINDOW_SECS)
+    wait_until(
+        lambda: b.audience_current_value() == "public",
+        _UI_WINDOW_SECS,
+        diagnose=lambda: f"owner row reads {b.audience_current_value()!r}",
+    )
+    assert app.driver.is_absent("folder-audience-unattested"), (
+        "the owner row says this seat cannot confirm the folder was made "
+        "public — the born-public attestation does not verify for its owner"
+    )

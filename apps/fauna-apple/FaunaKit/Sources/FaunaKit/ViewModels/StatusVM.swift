@@ -152,6 +152,16 @@ public class StatusVM {
         await selfAuthoring?.refresh()
     }
 
+    /// **The sign-out's decision** — the sign-out record, written under the
+    /// install base, naming every account the registry lists plus the one this
+    /// window serves (`SignOutResidueSurface.recordSignOut`). Synchronous: the
+    /// gesture calls it right behind its serving question, before its first
+    /// await, and hands the answer to `signOut(sessionState:recorded:ownLock:)`.
+    @discardableResult
+    public func recordSignOut(sessionState: SessionState) -> [String] {
+        SignOutResidueSurface.recordSignOut(servedActor: sessionState.actorId)
+    }
+
     /// Sign out = erase the **whole credential namespace**, every account of it — not the
     /// active identity's two keys (`docs/goal/architecture/long-term-store.md`
     /// § Cleanup contract: *"Under multi-account, 'all three slots' means the whole
@@ -204,20 +214,39 @@ public class StatusVM {
     /// tolerates the still-open handle, so skipping this leaves the engine
     /// writing to an unreachable inode rather than causing a visible failure
     /// here — the same uniformity debt windows' `os error 32` made visible.
-    public func signOut(sessionState: SessionState) async {
+    ///
+    /// ⚠ **The decision is on the disk before the first await**
+    /// (`account-scoping.md` § Erasure follows scope → *The sign-out record is
+    /// on all 7 apps*, decision 1): the sign-out record names every account the
+    /// registry lists plus the one this window serves and owes the wipe, so a
+    /// process killed anywhere after it — inside the stop's budget included —
+    /// is finished by the next launch (`OnboardingVM.launchMayProceed`). The
+    /// gesture writes it itself, right behind its serving question, and hands
+    /// it in as `recorded` (`SignOutSection.confirmSignOut`); a caller with no
+    /// await between its question and this call (the unreadable-index
+    /// start-over) leaves it to the first line here. `ownLock` is the window's
+    /// own instance lock, which it still holds here, put down around the
+    /// finish so its serving question does not meet its own reflection.
+    public func signOut(
+        sessionState: SessionState, recorded: [String]? = nil,
+        ownLock: FfiAccountInstanceLock? = nil
+    ) async {
+        let written = recorded ?? recordSignOut(sessionState: sessionState)
         await api?.stopAccountRuntimeForSignOut()
         await api?.releaseAccountScopedStores()
-        // What still reads back after the credential erase — the only witness this
-        // seat has, since `KeychainStore`'s delete drops its `OSStatus`. It is
-        // recorded beside the filesystem sweep: a sign-out that recorded only the
-        // sweep read as clean over a keychain still holding the identity seed
-        // (`account-scoping.md` § Erasure follows scope). The record is kept under
-        // the install base, so a relaunch still tells the user (§ *the residue
-        // surface*).
-        let credentials = FaunaAccounts.registry().clearAll()
-        let sweep = AccountStateDir.eraseAll()
-        sessionState.signOutResidue = SignOutResidueSurface.record(
-            sweep: sweep, credentials: credentials)
+        // The one routine the launch and Remove Again run too, over the record
+        // written above: the wipe first — the registry's own store, read back —
+        // so if the erase dies partway the identity is already unreachable;
+        // then every recorded account's scopes under the install base and the
+        // store container, with its auxiliary slots; the residue record written
+        // before the sign-out record clears (decisions 2–6). The sync agent was
+        // dismissed by the stop above. What the erase could not remove goes to
+        // the log by path and to the user by count, on the onboarding surface
+        // this hands them (§ *the residue surface*).
+        let outcome = await Task.detached {
+            SignOutResidueSurface.finish(ownLock: ownLock, dismissAgent: false, written: written)
+        }.value
+        sessionState.signOutResidue = outcome.residue
         sessionState.clearAuthenticatedOverride()
         sessionState.secretHex = nil
         sessionState.actorId = nil

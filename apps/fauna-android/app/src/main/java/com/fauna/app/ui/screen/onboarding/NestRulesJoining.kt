@@ -41,8 +41,11 @@ fun NestRulesJoining(summary: NestRulesSummary) {
             modifier = Modifier.testTag(Ids.ONBOARDING_NEST_RULES),
         )
         for (rule in summary.rules) {
+            // A rule this device cannot apply carries its not-applied note on a
+            // second line of the same item (tui `joining_rule_line`).
+            val inert = rule.inert?.let { localized(it).orEmpty() }
             Text(
-                ruleLine(rule),
+                if (inert != null) "${ruleLine(rule)}\n$inert" else ruleLine(rule),
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag(Ids.ONBOARDING_NEST_RULES_ITEM),
             )

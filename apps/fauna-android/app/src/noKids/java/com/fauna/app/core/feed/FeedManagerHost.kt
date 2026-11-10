@@ -11,6 +11,7 @@ import com.fauna.ffi.FfiFeedManager
 import com.fauna.ffi.FfiNestClient
 import com.fauna.ffi.FfiPostBlobHosts
 import com.fauna.ffi.autosaveDebounceMs
+import com.fauna.ffi.connectionStateWord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -120,12 +121,32 @@ class FeedManagerHost @Inject constructor(
         val m = api.feedManager(observer) ?: return null
         if (m !== seen) {
             seen = m
+            m.setSpamMarked(spamMarked)
             _snapshot.value = m.snapshot()
             restoreDrafts(m)
             registerLeaveFlushDoor()
             draftsScope.launch { installRoomPostSeam(m) }
+            feedConnectionWord(m)
         }
         return m
+    }
+
+    private var connectionWordJob: Job? = null
+
+    /**
+     * Feed [m] the connection word the offline gate reads, now and on every
+     * change (`account-offline-mutation.md` § The offline-mutation contract):
+     * the first word wires the device's offline outbox, so a like tapped with
+     * no nest is kept in the account store and sent when the nest is back,
+     * and a control the gate keeps live is exactly a control whose gesture
+     * queues. The word is the shared `connectionStateWord`, never a Kotlin
+     * mapping. One collector, following the current manager.
+     */
+    private fun feedConnectionWord(m: FfiFeedManager) {
+        connectionWordJob?.cancel()
+        connectionWordJob = draftsScope.launch {
+            api.connectionState.collect { state -> m.setConnectionState(connectionStateWord(state)) }
+        }
     }
 
     private var registeredForLifecycle = false
@@ -256,6 +277,24 @@ class FeedManagerHost @Inject constructor(
     // Never uploaded here: the seal depends on the composer's staged audience,
     // which is not known until submit (`FeedVM.submitPost`).
     private var pendingAttachmentBytes: ByteArray? = null
+
+    /**
+     * The reader's post spam marks (`report-sharing.md` § Report capture → *The
+     * post's mark-as-spam verb*), kept so a manager rebuilt later starts with
+     * them — the list's load may land before the manager is built.
+     */
+    @Volatile
+    private var spamMarked: List<String> = emptyList()
+
+    /** Hand the manager the spam marks (its next snapshot folds `spam`@1000 into
+     *  each marked post's labels and notifies) and keep them for a rebuild. */
+    fun setSpamMarked(ids: List<String>) {
+        spamMarked = ids
+        seen?.setSpamMarked(ids)
+    }
+
+    /** The kept spam marks — what an author window minted off the timeline starts with. */
+    fun spamMarked(): List<String> = spamMarked
 
     /** Hold (or, with `null`, drop) a picked file's bytes for [pendingAttachmentBytes]. */
     fun stageAttachmentBytes(bytes: ByteArray?) {

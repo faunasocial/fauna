@@ -52,7 +52,7 @@ pub use folder_keys::{FolderKeyResolver, ResolvedCustody, ResolvedFolderKeys};
 pub use machine::{FolderChannelOwners, MediaMachine, MlsQuery, SettlePolicy};
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use nest_api::{FakeMediaNestApi, MediaNestCall};
-pub use nest_api::{MediaApiError, MediaNestApi};
+pub use nest_api::{ForeignListing, MediaApiError, MediaNestApi};
 #[cfg(feature = "rpc-glue")]
 pub use nest_api::{build_media_machine, build_media_machine_with_folder_keys};
 pub use observer::MediaObserver;

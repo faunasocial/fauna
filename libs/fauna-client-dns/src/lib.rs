@@ -715,6 +715,17 @@ pub struct DnsSnapshot {
     /// [`DnsAction::RefreshCertStatus`] read.
     #[cfg_attr(feature = "uniffi", uniffi(default = []))]
     pub cert_issuance_errors: Vec<CertIssuanceErrorRow>,
+    /// The nest's desired listener names the served cert does not cover under
+    /// a trusted cert right now (wire `CertStatusReply::uncovered_sans`) —
+    /// empty when the served cert covers the whole set. Deployment-level, like
+    /// `cert_issuance_errors`, and set by the same
+    /// [`DnsAction::RefreshCertStatus`] read. The signal a client-issued
+    /// (DNS-01) deployment re-orders on during a primary-domain rename
+    /// ([`Self::domains_needing_auto_renew`]; `tls-certificates.md` § B tier 2
+    /// → *The set carries a rename's hosts, and the nest says what the served
+    /// cert lacks*).
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    pub uncovered_sans: Vec<String>,
 }
 
 impl DnsSnapshot {
@@ -728,6 +739,7 @@ impl DnsSnapshot {
             delegations: Vec::new(),
             cert_statuses: Vec::new(),
             cert_issuance_errors: Vec::new(),
+            uncovered_sans: Vec::new(),
         }
     }
 
@@ -775,14 +787,64 @@ impl DnsSnapshot {
     /// auto-renew (priority #2/#3); the per-app glue owns only the cadence and
     /// the `target_nest_id`. A domain with no `cert_statuses` row yet (status not
     /// refreshed) is conservatively **not** auto-issued. Pure read.
+    ///
+    /// **A rename's uncovered host re-orders too** (`tls-certificates.md` § B
+    /// tier 2 → *The set carries a rename's hosts, and the nest says what the
+    /// served cert lacks*): when [`Self::uncovered_sans`] is non-empty, the first
+    /// domain that can order a cert covering one of those names is also returned
+    /// — see [`Self::domains_ordering_an_uncovered_san`]. Only one: the order
+    /// covers every desired name its credential can publish, so returning every
+    /// such domain would issue N identical certs; and none when an at-risk
+    /// domain already returned is itself such a domain (its order covers them).
     pub fn domains_needing_auto_renew(&self) -> Vec<String> {
-        self.domains
+        let mut out: Vec<String> = self
+            .domains
             .iter()
             .filter(|d| d.auto_renew)
             .filter(|d| {
                 self.cert_statuses
                     .iter()
                     .any(|s| s.domain == d.domain && s.state != CertHealthState::ValidTrusted)
+            })
+            .map(|d| d.domain.clone())
+            .collect();
+        let candidates = self.domains_ordering_an_uncovered_san();
+        if !candidates.iter().any(|c| out.contains(c))
+            && let Some(first) = candidates.into_iter().next()
+        {
+            out.push(first);
+        }
+        out
+    }
+
+    /// The domains whose client-placed order would cover at least one
+    /// [`Self::uncovered_sans`] name, in matrix order: auto-renew on, managed
+    /// ([`DomainView::is_managed`]) and **not** CNAME-delegated (a delegated
+    /// order stays single-name — `order_san_set` — so it can never carry a
+    /// sibling host), with an uncovered name inside a zone of the credential
+    /// covering the domain (the same first-covering-credential pick
+    /// `resolve_issuance_target` makes, and the same `zone_covers` filter
+    /// `order_san_set` applies to the desired set).
+    fn domains_ordering_an_uncovered_san(&self) -> Vec<String> {
+        if self.uncovered_sans.is_empty() {
+            return Vec::new();
+        }
+        self.domains
+            .iter()
+            .filter(|d| d.auto_renew && d.is_managed())
+            .filter(|d| !self.delegations.iter().any(|g| g.domain == d.domain))
+            .filter(|d| {
+                let Some(cred) = self
+                    .credentials
+                    .iter()
+                    .find(|c| c.zones.iter().any(|z| zone_covers(z, &d.domain)))
+                else {
+                    return false;
+                };
+                self.uncovered_sans.iter().any(|name| {
+                    let name = name.trim().to_ascii_lowercase();
+                    cred.zones.iter().any(|z| zone_covers(z, &name))
+                })
             })
             .map(|d| d.domain.clone())
             .collect()
@@ -2250,6 +2312,7 @@ impl DnsManagementMachine {
                 .collect()
         };
         let reply = self.nest.cert_status(domains).await?;
+        let uncovered_sans = reply.uncovered_sans;
         let issuance_errors: Vec<CertIssuanceErrorRow> = reply
             .issuance_errors
             .into_iter()
@@ -2267,6 +2330,7 @@ impl DnsManagementMachine {
             let mut inner = self.inner.lock().expect("snapshot mutex");
             let prior = std::mem::replace(&mut inner.snapshot.cert_statuses, new_rows.clone());
             inner.snapshot.cert_issuance_errors = issuance_errors;
+            inner.snapshot.uncovered_sans = uncovered_sans;
             let primary = inner
                 .snapshot
                 .domains
@@ -4634,8 +4698,12 @@ mod provider_seam {
                 .strip_prefix(FAKE_DNS_OK_PREFIX)
                 .or_else(|| v.strip_prefix(FAKE_DNS_REFUSE_PREFIX))
             {
+                // The zones end at the first `|`; what follows is the planted
+                // foreign records ([`fake_dns_plants_from_token`]).
+                let zones = rest.split('|').next().unwrap_or_default();
                 return Some(
-                    rest.split(',')
+                    zones
+                        .split(',')
                         .map(str::trim)
                         .filter(|z| !z.is_empty())
                         .map(|z| DnsZoneRef {
@@ -4647,6 +4715,62 @@ mod provider_seam {
             }
         }
         None
+    }
+
+    /// The log line [`SentinelDnsProvider::verify`] emits for every foreign
+    /// record a sentinel token plants, followed by `TXT <name> <value>`.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub(crate) const FAKE_DNS_PLANT_WITNESS: &str = "e2e fake DNS provider planted";
+
+    /// The foreign TXT records an accepting sentinel token carries after its
+    /// zones: `fake-dns-ok:<zones>|<name>=<value>|…`, each item split at its
+    /// FIRST `=` (a TXT value keeps its own `=`s). They stand for records some
+    /// other tool left in the zone — another mailer's DKIM selector, a
+    /// verification token at a name Fauna also writes — so an e2e can show a
+    /// managed pass never withdraws what Fauna did not write
+    /// (`dns-management.md` § Records covered). Pure.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub(crate) fn fake_dns_plants_from_token(
+        fields: &[(String, SecretString)],
+    ) -> Vec<(String, String)> {
+        fields
+            .iter()
+            .find_map(|(_k, v)| v.strip_prefix(FAKE_DNS_OK_PREFIX))
+            .map(|rest| {
+                rest.split('|')
+                    .skip(1)
+                    .filter_map(|item| item.split_once('='))
+                    .map(|(name, value)| (name.trim().to_string(), value.to_string()))
+                    .filter(|(name, value)| !name.is_empty() && !value.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Put each planted record into the fake zone that holds its name (the
+    /// zone whose name it ends with, else the first) — idempotent, so a
+    /// re-verify plants nothing twice — logging [`FAKE_DNS_PLANT_WITNESS`].
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    fn plant_foreign_records(zones: &[DnsZoneRef], plants: &[(String, String)]) {
+        let Some(first) = zones.first() else {
+            return;
+        };
+        let mut fake = FAKE_ZONE.lock().expect("fake zone");
+        for (name, value) in plants {
+            let zone = zones
+                .iter()
+                .find(|z| name == &z.name || name.ends_with(&format!(".{}", z.name)))
+                .unwrap_or(first);
+            let values = fake.entry(fake_zone_key(zone, name, "TXT")).or_default();
+            if !values.contains(value) {
+                values.push(value.clone());
+                tracing::info!(
+                    target: "fauna_dns",
+                    "{FAKE_DNS_PLANT_WITNESS} TXT {name} {value} into zone {}",
+                    zone.name
+                );
+            }
+        }
     }
 
     /// e2e-only [`DnsProviderSeam`] decorator over the real [`RpcDnsProvider`]:
@@ -4738,6 +4862,7 @@ mod provider_seam {
             fields: &[(String, SecretString)],
         ) -> Result<Vec<DnsZoneRef>, DnsProviderError> {
             if let Some(zones) = fake_dns_zones_from_token(fields) {
+                plant_foreign_records(&zones, &fake_dns_plants_from_token(fields));
                 return Ok(zones);
             }
             self.real.verify(provider_id, fields).await
@@ -4912,6 +5037,53 @@ mod provider_seam {
                 zones.iter().map(|z| z.name.as_str()).collect::<Vec<_>>(),
                 vec!["example.com", "sub.example.org"]
             );
+        }
+
+        /// A sentinel token may carry foreign TXT records after its zones
+        /// (`|name=value` items, split at the FIRST `=` so a value keeps its
+        /// own): the zones stay what they were, and verifying the credential
+        /// plants each record in the fake zone the way another tool would have
+        /// left it — what the managed clean-up e2e needs to show those records
+        /// are never withdrawn.
+        #[tokio::test]
+        async fn sentinel_token_plants_foreign_records_at_verify() {
+            let seam = SentinelDnsProvider {
+                real: Arc::new(super::RpcDnsProvider::new()),
+            };
+            let fields = vec![(
+                "api-token".to_string(),
+                SecretString::from(
+                    "fake-dns-ok:plant.test|theirs._domainkey.m.plant.test=v=DKIM1; p=THEIRS\
+                     |m.plant.test=site-verification=abc",
+                ),
+            )];
+            let zones = seam.verify("cloudflare", &fields).await.unwrap();
+            assert_eq!(
+                zones.iter().map(|z| z.name.as_str()).collect::<Vec<_>>(),
+                ["plant.test"],
+                "the planted items are not zones"
+            );
+            let at = |name: &'static str| {
+                let seam = &seam;
+                let fields = &fields;
+                let zone = &zones[0];
+                async move {
+                    seam.find_records("cloudflare", fields, zone, name, "TXT")
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .map(|r| r.value)
+                        .collect::<Vec<_>>()
+                }
+            };
+            assert_eq!(
+                at("theirs._domainkey.m.plant.test").await,
+                ["v=DKIM1; p=THEIRS"]
+            );
+            assert_eq!(at("m.plant.test").await, ["site-verification=abc"]);
+            // A second verify plants nothing twice.
+            seam.verify("cloudflare", &fields).await.unwrap();
+            assert_eq!(at("m.plant.test").await, ["site-verification=abc"]);
         }
 
         #[test]
@@ -5515,6 +5687,9 @@ mod tests {
         /// Seeded `CertStatusReply::issuance_errors` — the nest's failing
         /// HTTP-01 orders.
         issuance_errors: StdMutex<Vec<fauna_protocol::tls::CertIssuanceError>>,
+        /// Seeded `CertStatusReply::uncovered_sans` — the desired names the
+        /// served cert lacks (a rename's `mail.<new>`).
+        uncovered_sans: StdMutex<Vec<String>>,
         /// Every `cert_status` call's requested domains, in order — lets a test
         /// observe that `issue_cert` reads the SAN set without letting the order
         /// reach a CA.
@@ -5593,6 +5768,7 @@ mod tests {
             Ok(CertStatusReply {
                 desired_sans: self.desired_sans.lock().unwrap().clone(),
                 issuance_errors: self.issuance_errors.lock().unwrap().clone(),
+                uncovered_sans: self.uncovered_sans.lock().unwrap().clone(),
                 extra: Default::default(),
                 statuses: domains
                     .into_iter()
@@ -7142,6 +7318,151 @@ mod tests {
             vec!["floor.example".to_string(), "expiring.example".to_string()],
             "only at-risk ∧ auto-renew-on domains with a status row are auto-issued"
         );
+    }
+
+    // ── A rename's uncovered host re-orders (issuer-independence, client half) ──
+    //
+    // `tls-certificates.md` § B tier 2 → *The set carries a rename's hosts, and
+    // the nest says what the served cert lacks*; § C.3. Every domain row reads
+    // `ValidTrusted` (the new apex is already covered) yet the nest reports
+    // `mail.new.example.com` uncovered — the at-risk test alone never fires.
+
+    fn hetzner_summary(zones: &[&str]) -> CredentialSummary {
+        CredentialSummary {
+            provider_id: "hetzner".into(),
+            zones: zones.iter().map(|z| (*z).to_string()).collect(),
+            label: "Hetzner".into(),
+        }
+    }
+
+    fn delegation_view(domain: &str) -> DelegationView {
+        DelegationView {
+            domain: domain.into(),
+            cname: DnsRecordRow {
+                name: format!("_acme-challenge.{domain}"),
+                record_type: "CNAME".into(),
+                expected: format!("_acme-challenge.{domain}.controlled.example"),
+                ttl_seconds: 300,
+                verdict: None,
+            },
+        }
+    }
+
+    /// The rename snapshot: `new.example.com` managed with auto-renew on, every
+    /// row trusted, `mail.new.example.com` uncovered, one credential over
+    /// `example.com`.
+    fn rename_snapshot() -> DnsSnapshot {
+        DnsSnapshot {
+            domains: vec![domain_view_auto("new.example.com", MODE_MANAGED, true)],
+            credentials: vec![hetzner_summary(&["example.com"])],
+            cert_statuses: vec![cert_row("new.example.com", CertHealthState::ValidTrusted)],
+            uncovered_sans: vec!["mail.new.example.com".into()],
+            ..DnsSnapshot::empty()
+        }
+    }
+
+    /// (a) A managed, non-delegated, auto-renew-on domain whose credential zone
+    /// covers the uncovered name is returned, though its own row is trusted.
+    #[test]
+    fn auto_renew_reorders_for_an_uncovered_rename_host() {
+        assert_eq!(
+            rename_snapshot().domains_needing_auto_renew(),
+            vec!["new.example.com".to_string()]
+        );
+    }
+
+    /// (b) A CNAME-delegated domain's order stays single-name, so it can never
+    /// carry the sibling host — not returned.
+    #[test]
+    fn auto_renew_skips_a_delegated_domain_for_an_uncovered_host() {
+        let snap = DnsSnapshot {
+            delegations: vec![delegation_view("new.example.com")],
+            ..rename_snapshot()
+        };
+        assert!(snap.domains_needing_auto_renew().is_empty());
+    }
+
+    /// (c) Auto-renew opted out → not returned.
+    #[test]
+    fn auto_renew_off_ignores_an_uncovered_host() {
+        let snap = DnsSnapshot {
+            domains: vec![domain_view_auto("new.example.com", MODE_MANAGED, false)],
+            ..rename_snapshot()
+        };
+        assert!(snap.domains_needing_auto_renew().is_empty());
+    }
+
+    /// (d) An uncovered name outside every credential zone cannot be published,
+    /// so no order would cover it — not returned. A manual (non-managed) domain
+    /// is not returned either.
+    #[test]
+    fn auto_renew_ignores_an_uncovered_host_no_credential_can_publish() {
+        let snap = DnsSnapshot {
+            uncovered_sans: vec!["mail.other.example".into()],
+            ..rename_snapshot()
+        };
+        assert!(snap.domains_needing_auto_renew().is_empty());
+        let manual = DnsSnapshot {
+            domains: vec![domain_view_auto("new.example.com", MODE_MANUAL, true)],
+            ..rename_snapshot()
+        };
+        assert!(manual.domains_needing_auto_renew().is_empty());
+    }
+
+    /// (e) Two managed domains in the same zone → exactly one order: the order
+    /// covers every desired name the credential can publish, so N domains would
+    /// issue N identical certs. And an at-risk domain the at-risk test already
+    /// returns, under the same credential, is that one order.
+    #[test]
+    fn auto_renew_returns_one_domain_for_an_uncovered_host() {
+        let snap = DnsSnapshot {
+            domains: vec![
+                domain_view_auto("new.example.com", MODE_MANAGED, true),
+                domain_view_auto("old.example.com", MODE_MANAGED, true),
+            ],
+            cert_statuses: vec![
+                cert_row("new.example.com", CertHealthState::ValidTrusted),
+                cert_row("old.example.com", CertHealthState::ValidTrusted),
+            ],
+            ..rename_snapshot()
+        };
+        assert_eq!(
+            snap.domains_needing_auto_renew(),
+            vec!["new.example.com".to_string()]
+        );
+        let at_risk = DnsSnapshot {
+            cert_statuses: vec![
+                cert_row("new.example.com", CertHealthState::ValidTrusted),
+                cert_row("old.example.com", CertHealthState::Expiring),
+            ],
+            ..snap
+        };
+        assert_eq!(
+            at_risk.domains_needing_auto_renew(),
+            vec!["old.example.com".to_string()]
+        );
+    }
+
+    /// The decision runs on what `refresh_cert_status` copied: the nest's
+    /// `uncovered_sans` reaches the snapshot, and the next read without it
+    /// clears it.
+    #[tokio::test]
+    async fn refresh_cert_status_carries_the_uncovered_sans() {
+        let nest = Arc::new(FakeNest {
+            domains: StdMutex::new(vec![domain("new.example.com")]),
+            uncovered_sans: StdMutex::new(vec!["mail.new.example.com".into()]),
+            ..Default::default()
+        });
+        let m = DnsManagementMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        m.dispatch(DnsAction::RefreshCertStatus).await.unwrap();
+        assert_eq!(
+            m.snapshot().uncovered_sans,
+            vec!["mail.new.example.com".to_string()]
+        );
+        nest.uncovered_sans.lock().unwrap().clear();
+        m.dispatch(DnsAction::RefreshCertStatus).await.unwrap();
+        assert!(m.snapshot().uncovered_sans.is_empty());
     }
 
     // ── The shared background auto-renew tick (§ C.3) ────────────────
@@ -9804,6 +10125,31 @@ mod tests {
         assert_eq!(
             order_san_set("example.net", nest_wants(), &cred, &delegated),
             vec!["example.net".to_string()]
+        );
+
+        // A primary-domain rename (issuer-independence): the nest's set gains
+        // `mail.<new>` while grace keeps `mail.<old>` — both land in the order
+        // the auto-renew decision triggers from the new apex.
+        let rename_cred = DnsProviderCredential {
+            zones: vec![zone("z", "example.com")],
+            ..cred.clone()
+        };
+        assert_eq!(
+            order_san_set(
+                "new.example.com",
+                vec![
+                    "new.example.com".into(),
+                    "mail.new.example.com".into(),
+                    "mail.old.example.com".into(),
+                ],
+                &rename_cred,
+                &[]
+            ),
+            vec![
+                "new.example.com".to_string(),
+                "mail.new.example.com".to_string(),
+                "mail.old.example.com".to_string(),
+            ]
         );
 
         // An empty desired set → the clicked domain alone.

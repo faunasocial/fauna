@@ -222,12 +222,21 @@ class ContactsVM @Inject constructor(
         }
     }
 
+    /**
+     * Accept [peerId]'s knock. With no nest the accept is queued in the device's
+     * outbox (`account-offline-mutation.md`): the knock leaves the local list and
+     * no roster row is added — the nest's read after the drain is the word
+     * (tui's rule); sent, the knocks and roster are re-read.
+     */
     fun acceptKnock(peerId: String) {
         viewModelScope.launch {
             try {
                 val actorId = actorIdHex() ?: return@launch
-                api.acceptKnock(actorId, peerId)
-                refresh()
+                if (api.acceptKnockOrQueue(actorId, peerId)) {
+                    knockDao.deleteBySender(peerId)
+                } else {
+                    refresh()
+                }
             } catch (e: Exception) { errorMessage.value = e.message }
         }
     }

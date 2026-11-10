@@ -277,6 +277,9 @@ public final class DevicesMachineVM {
         }
         connectError = nil
         machine = built
+        // The Settings pending-actions row names an automatic prune's folder
+        // off this machine (`settings.md` § Pending actions).
+        FolderRoster.publish(built)
         if wizardOpenHeld {
             logMessage(level: .info, target: "fauna.devices.vm",
                        message: "configure: machine built — opening the wizard a tap asked for during the build")

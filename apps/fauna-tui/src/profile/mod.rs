@@ -196,8 +196,19 @@ pub struct ProfileState {
     pictures: HeaderPictures,
     /// The header pictures' rasterized art, once fetched ([`fetch_pictures`]).
     art: HeaderArt,
-    /// OTHER: whether the follow subscribe landed (label Follow → Following).
-    followed: bool,
+    /// OTHER: the viewer's own Follow ⇄ Following press for the CURRENT open —
+    /// `Some(true)` once a follow landed, `Some(false)` once an unfollow was
+    /// sent. It outranks [`Self::status`] for the label: an unfollow returns
+    /// `Queued` and the status still names the tier until the author's client
+    /// commits the leave, so the flip is the optimistic half and the status
+    /// re-read the truth (`subscriptions.md` § The free followers tier —
+    /// follow and unfollow, rule 4). Cleared by [`Self::reset_for_open`].
+    follow_flip: Option<bool>,
+    /// OTHER: the paid-tier unfollow confirm is armed — the first press on
+    /// *Following* while the status names a paid tier relabelled the button
+    /// (`profile.unfollow_confirm`); the second press leaves. Any other profile
+    /// gesture, a fresh open, or the press's own reply disarms it.
+    unfollow_armed: bool,
     /// The actor id `profile-actor-id-copy-btn` last put on the clipboard for
     /// this open, painted back onto the button as its `copied` attr — the value
     /// that reached `copy_to_clipboard`, never re-derived, so a test can assert
@@ -225,8 +236,12 @@ pub struct ProfileState {
     block_user_authored: bool,
     /// OTHER Tiers tab: the creator's offered tiers.
     offers: Vec<TierItem>,
-    /// OTHER Tiers tab: the viewer's confirmed held tier (`status.get`).
-    status_tier: Option<String>,
+    /// OTHER: the viewer's `status.get` reply for this author — read at the
+    /// open, re-read by the Tiers tab and after every follow, unfollow and
+    /// subscribe. `None` until a read lands (or when it failed). Its `tier` is
+    /// the Tiers tab's confirmed held tier; with `follow_pending` it drives the
+    /// follow toggle through `format::is_following`.
+    status: Option<FollowStatus>,
     /// OTHER Tiers tab: a transient post-click `Queued` flag for one tier
     /// (encrypted-mode subscribe), shown until the next `status.get` confirms it.
     pending_tier: Option<String>,
@@ -323,6 +338,28 @@ impl ProfileState {
         self.viewing.as_deref().unwrap_or(&self.self_actor_id)
     }
 
+    /// The Tiers tab's confirmed held tier — the status read's `tier`.
+    fn status_tier(&self) -> Option<&str> {
+        self.status.as_ref().and_then(|s| s.tier.as_deref())
+    }
+
+    /// Whether `profile-follow-button` reads *Following*: the viewer's own
+    /// press for this open, else the shared derivation over the status read
+    /// (`format::is_following`); *Follow* until either says otherwise.
+    fn is_following(&self) -> bool {
+        self.follow_flip.unwrap_or_else(|| {
+            self.status
+                .as_ref()
+                .is_some_and(|s| format::is_following(s.tier.as_deref(), s.follow_pending))
+        })
+    }
+
+    /// Whether a press on *Following* is confirm-gated: the status names a paid
+    /// tier, which the unfollow ends too (`format::unfollow_ends_paid_tier`).
+    fn unfollow_needs_confirm(&self) -> bool {
+        format::unfollow_ends_paid_tier(self.status_tier())
+    }
+
     /// Reset the per-view transient state on (re)open — a fresh target must not
     /// inherit the prior actor's header/offers/block state (linux rebuilds the
     /// whole view per `open_profile`). Called by [`App::open_profile`].
@@ -332,7 +369,8 @@ impl ProfileState {
         self.header_name = None;
         self.pictures = HeaderPictures::default();
         self.art = HeaderArt::default();
-        self.followed = false;
+        self.follow_flip = None;
+        self.unfollow_armed = false;
         self.copied = None;
         self.is_blocked = None;
         // Retire whatever the previous open still has in flight, and hand the
@@ -341,7 +379,7 @@ impl ProfileState {
         self.open_epoch = self.open_epoch.wrapping_add(1);
         self.block_user_authored = false;
         self.offers.clear();
-        self.status_tier = None;
+        self.status = None;
         self.pending_tier = None;
         self.author.reset();
         self.actor_home = None;
@@ -419,6 +457,29 @@ pub fn set_self_address(st: &mut ProfileState, address: Option<String>) {
 ///
 /// `blobs` is the session's post-blob host pick (`crate::feed::blob_hosts`),
 /// which the header's pictures are fetched through once the name has landed.
+/// The two fields of a `fauna.subscriptions.status.get` reply the page reads:
+/// the viewer's held tier at the author and whether a follow is pending.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FollowStatus {
+    pub tier: Option<String>,
+    pub follow_pending: bool,
+}
+
+/// `status.get(author)` folded to [`FollowStatus`]; `None` when the read fails
+/// (a malformed id or a nest error), so a failure never reads as "not
+/// following".
+async fn fetch_follow_status(nest: &Arc<NestClient>, author: &str) -> Option<FollowStatus> {
+    let author_id = ActorId::from_hex(author).ok()?;
+    let reply = SubscriptionsClient::new(Arc::clone(nest))
+        .status_get(author_id)
+        .await
+        .ok()?;
+    Some(FollowStatus {
+        tier: reply.tier,
+        follow_pending: reply.follow_pending,
+    })
+}
+
 pub fn spawn_open_refresh(
     state: &ProfileState,
     tx: &UnboundedSender<UiMessage>,
@@ -481,6 +542,14 @@ pub fn spawn_open_refresh(
             let _ = tx.send(UiMessage::Data(DataMessage::Page(
                 session_generation,
                 crate::app::PageOutcome::Profile(Outcome::BlockState { epoch, blocked }),
+            )));
+            // The follow toggle's state: whether the viewer already follows
+            // (or has a follow pending), and whether the unfollow would end a
+            // paid tier — the open reads it, so *Following* is pressable at once.
+            let status = fetch_follow_status(&nest, &actor_id).await;
+            let _ = tx.send(UiMessage::Data(DataMessage::Page(
+                session_generation,
+                crate::app::PageOutcome::Profile(Outcome::FollowStatus { epoch, status }),
             )));
             // The OTHER header holds no handle: re-read the contact roster now,
             // so a contact accepted a moment ago is named by the roster's
@@ -673,11 +742,14 @@ pub enum Action {
     ShowTiers,
     /// `subscription-offer-subscribe-button[i]` — subscribe to that tier.
     Subscribe(String),
-    /// `subscription-offer-payment-link[i]` — open the offer's external
-    /// `payment_url` in the OS browser (off-platform checkout). The money
-    /// plane's buyer half, with the offer row's link that paints it.
+    /// `subscription-offer-payment-link[i]` — subscribe to the tier the link
+    /// sells FIRST, then open the offer's external checkout in the OS browser,
+    /// the URL carrying the buyer's actor id for a host the shared rule names
+    /// (`SubscriptionsClient::subscribe_and_checkout`, `monetization.md` §
+    /// Pillar 3 → *Buyer↔actor binding (Q4)*, the Q13 rules (1) and (2)). The
+    /// money plane's buyer half, with the offer row's link that paints it.
     #[cfg(feature = "payments")]
-    OpenPaymentLink(String),
+    OpenPaymentLink { tier: String, url: String },
 
     // ── OTHER private section ([`private`]) ─────────────────────────────
     /// `profile-label-add-button` — stage the typed label.
@@ -777,8 +849,14 @@ impl Action {
         match self {
             Action::SaveEdit => Some("fauna.profile.set"),
             // Following IS a subscription to the author's `followers` tier
-            // (`Op::Follow` — `subscribe(author, "followers")`).
+            // (`Op::Follow` — `subscribe(author, "followers")`); the same
+            // toggle's unfollow (`Op::Unfollow`) is its online-only twin,
+            // `fauna.subscriptions.unsubscribe`, gated the same way.
             Action::Follow | Action::Subscribe(_) => Some("fauna.subscriptions.subscribe"),
+            // The payment link subscribes before it opens the checkout (Q13
+            // rule (1)) — the same online-only write.
+            #[cfg(feature = "payments")]
+            Action::OpenPaymentLink { .. } => Some("fauna.subscriptions.subscribe"),
             // The knock rides `fauna.inbox.send`, the ask its family twin —
             // the same kinds the contacts page's pair sends.
             Action::RequestContact => Some("fauna.inbox.send"),
@@ -813,12 +891,8 @@ impl Action {
             Action::Post(action) => action.wire_kind(),
 
             // Local. Clipboard writes, tab switches whose refetch is a `Read`,
-            // the edit/tier/provider form buffers, the Start-DM nav glue
-            // (`start_dm` — "pure nav glue, no new kind"), and the OS handoff
-            // of a payment URL (its own arm, so the flavor without the
-            // variant compiles the list unchanged).
-            #[cfg(feature = "payments")]
-            Action::OpenPaymentLink(_) => None,
+            // the edit/tier/provider form buffers and the Start-DM nav glue
+            // (`start_dm` — "pure nav glue, no new kind").
             Action::Copy
             | Action::OpenEdit
             | Action::CancelEdit
@@ -857,6 +931,11 @@ impl Action {
 }
 
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
+    // An armed unfollow confirm answers only its own button's next press: any
+    // other gesture on the page disarms it.
+    if !matches!(action, Action::Follow) {
+        app.profile.unfollow_armed = false;
+    }
     // Start-DM needs `app.conversations` + `app.page`, so it can't run under the
     // `&mut app.profile` borrow below — handle it first (pure nav glue, no op).
     if let Action::StartDm = action {
@@ -885,6 +964,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::Post(action) => return posts::route(app, action),
         _ => {}
     }
+    // The device's outbox, lent to the knock send's identity door (`None`
+    // before the account store is ready: the knock sends as it always did).
+    let queue = app
+        .account_outbox
+        .clone()
+        .map(|outbox| outbox as Arc<dyn fauna_protocol::offline_intent::OfflineIntentQueue>);
     // Whom this identity succeeded from, per the account registry — the only
     // evidence that admits a stored base signed by someone else. Read before
     // the page-state borrow below, and only for the one action that signs.
@@ -989,7 +1074,6 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 links: edit
                     .links
                     .iter()
-                    .filter(|(l, u)| !l.trim().is_empty() || !u.trim().is_empty())
                     .map(|(l, u)| ProfileLink {
                         label: l.clone(),
                         uri: u.clone(),
@@ -1000,12 +1084,36 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 audience: edit.audience_edit,
             })
         }
-        Action::Follow => Some(Op::Follow {
-            nest: st.nest.clone()?,
-            secret: st.secret.clone()?,
-            author: st.viewing.clone()?,
-            home_nest_url: st.actor_home.clone(),
-        }),
+        // The Follow ⇄ Following toggle (`subscriptions.md` § The free
+        // followers tier — follow and unfollow, rule 4): *Follow* subscribes;
+        // *Following* unfollows at once for a free follower, and behind a
+        // second press when the status names a paid tier, which the leave ends
+        // too — the first press only relabels the button with the cost.
+        Action::Follow => {
+            let (nest, secret, author) =
+                (st.nest.clone()?, st.secret.clone()?, st.viewing.clone()?);
+            let home_nest_url = st.actor_home.clone();
+            if !st.is_following() {
+                st.unfollow_armed = false;
+                return Some(Op::Follow {
+                    nest,
+                    secret,
+                    author,
+                    home_nest_url,
+                });
+            }
+            if st.unfollow_needs_confirm() && !st.unfollow_armed {
+                st.unfollow_armed = true;
+                return None;
+            }
+            st.unfollow_armed = false;
+            Some(Op::Unfollow {
+                nest,
+                secret,
+                author,
+                home_nest_url,
+            })
+        }
         Action::ToggleBlock => Some(Op::ToggleBlock {
             nest: st.nest.clone()?,
             actor_id: st.viewing.clone()?,
@@ -1021,6 +1129,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 secret: st.secret.as_ref()?.to_array(),
                 recipient: st.viewing.clone()?,
                 recipient_nest_url: st.actor_home.clone(),
+                queue,
             })
         }
         Action::AskGuardian => {
@@ -1058,21 +1167,34 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 secret: st.secret.clone()?,
                 author: st.viewing.clone()?,
                 tier,
+                home_nest_url: st.actor_home.clone(),
+                checkout: None,
             })
         }
         // Refused for a non-`https` scheme via the shared `fauna_core::
         // subscription::is_safe_payment_url` guard (F-CL2 anti-phishing-redirect
         // class) — author-supplied content, same check the feed's
-        // `gated-post-payment-link` applies.
+        // `gated-post-payment-link` applies. A safe link is the Subscribe with
+        // the checkout riding it: the intent first, then the browser (Q13
+        // rule (1)), under the same optimistic pending transient.
         #[cfg(feature = "payments")]
-        Action::OpenPaymentLink(url) => {
-            if fauna_core::subscription::is_safe_payment_url(&url) {
-                crate::os_open::open(&url);
-            } else {
+        Action::OpenPaymentLink { tier, url } => {
+            if !fauna_core::subscription::is_safe_payment_url(&url) {
                 app.errors
                     .insert(Page::Profile, s::UNSAFE_PAYMENT_URL.to_string());
+                return None;
             }
-            None
+            let (nest, secret, author) =
+                (st.nest.clone()?, st.secret.clone()?, st.viewing.clone()?);
+            st.pending_tier = Some(tier.clone());
+            Some(Op::Subscribe {
+                nest,
+                secret,
+                author,
+                tier,
+                home_nest_url: st.actor_home.clone(),
+                checkout: Some(url),
+            })
         }
 
         // ── SELF Tiers tab §§1–5 ────────────────────────────────────────
@@ -1193,8 +1315,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         #[cfg(feature = "payments")]
         Action::SetProviderFormKind(kind) => {
+            // One config per kind: picking a kind that is already configured
+            // edits that provider, so its saved product (not a secret) is
+            // pre-filled; a kind with no config starts empty. The secret is
+            // never pre-filled — the list reply does not carry it.
+            let saved_product = st
+                .author
+                .providers
+                .iter()
+                .find(|p| p.kind == kind)
+                .and_then(|p| p.product_ref.clone())
+                .unwrap_or_default();
             if let Some(f) = st.author.provider_form.as_mut() {
                 f.kind = kind;
+                f.product = saved_product;
             }
             None
         }
@@ -1358,6 +1492,16 @@ pub enum Op {
         author: String,
         home_nest_url: Option<String>,
     },
+    /// `unsubscribe(author, "followers")` — the unfollow, a leave at the
+    /// followers floor (ending every tier held above it), across nests when the
+    /// author's home is another nest
+    /// (`SubscriptionsClient::unsubscribe_across_nests`, the follow's own slot).
+    Unfollow {
+        nest: Arc<NestClient>,
+        secret: SecretArray32,
+        author: String,
+        home_nest_url: Option<String>,
+    },
     /// `knocks_block` / `knocks_unblock`.
     ToggleBlock {
         nest: Arc<NestClient>,
@@ -1372,6 +1516,9 @@ pub enum Op {
         secret: [u8; 32],
         recipient: String,
         recipient_nest_url: Option<String>,
+        /// The device's outbox ([`App::account_outbox`]) — the contacts
+        /// page's identity door, lent the same way.
+        queue: Option<Arc<dyn fauna_protocol::offline_intent::OfflineIntentQueue>>,
     },
     /// The web-origin read (`crate::settings::read_web_page`) the §4 return-URL
     /// display builds on — the same read the feed's ⋯ overflow hydrates, folded
@@ -1390,12 +1537,20 @@ pub enum Op {
         nest: Arc<NestClient>,
         author: String,
     },
-    /// `subscribe(author, tier)` → refetch offers.
+    /// `subscribe(author, tier)` → refetch offers — across nests when the
+    /// page's [`ProfileState::actor_home`] names another nest
+    /// (`SubscriptionsClient::subscribe_across_nests`). With `checkout` set
+    /// (`subscription-offer-payment-link`) it is
+    /// `SubscriptionsClient::subscribe_and_checkout`: the subscribe first, then
+    /// the composed checkout URL handed to the OS; a refused subscribe opens
+    /// nothing.
     Subscribe {
         nest: Arc<NestClient>,
         secret: SecretArray32,
         author: String,
         tier: String,
+        home_nest_url: Option<String>,
+        checkout: Option<String>,
     },
 
     // ── SELF Tiers tab §§1–5 ────────────────────────────────────────────
@@ -1513,8 +1668,19 @@ pub enum Outcome {
         pictures: HeaderPictures,
         art: Box<HeaderArt>,
     },
-    /// The follow subscribe landed (label → Following).
-    Followed,
+    /// The follow subscribe landed (label → Following), with the status
+    /// re-read after it.
+    Followed { status: Option<FollowStatus> },
+    /// The unfollow was sent (label → Follow — optimistic: a `Queued` leave
+    /// holds the tier until the author's client commits it), with the status
+    /// re-read after it.
+    Unfollowed { status: Option<FollowStatus> },
+    /// The open-time `status.get` read, with the [`ProfileState::open_epoch`]
+    /// it was issued under.
+    FollowStatus {
+        epoch: u64,
+        status: Option<FollowStatus>,
+    },
     /// The initial OTHER block-toggle state (a background open-time read), with
     /// the [`ProfileState::open_epoch`] it was issued under.
     ///
@@ -1546,16 +1712,16 @@ pub enum Outcome {
     /// The ask itself failed (cap reached, peer blocked, knob off — typed
     /// refusals the ward reads verbatim).
     ContactRequestFailed(String),
-    /// A fresh offers list + the viewer's held tier.
+    /// A fresh offers list + the viewer's status read.
     Offers {
         offers: Vec<TierItem>,
-        status_tier: Option<String>,
+        status: Option<FollowStatus>,
     },
     /// A subscribe landed; carries the refetched offers/status + whether the
     /// nest queued it (encrypted mode) so the transient pending flag can settle.
     Subscribed {
         offers: Vec<TierItem>,
-        status_tier: Option<String>,
+        status: Option<FollowStatus>,
         tier: String,
         queued: bool,
     },
@@ -1667,12 +1833,34 @@ impl Op {
                     return Outcome::Failed("follow: malformed actor id".into());
                 };
                 let kp = ActorKeypair::from_secret(secret.to_array());
-                match SubscriptionsClient::new(nest)
+                match SubscriptionsClient::new(Arc::clone(&nest))
                     .subscribe_across_nests(author_id, FOLLOWERS_TIER, &kp, home_nest_url)
                     .await
                 {
-                    Ok(_) => Outcome::Followed,
+                    Ok(_) => Outcome::Followed {
+                        status: fetch_follow_status(&nest, &author).await,
+                    },
                     Err(e) => Outcome::Failed(format!("follow: {e}")),
+                }
+            }
+            Op::Unfollow {
+                nest,
+                secret,
+                author,
+                home_nest_url,
+            } => {
+                let Ok(author_id) = ActorId::from_hex(&author) else {
+                    return Outcome::Failed("unfollow: malformed actor id".into());
+                };
+                let kp = ActorKeypair::from_secret(secret.to_array());
+                match SubscriptionsClient::new(Arc::clone(&nest))
+                    .unsubscribe_across_nests(author_id, FOLLOWERS_TIER, &kp, home_nest_url)
+                    .await
+                {
+                    Ok(_) => Outcome::Unfollowed {
+                        status: fetch_follow_status(&nest, &author).await,
+                    },
+                    Err(e) => Outcome::Failed(format!("unfollow: {e}")),
                 }
             }
             Op::ToggleBlock {
@@ -1697,9 +1885,11 @@ impl Op {
                 secret,
                 recipient,
                 recipient_nest_url,
+                queue,
             } => {
-                let result = crate::contacts::send_knock(
+                let result = crate::contacts::send_knock_or_queue(
                     nest,
+                    queue.as_deref(),
                     &node_url,
                     secret,
                     recipient.clone(),
@@ -1723,10 +1913,7 @@ impl Op {
                 }
             }
             Op::LoadOffers { nest, author } => match fetch_offers(&nest, &author).await {
-                Ok((offers, status_tier)) => Outcome::Offers {
-                    offers,
-                    status_tier,
-                },
+                Ok((offers, status)) => Outcome::Offers { offers, status },
                 Err(e) => Outcome::Failed(e),
             },
             Op::Subscribe {
@@ -1734,15 +1921,33 @@ impl Op {
                 secret,
                 author,
                 tier,
+                home_nest_url,
+                checkout,
             } => {
                 let Ok(author_id) = ActorId::from_hex(&author) else {
                     return Outcome::Failed("subscribe: malformed actor id".into());
                 };
                 let kp = ActorKeypair::from_secret(secret.to_array());
-                let queued = match SubscriptionsClient::new(Arc::clone(&nest))
-                    .subscribe_publishing_ek(author_id, tier.clone(), &kp)
-                    .await
-                {
+                let subs = SubscriptionsClient::new(Arc::clone(&nest));
+                let reply = match checkout {
+                    // The payment link: intent first, then the browser.
+                    Some(url) => subs
+                        .subscribe_and_checkout(author_id, tier.clone(), &url, &kp, home_nest_url)
+                        .await
+                        .map(|open| {
+                            open.map(|open| {
+                                crate::os_open::open(&open.url);
+                                open.reply
+                            })
+                            // Unsafe (refused before the op): nothing sent.
+                            .unwrap_or(SubscribeReply::Unknown)
+                        }),
+                    None => {
+                        subs.subscribe_across_nests(author_id, tier.clone(), &kp, home_nest_url)
+                            .await
+                    }
+                };
+                let queued = match reply {
                     Ok(SubscribeReply::Approved { .. }) => false,
                     // An outcome a newer nest added: sent, state unknown — the
                     // re-read below decides what to show, never a guess.
@@ -1751,9 +1956,9 @@ impl Op {
                 };
                 // Re-read authoritatively (linux's refresh-after-subscribe).
                 match fetch_offers(&nest, &author).await {
-                    Ok((offers, status_tier)) => Outcome::Subscribed {
+                    Ok((offers, status)) => Outcome::Subscribed {
                         offers,
-                        status_tier,
+                        status,
                         tier,
                         queued,
                     },
@@ -1906,8 +2111,11 @@ impl Op {
                 // No client-side validation: the nest rejects unknown kinds,
                 // dangling tiers and empty secrets with typed `fauna.payments.*`
                 // errors that surface on the shared error label (linux's shape).
+                // The product is sent as shown — `Some(value)`, empty included
+                // — so the saved mapping is always what the creator last saw
+                // (an emptied field clears it; `None` would keep it).
                 match PaymentsClient::new(Arc::clone(&nest))
-                    .providers_set(form.kind, form.secret, form.tier)
+                    .providers_set(form.kind, form.secret, form.tier, Some(form.product))
                     .await
                 {
                     Ok(_) => author_snapshot(&nest, &roster_tier).await,
@@ -2205,15 +2413,14 @@ async fn fetch_block_state(nest: &Arc<NestClient>, actor_id: &str) -> bool {
 async fn fetch_offers(
     nest: &Arc<NestClient>,
     author: &str,
-) -> Result<(Vec<TierItem>, Option<String>), String> {
+) -> Result<(Vec<TierItem>, Option<FollowStatus>), String> {
     let author_id = ActorId::from_hex(author).map_err(|e| format!("offers: bad actor id: {e}"))?;
     let client = SubscriptionsClient::new(Arc::clone(nest));
     let offers = client
         .offers_list(author_id)
         .await
         .map_err(|e| format!("load offers: {e}"))?;
-    let status_tier = client.status_get(author_id).await.ok().and_then(|r| r.tier);
-    Ok((offers, status_tier))
+    Ok((offers, fetch_follow_status(nest, author).await))
 }
 
 /// Fold an outcome back into the page — one function for both dispatch paths.
@@ -2272,9 +2479,24 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             st.art = *art;
             app.errors.remove(&Page::Profile);
         }
-        Outcome::Followed => {
-            st.followed = true;
+        Outcome::Followed { status } => {
+            st.follow_flip = Some(true);
+            st.unfollow_armed = false;
+            st.status = status.or(st.status.take());
             app.errors.remove(&Page::Profile);
+        }
+        Outcome::Unfollowed { status } => {
+            st.follow_flip = Some(false);
+            st.unfollow_armed = false;
+            st.status = status.or(st.status.take());
+            app.errors.remove(&Page::Profile);
+        }
+        // A background open-time read: it never clears a live error, and a
+        // reply that outlived its open belongs to nobody on screen.
+        Outcome::FollowStatus { epoch, status } => {
+            if epoch == st.open_epoch && status.is_some() {
+                st.status = status;
+            }
         }
         // A background open-time read — never clears a live error, and never
         // outranks something newer that authored the same field: a later open
@@ -2295,7 +2517,11 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::Knock { peer, result } => {
             let current = st.viewing.as_deref() == Some(peer.as_str());
             match result {
-                crate::contacts::KnockSend::Sent => {
+                // A queued knock (no nest) folds as a sent one — the contact
+                // reads as requested, and a guardian refusal can be learned
+                // only at drain, where it parks the knock on the
+                // unsent-changes list instead of offering the ask.
+                crate::contacts::KnockSend::Sent | crate::contacts::KnockSend::Queued => {
                     if current {
                         st.knock_sent = true;
                     }
@@ -2330,22 +2556,19 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::ContactRequestFailed(e) => {
             app.errors.insert(Page::Profile, e);
         }
-        Outcome::Offers {
-            offers,
-            status_tier,
-        } => {
+        Outcome::Offers { offers, status } => {
             st.offers = offers;
-            st.status_tier = status_tier;
+            st.status = status;
             app.errors.remove(&Page::Profile);
         }
         Outcome::Subscribed {
             offers,
-            status_tier,
+            status,
             tier,
             queued,
         } => {
             st.offers = offers;
-            st.status_tier = status_tier;
+            st.status = status;
             // Auto-approve/plaintext ⇒ Approved ⇒ status_tier now names the
             // tier ⇒ the transient is spent; encrypted ⇒ Queued ⇒ keep it.
             st.pending_tier = queued.then_some(tier);
@@ -2444,6 +2667,16 @@ fn header_label(st: &ProfileState) -> format::PeerLabel {
 
 /// The Block⇄Unblock toggle label (`contact_toggle_block_label`) — tui is in the
 /// flipped set (Block ⇄ Unblock), not the block-only interim.
+/// The `profile-follow-button` label: the armed paid-tier confirm's cost line,
+/// else the shared Follow ⇄ Following map over [`ProfileState::is_following`].
+fn follow_label(st: &ProfileState) -> String {
+    if st.unfollow_armed {
+        t::UNFOLLOW_CONFIRM.to_string()
+    } else {
+        crate::wizard::localized(&format::follow_toggle_label(st.is_following()))
+    }
+}
+
 fn block_label(st: &ProfileState) -> String {
     crate::wizard::localized(&format::contact_toggle_block_label(
         st.is_blocked.unwrap_or(false),
@@ -2453,7 +2686,7 @@ fn block_label(st: &ProfileState) -> String {
 /// The per-tier offer-status badge text (`offer_status` → `offer_status_label`).
 fn offer_status_display(st: &ProfileState, tier_name: &str) -> String {
     let pending = st.pending_tier.as_deref() == Some(tier_name);
-    let status = format::offer_status(tier_name, st.status_tier.as_deref(), pending);
+    let status = format::offer_status(tier_name, st.status_tier(), pending);
     crate::wizard::localized(&format::offer_status_label(status))
 }
 
@@ -2523,7 +2756,7 @@ pub fn elements(app: &App) -> Vec<Element> {
     } else {
         out.push(Element::gesture_button(
             ids::PROFILE_FOLLOW_BUTTON,
-            if st.followed { t::FOLLOWING } else { t::FOLLOW },
+            follow_label(st),
             true,
             Gesture::Profile(Action::Follow),
         ));
@@ -2748,7 +2981,10 @@ pub fn elements(app: &App) -> Vec<Element> {
                     ids::SUBSCRIPTION_OFFER_PAYMENT_LINK,
                     s::PAYMENT_URL,
                     true,
-                    Gesture::Profile(Action::OpenPaymentLink(url.to_string())),
+                    Gesture::Profile(Action::OpenPaymentLink {
+                        tier: tier.name.clone(),
+                        url: url.to_string(),
+                    }),
                 ));
             }
             out.push(Element::gesture_button(
@@ -3065,6 +3301,129 @@ mod tests {
         }
     }
 
+    /// Fold in the open-time status read for the page's CURRENT open.
+    fn hydrate_status(app: &mut App, tier: Option<&str>, follow_pending: bool) {
+        let epoch = app.profile.open_epoch;
+        apply_outcome(
+            app,
+            Outcome::FollowStatus {
+                epoch,
+                status: Some(FollowStatus {
+                    tier: tier.map(str::to_string),
+                    follow_pending,
+                }),
+            },
+        );
+    }
+
+    /// `subscriptions.md` § The free followers tier — follow and unfollow,
+    /// rule 4: the open's status read labels the toggle through the shared
+    /// derivation — a held tier or a pending follow reads *Following*, nothing
+    /// held reads *Follow* — and a read for an earlier open lands nowhere.
+    #[test]
+    fn the_open_status_read_labels_the_follow_toggle() {
+        let mut app = knock_ready(None);
+        assert_eq!(text_of(&app, "profile-follow-button"), "Follow");
+        hydrate_status(&mut app, Some("followers"), false);
+        assert_eq!(text_of(&app, "profile-follow-button"), "Following");
+        hydrate_status(&mut app, Some("gold"), false);
+        assert_eq!(text_of(&app, "profile-follow-button"), "Following");
+        hydrate_status(&mut app, None, true);
+        assert_eq!(text_of(&app, "profile-follow-button"), "Following");
+        hydrate_status(&mut app, None, false);
+        assert_eq!(text_of(&app, "profile-follow-button"), "Follow");
+        let stale = app.profile.open_epoch.wrapping_sub(1);
+        apply_outcome(
+            &mut app,
+            Outcome::FollowStatus {
+                epoch: stale,
+                status: Some(FollowStatus {
+                    tier: Some("followers".into()),
+                    follow_pending: false,
+                }),
+            },
+        );
+        assert_eq!(text_of(&app, "profile-follow-button"), "Follow");
+    }
+
+    /// A free follower's press on *Following* unfollows at once — a leave of
+    /// `followers` at the follow's own home slot — and the reply flips the
+    /// label to *Follow* even while the re-read status still names the tier
+    /// (the leave is `Queued` until the author's client commits it).
+    #[test]
+    fn a_free_followers_press_on_following_unfollows_at_once() {
+        let mut app = knock_ready(Some("https://other.test"));
+        hydrate_status(&mut app, Some("followers"), false);
+        match apply_local(&mut app, Action::Follow) {
+            Some(Op::Unfollow {
+                author,
+                home_nest_url,
+                ..
+            }) => {
+                assert_eq!(author, "cd".repeat(32));
+                assert_eq!(home_nest_url.as_deref(), Some("https://other.test"));
+            }
+            _ => panic!("Following pressed must emit the unfollow"),
+        }
+        apply_outcome(
+            &mut app,
+            Outcome::Unfollowed {
+                status: Some(FollowStatus {
+                    tier: Some("followers".into()),
+                    follow_pending: false,
+                }),
+            },
+        );
+        assert_eq!(text_of(&app, "profile-follow-button"), "Follow");
+        // Pressed again it follows again.
+        assert!(matches!(
+            apply_local(&mut app, Action::Follow),
+            Some(Op::Follow { .. })
+        ));
+    }
+
+    /// A paid-tier holder's first press only relabels the button with the
+    /// cost; the second press leaves.
+    #[test]
+    fn a_paid_holders_unfollow_takes_two_presses() {
+        let mut app = knock_ready(None);
+        hydrate_status(&mut app, Some("gold"), false);
+        assert!(
+            apply_local(&mut app, Action::Follow).is_none(),
+            "first press arms"
+        );
+        assert_eq!(
+            text_of(&app, "profile-follow-button"),
+            t::UNFOLLOW_CONFIRM,
+            "the armed button names the cost"
+        );
+        assert!(matches!(
+            apply_local(&mut app, Action::Follow),
+            Some(Op::Unfollow { .. })
+        ));
+        assert_eq!(text_of(&app, "profile-follow-button"), "Following");
+        apply_outcome(&mut app, Outcome::Unfollowed { status: None });
+        assert_eq!(text_of(&app, "profile-follow-button"), "Follow");
+    }
+
+    /// Another gesture between the two presses disarms the confirm, and so
+    /// does a fresh open: the next press on *Following* arms again.
+    #[test]
+    fn another_gesture_or_a_fresh_open_disarms_the_unfollow_confirm() {
+        let mut app = knock_ready(None);
+        hydrate_status(&mut app, Some("gold"), false);
+        assert!(apply_local(&mut app, Action::Follow).is_none());
+        apply_local(&mut app, Action::Copy);
+        assert_eq!(text_of(&app, "profile-follow-button"), "Following");
+        assert!(
+            apply_local(&mut app, Action::Follow).is_none(),
+            "the press after another gesture arms again, never leaves"
+        );
+        app.profile.reset_for_open();
+        assert!(!app.profile.unfollow_armed);
+        assert_eq!(text_of(&app, "profile-follow-button"), "Follow");
+    }
+
     /// The open target's carried home seeds the actor-home slot at once, so a
     /// follow pressed before the header read answers is already carried there;
     /// the header read's answer then replaces it (`profile.md` § Where logic
@@ -3206,6 +3565,77 @@ mod tests {
             apply_local(&mut app, Action::RequestContact).is_none(),
             "a sent knock is not re-sent",
         );
+    }
+
+    fn run_profile_knock(
+        word: &'static str,
+    ) -> (Outcome, Arc<fauna_client_testkit::RecordingQueue>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let op = Op::SendKnock {
+            nest: fauna_client::NestClient::new(
+                "http://127.0.0.1:9".to_string(),
+                fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+            ),
+            node_url: "https://home.test".to_string(),
+            secret: [7u8; 32],
+            recipient: "cd".repeat(32),
+            recipient_nest_url: Some("https://peer.test".into()),
+            queue: Some(queue.clone() as _),
+        };
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(op.run());
+        (outcome, queue)
+    }
+
+    /// With no nest the profile's knock queues its inputs on the identity
+    /// door (composed and signed at drain) and the button reads "Request
+    /// sent", the guardian ask never offered.
+    #[test]
+    fn a_knock_send_with_no_nest_is_queued_and_reads_as_requested() {
+        let (outcome, queue) = run_profile_knock("disconnected");
+        assert!(
+            matches!(
+                &outcome,
+                Outcome::Knock {
+                    result: crate::contacts::KnockSend::Queued,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let queued = queue.identity_queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1, format!("inbox.send:{}", "cd".repeat(32)));
+
+        let mut app = knock_ready(Some("https://peer.test"));
+        apply_outcome(&mut app, outcome);
+        let button = elements(&app)
+            .into_iter()
+            .find(|e| e.id == "profile-request-contact-button")
+            .expect("painted");
+        assert_eq!(button.text, t::REQUEST_CONTACT_SENT);
+        assert!(!app.profile.guardian_refused);
+    }
+
+    /// Connected, the profile's knock is sent as before (to this dummy nest it
+    /// fails on the transport) and nothing is queued.
+    #[test]
+    fn a_knock_send_with_the_nest_connected_is_sent_not_queued() {
+        let (outcome, queue) = run_profile_knock("connected");
+        assert!(
+            matches!(
+                &outcome,
+                Outcome::Knock {
+                    result: crate::contacts::KnockSend::Failed(_),
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(queue.identity_queued().is_empty());
     }
 
     /// `family-safety.md` § Child-initiated contact requests, on this page:
@@ -3988,7 +4418,7 @@ mod tests {
             &mut app,
             Outcome::Offers {
                 offers: vec![a_tier("followers", None), a_tier("gold", Some("$5/mo"))],
-                status_tier: None,
+                status: None,
             },
         );
         assert!(
@@ -4012,7 +4442,10 @@ mod tests {
             &mut app,
             Outcome::Subscribed {
                 offers: vec![a_tier("gold", Some("$5/mo"))],
-                status_tier: Some("gold".to_string()),
+                status: Some(FollowStatus {
+                    tier: Some("gold".to_string()),
+                    follow_pending: false,
+                }),
                 tier: "gold".to_string(),
                 queued: false,
             },
@@ -4408,6 +4841,100 @@ mod tests {
         assert_eq!(f.asking_price, "", "an unpriced create form starts empty");
     }
 
+    /// One listed provider with the given product (the list reply never
+    /// carries the secret, so the fixture has none either).
+    #[cfg(feature = "payments")]
+    fn a_provider(kind: &str, product_ref: Option<&str>) -> fauna_protocol::payments::ProviderItem {
+        fauna_protocol::payments::ProviderItem {
+            kind: kind.to_string(),
+            tier: "gold".to_string(),
+            created_at: fauna_core::data::Timestamp(1),
+            last_verified_at: None,
+            last_rejected_at: None,
+            product_ref: product_ref.map(str::to_string),
+            extra: Default::default(),
+        }
+    }
+
+    /// The §4 form's optional product field (`subscription-provider-form-product`,
+    /// monetization.md § Pillar 3 → *Configuration*): typed in, it rides the
+    /// save as `Some(value)` — sent as shown, so an emptied field clears the
+    /// saved mapping rather than keeping it (`None` is the "keep" arm, which a
+    /// form that shows the field never sends).
+    #[test]
+    #[cfg(feature = "payments")]
+    fn provider_form_product_is_painted_and_sent_as_shown_on_save() {
+        const ID: &str = "subscription-provider-form-product";
+        let mut app = author_app();
+        apply_local(&mut app, Action::OpenProviderForm);
+        assert!(
+            ids(&app).contains(&ID.to_string()),
+            "the product input paints in the open form"
+        );
+        assert_eq!(text_of(&app, ID), "", "a fresh form starts with no product");
+
+        apply_local(&mut app, Action::SetProviderFormKind("fake".to_string()));
+        tiers::set_field(
+            &mut app.profile,
+            tiers::TierField::ProviderFormProduct,
+            "plink_gold".to_string(),
+        );
+        assert_eq!(
+            text_of(&app, ID),
+            "plink_gold",
+            "the typed product is what the input shows"
+        );
+        let form = app.profile.author.provider_form.clone().expect("form open");
+        assert_eq!(form.product, "plink_gold");
+
+        // Emptied → still sent, as the empty string that clears the mapping.
+        tiers::set_field(
+            &mut app.profile,
+            tiers::TierField::ProviderFormProduct,
+            String::new(),
+        );
+        let form = app.profile.author.provider_form.clone().expect("form open");
+        assert_eq!(
+            form.product, "",
+            "an emptied field is sent empty, never dropped to None"
+        );
+    }
+
+    /// Picking a kind that is already configured edits that provider, so the
+    /// form pre-fills its saved product (not a secret); a kind with no config
+    /// starts empty, and switching kinds swaps the product with it.
+    #[test]
+    #[cfg(feature = "payments")]
+    fn provider_form_product_prefills_from_the_listed_provider_of_the_picked_kind() {
+        const ID: &str = "subscription-provider-form-product";
+        let mut app = author_app();
+        app.profile.author.providers = vec![a_provider("fake", Some("plink_old"))];
+        apply_local(&mut app, Action::OpenProviderForm);
+        assert_eq!(
+            text_of(&app, ID),
+            "",
+            "no kind picked yet → nothing to pre-fill"
+        );
+
+        apply_local(&mut app, Action::SetProviderFormKind("fake".to_string()));
+        assert_eq!(
+            text_of(&app, ID),
+            "plink_old",
+            "the configured kind's product pre-fills"
+        );
+        assert_eq!(
+            text_of(&app, "subscription-provider-form-secret"),
+            "",
+            "the secret is never pre-filled — the list reply does not carry it"
+        );
+
+        apply_local(&mut app, Action::SetProviderFormKind("stripe".to_string()));
+        assert_eq!(text_of(&app, ID), "", "a kind with no config starts empty");
+
+        apply_local(&mut app, Action::SetProviderFormKind("fake".to_string()));
+        assert_eq!(text_of(&app, ID), "plink_old", "and back again");
+    }
+
     /// The §4 return-URL display is the shared `return_url` face over the
     /// creator's WEB-SITE origin — not the nest URL the webhook display beside
     /// it uses — and it tracks the kind select, placeholder and all. With no
@@ -4743,11 +5270,64 @@ mod tests {
         }];
         assert!(ids(&app).contains(&"subscription-offer-payment-link".to_string()));
 
-        apply_local(&mut app, Action::OpenPaymentLink("http://evil.test".into()));
+        let refused = apply_local(
+            &mut app,
+            Action::OpenPaymentLink {
+                tier: "gold".into(),
+                url: "http://evil.test".into(),
+            },
+        );
+        assert!(refused.is_none(), "an unsafe link subscribes to nothing");
         assert!(
             app.errors.contains_key(&Page::Profile),
             "a non-https payment link must be refused, not opened"
         );
+    }
+
+    /// The storefront's payment link is the Subscribe with the checkout riding
+    /// it (Q13 rule (1)): it subscribes to the tier the link sells — across
+    /// nests at the page's home — under the optimistic pending transient, and
+    /// the checkout is handed to the OS only by that op's run, after the
+    /// subscribe (`subscribe_and_checkout`). The plain Subscribe carries the
+    /// home too, so a remote buyer's next Subscribe sends the intent.
+    #[cfg(feature = "payments")]
+    #[test]
+    fn offer_payment_link_subscribes_first_at_the_pages_home() {
+        let mut app = knock_ready(Some("https://author-home.test"));
+        app.profile.tab = Tab::Tiers;
+        let op = apply_local(
+            &mut app,
+            Action::OpenPaymentLink {
+                tier: "gold".into(),
+                url: "https://buy.stripe.com/test_abc".into(),
+            },
+        );
+        match op {
+            Some(Op::Subscribe {
+                tier,
+                home_nest_url,
+                checkout,
+                ..
+            }) => {
+                assert_eq!(tier, "gold");
+                assert_eq!(home_nest_url.as_deref(), Some("https://author-home.test"));
+                assert_eq!(checkout.as_deref(), Some("https://buy.stripe.com/test_abc"));
+            }
+            _ => panic!("the payment link must emit the subscribe carrying the checkout"),
+        }
+        assert_eq!(app.profile.pending_tier.as_deref(), Some("gold"));
+
+        match apply_local(&mut app, Action::Subscribe("silver".into())) {
+            Some(Op::Subscribe {
+                home_nest_url,
+                checkout,
+                ..
+            }) => {
+                assert_eq!(home_nest_url.as_deref(), Some("https://author-home.test"));
+                assert_eq!(checkout, None);
+            }
+            _ => panic!("Subscribe must emit the subscribe"),
+        }
     }
 
     /// The repeatable-links sub-list landmark paints with the edit form (the
