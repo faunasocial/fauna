@@ -296,32 +296,32 @@ impl TlsaResolver for NullTlsaResolver {
 /// Looks up TLSA records for `mx_host` at `_25._tcp.<mx_host>` per RFC 7672
 /// §2.2 with mandatory DNSSEC validation (RFC 7672 §2.2.1: "the security of
 /// DANE is dependent on a chain of trust to the root zone via DNSSEC").
-/// Only records with `Proof::Secure` are returned.
+/// Only records with `Proof::Secure` are returned. Called only on a
+/// DNSSEC-capable resolver path — see [`lookup_tlsa_on_path`].
 ///
-/// Outcomes:
+/// Outcomes (`smtp-server.md` § Architectural rules, the TLSA bullets):
 /// - Secure-proven TLSA records → returned to the caller.
-/// - NXDOMAIN / NoData → empty list, no DANE pinning, fall back to CA.
-/// - Records present but DNSSEC proof is Insecure / Bogus / Indeterminate
-///   → empty list + warn-log. Caller falls back to CA validation.
-///   (Can't trust the records; an attacker may have spoofed them.)
-/// - Resolver/network error → propagated. Caller logs + falls back.
+/// - NXDOMAIN / NoData the validator accepted → empty list: DANE not
+///   applicable to this host (RFC 7672 §2.2.3).
+/// - Records whose proof is `Insecure` → empty list + warn-log: DANE not
+///   applicable (an unsigned zone or opt-out delegation).
+/// - A Bogus or Indeterminate proof, a validation error, SERVFAIL, a
+///   timeout → `Err`: a **TLSA lookup failure**. RFC 7672 §2.1.2 says the
+///   SMTP client MUST treat that server as unreachable; the Go MTA skips the
+///   host and tries the next MX, never proceeding without pinning.
 ///
 /// Native-only (`outbound-net` feature): `hickory-resolver` does not
 /// cross-compile to wasm32 and must not enter the client FFI surface.
 #[cfg(feature = "outbound-net")]
 pub async fn lookup_tlsa(mx_host: &str) -> anyhow::Result<Vec<TlsaRecord>> {
-    use hickory_resolver::TokioResolver;
-    use hickory_resolver::config::ResolverOpts;
     use hickory_resolver::proto::dnssec::Proof;
     use hickory_resolver::proto::rr::RData;
 
-    let mut opts = ResolverOpts::default();
-    opts.validate = true; // Require DNSSEC validation for the chain.
-    let resolver = TokioResolver::builder_tokio()
-        .map_err(|e| anyhow::anyhow!("build resolver: {e}"))?
-        .with_options(opts)
-        .build()
-        .map_err(|e| anyhow::anyhow!("build resolver: {e}"))?;
+    // DNSSEC validation required for the chain, over the one TCP-only
+    // validating resolver (smtp-server.md § MX resolution item 1, the TCP
+    // paragraph — a hard-cut truncated UDP answer would fail every lookup
+    // needing that RRset).
+    let resolver = crate::outbound::dnssec_path::validating_resolver()?;
 
     let query = format!("_25._tcp.{}", mx_host.trim_end_matches('.'));
     let rrset = match resolver.tlsa_lookup(query).await {
@@ -337,53 +337,162 @@ pub async fn lookup_tlsa(mx_host: &str) -> anyhow::Result<Vec<TlsaRecord>> {
         }
     };
 
-    let mut records = Vec::new();
-    let mut had_unsecure = false;
-    // hickory 0.26: `tlsa_lookup` returns a generic `Lookup` whose records carry their
-    // per-record DNSSEC `proof` (populated because `opts.validate = true`). A record is
-    // trustworthy only when its proof is `Secure`; anything else (e.g. an `Insecure`
-    // unsigned delegation) is treated as no DANE per RFC 7672 §2.2.2. A hard
-    // validation failure surfaces as a lookup error, handled above.
-    for record in rrset.answers() {
-        if record.proof == Proof::Secure {
-            if let RData::TLSA(tlsa) = &record.data {
-                records.push(TlsaRecord {
+    // hickory 0.26: `tlsa_lookup` returns a generic `Lookup` whose records carry
+    // their per-record DNSSEC `proof` (populated because `opts.validate = true`).
+    // Only the TLSA records' own proofs are read: the answer also carries the
+    // RRSIG records, and a zone signed with two algorithms (an algorithm
+    // rollover) can hand back one signature the validator calls Indeterminate
+    // beside one that proves the RRset Secure — measured 2026-11-07 on a
+    // dual-signed MX RRset.
+    let answers: Vec<(TlsaProof, TlsaRecord)> = rrset
+        .answers()
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::TLSA(tlsa) => Some((
+                match record.proof {
+                    Proof::Secure => TlsaProof::Secure,
+                    Proof::Insecure => TlsaProof::Insecure,
+                    _ => TlsaProof::Unproven,
+                },
+                TlsaRecord {
                     usage: u8::from(tlsa.cert_usage),
                     selector: u8::from(tlsa.selector),
                     matching: u8::from(tlsa.matching),
                     data: tlsa.cert_data.to_vec(),
-                });
-            }
-        } else {
-            had_unsecure = true;
-        }
-    }
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    tlsa_answer_policy(mx_host, answers)
+}
 
-    if records.is_empty() && had_unsecure {
-        // Records present but DNSSEC didn't prove them secure. RFC 7672
-        // §2.2.2: treat as if no records — caller falls back to CA. Log
-        // loudly because this could be an attacker spoofing TLSA.
-        tracing::warn!(
-            mx = %mx_host,
-            "TLSA records present but DNSSEC proof not Secure — discarding (potential DNS spoof?)",
+#[cfg(feature = "outbound-net")]
+/// One answer record's DNSSEC proof, as our policy reads hickory's `Proof`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlsaProof {
+    Secure,
+    Insecure,
+    /// Bogus or Indeterminate.
+    Unproven,
+}
+
+#[cfg(feature = "outbound-net")]
+/// The TLSA policy over a validating lookup's answer records: any unproven
+/// record is a lookup failure; `Insecure` records mean DANE is not
+/// applicable; `Secure` TLSA records are returned.
+fn tlsa_answer_policy(
+    mx_host: &str,
+    answers: Vec<(TlsaProof, TlsaRecord)>,
+) -> anyhow::Result<Vec<TlsaRecord>> {
+    if answers.iter().any(|(p, _)| *p == TlsaProof::Unproven) {
+        anyhow::bail!(
+            "TLSA RRset for {mx_host} failed DNSSEC validation (Bogus / Indeterminate); \
+             the host is unreachable for this attempt (RFC 7672 §2.1.2)"
         );
     }
-
+    let mut records = Vec::new();
+    let mut had_insecure = false;
+    for (proof, tlsa) in answers {
+        match proof {
+            TlsaProof::Secure => records.push(tlsa),
+            _ => had_insecure = true,
+        }
+    }
+    if records.is_empty() && had_insecure {
+        // RFC 7672 §2.2.3: an Insecure TLSA RRset — DANE does not apply.
+        tracing::warn!(
+            mx = %mx_host,
+            "TLSA records present but provably Insecure — DANE not applicable",
+        );
+    }
     Ok(records)
 }
 
-/// Live `TlsaResolver` over the DNSSEC-validating [`lookup_tlsa`]. The
-/// production outbound path holds an `Arc<dyn TlsaResolver>`; this is the
-/// network-touching impl (mirrors
-/// [`crate::outbound::mta_sts::LiveMtaStsFetcher`]).
+/// The TLSA lookup on the resolver path's posture: on a DNSSEC-capable path
+/// [`lookup_tlsa`]; on an incapable one no records, without looking — the
+/// nest is then a pre-DANE MTA (`smtp-server.md` § MX resolution item 1, the
+/// resolver-path paragraph).
 #[cfg(feature = "outbound-net")]
-pub struct LiveTlsaResolver;
+pub async fn lookup_tlsa_on_path(
+    mx_host: &str,
+    path: crate::outbound::dnssec_path::ResolverPath,
+) -> anyhow::Result<Vec<TlsaRecord>> {
+    match path {
+        crate::outbound::dnssec_path::ResolverPath::Capable => lookup_tlsa(mx_host).await,
+        crate::outbound::dnssec_path::ResolverPath::Incapable => Ok(Vec::new()),
+    }
+}
+
+/// Live `TlsaResolver` over [`lookup_tlsa_on_path`], consulting the process's
+/// [`crate::outbound::dnssec_path::DnssecPath`] (shared with
+/// [`crate::outbound::mx::LiveMxRrsetResolver`]) on every lookup. The
+/// production outbound path holds an `Arc<dyn TlsaResolver>`; this is the
+/// network-touching impl.
+#[cfg(feature = "outbound-net")]
+pub struct LiveTlsaResolver {
+    path: std::sync::Arc<crate::outbound::dnssec_path::DnssecPath>,
+}
+
+#[cfg(feature = "outbound-net")]
+impl LiveTlsaResolver {
+    pub fn new(path: std::sync::Arc<crate::outbound::dnssec_path::DnssecPath>) -> Self {
+        Self { path }
+    }
+}
 
 #[cfg(feature = "outbound-net")]
 #[async_trait::async_trait]
 impl TlsaResolver for LiveTlsaResolver {
     async fn lookup(&self, mx_host: &str) -> anyhow::Result<Vec<TlsaRecord>> {
-        lookup_tlsa(mx_host).await
+        lookup_tlsa_on_path(mx_host, self.path.posture().await).await
+    }
+}
+
+#[cfg(all(test, feature = "outbound-net"))]
+mod path_policy_tests {
+    use super::*;
+
+    fn rec() -> TlsaRecord {
+        TlsaRecord {
+            usage: 3,
+            selector: 1,
+            matching: 1,
+            data: vec![1, 2, 3],
+        }
+    }
+
+    #[test]
+    fn secure_records_are_returned() {
+        let r = tlsa_answer_policy("mx.test", vec![(TlsaProof::Secure, rec())]).unwrap();
+        assert_eq!(r, vec![rec()]);
+    }
+
+    #[test]
+    fn insecure_records_mean_dane_is_not_applicable() {
+        let r = tlsa_answer_policy("mx.test", vec![(TlsaProof::Insecure, rec())]).unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn an_unproven_record_is_a_lookup_failure() {
+        let r = tlsa_answer_policy(
+            "mx.test",
+            vec![(TlsaProof::Secure, rec()), (TlsaProof::Unproven, rec())],
+        );
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_incapable_path_answers_no_records_without_looking() {
+        // A name that would need the network: the incapable path never asks.
+        let r = lookup_tlsa_on_path(
+            "mx.invalid",
+            crate::outbound::dnssec_path::ResolverPath::Incapable,
+        )
+        .await
+        .unwrap();
+        assert!(r.is_empty());
     }
 }
 

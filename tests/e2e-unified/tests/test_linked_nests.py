@@ -14,6 +14,7 @@ tier_3 (full stack — real `fauna-nest` binary; the pairing kinds + the operato
 breaks between the shared machine and the handlers). linux leads; the other five
 apps lift this shape (priority #1).
 """
+import secrets
 import time
 
 import pytest
@@ -296,3 +297,137 @@ def test_link_refuses_two_nests_holding_different_recovery_keys(
         assert pairings == [], (
             f"the refused link wrote a pairing row at {nest['url']}: {pairings!r}"
         )
+
+
+#: The five capabilities a pairing carried before `account_replica` existed.
+_PRE_REPLICA_CAPS = ["mls_pull", "namespace_sync", "post_forward", "mail_pull", "nostr_push"]
+_ACCOUNT_REPLICA = "account_replica"
+
+
+def _caps_naming(port: int, actor: dict, nest_id_hex: str) -> list[str] | None:
+    """The capabilities of ``actor``'s pairing row on this nest that names
+    ``nest_id_hex``, or None when there is no such row. Ground truth — the
+    nest's own row, never the app's rendering of it."""
+    from tests.api import ws_api
+
+    for row in ws_api.list_pairings(port, actor).get("pairings", []):
+        if bytes(row["private_nest_id"]).hex() == nest_id_hex.lower():
+            return list(row.get("capabilities") or [])
+    return None
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("nests-and-trust")
+def test_the_account_copy_capability_is_named_carried_on_relink_and_its_wraps_swept_on_unlink(
+    logged_in_app, nest_instance, test_user, pairing_nest_b
+):
+    """A linked nest keeps a copy of the account (`account_replica`), and the
+    Nests page says so in plain words; a new link carries it by default,
+    re-linking a pairing made before it existed adds it, and unlinking deletes
+    the account's escrow wraps at that nest (`linked-nests.md` § The surface
+    and § Implementation status today; the unlink sweep is
+    `LinkedNestsMachine::unlink` → `sweep_escrow_at`, ruling 4 of
+    `account-sync-plane.md` § The bind leg).
+
+    Setup, not journey: the old five-capability pairing is written through the
+    nest API as an older app would have left it, and one escrow wrap is
+    deposited at nest B so the sweep has something to delete whatever the
+    linked leg has delivered by then. Every journey step — the relink and the
+    unlink — goes through the page (convention 8)."""
+    from i18n.strings import S
+    from tests.api import ws_api
+    from helpers.waiting import wait_until
+
+    app = logged_in_app
+    nest_b = pairing_nest_b
+    register_user(
+        nest_b["port"],
+        test_user["actor_id_hex"],
+        admin_signing_key=nest_b["admin"]["signing_key"],
+    )
+    a_id, b_id = nest_instance["nest_id"].lower(), nest_b["nest_id"].lower()
+    assert a_id and b_id, f"a nest reported no nest_id: a={a_id!r} b={b_id!r}"
+    label = S.nests.capability_account_replica
+
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible()
+    for _ in range(app.linked_nests.pairing_count()):
+        app.linked_nests.unlink(0)
+    assert app.linked_nests.wait_for_pairing_count(0, timeout=8.0)
+
+    # ── An old pairing: five capabilities, no account copy. ──
+    ws_api.add_pairing(
+        nest_instance["port"], test_user, bytes.fromhex(b_id),
+        capabilities=_PRE_REPLICA_CAPS, nest_url=nest_b["peer_url"],
+    )
+    app.linked_nests.navigate()
+    assert app.linked_nests.wait_for_pairing_count(1, timeout=12.0), (
+        f"the old pairing did not list; error={app.linked_nests.page_error_text()!r}"
+    )
+    old_line = app.linked_nests.capability_lines()[0]
+    assert label not in old_line, (
+        f"a pairing without {_ACCOUNT_REPLICA} must not claim an account copy: "
+        f"{old_line!r}"
+    )
+
+    # ── Relink it through the page: the sixth capability joins. ──
+    app.linked_nests.link(nest_b["url"])
+    wait_until(
+        lambda: _ACCOUNT_REPLICA in (_caps_naming(nest_instance["port"], test_user, b_id) or []),
+        15.0,
+        diagnose=lambda: (
+            f"relinking did not add {_ACCOUNT_REPLICA} on the connected nest: "
+            f"{_caps_naming(nest_instance['port'], test_user, b_id)!r}; "
+            f"error={app.linked_nests.page_error_text(timeout=1.0)!r}"
+        ),
+    )
+    assert app.linked_nests.pairing_count() == 1, (
+        "a relink replaces the pairing, it does not add a second row"
+    )
+    # nest B had no row naming A: the link wrote a NEW pairing there, and a
+    # new link carries the account copy by default.
+    b_caps = _caps_naming(nest_b["port"], test_user, a_id)
+    assert b_caps is not None and _ACCOUNT_REPLICA in b_caps, (
+        f"the new pairing on nest B must carry {_ACCOUNT_REPLICA} by default: {b_caps!r}"
+    )
+
+    # The line says it in user voice, never the wire name.
+    line = wait_until(
+        lambda: (lambda lines: lines[0] if lines and label in lines[0] else None)(
+            app.linked_nests.capability_lines()
+        ),
+        12.0,
+        diagnose=lambda: (
+            f"the capabilities line never named the account copy ({label!r}): "
+            f"{app.linked_nests.capability_lines()!r}"
+        ),
+    )
+    assert _ACCOUNT_REPLICA not in line, (
+        f"the capabilities line leaks the wire name {_ACCOUNT_REPLICA!r}: {line!r}"
+    )
+
+    # ── Unlink: the account's wraps at nest B are deleted. ──
+    ws_api.escrow_put(
+        nest_b["port"], test_user, secrets.token_bytes(32), secrets.token_bytes(64),
+        f"identity/{test_user['actor_id_hex']}",
+    )
+    assert ws_api.escrow_wraps(nest_b["port"], test_user), (
+        "the deposited wrap did not list at nest B — nothing for the sweep to delete"
+    )
+    app.linked_nests.unlink(0)
+    assert app.linked_nests.wait_for_pairing_count(0, timeout=12.0), (
+        f"unlinking should empty the list; error={app.linked_nests.page_error_text()!r}"
+    )
+    wait_until(
+        lambda: ws_api.escrow_wraps(nest_b["port"], test_user) == [],
+        15.0,
+        diagnose=lambda: (
+            f"unlinking left {len(ws_api.escrow_wraps(nest_b['port'], test_user))} "
+            f"escrow wrap(s) at nest B — the unlink sweep did not reach it"
+        ),
+    )

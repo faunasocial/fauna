@@ -901,8 +901,9 @@ export async function fetchKnocks(secretHex: string): Promise<Knock[]> {
   return rpc.knocksList(secretHex);
 }
 
-export async function acceptKnock(secretHex: string, peerId: string): Promise<void> {
-  await rpc.knocksAccept(secretHex, peerId);
+/** A knock accept sent or, with no nest, queued; `true` = queued. */
+export function acceptKnockOrQueue(secretHex: string, peerId: string): Promise<boolean> {
+  return rpc.knocksAcceptOrQueue(secretHex, peerId);
 }
 
 export async function blockKnock(secretHex: string, peerId: string): Promise<void> {
@@ -982,7 +983,8 @@ export function listEmailFilters(secretHex: string): Promise<rpc.EmailFilter[]> 
   return rpc.emailFiltersList(secretHex);
 }
 
-export async function createEmailFilter(
+/** A filter create sent or, with no nest, queued; `true` = queued. */
+export function createEmailFilterOrQueue(
   secretHex: string,
   name: string,
   rules: unknown[],
@@ -990,8 +992,8 @@ export async function createEmailFilter(
   action: string | Record<string, unknown>,
   priority: number,
   continueOnMatch: boolean,
-): Promise<{ id: number }> {
-  return { id: await rpc.emailFiltersCreate(secretHex, name, rules, combination, action, priority, continueOnMatch) };
+): Promise<boolean> {
+  return rpc.emailFiltersCreateOrQueue(secretHex, name, rules, combination, action, priority, continueOnMatch);
 }
 
 export async function deleteEmailFilter(secretHex: string, id: number): Promise<void> {

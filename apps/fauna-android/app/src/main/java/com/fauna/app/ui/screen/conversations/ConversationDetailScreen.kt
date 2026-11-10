@@ -566,6 +566,7 @@ fun ConversationDetailScreen(
         // nest can't read → no server fallback). Mirrors linux `mark_message_spam`.
         onMarkSpam = { msg -> vm.markMessageSpam(msg) },
         onReportMessage = { target -> vm.openReport(target) },
+        onShowAgain = vm::showAgain,
     )
 
     // The "more" emoji picker dialog — shown iff a bubble requested it. The
@@ -802,6 +803,8 @@ fun ConversationDetailContent(
     // `dm-message-report-button` → the shared report sheet (moderation.md
     // § User-initiated reporting); lifts the target the shared Rust constructor built.
     onReportMessage: (com.fauna.ffi.FfiReportTarget) -> Unit = {},
+    // `content-policy-show-again-button` — the un-hide of the viewer's own report.
+    onShowAgain: (List<String>) -> Unit = {},
 ) {
     // Rename overlay visibility is local Compose state (the only client-side
     // state in this view) — the button opens it, Save lifts the label out via
@@ -972,6 +975,11 @@ fun ConversationDetailContent(
                                     )
                                 }
                                 val reported = decision.reported
+                                // The reporter's show-again over the same keys (moderation.md
+                                // § Corollary — the reporter's hide is theirs to undo).
+                                val showAgain = remember(msg, contentPolicyInputs, reported) {
+                                    if (reported) contentPolicyInputs.showAgainFor(reportKey, senderActor) else null
+                                }
                                 RegionBlockWitness("conversation:${msg.messageId}", decision.isRegionBlocked)
                                 NestBlockWitness("conversation:${msg.messageId}", decision.isNestBlocked)
                                 val reportTarget = remember(msg.messageId, msg.isOwn, msg.body, senderActor) {
@@ -980,6 +988,8 @@ fun ConversationDetailContent(
                                 MessageBubble(
                                     msg = msg,
                                     reported = reported,
+                                    showAgain = showAgain,
+                                    onShowAgain = onShowAgain,
                                     onReport = reportTarget?.let { target -> { onReportMessage(target) } },
                                     // `SearchNav::Mail`'s second half (conversations.md § The
                                     // selected message) — the read-time-resolved id, `None`
@@ -1880,6 +1890,10 @@ private fun MessageBubble(
     // also hides): the `block` notice names that act — "You reported this" — not a
     // policy. `contentVerdict` is already `block` when this is set.
     reported: Boolean = false,
+    // The reporter's show-again beside that notice (`content-policy-show-again-button`):
+    // the shared fold's ids + label, `null` paints nothing; [onShowAgain] runs the un-hide.
+    showAgain: com.fauna.ffi.FfiShowAgain? = null,
+    onShowAgain: (List<String>) -> Unit = {},
     // The region's placeholder when the region drove the verdict
     // (region-blocking.md § The blocked render) — painted AHEAD of the family
     // arms below; a revealed `collapse` shares [contentRevealed].
@@ -2033,6 +2047,7 @@ private fun MessageBubble(
                     .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
                     .semantics { stateDescription = "blocked" },
             )
+            com.fauna.app.ui.components.ShowAgainButton(showAgain, onShowAgain)
             GuardianReason(guardianReason)
             MessageTimestamp(msg.timestampMs, isSelected)
         }

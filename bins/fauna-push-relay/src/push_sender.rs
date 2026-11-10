@@ -132,7 +132,10 @@ impl PushSender for ApnsPushSender {
             .header("apns-priority", "5")
             .json(&body)
             .send()
-            .await?;
+            .await
+            // The request URL carries the push token and a transport error
+            // renders it; strip it so no log line can leak the token.
+            .map_err(|e| anyhow::Error::new(e.without_url()))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -240,6 +243,37 @@ mod tests {
         assert!(
             !log.contains("device-token-abc123"),
             "push token leaked: {log:?}"
+        );
+    }
+
+    /// A reqwest transport error renders the request URL, which carries the
+    /// push token; the APNs failure arm must strip it before it propagates.
+    #[tokio::test]
+    async fn apns_transport_error_never_carries_the_push_token() {
+        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let sender = ApnsPushSender {
+            client: reqwest::Client::new(),
+            key_id: "KEY123".to_string(),
+            team_id: "TEAM456".to_string(),
+            signing_key,
+            topic: "com.example.app".to_string(),
+            // Nothing listens on port 1: the send fails at connect.
+            base_url: "http://127.0.0.1:1".to_string(),
+        };
+        let payload = WakePayload {
+            requester_actor_id: "abc".into(),
+            nonce: "123".into(),
+        };
+
+        let err = sender
+            .send("apns", "distinctive-device-token-xyz", &payload)
+            .await
+            .expect_err("connect to port 1 must fail");
+
+        let rendered = format!("{err:#} / {err:?}");
+        assert!(
+            !rendered.contains("distinctive-device-token-xyz"),
+            "push token leaked in the transport error: {rendered}"
         );
     }
 }

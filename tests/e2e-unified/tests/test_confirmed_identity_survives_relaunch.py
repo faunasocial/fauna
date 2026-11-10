@@ -55,16 +55,21 @@ def test_a_confirmed_identity_is_found_by_the_next_launch(app):
     # the two landings without a driver-type branch (the
     # `resume_or_import_identity` idiom) and confirm the kit when it shows.
     app.driver.click("identity-continue-button")
+    # The kit is read by its secret display, at the top of the page: its
+    # confirm button is the page's last row and sits below the fold of a small
+    # window, where a bare visibility read answers False on windows (the
+    # confirm's own click scrolls to it).
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        if (app.driver.is_visible("recovery-kit-confirm-button")
+        if (app.onboarding.recovery_kit_showing()
                 or app.driver.is_visible("handle-input")):
             break
         time.sleep(0.5)
-    if app.driver.is_visible("recovery-kit-confirm-button"):
+    if app.onboarding.recovery_kit_showing():
         app.onboarding.confirm_recovery_kit()
     else:
-        app.driver.wait_for("handle-input", timeout=15)
+        # Names the page the wizard is on when it is neither.
+        app.onboarding.wait_for_handle_entry(15)
 
     # ── Force-quit + relaunch. In-memory state dies here; only the durable
     # store comes back. `hard_reload` is the canonical cross-driver restart

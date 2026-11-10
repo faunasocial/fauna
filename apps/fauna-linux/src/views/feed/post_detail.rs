@@ -12,9 +12,8 @@ use fauna_feed::{PostSummary, ThreadPage, ThreadPostView, ThreadStatus};
 #[cfg(feature = "payments")]
 use super::post_list::build_tip_row;
 use super::post_list::{
-    append_tag_chips, build_post_image, build_post_proxied_image, build_post_video,
-    build_reaction_pills, build_reply_dialog, engagement_indicator_content, format_timestamp,
-    post_video_block,
+    append_post_media, append_tag_chips, build_reaction_pills, build_reply_dialog,
+    engagement_indicator_content, format_timestamp,
 };
 use crate::i18n::strings::{common, feed};
 use crate::views::document;
@@ -269,29 +268,9 @@ pub fn build_post_detail<F: Fn() + 'static>(
     //    shared walker has no blob loader). The folded `QuotedPost` card is
     //    already painted by the body walker above. Closes the prior gap where the
     //    detail showed only a "has media" badge and no image. ──
-    //    A bridged post's own picture / video (render-model.md § D6c) takes
-    //    the same slot when there is no blob one, as on the list card.
-    if let Some(hash) = post.document.first_image_hash() {
-        content.append(&build_post_image(
-            hash,
-            crate::feed::post_media::post_home(post),
-            manager,
-            client,
-        ));
-    } else if let Some(path) = post.document.proxied_post_image() {
-        content.append(&build_post_proxied_image(path, manager, client));
-    }
-    // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md
-    // § D6b); mutually exclusive with the image branch above, same fold.
-    if let Some(block) = post_video_block(&post.document) {
-        content.append(&build_post_video(
-            &post.post_id,
-            block,
-            crate::feed::post_media::post_home(post),
-            manager,
-            client,
-        ));
-    }
+    //    Every picture and video (bridged ones included, render-model.md
+    //    § D6c), in body order — the walk the list card paints (§ D6b). ──
+    append_post_media(&content, post, manager, client);
 
     // ── Tip surface (`monetization.md` § Tips) — the same surface the list
     //    card paints, resolved lazily by the same fire-once trigger. Gated on

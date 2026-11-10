@@ -195,7 +195,7 @@ pub(crate) async fn atproto_pds_bridge_approved(state: &AppState) -> bool {
 /// (the bridge updates its cached flag directly from the nudge); `None` on
 /// session/credential revokes.
 pub(crate) async fn notify_atproto_sessions_changed(
-    state: &Arc<AppState>,
+    state: &AppState,
     actor_id: &[u8; 32],
     external_apps_enabled: Option<bool>,
 ) {
@@ -356,12 +356,18 @@ fn fetch_app_credential_verifiers_handler() -> RpcHandler {
             // suspending the account's ENTIRE ATProto presence, live app
             // sessions included — revoking those sessions is not enough on its
             // own, since nothing stopped the app logging straight back in.
+            //
+            // A third rule rides the same field: an account that does not
+            // stand — locked or suspended — opens no session at all,
+            // its app passwords included (`ensure_target_stands`), so the
+            // DID is withheld exactly as for an inactive identity.
+            let stands = crate::bridge_routing_handlers::target_stands(&state, &actor).await?;
             let login_did = state
                 .db
                 .get_atproto_identity(&actor)
                 .await
                 .map_err(internal)?
-                .filter(|row| row.status == "active")
+                .filter(|row| stands && row.status == "active")
                 .and_then(|row| row.did);
             let verifiers = state
                 .db
@@ -401,6 +407,9 @@ fn record_session_handler() -> RpcHandler {
             if !VALID_PLANES.contains(&req.plane.as_str()) {
                 return Err(malformed(format!("unknown session plane {:?}", req.plane)));
             }
+            // A locked or suspended account registers no session, whatever the
+            // bridge's cached verifier read said (`ensure_target_stands`).
+            crate::bridge_routing_handlers::ensure_target_stands(&state, &actor).await?;
             // Defense-in-depth: the bridge already refuses createSession on
             // its cached flag; re-check here so a stale cache can never
             // register a session for a disabled account.
@@ -450,6 +459,7 @@ fn refresh_session_handler() -> RpcHandler {
             .await?;
             let req: RefreshSessionRequest = decode(&payload).map_err(malformed)?;
             let actor = parse_actor_id(&req.actor_id)?;
+            crate::bridge_routing_handlers::ensure_target_stands(&state, &actor).await?;
             let status = rotate_session(
                 &state,
                 &actor,
@@ -504,6 +514,10 @@ fn fetch_preferences_handler() -> RpcHandler {
             .await?;
             let req: FetchPreferencesRequest = decode(&payload).map_err(malformed)?;
             let actor = parse_actor_id(&req.actor_id)?;
+            // A token minted before a lock or suspension outlives it (the
+            // bridge keeps no revoked-session state), so the nest asks whether
+            // the account stands at every call (`ensure_target_stands`).
+            crate::bridge_routing_handlers::ensure_target_stands(&state, &actor).await?;
             let preferences = state
                 .db
                 .get_atproto_preferences(&actor)
@@ -533,6 +547,10 @@ fn store_preferences_handler() -> RpcHandler {
             .await?;
             let req: StorePreferencesRequest = decode(&payload).map_err(malformed)?;
             let actor = parse_actor_id(&req.actor_id)?;
+            // A token minted before a lock or suspension outlives it (the
+            // bridge keeps no revoked-session state), so the nest asks whether
+            // the account stands at every call (`ensure_target_stands`).
+            crate::bridge_routing_handlers::ensure_target_stands(&state, &actor).await?;
             if req.preferences.len() > PREFERENCES_MAX_BYTES {
                 return Err(malformed(format!(
                     "preferences payload is {} bytes, over the {PREFERENCES_MAX_BYTES}-byte cap",
@@ -572,6 +590,10 @@ fn record_blob_handler() -> RpcHandler {
             require_class(&state, &bridge_actor, "fauna.bridges.atproto.record_blob").await?;
             let req: RecordBlobRequest = decode(&payload).map_err(malformed)?;
             let actor = parse_actor_id(&req.actor_id)?;
+            // A token minted before a lock or suspension outlives it (the
+            // bridge keeps no revoked-session state), so the nest asks whether
+            // the account stands at every call (`ensure_target_stands`).
+            crate::bridge_routing_handlers::ensure_target_stands(&state, &actor).await?;
             // A `ContentHash` is a blake3 digest — fixed 32 bytes. Anything else
             // is a bridge bug, and storing it would leave a row naming media
             // that can never resolve.
@@ -4852,6 +4874,195 @@ mod tests {
             Some(DID),
             "the DID must survive deactivation — it is what makes re-enable restore the same identity"
         );
+    }
+
+    /// the account lock and suspension reach the app
+    /// passwords. An account that does not stand gets no login DID (so the
+    /// bridge opens no session on an app password), and the nest refuses to
+    /// register or refresh one — while a lapsed lock and a restore log in again
+    /// with nothing redone.
+    #[tokio::test]
+    async fn a_locked_or_suspended_account_opens_no_atproto_session() {
+        let state = fixture_state().await;
+        seed_user_and_bridge(&state).await;
+        provision_credential(&state, "ivory", false).await;
+        const DID: &str = "did:plc:7iza6de2dwap2sbkpav7c6c6";
+        state
+            .db
+            .upsert_atproto_identity_intent(&USER, "plc", "did:key:zTestRotationPub")
+            .await
+            .unwrap();
+        state
+            .db
+            .record_atproto_minted(&USER, DID, None)
+            .await
+            .unwrap();
+        let fetch = async || -> FetchAppCredentialVerifiersReply {
+            let req = FetchAppCredentialVerifiersRequest {
+                identifier: "alice".into(),
+                extra: Default::default(),
+            };
+            decode(
+                &fetch_app_credential_verifiers_handler()(state.clone(), BRIDGE, enc(&req))
+                    .await
+                    .expect("fetch"),
+            )
+            .unwrap()
+        };
+        let record = async || {
+            let req = RecordSessionRequest {
+                actor_id: USER.to_vec(),
+                session_id: b"sess-lock".to_vec(),
+                plane: "app_credential".into(),
+                credential_id: None,
+                client_note: None,
+                expires_at: i64::MAX,
+                extra: Default::default(),
+            };
+            record_session_handler()(state.clone(), BRIDGE, enc(&req)).await
+        };
+        assert_eq!(fetch().await.login_did.as_deref(), Some(DID));
+
+        let now = crate::db::now_epoch_secs();
+        state
+            .db
+            .set_locked_until(&USER[..], Some(now + 3600))
+            .await
+            .unwrap();
+        assert!(
+            fetch().await.login_did.is_none(),
+            "a locked account must not log in on an app password"
+        );
+        let err = record()
+            .await
+            .expect_err("a locked account registers no session");
+        assert_eq!(err.code, "fauna.bridges.account_revoked");
+        let refresh = RefreshSessionRequest {
+            actor_id: USER.to_vec(),
+            session_id: b"sess-lock".to_vec(),
+            presented_jti: "a".into(),
+            new_jti: "b".into(),
+            new_expires_at: i64::MAX,
+            extra: Default::default(),
+        };
+        let err = refresh_session_handler()(state.clone(), BRIDGE, enc(&refresh))
+            .await
+            .expect_err("a locked account refreshes nothing");
+        assert_eq!(err.code, "fauna.bridges.account_revoked");
+
+        // A lapsed lock logs in again.
+        state
+            .db
+            .set_locked_until(&USER[..], Some(now - 1))
+            .await
+            .unwrap();
+        assert_eq!(fetch().await.login_did.as_deref(), Some(DID));
+
+        // Suspension, likewise — and the restore.
+        state
+            .db
+            .suspend_user_now(&USER, "abuse", "abuse")
+            .await
+            .unwrap();
+        assert!(
+            fetch().await.login_did.is_none(),
+            "suspended must not log in"
+        );
+        assert_eq!(
+            record().await.expect_err("suspended").code,
+            "fauna.bridges.account_revoked"
+        );
+        state.db.cancel_eviction(&USER).await.unwrap();
+        assert_eq!(fetch().await.login_did.as_deref(), Some(DID));
+        record()
+            .await
+            .expect("a restored account registers its session");
+    }
+
+    /// an access token minted before the lock outlives it
+    /// (the bridge keeps no revoked-session state), so the nest is the door: the
+    /// preferences read and write and the blob attribution refuse an account
+    /// that does not stand — locked or suspended — while an admin stands
+    /// regardless and a lapsed lock or a restore serves again.
+    #[tokio::test]
+    async fn a_locked_or_suspended_account_s_atproto_preferences_and_blobs_are_refused() {
+        let state = fixture_state().await;
+        seed_user_and_bridge(&state).await;
+        // The three kinds, each answering Ok(()) or the refusal's code.
+        let call_all = async || -> [Result<(), String>; 3] {
+            let fetch = FetchPreferencesRequest {
+                actor_id: USER.to_vec(),
+                extra: Default::default(),
+            };
+            let store = StorePreferencesRequest {
+                actor_id: USER.to_vec(),
+                preferences: b"[]".to_vec(),
+                extra: Default::default(),
+            };
+            let blob = RecordBlobRequest {
+                actor_id: USER.to_vec(),
+                cid: "bafkreitestcid".into(),
+                media_ref: vec![7u8; 32],
+                extra: Default::default(),
+            };
+            let code = |r: Result<_, RpcError>| r.map(|_| ()).map_err(|e| e.code);
+            [
+                code(fetch_preferences_handler()(state.clone(), BRIDGE, enc(&fetch)).await),
+                code(store_preferences_handler()(state.clone(), BRIDGE, enc(&store)).await),
+                code(record_blob_handler()(state.clone(), BRIDGE, enc(&blob)).await),
+            ]
+        };
+        let refused = || std::array::from_fn(|_| Err("fauna.bridges.account_revoked".to_string()));
+        assert_eq!(call_all().await, [Ok(()), Ok(()), Ok(())]);
+
+        let now = crate::db::now_epoch_secs();
+        state
+            .db
+            .set_locked_until(&USER[..], Some(now + 3600))
+            .await
+            .unwrap();
+        assert_eq!(
+            call_all().await,
+            refused(),
+            "a locked account is served nothing"
+        );
+
+        // An admin stands regardless, the exemption every door applies. A
+        // second superadmin is seated first so the step-down clears the floor.
+        state.db.add_admin_actor(&[0x5au8; 32]).await.unwrap();
+        state.db.add_admin_actor(&USER[..]).await.unwrap();
+        assert_eq!(
+            call_all().await,
+            [Ok(()), Ok(()), Ok(())],
+            "an admin stands"
+        );
+        assert!(matches!(
+            state.db.remove_admin_actor(&USER[..]).await.unwrap(),
+            crate::db::admin::RosterWrite::Applied
+        ));
+        assert_eq!(call_all().await, refused());
+
+        // A lapsed lock serves again.
+        state
+            .db
+            .set_locked_until(&USER[..], Some(now - 1))
+            .await
+            .unwrap();
+        assert_eq!(call_all().await, [Ok(()), Ok(()), Ok(())]);
+
+        // Suspension, likewise — and the restore.
+        state
+            .db
+            .suspend_user_now(&USER, "abuse", "abuse")
+            .await
+            .unwrap();
+        assert_eq!(
+            call_all().await,
+            refused(),
+            "a suspended account is served nothing"
+        );
+        state.db.cancel_eviction(&USER).await.unwrap();
+        assert_eq!(call_all().await, [Ok(()), Ok(()), Ok(())]);
     }
 
     #[tokio::test]

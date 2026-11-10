@@ -187,6 +187,16 @@ class MediaActions:
         row*, (a)). The one place the scheme is spelled, so tests never do."""
         return f"local:{folder_id}"
 
+    @staticmethod
+    def foreign_set_value(channel_hex: str) -> str:
+        """The ``media-folder-filter`` value of a set homed on ANOTHER nest that
+        the caller accepted a share of — its ``FolderRef::Foreign(channel)``
+        wire string (``media.md`` § Cross-nest shared sets: the option's value
+        is ``foreign:<channel hex>``, its label ``<name> (<owner>)``). Selecting
+        it enters the foreign browse scope. Beside :meth:`shared_set_value`, so
+        the scheme is spelled in one place."""
+        return f"foreign:{channel_hex}"
+
     def folder_filter_labels(self) -> list[str] | None:
         """The labels ``media-folder-filter`` paints, one per option — a shared
         set's reads ``<name> (<owner>)`` (ibid., (b)). ``None`` on a driver

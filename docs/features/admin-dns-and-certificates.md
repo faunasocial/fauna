@@ -4,6 +4,9 @@ title: Domains, DNS records and certificates
 section: admin area
 goal: docs/goal/behavior/dns-management.md § Goal
 guide: docs/guides/admin-tour.md § DNS
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -18,7 +21,7 @@ badge; the primary domain can be renamed.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at 308c995169.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] A hosted domain appears on the page with its records, each showing a value, and the reverse-lookup record carries a note that it is set at the server's provider — `docs/goal/behavior/dns-management.md` § Records covered
    - `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_domain_records`
@@ -177,6 +180,14 @@ Stamped 2026-10-01 at 308c995169.
 70. [app] A domain whose trusted certificate is live shows that on its badge, and one coming up for renewal shows that it is due; auto-renew starts on for a domain whose DNS credential the nest holds, not only for a delegated one — `docs/goal/architecture/nest/tls-certificates.md` § B. Trusted-cert acquisition
     - `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on`
     - `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_on_web_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on`
+71. [nest] A primary-domain rename takes effect only once the certificate covers the new domain's mail host, and a new mail host that does not resolve yet makes the rename wait without disturbing the current domain's certificate — `docs/goal/behavior/mail-primary-domain-rename.md` § Pre-flip
+    - `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_rename_waits_for_its_new_mail_host_then_retargets_every_domains_records`
+72. [nest] After the rename, the records listed for every domain point at the new primary's mail host — `docs/goal/behavior/mail-primary-domain-rename.md` § At-flip
+    - `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_rename_waits_for_its_new_mail_host_then_retargets_every_domains_records`
+73. [nest] A rename under way carries on after the nest restarts — `docs/goal/behavior/mail-primary-domain-rename.md` § Crash recovery
+    - `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_rename_carries_on_across_nest_restarts`
+74. [app] When Fauna manages a domain its clean-up removes only records Fauna wrote: another provider's DKIM selector, a verification token at the same name or a sibling identity key stays — `docs/goal/behavior/dns-management.md` § Records covered
+   - `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_cleanup_leaves_records_fauna_did_not_write`
 
 ## Status
 
@@ -190,6 +201,8 @@ Stamped 2026-10-01 at 308c995169.
 | ios | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
 | android | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
 | tui | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -206,14 +219,14 @@ Stamped 2026-10-01 at 308c995169.
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_issue.py::test_admin_dns_cert_issue_button_renders_per_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_auto_renew.py::test_admin_dns_auto_renew_default_on_and_toggles` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_delegate.py::test_admin_dns_cert_delegate_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/live/test_dns01_cert_renewal_hetzner.py::test_dns01_reissues_the_nest_certificate_through_the_client_ui` — requires `live-drive-onboarding-bridge` (test harness) (not built: android) | tui (linux): failed |
+| 6 | app | `tests/e2e-unified/tests/live/test_dns01_cert_renewal_hetzner.py::test_dns01_reissues_the_nest_certificate_through_the_client_ui` — requires `live-drive-onboarding-bridge` (test harness) (not built: android, android-kids) | tui (linux): failed |
 | 7 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_rename_sheet_opens_and_cancels` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_adds_and_lists_local_domain_over_wire` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_non_admin_denied_on_local_domain_kind` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_real_domain_registers_primary_and_dns` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_add_domain_acme_serves_mail.py::test_domainless_add_domain_acquires_acme_cert_and_serves_mail` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/test_primary_domain_rename.py::test_start_refuses_bogus_target_over_wire` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
-| 11 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_dns_pickers_stay_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_dns_pickers_stay_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_dns_pickers_offer_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_every_record_with_type_value_and_live_status` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_rechecks_on_demand_and_by_itself_while_open` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
@@ -252,7 +265,7 @@ Stamped 2026-10-01 at 308c995169.
 | 44 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_finished_rename_keeps_the_old_domain_and_its_addresses_and_moves_signups` | nest (linux): passed |
 | 45 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_during_grace_the_old_mail_host_delivers_and_old_unsubscribe_links_keep_working` | nest (linux): passed |
 | 46 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_during_grace_the_old_mail_host_delivers_and_old_unsubscribe_links_keep_working` | nest (linux): passed |
-| 47 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_after_a_rename_the_profile_shows_the_handle_on_the_new_primary` — requires `profile-handle-primary-domain` (not built: windows) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 47 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_after_a_rename_the_profile_shows_the_handle_on_the_new_primary` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 48 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_finished_rename_keeps_the_old_domain_and_its_addresses_and_moves_signups` | nest (linux): passed |
 | 49 | nest | `tests/e2e-unified/tests/api/test_primary_domain_rename_lifecycle.py::test_neither_domain_of_an_unfinished_rename_can_be_removed` | nest (linux): passed, nest (macos): passed |
 | 50 | nest | `tests/e2e-unified/tests/api/test_primary_domain_rename_lifecycle.py::test_a_rename_onto_a_weaker_tls_posture_is_refused_until_it_catches_up` | nest (linux): passed, nest (macos): passed |
@@ -280,4 +293,8 @@ Stamped 2026-10-01 at 308c995169.
 | 69 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_added_domain_shows_its_records_without_a_tick` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 70 | app | `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on` | web (linux): skipped, linux (linux): passed, ios (macos): error, tui (linux): passed |
 | 70 | app | `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_on_web_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on` | web (linux): passed |
+| 71 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_rename_waits_for_its_new_mail_host_then_retargets_every_domains_records` | nest (linux): passed |
+| 72 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_rename_waits_for_its_new_mail_host_then_retargets_every_domains_records` | nest (linux): passed |
+| 73 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_rename_carries_on_across_nest_restarts` | nest (linux): passed |
+| 74 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_cleanup_leaves_records_fauna_did_not_write` | macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

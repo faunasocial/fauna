@@ -365,7 +365,8 @@ pub struct PostListHandles {
 }
 
 /// Build the post list pane for the selected feed: compose bar, search bar, the
-/// post list, and a "Load more" button. Snapshot-driven — `refresh` (below)
+/// post list, paged on its scrolled window's bottom edge (`feed::scroll_edge`).
+/// Snapshot-driven — `refresh` (below)
 /// rebuilds the rows from `FeedManager::snapshot()`; the gestures drive the
 /// manager's async methods.
 pub fn build_post_list_wired(
@@ -560,20 +561,16 @@ pub fn build_post_list_wired(
         );
     }
 
-    // Load more button → `FeedManager::load_more`.
-    let load_more = gtk::Button::with_label(common::LOAD_MORE);
-    load_more.set_halign(gtk::Align::Center);
-    load_more.set_margin_top(8);
-    load_more.set_margin_bottom(8);
+    // The scroll edge → `FeedManager::load_more` — the paging gesture every
+    // app shares; the feed has no load-more element.
     {
         let m = Arc::clone(manager);
         let rt = rt.clone();
-        load_more.connect_clicked(move |_| {
+        crate::feed::scroll_edge::wire(&scrolled, move || {
             let m = Arc::clone(&m);
             rt.spawn(async move { m.load_more().await });
         });
     }
-    list_page.append(&load_more);
 
     content_stack.add_named(&list_page, Some("list"));
     outer.append(&content_stack);
@@ -1407,7 +1404,7 @@ fn show_post_detail(
     stack.set_visible_child_name("detail");
 }
 
-/// The `(has_quoted_post, has_image, has_blocked_remote_images, gated_unlocked,
+/// The `(has_quoted_post, has_media, has_blocked_remote_images, gated_unlocked,
 /// has_tips)` embed signature of an open post detail — the reactive-repaint
 /// trigger in [`render_posts`]. A change in any element (a late-folded quote /
 /// media, a remote-image reveal flipping `has_blocked_remote_images` — D3, a
@@ -1425,7 +1422,7 @@ fn show_post_detail(
 fn detail_embed_sig(post: &PostSummary) -> (bool, bool, bool, bool, bool) {
     (
         post.document.has_quoted_post(),
-        post.document.first_image_hash().is_some(),
+        !post.document.media_blocks().is_empty(),
         post.document.has_blocked_remote_images(),
         post.gated_unlocked,
         post.tips.is_some(),
@@ -2093,10 +2090,9 @@ fn connect_lightbox(button: &gtk::Button, picture: &gtk::Picture) {
     });
 }
 
-/// Build a `post-image` element for a bridged post's own picture — the first
-/// `ProxiedImage` of a post with no blob image
-/// ([`RenderDocument::proxied_post_image`](fauna_core::render::RenderDocument::proxied_post_image),
-/// render-model.md § D6c). Its nest-relative `path` is fetched from the
+/// Build a `post-image` element for a bridged post's own picture — one
+/// `ProxiedImage` block of its document ([`append_post_media`] paints every
+/// one, render-model.md § D6c). Its nest-relative `path` is fetched from the
 /// reader's own nest through the same bearer-carrying content `get` a blob
 /// takes, and the bytes are painted as they come: the proxy's answer is
 /// plaintext, so there is no `open_media_bytes`, and no `c2pa-badge` (they are
@@ -2157,25 +2153,63 @@ fn build_post_proxied_image_from(
     outer
 }
 
-/// The block a post's `video-thumbnail` plays — the document's `Video` by
-/// content hash, else a bridged post's `ProxiedVideo` (render-model.md § D6b,
-/// § D6c → *Proxied video*): the same slot pick `first_video_hash` /
-/// `proxied_post_video` make, as the block `playback_source` takes.
-pub(crate) fn post_video_block(
-    document: &fauna_core::render::RenderDocument,
-) -> Option<RenderBlock> {
-    if let Some(hash) = document.first_video_hash() {
-        return Some(RenderBlock::Video {
-            hash: hash.to_string(),
-            alt: String::new(),
-        });
+/// The label a media element carries: the block's own `alt` when the author
+/// wrote one, else the shared fixed text (render-model.md § D6c → *Proxied
+/// video*, the `alt` paragraph).
+pub(crate) fn media_alt<'a>(alt: &'a str, fallback: &'a str) -> &'a str {
+    if alt.is_empty() { fallback } else { alt }
+}
+
+/// Paint every media block of a post's document into `container`, in body
+/// order (render-model.md § D6b *Accessors*): one `post-image` per picture
+/// block and one `video-thumbnail` per video block of
+/// [`RenderDocument::media_blocks`](fauna_core::render::RenderDocument::media_blocks),
+/// each publishing its block's `alt` — or the shared
+/// `feed.post.image_alt_fallback` / `video_alt_fallback` — as its `alt`
+/// attribute. tui's `feed::media_elements` walk; the list card and the post
+/// detail both paint through here. Each picture asks the per-reader cache for
+/// its own bytes, so every painted picture is fetched.
+pub(crate) fn append_post_media(
+    container: &gtk::Box,
+    post: &PostSummary,
+    manager: &Arc<LinuxFeedManager>,
+    client: &Rc<FaunaClient>,
+) {
+    use crate::i18n::strings::feed::post::{IMAGE_ALT_FALLBACK, VIDEO_ALT_FALLBACK};
+    let home = crate::feed::post_media::post_home(post);
+    for block in post.document.media_blocks() {
+        match &block {
+            RenderBlock::Image { hash, alt } => {
+                let outer = build_post_image(hash, home.clone(), manager, client);
+                label_post_image(&outer, media_alt(alt, IMAGE_ALT_FALLBACK));
+                container.append(&outer);
+            }
+            RenderBlock::ProxiedImage { path, alt } => {
+                let outer = build_post_proxied_image(path, manager, client);
+                label_post_image(&outer, media_alt(alt, IMAGE_ALT_FALLBACK));
+                container.append(&outer);
+            }
+            RenderBlock::Video { alt, .. } | RenderBlock::ProxiedVideo { alt, .. } => {
+                let label = media_alt(alt, VIDEO_ALT_FALLBACK).to_string();
+                // A tap plays it in place (§ D6c → *Inline playback*).
+                let host =
+                    build_post_video(&post.post_id, block.clone(), home.clone(), manager, client);
+                crate::testid::set_test_attr_text(&host, "alt", &label);
+                container.append(&host);
+            }
+            _ => {}
+        }
     }
-    document
-        .proxied_post_video()
-        .map(|path| RenderBlock::ProxiedVideo {
-            path: path.to_string(),
-            alt: String::new(),
-        })
+}
+
+/// Publish `alt` on the `post-image` button a [`build_post_image`] /
+/// [`build_post_proxied_image`] frame wraps (its first child,
+/// [`post_image_button`]), and as the button's tooltip.
+fn label_post_image(outer: &gtk::Box, alt: &str) {
+    if let Some(button) = outer.first_child() {
+        crate::testid::set_test_attr_text(&button, "alt", alt);
+        button.set_tooltip_text(Some(alt));
+    }
 }
 
 pub(crate) use super::video_thumbnail::build_post_video;
@@ -2598,7 +2632,13 @@ fn build_post_card(
             gtk::accessible::Property::Description("post-card"),
             gtk::accessible::Property::Label(notice),
         ]);
-        row.set_child(Some(&build_content_block(&composed)));
+        // The reporter's show-again beside their own placeholder
+        // (`moderation.md` § Corollary — the reporter's hide is theirs to undo).
+        let again = composed
+            .reported()
+            .then(|| crate::report::show_again_button(client, &post.post_id, Some(&post.author)))
+            .flatten();
+        row.set_child(Some(&build_content_block(&composed, again)));
         return row;
     }
 
@@ -2672,7 +2712,14 @@ use crate::content_policy::block_notice;
 /// `reported` is the viewer's own report (`moderation.md` § Corollary): the same
 /// element reads "You reported this" and carries `source="reported"` — a
 /// personal filter, not a policy, so it names the viewer's own act.
-fn build_content_block(composed: &fauna_core::obligation::ComposedVerdict) -> gtk::Box {
+///
+/// `show_again` is the reporter's `content-policy-show-again-button`
+/// ([`crate::report::show_again_button`]), painted under the notice when the
+/// card offers it.
+fn build_content_block(
+    composed: &fauna_core::obligation::ComposedVerdict,
+    show_again: Option<gtk::Button>,
+) -> gtk::Box {
     let reported = composed.reported();
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     vbox.set_margin_top(12);
@@ -2692,6 +2739,9 @@ fn build_content_block(composed: &fauna_core::obligation::ComposedVerdict) -> gt
         crate::testid::set_test_attr(&placeholder, "source", "reported");
     }
     vbox.append(&placeholder);
+    if let Some(button) = show_again {
+        vbox.append(&button);
+    }
     // The guardian rule's reason, verbatim beside the frame (`nest-rules.md`
     // § The shared rule editor → *The reason is the member's to read*).
     if let Some(reason) = crate::content_policy::reason_label(composed) {
@@ -2710,7 +2760,7 @@ fn content_placeholder_box(
     on_reveal: impl Fn() + 'static,
 ) -> gtk::Box {
     if composed.verdict == RenderVerdict::Block {
-        return build_content_block(composed);
+        return build_content_block(composed, None);
     }
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     vbox.set_margin_top(12);
@@ -2930,6 +2980,11 @@ fn build_post_card_body(
     vbox.set_margin_bottom(12);
     vbox.set_margin_start(12);
     vbox.set_margin_end(12);
+    // The engagement-cue subject mark: only a card showing the post itself is
+    // an exposure to it. The placeholder arms (muted, blocked, collapsed, a
+    // rule's withheld notice) never build this body, so the viewport observer
+    // leaves them out (`feed::viewport::CUE_SUBJECT_CLASS`; tui's `card_rows`).
+    vbox.add_css_class(crate::feed::viewport::CUE_SUBJECT_CLASS);
 
     // A REPOST ROW (feed.md § Interaction bar → Repost, ratified 2026-08-10):
     // attribution + the embedded original, no interaction bar of its own — the
@@ -3172,30 +3227,9 @@ fn build_post_card_body(
     // loader) and painted through the client — the async-byte-load-stays-client
     // idiom. Both blocks are folded in lazily by `resolve_quoted_post` /
     // `resolve_media`, triggered fire-once in `render_posts`.
-    // A bridged post's own picture / video (`ProxiedImage` / `ProxiedVideo`,
-    // render-model.md § D6c) takes the same slot when there is no blob one.
-    if let Some(hash) = post.document.first_image_hash() {
-        vbox.append(&build_post_image(
-            hash,
-            crate::feed::post_media::post_home(post),
-            manager,
-            client,
-        ));
-    } else if let Some(path) = post.document.proxied_post_image() {
-        vbox.append(&build_post_proxied_image(path, manager, client));
-    }
-    // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md
-    // § D6b); mutually exclusive with the image branch above, same fold.
-    // A tap plays it in place (§ D6c → *Inline playback*).
-    if let Some(block) = post_video_block(&post.document) {
-        vbox.append(&build_post_video(
-            &post.post_id,
-            block,
-            crate::feed::post_media::post_home(post),
-            manager,
-            client,
-        ));
-    }
+    // Every picture and video, bridged (`ProxiedImage` / `ProxiedVideo`,
+    // render-model.md § D6c) or blob, in body order (§ D6b).
+    append_post_media(&vbox, post, manager, client);
 
     // Link-preview cards (render-model.md § D4): one per Resolved `LinkPreview` block in
     // the post `document` (the producer emits one per standalone bare-url paragraph; the
@@ -3535,6 +3569,19 @@ fn build_post_actions_button(
         menu.append(&report_btn);
     }
 
+    // Mark someone else's post as spam (`report-sharing.md` § Report capture →
+    // *The post's mark-as-spam verb*): beside report, gated `!is_own`, a
+    // toggle whose `state` reads the manager's `spam_marked` list.
+    if client.actor_id().as_deref() != Some(post.author.as_str()) {
+        menu.append(&build_mark_spam_verb(
+            post,
+            manager,
+            client,
+            &popover,
+            error_label,
+        ));
+    }
+
     popover.set_child(Some(&menu));
 
     {
@@ -3548,6 +3595,79 @@ fn build_post_actions_button(
         let pop = popover.clone();
         btn.connect_destroy(move |_| pop.unparent());
     }
+    btn
+}
+
+/// `feed-post-mark-as-spam-button` — the post's mark-as-spam toggle
+/// (`report-sharing.md` § Report capture → *The post's mark-as-spam verb*). One
+/// press writes the plane delta first (`mark_spam`/`unmark_spam`; the stored
+/// list goes to the manager, whose next snapshot collapses the post for the
+/// marker at once), then runs the shared façade with the verb's new state
+/// (`FaunaClient::train_post_spam` → `train_moderation_correction`). A failure
+/// of either lands on the page's `error-message` and never undoes the other.
+fn build_mark_spam_verb(
+    post: &PostSummary,
+    manager: &Arc<LinuxFeedManager>,
+    client: &Rc<FaunaClient>,
+    popover: &gtk::Popover,
+    error_label: &gtk::Label,
+) -> gtk::Button {
+    let marked = manager.is_spam_marked(&post.post_id);
+    let btn = gtk::Button::with_label(feed::MARK_AS_SPAM);
+    btn.add_css_class("flat");
+    crate::testid::set_test_id(&btn, ids::FEED_POST_MARK_AS_SPAM_BUTTON);
+    crate::testid::set_test_attr(&btn, "state", if marked { "on" } else { "off" });
+    if marked {
+        btn.add_css_class("suggested-action");
+    }
+    crate::offline_gate::declare_wire_kind(&btn, "fauna.moderation.train");
+    let m = Arc::clone(manager);
+    let c = Rc::clone(client);
+    let pid = post.post_id.clone();
+    let pop = popover.clone();
+    let error_label = error_label.clone();
+    btn.connect_clicked(move |_| {
+        pop.popdown();
+        let is_spam = !m.is_spam_marked(&pid);
+        let m = Arc::clone(&m);
+        let error_label = error_label.clone();
+        crate::async_helper::spawn_with_snapshot(
+            &c.runtime_handle(),
+            {
+                let train = c.train_post_spam_future(pid.clone(), is_spam);
+                let pid = pid.clone();
+                move || async move {
+                    use fauna_sync_engine::preference_surfaces as surfaces;
+                    let store = crate::account_runtime::handle_source();
+                    let marked = if is_spam {
+                        surfaces::mark_spam(&store, &pid).await
+                    } else {
+                        surfaces::unmark_spam(&store, &pid).await
+                    };
+                    let (stored, mut error) = match marked {
+                        Ok(list) => (Some(list), None),
+                        Err(e) => (None, Some(surfaces::plane_failure(e))),
+                    };
+                    if let Err(e) = train.await {
+                        error.get_or_insert(e);
+                    }
+                    (stored, error)
+                }
+            },
+            move |(stored, error): (Option<Vec<String>>, Option<String>)| {
+                if let Some(list) = stored {
+                    // The row's own manager (the timeline's) and the kept
+                    // list a later rebuild starts from.
+                    m.set_spam_marked(list.clone());
+                    crate::feed::host::set_spam_marked(list);
+                }
+                crate::settings::render_error_label(
+                    &error_label,
+                    error.as_deref().map(feed::error_mark_spam).as_deref(),
+                );
+            },
+        );
+    });
     btn
 }
 

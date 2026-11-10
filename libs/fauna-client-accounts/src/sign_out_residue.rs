@@ -241,7 +241,7 @@ impl SignOutResidue {
 
     /// The accounts the recorded paths belong to: each actor scope's own name,
     /// and every scope under a recorded base that can be listed now.
-    fn accounts(&self) -> Vec<String> {
+    pub(crate) fn accounts(&self) -> Vec<String> {
         let mut actors: Vec<String> = Vec::new();
         let mut push = |actor: String| {
             if !actors.contains(&actor) {

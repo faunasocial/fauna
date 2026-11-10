@@ -37,6 +37,28 @@ impl ActorAuthority {
     }
 }
 
+/// [`CacheDb::actor_authority`] over a held connection: the same one-query
+/// read for a door that already holds the `Connection` (the Nostr signer,
+/// which reads it for every NIP-46 author — `nostr::bunker::account_stands`).
+pub fn read_actor_authority(
+    conn: &rusqlite::Connection,
+    actor: &[u8],
+) -> Result<Option<ActorAuthority>> {
+    let row = conn.query_row(
+        "SELECT suspended, locked_until FROM users WHERE actor_id = ?1",
+        rusqlite::params![actor],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+    );
+    match row {
+        Ok((suspended, locked_until)) => Ok(Some(ActorAuthority {
+            suspended: suspended != 0,
+            locked_until,
+        })),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e).context("read actor authority"),
+    }
+}
+
 /// Outcome of a roster-shrinking write ([`CacheDb::remove_admin_actor`],
 /// [`CacheDb::set_admin_role`]) — forces every caller to face the superadmin
 /// floor explicitly instead of reading a bool that conflates "done" with
@@ -1810,21 +1832,8 @@ impl CacheDb {
     /// contrast [`CacheDb::actor_suspended`], whose `None` two callers interpret
     /// with deliberately *opposite* null policies.
     pub async fn actor_authority(&self, actor: &[u8]) -> Result<Option<ActorAuthority>> {
-        let a = actor.to_vec();
         let conn = self.conn.lock().await;
-        let row = conn.query_row(
-            "SELECT suspended, locked_until FROM users WHERE actor_id = ?1",
-            rusqlite::params![a],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
-        );
-        match row {
-            Ok((suspended, locked_until)) => Ok(Some(ActorAuthority {
-                suspended: suspended != 0,
-                locked_until,
-            })),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e).context("read actor authority"),
-        }
+        read_actor_authority(&conn, actor)
     }
 
     // ==================== Audit Log ====================

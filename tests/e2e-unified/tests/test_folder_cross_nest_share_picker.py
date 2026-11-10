@@ -34,11 +34,10 @@ Exclusion class (8), as `test_contacts_cross_nest_knock.py`: the home nest
 dials the foreign one, which in docker mode is refused as non-global; the read
 of the foreign handle's `peer_url` declares it.
 
-tui only for now (the lead app): the other six apps follow in one batched
-trickle-down, and `surfaces.toml`'s `folder-share-cross-nest` key gates them
-until it lands.
+Built on all seven apps (tui first, the other six in the trickle-down; windows
+last, 2026-11-07), so no surface key gates it any more.
 
-tier_3: two real `fauna-nest` binaries + the real tui app with a live MLS
+tier_3: two real `fauna-nest` binaries + the real app with a live MLS
 engine.
 """
 
@@ -49,7 +48,6 @@ import secrets
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import require_surface
 from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
@@ -65,7 +63,6 @@ def test_owner_shares_a_folder_with_a_person_on_another_nest(
     from tests.api import conv_api
 
     app = logged_in_app
-    require_surface(app.driver, "folder-share-cross-nest")
 
     foreign = cross_nest_foreign
     authority = foreign["authority"]

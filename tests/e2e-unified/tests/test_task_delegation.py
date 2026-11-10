@@ -29,6 +29,7 @@ import pytest
 from actions.task_delegation import AUTOMATIC, THIS_DEVICE
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.app_surface import app_name, require_surface
+from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -999,3 +1000,92 @@ def test_a_kind_pinned_to_another_device_waits_for_it_rather_than_moving(
             f"exactly what pinning exists to prevent. "
             f"nest view: {lease.observe(nest_instance, user, 'index')!r}"
         )
+
+
+#: Seat B's plane write reaching seat A through its runtime's push arm at
+#: nudge latency (`_wait_for_assignment_reload`'s 60 s rationale), plus the
+#: store-change notice and the open page's reload. A ceiling, never a
+#: subject (convention 14): the poll returns on the first read that shows it.
+OPEN_PAGE_REPAINT_S = 120.0
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("task-delegation")
+def test_an_assignment_made_on_another_device_repaints_the_open_page(delegation_seats):
+    """**Outcome 11** — *an assignment made or cleared on another of your
+    devices shows on an open Task delegation page without leaving it*
+    (``account-runtime.md`` § Multi-instance concurrency → *A runtime's
+    own pump is a source of the notice too*: an open store-backed surface shows
+    what a fresh visit would show, whichever process applied the change).
+
+    Outcome 7's test re-opens the page on every poll, so it proves the
+    assignment *reaches* this device, never that an OPEN page follows it. Here
+    seat A opens Task delegation ONCE and never leaves it — no ``navigate()``
+    after the first — while seat B, the user's other device, pins ``index`` to
+    itself and then clears it. Both the pin and the clear must paint on A's
+    open page. The failure message re-opens A's page, so a red tells "never
+    reached A" apart from "reached A, open page never re-driven".
+
+    Seat B is :attr:`_Seats.pinning_app` — this app where it can make an index
+    pin, a tui seat where it cannot — and seat A only watches, so the journey
+    fits every column; tui leads (the lead app) and the others join by marker
+    as each is run against it.
+    """
+    seats = delegation_seats
+    seat_a = seats.observer
+    td_a = seat_a.task_delegation
+
+    # Seat A opens the page once, and stays.
+    td_a.navigate()
+    assert td_a.is_page_visible(), (
+        f"seat A's task-delegation page did not render; error={seat_a.error_text()!r}"
+    )
+    row_a = td_a.row_of(KIND_INDEX)
+    assert td_a.assignment_key(row_a) == AUTOMATIC, (
+        f"precondition: a fresh actor's index row reads Automatic, got "
+        f"{td_a.assignment_key(row_a)!r}"
+    )
+
+    seat_b, _stop_b = seats.launch(seats.pinning_app, "b")
+    row_b = _pin_to_itself(seat_b, "seat B")
+
+    def open_key() -> str:
+        try:
+            return td_a.assignment_key(td_a.row_of(KIND_INDEX))
+        except (LookupError, AssertionError):
+            return ""  # a row the page rebuilt away between the count and the read
+
+    def diagnosis(want: str):
+        return lambda: (
+            f"seat A's OPEN page still reads {open_key()!r} for {KIND_INDEX!r}, "
+            f"wanted {want}; a re-open now reads "
+            f"{_wait_for_assignment_reload(seat_a, lambda k: True, timeout=5.0)[1]!r} "
+            f"(if that shows it, the change reached A and the open page was never "
+            f"re-driven); error={seat_a.error_text()!r}"
+        )
+
+    wait_until(
+        lambda: open_key() not in (AUTOMATIC, THIS_DEVICE, ""),
+        OPEN_PAGE_REPAINT_S,
+        interval=0.5,
+        diagnose=diagnosis("B's pin, as a pin to another device"),
+    )
+
+    # …and the clear made on B reaches the same open page.
+    td_b = seat_b.task_delegation
+    td_b.set_assignment(row_b, "automatic")
+    assert td_b.wait_for_assignment(row_b, AUTOMATIC), (
+        f"seat B's clear did not take; got {td_b.assignment_key(row_b)!r} "
+        f"error={seat_b.error_text()!r}"
+    )
+    wait_until(
+        lambda: open_key() == AUTOMATIC,
+        OPEN_PAGE_REPAINT_S,
+        interval=0.5,
+        diagnose=diagnosis("Automatic after B cleared its pin"),
+    )

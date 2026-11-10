@@ -75,6 +75,37 @@ if sync_seats.seat_mode_app(sync_seats.WEB_MODE, sys.platform):
         pytest.param(_WEB_READER_PAIR, id=sync_seats.seat_set_param_id(_WEB_READER_PAIR))
     )
 
+
+
+def journey_seat_sets(tui_set: tuple, *, reader: int | None = 0) -> list:
+    """The seat sets a Devices-page journey first written over ``tui_set`` (all
+    ``tui``) collects here, as ``pytest.param``s: the tui set itself, its
+    ``native`` twin (this platform's own GUI app in every seat), and — when
+    ``reader`` names a seat — the same set with that seat played by each
+    device-only mode this platform launches (``web`` on Linux, ``phone``: the
+    android emulator on Linux, the iOS simulator on macOS).
+
+    The device-only seat is always the one whose Devices page the journey reads
+    and acts on, the folder-binding seats around it the devices it names — the
+    shape outcomes 18 and 19 took first — so the feature ledger credits the web
+    or phone app alone for that set (``sync_seats.DEVICE_ONLY_MODES``). A
+    journey whose subject is a desktop-only fact (an app beside its sync helper)
+    passes ``reader=None`` and collects the tui and native sets alone. A set
+    naming a mode this platform cannot launch is dropped at collection, never
+    skipped (convention 7)."""
+    sets = [tuple(tui_set), tuple("native" for _ in tui_set)]
+    if reader is not None:
+        for mode in (sync_seats.WEB_MODE, sync_seats.PHONE_MODE):
+            seats = list(tui_set)
+            seats[reader] = mode
+            sets.append(tuple(seats))
+    launchable = [
+        s for s in sync_seats.seat_sets_for_platform(sys.platform, tuple(sets))
+        if all(sync_seats.seat_mode_app(m, sys.platform) for m in s)
+    ]
+    return [pytest.param(s, id=sync_seats.seat_set_param_id(s)) for s in launchable]
+
+
 #: The app default each desktop seat mode registers under; the native seat's
 #: is its platform app's (``fauna-macos`` on macOS).
 _DESKTOP_DEFAULTS = {"tui": "fauna-tui"}
@@ -434,6 +465,166 @@ def test_a_device_renamed_on_one_seat_reads_its_new_name_on_both(
                     f"— the sibling could not open the owner-root seal, or its engine's "
                     f"re-register overwrote the user's name (rule (b)); nest rows "
                     f"(device_id, label, sealed?, online): {_nest_rows(account)!r}"
+                ),
+            )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+#: Three seats of one account: `a` acts, `b`'s Devices page stays open and is
+#: never navigated after the rename, `c` is the device `a` removes. `b`, the
+#: open page, is the seat a device-only app plays (web, phone).
+_OPEN_PAGE_SETS = journey_seat_sets(("tui", "tui", "tui"), reader=1)
+
+
+@pytest.mark.timeout(int(3 * STARTUP_WINDOW + 5 * _ROSTER_WINDOW + 300))
+@pytest.mark.parametrize("seat_set", _OPEN_PAGE_SETS)
+@pytest.mark.feature("devices")
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.web
+@pytest.mark.ios
+@pytest.mark.android
+def test_an_open_devices_page_repaints_a_sibling_rename_and_removal(
+    nest_instance, request, seat_set
+):
+    """Devices outcome 26 (``devices.md`` § Listing Devices → *An open roster
+    follows a sibling's write*): seat `b`'s Devices page is open; seat `a`
+    renames `b`'s card, and `b`'s own card reads the new name; `a` then
+    removes seat `c`, and `c`'s card drops from `b`'s page — with no
+    navigation on `b` between either write and its assertion.
+
+    A rename is nest-only (nothing lands in any account store), so before the
+    roster push (``fauna.sync.devices.changed`` → ``StaleSurfaces::devices``)
+    `b`'s open page kept the old name until the user left and came back. Every
+    mutation is a UI gesture (convention 8); every wait a deadline poll on
+    state (convention 14).
+    """
+    account = _account(nest_instance)
+    port, url, secret_key = account[0], account[1], account[2]
+    folder = f"open-roster-{secrets.token_hex(4)}"
+    from common import user_create_folder
+    from helpers.waiting import await_device_removal_ready
+
+    user_create_folder(port, folder, secret_key=secret_key, base_url=url)
+
+    new_name = f"study {secrets.token_hex(3)}"
+    run_token = sync_seats.new_run_token(seats=3)
+    tmp = Path(tempfile.mkdtemp(prefix=f"fauna-{folder}-"))
+    seat = _seat_factory(nest_instance, request, account, folder, tmp, run_token, seat_set)
+
+    def painted_names(driver) -> list:
+        driver.wait_for("device-card", timeout=30.0)
+        return [
+            driver.get_text("device-name", scope=f"device-card[{i}]")
+            for i in range(driver.count("device-card"))
+        ]
+
+    try:
+        with contextlib.ExitStack() as stack:
+            a = stack.enter_context(seat("a"))
+            b = stack.enter_context(seat("b"))
+            c = stack.enter_context(seat("c"))
+            for s in (a, b, c):
+                s.await_ready(STARTUP_WINDOW)
+            da, db = a.app.driver, b.app.driver
+            last: dict = {}
+
+            # Each seat's own painted name. Rows sharing an app default
+            # (three tui seats, or a and c beside a web or phone b) read
+            # `<default> · <code>` by rule (c), and the code is set-relative —
+            # one roster, so every page paints a row alike; the three names
+            # are therefore three distinct strings on every page.
+            def own_name_on(s, key) -> bool:
+                s.app.backups.navigate_devices()
+                last[key] = _own_name(s.app.driver)
+                return bool(last[key])
+
+            for s, key in ((a, "a_own"), (b, "b_own"), (c, "c_own")):
+                wait_until(
+                    lambda s=s, key=key: own_name_on(s, key), _ROSTER_WINDOW,
+                    interval=2.0,
+                    diagnose=lambda key=key: (
+                        f"seat {key[0]}'s own card never read a name "
+                        f"({last.get(key)!r}); nest rows (device_id, label, sealed?, "
+                        f"online): {_nest_rows(account)!r}"
+                    ),
+                )
+
+            # `b`'s page is open from here on, and lists all three seats.
+            def b_lists_everyone() -> bool:
+                b.app.backups.navigate_devices()
+                last["b_names"] = painted_names(db)
+                return all(
+                    last[k] in last["b_names"] for k in ("a_own", "b_own", "c_own")
+                )
+
+            wait_until(
+                b_lists_everyone, _ROSTER_WINDOW, interval=2.0,
+                diagnose=lambda: (
+                    f"seat b's Devices page never listed all three seats "
+                    f"({last.get('b_names')!r}); nest rows: {_nest_rows(account)!r}"
+                ),
+            )
+
+            def card_on_a(name: str) -> int | None:
+                a.app.backups.navigate_devices()
+                names = painted_names(da)
+                last["a_names"] = names
+                return names.index(name) if name in names else None
+
+            def a_lists(name: str) -> bool:
+                return card_on_a(name) is not None
+
+            wait_until(
+                lambda: a_lists(last["b_own"]) and a_lists(last["c_own"]),
+                _ROSTER_WINDOW, interval=2.0,
+                diagnose=lambda: (
+                    f"seat a's Devices page never listed b {last['b_own']!r} and c "
+                    f"{last['c_own']!r} (it reads {last.get('a_names')!r})"
+                ),
+            )
+
+            # ── The rename, from `a`; `b` is not navigated again ──
+            scope = f"device-card[{card_on_a(last['b_own'])}]"
+            da.click("device-rename-button", scope=scope)
+            da.wait_for("device-rename-input", timeout=15.0)
+            da.fill("device-rename-input", new_name)
+            da.click("device-rename-confirm-button")
+
+            def b_reads_new_name() -> bool:
+                last["b_now"] = _own_name(db)
+                return last["b_now"] == new_name
+
+            wait_until(
+                b_reads_new_name, _ROSTER_WINDOW, interval=2.0,
+                diagnose=lambda: (
+                    f"seat b's OPEN Devices page still reads {last.get('b_now')!r} for "
+                    f"its own card, not {new_name!r} — the roster push did not reach "
+                    f"it, or tui did not re-read on it; nest rows (device_id, label, "
+                    f"sealed?, online): {_nest_rows(account)!r}\n{b.diagnostics()}"
+                ),
+            )
+
+            # ── The removal, from `a`; `b` is still not navigated ──
+            await_device_removal_ready(da)
+            index = card_on_a(last["c_own"])
+            assert index is not None, f"seat a lost c's card: {last.get('a_names')!r}"
+            da.click("device-remove-button", scope=f"device-card[{index}]")
+
+            def c_dropped_from_b() -> bool:
+                last["b_names"] = painted_names(db)
+                return last["c_own"] not in last["b_names"]
+
+            wait_until(
+                c_dropped_from_b, _ROSTER_WINDOW, interval=2.0,
+                diagnose=lambda: (
+                    f"seat b's OPEN Devices page still lists the removed seat c "
+                    f"{last['c_own']!r} ({last.get('b_names')!r}); error-message on a: "
+                    f"{da.get_text('error-message') if not da.is_absent('error-message') else None!r}; "
+                    f"nest rows: {_nest_rows(account)!r}\n{c.diagnostics()}"
                 ),
             )
     finally:

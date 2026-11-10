@@ -21,10 +21,9 @@ What it dials, all from outside the container, through the published ports:
   * **udp 7842** — the relay's QUIC address discovery.
 
 **Rejects that wait on a fix are ``xfail``**, named by the row that lands the
-fix; the ``strict`` ones go red — telling their owner to drop the marker — the
-moment the fix lands: the HTTP-01 listener's foreign-``Host`` and connection-cap
-behaviour, the ActivityPub verify-before-fetch (not strict: an SSRF guard that refuses the
-dial would also pass it) and the ``/internal/router-status`` loopback gate.
+fix; a ``strict`` one goes red — telling its owner to drop the marker — the
+moment the fix lands. One remains: the ActivityPub verify-before-fetch (not
+strict: an SSRF guard that refuses the dial would also pass it).
 
 **Not covered, and why.** The IMAP pre-auth *idle* bound is ours, not the
 vendored fork's: 60 s from accept to a successful authentication
@@ -65,9 +64,11 @@ from .helpers import (
     register_primary_domain,
     relax_spam_policy,
     remove_container,
+    scanner_wired_network,
     start_container_with_ports,
     wait_for_health,
 )
+from .mail_perimeter import network_gateway
 
 try:
     subprocess.run(["docker", "info"], capture_output=True, timeout=10)
@@ -87,11 +88,18 @@ RECIPIENT_PASSWORD = "preauth-rejects-password-1"
 DISCOVERY_PORT = 7842
 AP_DOMAIN = "ap.preauth.test"
 
-# A resolvable sender domain: the nest's sender-domain check has no loopback
-# exemption, and the peer here is the network gateway. `--add-host` makes the
-# reserved `.test` name resolve inside the container.
+# A resolvable sender domain: the nest's sender-domain and HELO-identity checks
+# have no exemption for the peer here, the user-defined network's gateway.
+# `--add-host` makes the reserved `.test` name resolve inside the container to
+# that gateway (not `host-gateway`, docker0's address, which is not the peer a
+# published port on this network delivers), so the EHLO name matches the peer.
 SENDER_HOST = "probe.test"
 SENDER = f"sender@{SENDER_HOST}"
+
+# The admin's live `max_message_bytes`, pinned small so the 552 test streams a
+# megabyte, not the 50 MB default. The EHLO `SIZE` advertises the product
+# ceiling, never this cap (`mta/server.go`, `srv.MaxMessageBytes`).
+SIZE_CAP = 1_000_000
 
 # `Frame` envelope keys and the Request/Reply tags (`libs/fauna-protocol`), as the
 # harness's own WS-RPC client writes them (`clients/_ws_rpc_core.py::_attempt`).
@@ -120,40 +128,46 @@ def nest(docker_image, run_seal_helper):
     mail_ports = dict(zip((25, 465, 587, 993), mail))
     udp_port = find_free_ports(1)[0]
     name = f"fauna-preauth-{api_port}"
-    start_container_with_ports(
-        name,
-        {443: api_port, 8080: http80_port, **mail_ports},
-        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
-        add_hosts={SENDER_HOST: "host-gateway"},
-        udp_port_map={DISCOVERY_PORT: udp_port},
-    )
-    try:
-        wait_for_health(api_port, name)
-        admin = claim_admin_api(api_port, CLAIM_CODE, handle="admin")
-        handle = {
-            "name": name,
-            "port": api_port,
-            "url": f"https://127.0.0.1:{api_port}",
-            "admin": admin,
-            "mail_ports": mail_ports,
-            "router_port": api_port,
-            "http80_port": http80_port,
-            "udp_port": udp_port,
-        }
-        register_primary_domain(handle, DOMAIN)
-        relax_spam_policy(handle)
-        handle["recipient"] = provision_mail_recipient(
-            handle, run_seal_helper, domain=DOMAIN,
-            local_part=RECIPIENT_LOCAL, password=RECIPIENT_PASSWORD,
+    # Mail enable needs content scanners beside the nest: a public box whose
+    # artifact wired none refuses `set_mail_enabled(true)` with
+    # `fauna.bridges.mail_unavailable_here`. The rejects below are structural
+    # (before DATA), so the fake scanners are never reached.
+    with scanner_wired_network("fauna-preauth") as (network, scan_env):
+        start_container_with_ports(
+            name,
+            {443: api_port, 8080: http80_port, **mail_ports},
+            env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000", **scan_env},
+            add_hosts={SENDER_HOST: network_gateway(network)},
+            udp_port_map={DISCOVERY_PORT: udp_port},
+            network=network,
         )
         try:
-            bring_bridges_to_serving(name, handle, mail_ports, DOMAIN)
-        except (AssertionError, TimeoutError) as e:
-            raise AssertionError(
-                f"{e}\n\n── bridge diagnostics ──\n{bridge_diag(name)}") from e
-        yield handle
-    finally:
-        remove_container(name)
+            wait_for_health(api_port, name)
+            admin = claim_admin_api(api_port, CLAIM_CODE, handle="admin")
+            handle = {
+                "name": name,
+                "port": api_port,
+                "url": f"https://127.0.0.1:{api_port}",
+                "admin": admin,
+                "mail_ports": mail_ports,
+                "router_port": api_port,
+                "http80_port": http80_port,
+                "udp_port": udp_port,
+            }
+            register_primary_domain(handle, DOMAIN)
+            relax_spam_policy(handle, max_message_bytes=SIZE_CAP)
+            handle["recipient"] = provision_mail_recipient(
+                handle, run_seal_helper, domain=DOMAIN,
+                local_part=RECIPIENT_LOCAL, password=RECIPIENT_PASSWORD,
+            )
+            try:
+                bring_bridges_to_serving(name, handle, mail_ports, DOMAIN)
+            except (AssertionError, TimeoutError) as e:
+                raise AssertionError(
+                    f"{e}\n\n── bridge diagnostics ──\n{bridge_diag(name)}") from e
+            yield handle
+        finally:
+            remove_container(name)
 
 
 # ── :443 — the nest behind the SNI router ─────────────────────────────
@@ -292,6 +306,86 @@ def test_ws_off_allowlist_kind_is_unauthenticated(nest):
         ws.close()
 
 
+_ENROLL_REFUSED = "fauna.bridges.remote_enrollment_unsupported"
+
+
+def _enroll_payload() -> dict:
+    return {
+        "ed25519_pubkey": secrets.token_bytes(32),
+        "role_hint": "mta",
+        "bridge_id": f"mta-{secrets.token_hex(4)}",
+    }
+
+
+@pytest.mark.feature("admin-bridges")
+def test_a_stranger_crossing_the_sni_router_cannot_ask_to_enroll_as_a_bridge(nest):
+    """``fauna.bridges.request_enrollment`` is loopback-only
+    (``docs/goal/behavior/mail-bridge-lifecycle.md`` § Lifecycle phases; the gate
+    is ``routes.rs`` step (1c)). On the deployed image the public :443 is the
+    ``fauna-sni-router``, a loopback peer of the nest, so the gate holds only
+    because the router conveys the stranger's real address in a PROXY-v2 header
+    the nest honours. A stranger dialling through the published port arrives
+    from the network gateway, never loopback, and must get the gate's own
+    refusal. The exact code is what makes this falsifiable: were the header not
+    sent (the nest missing from the router's ``--send-proxy-to``) or not honoured
+    (a mismatched router-auth secret falls back to the TCP peer), the nest would
+    read the router's 127.0.0.1 and the call would pass the gate instead."""
+    ws = _anon_ws(nest)
+    try:
+        ws.send_binary(_request_frame(
+            "fauna.bridges.request_enrollment", _enroll_payload(), corr=1))
+        reply = _reply(ws)
+        assert not reply.get(7), f"a stranger was admitted to enrollment: {reply!r}"
+        assert _error_code(reply) == _ENROLL_REFUSED, (
+            f"want the loopback gate's refusal, got {_error_code(reply)!r}")
+    finally:
+        ws.close()
+
+
+def _proxy_v2_header_claiming_loopback() -> bytes:
+    """A PROXY-v2 ``PROXY`` header over TCP/IPv4 naming 127.0.0.1 as the source
+    — what a stranger would forge to read as the nest's own machine."""
+    signature = b"\r\n\r\n\x00\r\nQUIT\n"
+    block = socket.inet_aton("127.0.0.1") * 2 + struct.pack("!HH", 40000, 3000)
+    return signature + bytes([0x21, 0x11]) + struct.pack("!H", len(block)) + block
+
+
+@pytest.mark.feature("admin-bridges")
+def test_a_forged_proxy_header_through_the_sni_router_cannot_pass_for_loopback(nest):
+    """A stranger who sends its own PROXY-v2 header claiming 127.0.0.1 before its
+    TLS ClientHello gets no further than one without it. The router splices
+    only after reading a ClientHello and prepends its OWN header (the real peer,
+    authenticated by the router secret); the nest reads exactly one header, so
+    a forged one either stops the router or lands in the nest's TLS handshake
+    as garbage. Whatever stage fails, enrollment is never granted: a successful
+    reply, or any reply but the gate's refusal, is the spoof."""
+    import websocket  # from websocket-client
+
+    raw = socket.create_connection(("127.0.0.1", nest["router_port"]), timeout=15)
+    reply = None
+    try:
+        raw.sendall(_proxy_v2_header_claiming_loopback())
+        ctx = ssl._create_unverified_context()
+        tls = ctx.wrap_socket(raw, server_hostname=DOMAIN)
+        ws = websocket.create_connection(
+            f"ws://127.0.0.1:{nest['router_port']}/api/v1/ws",
+            socket=tls, subprotocols=["fauna.v1"], timeout=15,
+        )
+        try:
+            ws.send_binary(_request_frame(
+                "fauna.bridges.request_enrollment", _enroll_payload(), corr=1))
+            reply = _reply(ws)
+        finally:
+            ws.close()
+    except (ssl.SSLError, OSError, websocket.WebSocketException):
+        return  # the forged connection never reached the dispatcher
+    finally:
+        raw.close()
+    assert not reply.get(7), f"a forged PROXY header was admitted to enrollment: {reply!r}"
+    assert _error_code(reply) == _ENROLL_REFUSED, (
+        f"want the loopback gate's refusal, got {_error_code(reply)!r}")
+
+
 def test_ws_claim_admin_is_throttled_per_source(nest):
     """``fauna.auth.claim_admin`` is a credential guess against a short secret:
     10 attempts / 60 s per source IP (``anonymous_rate_limit.rs``). Past the cap
@@ -377,12 +471,11 @@ def test_challenge_issue_is_bounded_per_source(nest):
     assert issued <= 128, f"{issued} challenges issued past the 128 cap"
 
 
-@pytest.mark.xfail(strict=True, reason="waits on the loopback gate: /internal/router-status has no loopback gate yet")
 def test_router_status_is_refused_from_a_non_loopback_source(nest):
-    """L1: ``/internal/router-status`` serves the exact version and the user
-    counts to any internet client today. Ruled loopback-only, fail-closed through
-    the shared internal gate; a request through the published port arrives from
-    the network gateway, never loopback, so it must not be a 200."""
+    """L1: ``/internal/router-status`` carries the exact version and the user
+    counts, so it is ruled loopback-only, fail-closed through the shared internal
+    gate; a request through the published port arrives from the network gateway,
+    never loopback, so it must not be a 200."""
     conn = http.client.HTTPSConnection(
         "127.0.0.1", nest["port"], timeout=15, context=ssl._create_unverified_context())
     conn.request("GET", "/internal/router-status")
@@ -636,7 +729,6 @@ def test_http80_without_host_is_400_on_a_domainless_nest(nest):
     assert status == 400
 
 
-@pytest.mark.xfail(strict=True, reason="waits on the :80 fix: the fallback reflects the Host header into a 308")
 def test_http80_foreign_host_gets_404_and_never_a_redirect(nest):
     """M2: only a host this nest serves is ever redirected to; any other ``Host``
     is a 404 with no ``Location`` (ruled)."""
@@ -644,7 +736,6 @@ def test_http80_foreign_host_gets_404_and_never_a_redirect(nest):
     assert location is None and status == 404, (status, location)
 
 
-@pytest.mark.xfail(strict=True, reason="waits on the :80 fix: :80 is a bare axum::serve with no connection cap")
 def test_http80_sheds_connections_past_the_per_ip_cap(nest):
     """M2: once :80 is served through the admitted accept loop it sheds a source's
     connections past the per-IP cap (256, ``fauna-conn-limit``)."""
@@ -698,24 +789,28 @@ def test_port25_recipient_cap_is_452_past_100(nest):
 
 
 def test_port25_data_over_the_size_cap_is_552(nest):
-    """A message body one byte past the advertised ``SIZE`` is refused 552
-    (``mta/server.go`` ``Data``: the ``maxMessageBytes+1`` read, then 552)."""
+    """A message body past the admin's live cap is refused 552 (``mta/server.go``
+    ``Data``: the ``maxMessageBytes+1`` read, then 552). The EHLO ``SIZE`` is the
+    product ceiling, an upper bound on the live cap, never the cap itself."""
     rcpt = nest["recipient"]["username"]
     client = _smtp_tls_session(nest["mail_ports"][25])
     try:
-        size = int(client.esmtp_features["size"])
-        assert size <= 128 * 1024 * 1024, f"advertised cap {size} is too large to stream in a test"
+        advertised = int(client.esmtp_features["size"])
+        assert advertised >= SIZE_CAP, (advertised, SIZE_CAP)
         _mail_from_ok(client)
         assert client.docmd("RCPT", f"TO:<{rcpt}>")[0] == 250
         assert client.docmd("DATA")[0] == 354
-        chunk = (b"x" * 998 + b"\r\n") * 1024
+        chunk = (b"x" * 998 + b"\r\n") * 64
         sent = 0
-        while sent <= size:
-            client.sock.sendall(chunk)
-            sent += len(chunk)
-        client.sock.sendall(b"\r\n.\r\n")
-        code, _ = client.getreply()
-        assert code == 552
+        try:
+            while sent <= SIZE_CAP:
+                client.sock.sendall(chunk)
+                sent += len(chunk)
+            client.sock.sendall(b"\r\n.\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the server may answer and stop reading before the dot
+        code, text = client.getreply()
+        assert code == 552, (code, text, sent)
     finally:
         client.close()
 

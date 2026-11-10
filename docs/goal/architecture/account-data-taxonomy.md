@@ -82,7 +82,7 @@ cannot open.
 1. **Delegable** — sealed under per-kind keys inside the grant-mintable
    universe: a user-minted, revocable, audited grant hands the kind's
    `{entry_key, item_blind}` pair
-   ([`encryption-at-rest.md`](encryption-at-rest.md) § Capability tiering).
+   ([`capability-grants.md`](capability-grants.md) § Capability tiering).
    For preferences, relationship state, anything a third party could
    legitimately be granted.
 2. **Fleet-only** — sealed under a sibling derivation branch the grant
@@ -196,7 +196,7 @@ browse trigger builds).** `fauna.state.seen-set` was never a
 default-narrow test does, and its argued need is concrete and already
 ratified: **materialization (R9) is a grant**, and only delegable-rung
 kinds are grant-mintable at any tier
-([`encryption-at-rest.md`](encryption-at-rest.md) § Capability tiering) —
+([`capability-grants.md`](capability-grants.md) § Capability tiering) —
 a fleet-only seen-set would foreclose materialized read-state (unread
 views, cross-device resume, attention-derived digests) permanently, since
 a rung widens only by re-registration under a new kind string. The payload

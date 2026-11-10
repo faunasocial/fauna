@@ -442,3 +442,25 @@ def skip_environment(reason: str):
     from helpers import feature_ledger
     feature_ledger.note_skip_class(feature_ledger.ENVIRONMENT)
     pytest.skip(f"environment: {reason}")
+
+
+def launched_as_a_bundle(driver) -> bool:
+    """Did this macOS launch come from the `.app`, or from the bare binary?
+
+    `NotificationHost.isAvailable` is `Bundle.main.bundleURL.pathExtension ==
+    "app" && bundleIdentifier != nil`, so a bare-binary process has no
+    notification host at all: FaunaKit hands no OS notification to the platform
+    and — deliberately — records none in a fired-notification log rather than
+    recording around the guard. The driver already reports which of the two
+    ran (`drivers/macos.py::bundle_path`, `None` exactly for a bare-binary
+    launch), so a notification witness asserts the macOS column under
+    `--macos-artifact` and declares it an environment skip otherwise.
+
+    The flag is run-level and single-valued — `docs/goal/architecture/apps/
+    apple-e2e-automation.md` § Artifact launch mode, *"so any macOS journey can
+    be replayed against the artifact"* — and the default stays the bare binary
+    (rule 9 of the same doc). The bare-binary launch is therefore a property of
+    the run: not app work and not debt.
+    """
+    reader = getattr(driver, "bundle_path", None)
+    return bool(reader()) if callable(reader) else False

@@ -81,6 +81,10 @@ public sealed partial class SettingsWebPage : Page
         _suppressToggle = true;
         SubdomainToggle.IsOn = _vm.SubdomainEnabled;
         _suppressToggle = false;
+        // Live only once the page has read the nest — an early flip is refused
+        // loudly rather than dropped (the XAML starts it disabled for the frame
+        // drawn before Page_Loaded's read lands).
+        SubdomainToggle.IsEnabled = _vm.SubdomainToggleEnabled;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
             SubdomainToggle, _vm.SubdomainEnabled ? "on" : "off");
         SubdomainUrl.Text = _vm.SubdomainUrlText;

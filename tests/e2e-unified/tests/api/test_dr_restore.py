@@ -430,3 +430,54 @@ def test_conv_snapshot_create_restore_and_history(dr_nest):
                 {"snapshot_id": snapshot_id, "confirm_id": str(snapshot_id)},
             )
         assert "member" in str(restore_err.value).lower(), restore_err.value
+
+
+@pytest.mark.feature("snapshots")
+def test_a_posts_snapshot_restore_adds_its_posts_and_keeps_a_later_one(dr_nest):
+    """`docs/features/snapshots.md` outcome 16 (``message-segment-store.md``
+    § Restore dispatch on message_kind, the ``post`` arm): a posts snapshot's
+    restore is ADDITIVE, never a revert. The author posts, snapshots their
+    posts, posts again, and restores the snapshot: the snapshot's post is
+    served and so is the post written after it — a revert-replace restore,
+    the conv/mail shape, would have dropped the later one."""
+    from tests.api import ws_api
+    from tests.api.bare import sign_and_encode_post
+
+    author = create_actor_and_register(
+        dr_nest["port"], admin_signing_key=dr_nest["admin"]["signing_key"]
+    )
+    now_us = int(time.time() * 1_000_000)
+    held_text = f"a post the snapshot holds {secrets.token_hex(4)}"
+    held_id = ws_api.create_post(
+        dr_nest["port"], author, sign_and_encode_post(author["signing_key"], now_us, held_text)
+    )
+
+    with _ws_client(dr_nest, author) as ws:
+        created = ws.call("fauna.filesync.snapshot.create_message_kind", {"kind": "post"})
+    snapshot_id = created["snapshot_id"]
+    assert isinstance(snapshot_id, int) and snapshot_id > 0, created
+    assert created["kind"] == "post", created
+
+    later_text = f"a post written after the snapshot {secrets.token_hex(4)}"
+    later_id = ws_api.create_post(
+        dr_nest["port"], author,
+        sign_and_encode_post(author["signing_key"], now_us + 1_000_000, later_text),
+    )
+
+    with _ws_client(dr_nest, author) as ws:
+        restored = ws.call(
+            "fauna.filesync.snapshot.restore_message_kind",
+            {"snapshot_id": snapshot_id, "confirm_id": str(snapshot_id)},
+        )
+        history = ws.call("fauna.filesync.snapshot.list_restore_history", {"limit": 0})
+    assert restored["snapshot_id"] == snapshot_id and restored["kind"] == "post", restored
+    assert [r["kinds_restored"] for r in history["rows"]] == ["post"], history
+
+    served = {p["post_id"] for p in ws_api.local_feed_posts(dr_nest["port"], author, limit=50)}
+    assert held_id in served, (
+        f"the snapshot's post {held_id} must be served after the restore; served {served!r}"
+    )
+    assert later_id in served, (
+        f"the post written after the snapshot ({later_id}) must survive the restore — "
+        f"a posts restore adds, never reverts; served {served!r}"
+    )

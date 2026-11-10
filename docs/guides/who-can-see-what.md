@@ -75,6 +75,8 @@ in kind from the other two:
   opens a file.
 - **Going back can't take back what was public.** Your devices encrypt the files again, but anything that was public can have been copied, indexed, or archived by anyone in the meantime. Treat anything you published as public for good.
 
+You can also make a folder public as you create it: when you add a folder in **Settings → Folders**, set **Who can see this folder**, beside its name, to *Public*. When you then create it, your app asks the same confirmation first and creates nothing until you confirm, so the folder is public from its first file.
+
 That is why nothing becomes public by accident: it takes the setting *and* the
 confirmation, and a folder shared with specific people has to stop being shared
 before it can become private again.

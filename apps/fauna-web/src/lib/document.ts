@@ -29,9 +29,7 @@
 import {
   renderDocumentHasBlockedRemoteImages,
   renderDocumentQuotedPost,
-  renderDocumentFirstImageHash,
   renderDocumentMediaBlocks,
-  renderDocumentProxiedPostImage,
   renderDocumentResolvingLinkPreviewUrls,
   renderDocumentResolvedLinkPreviews,
 } from '#lib/wasm';
@@ -266,7 +264,10 @@ function blockToHtml(block: RenderBlock, forceReveal: boolean | undefined): stri
   if ('ListBlock' in block) {
     const tag = block.ListBlock.ordered ? 'ol' : 'ul';
     const items = block.ListBlock.items.map((it) => `<li>${itemInner(it, forceReveal)}</li>`).join('');
-    return `<${tag}>${items}</${tag}>`;
+    // `doc-list`: app.css's global reset zeroes every element's padding, which took the
+    // list's indent with it — a nested list painted flat (render-model.md § D7). The class
+    // carries the indent back (`app.css`, *Document markup*).
+    return `<${tag} class="doc-list">${items}</${tag}>`;
   }
   // A GFM task list (render-model.md § D7a): each item is a disabled checkbox + its content
   // (the `<input>` reflects `checked`; read-side render only — the editable checkbox is Notes).
@@ -281,7 +282,7 @@ function blockToHtml(block: RenderBlock, forceReveal: boolean | undefined): stri
   }
   if ('CodeBlock' in block) return `<pre><code>${escapeHtml(block.CodeBlock.text)}</code></pre>`;
   if ('BlockQuote' in block)
-    return `<blockquote>${block.BlockQuote.blocks.map((b) => blockToHtml(b, forceReveal)).join('\n')}</blockquote>`;
+    return `<blockquote class="doc-quote">${block.BlockQuote.blocks.map((b) => blockToHtml(b, forceReveal)).join('\n')}</blockquote>`;
   if ('RemoteImage' in block)
     return renderImage(block.RemoteImage.url, block.RemoteImage.alt, forceReveal === true || block.RemoteImage.revealed);
   // `Attachment` embeds (render-model.md § D2) are painted by the bubble's reactive Svelte
@@ -385,37 +386,6 @@ export function quotedMessageBlock(doc: RenderDocument | undefined): QuotedMessa
   if (!doc || !doc.blocks) return null;
   for (const b of doc.blocks) if ('QuotedMessage' in b) return b.QuotedMessage;
   return null;
-}
-
-/**
- * The content hash of the first trusted `Image` block (the feed's resolved media,
- * render-model.md § D6), or null. `resolve_media` folds it in; the feed page paints it through the
- * client blob loader (the body `{@html}` can't produce an async blob URL — the same reason an
- * image `Attachment` paints reactively). This is the snapshot-media fallback BELOW web's richer
- * decoded multi-image path.
- *
- * Delegates to the shared `RenderDocument::first_image_hash` over the `renderDocumentFirstImageHash`
- * wasm boundary (the browser twin of the native UniFFI face linux/tui already consume) — hash only,
- * matching the shared projection: the block's `alt` is not part of it. That loses nothing today —
- * the feed fold sets `alt` to the empty string (`fauna-feed` `manager.rs`: "the alt isn't on the
- * snapshot") and both call sites label the image themselves. Should the media alt ever become
- * paintable, it belongs on the SHARED face so all 7 apps get it at once, not in a local walker.
- */
-export function mediaImageHash(doc: RenderDocument | undefined): string | null {
-  if (!doc || !doc.blocks) return null;
-  return renderDocumentFirstImageHash(doc);
-}
-
-/**
- * The nest-relative path a post's single `post-image` slot paints when it is a bridged picture —
- * the first `ProxiedImage` of a post with no blob image (render-model.md § D6c), or null. The
- * precedence is Rust's — `RenderDocument::proxied_post_image_ref` over the
- * `renderDocumentProxiedPostImage` wasm boundary; nothing is composed here. The post-detail pane's
- * one image reads it; the list card paints every media block.
- */
-export function proxiedPostImage(doc: RenderDocument | undefined): { path: string; alt: string } | null {
-  if (!doc || !doc.blocks) return null;
-  return renderDocumentProxiedPostImage(doc);
 }
 
 /**

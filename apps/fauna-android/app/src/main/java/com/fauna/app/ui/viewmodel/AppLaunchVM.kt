@@ -44,8 +44,11 @@ import uniffi.fauna_launch_machine.resolvedDialUrl
  */
 @HiltViewModel
 class AppLaunchVM @Inject constructor(
-    private val machine: LaunchMachine,
-    observer: LaunchObserverImpl,
+    /** A fresh machine per launch drive (`LaunchModule.provideLaunchMachineFactory`). */
+    private val machines: com.fauna.app.di.LaunchMachineFactory,
+    /** Which launch is the current one — see [drive]. */
+    private val currency: com.fauna.app.core.LaunchCurrency,
+    private val observer: LaunchObserverImpl,
     private val host: OnboardingHost,
     private val sessionAccount: SessionAccount,
     private val apiClient: ApiClient,
@@ -111,8 +114,105 @@ class AppLaunchVM @Inject constructor(
         apiClient.setConversationsSelfAddress("$handle@$domain")
     }
 
-    /** Suspend; runs the LaunchMachine's four-case routing and HTTP. */
-    suspend fun start() = machine.start()
+    /**
+     * Suspend; runs the launch's four-case routing and HTTP on a FRESH machine —
+     * the cold start and every re-entry (the switcher's, the teardown's, the
+     * index reset's, the succession adopt's) is a new launch.
+     */
+    suspend fun start() {
+        // The cold boot's finish, once per process and BEFORE the machine reads
+        // the registry: whatever a sign-out (or a remove-account) cut short owes
+        // is finished first — the sync agent dismissed, the wipe, each recorded
+        // account's erase, the residue re-sweep — so this launch never routes
+        // `Online` over an account being signed out (`account-scoping.md`
+        // § Erasure follows scope → *The sign-out record is on all 7 apps*,
+        // decision 3). Not on the later re-entries (switch, teardown, reset,
+        // adopt): a remove-account's own erase may be in flight then, over the
+        // record it joined. A refused finish whose record still owes its wipe
+        // FAILS CLOSED (decision 4): the machine is not started, and the wizard
+        // lands on `identity_choice` painting the retry's refusal line, whose
+        // Remove Again ([retrySignOutResidue]) re-runs the routine.
+        if (launchFinished.compareAndSet(false, true)) {
+            val outcome = kotlinx.coroutines.withContext(finishDispatcher) {
+                accountStores.finishSignOut(
+                    SignOutCredentialEraser(registry, secureStorage),
+                    dismissAgent = true,
+                    written = null,
+                )
+            }
+            launchResidueFlow.value = outcome.residue
+            if (outcome.failsClosed) {
+                failedClosedFlow.value = true
+                return
+            }
+        }
+        drive(machines.fresh()) { it.start() }
+    }
+
+    /**
+     * Where the blocking sign-out finish runs — file I/O and, at the launch and
+     * on Remove Again, the sync agent's dismissal under its budget. A test pins
+     * it to its own scheduler.
+     */
+    internal var finishDispatcher: kotlinx.coroutines.CoroutineDispatcher =
+        kotlinx.coroutines.Dispatchers.IO
+
+    /** The cold boot's finish has run (once per process — [start]). */
+    private val launchFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private val failedClosedFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    /**
+     * The cold boot's finish was refused while its record still owes the wipe:
+     * the launch must not route over the registry. The NavHost lands on
+     * `identity_choice` instead of reading the machine ([start]).
+     */
+    val failedClosed: StateFlow<Boolean> = failedClosedFlow
+
+    private val launchResidueFlow =
+        kotlinx.coroutines.flow.MutableStateFlow<com.fauna.ffi.FfiSignOutResidue?>(null)
+
+    /**
+     * What the cold boot's finish left for the `sign-out-residue` view — the
+     * residue, or the retry's refusal line when it failed closed. The NavHost
+     * hands it to `AppState.signOutResidue` once the wizard is up and
+     * [consumeLaunchResidue]s it.
+     */
+    val launchResidue: StateFlow<com.fauna.ffi.FfiSignOutResidue?> = launchResidueFlow
+
+    /** The wizard has taken [launchResidue] over. */
+    fun consumeLaunchResidue() {
+        launchResidueFlow.value = null
+    }
+
+    /**
+     * Run one asynchronous launch drive of [machine] under the currency check
+     * (`onboarding.md` § App-launch routing → *A verdict renders only while its
+     * own launch is still the current one*; multiple-accounts outcome 17).
+     *
+     * The drive [LaunchCurrency.begin]s before it awaits, which takes the launch
+     * surface for [machine] and supersedes any earlier drive still waiting; the
+     * observer forwards a machine's snapshots only while it holds the surface, so
+     * a superseded verdict never paints, and [LaunchCurrency.deliver] accounts for
+     * the verdict when it lands. Anything that becomes a newer session retires the
+     * launch by replacing or clearing the held one — never by reaching into this
+     * drive — so the await runs to its end even when the composable that started
+     * it has left ([NonCancellable]): its verdict is then dropped, not lost.
+     */
+    private suspend fun drive(machine: LaunchMachine, run: suspend (LaunchMachine) -> Unit) {
+        val launch = currency.begin(machine)
+        observer.show(machine)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            try {
+                run(machine)
+            } finally {
+                currency.deliver(launch)
+            }
+        }
+    }
+
+    /** The machine the launch surface reads (Retry / Trust re-drive it). */
+    private fun shownMachine(): LaunchMachine? = currency.shownMachine()
 
     /**
      * Connect (or reconnect, on an account switch) [ApiClient]'s WS-RPC session for
@@ -146,16 +246,22 @@ class AppLaunchVM @Inject constructor(
      * against the saved nest; no-op if the machine isn't in
      * Offline { transient: true }.
      */
-    suspend fun retry() = machine.retrySilentChallenge()
+    suspend fun retry() {
+        val machine = shownMachine() ?: return
+        drive(machine) { it.retrySilentChallenge() }
+    }
 
     /**
      * "Trust this nest" CTA on the `launch_identity_changed` warning
      * (security.md § Transport trust). Forgets the stale TOFU pin
-     * and re-runs the silent challenge on `machine` — the SAME instance that
+     * and re-runs the silent challenge on the machine on screen — the SAME instance that
      * produced the `IdentityChanged` verdict, since it re-reads secret +
      * nest_url off that state. No-op on any machine not in `IdentityChanged`.
      */
-    suspend fun trustIdentity() = machine.trustNestIdentity()
+    suspend fun trustIdentity() {
+        val machine = shownMachine() ?: return
+        drive(machine) { it.trustNestIdentity() }
+    }
 
     /**
      * `account-index-reset-confirm-button`'s action — the malformed verdict's
@@ -171,51 +277,61 @@ class AppLaunchVM @Inject constructor(
      * afterward beyond the log line.
      */
     suspend fun resetAccountIndex() {
+        // The decision first, as the sign-out writes it: over an index this
+        // build cannot read the registry names nobody, so the record owes the
+        // wipe with no accounts, and its finish sweeps every scope under the
+        // bases (`account-scoping.md` § Erasure follows scope → *The sign-out
+        // record is on all 7 apps*, decision 1).
+        val recorded = accountStores.recordSignOut(null)
         // Sign-out-shaped: the erase below takes this machine's account-store
         // slot (the writer key) with it, same as `AccountSettingsVM.signOut`
         // (`sync-agent-credentials.md` § Credential model → *The signed-out
         // reconcile*).
         apiClient.stopAccountRuntimeForSignOutAwaited()
-        val credentials = SignOutCredentialEraser(registry, secureStorage).eraseCredentials()
         actorScope.dropActorScopedState()
-        // Recorded like a sign-out's residue, so the signed-out launch the
-        // re-routing below lands on re-sweeps it ([recheckSignOutResidue]).
-        val residue = accountStores.recordResidue(accountStores.eraseAllAccounts(), credentials)
-        if (residue != null) {
+        // The one routine; what it could not remove stays in the residue record
+        // for the signed-out wizard the re-routing below lands on.
+        val outcome = kotlinx.coroutines.withContext(finishDispatcher) {
+            accountStores.finishSignOut(
+                SignOutCredentialEraser(registry, secureStorage),
+                dismissAgent = false,
+                written = recorded,
+            )
+        }
+        if (outcome.residue != null) {
             ShellLog.w("AppLaunchVM", "account-index reset left data behind")
         }
-        machine.start()
+        start()
     }
 
     /**
-     * The signed-out launch's silent re-check (`account-scoping.md` § Erasure
-     * follows scope → *the residue surface*): a residue a previous sign-out
-     * recorded is re-swept FIRST, and comes back only if something is still
-     * left — the residue `identity_choice` then paints. Shared Rust leaves the
-     * record alone while the registry holds an account. Twin of tui's
-     * `account_scope::recheck_residue_at_launch`.
+     * Remove Again (`sign-out-residue-retry-button`): the one routine again —
+     * the sign-out record's work if any is still owed, then the residue
+     * re-sweep (`account-scoping.md` § Erasure follows scope → *The sign-out
+     * record is on all 7 apps*, decision 3). `null` — the device is now clean,
+     * the view closes. A launch that failed closed routes once the finish no
+     * longer refuses.
      */
-    suspend fun recheckSignOutResidue(): com.fauna.ffi.FfiSignOutResidue? =
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            accountStores.recheckResidueAtLaunch(SignOutCredentialEraser(registry, secureStorage))
+    suspend fun retrySignOutResidue(): com.fauna.ffi.FfiSignOutResidue? {
+        val outcome = kotlinx.coroutines.withContext(finishDispatcher) {
+            accountStores.finishSignOut(
+                SignOutCredentialEraser(registry, secureStorage),
+                dismissAgent = true,
+                written = null,
+            )
         }
-
-    /**
-     * Remove Again (`sign-out-residue-retry-button`): the shared re-sweep over
-     * what [residue] recorded. `null` — the device is now clean, the view closes.
-     */
-    suspend fun retrySignOutResidue(
-        residue: com.fauna.ffi.FfiSignOutResidue,
-    ): com.fauna.ffi.FfiSignOutResidue? =
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            accountStores.retryResidue(residue, SignOutCredentialEraser(registry, secureStorage))
+        if (failedClosedFlow.value && !outcome.failsClosed) {
+            failedClosedFlow.value = false
+            viewModelScope.launch { drive(machines.fresh()) { it.start() } }
         }
+        return outcome.residue
+    }
 
     /**
      * One-shot best-effort post-auth identity re-check (`security.md` §
      * Post-auth surfacing) — the android analog of linux's `silent_sign_in()`
      * and apple's `performPostAuthSilentSignIn()`: re-run the same silent
-     * challenge the boot-time [machine] ran, once, against the now-
+     * challenge the boot-time launch ran, once, against the now-
      * authenticated session, so a nest identity that changes AFTER this
      * boot's own challenge is still caught before the session goes stale.
      * Two verdicts escalate: `FfiException.NestIdentityChanged`, and a `null`
@@ -232,7 +348,7 @@ class AppLaunchVM @Inject constructor(
      * erase) and returns `true` so the caller re-enters
      * the real launch flow (`appState.isOnboarding = true`, the same "no
      * relaunch" reconnect [switchAccount][com.fauna.app.ui.viewmodel.AccountSettingsVM.switchAccount]
-     * already uses) — which re-runs THIS SAME [machine] instance's [start]
+     * already uses) — which runs [start] on a fresh launch machine
      * and re-derives the verdict fresh. Never paint the surface from a
      * synthesized phase: the re-trust button drives [trustIdentity] on the
      * machine that produced the verdict, and a synthesized phase would render
@@ -281,7 +397,7 @@ class AppLaunchVM @Inject constructor(
      * `SessionEndingRoute`: tear the session down WITHOUT erasing credentials
      * (a drop, never an erase — a suspension may be lifted, and only the
      * user's own sign-out erases), after which the caller re-enters the real
-     * launch flow (`appState.isOnboarding = true`). The re-run [machine] then
+     * launch flow (`appState.isOnboarding = true`). The re-run launch then
      * meets the verdict on its own challenge and owns the surface — the
      * refused surface for `SIGN_IN_REFUSED`, the identity-changed warning for
      * `NEST_IDENTITY_CHANGED`, the import route for `SUPERSEDED`.
@@ -376,7 +492,7 @@ class AppLaunchVM @Inject constructor(
             return LockedCeremonyResult.Failed(e.message)
         }
         actorScope.dropActorScopedState()
-        machine.start()
+        start()
         return LockedCeremonyResult.SignedIn
     }
 
@@ -437,9 +553,26 @@ class AppLaunchVM @Inject constructor(
     /**
      * Drop back into the wizard at handle_entry with the identity
      * pre-seeded. Used by LaunchRetryScreen's "Use a different nest" CTA.
+     *
+     * Walks the account away from its nest through the registry
+     * (`account-scoping.md` § Concurrent instances, the delete corollary):
+     * `clearNestBinding` drops the per-actor (nest_url, device_id) slots and
+     * keeps the identity, so an abandoned re-onboard relaunches at the handle
+     * step instead of silently retrying the same nest (connect-and-sign-in
+     * outcome 16). The target is the registry's ACTIVE account — the one
+     * [sessionAccount] reads the seed secret from — so the seed and the clear
+     * never name two accounts. Best-effort, as tui/linux/apple: a failed clear
+     * is logged and the seed still goes ahead.
      */
     fun seedForFallthrough(): String {
         val secret = sessionAccount.secretHex ?: return "onboarding/identity-choice"
+        runCatching { registry.active() }.getOrNull()?.let { actor ->
+            try {
+                registry.clearNestBinding(actor)
+            } catch (e: Exception) {
+                ShellLog.w("AppLaunchVM", "[launch] use-a-different-nest: clearNestBinding failed: ${e.message}")
+            }
+        }
         host.machine.seedIdentity(secret)
         return "onboarding/handle-entry"
     }
@@ -452,6 +585,16 @@ class AppLaunchVM @Inject constructor(
      * ([RecoverableBoxes.load], the twin of apple's `RecoverableBoxes.load`).
      * Empty with no served account.
      */
+    /**
+     * `launch-identity-label` on `launch_progress` and `launch_retry`: the
+     * bound (else active) account's cached `handle@domain · tier`, composed in
+     * shared Rust (`FfiAccountRegistry.launchIdentityLine` →
+     * `fauna_client_accounts::identity_line`); null while its cache holds no
+     * handle — the label is then absent (`onboarding.md` § App-launch routing →
+     * *The cached identity on the launch surfaces*).
+     */
+    fun launchIdentityLine(): String? = runCatching { registry.launchIdentityLine() }.getOrNull()
+
     suspend fun loadRecoverableBoxes(): List<String> {
         val secretHex = sessionAccount.secretHex?.ifBlank { null } ?: return emptyList()
         val ownerSecret = try {
@@ -576,7 +719,7 @@ class AppLaunchVM @Inject constructor(
             return
         }
         actorScope.dropActorScopedState()
-        machine.start()
+        start()
     }
 
     /**

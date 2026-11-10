@@ -1547,8 +1547,10 @@ public class APIClient {
         try await book.refresh(nest: try await ensureNestConnected())
     }
 
+    #if !FAUNA_KIDS
     /// `fauna.admin.content_policy.get` — the admin's published nest rules
-    /// document (`admin.md` § N. Nest → *Nest rules*).
+    /// document (`admin.md` § N. Nest → *Nest rules*). The rule editor's type:
+    /// excised from the kids build with the rule editor.
     public func adminContentPolicy() async throws -> FfiAdminContentPolicy {
         try await adminClient().contentPolicy()
     }
@@ -1557,7 +1559,9 @@ public class APIClient {
     public func adminSetContentPolicy(document: Data) async throws -> FfiAdminContentPolicy {
         try await adminClient().setContentPolicy(document: document)
     }
+    #endif
 
+    #if !FAUNA_KIDS  // the rule editor's doors: excised with the rule editor
     /// The caller's subscribed `wasm` labelers over posts, as hex ids — the
     /// `subscribed` argument of `FfiRuleEditor.labelerChoices` (the shared rule
     /// editor's labeler picker).
@@ -1578,6 +1582,7 @@ public class APIClient {
     public func familySaveContentRules(ward: Data, document: Data) async throws -> FfiFamilyWardInfo? {
         try await familyClient().saveContentRules(ward: ward, document: document)
     }
+    #endif
 
     /// The once-per-sign-in newer-version look, over this session's nest
     /// connection (`installers/README.md` § The nest's newest-release field):
@@ -1632,6 +1637,7 @@ public class APIClient {
         return client
     }
 
+#if !FAUNA_KIDS  // the mail plane is excised from the kids flavor
     /// Start the shared mail connect-time refresh on the session's `FfiNestClient`:
     /// once now and again after every reconnect, for the client's life
     /// (`mail-credentials.md` § Hard revoke → *Published before the nest moves*,
@@ -1640,6 +1646,7 @@ public class APIClient {
     public func startMailEpochRefreshOnEveryConnect() async throws {
         await FaunaFFISwift.startMailEpochRefreshOnEveryConnect(nest: try await ensureNestConnected())
     }
+#endif
 
     /// Subscribe to WS-RPC reconnect bumps over the shared `FfiNestClient`. The
     /// returned subscription's async `next()` returns the new counter on every
@@ -1922,6 +1929,17 @@ public class APIClient {
     public func escrowWrapCoordinatesJson() async -> String? {
         guard let nestClient else { return nil }
         return await nestClient.escrowWrapCoordinatesJson()
+    }
+
+    /// The succession journeys' custody read — which content-key generations
+    /// THIS app's folder custody holds for one set (`succession-aftermath.md`
+    /// § Re-key scope), JSON-encoded. `nil` when there is no connected client
+    /// to ask; throws when shared Rust refuses the selector. `#if DEBUG` for the
+    /// same reason as `deviceSetStateJson` above (a `test-helpers` UniFFI
+    /// export). Only `FolderSetCustodyTestCommand` calls it.
+    public func folderSetCustodyJson(setName: String?, channelIdHex: String?) async throws -> String? {
+        guard let nestClient else { return nil }
+        return try await nestClient.folderSetCustodyJson(setName: setName, channelIdHex: channelIdHex)
     }
 
     /// The `reconnect_backoff` e2e seam on the live connection
@@ -3020,39 +3038,20 @@ public class APIClient {
     // MARK: - Critical alerts (critical-alerts.md § Mechanism)
 
 #if !FAUNA_KIDS
-    /// Run the critical-alerts session-start + periodic re-sweep loop
-    /// (`libs/fauna-client-alert-sweep::run_alert_sweep_loop`, over
-    /// `libs/fauna-ffi`'s `runCriticalAlertSweepLoop` free function) — the one
-    /// shared entry point every feeder rides with no page of its own
-    /// (critical-alerts.md § Mechanism → *Who runs the detector* + *How
-    /// often*; already adopted by tui/linux/web/android/windows). The loop
-    /// only returns once the identity tears down (`CriticalAlerts.clearAll`),
-    /// so the caller must launch this on a process-lifetime `Task`, never a
-    /// view-scoped one — mirrors `subscribeReconnects()`'s ensure-connected
-    /// shape.
-    public func startCriticalAlertSweepLoop() async throws {
+    /// The post-auth hook's critical-alert call: the shared
+    /// `startCriticalAlertSweep` (`libs/fauna-ffi/src/critical_alerts.rs`) on this
+    /// client's own connection, with the nest's literal URL. It decides the loop /
+    /// one-pass arm itself, keyed on the actor at that URL and on this client's
+    /// connection, and returns when the loop ends or the one pass is done — so
+    /// launch it on a process-lifetime `Task`, never a view-scoped one.
+    public func startCriticalAlertSweepForSession() async throws {
         guard let secret else { throw APIError.ffiError("No secret for critical-alert sweep") }
-        try await runCriticalAlertSweepLoop(nest: try await ensureNestConnected(), secret: hex_to_data(secret))
+        try await startCriticalAlertSweep(
+            nest: try await ensureNestConnected(),
+            secret: hex_to_data(secret),
+            nestUrl: nodeUrl.absoluteString)
     }
 #endif
-
-#if !FAUNA_KIDS
-    /// One sweep pass (`runCriticalAlertSweep`) — the same-identity re-establish
-    /// arm of `CriticalAlertsHost.startSweepLoop`, where the identity's loop is
-    /// already running and a second one would stack.
-    public func runCriticalAlertSweepOnce() async throws {
-        guard let secret else { throw APIError.ffiError("No secret for critical-alert sweep") }
-        try await runCriticalAlertSweep(nest: try await ensureNestConnected(), secret: hex_to_data(secret))
-    }
-#endif
-
-    /// The identity a critical-alert sweep loop covers — the actor AT a nest, so
-    /// a re-point at another nest gets a loop sweeping that nest. `nil` with no
-    /// secret (no identity to sweep for).
-    public var sweepIdentityKey: String? {
-        guard let secret, let actor = try? actor_id_from_secret(secret) else { return nil }
-        return "\(actor)@\(nodeUrl.absoluteString)"
-    }
 
     // MARK: - Mail-admin machines (shared FaunaKit, macOS + iOS)
     //
@@ -3856,12 +3855,20 @@ public class APIClient {
         authorId: Data, tier: String, homeNestUrl: String?
     ) async throws -> FfiUnsubscribeReply {
         guard let secret else { throw APIError.ffiError("No secret for unsubscribe") }
+        #if FAUNA_KIDS
+        // The cross-nest leave rides the author-side subscriptions module, which
+        // the kids flavor excises: refused loudly, as android's kids
+        // `KidsExcisedApi.subscriptionUnsubscribe` does.
+        _ = (secret, authorId, tier, homeNestUrl)
+        throw APIError.ffiError("excised from the kids build: subscriptions")
+        #else
         return try await subscriptionsUnsubscribeAcrossNests(
             nest: try await ensureNestConnected(),
             subscriberSecret: hex_to_data(secret),
             authorId: authorId,
             tier: tier,
             homeNestUrl: homeNestUrl)
+        #endif
     }
 
     // MARK: - Payment providers (Pillar 3 — monetization.md § Pillars 2+3 — app UX)
@@ -3898,11 +3905,15 @@ public class APIClient {
 
     /// `fauna.payments.providers.set` — create or replace a provider config
     /// (thin). The tier must be one of the author's own (`monetization.md` §
-    /// Pillar 3 — "first cut: one mapping per provider").
+    /// Pillar 3 — "first cut: one mapping per provider"). `productRef` is the
+    /// product the tier is sold as (§ Pillar 3 → *Configuration*): the form
+    /// sends it as shown, so an empty string clears the saved mapping; nil
+    /// keeps whatever product the nest has saved.
     @discardableResult
-    public func setPaymentProvider(kind: String, webhookSecret: String, tier: String) async throws -> Bool {
+    public func setPaymentProvider(kind: String, webhookSecret: String, tier: String,
+                                   productRef: String?) async throws -> Bool {
         try await ensureNestConnected().payments().providersSet(
-            kind: kind, webhookSecret: webhookSecret, tier: tier)
+            kind: kind, webhookSecret: webhookSecret, tier: tier, productRef: productRef)
     }
 
     /// `fauna.payments.providers.remove` — deregister a provider by kind (thin).

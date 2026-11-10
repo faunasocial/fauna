@@ -88,6 +88,10 @@ test-hooks = [
   "fauna-mls/test-helpers",
   "fauna-bridge-atproto/test-helpers",
   "fauna-core/test-helpers",
+  # The HTTP-01 client's dark default directory: with no `[acme].directory_url`
+  # a test nest orders from a closed loopback port, never the public CA
+  # (`nest/tls-certificates.md` § ACME settings — constants, not choices).
+  "fauna-acme-http01/e2e-dark-ca",
 ]
 # `src/test_support.rs` — in-process test-NEST CONSTRUCTION lent to another
 # crate's tests (`fauna-sync-agent`'s `tier3-nest` harnesses). Deliberately NOT

@@ -479,6 +479,14 @@ pub enum IntentDrainer {
     /// conversations engine, which seals at the then-current epoch. The
     /// generic drain lists these but never sends them.
     Mls,
+    /// The identity drain (`account-offline-mutation.md` § The
+    /// offline-mutation contract → *Identity-bound intents compose at
+    /// drain*): the payload is the intent's inputs, never signed bytes, and
+    /// only a process holding the identity seed — an app, never the
+    /// bearer-only sync agent — composes and signs the wire request from them
+    /// at the then-current identity. The generic drain lists these but never
+    /// sends them.
+    Identity,
 }
 
 impl IntentDrainer {
@@ -486,6 +494,7 @@ impl IntentDrainer {
         match self {
             Self::Rpc => "rpc",
             Self::Mls => "mls",
+            Self::Identity => "identity",
         }
     }
 
@@ -493,6 +502,7 @@ impl IntentDrainer {
         Ok(match s {
             "rpc" => Self::Rpc,
             "mls" => Self::Mls,
+            "identity" => Self::Identity,
             other => bail!("unknown intent drainer {other:?}"),
         })
     }
@@ -554,9 +564,11 @@ pub struct NewOutboxIntent {
 /// One undrained outbox intent — charter § The offline-mutation contract (the
 /// W4 phase-0 ruling: the outbox is its own durable component, holding
 /// `OfflineQueued` intents only). An undrained intent is the only copy of the
-/// user's pending write: **no store operation may destroy one** — the outbox
-/// is deliberately outside every scope-keyed plane, so `drop_scope` cannot
-/// reach it.
+/// user's pending write: **no store operation may destroy one** except the
+/// user's own discard of a parked intent (`outbox_discard`, which deletes an
+/// [`IntentStatus::Failed`] row and nothing else, so never a write the drain
+/// may be sending). The outbox is deliberately outside every scope-keyed
+/// plane, so `drop_scope` cannot reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxIntent {
     pub intent_id: [u8; 16],
@@ -575,6 +587,11 @@ pub struct OutboxIntent {
     /// Seconds since epoch of the last inconclusive attempt (the backoff
     /// pair's stamp half); `None` before the first attempt.
     pub last_attempt_at: Option<u64>,
+    /// Why the drain parked it: a stable code (the nest's error code, or one
+    /// of `fauna_core::offline_intent::park_code`), never free text — the
+    /// unsent-changes surface renders it through a `LocalizedText` keyed by
+    /// the code. `None` on a pending intent.
+    pub failure_reason: Option<String>,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

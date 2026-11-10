@@ -59,6 +59,32 @@ pub fn display_handle(
     })
 }
 
+/// The bound account's cached identity as the launch surfaces show it —
+/// `<handle>@<domain> · <tier>` (`onboarding.md` § App-launch routing → *The
+/// cached identity on the launch surfaces*), or `<handle>@<domain>` while the
+/// cache holds no tier. `None` — the label is absent, never empty — while the
+/// registry's server-data cache holds no handle (a first launch, an import).
+///
+/// The address half is [`display_handle`]'s registry half, the same
+/// `registry_address` text the Settings identity cell and the profile SELF
+/// header show, so a primary-domain rename moves all three at once. It reads
+/// the registry entry ONLY, never a session handle: the launch surfaces paint
+/// before any session exists, from what the last verify reply cached. It lives
+/// here, not in `fauna-launch-machine`, because this crate depends on that one
+/// — the launch machine cannot reach `display_handle` without a cycle, and a
+/// second copy of the `handle@domain` text there could drift from it.
+pub fn identity_line(
+    entry_handle: Option<&str>,
+    entry_domain: Option<&str>,
+    entry_tier: Option<&str>,
+) -> Option<String> {
+    let address = registry_address(entry_handle, entry_domain)?;
+    match entry_tier.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(tier) => Some(format!("{address} \u{b7} {tier}")),
+        None => Some(address),
+    }
+}
+
 /// `<handle>@<domain>` from the registry entry alone — both from the nest, or
 /// nothing ([`self_address`] says why the session handle never stands in for a
 /// missing one).
@@ -163,5 +189,44 @@ mod tests {
         // handle — this is not a not-yet-loaded race.
         assert_eq!(self_address("e2e-user", Some(""), Some("fauna.test")), None);
         assert_eq!(self_address("e2e-user", None, Some("fauna.test")), None);
+    }
+
+    // ── identity_line (the launch surfaces' cached identity) ────────
+
+    #[test]
+    fn identity_line_is_the_registry_address_and_the_tier() {
+        assert_eq!(
+            identity_line(Some("alice"), Some("fauna.test"), Some("plus")),
+            Some("alice@fauna.test \u{b7} plus".to_string()),
+        );
+    }
+
+    #[test]
+    fn identity_line_without_a_tier_is_the_address_alone() {
+        assert_eq!(
+            identity_line(Some("alice"), Some("fauna.test"), None),
+            Some("alice@fauna.test".to_string()),
+        );
+        assert_eq!(
+            identity_line(Some("alice"), Some("fauna.test"), Some("  ")),
+            Some("alice@fauna.test".to_string()),
+        );
+    }
+
+    #[test]
+    fn identity_line_is_none_without_a_cached_handle_or_domain() {
+        // A first launch or an import: nothing cached, the label is absent.
+        assert_eq!(identity_line(None, None, None), None);
+        assert_eq!(identity_line(None, Some("fauna.test"), Some("plus")), None);
+        assert_eq!(identity_line(Some("alice"), None, Some("plus")), None);
+    }
+
+    #[test]
+    fn identity_line_address_matches_the_display_handle() {
+        // One `handle@domain` text on every surface (settings.md § Layout & flow
+        // item 1): the launch line's address half is the display twin's.
+        let line = identity_line(Some("bob"), Some("new.test"), Some("free")).unwrap();
+        let handle = display_handle("bob@old.test", Some("bob"), Some("new.test")).unwrap();
+        assert!(line.starts_with(&handle));
     }
 }

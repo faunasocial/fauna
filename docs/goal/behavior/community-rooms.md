@@ -4,7 +4,7 @@ Owns: community-rooms
 Status: ratified — split verbatim out of [`conversation-rooms.md`](conversation-rooms.md) on 2026-09-10; the class was ratified there on 2026-09-08 with the room model (TP8, decision 1 — [`../architecture/third-party.md`](../architecture/third-party.md) § The rulings — TP8). Its key model's refutable window closed unrefuted at the first community-room build (2026-09-09), and the read's purposes' and the attachment kind's at the first label builds (2026-09-10).
 Authority: **the community class** — the room class whose member set includes its home nest: why the class exists (the room model's decision 1), its key model (the recipient-set scheme — ratified decision R15, [`../architecture/account-data-plane.md`](../architecture/account-data-plane.md) § The ratified decisions — with the home nest as one reader recipient, never in the authority set), who wrote a message (the author's signature, bound by every reader to the floor roster), the attachment content kind, and what the home nest does with its read — the purposes (search, labels, room-restricted posts), what the read covers, what is forbidden, and the search door's where-never-what rule — together with the class's build record: the birth ceremony, the floor-authoritative doors as this class runs them, the sealing, the derived views and their revoke, and the client half. Defers the room model the class is one class of — the class rule and table, principals, the floor roster, roles and how each class enforces them, join rules and invites (the invitation's lifecycle is [`room-invitations.md`](room-invitations.md)'s), the home nest and its transfer, history for joiners, the group plane's fate — to [`conversation-rooms.md`](conversation-rooms.md); the recipient-set scheme's mechanics to [`../architecture/recipient-set-scheme.md`](../architecture/recipient-set-scheme.md) § The recipient-set scheme; the room-read keypair and the per-kind content keys to [`../architecture/key-material-hierarchy.md`](../architecture/key-material-hierarchy.md); a scoring purpose's placement to [`../architecture/content-scoring.md`](../architecture/content-scoring.md) § The placement matrix; the labeler input ABI to [`../architecture/content-moderation-and-ranking.md`](../architecture/content-moderation-and-ranking.md) § Tier-3; the room-restricted post's shape and seal to [`restricted-posts.md`](restricted-posts.md) § Encryption at rest; and the class statement's copy to [`../ui/conversations.md`](../ui/conversations.md) § Element IDs.
 
-Last verified: 2026-09-26 (two passes — the second: the cross-nest community invite BUILT — § Implementation status today, the *What is still unbuilt* entry; the two *latent* holes now reachable and closed, *A removal severs*, *leaving does sever*; the first: every glue site registers the four nest-backed room seams as one bundle, and web, which has no account plane, founds and joins nothing — § Implementation status today, the founding entry); 2026-09-21 (the class's records are replayable, and an order-dependent fold must read the set — § The three classes → *Community* → *Who wrote it*, the reaction fold's stamp rule); 2026-09-14 (a stored reception key is FIPS-203-valid before it is ever stored — § Implementation status today → *A reception key is FIPS-203-valid before it is ever stored*, row 749); 2026-09-13 (the wrap-target door and the tend pass's own-seat heal — § Implementation status today → *A seat gains or rotates its wrap target*; the reach of the nest-read revoke — § Implementation status today, the sealing entry → *How far the revoke reaches*; the search door's hits bounded by the caller's own wraps, 2026-09-11 — § The three classes → *The door answers where, never what*, its second half; a foreign member's cross-nest delivery is pull-only, traced end to end and closed as no gap — § Implementation status today → *A foreign member of a community room learns of a new message only by polling*; every other build date, pin count and gap below is its entry's own, carried across the 2026-09-10 split unedited) | Sources: `libs/fauna-mls/src/{room_policy.rs,room_message.rs,wrapped_blob/{generation_wraps.rs,group_generation_wraps.rs}}`, `libs/fauna-pq-kem/src/lib.rs`, `libs/fauna-core/src/{group_content.rs,group_generation.rs}`, `libs/fauna-conversations/src/{backend.rs,session.rs,backends/fauna_mls.rs}`, `bins/fauna-nest/src/{conversations_handlers.rs,federation_handlers.rs,federation_pool.rs,room_read_key.rs,db/{rooms.rs,channels.rs}}`
+Last verified: 2026-11-08 (the failed severance mint's retry is the tend pass's, read off a `severance_owed` floor field, and the residue is its own error — ruled and BUILT the same day, a leave owing the same mint — § Implementation status today → *A removal severs*, the retry paragraph; a foreign leaver or removed member is offered the re-invitation — § Implementation status today → *A removal severs*, the member-device clause); 2026-11-07 (a foreign admin's removal and the backfill twin BUILT the day they were ruled — § Implementation status today → *A removal severs*, the foreign-admin clause; → *A seat gains or rotates its wrap target*, bound (ii) re-read); 2026-09-26 (two passes — the second: the cross-nest community invite BUILT — § Implementation status today, the *What is still unbuilt* entry; the two *latent* holes now reachable and closed, *A removal severs*, *leaving does sever*; the first: every glue site registers the four nest-backed room seams as one bundle, and web, which has no account plane, founds and joins nothing — § Implementation status today, the founding entry); 2026-09-21 (the class's records are replayable, and an order-dependent fold must read the set — § The three classes → *Community* → *Who wrote it*, the reaction fold's stamp rule); 2026-09-14 (a stored reception key is FIPS-203-valid before it is ever stored — § Implementation status today → *A reception key is FIPS-203-valid before it is ever stored*, row 749); 2026-09-13 (the wrap-target door and the tend pass's own-seat heal — § Implementation status today → *A seat gains or rotates its wrap target*; the reach of the nest-read revoke — § Implementation status today, the sealing entry → *How far the revoke reaches*; the search door's hits bounded by the caller's own wraps, 2026-09-11 — § The three classes → *The door answers where, never what*, its second half; a foreign member's cross-nest delivery is pull-only, traced end to end and closed as no gap — § Implementation status today → *A foreign member of a community room learns of a new message only by polling*; every other build date, pin count and gap below is its entry's own, carried across the 2026-09-10 split unedited) | Sources: `libs/fauna-mls/src/{room_policy.rs,room_message.rs,wrapped_blob/{generation_wraps.rs,group_generation_wraps.rs}}`, `libs/fauna-pq-kem/src/lib.rs`, `libs/fauna-core/src/{group_content.rs,group_generation.rs}`, `libs/fauna-conversations/src/{backend.rs,session.rs,backends/fauna_mls.rs}`, `bins/fauna-nest/src/{conversations_handlers.rs,federation_handlers.rs,federation_pool.rs,room_read_key.rs,db/{rooms.rs,channels.rs}}`
 
 > **Audience:** the nest (the floor doors, the sealing's admission, the derived views and their revoke) and every app (founding, joining and keying a room, the client half's read and send) — anyone touching a room whose member set includes its home nest.
 > **Purpose:** what the one nest-readable room class is and why it exists, how its content is keyed and attributed, and exactly what its home nest may do with the read its members grant.
@@ -155,7 +155,7 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   withdrawal is the materialization grant's own revoke — reason 1 of the key
   model says the nest's readable position is "exactly the shape of the
   materialization grant" — and it inherits that grant's ratified honest bound
-  ([`../architecture/encryption-at-rest.md`](../architecture/encryption-at-rest.md)
+  ([`../architecture/capability-grants.md`](../architecture/capability-grants.md)
   § Capability tiering, the standing *trust-until-revoke* grant: scope and
   unforgeability are cryptographic, expiry and revocation bind the holder).
   So the revoke **binds an honest home nest**, and is **not a cryptographic
@@ -203,7 +203,7 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   the scheme's existing moves rather than new ones (reason 4). What the
   build *added* to the design is one ruling, above: the revoke is a
   rotation, not a roster removal.
-- **The room's search — its relay for a member homed elsewhere BUILT 2026-10-17, its client surface BUILT on tui 2026-10-19, the other six apps UNBUILT.** The five ids are in ui.yaml since 2026-10-19, and tui paints the shared manager's `ConversationsManager::room_search` on the room's thread view ([`room-search.md`](room-search.md) § Implementation status today names the pins); on the other six the `fauna.conversations.room.search` door below still serves API callers only. The door is same-nest — it resolves the room from this nest's own record — so a foreign member reaches it through its own nest: the relayed twin `fauna.conversations.room.search_remote` → `fauna.federation.conversation.room.search.fetch` (ruled 2026-10-16, built 2026-10-17) is owned by [`../architecture/federation.md`](../architecture/federation.md) § Federation residue surface (the *room search* row), and a room **post** hit is the discovery door a room post takes to a foreign member until the federated follow lands ([`../architecture/feed-read-model.md`](../architecture/feed-read-model.md) § The read model → *Opening a post the timeline never loaded* → *A post homed on another nest*); the client surface — the room's own search on its thread view — is specified since 2026-10-16 in [`room-search.md`](room-search.md) (its five element ids user-approved under rule A and in ui.yaml since 2026-10-19; [`../ui/conversations.md`](../ui/conversations.md) keeps the page's stub and § User actions rows) and is built tui first, the other six following in their trickle-down.
+- **The room's search — its relay for a member homed elsewhere BUILT 2026-10-17, its client surface BUILT on all 7 apps (tui 2026-10-19 first; [`room-search.md`](room-search.md) § Implementation status today owns each app's dates and pins).** The five ids are in ui.yaml since 2026-10-19, and every app paints the shared manager's `ConversationsManager::room_search` on the room's thread view. The door is same-nest — it resolves the room from this nest's own record — so a foreign member reaches it through its own nest: the relayed twin `fauna.conversations.room.search_remote` → `fauna.federation.conversation.room.search.fetch` (ruled 2026-10-16, built 2026-10-17) is owned by [`../architecture/federation.md`](../architecture/federation.md) § Federation residue surface (the *room search* row), and a room **post** hit is the discovery door a room post takes to a foreign member until the federated follow lands ([`../architecture/feed-read-model.md`](../architecture/feed-read-model.md) § The read model → *Opening a post the timeline never loaded* → *A post homed on another nest*); the client surface — the room's own search on its thread view — is specified since 2026-10-16 in [`room-search.md`](room-search.md) (its five element ids user-approved under rule A and in ui.yaml since 2026-10-19; [`../ui/conversations.md`](../ui/conversations.md) keeps the page's stub and § User actions rows) and is built tui first, the other six following in their trickle-down.
 - **The search index becomes readable — the first purpose of the read served
   end to end (2026-09-10, schema 58).**
   `fauna.conversations.room.search` is the door: a live floor member of any
@@ -447,8 +447,10 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   editor, names it and saves; the room's verified set names it on the
   owner's seat; a member's message the labeler has something to say about
   paints a `content-label-badge` on the owner's bubble, and the founding
-  message sent before the set existed stays unlabelled. **Not built:** the
-  six-app lift.
+  message sent before the set existed stays unlabelled. The other six apps
+  carry the journey's mark; web paints the rows and the inspect panel in
+  `RoomLabelerRows.svelte` and `LabelerInspectPanel.svelte`, its mark added
+  2026-11-06 with the witness on the verify queue.
 - **Attribution lands — a community-room message is authored, not just sealed
   (2026-09-10; § The three classes → *Community* → *Who wrote it*).** The
   sealed plaintext of a `RoomSealed` envelope is now a **signed**
@@ -548,9 +550,13 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   collapse into hosting the plane. So on web, founding and accepting an
   invitation are refused by name only while the tab's account runtime is not
   up (still assembling, or its start failed), and a community room's records
-  stay unopened for that window; web's paint of the founding and accepting
-  controls, and the web leg of `test_conversation_room_community.py`, are the
-  trickle-down's. The governance doors (`set_policy`,
+  stay unopened for that window. Web paints the founding and accepting
+  controls (`routes/conversations/+page.svelte`: the composer's
+  `recipient-picker-home-nest-toggle` and `recipient-picker-class`, the
+  `room-invitation` rows, and the room settings' `room-pending-invite` rows
+  and `room-nest-read-toggle`), and `test_conversation_room_community.py`
+  carries the web mark since 2026-11-06, its witness on the verify
+  queue. The governance doors (`set_policy`,
   `transfer_ownership`, `set_labelers`) need no reception key, and they work
   on web.
   **And the join, in the same landing.** `invite_to_room` signs the invitation
@@ -563,11 +569,10 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   `key_in_room_member` is the inviter's own act once acceptance has put the
   newcomer on the floor. The three cannot be collapsed into one door: an
   invitation seats nobody, and a wrap names the roster entry the **seating**
-  derived. The backfill carries the **tip alone**, because no client can read a
-  room's `history_policy` — the roster read serves roles and a version, and the
-  room plane has no policy-get door — and a batch naming one unauthorized
-  generation is refused whole, which would leave a newcomer with nothing rather
-  than with less. Pinned by a two-seat journey through client doors alone,
+  derived. The backfill carried the **tip alone** when this landed, because no
+  client could then read a room's `history_policy`; since 2026-11-07 it follows
+  the policy (the *add's backfill* entry below, its client-half paragraph).
+  Pinned by a two-seat journey through client doors alone,
   ending with the newcomer opening the founder's message under the key it
   recovered from the top-up wrap the founder's device built for its own entry,
   red-verified against a backfill addressed to the wrong entry.
@@ -620,8 +625,10 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   zero rather than being refused by the envelope it is about to consume, and,
   read rather than separately tested, why two concurrent invitations for the
   same invitee cannot both pass the check and both charge. A refusal there
-  delivers nothing and charges nothing, surfacing as `forbidden` "invitee's
-  inbox is full" for every failed check alike — invitee unregistered,
+  delivers nothing and charges nothing, surfacing as
+  `fauna.conversations.invitee_inbox_full` (its own catalog sentence, not the
+  reach-policy `forbidden` one whose contact-request remedy cannot make room
+  in an inbox; 2026-11-08) for every failed check alike — invitee unregistered,
   invitee suspended, envelope over `max_blob_size`, or the inbox itself over
   quota — one wording where an ordinary inbox push instead splits
   unregistered/suspended from an oversized-or-over-quota envelope into two
@@ -641,7 +648,32 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
 
 - **A removal severs, because the client rotates (2026-09-10).** The membership
   doors reach a client for the first time: `room.remove` and `room.leave` are
-  `FaunaMlsBackend::remove_room_member` / `leave_room`. The removal is **two
+  `FaunaMlsBackend::remove_room_member` / `leave_room`. **The app path is
+  the member chip (2026-11-07):** every app's chip removal calls
+  `ConversationBackend::remove_participant`, and `FaunaMlsBackend` routes it
+  by the room's class there — a channel with no MLS group (the community
+  signature the policy edit already branches on) goes to
+  `remove_room_member`, an end-to-end room keeps its Remove commit plus
+  roster report — so the apps never learn the class; witnessed on tui by
+  `test_conversation_room_community.py`'s closing leg. **A foreign admin's
+  removal — ruled and BUILT 2026-11-07:** a community room homed on another
+  nest removes through the relayed twins, picked inside the ceremony seam off
+  the channel's recorded home, so the chip's former "not built yet" refusal is
+  gone and an admin homed elsewhere unseats and rotates as a home admin does
+  (witnessed on tui by `test_conversation_room_community_cross_nest.py`'s
+  foreign-admin leg); the twins — `room.remove_remote` → `fauna.federation.conversation.room.remove`
+  and `room.publish_generation_remote` → `…room.publish_generation`, each the
+  `leave_remote` shape (the member's own nest originates, the home gates on
+  the requester's binding and then runs the SAME body the same-nest door
+  runs, purge-before-unseat included, and the mint is admissible from any
+  rank the floor grants, the home judging coverage on its own floor as it
+  does for a home admin; the remove twin converges a re-sent frame as the
+  leave does, so the transport can never strand the ceremony between its
+  two acts, while the keying twins forbid replay as their doors do and leave
+  the ratified residue retry) —
+  [`../architecture/federation.md`](../architecture/federation.md)
+  § Federation residue surface owns both rows (*room remove*, *room generation
+  publish and backfill*). The removal is **two
   acts presented as one**, and it has to be — unseating alone severs nothing,
   since a removed member keeps every generation key it was ever wrapped into and
   a room's ciphertext is fetchable by anyone the relay serves. What ends the
@@ -660,6 +692,83 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   an existing room — is the retry any owner or admin runs from any device. It is
   deliberately not undone by re-seating the target, because re-admission returns
   a member on a **fresh** roster entry and would not restore what was there.
+  **The retry is the tend pass's, never a gesture's (ruled 2026-11-08; BUILT 2026-11-08, the paragraph's close).** The key model already rules
+  it: a severance mint is owed by a scope exactly while its merged roster holds
+  a `Removed` and resolves no admissible mint — a fact about STATE, never about
+  what a pass happened to write
+  ([`../architecture/recipient-set-scheme.md`](../architecture/recipient-set-scheme.md)
+  § The recipient-set scheme → *Mint triggers*, the 2026-09-21 ruling, whose
+  own first build had exactly this hole: a mint that errored left no pass that
+  ever minted). This class's floor is the home nest's, so the nest answers the
+  debt as it answers coverage — one more additive roster field beside
+  `tip_wrapped`, `severance_owed`: true while the room's current generation
+  wraps to an entry that is off the floor (a member row with `removed_at` set
+  whose entry the tip's wrap set still names), served to every seat on the
+  same-nest read and through `list_roster_remote` unchanged, as `tip_wrapped`
+  is. The tend pass's governing arm reads it: an owner's or admin's device
+  whose floor read answers `severance_owed` mints a fresh generation on that
+  pass — `rotate_room_key`, the same mint, beside `owes_own_mint`'s — and a
+  plain member's device reads it and mints nothing, as on every other trigger.
+  So "any owner or admin can retry from any device" holds with no gesture:
+  whichever governing device next reads the floor completes the removal, the
+  device that met the failure included (the residue schedules its own
+  `refresh_floor_soon`, so that device's next poll retries rather than its
+  fourth), and the un-severed window is one governing device's poll cadence
+  plus the mint's round trip rather than however long it takes a human to
+  notice — a retry a human owes is the retry nobody runs, the scheme's own
+  finding. A foreign governor reads the field through the relay and mints
+  through `publish_generation_remote` as it does today, so no new twin. **Why
+  not a control or Save.** A "re-key the room" button would be a new ui.yaml
+  id for a state the floor already knows how to end, and would hang the
+  severance on someone noticing; Save re-running a rotation "recorded at the
+  failure" needs the same nest-side fact (nothing is persisted at the failure
+  today, and a client-side record would be one device's) and adds a gesture to
+  it. The nest-read toggle's Save-mints (`rotate_room_nest_read`) is no
+  precedent against this: it commits a CHOICE the members make, which is a
+  gesture's by nature; a severance owed is not a choice. **The residue stays
+  named — and today it is not.** The removal's error is an `Internal` the
+  manager renders as the generic send failure and answers by putting the
+  member chip back: a severance reported as not having happened while the
+  unseat landed, the one reading the sentence above forbids. Ruled: the
+  residue is its own error kind; the chip stays gone, because the member IS off
+  the floor; the thread's `error-message` says what the residue is — off the
+  floor, not yet re-keyed, completed by the next owner's or admin's pass — with
+  no new element. The richer paint, a standing `thread-room-notice` state
+  (`rekey-pending`, from `RoomSnapshot`'s `severance_owed`, cleared by the
+  floor read that shows the debt paid, the `awaiting-key` shape) is the right
+  long-term shape but a fourth user-approved state (Rule A), so it is asked
+  for and nothing waits on it. **Wording:**
+  the retry "any owner or admin runs from any device" above now reads as any
+  owner's or admin's DEVICE runs it, on its next floor read — the promise
+  kept, the gesture removed; advisory, refutable by the owner. **BUILT
+  2026-11-08, shared Rust and the nest,
+  so every app's chip path carries it; witnessed on tui:** the nest answers
+  `severance_owed` on the roster read (`room_severance_owed`, keyed on the
+  ENTRY, so a re-admitted principal's fresh seat owes nothing), forwarded
+  unchanged by the relay — pinned in `conformance_conversation_rooms.rs`
+  (`a_removal_whose_mint_never_lands_leaves_the_roster_owing_a_severance`) and,
+  on the same-nest and relayed reads both, in
+  `conformance_cross_nest_conversations_client.rs`
+  (`a_generation_minted_while_a_foreign_member_is_away_does_not_open_at_the_seat_it_returns_to`);
+  the tend arm and the error kind (`BackendError::RemovalUnsevered`, rendered
+  as `conversations.unified.error_remove_participant_unsevered` in place of
+  "Could not remove them") are pinned in `fauna_mls_backend_tests.rs`
+  (`a_governing_seat_that_reads_severance_owed_mints_once`,
+  `a_plain_member_that_reads_severance_owed_writes_nothing`,
+  `a_removal_residue_keeps_the_chip_gone_and_names_what_is_owed`,
+  `a_removal_whose_rotation_fails_names_the_unsevered_residue`); and witnessed
+  on tui by
+  `test_conversation_room_community.py::test_a_removal_whose_rekey_fails_says_so_and_the_next_pass_completes_it`
+  (surface `community-room-rekey-retry`), which refuses the mint's kind at the
+  removal, reads the residue on `error-message` with the chip gone, lifts the
+  refusal and reads the next pass's severance off the floor. A pass whose
+  own-seat heal already called the door leaves the debt to the next poll, so
+  one pass never mints twice. **A leave owes the same mint:** a departure
+  also sets `removed_at` on an entry the tip still wraps, so the field answers
+  it too and a governing device's next pass seals the leaver out of new
+  traffic — the leaver's own device still never rotates (it holds no key
+  authority, below), and this is the scheme's trigger (1), which names any
+  `Removed`, not only a removal.
   **A removal also ends a FOREIGN member's admission, and the rotation is no
   substitute for that (2026-09-11).** The rotation covers ciphertext. It covers
   no plaintext door, and a member homed elsewhere reaches this room through a
@@ -697,9 +806,11 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
 
   **Leaving does not rotate, and that is a reason rather than an omission:** a
   leaver holds no mint authority, and a mint it could build would still wrap to
-  itself, since it is on the floor until the unseat lands. A room that wants a
-  departed member sealed out of new traffic rotates from a remaining owner or
-  admin. The leaver's own device keeps the generations and bubbles it already
+  itself, since it is on the floor until the unseat lands. The departed member
+  is sealed out of new traffic by a remaining owner's or admin's device — with
+  no gesture since 2026-11-08: the leave leaves the tip wrapping to an unseated
+  entry, so the floor answers `severance_owed` and the next governing tend pass
+  mints (*A removal severs*, the retry paragraph). The leaver's own device keeps the generations and bubbles it already
   holds — deleting them would destroy the user's own copy of a conversation they
   were legitimately part of, and would not un-read a byte.
   **But leaving DOES sever, and a foreign member had no leave at all until
@@ -738,6 +849,30 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   ([`../architecture/nest/common.md`](../architecture/nest/common.md)
   § Client-state recoverability). Reaching it takes a storage failure between the
   two writes; the leave's own doors are otherwise idempotent.
+  **The member's own device offers the re-invitation (2026-11-08).** A leaver or
+  a removed member keeps the thread (it keeps its bubbles), so
+  `FaunaMlsBackend::room_invitations` settles an invitation into that room as
+  spent unless this session has confirmed the device off the floor. Three things
+  confirm it: a landed `leave_room_by_ceremony` marks the room unseated at once;
+  the invitation pass itself reads the floor before it settles anything
+  (`seated_by_fresh_read` — settling destroys the envelope, and a removed
+  member learns of its removal only from a floor read the tend pass makes on a
+  cadence, so the re-invitation can arrive first; a read that does not land
+  neither settles nor offers); and a floor read that comes back refused marks
+  the room unseated — and for a room homed on
+  another nest the refusal is the home's federation gate answering
+  `fauna.federation.forbidden` ("not a member of this channel from this nest",
+  the purged binding), which `read_roster` reads as `NoFloor` on the relayed
+  read, as it reads the same-nest door's `permission_denied`
+  (`libs/fauna-client-conversations`'s `roster_read_refused`). Before that a
+  foreign leaver's or removed member's re-invitation was settled out from under
+  them (group-conversations outcome 41); pinned red-verified by
+  `a_relayed_not_a_member_refusal_reads_as_no_floor`,
+  `a_re_invitation_after_a_leave_is_offered_not_settled` and
+  `a_re_invitation_before_the_removal_is_tended_is_offered_not_settled`,
+  witnessed on tui by
+  `test_conversation_room_community_foreign_member.py`'s leave-and-return
+  leg.
 - **The policy doors reach a client, over a policy the client can finally read
   (2026-09-10).** `room.set_policy` and `room.transfer_ownership` are
   `FaunaMlsBackend::set_room_policy` / `transfer_room_ownership`, and the
@@ -898,10 +1033,21 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   state, shared with the unverified-moderation notice
   ([`../ui/conversations.md`](../ui/conversations.md) § Element IDs); the
   six others follow in the room trickle-down.
-  **Not witnessed end to end:** the journey above keys the member in with no
-  gesture, so the waiting window is a race against the founder's device, not
-  a state a latency-independent test can hold — the paint is pinned by the
-  tui unit test and the shared `RoomNotice` test instead.
+  **Witnessed end to end on tui (2026-11-07):** the founder's key-in goes
+  through one door (`room.backfill_generations`), so the nest's test hold on
+  that kind turns the waiting window from a race into a state —
+  `test_conversation_room_community_awaiting_key.py` holds it, reads the
+  notice, exchanges a one-to-one message both ways inside the window (one
+  unkeyed room stalls nothing), and releases it. **The wait starts at the
+  accept (2026-11-07):** `accept_room_invite` marks the room waiting before
+  it binds it, so the room reads `awaiting_key` from its first sight rather
+  than from the walk's first stop at a record it cannot open; the wait ends
+  at the walk's first opened key (the one-shot `keyed_in` stop, so the
+  backlog behind it is catch-up) or, for a room nobody has written in, at a
+  complete walk's probe of the tip. A send while this device holds no key in
+  the room at all is refused by name (`error.send.room_awaiting_key`, inside
+  `conversations.unified.error_send`) and marks the room waiting, never the
+  generic failure; the same journey asserts both on tui.
 
 - **The add's backfill lands, and `history_policy` becomes enforceable
   (2026-09-10).** `fauna.conversations.room.backfill_generations` is the
@@ -917,6 +1063,7 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   § The recipient-set scheme → *Mint triggers*: adds never mint), so the door
   structurally cannot move the room's tip, and the batch is all-or-nothing —
   a refusal leaves no partial bundle behind.
+  **The client half follows the policy (2026-11-07).** The inviter's key-in (`FaunaMlsBackend::key_in_room_member`, shared Rust, so every app hosting the community plane) reads the room's anchored, verified policy off the same floor read its wrap target comes from: under `full` it publishes one batch wrapping every retained generation the keying device holds a key for, tip included (a generation it cannot open is skipped — it cannot hand out what it cannot read); under `none`, or with no policy it can stand behind, the tip alone; and a `full` batch the door refuses whole — the room said `none` between the read and the door — is retried as the tip alone, so a policy race leaves the newcomer with less, never with nothing. Pinned by `a_key_in_backfills_what_the_rooms_history_policy_authorizes` (`libs/fauna-conversations/tests/fauna_mls_backend_tests.rs`) and, end to end on tui, by `test_conversation_room_community_history.py`'s `full` arm (the newcomer reads what the room said before the join, across a rotation).
   **What the policy bounds, and the one thing it does not.** `full`
   authorizes the whole retained bundle; `none` — every room's default —
   authorizes the **tip alone**, which is § History for joiners' "the nest
@@ -1095,12 +1242,29 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   `fauna_mls_backend_tests.rs` (keyless owner mints itself back in over the
   floor as the nest now serves it, keyless member mints nothing, a current
   seat costs nothing unless it governs and is known uncovered, a rotated owner
-  re-binds and rotates). **Declared bounds.** *(i)* A plain member's rotation
+  re-binds and rotates). **End to end on the device that ran the ceremony
+  only since 2026-11-08:** until then the pass
+  never reached the room there — the `__mls` re-seal walked the replica's
+  groups alone, left the room's slice sealed to the retired key, and the
+  successor's first launch failed its load and listed no community room
+  ([`succession-aftermath.md`](succession-aftermath.md) § Implementation
+  status today, the `__mls` leg); witnessed on tui by
+  `test_conversation_room_community_succession.py` (the successor seated
+  owner, covered by the tip's wraps, reading both ways). **Declared bounds.** *(i)* A plain member's rotation
   waits for a key authority's next mint: no owner's or admin's pass observes
   another member's rotation yet, because the floor read carries coverage, not
-  key age — the taxonomy's trigger (2) is served for the governing seat only. *(ii)* Same-nest only, as `room.accept_invite` is: a seat homed on another
-  nest reaches its room's home through a relay kind that does not exist yet,
-  and today every seat is local.
+  key age — the taxonomy's trigger (2) is served for the governing seat only. *(ii)* Same-nest only, in two halves
+  that have come apart since: the door's own twin — a seat homed on another
+  nest rotating its own wrap target through its home nest — still does not
+  exist (foreign seats exist since the cross-nest accept of 2026-09-26, so
+  this half is reachable and open); and the tend pass's **keying-in of a
+  newcomer by a foreign admin** reached its own nest's "no such room" until
+  the backfill's relayed twin was ruled and built on 2026-11-07, `fauna.conversations.room.backfill_generations_remote`
+  → `fauna.federation.conversation.room.backfill_generations`, which
+  `key_in_room_member` now rides for a foreign-homed room
+  ([`../architecture/federation.md`](../architecture/federation.md)
+  § Federation residue surface, *room generation publish and backfill*, owns
+  it).
 
 - **A reception key is FIPS-203-valid before it is ever stored (2026-09-14).** Until this landed, `set_reception_key`
   checked only that a key was 1216 bytes, and `room.create`/`accept_invite`
@@ -1163,7 +1327,13 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   with no validation): the roster reports the seat's key absent, the owner's
   mint over the rest of the floor is admitted, `room.backfill_generations`
   refuses the seat, and the seat's own `room.set_reception_key` heals it
-  (`rotated: true`) and is covered by the next mint.
+  (`rotated: true`) and is covered by the next mint. End to end on tui
+  (2026-11-08), `test_conversation_room_community_seat_lost_key.py` poisons a
+  live member's seat through the nest's `test-hooks` route
+  `POST /api/v1/test/rooms/poison-seat-key` (`room_seat_key_test_hook.rs`, the
+  same bytes through the same unvalidated writer): the roster reads the seat
+  keyless, the member's own tend pass reaches for `room.set_reception_key`,
+  re-binds its current key, and the room reads both ways after.
 
 - **A foreign member of a community room learns of a new message only by
   polling its own home nest — traced end to end, and the class needs no fix
@@ -1382,7 +1552,9 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   `the_room_notice_is_absent_says_unverified_moderation_and_yields_to_awaiting_key`;
   the six other apps follow in the room trickle-down. **Journey gap, recorded:** no e2e reaches the notice — tui founds a
   community room since 2026-09-25, but no journey parks a floor delete behind
-  a cross-nest retired name (below: no journey deletes in one yet);
+  a cross-nest retired name (a journey deletes in one since 2026-11-07 —
+  `test_conversation_room_delete_relaunch.py`, own and admin deletes on both
+  seats — but parks nothing behind a retired name);
   *(b)* a room founded before schema 68 whose founding version was
   already overwritten can never anchor; *(c)* **closed 2026-10-12** — a long
   chain costs one roster read per RUN of versions, not per version: the roster
@@ -1424,7 +1596,29 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   records per room and no fetch). Pinned by
   `a_floor_delete_record_parked_at_quit_is_judged_and_painted_after_the_relaunch`
   (`fauna_mls_backend_tests.rs`, red-verified with the restore re-seed
-  removed) and the two `parked_floor_deletes` slice tests (`history.rs`);
+  removed) and the two `parked_floor_deletes` slice tests (`history.rs`).
+  **The end-to-end witness:** a journey parks the record for real — the home
+  nest refusing the MEMBER's policy-version reads alone (the test hook's
+  refusal scoped to one actor, so the founder's own delete still reads the
+  version it signs under), the founder moving the policy one version first so
+  the record names a version the member never anchored, the target still
+  painted on the member's seat after a later message did — quits, and reopens
+  against the pinned store. Until 2026-11-07 the reopened app listed no community room at
+  all (`0 channel(s) restored from replica`): the launch load fetched a slice
+  only for a group the provider lists, and a community room has none. The
+  room's community marker now lists it ([`devices.md`](devices.md) § Durability
+  rules → *A community room is listed by its marker*), and the
+  `community-room-relaunch-restore` surface is built on tui —
+  a room quit with a judged tombstone comes back with it — the other apps
+  joining as their room surfaces land, the fix being shared Rust. **The
+  parked half is witnessed on tui (2026-11-07,
+  `test_a_community_rooms_delete_parked_at_quit_is_applied_after_the_relaunch`):**
+  until then the journey's refusal was keyed on the RPC kind alone, so the
+  founder's own floor delete — which reads the same `room.list_roster` for the
+  version it signs under — filed no record, and a version-1 record ranked at
+  once against the member's in-session anchor; the
+  `room-roster-refusal-per-actor` harness surface closes both,
+  the other apps joining with their room settings editors;
   *(e)* **closed 2026-09-21** — `retain_policy_version` no longer overwrites a
   version's blob in place: an identical replay converges (the founding door is
   an upsert at version 1 and must), and a *differing* blob at a number already

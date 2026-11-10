@@ -24,6 +24,12 @@ e2e test):
    settings page. The fix is to prefer the WIDEST (largest bounding-rect area)
    vertical scroller, which is structurally the content frame, never the narrow
    rail — independent of tree order.
+3. **Bringing an element in whole.** WinUI clips an element's UIA
+   rect to its `ScrollViewer`, so a sliver of a card reads as a whole smaller
+   card. `Actions.MakeWhole` (behind `scroll_to` and the measured
+   `scroll_to_visible_fraction`) reads the true extent from two readings at
+   different scroll positions; checks 7–12 pin that arithmetic on the
+   28 %-visible post-card UIA once reported whole.
 
 **Why this is not a "needs a full e2e run" check.** Both problems are pure
 arithmetic/selection given a viewport-size percentage and a set of bounding-rect

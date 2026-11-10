@@ -98,7 +98,7 @@ impl OwedNestsPass {
 
 /// Log one keeper's deliveries on the event: a landed or settled entry at
 /// info, an entry that stays owed for a reason a pass will not change at warn,
-/// and the waits (no address, unreachable) at debug.
+/// and the waits (no address, unreachable, parked) at debug.
 pub fn log_owed_nests(pass: &OwedNestsPass) {
     let keeper = pass.keeper.map_or_else(
         || "the bound nest".to_string(),
@@ -122,7 +122,11 @@ pub fn log_owed_nests(pass: &OwedNestsPass) {
                 %keeper, %owed_at,
                 "succession delivery: the owed nest holds no account for the retired identity — settled"
             ),
-            Delivery::Owed(OwedReason::NoAddress | OwedReason::Unreachable(_)) => {
+            // A parked entry is the quiet answer: its mismatch was warned of
+            // on the pass that parked it.
+            Delivery::Owed(
+                OwedReason::NoAddress | OwedReason::Unreachable(_) | OwedReason::Parked { .. },
+            ) => {
                 tracing::debug!(%keeper, %owed_at, ?delivery, "succession delivery: still owed");
             }
             Delivery::Owed(reason) => tracing::warn!(

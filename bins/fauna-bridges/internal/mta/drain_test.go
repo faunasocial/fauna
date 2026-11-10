@@ -61,7 +61,7 @@ func TestInboundListenerGracefulDrain(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- runListenerWithBackend(ctx, ln, backend, nil, "test.example", 0, 5*time.Second, drain, slog.Default())
+		serveErr <- runListenerWithBackend(ctx, ln, backend, nil, "test.example", 5*time.Second, drain, slog.Default())
 	}()
 	addr := ln.Addr().String()
 	time.Sleep(20 * time.Millisecond) // let Serve start before dialing

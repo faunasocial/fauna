@@ -951,6 +951,14 @@ def _load_releases(path: Path) -> list:
     return list(rows)
 
 
+def _load_artifacts(path: Path) -> list:
+    """The table's `artifacts` list (schema 2), or `[]` before the first entry."""
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return list(data.get("artifacts") or []) if isinstance(data, dict) else []
+
+
 def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
                    image_digest: str | None, image: str | None = None,
                    public_commit: str | None = None,
@@ -1000,8 +1008,14 @@ def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
         row["public_commit"] = public_commit
     row.setdefault("promoted", False)
 
-    path.write_text(json.dumps({"schema": 1, "releases": releases}, indent=2,
-                               sort_keys=True) + "\n", encoding="utf-8")
+    # Schema 2 carries the artifacts of each version beside the rows; this writer
+    # keeps them as they stand (release-table.md § Tag gate and release table, *The
+    # artifacts of a version*) and writes them in the order their own writer does.
+    artifacts = _load_artifacts(path)
+    artifacts.sort(key=lambda e: (tuple(int(p) for p in e["version"].split(".")),
+                                  e["artifact"]))
+    path.write_text(json.dumps({"schema": 2, "releases": releases, "artifacts": artifacts},
+                               indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 

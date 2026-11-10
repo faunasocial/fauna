@@ -143,10 +143,16 @@ class FakeFollower:
         *,
         require_signed_get: bool = False,
         require_user_agent: bool = False,
+        host: str = "127.0.0.1",
     ):
         self.port = port
         self.username = username
-        self.actor_uri = f"http://127.0.0.1:{port}/users/{username}"
+        # The loopback address this server binds and names itself by. Another
+        # `127.0.0.0/8` address (`127.0.0.2`) is ANOTHER SERVER to the nest's
+        # same-origin gate, which compares hosts and ignores ports
+        # (`inbox_routes::same_origin`).
+        self.host = host
+        self.actor_uri = f"http://{host}:{port}/users/{username}"
         self.inbox_url = f"{self.actor_uri}/inbox"
         # The profile fields a real actor document carries (`name`, `icon`) —
         # what the nest projects as the bridged-author face (bridges.md
@@ -181,7 +187,7 @@ class FakeFollower:
             .decode()
         )
         self._server = http.server.ThreadingHTTPServer(
-            ("127.0.0.1", port), self._handler_class()
+            (host, port), self._handler_class()
         )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -282,12 +288,12 @@ class FakeFollower:
     @property
     def handle(self) -> str:
         """The two-`@` account this server serves, as a user types it —
-        ``@<username>@127.0.0.1:<port>``, what WebFinger answers for."""
-        return f"@{self.username}@127.0.0.1:{self.port}"
+        ``@<username>@<host>:<port>``, what WebFinger answers for."""
+        return f"@{self.username}@{self.host}:{self.port}"
 
     def _serve_webfinger(self, handler, query: str) -> None:
         """RFC 7033: the JRD naming :attr:`actor_uri` for
-        ``acct:<username>@127.0.0.1:<port>``, 404 for any other resource."""
+        ``acct:<username>@<host>:<port>``, 404 for any other resource."""
         resource = (urllib.parse.parse_qs(query).get("resource") or [""])[0]
         with self._lock:
             self.webfinger_queries.append(resource)

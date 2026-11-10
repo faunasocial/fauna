@@ -19,16 +19,28 @@ namespace FaunaApp.Helpers;
 /// swallowed below, so feed and conversation images silently stopped loading until an app
 /// restart. Taking a resolver instead of a reference makes that staleness
 /// unrepresentable.</para>
+/// <para><b>One load per picture, however often it is asked for.</b> Both caches are
+/// <see cref="SingleFlightCache{TValue}"/>s: a caller that asks while a picture's load is
+/// still running shares that load. The feed asks for each picture many times while it
+/// loads (every post-card sync requests an unchecked row's C2PA verdict, and a
+/// content-changed row re-binds its image), so a cache of finished loads alone re-fetched,
+/// re-parsed and re-decoded the same blob on every tick — the UI-thread storm
+/// <c>SingleFlightCacheTests</c> pins.</para>
 /// </summary>
 public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
 {
     private readonly Func<INestHttpClient?> _nest;
     private readonly Func<IFfiFeedManager?>? _feedManager;
-    private readonly Dictionary<string, (BitmapImage Image, bool HasC2pa)> _cache = new();
+
+    /// <summary>Decoded post pictures and their C2PA verdict, keyed by blob hash. Only a
+    /// picture that decoded is kept: a sealed item that did not open, or bytes that will
+    /// not decode, is loaded again by the next caller.</summary>
+    private readonly SingleFlightCache<(BitmapImage? Image, bool HasC2pa)> _cache =
+        new(result => result.Image is not null);
 
     /// <summary>Decoded bridged-post pictures, keyed by their nest-relative path
     /// (<see cref="LoadProxiedAsync"/>). Dropped with <see cref="_cache"/>.</summary>
-    private readonly Dictionary<string, BitmapImage> _proxiedCache = new();
+    private readonly SingleFlightCache<BitmapImage?> _proxiedCache = new(bmp => bmp is not null);
 
     /// <summary>The manager the cached bitmaps were opened under — see the cache-reset
     /// note in <see cref="LoadWithC2paAsync"/>. Compared by reference, mirroring
@@ -67,7 +79,7 @@ public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
         return result.Image;
     }
 
-    public async Task<(BitmapImage? Image, bool HasC2pa)> LoadWithC2paAsync(string hash, object? home = null)
+    public Task<(BitmapImage? Image, bool HasC2pa)> LoadWithC2paAsync(string hash, object? home = null)
     {
         var manager = _feedManager?.Invoke();
 
@@ -76,17 +88,22 @@ public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
         // per-post key only this actor's manager holds, so a bitmap decoded for one actor
         // must not survive into the next one's session. The manager instance is exactly
         // that boundary — FeedManagerHost rebuilds it on re-auth and clears it at an actor
-        // change — so a change of manager drops the cache. Public blobs are unaffected in
-        // substance (they are unauthenticated by design and would re-fetch identically);
-        // paying one re-fetch for them is cheaper than reasoning about which cached bitmap
-        // came from which key.
+        // change — so a change of manager drops the cache, and with it every load still
+        // running under the old manager (SingleFlightCache.Clear). Public blobs are
+        // unaffected in substance (they are unauthenticated by design and would re-fetch
+        // identically); paying one re-fetch for them is cheaper than reasoning about which
+        // cached bitmap came from which key.
         DropCachesOnManagerChange(manager);
 
         // Hash-keyed within one manager's lifetime: a blob hash is content-addressed, and
-        // the cached value is an already-decoded bitmap.
-        if (_cache.TryGetValue(hash, out var cached))
-            return (cached.Image, cached.HasC2pa);
+        // the cached value is an already-decoded bitmap. A caller asking while the hash is
+        // loading shares that load (see the class note).
+        return _cache.GetOrLoadAsync(hash, () => FetchOpenDecodeAsync(hash, home, manager));
+    }
 
+    private async Task<(BitmapImage? Image, bool HasC2pa)> FetchOpenDecodeAsync(
+        string hash, object? home, IFfiFeedManager? manager)
+    {
         var nest = _nest();
         if (nest is null) return (null, false);
 
@@ -95,8 +112,8 @@ public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
             // Fetch, then open: a gated post's attachment is sealed under the same
             // per-post key its body opened under (PostMediaOpen). `null` bytes mean a
             // known-sealed item did not open — degrade to the same collapsed image a
-            // decode failure gives, and DON'T cache it, so the render after the post's
-            // detail-open unlock retries and paints.
+            // decode failure gives, and the cache does NOT keep it (its keep predicate),
+            // so the render after the post's detail-open unlock retries and paints.
             // A foreign home with no plane built yet is a miss, never a fallback to this
             // nest's by-hash GET (that would ask the wrong nest, bearer attached).
             var postHome = home as FfiPostBlobHome;
@@ -107,7 +124,6 @@ public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
             if (bytes is null) return (null, false);
             var bmp = await BitmapFromBytesAsync(bytes);
             if (bmp is null) return (null, false);
-            _cache[hash] = (bmp, hasC2pa);
             return (bmp, hasC2pa);
         }
         catch (Exception ex)
@@ -125,25 +141,25 @@ public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
     /// — the GET a blob takes, with a different argument — and decoded. No
     /// <see cref="PostMediaOpen"/> step and no C2PA verdict: the nest proxies a third
     /// party's public picture, so nothing is sealed and nothing is attested. A fetch that
-    /// fails or will not decode is not cached, so the next bind retries.</summary>
-    public async Task<BitmapImage?> LoadProxiedAsync(string path)
+    /// fails or will not decode is not cached, so the next bind retries; a bind while the
+    /// path is loading shares that load.</summary>
+    public Task<BitmapImage?> LoadProxiedAsync(string path)
     {
         // The bearer belongs to the session that asked: a new manager is a new session.
         DropCachesOnManagerChange(_feedManager?.Invoke());
 
-        if (_proxiedCache.TryGetValue(path, out var cached))
-            return cached;
+        return _proxiedCache.GetOrLoadAsync(path, () => FetchDecodeProxiedAsync(path));
+    }
 
+    private async Task<BitmapImage?> FetchDecodeProxiedAsync(string path)
+    {
         var nest = _nest();
         if (nest is null) return null;
 
         try
         {
             var bytes = await nest.GetContentAsync(path);
-            var bmp = await BitmapFromBytesAsync(bytes);
-            if (bmp is null) return null;
-            _proxiedCache[path] = bmp;
-            return bmp;
+            return await BitmapFromBytesAsync(bytes);
         }
         catch (Exception ex)
         {

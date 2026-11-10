@@ -4,6 +4,9 @@ title: Make a folder public, or a website
 section: your data and devices
 goal: docs/goal/ui/folders.md § Audience and website serving
 guide: docs/guides/who-can-see-what.md § Folders you make public
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -18,7 +21,7 @@ stays encrypted while the folder is public and afterwards.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 25eff180d4.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] Making a folder public asks you to confirm first, and the website switch is separate from the audience — `docs/goal/ui/folders.md` § Audience and website serving
    - `tests/e2e-unified/tests/test_folder_audience_control.py::test_the_audience_control_arms_before_it_publishes`
@@ -47,19 +50,24 @@ Stamped 2026-09-19 at 25eff180d4.
    - `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_an_executable_file_is_never_served_however_it_got_into_the_folder`
 11. [app] A folder made public before your app could record that you did it says so, and confirming it public again from the folder's row restores that record — `docs/goal/ui/folders.md` § Audience and website serving
    - `tests/e2e-unified/tests/test_folder_audience_reconfirm.py::test_an_unattested_public_folder_is_healed_by_the_owners_reconfirm`
+12. [app] A folder can be created already public, and a website folder browses in Media — `docs/goal/ui/folders.md` § Audience and website serving
+   - `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_public_website_folder_browses_in_media`
+   - `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_folder_can_be_created_already_public`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5 docker |
-| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| web | ⚠ partial | 0.1.5 docker |
+| linux | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| windows | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5 docker |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -79,4 +87,6 @@ Stamped 2026-09-19 at 25eff180d4.
 | 9 | nest | `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_public_refuses_webdav_and_a_paywall_whichever_moves_second` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_web_folder_serving_switches.py::test_an_executable_file_is_never_served_however_it_got_into_the_folder` | nest (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_folder_audience_reconfirm.py::test_an_unattested_public_folder_is_healed_by_the_owners_reconfirm` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_public_website_folder_browses_in_media` | tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_folder_audience_control.py::test_a_folder_can_be_created_already_public` — requires `folder-create-public` (not built: windows, android-kids, ios-kids) | tui (linux): passed |
 <!-- features-render:end -->

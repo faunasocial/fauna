@@ -32,12 +32,15 @@ from helpers.client_metadata_server import _ca_and_leaf
 
 class RemoteMediaServer:
     """Serves ``files`` (``{path: (bytes, content_type)}``) for ``host`` over
-    HTTPS on loopback, under a throwaway CA. Every GET's path is recorded in
-    ``requests`` — the witness that a byte load reached the remote."""
+    HTTPS on loopback, under a throwaway CA, and answers each of ``redirects``
+    (``{path: location}``) with a ``302`` to its location. Every GET's path is
+    recorded in ``requests`` — the witness that a byte load reached the remote."""
 
-    def __init__(self, host: str, tmp: Path, files: dict[str, tuple[bytes, str]]):
+    def __init__(self, host: str, tmp: Path, files: dict[str, tuple[bytes, str]],
+                 redirects: dict[str, str] | None = None):
         self.host = host
         self.files = files
+        self.redirects = dict(redirects or {})
         self.requests: list[str] = []
         self.port = find_free_port()
         self.ca_pem, cert_pem, key_pem = _ca_and_leaf([host], tmp)
@@ -47,6 +50,13 @@ class RemoteMediaServer:
         class _Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 — the stdlib's name
                 server.requests.append(self.path)
+                location = server.redirects.get(self.path)
+                if location is not None:
+                    self.send_response(302)
+                    self.send_header("Location", location)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 entry = server.files.get(self.path)
                 if entry is None:
                     self.send_error(404)

@@ -1796,6 +1796,13 @@ pub mod feed {
 
     pub const REPORT_POST: &str = "Report post";
 
+    pub const MARK_AS_SPAM: &str = "Mark as spam";
+
+    pub const ERROR_MARK_SPAM: &str = "Could not mark the post as spam: {message}";
+    pub fn error_mark_spam(message: &str) -> String {
+        format!("Could not mark the post as spam: {message}")
+    }
+
     pub const ERROR_MUTED_KEYWORDS: &str = "Your muted words are not being applied: {message}";
     pub fn error_muted_keywords(message: &str) -> String {
         format!("Your muted words are not being applied: {message}")
@@ -1890,6 +1897,8 @@ pub mod feed {
 
         pub const FACTOR_SKIP: &str = "Skipped past";
 
+        pub const FACTOR_REPORTED_SPAM: &str = "Reported as spam";
+
         pub const FACTOR_WEIGHT_PLACEHOLDER: &str = "1.0";
 
         pub const FACTOR_GLOBAL_TOGGLE: &str = "Apply to all feeds";
@@ -1916,6 +1925,10 @@ pub mod feed {
         pub const WHATS_ON_YOUR_MIND: &str = "What's on your mind?";
 
         pub const HAS_MEDIA: &str = "[media]";
+
+        pub const IMAGE_ALT_FALLBACK: &str = "Picture";
+
+        pub const VIDEO_ALT_FALLBACK: &str = "Video";
 
         pub const VIEW_THREAD: &str = "View Thread";
 
@@ -2192,9 +2205,16 @@ pub mod conversations {
             format!("their undelivered earlier invitation was removed first, so they are no longer in the group — adding them again starts cleanly. The re-invitation failed: {reason}")
         }
 
+        pub const ERROR_ADD_PARTICIPANT_UNCONFIRMED: &str = "they are already in this group, but whether their invitation reached them cannot be confirmed right now. If they never received it, remove them from the group and add them again.";
+
         pub const ERROR_REMOVE_PARTICIPANT: &str = "Could not remove them from this conversation: {message}";
         pub fn error_remove_participant(message: &str) -> String {
             format!("Could not remove them from this conversation: {message}")
+        }
+
+        pub const ERROR_REMOVE_PARTICIPANT_UNSEVERED: &str = "{name} is out of this room, but the room's key has not been changed yet, so they can still read new messages until the next owner's or admin's app finishes the removal. Nothing for you to do.";
+        pub fn error_remove_participant_unsevered(name: &str) -> String {
+            format!("{name} is out of this room, but the room's key has not been changed yet, so they can still read new messages until the next owner's or admin's app finishes the removal. Nothing for you to do.")
         }
 
         pub const ERROR_RENAME_THREAD: &str = "Could not rename this conversation: {message}";
@@ -2205,6 +2225,16 @@ pub mod conversations {
         pub const ERROR_LEAVE_ROOM: &str = "Could not leave this conversation: {message}";
         pub fn error_leave_room(message: &str) -> String {
             format!("Could not leave this conversation: {message}")
+        }
+
+        pub const ERROR_REMOVE_MESSAGE: &str = "Could not remove this message from your nest: {message}";
+        pub fn error_remove_message(message: &str) -> String {
+            format!("Could not remove this message from your nest: {message}")
+        }
+
+        pub const ERROR_REMOVE_THREAD: &str = "Could not remove this conversation from your nest: {message}";
+        pub fn error_remove_thread(message: &str) -> String {
+            format!("Could not remove this conversation from your nest: {message}")
         }
 
         pub const ERROR_SET_ROOM_POLICY: &str = "Could not change this room's settings: {message}";
@@ -3729,6 +3759,8 @@ pub mod media {
     }
 
     pub const ERROR_FOLLOWED_READ_ONLY: &str = "You follow this folder — it's read-only here. Switch to one of your own folders to upload.";
+
+    pub const ERROR_FOREIGN_REMOVED: &str = "You no longer have access to this shared folder. Its owner may have removed you, or stopped sharing it.";
 
     pub const ERROR_METADATA_ONLY_FOLDER: &str = "This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it.";
 
@@ -5393,6 +5425,11 @@ pub mod devices {
         format!("Shared by {who}")
     }
 
+    pub const SHARED_BY_OWNER_CHANGED: &str = "Shared by {who} · owner changed, ask them to share it again";
+    pub fn shared_by_owner_changed(who: &str) -> String {
+        format!("Shared by {who} · owner changed, ask them to share it again")
+    }
+
     pub const ERROR_ACCEPT_SHARE: &str = "Failed to accept share: {message}";
     pub fn error_accept_share(message: &str) -> String {
         format!("Failed to accept share: {message}")
@@ -5497,6 +5534,13 @@ pub mod devices {
         pub const CREATE_MEMBER_ERROR: &str = "Folder created, but some devices could not be enrolled: {message}";
         pub fn create_member_error(message: &str) -> String {
             format!("Folder created, but some devices could not be enrolled: {message}")
+        }
+
+        pub const REVIEW_AUDIENCE: &str = "Who can see it";
+
+        pub const CREATE_ATTEST_ERROR: &str = "Folder created, but making it public did not finish: {message}. Choose Public again on the folder to finish.";
+        pub fn create_attest_error(message: &str) -> String {
+            format!("Folder created, but making it public did not finish: {message}. Choose Public again on the folder to finish.")
         }
 
         pub const NO_DEVICES_AVAILABLE: &str = "No devices available. Register a device first.";
@@ -6338,6 +6382,20 @@ pub mod settings {
             format!("Delete snapshot {snapshot}")
         }
 
+        pub const PRUNE_VERSIONS_IN: &str = "Remove old versions in {folder}";
+        pub fn prune_versions_in(folder: &str) -> String {
+            format!("Remove old versions in {folder}")
+        }
+
+        pub const PRUNE_VERSIONS: &str = "Remove old versions in a folder";
+
+        pub const PRUNE_SNAPSHOTS_OF: &str = "Remove old snapshots of {folder}";
+        pub fn prune_snapshots_of(folder: &str) -> String {
+            format!("Remove old snapshots of {folder}")
+        }
+
+        pub const PRUNE_SNAPSHOTS: &str = "Remove old snapshots of a folder";
+
         pub const ADMIN_DELETE_USER: &str = "Delete the account {target}";
         pub fn admin_delete_user(target: &str) -> String {
             format!("Delete the account {target}")
@@ -6356,6 +6414,75 @@ pub mod settings {
         pub const ADMIN_CHANGE_ROLE: &str = "Change the admin role of {target}";
         pub fn admin_change_role(target: &str) -> String {
             format!("Change the admin role of {target}")
+        }
+    }
+
+    pub mod unsent_changes {
+        pub const KIND_LIKE: &str = "Like on a post";
+
+        pub const KIND_UNLIKE: &str = "Removed like on a post";
+
+        pub const KIND_POST_INTERACTION: &str = "Interaction on a post";
+
+        pub const KIND_MESSAGE: &str = "Message: {excerpt}";
+        pub fn kind_message(excerpt: &str) -> String {
+            format!("Message: {excerpt}")
+        }
+
+        pub const KIND_APPROVAL_APPROVE: &str = "Approval of a request";
+
+        pub const KIND_APPROVAL_DENY: &str = "Refusal of a request";
+
+        pub const KIND_CONTACT_PRE_APPROVE: &str = "Pre-approved contact";
+
+        pub const KIND_EMAIL_FILTER_CREATE: &str = "New email filter: {name}";
+        pub fn kind_email_filter_create(name: &str) -> String {
+            format!("New email filter: {name}")
+        }
+
+        pub const KIND_BRIDGE_FOLLOW_ADD: &str = "Follow: {account}";
+        pub fn kind_bridge_follow_add(account: &str) -> String {
+            format!("Follow: {account}")
+        }
+
+        pub const KIND_BRIDGE_FOLLOW_REMOVE: &str = "Unfollow: {account}";
+        pub fn kind_bridge_follow_remove(account: &str) -> String {
+            format!("Unfollow: {account}")
+        }
+
+        pub const KIND_KNOCK_ACCEPT: &str = "Accepted contact request";
+
+        pub const KIND_KNOCK_SEND: &str = "Contact request: {recipient}";
+        pub fn kind_knock_send(recipient: &str) -> String {
+            format!("Contact request: {recipient}")
+        }
+
+        pub const KIND_ABUSE_REPORT: &str = "Report to the admins";
+
+        pub const KIND_OTHER: &str = "{kind}";
+        pub fn kind_other(kind: &str) -> String {
+            kind.to_string()
+        }
+
+        pub const STATE_WAITING: &str = "Waiting to send";
+
+        pub const STATE_HELD: &str = "Waiting behind a change that was not sent";
+
+        pub const STATE_UNSENT: &str = "Not sent";
+
+        pub const REASON_UNKNOWN_KIND: &str = "This version of the app cannot send this change";
+
+        pub const REASON_UNDECODABLE: &str = "This change could not be read";
+
+        pub const REASON_MLS_NO_CHANNEL: &str = "The conversation could not be found";
+
+        pub const REASON_MLS_NOT_A_MEMBER: &str = "You are no longer a member of this conversation";
+
+        pub const REASON_MLS_SEND_FAILED: &str = "The message could not be sent";
+
+        pub const REASON_FALLBACK: &str = "Your nest refused this change ({code})";
+        pub fn reason_fallback(code: &str) -> String {
+            format!("Your nest refused this change ({code})")
         }
     }
 
@@ -6779,6 +6906,8 @@ pub mod nests {
     pub const SCOPE_MAIL: &str = "Mail — and the spam-filter model and training history derived from it";
 
     pub const SCOPE_CALENDAR: &str = "Calendar";
+
+    pub const SCOPE_CARD: &str = "Contacts";
 
     pub const SCOPE_POSTS: &str = "Posts";
 
@@ -10358,12 +10487,20 @@ pub mod moderation {
             format!("Report sent to the admins of {nest} and forwarded, without your name, to the admins of {home_nest}.")
         }
 
+        pub const QUEUED: &str = "Report saved. It will be sent when you are back online.";
+
+        pub const BLOCK_NOT_SENT: &str = "The block was not sent because you are offline. Block this person again once you are back online.";
+
         pub const FAILED: &str = "The report could not be sent: {error}";
         pub fn failed(error: &str) -> String {
             format!("The report could not be sent: {error}")
         }
 
         pub const HIDDEN_PLACEHOLDER: &str = "You reported this";
+
+        pub const SHOW_AGAIN_ITEM: &str = "Show it again";
+
+        pub const SHOW_AGAIN_ACCOUNT: &str = "Show this account again";
 
         pub const LEDGER_TITLE: &str = "Your reports";
 
@@ -11501,6 +11638,8 @@ pub mod profile {
 
     pub const FOLLOW: &str = "Follow";
 
+    pub const UNFOLLOW_CONFIRM: &str = "Unfollow and end your paid subscription?";
+
     pub const COPY_ID: &str = "Copy ID";
 
     pub const START_DM: &str = "Message";
@@ -11664,6 +11803,10 @@ pub mod subscriptions {
 
     pub const WEBHOOK_SECRET: &str = "Webhook secret";
 
+    pub const PRODUCT_LABEL: &str = "Payment Link (optional)";
+
+    pub const PRODUCT_HINT: &str = "Only payments through this link grant the tier. Leave empty to grant it for every payment on the account.";
+
     pub const WEBHOOK_URL_LABEL: &str = "Webhook URL:";
 
     pub const RETURN_URL_LABEL: &str = "Return URL:";
@@ -11675,6 +11818,16 @@ pub mod subscriptions {
     pub const CLAIM_CODE: &str = "Claim code";
 
     pub const REDEEM: &str = "Redeem";
+
+    pub const CLAIM_DELIVERY_DM: &str = "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.";
+    pub fn claim_delivery_dm(code: &str) -> String {
+        format!("Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.")
+    }
+
+    pub const CLAIM_DELIVERY_DM_LINK: &str = "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.";
+    pub fn claim_delivery_dm_link(code: &str, url: &str) -> String {
+        format!("Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.")
+    }
 
     pub const OFFER_STATUS_NONE: &str = "Not subscribed";
 
@@ -11861,6 +12014,8 @@ pub mod error {
         pub const FORBIDDEN: &str = "This person isn't accepting new conversations right now. You can send them a contact request instead.";
 
         pub const RATE_LIMITED: &str = "This is happening too quickly. Please wait a moment and try again.";
+
+        pub const INVITEE_INBOX_FULL: &str = "This person's inbox is full, so the invitation couldn't be delivered. Try again later.";
     }
 
     pub mod profile {
@@ -11937,6 +12092,10 @@ pub mod error {
         pub const NO_RELAYS_CONFIGURED: &str = "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.";
 
         pub const REPLIES_OFF: &str = "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.";
+
+        pub const NOT_SOLD: &str = "Only a post you sell can be advertised on Nostr. Sell this post first.";
+
+        pub const NO_ASKING_PRICE: &str = "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.";
     }
 
     pub mod nest {
@@ -12015,6 +12174,8 @@ pub mod error {
         pub const ROOM_OWNER_CANNOT_LEAVE: &str = "Hand the room over to someone else before you leave — a room always has an owner.";
 
         pub const ROOM_LEAVE_FAILED: &str = "Leaving this room did not go through. Try again.";
+
+        pub const ROOM_AWAITING_KEY: &str = "You can't send in this room until an owner or admin keys you in.";
 
         pub const ATTACHMENT_UPLOAD_FOREIGN_FAILED: &str = "The attachment couldn't be uploaded to this conversation's home server. Try sending it again.";
 
@@ -12134,6 +12295,8 @@ pub mod errors {
     pub const RECOVERY_PRIOR_KIT_REQUIRED: &str = "A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead.";
 
     pub const RECOVERY_PRIOR_KIT_MISMATCH: &str = "That kit does not match the one currently registered for this identity.";
+
+    pub const RECOVERY_KIT_FOR_ANOTHER_ACCOUNT: &str = "That recovery kit belongs to a different account, not this one. Nothing was changed.";
 
     pub const RECOVERY_PRIOR_ESCROW_UNREADABLE: &str = "Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it.";
     pub fn recovery_prior_escrow_unreadable(reason: &str) -> String {
@@ -12647,6 +12810,8 @@ pub mod connected_apps {
     pub const SIGNER_REVOKED: &str = "Access revoked — connect this signer app again with a new connection";
 
     pub const PAUSED: &str = "Paused — turn Allow external apps back on to let this app work again";
+
+    pub const PAUSED_SUSPENDED: &str = "Paused — turn Bluesky back on, then sign in to this app again";
 
     pub const CREATED: &str = "Added {time}";
     pub fn created(time: &str) -> String {
@@ -13594,6 +13759,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.delete_post_confirm_title" => Some(feed::DELETE_POST_CONFIRM_TITLE),
         "feed.error_delete" => Some(feed::ERROR_DELETE),
         "feed.report_post" => Some(feed::REPORT_POST),
+        "feed.mark_as_spam" => Some(feed::MARK_AS_SPAM),
+        "feed.error_mark_spam" => Some(feed::ERROR_MARK_SPAM),
         "feed.error_muted_keywords" => Some(feed::ERROR_MUTED_KEYWORDS),
         "feed.unverified_source" => Some(feed::UNVERIFIED_SOURCE),
         "feed.unverified_source_tooltip" => Some(feed::UNVERIFIED_SOURCE_TOOLTIP),
@@ -13636,6 +13803,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.create.factor_trending" => Some(feed::create::FACTOR_TRENDING),
         "feed.create.factor_watch_complete" => Some(feed::create::FACTOR_WATCH_COMPLETE),
         "feed.create.factor_skip" => Some(feed::create::FACTOR_SKIP),
+        "feed.create.factor_reported_spam" => Some(feed::create::FACTOR_REPORTED_SPAM),
         "feed.create.factor_weight_placeholder" => Some(feed::create::FACTOR_WEIGHT_PLACEHOLDER),
         "feed.create.factor_global_toggle" => Some(feed::create::FACTOR_GLOBAL_TOGGLE),
         "feed.create.add_factor" => Some(feed::create::ADD_FACTOR),
@@ -13647,6 +13815,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.post.add_comment" => Some(feed::post::ADD_COMMENT),
         "feed.post.whats_on_your_mind" => Some(feed::post::WHATS_ON_YOUR_MIND),
         "feed.post.has_media" => Some(feed::post::HAS_MEDIA),
+        "feed.post.image_alt_fallback" => Some(feed::post::IMAGE_ALT_FALLBACK),
+        "feed.post.video_alt_fallback" => Some(feed::post::VIDEO_ALT_FALLBACK),
         "feed.post.view_thread" => Some(feed::post::VIEW_THREAD),
         "feed.post.thread" => Some(feed::post::THREAD),
         "feed.post.no_thread_data" => Some(feed::post::NO_THREAD_DATA),
@@ -13750,9 +13920,13 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.unified.attachment_remove" => Some(conversations::unified::ATTACHMENT_REMOVE),
         "conversations.unified.error_add_participant" => Some(conversations::unified::ERROR_ADD_PARTICIPANT),
         "conversations.unified.error_add_participant_after_heal" => Some(conversations::unified::ERROR_ADD_PARTICIPANT_AFTER_HEAL),
+        "conversations.unified.error_add_participant_unconfirmed" => Some(conversations::unified::ERROR_ADD_PARTICIPANT_UNCONFIRMED),
         "conversations.unified.error_remove_participant" => Some(conversations::unified::ERROR_REMOVE_PARTICIPANT),
+        "conversations.unified.error_remove_participant_unsevered" => Some(conversations::unified::ERROR_REMOVE_PARTICIPANT_UNSEVERED),
         "conversations.unified.error_rename_thread" => Some(conversations::unified::ERROR_RENAME_THREAD),
         "conversations.unified.error_leave_room" => Some(conversations::unified::ERROR_LEAVE_ROOM),
+        "conversations.unified.error_remove_message" => Some(conversations::unified::ERROR_REMOVE_MESSAGE),
+        "conversations.unified.error_remove_thread" => Some(conversations::unified::ERROR_REMOVE_THREAD),
         "conversations.unified.error_set_room_policy" => Some(conversations::unified::ERROR_SET_ROOM_POLICY),
         "conversations.unified.error_room_invitation" => Some(conversations::unified::ERROR_ROOM_INVITATION),
         "conversations.unified.error_withdraw_room_invite" => Some(conversations::unified::ERROR_WITHDRAW_ROOM_INVITE),
@@ -14320,6 +14494,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "media.error_followed_unavailable" => Some(media::ERROR_FOLLOWED_UNAVAILABLE),
         "media.error_followed_fetch" => Some(media::ERROR_FOLLOWED_FETCH),
         "media.error_followed_read_only" => Some(media::ERROR_FOLLOWED_READ_ONLY),
+        "media.error_foreign_removed" => Some(media::ERROR_FOREIGN_REMOVED),
         "media.error_metadata_only_folder" => Some(media::ERROR_METADATA_ONLY_FOLDER),
         "media.error_read_only_shared_folder" => Some(media::ERROR_READ_ONLY_SHARED_FOLDER),
         "media.versions_title" => Some(media::VERSIONS_TITLE),
@@ -14922,6 +15097,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.error_set_member_access" => Some(devices::ERROR_SET_MEMBER_ACCESS),
         "devices.shared_with_you" => Some(devices::SHARED_WITH_YOU),
         "devices.shared_by" => Some(devices::SHARED_BY),
+        "devices.shared_by_owner_changed" => Some(devices::SHARED_BY_OWNER_CHANGED),
         "devices.error_accept_share" => Some(devices::ERROR_ACCEPT_SHARE),
         "devices.error_decline_share" => Some(devices::ERROR_DECLINE_SHARE),
         "devices.error_leave_share" => Some(devices::ERROR_LEAVE_SHARE),
@@ -14963,6 +15139,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.wizard.review_devices" => Some(devices::wizard::REVIEW_DEVICES),
         "devices.wizard.create_error" => Some(devices::wizard::CREATE_ERROR),
         "devices.wizard.create_member_error" => Some(devices::wizard::CREATE_MEMBER_ERROR),
+        "devices.wizard.review_audience" => Some(devices::wizard::REVIEW_AUDIENCE),
+        "devices.wizard.create_attest_error" => Some(devices::wizard::CREATE_ATTEST_ERROR),
         "devices.wizard.no_devices_available" => Some(devices::wizard::NO_DEVICES_AVAILABLE),
         "devices.wizard.next" => Some(devices::wizard::NEXT),
         "devices.wizard.back" => Some(devices::wizard::BACK),
@@ -15281,10 +15459,37 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.pending_actions.change_handle_to" => Some(settings::pending_actions::CHANGE_HANDLE_TO),
         "settings.pending_actions.delete_account" => Some(settings::pending_actions::DELETE_ACCOUNT),
         "settings.pending_actions.delete_snapshot" => Some(settings::pending_actions::DELETE_SNAPSHOT),
+        "settings.pending_actions.prune_versions_in" => Some(settings::pending_actions::PRUNE_VERSIONS_IN),
+        "settings.pending_actions.prune_versions" => Some(settings::pending_actions::PRUNE_VERSIONS),
+        "settings.pending_actions.prune_snapshots_of" => Some(settings::pending_actions::PRUNE_SNAPSHOTS_OF),
+        "settings.pending_actions.prune_snapshots" => Some(settings::pending_actions::PRUNE_SNAPSHOTS),
         "settings.pending_actions.admin_delete_user" => Some(settings::pending_actions::ADMIN_DELETE_USER),
         "settings.pending_actions.admin_add" => Some(settings::pending_actions::ADMIN_ADD),
         "settings.pending_actions.admin_remove" => Some(settings::pending_actions::ADMIN_REMOVE),
         "settings.pending_actions.admin_change_role" => Some(settings::pending_actions::ADMIN_CHANGE_ROLE),
+        "settings.unsent_changes.kind_like" => Some(settings::unsent_changes::KIND_LIKE),
+        "settings.unsent_changes.kind_unlike" => Some(settings::unsent_changes::KIND_UNLIKE),
+        "settings.unsent_changes.kind_post_interaction" => Some(settings::unsent_changes::KIND_POST_INTERACTION),
+        "settings.unsent_changes.kind_message" => Some(settings::unsent_changes::KIND_MESSAGE),
+        "settings.unsent_changes.kind_approval_approve" => Some(settings::unsent_changes::KIND_APPROVAL_APPROVE),
+        "settings.unsent_changes.kind_approval_deny" => Some(settings::unsent_changes::KIND_APPROVAL_DENY),
+        "settings.unsent_changes.kind_contact_pre_approve" => Some(settings::unsent_changes::KIND_CONTACT_PRE_APPROVE),
+        "settings.unsent_changes.kind_email_filter_create" => Some(settings::unsent_changes::KIND_EMAIL_FILTER_CREATE),
+        "settings.unsent_changes.kind_bridge_follow_add" => Some(settings::unsent_changes::KIND_BRIDGE_FOLLOW_ADD),
+        "settings.unsent_changes.kind_bridge_follow_remove" => Some(settings::unsent_changes::KIND_BRIDGE_FOLLOW_REMOVE),
+        "settings.unsent_changes.kind_knock_accept" => Some(settings::unsent_changes::KIND_KNOCK_ACCEPT),
+        "settings.unsent_changes.kind_knock_send" => Some(settings::unsent_changes::KIND_KNOCK_SEND),
+        "settings.unsent_changes.kind_abuse_report" => Some(settings::unsent_changes::KIND_ABUSE_REPORT),
+        "settings.unsent_changes.kind_other" => Some(settings::unsent_changes::KIND_OTHER),
+        "settings.unsent_changes.state_waiting" => Some(settings::unsent_changes::STATE_WAITING),
+        "settings.unsent_changes.state_held" => Some(settings::unsent_changes::STATE_HELD),
+        "settings.unsent_changes.state_unsent" => Some(settings::unsent_changes::STATE_UNSENT),
+        "settings.unsent_changes.reason_unknown_kind" => Some(settings::unsent_changes::REASON_UNKNOWN_KIND),
+        "settings.unsent_changes.reason_undecodable" => Some(settings::unsent_changes::REASON_UNDECODABLE),
+        "settings.unsent_changes.reason_mls_no_channel" => Some(settings::unsent_changes::REASON_MLS_NO_CHANNEL),
+        "settings.unsent_changes.reason_mls_not_a_member" => Some(settings::unsent_changes::REASON_MLS_NOT_A_MEMBER),
+        "settings.unsent_changes.reason_mls_send_failed" => Some(settings::unsent_changes::REASON_MLS_SEND_FAILED),
+        "settings.unsent_changes.reason_fallback" => Some(settings::unsent_changes::REASON_FALLBACK),
         "settings.member_review_page.title" => Some(settings::member_review_page::TITLE),
         "settings.member_review_page.intro" => Some(settings::member_review_page::INTRO),
         "settings.member_review_page.empty" => Some(settings::member_review_page::EMPTY),
@@ -15466,6 +15671,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nests.trusted_to_read" => Some(nests::TRUSTED_TO_READ),
         "nests.scope_mail" => Some(nests::SCOPE_MAIL),
         "nests.scope_calendar" => Some(nests::SCOPE_CALENDAR),
+        "nests.scope_card" => Some(nests::SCOPE_CARD),
         "nests.scope_posts" => Some(nests::SCOPE_POSTS),
         "nests.scope_spam_labels" => Some(nests::SCOPE_SPAM_LABELS),
         "nests.scope_mail_labeler" => Some(nests::SCOPE_MAIL_LABELER),
@@ -16883,8 +17089,12 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "moderation.report.blocked_note_too_long" => Some(moderation::report::BLOCKED_NOTE_TOO_LONG),
         "moderation.report.sent_local" => Some(moderation::report::SENT_LOCAL),
         "moderation.report.sent_forwarded" => Some(moderation::report::SENT_FORWARDED),
+        "moderation.report.queued" => Some(moderation::report::QUEUED),
+        "moderation.report.block_not_sent" => Some(moderation::report::BLOCK_NOT_SENT),
         "moderation.report.failed" => Some(moderation::report::FAILED),
         "moderation.report.hidden_placeholder" => Some(moderation::report::HIDDEN_PLACEHOLDER),
+        "moderation.report.show_again_item" => Some(moderation::report::SHOW_AGAIN_ITEM),
+        "moderation.report.show_again_account" => Some(moderation::report::SHOW_AGAIN_ACCOUNT),
         "moderation.report.ledger_title" => Some(moderation::report::LEDGER_TITLE),
         "moderation.report.ledger_empty" => Some(moderation::report::LEDGER_EMPTY),
         "moderation.report.ledger_routed_to" => Some(moderation::report::LEDGER_ROUTED_TO),
@@ -17274,6 +17484,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "profile.tiers" => Some(profile::TIERS),
         "profile.edit" => Some(profile::EDIT),
         "profile.follow" => Some(profile::FOLLOW),
+        "profile.unfollow_confirm" => Some(profile::UNFOLLOW_CONFIRM),
         "profile.copy_id" => Some(profile::COPY_ID),
         "profile.start_dm" => Some(profile::START_DM),
         "profile.block" => Some(profile::BLOCK),
@@ -17347,12 +17558,16 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "subscriptions.provider_kind_label" => Some(subscriptions::PROVIDER_KIND_LABEL),
         "subscriptions.provider_tier_label" => Some(subscriptions::PROVIDER_TIER_LABEL),
         "subscriptions.webhook_secret" => Some(subscriptions::WEBHOOK_SECRET),
+        "subscriptions.product_label" => Some(subscriptions::PRODUCT_LABEL),
+        "subscriptions.product_hint" => Some(subscriptions::PRODUCT_HINT),
         "subscriptions.webhook_url_label" => Some(subscriptions::WEBHOOK_URL_LABEL),
         "subscriptions.return_url_label" => Some(subscriptions::RETURN_URL_LABEL),
         "subscriptions.return_url_unavailable" => Some(subscriptions::RETURN_URL_UNAVAILABLE),
         "subscriptions.redeem_claim_title" => Some(subscriptions::REDEEM_CLAIM_TITLE),
         "subscriptions.claim_code" => Some(subscriptions::CLAIM_CODE),
         "subscriptions.redeem" => Some(subscriptions::REDEEM),
+        "subscriptions.claim_delivery_dm" => Some(subscriptions::CLAIM_DELIVERY_DM),
+        "subscriptions.claim_delivery_dm_link" => Some(subscriptions::CLAIM_DELIVERY_DM_LINK),
         "subscriptions.offer_status_none" => Some(subscriptions::OFFER_STATUS_NONE),
         "subscriptions.offer_status_pending" => Some(subscriptions::OFFER_STATUS_PENDING),
         "subscriptions.offer_status_active" => Some(subscriptions::OFFER_STATUS_ACTIVE),
@@ -17421,6 +17636,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "error.rate_limited" => Some(error::RATE_LIMITED),
         "error.conversations.forbidden" => Some(error::conversations::FORBIDDEN),
         "error.conversations.rate_limited" => Some(error::conversations::RATE_LIMITED),
+        "error.conversations.invitee_inbox_full" => Some(error::conversations::INVITEE_INBOX_FULL),
         "error.profile.handle_taken" => Some(error::profile::HANDLE_TAKEN),
         "error.profile.handle_cooldown" => Some(error::profile::HANDLE_COOLDOWN),
         "error.bridges.recipient_on_local_domain" => Some(error::bridges::RECIPIENT_ON_LOCAL_DOMAIN),
@@ -17453,6 +17669,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "error.nostr.no_custodial_key" => Some(error::nostr::NO_CUSTODIAL_KEY),
         "error.nostr.no_relays_configured" => Some(error::nostr::NO_RELAYS_CONFIGURED),
         "error.nostr.replies_off" => Some(error::nostr::REPLIES_OFF),
+        "error.nostr.not_sold" => Some(error::nostr::NOT_SOLD),
+        "error.nostr.no_asking_price" => Some(error::nostr::NO_ASKING_PRICE),
         "error.nest.outdated" => Some(error::nest::OUTDATED),
         "error.nest.schema_mismatch" => Some(error::nest::SCHEMA_MISMATCH),
         "error.backup.writer_seat_held" => Some(error::backup::WRITER_SEAT_HELD),
@@ -17485,6 +17703,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "error.send.room_policy_unavailable" => Some(error::send::ROOM_POLICY_UNAVAILABLE),
         "error.send.room_owner_cannot_leave" => Some(error::send::ROOM_OWNER_CANNOT_LEAVE),
         "error.send.room_leave_failed" => Some(error::send::ROOM_LEAVE_FAILED),
+        "error.send.room_awaiting_key" => Some(error::send::ROOM_AWAITING_KEY),
         "error.send.attachment_upload_foreign_failed" => Some(error::send::ATTACHMENT_UPLOAD_FOREIGN_FAILED),
         "error.send.attachment_missing" => Some(error::send::ATTACHMENT_MISSING),
         "errors.auth_failed" => Some(errors::AUTH_FAILED),
@@ -17525,6 +17744,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "errors.recovery_malformed" => Some(errors::RECOVERY_MALFORMED),
         "errors.recovery_prior_kit_required" => Some(errors::RECOVERY_PRIOR_KIT_REQUIRED),
         "errors.recovery_prior_kit_mismatch" => Some(errors::RECOVERY_PRIOR_KIT_MISMATCH),
+        "errors.recovery_kit_for_another_account" => Some(errors::RECOVERY_KIT_FOR_ANOTHER_ACCOUNT),
         "errors.recovery_prior_escrow_unreadable" => Some(errors::RECOVERY_PRIOR_ESCROW_UNREADABLE),
         "errors.recovery_group_ceremony" => Some(errors::RECOVERY_GROUP_CEREMONY),
         "registrar.step.title" => Some(registrar::step::TITLE),
@@ -17703,6 +17923,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.not_connected" => Some(connected_apps::NOT_CONNECTED),
         "connected_apps.signer_revoked" => Some(connected_apps::SIGNER_REVOKED),
         "connected_apps.paused" => Some(connected_apps::PAUSED),
+        "connected_apps.paused_suspended" => Some(connected_apps::PAUSED_SUSPENDED),
         "connected_apps.created" => Some(connected_apps::CREATED),
         "connected_apps.last_used" => Some(connected_apps::LAST_USED),
         "connected_apps.never_used" => Some(connected_apps::NEVER_USED),

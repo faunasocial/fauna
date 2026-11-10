@@ -87,6 +87,44 @@ class BridgesActions:
         self.driver.navigate_to("bridges")
         time.sleep(0.5)
 
+    # A generous ceiling, not an expected duration — mirrors
+    # FamilyActions.BOUNCE_LANDED_BUDGET_S.
+    BOUNCE_LANDED_BUDGET_S = 30.0
+
+    def revisit(self) -> None:
+        """Enter the page again so it re-reads its rows — the step every
+        revisit-poll below takes between attempts.
+
+        On web this bounces through another route first: the SPA navigates
+        with SvelteKit's `goto`, a no-op on the route it is already on, so
+        the page's `onMount` read never re-runs and a row that reached the
+        nest after the page mounted (a consent approved on Connected apps)
+        stays off the page for the poll's whole deadline (the class
+        `FamilyActions.reload` documents). Measured on
+        `test_a_connected_bridge_app_is_listed_as_a_network_row_with_its_glyph
+        [web]`, which read the plugin card alone for 30 s. Native apps
+        rebuild the page on every nav and need no bounce. The bounce is
+        confirmed against the nav state, never timed (convention 14)."""
+        if self.driver.is_web():
+            self.driver.set_state({"nav": {"stack": [{"view": "settings"}]}})
+            self._await_left_bridges_route()
+        self.navigate()
+
+    def _await_left_bridges_route(self) -> None:
+        """Block until the web bounce has left the bridges route; falls
+        through on timeout, since the caller's own poll and assertion give
+        the better diagnosis."""
+        deadline = time.monotonic() + self.BOUNCE_LANDED_BUDGET_S
+        while time.monotonic() < deadline:  # deadline-ok: documented above — the caller's own poll+diagnosis is the real check
+            try:
+                stack = (self.driver.get_state("nav") or {}).get("stack") or []
+                if stack and stack[0].get("view") != "bridges":
+                    return
+            except Exception:
+                # A read that fails mid-navigation is not a verdict — retry.
+                pass
+            time.sleep(0.1)
+
     def is_page_visible(self, timeout: float = 10.0) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -466,7 +504,42 @@ class BridgesActions:
                 return True
             if time.monotonic() >= deadline:
                 return False
-            self.navigate()
+            self.revisit()
+
+    def _plugin_card_scope(self, client_id: str) -> str:
+        i = self.plugin_card_index(client_id)
+        if i is None:
+            raise AssertionError(
+                f"no settings card names {client_id!r}; "
+                f"diagnose={self.driver.diagnose('bridge-action-button', attrs=('client_id',))}"
+            )
+        return f"bridge-card[{i}]"
+
+    def plugin_has_setting(self, client_id: str, key: str) -> bool:
+        """Whether `client_id`'s card paints `bridge-setting[<key>]` — a bound
+        plugin's card carries this account's settings (third-party.md §
+        Hosted principals), through the same renderer a linked bridge's uses."""
+        scope = self._plugin_card_scope(client_id)
+        return self.driver.count(f"bridge-setting[{key}]", scope=scope) > 0
+
+    def plugin_setting_text(self, client_id: str, key: str) -> str:
+        return self.driver.get_text(
+            f"bridge-setting[{key}]", scope=self._plugin_card_scope(client_id)
+        ) or ""
+
+    def commit_plugin_setting(self, client_id: str, key: str, value: str) -> None:
+        """Type a text or number setting's new value and commit it — the
+        agent's click on an editable is its commit, as on a bridge's card."""
+        scope = self._plugin_card_scope(client_id)
+        self.driver.clear_and_type(f"bridge-setting[{key}]", value, scope=scope)
+        self.driver.click(f"bridge-setting[{key}]", scope=scope)
+
+    def plugin_status_text(self, index: int) -> str:
+        """The admin list's `bridge-plugin-status` lines: the state in words,
+        the fault count, the last fault and a stopped plugin's reason."""
+        return self.driver.get_text(
+            "bridge-plugin-status", scope=self._plugin_scope(index)
+        ) or ""
 
     def press_plugin_card(self, client_id: str) -> None:
         """Press the plugin card's action button — Connect while unbound (the
@@ -479,6 +552,38 @@ class BridgesActions:
                 f"diagnose={self.driver.diagnose('bridge-action-button', attrs=('client_id',))}"
             )
         self.driver.click("bridge-action-button", scope=f"bridge-card[{i}]")
+
+    # --- Card titles (`bridge-card-name`, owner-approved 2026-11-08; tagged
+    # on every app but windows, which tags it on its trickle-down). A consented bridge app's
+    # row is headed by its declared glyph before its name; a first-party
+    # card's title is the bare name. ---
+
+    def card_names(self) -> list[str]:
+        """Every card's painted title, in card order."""
+        return self.driver.get_texts("bridge-card-name")
+
+    def wait_for_card_named(
+        self, title: str, bridge_id: str | None = None, timeout: float = 30.0
+    ) -> bool:
+        """Wait for a card titled exactly `title`, re-reading by revisiting
+        the page (a consent approved on Connected apps pushes nothing here).
+        Deadline-polled (convention 14).
+
+        `bridge_id` names the network row whose card should carry `title`:
+        on linux a network row's card is the one detail pane, painted only
+        once its list row is activated (class docstring), so each attempt
+        opens that row; every other app paints the card inline and ignores
+        it. A plugin card (linux's plugin section sits under the list) needs
+        no `bridge_id`."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if bridge_id and self.driver.is_linux() and self.driver.is_visible(bridge_id):
+                self.driver.click(bridge_id, wait_for_child="bridge-card-name")
+            if title in self.card_names():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            self.revisit()
 
     # --- Errors ---
 

@@ -42,6 +42,8 @@
   import { runSuccessionAftermath } from '#lib/rpc';
   import { successionKitOwed, staleSurfacesForPushKind } from '#lib/wasm';
   import { onPushEvent } from '#lib/rpc';
+  import { subscribeKnockToasts } from '#lib/knock-toast';
+  import { clearMutedWords, loadMutedWords } from '#lib/muted-words';
   import { configStageSettled, recordAftermathLeg } from '#lib/succession-aftermath';
   import { refreshMemberReviewRoster } from '#lib/member-reviews';
   import {
@@ -587,6 +589,19 @@
     return onPushEvent((kind) => {
       if (staleSurfacesForPushKind(kind).nest_info) void refreshNestRules(secret);
     });
+  });
+
+  // The knock toast (`notifications.md` § Localized body, *The knock toast*):
+  // one app-wide arm for the signed-in session, over the session-held muted
+  // list its rule-6 gate reads — loaded here at sign-in (tui's login load), so
+  // a fresh tab withholds a muted knock without a Settings visit. Keyed on the
+  // secret: an actor switch drops the old list and re-arms.
+  $effect(() => {
+    const secret = $signedInIdentity?.secretHex;
+    if (!secret) return;
+    clearMutedWords();
+    void loadMutedWords(secret).catch((e) => console.warn('muted words failed to load:', e));
+    return subscribeKnockToasts();
   });
 
   // Report the nest's PUBLIC IP once per session at the same universal post-auth

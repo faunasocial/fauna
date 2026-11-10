@@ -122,6 +122,41 @@ pub fn combined_spam_score_milli(rspamd_scaled_milli: i32, weighted_bayesian_mil
     rspamd_scaled_milli.max(weighted_bayesian_milli).max(0)
 }
 
+/// The `report:spam` aggregate's term on the mail scale, in milli-units of the
+/// 0–15 scale.
+///
+/// The report-sharing curve's per-mille score (`report-sharing.md` § The
+/// aggregate) maps its full scale onto the full point scale: 1000‰ → 15 points
+/// (15000 milli), so the k = 3 floor's 200‰ is 3 points and the peer-only
+/// bucket's 100‰ is 1.5 (`report-sharing.md` § Applying the aggregate). The
+/// input is clamped to `0..=1000`: the curve never leaves that range, and a
+/// malformed row must neither subtract from the classifiers nor overflow.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn report_spam_milli(score_pm: i64) -> i32 {
+    // 1000 × 15 = 15000 fits i32 comfortably.
+    (score_pm.clamp(0, 1000) * 15) as i32
+}
+
+/// The effective spam score a post-delivery scoring position compares against
+/// a message's own threshold: the classifier combination plus the
+/// `report:spam` term.
+///
+/// `combined_spam_score_milli(rspamd, bayesian) + report_spam_milli(report_pm)`
+/// — additive ON TOP of the max, never inside it: the reports are other
+/// people's judgments, independent evidence beside the classifiers' estimate
+/// (the unlisted-recipient penalty's precedent; `report-sharing.md`
+/// § Applying the aggregate). `report_pm = 0` (no live row) leaves the combined
+/// value unchanged. Saturating at `i32::MAX`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn effective_spam_score_milli(
+    rspamd_scaled_milli: i32,
+    weighted_bayesian_milli: i32,
+    report_pm: i64,
+) -> i32 {
+    combined_spam_score_milli(rspamd_scaled_milli, weighted_bayesian_milli)
+        .saturating_add(report_spam_milli(report_pm))
+}
+
 /// Add the deployment-wide unlisted-recipient penalty to a combined milli-score.
 ///
 /// The recipient-whitelist model treats mail to any address **not** on the
@@ -207,4 +242,45 @@ fn ordered_nonzero(policy: &SpamPolicy) -> bool {
     policy.spam_folder_threshold == 0
         || policy.reject_threshold == 0
         || policy.spam_folder_threshold < policy.reject_threshold
+}
+
+#[cfg(test)]
+mod report_term_tests {
+    use super::{combined_spam_score_milli, effective_spam_score_milli, report_spam_milli};
+
+    #[test]
+    fn k3_floor_adds_three_points() {
+        assert_eq!(report_spam_milli(200), 3000);
+        assert_eq!(effective_spam_score_milli(0, 1200, 200), 4200);
+    }
+
+    #[test]
+    fn peer_only_bucket_adds_one_and_a_half_points() {
+        assert_eq!(report_spam_milli(100), 1500);
+        assert_eq!(effective_spam_score_milli(0, 0, 100), 1500);
+    }
+
+    #[test]
+    fn saturated_curve_adds_fifteen_points() {
+        assert_eq!(report_spam_milli(1000), 15000);
+        // Out-of-range input clamps; a negative row never subtracts.
+        assert_eq!(report_spam_milli(5000), 15000);
+        assert_eq!(report_spam_milli(-300), 0);
+    }
+
+    #[test]
+    fn no_report_leaves_the_combination_unchanged() {
+        for (r, b) in [(3000, 7500), (9000, 1200), (-1500, 0), (0, 0)] {
+            assert_eq!(
+                effective_spam_score_milli(r, b, 0),
+                combined_spam_score_milli(r, b)
+            );
+        }
+    }
+
+    #[test]
+    fn report_term_is_additive_on_top_of_the_max() {
+        // max(3000, 7500) + 3000, not max(3000, 7500, 3000).
+        assert_eq!(effective_spam_score_milli(3000, 7500, 200), 10500);
+    }
 }

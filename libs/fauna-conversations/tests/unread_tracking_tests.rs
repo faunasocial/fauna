@@ -226,6 +226,7 @@ const CHANNEL: &str = "c4a1c4a1c4a1c4a1c4a1c4a1c4a1c4a1c4a1c4a1c4a1c4a1c4a1c4a1c
 
 fn native(seq: u64, own: bool) -> MessageSnapshot {
     MessageSnapshot {
+        queued_send: None,
         message_id: MessageId(format!("conv:{CHANNEL}:{seq}")),
         sender: TypedAddress::Email {
             email_address: if own {
@@ -250,6 +251,7 @@ fn native(seq: u64, own: bool) -> MessageSnapshot {
         labels: vec![],
         plane_ref: None,
         can_delete: false,
+        can_remove: false,
         undelivered: false,
         warmup_hold: None,
         scan_result_lines: Vec::new(),

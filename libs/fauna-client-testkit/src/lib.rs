@@ -617,6 +617,94 @@ impl RpcRequester for CapturingRequester {
     }
 }
 
+/// An [`fauna_protocol::offline_intent::OfflineIntentQueue`] that reports a
+/// fixed connection word and records every intent appended to it — the double
+/// for a typed client's `*_or_queue` method (the `OfflineQueued` composer,
+/// `account-offline-mutation.md` § The offline-mutation contract). Pair it with
+/// [`RecordingRequester`]: with an offline word the requester must see nothing
+/// and [`Self::queued`] holds the `(kind, scope, payload)`; with `"connected"`
+/// the requester sees the send and the queue stays empty.
+///
+/// Its `enqueue` answers at once (no suspension point), so [`block_on`] drives
+/// it. Native only: the trait's wasm arm is `?Send`, and the composer's tests
+/// run native.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct RecordingQueue {
+    word: &'static str,
+    queued: Mutex<Vec<(&'static str, String, Vec<u8>)>>,
+    identity_queued: Mutex<Vec<(&'static str, String, Vec<u8>)>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RecordingQueue {
+    /// A queue whose connection word is `word` (`"disconnected"`,
+    /// `"unreachable"`, `"connected"`, …).
+    pub fn new(word: &'static str) -> Self {
+        Self {
+            word,
+            queued: Mutex::new(Vec::new()),
+            identity_queued: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every intent appended so far through the generic door, in order:
+    /// `(kind, scope, payload)`.
+    pub fn queued(&self) -> Vec<(&'static str, String, Vec<u8>)> {
+        self.queued.lock().unwrap().clone()
+    }
+
+    /// Every intent appended so far through the identity door
+    /// (`enqueue_identity`), in order: `(kind, scope, inputs)`.
+    pub fn identity_queued(&self) -> Vec<(&'static str, String, Vec<u8>)> {
+        self.identity_queued.lock().unwrap().clone()
+    }
+}
+
+// Written in `async_trait`'s desugared form: this crate carries no
+// `async-trait` dependency (the trait itself, in `fauna-core`, is the
+// `async_trait` shape), so the impl names the boxed future.
+#[cfg(not(target_arch = "wasm32"))]
+impl fauna_protocol::offline_intent::OfflineIntentQueue for RecordingQueue {
+    fn connection_state(&self) -> String {
+        self.word.to_string()
+    }
+
+    fn enqueue<'life0, 'async_trait>(
+        &'life0 self,
+        kind: &'static str,
+        scope: String,
+        payload: Vec<u8>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<[u8; 16], String>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.queued.lock().unwrap().push((kind, scope, payload));
+        Box::pin(async { Ok([7; 16]) })
+    }
+
+    fn enqueue_identity<'life0, 'async_trait>(
+        &'life0 self,
+        kind: &'static str,
+        scope: String,
+        payload: Vec<u8>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<[u8; 16], String>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.identity_queued
+            .lock()
+            .unwrap()
+            .push((kind, scope, payload));
+        Box::pin(async { Ok([7; 16]) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

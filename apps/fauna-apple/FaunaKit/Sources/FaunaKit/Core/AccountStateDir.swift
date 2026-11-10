@@ -191,8 +191,9 @@ public enum AccountStateDir {
     /// own (a Rust panic traps rather than throwing, as everywhere else in this
     /// binding), so there is nothing left to catch.
     ///
-    /// The outcome is recorded by `StatusVM.signOut` →
-    /// `SignOutResidueSurface.record` → `SessionState.signOutResidue` →
+    /// A sign-out no longer calls this: its erase is the shared sign-out
+    /// routine's (`SignOutResidueSurface.finish`), whose outcome travels
+    /// `StatusVM.signOut` → `SessionState.signOutResidue` →
     /// `OnboardingVM.signOutResidue` → `IdentityChoiceView`'s `sign-out-residue`
     /// view: the paths to the log (here), the count to the user, and nothing at
     /// all when the sweep was clean (`account-scoping.md` § Erasure follows

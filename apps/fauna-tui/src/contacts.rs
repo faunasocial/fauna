@@ -48,6 +48,7 @@ use fauna_client_contacts::ContactsClient;
 use fauna_client_family::family::FamilyContactRequestInfo;
 use fauna_i18n::strings::{common, contacts as t};
 use fauna_protocol::contacts::{ContactItem, KnockItem};
+use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -389,6 +390,13 @@ impl Action {
 }
 
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
+    // The device's outbox, lent to the `OfflineQueued` peer-edge gestures (the
+    // knock accept, and the knock send through its identity door); `None`
+    // before the account store is ready, when both send as they always did.
+    let queue = app
+        .account_outbox
+        .clone()
+        .map(|outbox| outbox as Arc<dyn OfflineIntentQueue>);
     let st = &mut app.contacts;
     match action {
         Action::Lookup => {
@@ -450,6 +458,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 secret,
                 recipient,
                 recipient_nest_url,
+                queue,
             })
         }
         Action::RequestContact => {
@@ -470,10 +479,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
             None
         }
-        Action::AcceptKnock { peer_id } => knock_op(st, KnockKind::Accept, peer_id),
-        Action::BlockKnock { peer_id } => knock_op(st, KnockKind::Block, peer_id),
-        Action::DismissKnock { peer_id } => knock_op(st, KnockKind::Dismiss, peer_id),
-        Action::ConfirmContact { peer_id } => knock_op(st, KnockKind::Confirm, peer_id),
+        Action::AcceptKnock { peer_id } => knock_op(st, KnockKind::Accept, peer_id, queue),
+        Action::BlockKnock { peer_id } => knock_op(st, KnockKind::Block, peer_id, None),
+        Action::DismissKnock { peer_id } => knock_op(st, KnockKind::Dismiss, peer_id, None),
+        Action::ConfirmContact { peer_id } => knock_op(st, KnockKind::Confirm, peer_id, None),
         Action::ShowPeople => {
             st.segment = Segment::People;
             // Leaving the Address Book closes its detail, so coming back lands
@@ -548,12 +557,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     }
 }
 
-fn knock_op(state: &ContactsState, kind: KnockKind, peer_id: String) -> Option<Op> {
+fn knock_op(
+    state: &ContactsState,
+    kind: KnockKind,
+    peer_id: String,
+    queue: Option<Arc<dyn OfflineIntentQueue>>,
+) -> Option<Op> {
     Some(Op::KnockAction {
         nest: state.nest.clone()?,
         kind,
         peer_id,
         query_gen: claim_roster_gen(state),
+        queue,
     })
 }
 
@@ -602,6 +617,12 @@ pub enum Op {
         secret: [u8; 32],
         recipient: String,
         recipient_nest_url: Option<String>,
+        /// The device's outbox ([`App::account_outbox`]): with no nest the
+        /// knock's inputs rest there and are composed and signed at drain by
+        /// the identity then signed in (`account-offline-mutation.md` § The
+        /// offline-mutation contract → *Identity-bound intents compose
+        /// at drain*).
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
     },
     /// `fauna.family.contact.request` — the supervised ward's ask, offered only
     /// after `SendKnock` came back refused by the guardian gate.
@@ -614,6 +635,10 @@ pub enum Op {
         peer_id: String,
         /// The [`ContactsState::roster_gen`] its refetch reads at.
         query_gen: u64,
+        /// The device's outbox ([`App::account_outbox`]), lent to the accept
+        /// alone — the one `OfflineQueued` kind of the four: with no nest the
+        /// accept rests there and drains on reconnect.
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
     },
     /// `fauna.bridges.list_addressbooks` + unseal — the Address Book picker.
     LoadAddressbooks {
@@ -690,6 +715,13 @@ pub enum Outcome {
     ArchiveViews(Vec<ArchiveLinkView>),
     /// A transport failure loading or mutating — lands on `error-message`.
     Failed(String),
+    /// No nest: the knock accept rests in the device's outbox and drains when
+    /// the nest is back (`account-offline-mutation.md` § The offline-mutation
+    /// contract). Nothing is re-read — there is no nest to read. The accepted
+    /// knock leaves the local list, the way a queued family decision leaves
+    /// the approvals queue; the roster gains the contact only on the read
+    /// after the drain, the nest's word.
+    KnockQueued { peer_id: String },
     /// The Find User handle branch resolved. `nest_url` is `Some` only when the
     /// actor was found on a **peer** nest (see [`FindResult::nest_url`]).
     Resolved {
@@ -700,6 +732,13 @@ pub enum Outcome {
     NotFound,
     /// The knock was accepted by the nest (the button flips to "Sent").
     KnockSent,
+    /// No nest: the knock rests in the device's outbox and is composed and
+    /// signed at drain. Folds as [`Outcome::KnockSent`] — the contact reads as
+    /// requested; the read after the drain is the nest's word. The guardian
+    /// gate can be learned only at drain, so a queued knock never offers
+    /// `contact-request-guardian-button`: a refusal parks the knock, and the
+    /// unsent-changes list says why.
+    KnockSendQueued,
     /// The knock send failed — lands on `error-message` (the knock-send e2e
     /// asserts no error banner on success, so failures must be loud).
     KnockFailed(String),
@@ -745,7 +784,7 @@ pub enum Outcome {
 }
 
 // The knock send and its classification are shared Rust (`fauna_client_contacts::knock`).
-pub(crate) use fauna_client_contacts::knock::{KnockSend, send_knock};
+pub(crate) use fauna_client_contacts::knock::{KnockSend, send_knock_or_queue};
 
 /// `fauna.family.contact.request` — the supervised ward's ask, offered only
 /// after a knock came back [`KnockSend::RefusedByGuardian`]. On success it
@@ -838,8 +877,19 @@ impl Op {
                 secret,
                 recipient,
                 recipient_nest_url,
-            } => match send_knock(nest, &node_url, secret, recipient, recipient_nest_url).await {
+                queue,
+            } => match send_knock_or_queue(
+                nest,
+                queue.as_deref(),
+                &node_url,
+                secret,
+                recipient,
+                recipient_nest_url,
+            )
+            .await
+            {
                 KnockSend::Sent => Outcome::KnockSent,
+                KnockSend::Queued => Outcome::KnockSendQueued,
                 KnockSend::RefusedByGuardian => Outcome::KnockRefusedByGuardian,
                 KnockSend::Failed(e) => Outcome::KnockFailed(e),
             },
@@ -852,10 +902,23 @@ impl Op {
                 kind,
                 peer_id,
                 query_gen,
+                queue,
             } => {
                 let client = ContactsClient::new(Arc::clone(&nest));
                 let result = match kind {
-                    KnockKind::Accept => client.knocks_accept(peer_id).await.map(|_| ()),
+                    KnockKind::Accept => {
+                        match client
+                            .knocks_accept_or_queue(queue.as_deref(), peer_id.clone())
+                            .await
+                        {
+                            Ok(Composed::Sent(())) => Ok(()),
+                            // No nest: nothing to re-read — the knock leaves
+                            // the local list, and the read after the drain is
+                            // the nest's word.
+                            Ok(Composed::Queued(_)) => return Outcome::KnockQueued { peer_id },
+                            Err(e) => return Outcome::Failed(e.to_string()),
+                        }
+                    }
                     KnockKind::Block => client.knocks_block(peer_id).await.map(|_| ()),
                     KnockKind::Dismiss => client.knocks_dismiss(peer_id).await.map(|_| ()),
                     KnockKind::Confirm => client.contacts_confirm(peer_id).await.map(|_| ()),
@@ -982,6 +1045,10 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::Failed(e) => {
             app.errors.insert(crate::pages::Page::Contacts, e);
         }
+        Outcome::KnockQueued { peer_id } => {
+            st.knocks.retain(|k| k.sender != peer_id);
+            app.errors.remove(&crate::pages::Page::Contacts);
+        }
         Outcome::ArchiveViews(views) => {
             st.archive_views = views;
             app.errors.remove(&crate::pages::Page::Contacts);
@@ -996,6 +1063,10 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         }
         Outcome::KnockSent => {
             st.knock_sent = true;
+        }
+        Outcome::KnockSendQueued => {
+            st.knock_sent = true;
+            app.errors.remove(&crate::pages::Page::Contacts);
         }
         Outcome::KnockFailed(e) => {
             app.errors.insert(crate::pages::Page::Contacts, e);
@@ -2160,6 +2231,122 @@ mod tests {
             },
         );
         assert_eq!(app.contacts.cards.len(), 1);
+    }
+
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn knock(sender: &str) -> KnockItem {
+        KnockItem {
+            id: 1,
+            sender: sender.to_string(),
+            sender_node: String::new(),
+            summary: String::new(),
+            created_at: 0,
+            extra: Default::default(),
+        }
+    }
+
+    fn run_accept(word: &'static str) -> (Outcome, Arc<fauna_client_testkit::RecordingQueue>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let op = Op::KnockAction {
+            nest: fauna_client::NestClient::new(
+                "http://127.0.0.1:9".to_string(),
+                fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+            ),
+            kind: KnockKind::Accept,
+            peer_id: "aa".repeat(32),
+            query_gen: 1,
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+        };
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(op.run());
+        (outcome, queue)
+    }
+
+    /// With no nest, a knock accept rests in the outbox (not sent into the
+    /// dead connection) and the accepted knock leaves the local list; another
+    /// sender's knock stays.
+    #[test]
+    fn a_knock_accept_with_no_nest_is_queued_and_leaves_the_local_list() {
+        let (outcome, queue) = run_accept("disconnected");
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, "fauna.knocks.accept");
+        assert!(
+            matches!(&outcome, Outcome::KnockQueued { peer_id } if *peer_id == "aa".repeat(32)),
+            "{outcome:?}"
+        );
+
+        let mut app = contacts_app();
+        app.contacts.knocks = vec![knock(&"aa".repeat(32)), knock(&"bb".repeat(32))];
+        app.errors.insert(Page::Contacts, "stale".into());
+        apply_outcome(&mut app, outcome);
+        assert_eq!(app.contacts.knocks, vec![knock(&"bb".repeat(32))]);
+        assert!(!app.errors.contains_key(&Page::Contacts));
+    }
+
+    /// Connected, the accept is sent as before (to this dummy nest it fails on
+    /// the transport) and nothing is queued.
+    #[test]
+    fn a_knock_accept_with_the_nest_connected_is_sent_not_queued() {
+        let (outcome, queue) = run_accept("connected");
+        assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+        assert!(queue.queued().is_empty());
+    }
+
+    fn run_knock_send(word: &'static str) -> (Outcome, Arc<fauna_client_testkit::RecordingQueue>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let op = Op::SendKnock {
+            nest: fauna_client::NestClient::new(
+                "http://127.0.0.1:9".to_string(),
+                fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+            ),
+            node_url: "https://home.test".to_string(),
+            secret: [7u8; 32],
+            recipient: "aa".repeat(32),
+            recipient_nest_url: None,
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+        };
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(op.run());
+        (outcome, queue)
+    }
+
+    /// With no nest, a knock send queues its inputs on the identity door —
+    /// composed and signed at drain — and the contact reads as requested, the
+    /// guardian ask never offered.
+    #[test]
+    fn a_knock_send_with_no_nest_is_queued_and_reads_as_requested() {
+        let (outcome, queue) = run_knock_send("disconnected");
+        assert!(matches!(outcome, Outcome::KnockSendQueued), "{outcome:?}");
+        assert!(queue.queued().is_empty(), "never the generic door");
+        let queued = queue.identity_queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, "fauna.inbox.send");
+        assert_eq!(queued[0].1, format!("inbox.send:{}", "aa".repeat(32)));
+
+        let mut app = contacts_app();
+        app.errors.insert(Page::Contacts, "stale".into());
+        apply_outcome(&mut app, outcome);
+        assert!(app.contacts.knock_sent);
+        assert!(!app.contacts.guardian_refused);
+        assert!(!app.errors.contains_key(&Page::Contacts));
+    }
+
+    /// Connected, the knock is sent as before (to this dummy nest it fails on
+    /// the transport) and nothing is queued.
+    #[test]
+    fn a_knock_send_with_the_nest_connected_is_sent_not_queued() {
+        let (outcome, queue) = run_knock_send("connected");
+        assert!(matches!(outcome, Outcome::KnockFailed(_)), "{outcome:?}");
+        assert!(queue.identity_queued().is_empty());
+        assert!(queue.queued().is_empty());
     }
 
     /// A roster read superseded by a newer one is dropped when it lands late.

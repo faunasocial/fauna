@@ -71,6 +71,12 @@ struct Entry {
     /// / `test-attr-*` class. Empty for all but the handful of elements that
     /// carry state beyond their text (`recipient-resolve-status`'s `state`).
     attrs: Vec<(String, String)>,
+    /// The rich body of a document element ([`Element::doc`](crate::element::Element::doc))
+    /// — kept so `/element/attr`'s derived `painted` attribute can answer the body
+    /// as painted, boxes and indentation included
+    /// ([`crate::document::painted_text`]), computed only when a driver asks.
+    /// `None` for every element that is not a document.
+    doc: Option<fauna_core::render::RenderDocument>,
     /// What `/element/double_click` actuates
     /// ([`Element::dbl`](crate::element::Element::dbl)). `None` = this element
     /// has no second gesture, and the agent says so rather than silently
@@ -199,6 +205,7 @@ impl Registry {
             select: None,
             path: Vec::new(),
             attrs: Vec::new(),
+            doc: None,
             dbl: None,
             page_index: None,
             in_view: None,
@@ -253,6 +260,7 @@ impl Registry {
             select,
             path: element.path,
             attrs,
+            doc: element.doc,
             dbl: element.dbl.map(Action::Gesture),
             page_index: None,
             in_view: None,
@@ -979,6 +987,11 @@ fn state_json(app: &App, machine_result: Option<String>, device_id: Option<&str>
     // Set after the literal: the object above is at `json!`'s macro recursion
     // limit, so further keys are inserted rather than listed.
     //
+    // The registry's standing alerts — the witness for `critical-alerts`
+    // outcome 5's factory-reset arm (`fauna_e2e_agent::ALERT_REGISTRY_KEY`,
+    // which owns the contract). A shared getter read, like `alert_sweep_passes`.
+    state[fauna_e2e_agent::ALERT_REGISTRY_KEY] = alert_registry_json(app);
+    //
     // Every chat channel this device has bound a thread to — the restore
     // witness a Welcome-only (unlisted) 1:1 still satisfies
     // (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`, which owns the contract).
@@ -999,6 +1012,20 @@ fn state_json(app: &App, machine_result: Option<String>, device_id: Option<&str>
     // (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`, which owns the
     // contract). Five atomic loads in shared Rust; zeros before any payload.
     state[fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY] = custody_ceremony_ingest_json();
+    // Delivered launch verdicts rendered vs. dropped as superseded — the
+    // causal barrier for "a superseded launch never tears down the newer
+    // session" (`fauna_e2e_agent::LAUNCH_VERDICTS_KEY` owns the contract).
+    // Two field reads.
+    state[fauna_e2e_agent::LAUNCH_VERDICTS_KEY] = fauna_e2e_agent::launch_verdicts_json(
+        app.launch_verdicts_routed,
+        app.launch_verdicts_superseded,
+    );
+    // Every knock push the toast arm took and every knock toast it raised —
+    // the witness for `notifications` outcome 15
+    // (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, which owns the contract).
+    // Published unconditionally, pre-auth included, for the same reason as
+    // `message_banners`: absent means "no knock-toast leg at all".
+    state[fauna_e2e_agent::KNOCK_NOTICES_KEY] = app.knock_notices.json();
     // The admin Held-Custody page's `{answered, row_count}` — whether the
     // registry read has ANSWERED, read off the loop while the nav's awaited
     // read is held at the nest (`admin::custody_hosting::state_json`).
@@ -1063,6 +1090,15 @@ fn account_pump_cycles_json(app: &App) -> Value {
     // builder publishes as `(0, 0)`; a convention-11 refusal is the key being
     // absent, never a zero.
     fauna_client_account_runtime::account_pump_cycles_json(app.settings.account_store.as_ref())
+}
+
+/// The alert registry's standing alerts, `{"count", "keys"}`
+/// (`fauna_e2e_agent::ALERT_REGISTRY_KEY`). A plain getter read (convention 11
+/// corollary: no blocking I/O on the state path).
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn alert_registry_json(app: &App) -> Value {
+    let keys = app.alerts.active_keys();
+    json!({ "count": keys.len(), "keys": keys })
 }
 
 /// The `custody_ceremony_ingest` state value
@@ -1248,6 +1284,18 @@ fn gate(route: &str, id: &str, index: usize, enabled: bool) -> Option<Value> {
     )
 }
 
+/// The targeted scroll-into-view's move: [`App::focus_page_element`] wrapped
+/// in the paging edge a keystroke runs ([`App::page_on_arrival`]), so a driven
+/// scroll onto the feed's last card asks for the next page as an arrow key
+/// would. Returns whether the ring moved.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn focus_page_element_paging(app: &mut App, index: usize) -> bool {
+    let paging_before = app.paging_edge();
+    let moved = app.focus_page_element(index);
+    app.page_on_arrival(paging_before);
+    moved
+}
+
 #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
 pub async fn perform(app: &mut App, registry: &Registry, req: &ElementReq) -> Value {
     let id = req.id.as_str();
@@ -1330,6 +1378,21 @@ pub async fn perform(app: &mut App, registry: &Registry, req: &ElementReq) -> Va
                                 }
                                 None => Value::Null,
                             })
+                        })
+                        .or_else(|| {
+                            // A document element's body AS PAINTED — one line per
+                            // painted line, a task item's ☑/☐ box and a nested
+                            // item's indent kept — where `text` is the shared
+                            // one-line `to_plaintext` every app answers
+                            // (feed-read outcome 15; `document::painted_text`).
+                            // `Null` for an element with no document body.
+                            (req.arg == "painted")
+                                .then(|| {
+                                    e.doc.as_ref().map(|doc| {
+                                        Value::String(crate::document::painted_text(doc))
+                                    })
+                                })
+                                .flatten()
                         })
                 })
                 .unwrap_or(Value::Null)
@@ -1570,11 +1633,15 @@ pub async fn perform(app: &mut App, registry: &Registry, req: &ElementReq) -> Va
         // last frame did not already show — a scroll acked without moving would
         // let a dwell measure nothing (testing.md convention 11). The sidebar
         // and the shell chrome never scroll, so they are simply found.
+        //
+        // The move runs the same paging edge a keystroke does
+        // (`App::page_on_arrival`): scrolling to the feed's last card asks for
+        // the next page, as the user's arrow key would.
         ElementKind::ScrollIntoView => match registry.matches(id, scope).nth(req.index) {
             None => json!({ "error": "not found" }),
             Some(entry) => match entry.page_index {
                 None => json!({ "found": true }),
-                Some(index) if app.focus_page_element(index) => json!({ "found": true }),
+                Some(index) if focus_page_element_paging(app, index) => json!({ "found": true }),
                 Some(_) if entry.in_view == Some(true) => json!({ "found": true }),
                 Some(_) => json!({
                     "error": format!(
@@ -1841,6 +1908,22 @@ async fn dispatch_command(
             }
             recognized(true)
         }
+        // The hand-back journey's causal anchor: the run fails between the
+        // marker learning the zip's length + hash and the raw copy being
+        // written, so a resume elsewhere finds no raw copy and asks for the
+        // archive back (`set_stop_before_raw_copy_for_test`). No payload; a
+        // missing machine is loud for the same reason as above.
+        "archive_import_stop_before_raw_copy" => {
+            let Some(machine) = crate::settings::archive_import_machine(&app.settings) else {
+                app.report_failed_agent_command(
+                    action,
+                    "no archive-import machine (pre-auth, or the glue refused)",
+                );
+                return recognized(true);
+            };
+            machine.set_stop_before_raw_copy_for_test();
+            recognized(true)
+        }
         // The feed twin of `conversations_inject_page_error` above — there is no
         // *product* path that fails a feed fetch on demand (a real failure needs
         // the nest's own query to error), so this drives
@@ -1878,6 +1961,22 @@ async fn dispatch_command(
                 return recognized(false);
             };
             manager.hold_next_reload_for_test();
+            recognized(true)
+        }
+        // Hold / release this process's author drain, so a payment-backed
+        // subscribe request stands in the author's §2 requests while the test
+        // reads its paid badge (`monetization.md` § Pillar 3) — without it the
+        // pump grants the row on its next tick. The hold is in shared Rust
+        // (`fauna_client_subscriptions::orchestration::hold_author_drain_for_test`),
+        // checked after the queue read, so every row enqueued after this
+        // command's ack stands until the release. Pre-auth is fine: the flag is
+        // process-wide and the pump a login starts reads it.
+        "subscriptions_hold_author_drain" => {
+            fauna_client_subscriptions::orchestration::hold_author_drain_for_test();
+            recognized(true)
+        }
+        "subscriptions_release_author_drain" => {
+            fauna_client_subscriptions::orchestration::release_author_drain_for_test();
             recognized(true)
         }
         "feed_release_held_reload" => {
@@ -1976,6 +2075,30 @@ async fn dispatch_command(
         // What the capture holds after the latest draw: the exposures in
         // progress plus the measured cards and painted band — how a journey
         // steers a scroll to the step where exactly one card leaves view.
+        // Write `count` tagged `info` lines through the app's own tracing
+        // subscriber — ring, rolling file and stderr alike — each padded to
+        // about `bytes` bytes: the volume app-log's size-cap witness needs to
+        // push the on-device file past its (lowered, `fauna-log`'s
+        // `E2E_TOTAL_CAP_ENV`) cap without a real runaway writer. Line `i`
+        // reads `<tag> #<i> <padding>`, so the newest is `#<count - 1>`.
+        "app_log_emit" => {
+            let tag = payload
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let count = payload.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
+            let bytes = payload.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            // The shared body (linux's arm is its twin); a refusal is a loud
+            // `{"error"}` result, never a silent ack (convention 11).
+            let outcome = match fauna_log::rolling::emit_burst_for_test(tag, count, bytes) {
+                Ok(emitted) => json!({ "emitted": emitted }),
+                Err(e) => json!({ "error": e }),
+            };
+            CommandResult {
+                recognized: true,
+                machine_result: Some(outcome.to_string()),
+            }
+        }
         "feed_cue_probe" => CommandResult {
             recognized: true,
             machine_result: Some(app.feed.cue_capture.probe_for_test().to_string()),
@@ -2109,16 +2232,27 @@ async fn dispatch_command(
         // in this table.
         "screen_time_heartbeat" => {
             let minutes = payload.get("minutes").and_then(|v| v.as_i64()).unwrap_or(0);
+            // `focused` (additive, default true): `false` advances the clock
+            // with the app out of front or the device locked, the minutes a
+            // ward did not spend — what the billing witness drives to prove
+            // they are never billed (`family-client-enforcement.md` §
+            // Implementation status today, decision (b)). The default keeps
+            // the poke asserting what a ward actively using the app accrues.
+            let focused = payload
+                .get("focused")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             tracing::info!(
                 minutes,
+                focused,
                 "[agent] screen_time_heartbeat: advancing the ward clock"
             );
-            app.screen_lock.advance_test_clock(minutes * 60);
-            // `focused = true`: the poke asserts what a ward actively using the
-            // app accrues. Awaited rather than spawned — the driver's next
-            // (single-shot, un-retried) element read must already observe the
-            // lock this report's reply produces.
-            match crate::family::due_usage_report(app, true) {
+            app.screen_lock
+                .advance_test_clock_focused(minutes * 60, focused);
+            // Awaited rather than spawned — the driver's next (single-shot,
+            // un-retried) element read must already observe the lock this
+            // report's reply produces.
+            match crate::family::due_usage_report(app, focused) {
                 Some(op) => {
                     let outcome = op.run().await;
                     crate::family::apply_outcome(app, outcome);
@@ -2178,10 +2312,14 @@ async fn dispatch_command(
         fauna_e2e_agent::FOCUS_MOVE => match fauna_e2e_agent::focus_move_request(payload) {
             Ok((direction, times)) => {
                 for _ in 0..times {
+                    // Each step is one keystroke's move, the paging edge
+                    // included (`App::page_on_arrival`, as `handle_key` runs it).
+                    let paging_before = app.paging_edge();
                     match direction {
                         fauna_e2e_agent::FocusDirection::Next => app.focus_next(),
                         fauna_e2e_agent::FocusDirection::Prev => app.focus_prev(),
                     }
+                    app.page_on_arrival(paging_before);
                 }
                 recognized(true)
             }
@@ -2459,6 +2597,38 @@ async fn dispatch_command(
         // (`fleet-scope-reclamation.md` § *Fleet-scope reclamation*, clause
         // (3)(j)). The `device_set_state` reader shape: async store I/O, never
         // a per-tick state key.
+        // e2e-only: which content-key generations this seat's folder custody
+        // holds for the live set `set_name`, each as a version and a one-way
+        // key fingerprint (`fauna_client_folders::custody::held_generations`).
+        // The succession journey compares it across seats: a seat still holding
+        // a retired seed must hold no key for the generation the succession
+        // rotated in (`succession-aftermath.md` § Re-key scope). The
+        // `device_set_state` reader shape: async store I/O, never a per-tick
+        // state key; an unreadable custody answers `found: false` with the
+        // reason, never an empty holding.
+        "folder_set_custody" => {
+            // By `set_name` (an owner's live entry) or by `channel_id_hex` (a
+            // member's, whose entry for another owner's set need carry no name);
+            // the one reader every app's arm calls.
+            let set_name = payload.get("set_name").and_then(|v| v.as_str());
+            let channel = payload.get("channel_id_hex").and_then(|v| v.as_str());
+            match fauna_client_account_runtime::folder_set_custody_json(
+                app.settings.account_store.clone(),
+                set_name,
+                channel,
+            )
+            .await
+            {
+                Ok(value) => CommandResult {
+                    recognized: true,
+                    machine_result: Some(value.to_string()),
+                },
+                Err(why) => {
+                    app.report_failed_agent_command("folder_set_custody", why);
+                    recognized(true)
+                }
+            }
+        }
         "escrow_wrap_coordinates" => {
             let value = fauna_client_account_runtime::escrow_wrap_coordinates_json(
                 app.settings.account_store.as_ref(),
@@ -4205,6 +4375,139 @@ mod tests {
 
     /// Scroll-into-view resolves against the never-clipped registry: a present
     /// element is `found` (there is nothing to move), an absent one 404s.
+    /// A feed of `n` posts whose snapshot says more remain, on the feed page
+    /// with the ring in the page pane — the paging edge's fixture.
+    fn paging_feed_app(n: usize) -> App {
+        let mut app = authed_app();
+        let manager = std::sync::Arc::new(fauna_feed::FeedManager::new(
+            crate::app::tests::test_session().client,
+            [7u8; 32],
+        ));
+        let specs = (0..n)
+            .map(|i| fauna_feed::test_support::TestPostSpec {
+                post_id: format!("{i:064x}"),
+                author: "bb".repeat(32),
+                body: format!("post {i}"),
+                ..Default::default()
+            })
+            .collect();
+        let mut snapshot = fauna_feed::test_support::feed_snapshot_with_posts(specs);
+        snapshot.has_more = true;
+        manager.set_feed_snapshot_for_test(snapshot);
+        app.feed.manager = Some(manager);
+        app.page = crate::pages::Page::Feed;
+        app.enter_page_zone();
+        app
+    }
+
+    /// The page-element index of the first focusable control inside
+    /// `post-card[card]`.
+    fn first_focusable_in_card(app: &App, card: usize) -> usize {
+        app.page_elements()
+            .iter()
+            .position(|e| {
+                e.focusable()
+                    && e.path
+                        .first()
+                        .is_some_and(|(id, i)| id == "post-card" && *i == card)
+            })
+            .expect("the card paints a focusable control")
+    }
+
+    async fn focus_move(app: &mut App, direction: &str) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = dispatch_command(
+            app,
+            &tx,
+            fauna_e2e_agent::FOCUS_MOVE,
+            &Value::Null,
+            "",
+            "",
+            &Value::Null,
+            &json!({ "direction": direction }),
+        )
+        .await;
+        assert!(result.recognized);
+    }
+
+    /// `focus_move` onto the last card of a feed with more pages fires the
+    /// load-more a keystroke does — convention 11: the automation surface
+    /// performs the user's state mutation, never silently less.
+    #[test]
+    fn focus_move_onto_the_last_card_asks_for_the_next_page() {
+        let mut app = paging_feed_app(3);
+        // The last card's own stop sits just ahead of its first control; put
+        // the ring one stop before it (the previous card's last control).
+        let card = first_focusable_in_card(&app, 2) - 1;
+        assert_eq!(app.page_elements()[card].id, ids::POST_CARD);
+        app.focus = app.page_elements()[..card]
+            .iter()
+            .filter(|e| e.focusable())
+            .count()
+            - 1;
+        assert!(
+            !crate::feed::at_last_card(&app),
+            "fixture starts off the edge"
+        );
+        run(focus_move(&mut app, "next"));
+        assert_eq!(app.focused_index(), Some(card));
+        assert!(crate::feed::at_last_card(&app));
+        assert_eq!(
+            app.paging_fired,
+            vec![crate::app::PagingEdge {
+                feed: true,
+                profile_posts: false
+            }]
+        );
+        // On into the card's controls: still the last card, no new arrival.
+        run(focus_move(&mut app, "next"));
+        assert!(crate::feed::at_last_card(&app));
+        assert_eq!(app.paging_fired.len(), 1, "one request per arrival");
+    }
+
+    /// A move that does not arrive at the bottom edge fires nothing.
+    #[test]
+    fn focus_move_short_of_the_last_card_asks_for_nothing() {
+        let mut app = paging_feed_app(3);
+        app.focus = 0;
+        run(focus_move(&mut app, "next"));
+        assert!(!crate::feed::at_last_card(&app));
+        assert!(app.paging_fired.is_empty());
+    }
+
+    /// The targeted scroll-into-view onto the last card — the e2e `scroll_to`
+    /// — reaches the same load-more.
+    #[test]
+    fn scroll_into_view_onto_the_last_card_asks_for_the_next_page() {
+        let mut app = paging_feed_app(3);
+        app.focus = 0;
+        let registry = frame_registry(&app);
+        let mut scroll = req(ElementKind::ScrollIntoView, ids::POST_CARD);
+        scroll.index = 2;
+        let reply = run(perform(&mut app, &registry, &scroll));
+        assert_eq!(reply, json!({ "found": true }));
+        assert!(crate::feed::at_last_card(&app));
+        assert_eq!(app.paging_fired.len(), 1);
+        assert!(app.paging_fired[0].feed);
+    }
+
+    /// …and the same feed WITHOUT more pages fires nothing at the edge.
+    #[test]
+    fn scroll_into_view_onto_the_last_card_of_a_complete_feed_asks_for_nothing() {
+        let mut app = paging_feed_app(3);
+        let manager = app.feed.manager.clone().expect("manager");
+        let mut snapshot = manager.snapshot();
+        snapshot.has_more = false;
+        manager.set_feed_snapshot_for_test(snapshot);
+        app.focus = 0;
+        let registry = frame_registry(&app);
+        let mut scroll = req(ElementKind::ScrollIntoView, ids::POST_CARD);
+        scroll.index = 2;
+        let reply = run(perform(&mut app, &registry, &scroll));
+        assert_eq!(reply, json!({ "found": true }));
+        assert!(app.paging_fired.is_empty());
+    }
+
     #[test]
     fn scroll_into_view_resolves_registry_targets() {
         let mut app = authed_app();
@@ -4349,6 +4652,40 @@ mod tests {
         assert_eq!(attr("shown"), json!({ "value": "true" }));
         assert_eq!(attr("hidden"), json!({ "value": "false" }));
         assert_eq!(attr("unmeasured"), json!({ "value": Value::Null }));
+    }
+
+    /// `painted` answers a document element's body as painted — the ☑/☐ boxes and
+    /// the nested indent `text`'s one-line plaintext drops (feed-read outcome 15) —
+    /// read on a post card the way the feed page registers it, and `Null` for an
+    /// element with no document body.
+    #[test]
+    fn painted_reads_a_document_body_with_its_boxes_and_nesting() {
+        let mut app = test_app();
+        let mut registry = Registry::default();
+        let doc =
+            fauna_core::render::markdown_to_document("- [x] done\n- [ ] todo\n  - [ ] nested");
+        let plaintext = doc.to_plaintext();
+        registry.page_element(
+            crate::element::Element::document(ids::FEED_POST_TEXT, doc).within(ids::POST_CARD, 0),
+            0,
+            None,
+        );
+        registry.page_element(crate::element::Element::label("plain", "x"), 1, None);
+        let mut attr = |id: &str, scope: Vec<ScopeStep>| {
+            let mut r = req(ElementKind::Attr, id);
+            r.arg = "painted".to_string();
+            r.scope = scope;
+            run(perform(&mut app, &registry, &r))
+        };
+        let scoped: Vec<ScopeStep> = vec![(ids::POST_CARD.to_string(), 0)];
+        let painted = attr(ids::FEED_POST_TEXT, scoped)["value"]
+            .as_str()
+            .expect("a document element answers `painted`")
+            .to_string();
+        let lines: Vec<&str> = painted.lines().collect();
+        assert_eq!(lines, vec!["☑ done", "☐ todo", "  ☐ nested"], "{painted:?}");
+        assert!(!plaintext.contains('☑'), "text stays the shared plaintext");
+        assert_eq!(attr("plain", Vec::new()), json!({ "value": Value::Null }));
     }
 
     /// A scroll-into-view that cannot move anything says so instead of acking:
@@ -4642,6 +4979,28 @@ mod tests {
             app.alerts.active().is_empty(),
             "session teardown drops every alert, so the next identity starts clean"
         );
+    }
+
+    /// A factory reset is an arm that ends the authenticated session, so it
+    /// drops every standing alert and counts a teardown — published as
+    /// `alert_registry` / `session_generation`. The re-claim signs in as the
+    /// SAME identity, so the banner alone could never show a survivor.
+    #[test]
+    fn a_factory_reset_drops_every_standing_alert_and_counts_a_teardown() {
+        let mut app = authed_app();
+        app.alerts.post(
+            "recovery-replacement-pending:abc",
+            vec![fauna_core::localized::LocalizedText::key("boom")],
+        );
+        assert_eq!(alert_registry_json(&app)["count"], 1);
+        let generation = app.session_generation;
+        run(async { crate::launch::enter_factory_reset_reonboard(&mut app) });
+        assert_eq!(
+            alert_registry_json(&app),
+            json!({ "count": 0, "keys": [] }),
+            "a factory reset must drop every alert"
+        );
+        assert_eq!(app.session_generation, generation + 1);
     }
 
     /// The banner is gated on an authenticated shell: pre-identity there is no

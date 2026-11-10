@@ -86,6 +86,9 @@ zaps = ["payments", "fauna-client-nostr/zaps"]
 # endpoint.
 p2p-share = [
     "fauna-client-capabilities/p2p-share",
+    # The ceremony half of `fauna-iroh` (`ceremony_transport()`), forwarded
+    # here so a store-safe build keeps only its peer-leg half.
+    "fauna-iroh/ceremony",
     # The transfer plane's shared halves: the pump + serve stores
     # (fauna-sync-engine), the M2 roster consult over Arc<MlsEngine>
     # (fauna-client-folders — its own `mls` feature is unconditional above),
@@ -123,6 +126,9 @@ e2e-agent = [
     # the agent at all, rather than trusting `--gc-sections` to drop it.
     "fauna-e2e-agent/e2e-agent",
     "fauna-client-backup/e2e-agent",
+    # The lowered log-cap seam (`FAUNA_E2E_LOG_TOTAL_CAP_BYTES`) app-log's
+    # size-cap witness launches with.
+    "fauna-log/e2e-agent",
     # The Nests trust facet's render clock (`trust_clock`) — grant liveness and
     # custody receipt freshness, moved by `trust_facet_advance_clock`.
     "fauna-client-capabilities/e2e-agent",
@@ -204,6 +210,11 @@ e2e-agent = [
     # journey). Debug builds reach it through `debug_assertions`.
     "fauna-client/e2e-agent",
     "fauna-client-sync/test-helpers",
+    # `hold_author_drain_for_test` — the `subscriptions_hold_author_drain`
+    # command's anchor for a standing paid request (convention 14). Debug
+    # builds reach it through `debug_assertions`; this forward keeps a
+    # RELEASE-profile e2e tui able to compile the command (convention 15).
+    "fauna-client-subscriptions/test-helpers",
     "fauna-conversations/test-helpers",
     "fauna-feed/test-helpers",
     "fauna-onboarding-machine/test-helpers",

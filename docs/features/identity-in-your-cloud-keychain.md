@@ -25,7 +25,7 @@ than one place; the cloud copy is an extra you can opt into.
 
 ## Coverage contract
 
-Stamped 2026-10-21 at 77c610862e.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] You can choose to have your identity key kept in your device account's cloud keychain as well, and it is off until you turn it on — `docs/goal/architecture/apps/common.md` § Credential storage
    - `tests/e2e-unified/tests/test_icloud_backup_toggle.py::test_icloud_backup_toggle_defaults_off_and_round_trips`
@@ -34,6 +34,8 @@ Stamped 2026-10-21 at 77c610862e.
 3. [app] A new iPhone or Mac restored from your Apple account, with iCloud Keychain on, finds your identity when the app first starts there — `docs/goal/architecture/apps/common.md` § Credential storage
    - `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_a_restored_device_finds_the_identity_from_the_circle_copy`
    - `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_the_copy_carries_the_identity_and_a_restored_device_is_a_new_device`
+4. [app] On a Mac whose build cannot place the copy in the cloud keychain, turning the switch on is refused and says why, instead of seeming to work — `docs/goal/architecture/apps/ios.md` § Credential Storage
+   - `tests/e2e-unified/tests/test_icloud_backup_refused_on_macos.py::test_the_toggle_cannot_rest_on_where_no_copy_can_land`
 
 ## Status
 
@@ -44,9 +46,11 @@ Stamped 2026-10-21 at 77c610862e.
 | linux | — absent | |
 | windows | — absent | |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+2b3552a6 standalone |
+| ios | ⚠ partial | 0.1.5-dev+2b3552a6 standalone |
 | android | — absent | |
 | tui | — absent | |
+| android-kids | — absent | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -54,4 +58,5 @@ Stamped 2026-10-21 at 77c610862e.
 | 2 | app | `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_turning_the_copy_off_keeps_this_devices_working_copy` | ios (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_a_restored_device_finds_the_identity_from_the_circle_copy` | ios (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_the_copy_carries_the_identity_and_a_restored_device_is_a_new_device` | ios (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_icloud_backup_refused_on_macos.py::test_the_toggle_cannot_rest_on_where_no_copy_can_land` | macos (macos): passed |
 <!-- features-render:end -->

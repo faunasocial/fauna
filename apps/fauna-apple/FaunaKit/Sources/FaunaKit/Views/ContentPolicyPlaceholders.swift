@@ -28,10 +28,21 @@ import SwiftUI
 public struct ContentPolicyBlockedNotice: View {
     private let reported: Bool
     private let reason: String?
+    private let showAgain: FfiShowAgain?
+    private let onShowAgain: ([String]) -> Void
 
-    public init(reported: Bool = false, reason: String? = nil) {
+    /// `showAgain` is the shared `reported_show_again` fold for this item — kept
+    /// only on the `reported` arm, where it paints
+    /// `content-policy-show-again-button` (`moderation.md` § Corollary — the
+    /// reporter's hide is theirs to undo); `onShowAgain` receives its ids.
+    public init(
+        reported: Bool = false, reason: String? = nil,
+        showAgain: FfiShowAgain? = nil, onShowAgain: @escaping ([String]) -> Void = { _ in }
+    ) {
         self.reported = reported
         self.reason = reason
+        self.showAgain = reported ? showAgain : nil
+        self.onShowAgain = onShowAgain
     }
 
     private var text: String {
@@ -48,6 +59,16 @@ public struct ContentPolicyBlockedNotice: View {
                 .font(.caption)
                 .italic()
                 .foregroundStyle(.secondary)
+            if let showAgain {
+                let label = renderLocalizedText(showAgain.label)
+                let press = { onShowAgain(showAgain.ids) }
+                Button(label, action: press)
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
+                    .accessibilityIdentifier(Ids.contentPolicyShowAgainButton)
+                    .automationActivate(
+                        Ids.contentPolicyShowAgainButton, text: { label }, perform: press)
+            }
             GuardianReasonText(reason: reason)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

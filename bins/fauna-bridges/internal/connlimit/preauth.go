@@ -11,7 +11,10 @@ import (
 // connection that has not authenticated this long after accept is closed
 // (`docs/goal/behavior/smtp-server.md` § Connection-time limits → *Pre-auth
 // connection deadline*). Fixed from accept, never reset by a read, so a
-// trickle of bytes cannot extend it. A compile-time constant, never a knob.
+// trickle of bytes cannot extend it. A compile-time constant, never a knob:
+// the release bridge always applies exactly this (preAuthDeadline in
+// preauth_seam_absent.go); only the e2e flavor's harness seam
+// (preauth_seam.go, `-tags fauna_e2e_fixtures`) can shorten it.
 const PreAuthDeadline = 60 * time.Second
 
 // PreAuthListener wraps a net.Listener so every accepted connection carries
@@ -23,13 +26,16 @@ type PreAuthListener struct {
 	onDeadline func()
 	// now is the clock; a test-only seam (time.Now in production).
 	now func() time.Time
+	// deadline is PreAuthDeadline in every release bridge, fixed at
+	// construction from preAuthDeadline().
+	deadline time.Duration
 }
 
 // NewPreAuthListener wraps inner with the pre-auth deadline. onDeadline fires
 // once per connection whose read or write fails on OUR bound (the caller's
 // metric and log); it may be nil.
 func NewPreAuthListener(inner net.Listener, onDeadline func()) *PreAuthListener {
-	return &PreAuthListener{Listener: inner, onDeadline: onDeadline, now: time.Now}
+	return &PreAuthListener{Listener: inner, onDeadline: onDeadline, now: time.Now, deadline: preAuthDeadline()}
 }
 
 // SetClockForTest replaces the listener's clock — the witnesses' seam for a
@@ -37,7 +43,7 @@ func NewPreAuthListener(inner net.Listener, onDeadline func()) *PreAuthListener 
 // a knob.
 func (l *PreAuthListener) SetClockForTest(now func() time.Time) { l.now = now }
 
-// Accept sets the inner read AND write deadlines to accept + PreAuthDeadline
+// Accept sets the inner read AND write deadlines to accept + the deadline
 // before returning the wrapped connection. The write half matters as much as
 // the read: a stranger that pipelines commands and stops reading leaves the
 // server blocked in Write, where no read deadline applies.
@@ -48,7 +54,7 @@ func (l *PreAuthListener) Accept() (net.Conn, error) {
 	}
 	c := &preAuthConn{
 		Conn:       conn,
-		bound:      l.now().Add(PreAuthDeadline),
+		bound:      l.now().Add(l.deadline),
 		now:        l.now,
 		onDeadline: l.onDeadline,
 	}

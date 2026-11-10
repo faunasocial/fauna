@@ -7,6 +7,7 @@
   // address. A click opens the lightbox, as on a blob image.
   import Lightbox from './Lightbox.svelte';
   import { IDS } from '#lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
 
   interface Props {
     path: string;
@@ -17,7 +18,7 @@
   }
 
   let { path, alt = '', src, class: className = '' }: Props = $props();
-  const label = $derived(alt || 'post media');
+  const label = $derived(alt || t.feed.post.image_alt_fallback);
   let showLightbox = $state(false);
 </script>
 
@@ -29,7 +30,7 @@
     <Lightbox {src} alt={label} onclose={() => { showLightbox = false; }} />
   {/if}
 {:else}
-  <span data-testid={IDS.POST_IMAGE} data-proxied-path={path} class="proxied-placeholder" title={label}>{path}</span>
+  <span data-testid={IDS.POST_IMAGE} data-proxied-path={path} class="proxied-placeholder" title={label} data-alt={label}>{path}</span>
 {/if}
 
 <style>

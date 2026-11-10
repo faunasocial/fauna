@@ -1,13 +1,17 @@
-"""tier_1: the Store witness's give-back, with no Credential Manager call.
+"""tier_1: the Store witness's venue and give-back, with no Credential Manager or
+CIM call.
 
 A Store build names no credential namespace of its own, so its sign-in writes this
 Windows user's production rows, which ``helpers/windows_credman.py::sweep``
-refuses to walk. The give-back that takes its place (``give_back``, armed by
-``tests/artifact/test_windows_store_install.py::sign_in_venue``) deletes by exact
-target only the rows a snapshot taken before the run did not hold
-(``rows_gained``). These pin that set over ``CredentialRow`` values, the delete
-loop over a stand-in store, and the fence that keeps a give-back to whole
-namespaces.
+refuses to walk. Convention 12's Windows arm approves one venue for them, a
+virtual machine's own Windows user, and
+``tests/artifact/test_windows_store_install.py::sign_in_venue`` holds the run to
+it: it refuses a machine that does not report itself a virtual machine
+(``machine_is_virtual``), and its give-back (``give_back``) deletes by exact target
+only the rows a snapshot taken before the run did not hold (``rows_gained``).
+These pin the machine reading over the strings Windows reports, that set over
+``CredentialRow`` values, the delete loop over a stand-in store, and the fence
+that keeps a give-back to whole namespaces.
 """
 
 import sys
@@ -25,10 +29,34 @@ from helpers.windows_credman import (  # noqa: E402
     give_back,
     rows_gained,
 )
+from helpers.windows_store_install import machine_is_virtual  # noqa: E402
 
 pytestmark = [pytest.mark.tier_1, pytest.mark.windows]
 
 PREFIXES = ("fauna-windows/", "fauna-sync-agent/")
+
+
+@pytest.mark.parametrize("manufacturer, model", [
+    ("the virtualization host International GmbH.", "the virtualization host ARM Virtual Machine"),
+    ("Microsoft Corporation", "Virtual Machine"),
+    ("VMware, Inc.", "VMware20,1"),
+    ("QEMU", "Standard PC (Q35 + ICH9, 2009)"),
+    ("innotek GmbH", "VirtualBox"),
+])
+def test_a_virtual_machine_is_read_as_one(manufacturer, model):
+    assert machine_is_virtual(manufacturer, model)
+
+
+@pytest.mark.parametrize("manufacturer, model", [
+    ("Microsoft Corporation", "Surface Laptop, 7th Edition"),
+    ("Dell Inc.", "XPS 13 9345"),
+    ("LENOVO", "21N1"),
+    ("", ""),
+])
+def test_a_physical_or_unreadable_machine_is_not(manufacturer, model):
+    """A person's own PC, or a reading that says nothing, is refused: the check
+    fails closed."""
+    assert not machine_is_virtual(manufacturer, model)
 
 
 def _row(target: str, blob: bytes = b"x") -> CredentialRow:

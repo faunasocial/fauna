@@ -23,6 +23,9 @@ import SwiftUI
 /// (`docs/goal/ui/folders.md` § Element IDs).
 struct FolderWizardSheetView: View {
     let vm: DevicesMachineVM
+    /// Mirrors `ReviewSnapshot.declassifyArmed` for the alert binding — see
+    /// the `.declassifyConfirm` call in `content`.
+    @State private var declassifyShown = false
 
     var body: some View {
         // `snapshot.wizard` is the source of truth; nil during the dismiss
@@ -54,6 +57,23 @@ struct FolderWizardSheetView: View {
             navBar(wiz)
         }
         .frame(minWidth: 460, minHeight: 400)
+        // A Public wizard's Create armed the owner row's SAME declassify
+        // dialog (`DeclassifyConfirm`; Born public, ruling 2). The machine owns
+        // the arm (`ReviewSnapshot.declassifyArmed`); the local flag only
+        // mirrors it, because SwiftUI writes `false` back on every dismissal
+        // and the confirm must not read as a cancel. Confirm answers
+        // `confirmPublicCreate()` (creates the folder public and attests it);
+        // Cancel / Escape answers `cancelPublicCreate()` — nothing sent, the
+        // wizard stays on Review.
+        .declassifyConfirm(isPresented: $declassifyShown) {
+            await confirmPublicCreate()
+        } onCancel: {
+            vm.wizardMachine?.cancelPublicCreate()
+        }
+        .onAppear { declassifyShown = wiz.review.declassifyArmed }
+        .onChange(of: wiz.review.declassifyArmed) { _, armed in
+            declassifyShown = armed
+        }
     }
 
     // MARK: - Header
@@ -93,7 +113,53 @@ struct FolderWizardSheetView: View {
                 get: { snap.name },
                 set: { vm.wizardMachine?.setName(name: $0) }
             ))
+
+            // Who can see the new folder — a field of this step, never a step
+            // of its own (`ui/folders.md` § Audience and website serving →
+            // *Born public*, ruling 1). Absent on a seam that cannot attest a
+            // born-public create: a control that cannot work must not paint. A
+            // new folder is unbound, so the shared option set is exactly
+            // Private | Public. Nothing exists yet, so the select paints the
+            // user's choice — there is no current audience to snap back to.
+            if snap.audienceOffered {
+                audienceField(snap)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func audienceField(_ snap: NameSnapshot) -> some View {
+        let options = audienceOptions(bound: false, current: snap.audience)
+        Picker(L.devices.folderAudience, selection: Binding(
+            get: { snap.audience },
+            set: { vm.wizardMachine?.setAudience(audience: $0) }
+        )) {
+            ForEach(options, id: \.value) { option in
+                Text(renderLocalizedText(option.label)).tag(option.value)
+            }
+        }
+        .accessibilityIdentifier(Ids.wizardAudienceSelect)
+        // Drives the same `setAudience` the Picker does; value and options
+        // speak the wire string (the owner row's `folder-audience-select`
+        // shape). Live re-read of the snapshot. Env-gated no-op in production.
+        .automationSelect(
+            Ids.wizardAudienceSelect,
+            value: { vm.snapshot?.wizard?.name.audience ?? snap.audience },
+            options: {
+                audienceOptions(
+                    bound: false,
+                    current: vm.snapshot?.wizard?.name.audience ?? snap.audience
+                ).map(\.value)
+            },
+            set: { vm.wizardMachine?.setAudience(audience: $0) }
+        )
+
+        automationText(
+            Ids.wizardAudienceHint,
+            renderLocalizedText(audienceHint(bound: false, current: snap.audience))
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     // MARK: - Step 2: Enrollment + each seat's three place flags
@@ -269,6 +335,11 @@ struct FolderWizardSheetView: View {
             GroupBox(L.devices.wizard.review) {
                 VStack(alignment: .leading, spacing: 8) {
                     LabeledContent(L.common.name) { Text(snap.name) }
+                    // Who can see it — the Name step's choice, read-only like
+                    // the name (Born public, ruling 1).
+                    LabeledContent(L.devices.wizard.reviewAudience) {
+                        Text(renderLocalizedText(audienceLabel(value: snap.audience)))
+                    }
                     if !snap.enrolled.isEmpty {
                         LabeledContent(L.devices.enrolledDevices) { Text("\(snap.enrolled.count)") }
                     }
@@ -302,13 +373,18 @@ struct FolderWizardSheetView: View {
             case .review, .done:
                 Button(L.common.create) { Task { await create() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!wiz.review.createEnabled)
+                    // While the declassify confirm asks, Create stays painted
+                    // but dim: answering the dialog is the gesture that creates.
+                    .disabled(!wiz.review.createEnabled || wiz.review.declassifyArmed)
                     .accessibilityIdentifier(Ids.wizardCreateButton)
                     // Same async `create()` the Button runs; `isEnabled` live
                     // re-reads the machine's `createEnabled` (don't capture).
                     // Env-gated no-op in production.
                     .automationActivate(Ids.wizardCreateButton,
-                        isEnabled: { vm.snapshot?.wizard?.review.createEnabled ?? false }) {
+                        isEnabled: {
+                            guard let review = vm.snapshot?.wizard?.review else { return false }
+                            return review.createEnabled && !review.declassifyArmed
+                        }) {
                         Task { await create() }
                     }
             default:
@@ -330,9 +406,20 @@ struct FolderWizardSheetView: View {
 
     // MARK: - Helpers
 
+    /// Create. On a Public wizard not yet created this ARMS the declassify
+    /// confirm and sends nothing (the machine's `submit()` owns that rule);
+    /// the confirm's answer is `confirmPublicCreate()`.
     private func create() async {
         guard let machine = vm.wizardMachine else { return }
-        let step = await machine.submit()
+        await finish(machine.submit())
+    }
+
+    private func confirmPublicCreate() async {
+        guard let machine = vm.wizardMachine else { return }
+        await finish(machine.confirmPublicCreate())
+    }
+
+    private func finish(_ step: FolderWizardStep) async {
         if step == .done {
             vm.closeWizard()
             await vm.refresh()

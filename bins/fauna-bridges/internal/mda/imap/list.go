@@ -23,26 +23,6 @@ type listWriter interface {
 	WriteList(*imap.ListData) error
 }
 
-// canonicalMailboxAttr returns the RFC 6154 SPECIAL-USE attribute for
-// the standard mailboxes per `imap-server.md` § Standard mailboxes.
-// User-created mailboxes return ("", false). INBOX has no SPECIAL-USE
-// attribute (RFC 6154; INBOX is identified by name on the wire).
-func canonicalMailboxAttr(name string) (imap.MailboxAttr, bool) {
-	switch name {
-	case "Drafts":
-		return imap.MailboxAttrDrafts, true
-	case "Sent":
-		return imap.MailboxAttrSent, true
-	case "Trash":
-		return imap.MailboxAttrTrash, true
-	case "Junk":
-		return imap.MailboxAttrJunk, true
-	case "Archive":
-		return imap.MailboxAttrArchive, true
-	}
-	return "", false
-}
-
 // List implements imapserver.Session.List for the LIST, LSUB, and
 // LIST (SUBSCRIBED) commands. Translates one ListMailboxes RPC
 // (plus an optional second RPC for `RETURN (SUBSCRIBED)`), applies
@@ -59,9 +39,9 @@ func canonicalMailboxAttr(name string) (imap.MailboxAttr, bool) {
 //   - ReturnSubscribed (LIST RETURN (SUBSCRIBED)): plain LIST plus a
 //     second `subscribed_only=true` query builds a name set; each
 //     returned mailbox that's in the set gets the \Subscribed attr.
-//   - ReturnSpecialUse: the SPECIAL-USE attr lands on every standard
-//     mailbox unconditionally (Dovecot-compatible — clients that
-//     don't ask still benefit).
+//   - ReturnSpecialUse: the SPECIAL-USE attrs the nest sends on each
+//     MailboxEntry land unconditionally (Dovecot-compatible — clients
+//     that don't ask still benefit).
 func (s *Session) List(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
 	return s.list(&listWriterAdapter{w: w}, ref, patterns, options)
 }
@@ -125,9 +105,11 @@ func (s *Session) list(w listWriter, ref string, patterns []string, options *ima
 			continue
 		}
 
-		attrs := []imap.MailboxAttr{}
-		if attr, ok := canonicalMailboxAttr(m.Name); ok {
-			attrs = append(attrs, attr)
+		// SPECIAL-USE attrs come from the nest, the one owner of the
+		// standard-mailbox table (imap-server.md § Standard mailboxes).
+		attrs := make([]imap.MailboxAttr, 0, len(m.Attrs)+1)
+		for _, a := range m.Attrs {
+			attrs = append(attrs, imap.MailboxAttr(a))
 		}
 		if tagSubscribed {
 			if _, ok := subscribedSet[m.Name]; ok {

@@ -9,6 +9,13 @@ default = []
 # Exposes `test_support` (self-signed multi-SAN cert builder) to consumers'
 # test suites via a `[dev-dependencies]` re-declaration with this feature.
 test-helpers = []
+# The HTTP-01 client's dark default directory (`E2E_DARK_DIRECTORY_URL`): with
+# no override, an order goes to a closed loopback port, never the public CA.
+# Forwarded from `fauna-nest`'s `test-hooks` alone — never default, never on a
+# shipping build, and NOT folded into `test-helpers` (this crate's self
+# dev-dependency turns that on for every test build, which would leave the
+# production fallback's own test unrun).
+e2e-dark-ca = []
 
 [dependencies]
 anyhow.workspace = true

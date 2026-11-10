@@ -66,6 +66,10 @@ async function build(secretHex: string, s: Session): Promise<DevicesMachine> {
   machine.setMlsQuery({
     isJoinedSharedSet: (groupIdHex: string) =>
       conversationsManagerIfReady()?.foldersIsJoined(groupIdHex) ?? false,
+    // The forked-seat mark (federation-shared-folders.md § A forked seat is
+    // final): unready → false, the fail-safe reading.
+    isForkedSharedSet: (groupIdHex: string) =>
+      conversationsManagerIfReady()?.foldersIsForked(groupIdHex) ?? false,
     // The member-row declassification anchor: the channel's MLS-recorded
     // owner. Unready → none, and the member row seals.
     folderChannelOwner: (channelId: Uint8Array) =>
@@ -128,6 +132,18 @@ export async function sessionDevicesMachine(
     s.listeners.delete(onChanged);
     throw e;
   }
+}
+
+/**
+ * The name of the session's folder whose id is `id`, off the roster the
+ * session's machine already holds (`DevicesMachine::folder_name`) — the
+ * Settings pending-actions row's lookup, so an automatic prune names its folder
+ * (`ui/settings.md` § Pending actions). `null` before a Devices or Folders
+ * section has built the machine, or for a folder the roster cannot name: the
+ * row then paints the neutral sentence. No fetch of its own.
+ */
+export function sessionFolderName(id: string): string | null {
+  return session?.built?.folderName(id) ?? null;
 }
 
 /**

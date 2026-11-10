@@ -27,11 +27,10 @@ public class MediaFilterOptionsTests
         var entries = MediaFilterOptions.Build(
             new[] { Shared("photos", 7, "alice") }, Array.Empty<FollowedScopeOption>(), AllLabel);
 
+        // The label is the item's UIA Name (PickerOption), which the bridge's
+        // `options` attr answers and `folder_filter_labels()` reads on every app.
         var shared = Assert.Single(entries, e => e.Value == "local:7");
         Assert.Equal("photos (alice)", shared.Label);
-        // The bridge's `options` attr answers each item's UIA Name: the painted
-        // label, which is what `folder_filter_labels()` reads on every app.
-        Assert.Equal("photos (alice)", shared.AutomationName);
     }
 
     [Fact]
@@ -50,18 +49,19 @@ public class MediaFilterOptionsTests
     }
 
     [Fact]
-    public void The_all_media_sentinel_leads_and_reads_back_as_its_value()
+    public void The_all_media_sentinel_leads_painting_its_label_keyed_by_its_value()
     {
         var entries = MediaFilterOptions.Build(
             new[] { Own("photos", 3) }, Array.Empty<FollowedScopeOption>(), AllLabel);
 
+        // The sentinel is an option like any other: it paints its label and is
+        // keyed by its value, which `get_text("media-folder-filter")` reads back
+        // through the item's AutomationId — the cross-app contract reads the
+        // all-media default back as the sentinel
+        // (`test_select_refuses_unoffered_option.py`).
         var all = entries[0];
         Assert.Equal(MediaFilterOptions.AllValue, all.Value);
         Assert.Equal(AllLabel, all.Label);
-        // `get_text("media-folder-filter")` reads the selected item's UIA Name,
-        // and the cross-app contract reads the all-media default back as the
-        // sentinel (`test_select_refuses_unoffered_option.py`).
-        Assert.Equal(MediaFilterOptions.AllValue, all.AutomationName);
     }
 
     [Fact]
@@ -75,6 +75,5 @@ public class MediaFilterOptionsTests
         var last = entries[^1];
         Assert.Equal("followed:abc", last.Value);
         Assert.Equal("trip (bob)", last.Label);
-        Assert.Equal("trip (bob)", last.AutomationName);
     }
 }

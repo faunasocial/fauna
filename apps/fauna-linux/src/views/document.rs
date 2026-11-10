@@ -75,7 +75,7 @@ pub fn render_to_widget(
         split: &split,
     };
     for block in &doc.blocks {
-        render_block_into(&container, block, "", &[], &walk);
+        render_block_into(&container, block, "", &[], 0, &walk);
     }
     if split.get() {
         crate::testid::set_test_text(&container, &doc.to_plaintext());
@@ -92,20 +92,32 @@ struct Walk<'a> {
     split: &'a Cell<bool>,
 }
 
+/// The laid-out left inset of one list nesting level, in pixels. A nested item sits one
+/// more step right than its parent (render-model.md § D7), so the inset is the item's
+/// DEPTH times this — a single CSS class could only ever paint one level, flattening every
+/// deeper list onto its parent's column.
+const LIST_INDENT_PX: i32 = 16;
+
 /// Render one [`RenderBlock`] into `container`. `prefix` is literal text prepended to the
-/// block's label (a list bullet/number — only set by the `List` arm); `classes` are CSS
-/// classes carried by the block's label(s) (e.g. `md-blockquote`, `md-list-indent`).
+/// block's label (a list bullet/number/box — only set by the list arms); `classes` are CSS
+/// classes carried by the block's label(s) (e.g. `md-blockquote`); `depth` is the list
+/// nesting the block sits at, painted as a left inset of `depth` × [`LIST_INDENT_PX`].
 fn render_block_into(
     container: &gtk::Box,
     block: &RenderBlock,
     prefix: &str,
     classes: &[&str],
+    depth: i32,
     walk: &Walk<'_>,
 ) {
+    let indented = |w: gtk::Widget| {
+        w.set_margin_start(LIST_INDENT_PX * depth);
+        w
+    };
     let split = walk.split;
     match block {
         RenderBlock::Paragraph { inlines } => {
-            container.append(&inline_block(prefix, inlines, classes, split));
+            container.append(&indented(inline_block(prefix, inlines, classes, split)));
         }
         RenderBlock::Heading { level, inlines } => {
             let class = match level {
@@ -113,7 +125,7 @@ fn render_block_into(
                 2 => "md-heading2",
                 _ => "md-heading3",
             };
-            container.append(&inline_block(prefix, inlines, &[class], split));
+            container.append(&indented(inline_block(prefix, inlines, &[class], split)));
         }
         // Code-block text is literal: escape it so no markup is interpreted; monospace +
         // background come from the CSS class.
@@ -123,18 +135,18 @@ fn render_block_into(
                 .iter()
                 .map(|run| glib::markup_escape_text(run).to_string())
                 .collect();
-            container.append(&text_block(markups, &["md-code-block"], split));
+            container.append(&indented(text_block(markups, &["md-code-block"], split)));
         }
         RenderBlock::BlockQuote { blocks } => {
             for b in blocks {
-                render_block_into(container, b, "", &["md-blockquote"], walk);
+                render_block_into(container, b, "", &["md-blockquote"], depth, walk);
             }
         }
         RenderBlock::ListBlock { ordered, items } => {
             for (i, item) in items.iter().enumerate() {
                 // The shared model carries no item numbers — an ordered list renumbers
                 // from 1. Each item is a sub-document; the bullet/number prefixes its first
-                // block, and every block is indented.
+                // block, and every block sits one nesting level deeper than the list.
                 let item_prefix = if *ordered {
                     format!("{}.\u{00a0}", i + 1)
                 } else {
@@ -142,7 +154,7 @@ fn render_block_into(
                 };
                 for (j, b) in item.blocks.iter().enumerate() {
                     let p = if j == 0 { item_prefix.as_str() } else { "" };
-                    render_block_into(container, b, p, &["md-list-indent"], walk);
+                    render_block_into(container, b, p, classes, depth + 1, walk);
                 }
             }
         }
@@ -158,7 +170,7 @@ fn render_block_into(
                 };
                 for (j, b) in item.blocks.iter().enumerate() {
                     let p = if j == 0 { item_prefix } else { "" };
-                    render_block_into(container, b, p, &["md-list-indent"], walk);
+                    render_block_into(container, b, p, classes, depth + 1, walk);
                 }
             }
         }
@@ -605,6 +617,10 @@ pub(crate) fn build_link_preview_card(
 /// filename and size, never a bare icon (`conversations.md` § Attachments → *Retention*).
 /// The file button carries the same name and size. `dm-attachment-image` answers
 /// `get_attr(.., "state")` with `painted` (the picture's paintable) or `placeholder`.
+/// A painted picture is wrapped in a flat button, the feed `post-image`'s shape, so
+/// AT-SPI enumerates it and a click opens `image-lightbox` over the conversation from
+/// the texture already decoded; the placeholder is the same flat button, opening the
+/// lightbox as its declared text (`conversations.md` § User actions).
 fn build_attachment(
     blob_hash: &str,
     filename: &str,
@@ -623,16 +639,42 @@ fn build_attachment(
             picture.set_paintable(Some(&texture));
             picture.set_can_shrink(true);
             picture.set_size_request(-1, 200);
-            picture.set_halign(gtk::Align::Start);
-            picture.set_tooltip_text(Some(&declared));
-            crate::testid::set_test_id(&picture, ids::DM_ATTACHMENT_IMAGE);
-            return picture.upcast();
+            let button = gtk::Button::new();
+            button.add_css_class("flat");
+            button.set_halign(gtk::Align::Start);
+            button.set_tooltip_text(Some(&declared));
+            button.set_child(Some(&picture));
+            crate::testid::set_test_id(&button, ids::DM_ATTACHMENT_IMAGE);
+            button.connect_clicked(move |b| {
+                let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+                crate::views::lightbox::show_image_lightbox_paintable(
+                    parent.as_ref(),
+                    &texture,
+                    crate::i18n::strings::c2pa::IMAGE_VIEWER,
+                );
+            });
+            return button.upcast();
         }
-        let placeholder = gtk::Label::new(Some(&declared));
-        placeholder.set_halign(gtk::Align::Start);
-        placeholder.add_css_class("dim-label");
+        // The placeholder keeps the painted picture's shape — a flat button under the
+        // same id — so a click opens `image-lightbox` in its placeholder form, never a
+        // dropped click (`conversations.md` § User actions, the `dm-attachment-image[i]`
+        // row). The marker class answers `state` before any picture probe.
+        let label = gtk::Label::new(Some(&declared));
+        label.add_css_class("dim-label");
+        let placeholder = gtk::Button::new();
+        placeholder.add_css_class("flat");
         placeholder.add_css_class("test-attr-state-placeholder");
+        placeholder.set_halign(gtk::Align::Start);
+        placeholder.set_child(Some(&label));
         crate::testid::set_test_id(&placeholder, ids::DM_ATTACHMENT_IMAGE);
+        placeholder.connect_clicked(move |b| {
+            let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            crate::views::lightbox::show_image_lightbox_placeholder(
+                parent.as_ref(),
+                &declared,
+                crate::i18n::strings::c2pa::IMAGE_VIEWER,
+            );
+        });
         placeholder.upcast()
     } else {
         let btn = gtk::Button::with_label(&declared);

@@ -403,6 +403,13 @@ pub struct AppState {
     /// data dir is unavailable, or an admin revoked the holder's enrollment —
     /// paywalled serving then darkens to teasers; ungated serving is unaffected.
     pub web_serve_holder: Option<Arc<crate::web_content::holder::WebServeHolder>>,
+    /// The nest's in-process materializer — the holder of materialization
+    /// grants and the worker keeping each granted actor's readable mail index
+    /// (`encryption-at-rest.md` § Capability tiering → *The materialization
+    /// grant*). `None` when the data dir is unavailable, init failed, or an
+    /// admin revoked the holder's enrollment: no view is kept, and the mint
+    /// door refuses every `materialize` tuple.
+    pub materializer: Option<Arc<crate::materializer::Materializer>>,
     /// Web push notification service (None if no VAPID key is configured).
     pub push_service: Option<Arc<crate::push::PushService>>,
     pub services_json_path: std::path::PathBuf,
@@ -795,6 +802,27 @@ pub struct AppState {
     #[cfg(feature = "test-hooks")]
     pub custody_hosting_meter_fault: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
+    /// Test-only tally of the custodied-fleet handshake on this nest: every
+    /// request that reached it ("asked") and every one that minted a session
+    /// ("admitted"). Lets a journey assert that an owner device asked this
+    /// custodian nest only while its own nest was down, and never once the
+    /// grant was revoked (ruling 6 of the custodian-NEST serve door,
+    /// `account-data-plane.md` § Implementation status today), whichever
+    /// process on the device dialed (convention 14: state, never a log line).
+    /// Read by `GET /api/v1/test/custody_hosting/handshakes`. Never compiled
+    /// into production.
+    #[cfg(feature = "test-hooks")]
+    pub custodied_fleet_handshakes:
+        std::sync::Arc<crate::custody_hosting_test_hook::HandshakeTally>,
+
+    /// Test-only one-shot tear of the next segment-axis materialize at one of
+    /// its two named interruption points, leaving the real half-state an
+    /// interrupted re-seed leaves. Driven by `POST
+    /// /api/v1/test/backup/materialize_tear`. Never compiled into production;
+    /// see [`crate::materialize_tear_test_hook`].
+    #[cfg(feature = "test-hooks")]
+    pub materialize_tear: std::sync::Arc<crate::materialize_tear_test_hook::MaterializeTear>,
+
     /// MTA-STS policy fetcher for `fauna.bridges.fetch_mta_sts_policy`
     /// (T2.1a). nest owns the `_mta-sts.<domain>` TXT + `.well-known/
     /// mta-sts.txt` GET and the per-`max_age` cache so the Go MTA bridge
@@ -845,6 +873,13 @@ pub struct AppState {
     /// Production installs `LiveMxRrsetResolver`; `for_test` installs
     /// `NullMxRrsetResolver` (no hosts, not secure).
     pub mx_resolver: std::sync::Arc<dyn fauna_mail::outbound::mx::MxRrsetResolver>,
+
+    /// The resolver path's DNSSEC posture, shared by the live MX and TLSA
+    /// resolvers and re-probed by the deliverability diagnostics' "DNSSEC
+    /// resolver path" row (`smtp-server.md` § MX resolution item 1, the
+    /// resolver-path paragraph; `mail-deliverability.md` § Symptom
+    /// diagnostics → *Checks*). `for_test` installs a fixed incapable path.
+    pub dnssec_path: std::sync::Arc<fauna_mail::outbound::dnssec_path::DnssecPath>,
 
     /// Test-only scripted TLSA lookups, keyed by MX host. Consulted by
     /// `fetch_tlsa_handler` *before* `tlsa_resolver` so a tier_3 e2e can
@@ -936,6 +971,17 @@ pub struct AppState {
     #[cfg(feature = "test-hooks")]
     pub capabilities_withheld: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 
+    /// The nest id `fauna.nest.info` CLAIMS in place of this nest's own — the
+    /// running nest standing in for a backup destination whose claim and proof
+    /// disagree (`backup-destinations.md` § Create / edit / remove protocol →
+    /// Create step 1). Substituted at the claim only
+    /// (`discovery_core::nest_info_core`); the handshake keeps proving the
+    /// real key. Driven by `POST /api/v1/test/nest-info-claim`
+    /// (`nest_id_claim_test_hook`). Never compiled into production; gated on
+    /// `test-hooks` alone.
+    #[cfg(feature = "test-hooks")]
+    pub nest_id_claim_override: std::sync::Arc<std::sync::Mutex<Option<[u8; 32]>>>,
+
     /// `(bridge_role, bridge_id)` pairs whose `fauna.bridges.fetch_tls_cert_blob`
     /// answers "no blob" — a real bridge booted into the cert-less state its
     /// refresh loop heals from (`mail-bridge-lifecycle.md` § Implementation
@@ -947,6 +993,20 @@ pub struct AppState {
     #[cfg(feature = "test-hooks")]
     pub tls_cert_fetch_withheld:
         std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+
+    /// What `fauna.setup.status` reports as `registration_mode` in place of the
+    /// live posture — an unknown wire string or no field — so a test drives an
+    /// app's read-only branch for a mode it cannot name (`public-mode.md`
+    /// § Registration Modes). Read only where the heartbeat builds that field;
+    /// the live posture and the stored policy are untouched. Driven by
+    /// `POST /api/v1/test/registration-mode/report` and its `clear` twin
+    /// (`registration_mode_report_test_hook`). Never compiled into production.
+    #[cfg(feature = "test-hooks")]
+    pub registration_mode_report_override: std::sync::Arc<
+        std::sync::Mutex<
+            Option<crate::registration_mode_report_test_hook::ReportedRegistrationMode>,
+        >,
+    >,
 
     /// Per-channel refusal of one class of `fauna.conversations.channel.send`
     /// envelope — the seam that lets a tier_3 journey stage a succession sweep
@@ -1166,6 +1226,55 @@ impl AppState {
             .await;
         self.close_actor_sockets(actor_id);
         self.bridge_push_registry.remove_mda(actor_id);
+        self.end_bridge_held_sessions(actor_id).await;
+    }
+
+    /// The **bridge-held half** of an actor-wide revocation: the sessions a
+    /// bridge holds for the user, which no WS-RPC socket of the actor carries
+    /// (`transport-connection.md` § *Revocation teardown*, the bridge-held
+    /// sessions paragraph).
+    ///
+    /// * **Mail, calendar, contacts and files** — the MDA's IMAP, CalDAV,
+    ///   CardDAV and WebDAV sessions live on the bridge's own connection, so
+    ///   `close_actor_sockets` never reaches them. Every serving call they make
+    ///   asks whether the account stands
+    ///   ([`crate::bridge_routing_handlers::ensure_target_stands`]), so they read
+    ///   nothing from the next command on; this purges the actor's
+    ///   mailbox-state push subscriptions, because a Push is not an RPC and an
+    ///   IDLE or NOTIFY session would otherwise go on receiving UIDs and flags
+    ///   ([`crate::bridge_push_registry::BridgePushRegistry::remove_served_user`],
+    ///   the mail-off teardown's own call); and every approved MDA bridge is
+    ///   pushed `fauna.bridges.account_revoked`, on which it ends the actor's
+    ///   IMAP sessions at once — an IDLE one with a `BYE` — rather than at
+    ///   their next command
+    ///   ([`crate::bridge_routing_handlers::notify_mda_bridges_account_revoked`]).
+    /// * **ATProto apps** — every live session of the account is revoked, and the
+    ///   PDS bridges are nudged: refresh and writes are refused at once, and an
+    ///   access token already issued lapses within its own lifetime, the
+    ///   revocation bound `atproto-pds-bridge.md` states for every session
+    ///   revoke. The account opens no new one while it does not stand.
+    ///
+    /// Idempotent, and a no-op for an actor with neither (every bridge and
+    /// most users). Called by [`Self::revoke_actor_authority`], its sparing
+    /// twin, and every site that performs the halves inline (the pre-identity
+    /// lockout, suspend, the eviction ladder's suspension).
+    pub async fn end_bridge_held_sessions(&self, actor_id: &[u8; 32]) {
+        self.bridge_push_registry.remove_served_user(actor_id);
+        crate::bridge_routing_handlers::notify_mda_bridges_account_revoked(self, actor_id).await;
+        match self.db.revoke_all_atproto_sessions(actor_id).await {
+            Ok(0) => {}
+            Ok(_) => {
+                crate::bridge_atproto_handlers::notify_atproto_sessions_changed(
+                    self, actor_id, None,
+                )
+                .await;
+            }
+            Err(e) => tracing::warn!(
+                actor = %hex::encode(actor_id),
+                error = %format!("{e:#}"),
+                "revocation teardown: could not revoke the actor's ATProto sessions"
+            ),
+        }
     }
 
     /// The **socket half** of an actor-wide revocation: every WS-RPC
@@ -1225,6 +1334,7 @@ impl AppState {
             crate::dispatch_core::current_caller().map(|c| (c.conn_id, c.correlation_id)),
         );
         self.bridge_push_registry.remove_mda(actor_id);
+        self.end_bridge_held_sessions(actor_id).await;
     }
 
     /// Revoke **one session's** live authority: drop that bearer's row and
@@ -1484,6 +1594,26 @@ impl AppState {
             }
         }
         crate::db::now_epoch_secs()
+    }
+
+    /// [`Self::outbound_now`] in epoch MILLISECONDS — the same clock, at the
+    /// precision of the millisecond stamps it is compared with (a mail
+    /// domain's `added_at`, a DKIM selector's activation and publication
+    /// stamps). The real clock is read at full precision, never the seconds
+    /// figure times 1000, which would read a stamp written earlier in the same
+    /// second as lying in the future. Under `test-hooks` a set override is its
+    /// second times 1000.
+    pub fn outbound_now_ms(&self) -> i64 {
+        #[cfg(feature = "test-hooks")]
+        {
+            let v = self
+                .outbound_clock_override
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if v != 0 {
+                return v.saturating_mul(1000);
+            }
+        }
+        crate::db::now_epoch_millis()
     }
 
     /// Wall-clock seconds for the inbound greylist (`check_greylist`). Real
@@ -5636,6 +5766,30 @@ mod loopback_gate_tests {
         // treated as non-loopback ⇒ refused.
         let state = anon_state().await;
         let (conn, mut rx) = state.ws.subscribe_anonymous(None, None);
+
+        dispatch_request(
+            Arc::clone(&state),
+            Arc::clone(&conn),
+            enroll_request_frame(),
+        )
+        .await;
+
+        let err = recv_error(&mut rx).await;
+        assert_eq!(err.code, "fauna.bridges.remote_enrollment_unsupported");
+    }
+
+    /// A loopback TCP peer whose PROXY-v2 header the nest refused to honour
+    /// resolves to `UNTRUSTED_PROXIED_SOURCE` (`lib.rs`
+    /// `read_optional_proxy_header`, *A refused header forfeits loopback
+    /// trust*) — non-loopback by construction, so this gate refuses it like
+    /// any remote source: a forging helper, or a router carrying a secret
+    /// this nest does not hold, never reaches loopback-only enrollment.
+    #[tokio::test]
+    async fn request_enrollment_refused_from_an_untrusted_proxied_source() {
+        let state = anon_state().await;
+        let (conn, mut rx) = state
+            .ws
+            .subscribe_anonymous(Some(crate::UNTRUSTED_PROXIED_SOURCE), None);
 
         dispatch_request(
             Arc::clone(&state),

@@ -87,6 +87,12 @@ impl PendingActionSummary {
         describe_pending_action(&self.action_type, self.target.as_deref())
     }
 
+    /// [`Self::description`] naming the folder an automatic prune targets
+    /// through `folder_name` — see [`describe_pending_action_naming`].
+    pub fn description_naming(&self, folder_name: impl Fn(&str) -> Option<String>) -> String {
+        describe_pending_action_naming(&self.action_type, self.target.as_deref(), folder_name)
+    }
+
     /// Still open to cancel — `status == "pending"`. The one predicate every
     /// app lists by (an `executing` / `executed` / `cancelled` / `expired` row
     /// has no cancel window left).
@@ -118,9 +124,53 @@ impl PendingActionsListReply {
 /// and by the admin console's pending-admin-actions section for every admin
 /// `ActionType` — the same sentence the target reads on their own list
 /// ("Delete the account …"), so a row means one thing wherever it is shown.
+///
+/// An automatic retention prune (`version.bulk_prune`, `snapshot.bulk_prune`)
+/// targets a folder by its id, which is no name a user knows: this form paints
+/// the neutral sentence, and [`describe_pending_action_naming`] names the
+/// folder where the app holds its name.
 pub fn describe_pending_action(action_type: &str, target: Option<&str>) -> String {
+    describe_pending_action_naming(action_type, target, |_| None)
+}
+
+/// [`describe_pending_action_naming`] for a caller that has already resolved
+/// the one folder name (or none) — the wasm and UniFFI faces' shared form, so
+/// an app over a foreign-language boundary passes the summary plus the name its
+/// folder roster gave (`DevicesMachine::folder_name`), never a resolver of its
+/// own. `None` paints the neutral sentence.
+pub fn describe_pending_action_with_folder(
+    action_type: &str,
+    target: Option<&str>,
+    folder_name: Option<&str>,
+) -> String {
+    describe_pending_action_naming(action_type, target, |_| folder_name.map(str::to_owned))
+}
+
+/// [`describe_pending_action`], with `folder_name` resolving the folder id an
+/// automatic prune targets to the name the app already holds (its folder
+/// roster, unsealed). `None` — no roster yet, a folder this device cannot
+/// name — paints the neutral sentence with no id: the id is never shown
+/// (`ui/settings.md` § Pending actions, "what will happen, as one sentence").
+pub fn describe_pending_action_naming(
+    action_type: &str,
+    target: Option<&str>,
+    folder_name: impl Fn(&str) -> Option<String>,
+) -> String {
     use fauna_i18n::strings::settings::pending_actions as pa;
+    let named = |target: Option<&str>| {
+        target
+            .and_then(&folder_name)
+            .filter(|name| !name.trim().is_empty())
+    };
     match (action_type, target) {
+        ("version.bulk_prune", folder) => match named(folder) {
+            Some(name) => pa::prune_versions_in(&name),
+            None => pa::PRUNE_VERSIONS.to_string(),
+        },
+        ("snapshot.bulk_prune", folder) => match named(folder) {
+            Some(name) => pa::prune_snapshots_of(&name),
+            None => pa::PRUNE_SNAPSHOTS.to_string(),
+        },
         ("handle.change", Some(handle)) => pa::change_handle_to(handle),
         ("account.delete", _) => pa::DELETE_ACCOUNT.to_string(),
         ("snapshot.delete", Some(snapshot)) => pa::delete_snapshot(snapshot),
@@ -313,6 +363,76 @@ mod tests {
         assert_eq!(
             describe_pending_action("mailbox.purge", None),
             "mailbox.purge"
+        );
+    }
+
+    /// The automatic prunes name the folder where the app holds its name and
+    /// otherwise read the neutral sentence — never the wire kind, never the
+    /// folder id (`ui/settings.md` § Pending actions).
+    #[test]
+    fn describe_pending_action_names_the_folder_of_an_automatic_prune_never_its_id() {
+        use fauna_i18n::strings::settings::pending_actions as pa;
+        let id = "4711";
+        let roster = |wanted: &str| (wanted == id).then(|| "Photos".to_string());
+        for (kind, named, neutral) in [
+            (
+                "version.bulk_prune",
+                pa::prune_versions_in("Photos"),
+                pa::PRUNE_VERSIONS.to_string(),
+            ),
+            (
+                "snapshot.bulk_prune",
+                pa::prune_snapshots_of("Photos"),
+                pa::PRUNE_SNAPSHOTS.to_string(),
+            ),
+        ] {
+            let with_name = describe_pending_action_naming(kind, Some(id), roster);
+            assert_eq!(with_name, named);
+            assert!(with_name.contains("Photos"));
+            let without = [
+                describe_pending_action(kind, Some(id)),
+                describe_pending_action_naming(kind, Some("9999"), roster),
+                describe_pending_action_naming(kind, Some(id), |_| Some("  ".to_string())),
+                describe_pending_action(kind, None),
+            ];
+            for text in std::iter::once(&with_name).chain(without.iter()) {
+                assert!(
+                    !text.contains(id),
+                    "{kind}: the folder id leaked into {text:?}"
+                );
+                assert!(
+                    !text.contains(kind),
+                    "{kind}: the wire kind leaked into {text:?}"
+                );
+                assert!(!text.contains("bulk_prune"), "{text:?}");
+            }
+            for text in &without {
+                assert_eq!(text, &neutral);
+            }
+        }
+    }
+
+    /// The one-name form the wasm and UniFFI faces share paints exactly what
+    /// the resolver form does: the named sentence for a name, the neutral one
+    /// for none or a blank, and a non-prune kind untouched by any name.
+    #[test]
+    fn describe_pending_action_with_folder_matches_the_resolver_form() {
+        use fauna_i18n::strings::settings::pending_actions as pa;
+        assert_eq!(
+            describe_pending_action_with_folder("version.bulk_prune", Some("4711"), Some("Photos")),
+            pa::prune_versions_in("Photos")
+        );
+        assert_eq!(
+            describe_pending_action_with_folder("snapshot.bulk_prune", Some("4711"), None),
+            pa::PRUNE_SNAPSHOTS.to_string()
+        );
+        assert_eq!(
+            describe_pending_action_with_folder("version.bulk_prune", Some("4711"), Some(" ")),
+            pa::PRUNE_VERSIONS.to_string()
+        );
+        assert_eq!(
+            describe_pending_action_with_folder("handle.change", Some("bob"), Some("Photos")),
+            describe_pending_action("handle.change", Some("bob"))
         );
     }
 

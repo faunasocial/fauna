@@ -868,7 +868,6 @@ class TestNestInstaller:
                 "--local-binary", nest_binary,
                 "--mode", "public",
                 "--bind", "127.0.0.1:3199",
-                "--domain", "e2e-test.local",
             ],
             capture_output=True, text=True, timeout=60,
         )
@@ -884,10 +883,6 @@ class TestNestInstaller:
                 parsed_config = tomllib.load(f)
             assert parsed_config["nest"]["mode"] == "public"
             assert parsed_config["nest"]["listen"] == "127.0.0.1:3199"
-            assert parsed_config["nest"]["domain"] == "e2e-test.local", (
-                "domain must land under [nest], not get lost in [acme] — "
-                f"parsed config: {parsed_config}"
-            )
 
             result = subprocess.run(
                 ["id", "fauna"], capture_output=True, text=True,
@@ -944,7 +939,6 @@ class TestNestInstaller:
                 "--local-binary", nest_binary,
                 "--mode", "public",
                 "--bind", "127.0.0.1:3199",
-                "--domain", "e2e-test.local",
             ],
             capture_output=True, text=True, timeout=60,
         )

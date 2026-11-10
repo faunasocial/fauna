@@ -15,12 +15,33 @@ pub fn show_image_lightbox_paintable(
     paintable: &impl IsA<gtk::gdk::Paintable>,
     title: &str,
 ) {
-    show_lightbox_with(parent, title, &gtk::Picture::for_paintable(paintable));
+    let picture = gtk::Picture::for_paintable(paintable);
+    picture.set_can_shrink(true);
+    picture.set_content_fit(gtk::ContentFit::Contain);
+    picture.set_hexpand(true);
+    picture.set_vexpand(true);
+    show_lightbox_with(parent, title, &picture);
 }
 
-/// The shared modal-window body both entry points fill with their own
-/// `gtk::Picture`.
-fn show_lightbox_with(parent: Option<&gtk::Window>, title: &str, picture: &gtk::Picture) {
+/// Show the lightbox for a picture whose bytes this device does not hold: the
+/// same window, its body the picture's DECLARED text (`{filename} ({size})`) in
+/// place of the paint — tui's and windows' placeholder form, so a click on the
+/// placeholder is never dropped (`conversations.md` § User actions, the
+/// `dm-attachment-image[i]` row).
+pub fn show_image_lightbox_placeholder(parent: Option<&gtk::Window>, declared: &str, title: &str) {
+    let label = gtk::Label::new(Some(declared));
+    label.add_css_class("dim-label");
+    label.set_wrap(true);
+    label.set_hexpand(true);
+    label.set_vexpand(true);
+    label.set_halign(gtk::Align::Center);
+    label.set_valign(gtk::Align::Center);
+    show_lightbox_with(parent, title, &label);
+}
+
+/// The shared modal-window body every entry point fills with its own content —
+/// the decoded picture, or the placeholder's declared text.
+fn show_lightbox_with(parent: Option<&gtk::Window>, title: &str, content: &impl IsA<gtk::Widget>) {
     let window = adw::Window::builder()
         .title(title)
         .modal(true)
@@ -43,12 +64,20 @@ fn show_lightbox_with(parent: Option<&gtk::Window>, title: &str, picture: &gtk::
     let header = adw::HeaderBar::new();
     outer.append(&header);
 
-    picture.set_can_shrink(true);
-    picture.set_content_fit(gtk::ContentFit::Contain);
-    picture.set_hexpand(true);
-    picture.set_vexpand(true);
-
-    outer.append(picture);
+    outer.append(content);
     window.set_content(Some(&outer));
+
+    // Escape closes the lightbox — the keyboard's way out on every app (web's
+    // `Lightbox.svelte`, tui's `lightbox.rs`); ui.yaml declares no dismiss element.
+    let w = window.clone();
+    let escape = gtk::ShortcutController::new();
+    escape.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("Escape"),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            w.close();
+            gtk::glib::Propagation::Stop
+        })),
+    ));
+    window.add_controller(escape);
     window.present();
 }

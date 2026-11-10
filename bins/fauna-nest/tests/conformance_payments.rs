@@ -140,7 +140,7 @@ async fn claims_redeem(
 ) -> Result<ClaimRedeemReply, RpcError> {
     let req = encode_canonical(&ClaimRedeemRequest {
         code: code.into(),
-        extra: Default::default(),
+        ..Default::default()
     })
     .unwrap();
     let reply = common::call_raw(
@@ -441,15 +441,26 @@ async fn expired_window_unentitles_without_revocation_list() {
     );
 
     // A renewal payment re-entitles the same row — self-healing, no list.
+    // Inside the lapse grace the standing row is re-stamped in place, with no
+    // request for the author's client (`monetization.md` § Pillar 3 → *Expiry
+    // & revocation*).
     let until = future_secs();
     let queued = grant(&state, &author, &buyer, "gold", Some(until))
         .await
         .expect("renewal ok");
     assert!(
-        queued,
-        "a lapsed subscriber's renewal queues like a new grant"
+        !queued,
+        "a lapsed subscriber's renewal inside the grace re-stamps in place"
     );
-    author_client_approves(&router, &state, &author_kp, buyer).await;
+    assert!(
+        state
+            .db
+            .list_subscribe_requests(&author)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a renewal leaves no request row"
+    );
     assert!(
         state
             .db
@@ -494,6 +505,56 @@ async fn refund_voids_the_window() {
             .await
             .unwrap(),
         "refund voids the paid window immediately"
+    );
+
+    // The money went back, so the leave's removal is queued, and the author's
+    // drain commits it like every leave: the buyer leaves the roster and the
+    // tier's key rotates away from them (`monetization.md` § Pillar 3 →
+    // *Expiry & revocation*).
+    let before = state
+        .db
+        .get_current_key_blob(&author, "gold")
+        .await
+        .unwrap()
+        .expect("the tier's blob")
+        .0;
+    let version = common::drain_commits_removal(
+        &router,
+        state.clone(),
+        &author_kp,
+        buyer,
+        "gold",
+        &[],
+        &[0x5b; 32],
+        1_000_000_000,
+    )
+    .await
+    .expect("the author's drain commits the queued removal");
+    assert!(version > before as u64, "the key version is bumped");
+    assert!(
+        state
+            .db
+            .list_subscribers(&author, "gold")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the refunded buyer is off the roster"
+    );
+    assert!(
+        state
+            .db
+            .list_subscribe_requests(&author)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the drain cleared the removal's queue row"
+    );
+    assert!(
+        !state
+            .db
+            .is_subscriber(&author, &buyer, "gold")
+            .await
+            .unwrap()
     );
 }
 
@@ -653,7 +714,7 @@ async fn approve_stamps_the_payment_window() {
 
     state
         .db
-        .upsert_payment_entitled_request(&author, &buyer, "gold", Some(until))
+        .upsert_payment_entitled_request(&author, &buyer, "gold", Some(until), None)
         .await
         .unwrap();
     author_client_approves(&router, &state, &author_kp, buyer).await;

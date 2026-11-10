@@ -37,10 +37,12 @@ from actions.api_actor import ApiActor
 from actions.archive_import import ArchiveImportActions
 from actions.backups import BackupsActions
 from actions.contacts import ContactsActions
+from actions.feed import FeedActions
 from common.auth import create_actor_and_register
 from helpers import budgets
 from helpers.e2e_session import login_as
 from helpers.waiting import wait_until
+from i18n.strings import S
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fakes"))
 import fake_instagram_archive as instagram  # noqa: E402
@@ -140,6 +142,26 @@ def _login(request, app, nest, user, handle: str) -> None:
         app, nest, user, handle=handle, device_id="test-device-archive",
         request=request, spa_url_fixture="archive_spa_url",
     )
+
+
+def _like_count_after_a_reload(app, feed: FeedActions, post_id: str, expected: int) -> str:
+    """Failure-path only (e2e rules 5 and 6): the like count after the feed's
+    next natural reload — leave the feed and come back, the repost's anchor.
+
+    It splits a like that never moved the nest's counter (still short after
+    the reload) from one the nest counted but the loaded window lost (the
+    reload brings it in)."""
+    try:
+        ArchiveImportActions(app.driver).navigate()
+        feed.return_to_feed_page()
+        got = feed.wait_for_interaction_count_by_id(post_id, "like", expected, timeout=budgets.RPC_ROUNDTRIP_S)
+        row = feed.post_state_by_id(post_id) or {}
+        return (
+            f"after a reload the row reads like_count={got!r} viewer_liked={row.get('viewer_liked')!r} "
+            f"({'the nest counted it: the window lost the fold' if got == expected else 'the nest never counted it'})"
+        )
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        return f"the reload re-read failed: {type(e).__name__}: {e}"
 
 
 def _cards_with_badge(driver, tier: str) -> list[int]:
@@ -643,6 +665,89 @@ def test_an_import_started_on_one_device_is_finished_from_another(app, request, 
 
 
 @pytest.mark.feature("import-your-social-archive")
+@pytest.mark.requires_surface("archive-import-resume-handback")
+def test_a_resume_refuses_an_archive_that_is_not_the_one_the_import_started_from(
+    app, request, archive_nest, tmp_path,
+):
+    """§ Storage — the archive folder: a resume whose folder cannot serve the
+    archive asks for it back, and the handed-back file must be the export the
+    import started from — checked against the marker's length and BLAKE3 — or
+    the folder's model files and the zip's media would come from two exports.
+
+    Device A stops in the crash window a causal anchor arms before Start
+    (convention 14): the marker has learned the zip's length and hash, the raw
+    copy is not written. Device B, a fresh seat of the same account, finds the
+    import, is asked for the archive on Resume, is refused a different export
+    on the page's error element, and resumes once handed the right one."""
+    owner = _fresh_actor(archive_nest)
+    handle = _unique("e2e-archive-handback")
+    _login(request, app, archive_nest, owner, handle=handle)
+    right = FakeFacebookArchive(tag=" " + _unique("#handback")).write(tmp_path / "facebook.zip")
+    (tmp_path / "other").mkdir()
+    wrong = FakeFacebookArchive(tag=" " + _unique("#other")).write(tmp_path / "other" / "facebook.zip")
+
+    wizard = ArchiveImportActions(app.driver)
+    _walk_to_confirm(wizard, right)
+    wizard.arm_stop_before_raw_copy()
+    wizard.start()
+    wait_until(
+        lambda: wizard.error_text() or None,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the run never stopped before the raw copy; progress {wizard.progress_summary()!r}",
+    )
+
+    seat_b, driver_b = _another_device(request, archive_nest)
+    try:
+        _serve_from_the_archive_nest(request, driver_b, restore_at_teardown=False)
+        login_as(
+            seat_b, archive_nest, owner, handle=handle, device_id="test-device-archive-handback",
+            request=request, spa_url_fixture="archive_spa_url",
+        )
+        wizard_b = ArchiveImportActions(driver_b)
+        wizard_b.navigate()
+        wait_until(
+            lambda: (s := wizard_b.progress_summary()).startswith("Paused") and s or None,
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"device B never found the stopped import; progress "
+            f"{wizard_b.progress_summary()!r}, error {wizard_b.error_text()!r}",
+        )
+        wizard_b.resume()
+        asked = wait_until(
+            lambda: wizard_b.error_text() or None,
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"Resume never asked for the archive; progress {wizard_b.progress_summary()!r}",
+        )
+        assert "open the archive again" in asked, asked
+
+        wizard_b.set_archive_path(str(wrong))
+        wizard_b.open_archive()
+        refused = wait_until(
+            lambda: (e := wizard_b.error_text()) and "not the archive" in e and e or None,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"a different export was not refused; error {wizard_b.error_text()!r}, "
+            f"progress {wizard_b.progress_summary()!r}",
+        )
+        assert "this is not the archive the import started from" in refused, refused
+
+        wizard_b.set_archive_path(str(right))
+        wizard_b.open_archive()
+        wait_until(
+            lambda: not wizard_b.error_text() and wizard_b.progress_summary().startswith("Paused") or None,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"the right export was not taken back; error {wizard_b.error_text()!r}",
+        )
+        wizard_b.resume()
+        done = _wait_done(wizard_b)
+        assert done.startswith("4 imported"), (done, _skips_on_done(wizard_b))
+    finally:
+        try:
+            driver_b.screenshot("teardown-archive-import-handback-device-b")
+        except Exception:
+            pass
+        driver_b.teardown()
+
+
+@pytest.mark.feature("import-your-social-archive")
 def test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not(app, request, archive_nest, tmp_path):
     """§ Audience mapping: Friends → the followers tier. The import provisioned
     that tier; an approved follower unseals the post, a stranger cannot."""
@@ -1062,17 +1167,28 @@ def test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_
     for n, (who, handle) in enumerate(((owner, None), (follower, _unique("e2e-archive-fan"))), start=1):
         if handle:
             _login(request, app, archive_nest, who, handle=handle)
-            assert wait_until(
-                lambda: feed.post_state_by_id(post_id),
-                budgets.RPC_ROUNDTRIP_S,
-                diagnose=lambda: f"the follower's feed never listed the imported post; "
-                f"error-message={app.error_text()!r}",
-            )
-        feed.like_post(feed.post_index_by_id(post_id))
-        assert feed.wait_for_interaction_count_by_id(post_id, "like", n) == n, (
-            f"like #{n} on the imported post did not land; error={app.error_text()!r}"
+        # The ♥ toggles off the row's own `viewer_liked`, so the tap waits for THIS
+        # viewer's window: the post listed, not liked by them, at the likes so far.
+        # Right after a sign-in the state can still be the outgoing account's
+        # window, and a tap aimed through it unlikes the owner's ♥ or lands on
+        # another card.
+        before = wait_until(
+            lambda: (lambda r: r if r and not r.get("viewer_liked") and r.get("like_count") == n - 1 else None)(
+                feed.post_state_by_id(post_id)
+            ),
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"like #{n}'s viewer never saw the imported post un-liked by them at "
+            f"{n - 1} like(s): {feed.post_state_by_id(post_id)!r}; error-message={app.error_text()!r}",
         )
-        feed.reply_post(_unique(f"reply-{n}"), index=feed.post_index_by_id(post_id))
+        index = feed.card_index_by_id(post_id)
+        feed.like_post(index)
+        assert feed.wait_for_interaction_count_by_id(post_id, "like", n) == n, (
+            f"like #{n} on the imported post did not land; error={app.error_text()!r}; "
+            f"before the tap the row read like_count={before.get('like_count')!r}; "
+            f"{feed.like_landing_diagnosis(index, post_id)}; "
+            f"{_like_count_after_a_reload(app, feed, post_id, n)}"
+        )
+        feed.reply_post(_unique(f"reply-{n}"), index=feed.card_index_by_id(post_id))
         # Like the repost below, the reply's count is not re-read at the tap
         # (ruling 3: the nest's interact door refuses a non-`fauna` native
         # token), so it is read after the reload the return to the feed starts
@@ -1081,7 +1197,7 @@ def test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_
         assert feed.wait_for_interaction_count_by_id(post_id, "reply", n) == n, (
             f"reply #{n} on the imported post did not land; error={app.error_text()!r}"
         )
-        feed.repost_post(feed.post_index_by_id(post_id))
+        feed.repost_post(feed.card_index_by_id(post_id))
         # The tap does not re-read an imported post's counts — the nest's
         # interact door refuses every non-`fauna` native token
         # (`FeedManager::repost`, ruling 3) — so the count is read after the
@@ -1460,8 +1576,37 @@ def test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone(
         diagnose=lambda: f"the follower's feed never listed the link post; error-message={app.error_text()!r}",
     )
     assert seen.get("reply_count", 0) == 0, seen
-    assert _archive_comments_on(app, feed.post_index_by_id(post_id)) == []
+    assert _archive_comments_on(app, feed.card_index_by_id(post_id)) == []
     assert not any(FRIEND_TWO_COMMENT in feed.post_text(k) for k in range(feed.post_count()))
+
+
+@pytest.mark.feature("import-your-social-archive")
+def test_a_comment_no_post_places_is_counted_on_the_done_step(app, request, archive_nest, tmp_path):
+    """§ What each category becomes → *Placement under the owner's own post*:
+    a comment left on one of the owner's posts that no rung of the ladder can
+    place is never put under a post by time or by name — the Done step names
+    it in one line instead ("N comments could not be placed under a post",
+    ruling 11's shape). The default fixture keeps `Friend Two`'s comment on the
+    owner's post, naming a shared link no imported post carries (the link post
+    is left out here), so exactly that one comment is unplaced; the owner's
+    own comment on a friend's photo is under nobody's post of theirs and is
+    not counted."""
+    owner = _fresh_actor(archive_nest)
+    _login(request, app, archive_nest, owner, handle=_unique("e2e-archive-unplaced"))
+    zip_path = FakeFacebookArchive(tag=" " + _unique("#unplaced")).write(tmp_path / "facebook.zip")
+    done, _folder = _import_to_done(ArchiveImportActions(app.driver), zip_path)
+    assert done.startswith("4 imported"), done
+    line = S.archive_import.done_unplaced_comments_fmt(count="1")
+    assert f"· {line}" in done, (
+        f"the Done step must name the one comment no post could take: {done!r}"
+    )
+    feed = app.feed
+    app.driver.navigate_to("feed")
+    assert feed.wait_for_post_text(PUBLIC_TEXT), f"error-message={app.error_text()!r}"
+    _wait_imported_cards(app)
+    assert all(_archive_comments_on(app, k) == [] for k in range(feed.post_count())), (
+        "an unplaced comment must fold under no post"
+    )
 
 
 def _stored_profile_body(nest, user) -> bytes | None:

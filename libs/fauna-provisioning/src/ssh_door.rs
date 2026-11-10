@@ -170,7 +170,8 @@ const MARKER_PREFIX: &str = "# Fauna SSH door: ";
 ///
 /// On windows, which has no mode bits, the same two guarantees are an
 /// owner-only DACL (`fauna_ipc::win_acl::restrict_to_owner`) on the key file,
-/// set before its bytes are written, and on the directory when this creates it.
+/// set before its bytes are written while the file is held open with no
+/// sharing ([`open_secret_file`]), and on the directory when this creates it.
 /// Inheritance alone is not enough: a key takes whatever its directory hands
 /// down, and the Windows OpenSSH client refuses one that names anyone but its
 /// owner, SYSTEM or Administrators — measured on a directory that handed down
@@ -209,22 +210,17 @@ pub fn install_key(
             format!("{base}-{n}")
         };
         let path = ssh_dir.join(&name);
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        match opts.open(&path) {
+        match open_secret_file(&path, true) {
             Ok(f) => break (path, f),
             Err(e) if e.kind() == ErrorKind::AlreadyExists && n < 100 => n += 1,
             Err(e) => return Err(e),
         }
     };
     // The windows twin of the `0o600` the open above sets on unix, made before
-    // a byte of the key is written; a file that could not be narrowed is
-    // removed empty, never left holding the key under its inherited ACL.
+    // a byte of the key is written and while the open's no-sharing handle is
+    // still held, so no handle granted under the inherited ACL can exist to
+    // outlive it; a file that could not be narrowed is removed
+    // empty, never left holding the key under its inherited ACL.
     #[cfg(windows)]
     if let Err(e) = restrict_to_owner(&key_path) {
         drop(file);
@@ -240,6 +236,37 @@ pub fn install_key(
         key_path,
         command: format!("ssh {domain}"),
     })
+}
+
+/// Open `path` for a secret this module writes, created new (`create_new`) or
+/// truncated: owner-only from the open itself on unix (`0o600`). On windows the
+/// file is born under its directory's inherited ACL and narrowed only after
+/// this open, so it is opened with NO sharing: while this handle is held no
+/// other handle can exist on the file, and a reader the inherited ACL admitted
+/// cannot open it in that window and keep its handle past the narrowing (a
+/// handle keeps the access it was granted). The by-path DACL set
+/// [`restrict_to_owner`] makes asks for no data access, so share mode 0 does
+/// not refuse it.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_secret_file(path: &std::path::Path, create_new: bool) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    if create_new {
+        opts.create_new(true);
+    } else {
+        opts.create(true).truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        opts.share_mode(0);
+    }
+    opts.open(path)
 }
 
 /// [`fauna_ipc::win_acl::restrict_to_owner`] as an `io::Error`, the error type
@@ -299,14 +326,7 @@ fn write_host_entry(
 
     let tmp = target.with_file_name(".config.fauna-ssh-door.tmp");
     {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp)?;
+        let mut f = open_secret_file(&tmp, false)?;
         #[cfg(unix)]
         if let Ok(meta) = std::fs::metadata(&target) {
             // Keep the admin's own mode on a config they already had.
@@ -490,6 +510,40 @@ mod tests {
         assert!(!config.contains(&format!("\"{}\"", first.key_path.display())));
         assert!(config.contains(&format!("\"{}\"", other.key_path.display())));
         std::fs::remove_dir_all(ssh).unwrap();
+    }
+
+    /// A secret file admits no second handle while ours is held: a
+    /// reader that opened it in the window before the owner-only DACL landed
+    /// would keep that handle, and read the key once it is written. The DACL
+    /// itself still lands under the exclusive handle — a by-path DACL set asks
+    /// for no data access, which no share mode refuses. Both opens are checked:
+    /// the key's (`create_new`) and the config temp file's (truncate).
+    #[cfg(windows)]
+    #[test]
+    fn a_secret_file_admits_no_other_handle_while_held_and_still_narrows() {
+        use std::io::Write as _;
+        /// `ERROR_SHARING_VIOLATION`.
+        const SHARING_VIOLATION: i32 = 32;
+        let dir = scratch("exclusive");
+        for (name, create_new) in [("fauna-key.example", true), (".config.tmp", false)] {
+            let path = dir.join(name);
+            let mut held = open_secret_file(&path, create_new).unwrap();
+            let refused = std::fs::OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .expect_err("a second handle must be refused while the secret file is held");
+            assert_eq!(
+                refused.raw_os_error(),
+                Some(SHARING_VIOLATION),
+                "{name}: {refused}"
+            );
+            restrict_to_owner(&path).unwrap();
+            assert_owner_only(&path, 0o600);
+            held.write_all(b"secret").unwrap();
+            drop(held);
+            assert_eq!(std::fs::read(&path).unwrap(), b"secret", "{name}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

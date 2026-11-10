@@ -109,7 +109,7 @@ def test_external_mua_submission_surfaces_in_conversations_sent(
         "enabling mail must mint the first credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "mail must report enabled after the toggle; "
         f"status={app.mail_settings.status_text()!r}, "
         f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"

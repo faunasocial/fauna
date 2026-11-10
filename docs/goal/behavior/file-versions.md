@@ -24,7 +24,10 @@ history is **retroactive**: every change ever recorded is a listable version.
 
 ## Wire surface
 
-- `fauna.files.versions.list` — the version history of one file, oldest→newest.
+- `fauna.files.versions.list` — the version history of one file, oldest→newest. Its cross-nest
+  relay form (`nest_url` + `channel_id`, a foreign shared set's history read from its home nest)
+  is owned by [`../architecture/federation-shared-folders.md`](../architecture/federation-shared-folders.md)
+  (`fauna.federation.folder.versions.list`).
 - `fauna.files.versions.get` — one version's metadata; missing → `fauna.files.not_found`.
 
 Both are metadata-only: a version's bytes are reconstructed client-side from its

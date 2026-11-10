@@ -1389,7 +1389,7 @@ def test_the_unclean_kill_entry_agrees_with_the_drivers_own_answers():
         for h in handles:
             setattr(driver, h, object() if h in launched else None)
         answers[app] = bool(driver.supports_unclean_kill())
-    built = load_surface_registry(REGISTRY_PATH)["unclean-kill"].built
+    built = _registry_built("unclean-kill")
     assert {a for a, yes in answers.items() if yes} == set(built), answers
 
 
@@ -1410,9 +1410,12 @@ def _leaf_driver_classes():
 
 
 def _registry_built(key):
-    from features_catalog import load_surface_registry
+    """The entry's `built` over the seven app columns — the leaf drivers'. A kids
+    column's harness answer is its parent's, derived by the reader
+    (`features_catalog.load_surface_registry`), never a driver of its own."""
+    from features_catalog import APP_COLUMNS, load_surface_registry
 
-    return set(load_surface_registry(REGISTRY_PATH)[key].built)
+    return set(load_surface_registry(REGISTRY_PATH)[key].built) & set(APP_COLUMNS)
 
 
 # The other harness predicates that are real code keep it, and each one's entry

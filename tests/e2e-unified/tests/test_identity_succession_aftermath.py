@@ -1619,6 +1619,9 @@ def test_the_successors_conversations_unlock_without_a_user_command(
 @pytest.mark.ios
 @pytest.mark.android
 @pytest.mark.tui
+# Web is a reader like a phone: the tui host twin (`alice_builder_seats`) seeds,
+# runs the ceremony and does the take-over; web reads on the media page.
+@pytest.mark.web
 # The bound set's engine is the sync agent: macOS' production spawner is launchd,
 # which an e2e launch must not bootstrap, so no agent runs (and the seed never
 # uploads) unless this marker swaps in the child spawner
@@ -2448,6 +2451,7 @@ def test_the_successor_is_asked_to_confirm_its_npub(ungranted_app, nest_instance
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("take-your-account-back")
 def test_the_successors_burned_signer_connection_reads_revoked(
     ungranted_app, nest_instance
@@ -2458,8 +2462,7 @@ def test_the_successors_burned_signer_connection_reads_revoked(
     connection at the succession and lists it to the successor, and the shared
     machine composes it not connected with ``signer_burned`` set; the paint is
     the mail row's — the ``revoked`` attribute and the revoked line under the
-    name. tui, linux, web, android, macos and ios; windows rides the
-    trickle-down.
+    name. All 7 apps.
 
     ⚠ **The pre-ceremony connection is the whole test.** A succession over an
     account with no bunker connection lists nothing, so the post-ceremony

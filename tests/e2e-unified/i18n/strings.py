@@ -1076,6 +1076,7 @@ class _FeedCreate:
     factor_trending = "Trending"
     factor_watch_complete = "Watched to the end"
     factor_skip = "Skipped past"
+    factor_reported_spam = "Reported as spam"
     factor_weight_placeholder = "1.0"
     factor_global_toggle = "Apply to all feeds"
     add_factor = "Add Factor"
@@ -1092,6 +1093,8 @@ class _FeedPost:
     add_comment = "Add your comment..."
     whats_on_your_mind = "What's on your mind?"
     has_media = "[media]"
+    image_alt_fallback = "Picture"
+    video_alt_fallback = "Video"
     view_thread = "View Thread"
     thread = "Thread"
     no_thread_data = "No thread data"
@@ -1247,6 +1250,10 @@ class _Feed:
     def error_delete(*, message: str) -> str:
         return f"Failed to delete post: {message}"
     report_post = "Report post"
+    mark_as_spam = "Mark as spam"
+    @staticmethod
+    def error_mark_spam(*, message: str) -> str:
+        return f"Could not mark the post as spam: {message}"
     @staticmethod
     def error_muted_keywords(*, message: str) -> str:
         return f"Your muted words are not being applied: {message}"
@@ -1334,15 +1341,25 @@ class _ConversationsUnified:
     @staticmethod
     def error_add_participant_after_heal(*, reason: str) -> str:
         return f"their undelivered earlier invitation was removed first, so they are no longer in the group — adding them again starts cleanly. The re-invitation failed: {reason}"
+    error_add_participant_unconfirmed = "they are already in this group, but whether their invitation reached them cannot be confirmed right now. If they never received it, remove them from the group and add them again."
     @staticmethod
     def error_remove_participant(*, message: str) -> str:
         return f"Could not remove them from this conversation: {message}"
+    @staticmethod
+    def error_remove_participant_unsevered(*, name: str) -> str:
+        return f"{name} is out of this room, but the room's key has not been changed yet, so they can still read new messages until the next owner's or admin's app finishes the removal. Nothing for you to do."
     @staticmethod
     def error_rename_thread(*, message: str) -> str:
         return f"Could not rename this conversation: {message}"
     @staticmethod
     def error_leave_room(*, message: str) -> str:
         return f"Could not leave this conversation: {message}"
+    @staticmethod
+    def error_remove_message(*, message: str) -> str:
+        return f"Could not remove this message from your nest: {message}"
+    @staticmethod
+    def error_remove_thread(*, message: str) -> str:
+        return f"Could not remove this conversation from your nest: {message}"
     @staticmethod
     def error_set_room_policy(*, message: str) -> str:
         return f"Could not change this room's settings: {message}"
@@ -2221,6 +2238,7 @@ class _Media:
     def error_followed_fetch(*, message: str) -> str:
         return f"Couldn't read that followed folder: {message}"
     error_followed_read_only = "You follow this folder — it's read-only here. Switch to one of your own folders to upload."
+    error_foreign_removed = "You no longer have access to this shared folder. Its owner may have removed you, or stopped sharing it."
     error_metadata_only_folder = "This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it."
     error_read_only_shared_folder = "This folder was shared with you to read, not to add to. Ask its owner for write access, or pick one of your own folders."
     versions_title = "Version history"
@@ -2894,6 +2912,10 @@ class _DevicesWizard:
     @staticmethod
     def create_member_error(*, message: str) -> str:
         return f"Folder created, but some devices could not be enrolled: {message}"
+    review_audience = "Who can see it"
+    @staticmethod
+    def create_attest_error(*, message: str) -> str:
+        return f"Folder created, but making it public did not finish: {message}. Choose Public again on the folder to finish."
     no_devices_available = "No devices available. Register a device first."
     next = "Next"
     back = "Back"
@@ -3292,6 +3314,9 @@ class _Devices:
     def shared_by(*, who: str) -> str:
         return f"Shared by {who}"
     @staticmethod
+    def shared_by_owner_changed(*, who: str) -> str:
+        return f"Shared by {who} · owner changed, ask them to share it again"
+    @staticmethod
     def error_accept_share(*, message: str) -> str:
         return f"Failed to accept share: {message}"
     @staticmethod
@@ -3676,6 +3701,14 @@ class _SettingsPending_actions:
     def delete_snapshot(*, snapshot: str) -> str:
         return f"Delete snapshot {snapshot}"
     @staticmethod
+    def prune_versions_in(*, folder: str) -> str:
+        return f"Remove old versions in {folder}"
+    prune_versions = "Remove old versions in a folder"
+    @staticmethod
+    def prune_snapshots_of(*, folder: str) -> str:
+        return f"Remove old snapshots of {folder}"
+    prune_snapshots = "Remove old snapshots of a folder"
+    @staticmethod
     def admin_delete_user(*, target: str) -> str:
         return f"Delete the account {target}"
     @staticmethod
@@ -3687,6 +3720,46 @@ class _SettingsPending_actions:
     @staticmethod
     def admin_change_role(*, target: str) -> str:
         return f"Change the admin role of {target}"
+
+
+class _SettingsUnsent_changes:
+    kind_like = "Like on a post"
+    kind_unlike = "Removed like on a post"
+    kind_post_interaction = "Interaction on a post"
+    @staticmethod
+    def kind_message(*, excerpt: str) -> str:
+        return f"Message: {excerpt}"
+    kind_approval_approve = "Approval of a request"
+    kind_approval_deny = "Refusal of a request"
+    kind_contact_pre_approve = "Pre-approved contact"
+    @staticmethod
+    def kind_email_filter_create(*, name: str) -> str:
+        return f"New email filter: {name}"
+    @staticmethod
+    def kind_bridge_follow_add(*, account: str) -> str:
+        return f"Follow: {account}"
+    @staticmethod
+    def kind_bridge_follow_remove(*, account: str) -> str:
+        return f"Unfollow: {account}"
+    kind_knock_accept = "Accepted contact request"
+    @staticmethod
+    def kind_knock_send(*, recipient: str) -> str:
+        return f"Contact request: {recipient}"
+    kind_abuse_report = "Report to the admins"
+    @staticmethod
+    def kind_other(*, kind: str) -> str:
+        return f"{kind}"
+    state_waiting = "Waiting to send"
+    state_held = "Waiting behind a change that was not sent"
+    state_unsent = "Not sent"
+    reason_unknown_kind = "This version of the app cannot send this change"
+    reason_undecodable = "This change could not be read"
+    reason_mls_no_channel = "The conversation could not be found"
+    reason_mls_not_a_member = "You are no longer a member of this conversation"
+    reason_mls_send_failed = "The message could not be sent"
+    @staticmethod
+    def reason_fallback(*, code: str) -> str:
+        return f"Your nest refused this change ({code})"
 
 
 class _SettingsMember_review_page:
@@ -3917,6 +3990,7 @@ class _Settings:
     mail = _SettingsMail
     account_page = _SettingsAccount_page
     pending_actions = _SettingsPending_actions
+    unsent_changes = _SettingsUnsent_changes
     member_review_page = _SettingsMember_review_page
     encryption_page = _SettingsEncryption_page
     general_page = _SettingsGeneral_page
@@ -3960,6 +4034,7 @@ class _Nests:
     trusted_to_read = "Trusted to read:"
     scope_mail = "Mail — and the spam-filter model and training history derived from it"
     scope_calendar = "Calendar"
+    scope_card = "Contacts"
     scope_posts = "Posts"
     scope_spam_labels = "Write spam labels"
     @staticmethod
@@ -6018,10 +6093,14 @@ class _ModerationReport:
     @staticmethod
     def sent_forwarded(*, nest: str, home_nest: str) -> str:
         return f"Report sent to the admins of {nest} and forwarded, without your name, to the admins of {home_nest}."
+    queued = "Report saved. It will be sent when you are back online."
+    block_not_sent = "The block was not sent because you are offline. Block this person again once you are back online."
     @staticmethod
     def failed(*, error: str) -> str:
         return f"The report could not be sent: {error}"
     hidden_placeholder = "You reported this"
+    show_again_item = "Show it again"
+    show_again_account = "Show this account again"
     ledger_title = "Your reports"
     ledger_empty = "You have not reported anything."
     @staticmethod
@@ -6719,6 +6798,7 @@ class _Profile:
     tiers = "Tiers"
     edit = "Edit Profile"
     follow = "Follow"
+    unfollow_confirm = "Unfollow and end your paid subscription?"
     copy_id = "Copy ID"
     start_dm = "Message"
     block = "Block"
@@ -6805,12 +6885,20 @@ class _Subscriptions:
     provider_kind_label = "Provider:"
     provider_tier_label = "Tier:"
     webhook_secret = "Webhook secret"
+    product_label = "Payment Link (optional)"
+    product_hint = "Only payments through this link grant the tier. Leave empty to grant it for every payment on the account."
     webhook_url_label = "Webhook URL:"
     return_url_label = "Return URL:"
     return_url_unavailable = "Turn on your public web address (Settings, Web) to get a return URL"
     redeem_claim_title = "Redeem a claim code"
     claim_code = "Claim code"
     redeem = "Redeem"
+    @staticmethod
+    def claim_delivery_dm(*, code: str) -> str:
+        return f"Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
+    @staticmethod
+    def claim_delivery_dm_link(*, code: str, url: str) -> str:
+        return f"Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
     offer_status_none = "Not subscribed"
     offer_status_pending = "Pending approval"
     offer_status_active = "Subscribed"
@@ -6917,6 +7005,7 @@ class _File_context_menu:
 class _ErrorConversations:
     forbidden = "This person isn't accepting new conversations right now. You can send them a contact request instead."
     rate_limited = "This is happening too quickly. Please wait a moment and try again."
+    invitee_inbox_full = "This person's inbox is full, so the invitation couldn't be delivered. Try again later."
 
 
 class _ErrorProfile:
@@ -6967,6 +7056,8 @@ class _ErrorNostr:
     no_custodial_key = "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page."
     no_relays_configured = "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first."
     replies_off = "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page."
+    not_sold = "Only a post you sell can be advertised on Nostr. Sell this post first."
+    no_asking_price = "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it."
 
 
 class _ErrorNest:
@@ -7020,6 +7111,7 @@ class _ErrorSend:
     room_policy_unavailable = "This room has no room settings, so there is nothing to change here."
     room_owner_cannot_leave = "Hand the room over to someone else before you leave — a room always has an owner."
     room_leave_failed = "Leaving this room did not go through. Try again."
+    room_awaiting_key = "You can't send in this room until an owner or admin keys you in."
     attachment_upload_foreign_failed = "The attachment couldn't be uploaded to this conversation's home server. Try sending it again."
     @staticmethod
     def attachment_missing(*, filename: str) -> str:
@@ -7107,6 +7199,7 @@ class _Errors:
         return f"The nest sent back something unexpected: {detail}"
     recovery_prior_kit_required = "A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead."
     recovery_prior_kit_mismatch = "That kit does not match the one currently registered for this identity."
+    recovery_kit_for_another_account = "That recovery kit belongs to a different account, not this one. Nothing was changed."
     @staticmethod
     def recovery_prior_escrow_unreadable(*, reason: str) -> str:
         return f"Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it."
@@ -7445,6 +7538,7 @@ class _Connected_apps:
     not_connected = "Not connected right now"
     signer_revoked = "Access revoked — connect this signer app again with a new connection"
     paused = "Paused — turn Allow external apps back on to let this app work again"
+    paused_suspended = "Paused — turn Bluesky back on, then sign in to this app again"
     @staticmethod
     def created(*, time: str) -> str:
         return f"Added {time}"

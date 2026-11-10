@@ -48,8 +48,8 @@ use fauna_mls::wrapped_blob::{
     GrantBlob, GrantWindow, PriorMsekGeneration, ScopeTuple, ScopeWraps, WrapError,
     WrappedScopeKey, bounded_mail_epoch_wraps, bounded_mail_epoch_wraps_for_range,
     build_bounded_mail_grant, build_grant_blob, build_grant_blob_with_epochs, build_renewal_wraps,
-    derive_recipient_calendar_capability_secret, derive_recipient_mail_capability_secret,
-    mail_sealing_epoch_of,
+    derive_recipient_calendar_capability_secret, derive_recipient_card_capability_secret,
+    derive_recipient_mail_capability_secret, mail_sealing_epoch_of,
 };
 
 /// Advisory default grant window: ~90 days, in seconds — `GrantWindow`'s wire
@@ -185,6 +185,12 @@ pub enum DerivePayloadError {
     /// carry nothing else (`folder-deposit.md`).
     #[error("deposit scope tuple refused: {0}")]
     DepositRefused(String),
+    /// A `materialize` tuple must name one
+    /// [`fauna_mls::wrapped_blob::MATERIALIZABLE_KINDS`] kind and carry no
+    /// qualifier (`encryption-at-rest.md` § Capability tiering → *The
+    /// materialization grant*, part (a)).
+    #[error("materialize scope tuple refused: {0}")]
+    MaterializeRefused(String),
 }
 
 /// Derive the minimal payload a [`ScopeTuple`] wraps into its
@@ -219,6 +225,19 @@ pub fn derive_scope_payload(
                     .as_ref()
                     .ok_or(DerivePayloadError::MailNotEnabled)?;
                 Ok(Some(derive_recipient_calendar_capability_secret(msek)))
+            }
+            // The card's OWN standing secret, the calendar arm's twin
+            // (`owner-key-material.md` § Path B-sibling-6): it opens
+            // `card-record` envelopes only. Minted today by one grant alone,
+            // the card materialization grant (`encryption-at-rest.md`
+            // § Capability tiering → *The materialization grant*, part (a));
+            // no picker option offers a bare card read.
+            Some(ScopeTuple::KIND_CARD) => {
+                let msek = mail
+                    .msek
+                    .as_ref()
+                    .ok_or(DerivePayloadError::MailNotEnabled)?;
+                Ok(Some(derive_recipient_card_capability_secret(msek)))
             }
             Some(ScopeTuple::KIND_MAIL) => {
                 let msek = mail
@@ -313,6 +332,25 @@ pub fn derive_scope_payload(
         // revocation record alone — over exactly one folder.
         ScopeTuple::CLASS_DEPOSIT => {
             check_deposit(tuple).map_err(DerivePayloadError::DepositRefused)?;
+            Ok(None)
+        }
+        // KEYLESS by ratified design (`encryption-at-rest.md` § Capability
+        // tiering → *The materialization grant*, part (a)): the keys ride the
+        // master-key `content.read{kind}` tuple beside it; this tuple is what
+        // licenses the holder to keep a readable view, and what one revoke
+        // ends with the keys.
+        ScopeTuple::CLASS_MATERIALIZE => {
+            let kind = tuple.kind.as_deref().unwrap_or_default();
+            if !fauna_mls::wrapped_blob::MATERIALIZABLE_KINDS.contains(&kind) {
+                return Err(DerivePayloadError::MaterializeRefused(format!(
+                    "{kind:?} is not a materializable kind"
+                )));
+            }
+            if *tuple != ScopeTuple::materialize(kind) {
+                return Err(DerivePayloadError::MaterializeRefused(format!(
+                    "materialize{{{kind}}} carries a qualifier"
+                )));
+            }
             Ok(None)
         }
         ScopeTuple::CLASS_INDEX_WRITE | ScopeTuple::CLASS_INDEX_READ => {
@@ -699,6 +737,69 @@ pub enum MintGrantError {
     /// pubkey).
     #[error(transparent)]
     Wrap(#[from] WrapError),
+    /// The assembled blob is not a well-formed materialization grant
+    /// ([`fauna_mls::wrapped_blob::materialization_shape_refusal`]).
+    #[error("not a well-formed materialization grant: {0}")]
+    MaterializationShape(String),
+}
+
+/// The declared scope of a **materialization grant** over `kind` — the
+/// master-key `content.read{kind}` tuple that carries the keys, then the
+/// keyless `materialize{kind}` tuple that licenses the readable view
+/// (`encryption-at-rest.md` § Capability tiering → *The materialization
+/// grant*, part (a)). Never with `content.label-write`.
+#[must_use]
+pub fn materialization_scope(kind: &str) -> Vec<ScopeTuple> {
+    vec![
+        ScopeTuple::delegable_kind_read(kind),
+        ScopeTuple::materialize(kind),
+    ]
+}
+
+/// Mint the **materialization grant** over one own-actor `kind` (a
+/// [`fauna_mls::wrapped_blob::MATERIALIZABLE_KINDS`] kind: mail, calendar or
+/// card) to the nest's own in-process materializer holder
+/// (`encryption-at-rest.md` § Capability tiering → *The materialization
+/// grant*, parts (a), (b)): one [`GrantBlob`] whose declared scope is
+/// [`materialization_scope`]`(kind)` — the standing master-key wrap of that
+/// kind's own key [`derive_scope_payload`] derives, **never** the bounded
+/// per-epoch form (the view is retroactive over the already-held history,
+/// which only the standing key opens), plus the keyless `materialize{kind}`
+/// tuple. One grant per kind: a calendar grant opens no mail. The two tuples
+/// die together at one revoke. The blob is checked against
+/// [`fauna_mls::wrapped_blob::materialization_shape_refusal`] before it is
+/// returned (inside [`mint_grant`], which checks every blob declaring a
+/// `materialize` tuple) — the same check the nest's mint door reads.
+///
+/// The event-log twin records both tuples ([`grant_log::event_scope_of`]);
+/// [`grant_log::is_materialization_grant`] reads it back.
+///
+/// # Errors
+///
+/// [`DerivePayloadError::MailNotEnabled`] when the mail custody's `msek` is
+/// unset; [`MintGrantError::Wrap`] on a seal failure;
+/// an error for a `kind` that is not materializable (its read or its
+/// `materialize` tuple refused); [`MintGrantError::MaterializationShape`]
+/// never for a materializable one, by construction.
+pub fn mint_materialization_grant(
+    kind: &str,
+    mail: &MailConfig,
+    owner_actor_id: &[u8; 32],
+    grant_id: &[u8; 16],
+    holder_pubkey: &[u8; 32],
+    holder_mlkem_ek: Option<&[u8]>,
+    window: GrantWindow,
+) -> Result<GrantBlob, MintGrantError> {
+    mint_grant(
+        None,
+        mail,
+        owner_actor_id,
+        grant_id,
+        holder_pubkey,
+        holder_mlkem_ek,
+        window,
+        &materialization_scope(kind),
+    )
 }
 
 /// Assemble a user-minted [`GrantBlob`] from the owner's period-key and mail
@@ -735,14 +836,24 @@ pub fn mint_grant(
         let payload = derive_scope_payload(period_keys, mail, tuple)?;
         scopes.push((tuple.clone(), payload));
     }
-    Ok(build_grant_blob(
+    let blob = build_grant_blob(
         owner_actor_id,
         grant_id,
         holder_pubkey,
         holder_mlkem_ek,
         window,
         &scopes,
-    )?)
+    )?;
+    // A grant declaring a `materialize` tuple is held to the materialization
+    // shape here, so the generic `Mint` action's path refuses what the nest's
+    // mint door would (`materialize` beside `content.label-write`, a missing
+    // read, another kind); a grant declaring none is untouched.
+    if let Some(refusal) =
+        fauna_mls::wrapped_blob::materialization_shape_refusal(&blob.scope, &blob.wrapped_keys)
+    {
+        return Err(MintGrantError::MaterializationShape(refusal));
+    }
+    Ok(blob)
 }
 
 /// Mint the web-paywall **folder** grant: `content.read{folder:set}` with
@@ -1645,6 +1756,233 @@ mod tests {
             derive_scope_payload(None, &mail, &spam_model_scope()),
             Ok(None)
         );
+    }
+
+    /// The materialization grant (`encryption-at-rest.md` § Capability
+    /// tiering → *The materialization grant*, part (a)): the `materialize`
+    /// tuple is keyless and refuses a kind not yet materializable or a
+    /// qualifier; the mint builds the two-tuple blob whose one wrap is the
+    /// standing master-key mail key the holder can open.
+    #[test]
+    fn the_materialization_grant_is_master_key_mail_plus_a_keyless_tuple() {
+        let mail = MailConfig {
+            msek: Some([0x42u8; 32].into()),
+            ..MailConfig::default()
+        };
+        let materialize = ScopeTuple::materialize(ScopeTuple::KIND_MAIL);
+        assert_eq!(derive_scope_payload(None, &mail, &materialize), Ok(None));
+        // Keyless even with no mail custody: the keys ride the read tuple.
+        assert_eq!(
+            derive_scope_payload(None, &MailConfig::default(), &materialize),
+            Ok(None)
+        );
+        for refused in [
+            ScopeTuple::materialize(ScopeTuple::KIND_POST),
+            ScopeTuple::materialize(ScopeTuple::KIND_FOLDER),
+            ScopeTuple {
+                tier: Some("gold".into()),
+                ..materialize.clone()
+            },
+            ScopeTuple {
+                kind: None,
+                ..materialize.clone()
+            },
+        ] {
+            assert!(
+                matches!(
+                    derive_scope_payload(None, &mail, &refused),
+                    Err(DerivePayloadError::MaterializeRefused(_))
+                ),
+                "{refused:?}"
+            );
+        }
+
+        let (holder_sk, holder_pk) = generate_x25519_keypair();
+        let blob = mint_materialization_grant(
+            ScopeTuple::KIND_MAIL,
+            &mail,
+            &[0x77u8; 32],
+            &[0x05u8; 16],
+            &holder_pk,
+            None,
+            GrantWindow(0, DEFAULT_GRANT_WINDOW_SECS),
+        )
+        .unwrap();
+        assert_eq!(blob.scope, vec![ScopeTuple::mail(), materialize.clone()]);
+        assert_eq!(blob.wrapped_keys.len(), 1);
+        let wrap = &blob.wrapped_keys[0];
+        assert_eq!(wrap.scope, ScopeTuple::mail());
+        assert_eq!(wrap.epoch, None, "the standing wrap, never per-epoch");
+        let opened = unseal_capability(wrap, &[0x77u8; 32], &holder_sk).unwrap();
+        assert_eq!(
+            opened.as_slice(),
+            derive_scope_payload(None, &mail, &ScopeTuple::mail())
+                .unwrap()
+                .unwrap()
+                .as_slice()
+        );
+        assert_eq!(
+            fauna_mls::wrapped_blob::materialization_shape_refusal(&blob.scope, &blob.wrapped_keys),
+            None
+        );
+        // The log twin records both tuples, and the predicate reads it back.
+        let logged = grant_log::event_scope_of(&blob.scope);
+        assert!(grant_log::is_materialization_grant(&logged));
+        assert!(!grant_log::is_bounded_mail_grant(&logged));
+        assert!(!grant_log::is_materialization_grant(
+            &grant_log::event_scope_of(&[ScopeTuple::mail(), ScopeTuple::label_write(None),])
+        ));
+        // Reserved: a remote principal never holds it.
+        assert!(materialize.reserved_for_device_or_hosted());
+    }
+
+    /// Calendar and card materialize too, each under its OWN key: the grant
+    /// over one kind wraps that kind's standing secret, which differs from
+    /// the mail one and from the other DAV kind's (`encryption-at-rest.md`
+    /// § Capability tiering → *The materialization grant*, part (a);
+    /// `owner-key-material.md` § Path B-sibling-5 / -6).
+    #[test]
+    fn calendar_and_card_materialize_each_under_its_own_key() {
+        let mail = MailConfig {
+            msek: Some([0x42u8; 32].into()),
+            ..MailConfig::default()
+        };
+        let (holder_sk, holder_pk) = generate_x25519_keypair();
+        let mut opened = Vec::new();
+        for kind in [
+            ScopeTuple::KIND_MAIL,
+            ScopeTuple::KIND_CALENDAR,
+            ScopeTuple::KIND_CARD,
+        ] {
+            assert_eq!(
+                derive_scope_payload(None, &mail, &ScopeTuple::materialize(kind)),
+                Ok(None),
+                "{kind}"
+            );
+            let blob = mint_materialization_grant(
+                kind,
+                &mail,
+                &[0x77u8; 32],
+                &[0x06u8; 16],
+                &holder_pk,
+                None,
+                GrantWindow(0, DEFAULT_GRANT_WINDOW_SECS),
+            )
+            .unwrap();
+            let read = ScopeTuple::delegable_kind_read(kind);
+            assert_eq!(
+                blob.scope,
+                vec![read.clone(), ScopeTuple::materialize(kind)]
+            );
+            assert_eq!(blob.wrapped_keys.len(), 1);
+            assert_eq!(blob.wrapped_keys[0].scope, read);
+            assert_eq!(blob.wrapped_keys[0].epoch, None);
+            assert_eq!(
+                fauna_mls::wrapped_blob::materialization_shape_refusal(
+                    &blob.scope,
+                    &blob.wrapped_keys
+                ),
+                None
+            );
+            let key = unseal_capability(&blob.wrapped_keys[0], &[0x77u8; 32], &holder_sk).unwrap();
+            assert_eq!(
+                key.as_slice(),
+                derive_scope_payload(None, &mail, &read)
+                    .unwrap()
+                    .unwrap()
+                    .as_slice()
+            );
+            opened.push(key.to_vec());
+        }
+        assert_ne!(opened[0], opened[1], "a calendar grant carries no mail key");
+        assert_ne!(opened[0], opened[2], "a card grant carries no mail key");
+        assert_ne!(opened[1], opened[2], "calendar and card keys are distinct");
+        // A card read with no mail custody cannot derive.
+        assert_eq!(
+            derive_scope_payload(
+                None,
+                &MailConfig::default(),
+                &ScopeTuple::delegable_kind_read(ScopeTuple::KIND_CARD)
+            ),
+            Err(DerivePayloadError::MailNotEnabled)
+        );
+    }
+
+    /// The shape check the nest's mint and renew doors read refuses a bounded
+    /// mail regime, a missing read, a bundled `content.label-write`, and a
+    /// mint of any of those through the generic path — and leaves a grant
+    /// with no `materialize` tuple alone.
+    #[test]
+    fn the_materialization_shape_refuses_a_bounded_regime_and_bundles() {
+        use fauna_mls::wrapped_blob::materialization_shape_refusal;
+        let mail = MailConfig {
+            msek: Some([0x42u8; 32].into()),
+            ..MailConfig::default()
+        };
+        let (_, holder_pk) = generate_x25519_keypair();
+        let materialize = ScopeTuple::materialize(ScopeTuple::KIND_MAIL);
+
+        // A bounded mail grant with a `materialize` tuple stitched on.
+        let bounded = mint_bounded_mail_grant(
+            &mail,
+            &[0x77u8; 32],
+            &[0x06u8; 16],
+            &holder_pk,
+            None,
+            GrantWindow(1_000_000, 1_000_000 + DEFAULT_GRANT_WINDOW_SECS),
+            false,
+        )
+        .unwrap();
+        assert!(!bounded.wrapped_keys.is_empty());
+        let mut scope = bounded.scope.clone();
+        scope.push(materialize.clone());
+        let refusal = materialization_shape_refusal(&scope, &bounded.wrapped_keys).unwrap();
+        assert!(refusal.contains("bounded"), "{refusal}");
+        // No `materialize` tuple → not this check's business.
+        assert_eq!(
+            materialization_shape_refusal(&bounded.scope, &bounded.wrapped_keys),
+            None
+        );
+
+        let mint = |scope: &[ScopeTuple]| {
+            mint_grant(
+                None,
+                &mail,
+                &[0x77u8; 32],
+                &[0x07u8; 16],
+                &holder_pk,
+                None,
+                GrantWindow(0, DEFAULT_GRANT_WINDOW_SECS),
+                scope,
+            )
+        };
+        for bad in [
+            vec![materialize.clone()],
+            vec![
+                ScopeTuple::mail(),
+                materialize.clone(),
+                ScopeTuple::label_write(None),
+            ],
+            vec![
+                ScopeTuple::mail(),
+                materialize.clone(),
+                ScopeTuple {
+                    kind: Some(ScopeTuple::KIND_CALENDAR.into()),
+                    ..ScopeTuple::mail()
+                },
+            ],
+            vec![
+                ScopeTuple::mail_for_factor("labeler:00"),
+                materialize.clone(),
+            ],
+        ] {
+            assert!(
+                matches!(mint(&bad), Err(MintGrantError::MaterializationShape(_))),
+                "{bad:?}"
+            );
+        }
+        assert!(mint(&materialization_scope(ScopeTuple::KIND_MAIL)).is_ok());
+        assert!(mint(&[ScopeTuple::mail(), ScopeTuple::label_write(None)]).is_ok());
     }
 
     #[test]

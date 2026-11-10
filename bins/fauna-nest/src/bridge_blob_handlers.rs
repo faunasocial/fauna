@@ -58,6 +58,7 @@ use fauna_protocol::wrapped_blob::{
 };
 
 use crate::bridge_method_allowlist::{CallerClass, actor_prefix_hex};
+use crate::bridge_routing_handlers::ensure_target_stands;
 use crate::db::sync_storage::StorageQuotaError;
 use crate::routes::AppState;
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
@@ -1852,6 +1853,9 @@ fn fetch_wrapped_mls_blob_handler() -> RpcHandler {
                 );
                 return Err(rate_limited());
             }
+            // The MUA AUTH of a locked or suspended account unwraps nothing
+            // (`ensure_target_stands`).
+            ensure_target_stands(&state, &target_actor).await?;
             let blob = state
                 .db
                 .get_wrapped_mls_blob(&target_actor, &req.credential_id)
@@ -1894,6 +1898,7 @@ fn fetch_mls_snapshot_blob_handler() -> RpcHandler {
                 );
                 return Err(rate_limited());
             }
+            ensure_target_stands(&state, &target_actor).await?;
             let blob = state
                 .db
                 .get_mls_snapshot_blob(&target_actor)
@@ -1939,6 +1944,7 @@ fn fetch_webdav_keys_blob_handler() -> RpcHandler {
                 );
                 return Err(rate_limited());
             }
+            ensure_target_stands(&state, &target_actor).await?;
             let blob = state
                 .db
                 .get_webdav_keys_blob(&target_actor)
@@ -2021,6 +2027,10 @@ fn mint_bulk_byte_token_handler() -> RpcHandler {
                         );
                         return Err(permission_denied("folder bulk tokens are BridgeMda-only"));
                     }
+                    // A locked or suspended account's file apps move no bytes
+                    // (`ensure_target_stands`); the mail-body purpose is
+                    // delivery too and never asks.
+                    ensure_target_stands(&state, &target_actor).await?;
                     let served =
                         webdav_folder_for_actor(&state, &req.folder, &req.name_hash, &target_actor)
                             .await?
@@ -2202,6 +2212,7 @@ fn webdav_list_folders_handler() -> RpcHandler {
             {
                 return Err(rate_limited());
             }
+            ensure_target_stands(&state, &target_actor).await?;
             let folders = state
                 .db
                 .get_folders_for_actor_full(&target_actor)
@@ -2240,6 +2251,7 @@ fn webdav_list_files_handler() -> RpcHandler {
             {
                 return Err(rate_limited());
             }
+            ensure_target_stands(&state, &target_actor).await?;
             let fs = webdav_folder_for_actor(&state, &req.folder, &req.name_hash, &target_actor)
                 .await?
                 .filter(|row| row.is_webdav_served())
@@ -2299,6 +2311,7 @@ fn webdav_quota_handler() -> RpcHandler {
             {
                 return Err(rate_limited());
             }
+            ensure_target_stands(&state, &target_actor).await?;
             // Phase F bounds the MDA to folders the user flagged for WebDAV: an
             // actor serving no set has no meter to read.
             if !state
@@ -2345,6 +2358,7 @@ fn webdav_record_change_handler() -> RpcHandler {
             {
                 return Err(rate_limited());
             }
+            ensure_target_stands(&state, &target_actor).await?;
             let fs = webdav_folder_for_actor(&state, &req.folder, &req.name_hash, &target_actor)
                 .await?
                 .filter(|row| row.is_webdav_served())
@@ -2574,6 +2588,7 @@ fn fetch_wrapped_submission_token_handler() -> RpcHandler {
                 );
                 return Err(rate_limited());
             }
+            ensure_target_stands(&state, &target_actor).await?;
             let blob = state
                 .db
                 .get_wrapped_submission_token(&target_actor, &req.credential_id)
@@ -3427,6 +3442,14 @@ fn mint_grant_handler() -> RpcHandler {
                     "a remote principal is grantable only over the kinds it created",
                 ));
             }
+            if let Some(refusal) = materialization_door_refusal(
+                &state,
+                blob.holder.as_ref(),
+                &blob.scope,
+                &blob.wrapped_keys,
+            ) {
+                return Err(refusal);
+            }
             let grant_id = blob.index.1.clone();
             // epoch_end (u64 on the wire) → the i64 storage column / expiry
             // filter; clamp a never-expires sentinel to i64::MAX.
@@ -3451,6 +3474,7 @@ fn mint_grant_handler() -> RpcHandler {
                     }
                 })?;
             refresh_web_serve_holder(&state, &actor_id).await;
+            refresh_materializer(&state, &actor_id, false).await;
             // A fresh grant may make the nest the runner of a delegated task
             // kind — wake the lease runner so it claims without waiting out a
             // heartbeat period (delegation_runner module doc).
@@ -3549,6 +3573,52 @@ pub(crate) fn principal_fetch_grants_handler() -> crate::principal_handlers::Pri
 /// question at the mint and the principal fetch alike.
 fn grant_scope_is_reserved(scope: &[fauna_mls::wrapped_blob::format::ScopeTuple]) -> bool {
     scope.iter().any(|t| t.reserved_for_device_or_hosted())
+}
+
+/// The materialization door at `fauna.capabilities.mint` and `renew`
+/// (`encryption-at-rest.md` § Capability tiering → *The materialization
+/// grant*, part (a)): a blob declaring a `materialize` tuple is refused unless
+/// it passes the one shared shape check
+/// ([`fauna_mls::wrapped_blob::materialization_shape_refusal`] — its master-key
+/// read rides it, nothing else does, every wrap of that read is standing) and
+/// is sealed to this nest's own materializer. The nest-only holder and the
+/// master-key regime are enforced here, never trusted to the minting app. A
+/// blob with no `materialize` tuple passes untouched. Renew calls it over the
+/// merged wraps, so a top-up that replaces the standing wrap passes and one
+/// that would turn the read bounded is refused.
+fn materialization_door_refusal(
+    state: &AppState,
+    holder: &[u8],
+    scope: &[fauna_mls::wrapped_blob::format::ScopeTuple],
+    wrapped_keys: &[fauna_mls::wrapped_blob::format::WrappedScopeKey],
+) -> Option<RpcError> {
+    if !scope.iter().any(|t| t.is_materialize()) {
+        return None;
+    }
+    if let Some(why) = fauna_mls::wrapped_blob::materialization_shape_refusal(scope, wrapped_keys) {
+        return Some(permission_denied(&format!(
+            "not a well-formed materialization grant: {why}"
+        )));
+    }
+    match &state.materializer {
+        Some(m) if m.holder_x25519().as_slice() == holder => None,
+        _ => Some(permission_denied(
+            "a materialization grant is held only by this nest's own materializer",
+        )),
+    }
+}
+
+/// After a grant mutation, bring the materializer in line: a mint or renew
+/// arms (and, on a top-up, retries what the walk skipped); a revoke deletes
+/// the actor's view before the handler replies.
+async fn refresh_materializer(state: &Arc<AppState>, actor_id: &[u8; 32], revoked: bool) {
+    if let Some(m) = &state.materializer {
+        if revoked {
+            m.on_grant_revoked(actor_id).await;
+        } else {
+            m.on_grant_changed(actor_id).await;
+        }
+    }
 }
 
 /// `fauna.capabilities.renew` — the owner extends a grant's window and, for an
@@ -3680,6 +3750,18 @@ fn renew_grant_handler() -> RpcHandler {
                      scope — a grant is bounded (per-epoch only) XOR master-key, never both",
                 ));
             }
+            // The materialization door's renew arm, over the MERGED wraps: a
+            // top-up that replaces the standing mail wrap (an equal-end renew
+            // carrying the re-derived key) passes; a renew that would leave
+            // the read bounded, or re-home the grant, is refused.
+            if let Some(refusal) = materialization_door_refusal(
+                &state,
+                blob.holder.as_ref(),
+                &blob.scope,
+                &blob.wrapped_keys,
+            ) {
+                return Err(refusal);
+            }
             // Retention: the merged set keeps only the epochs the (possibly
             // slid) window still covers. Run on every renew — a request that
             // carries no start prunes nothing new, and an appended wrap for
@@ -3736,6 +3818,7 @@ fn renew_grant_handler() -> RpcHandler {
                 .await
                 .map_err(internal)?;
             refresh_web_serve_holder(&state, &actor_id).await;
+            refresh_materializer(&state, &actor_id, false).await;
             state.delegation_runner_wake.notify_one();
             encode_reply(&RenewGrantReply {
                 ok: true,
@@ -3802,6 +3885,7 @@ fn revoke_grant_handler() -> RpcHandler {
                     .map_err(internal)?;
             }
             refresh_web_serve_holder(&state, &actor_id).await;
+            refresh_materializer(&state, &actor_id, true).await;
             // A revoke may take the nest off a delegated kind — wake the lease
             // runner so the release (and its `lease_changed` push) is prompt.
             state.delegation_runner_wake.notify_one();
@@ -6943,6 +7027,148 @@ mod tests {
             .expect("ok");
         let reply: FetchWrappedMlsBlobReply = decode(&reply_bytes).unwrap();
         assert_eq!(reply.blob.as_ref().map(|b| b.len()), Some(64));
+    }
+
+    /// the account lock and suspension reach the mail
+    /// credential. The MDA's AUTH read of the wrapped MLS blob — and the
+    /// MTA's of the submission token — are refused while the target account
+    /// is locked or suspended, so a mail app signs in on neither; a lapsed lock
+    /// and the restore serve again with nothing redone.
+    #[tokio::test]
+    async fn a_locked_or_suspended_account_s_mail_credential_is_not_served() {
+        let state = fixture_state().await;
+        let target = [43u8; 32];
+        let mda = [55u8; 32];
+        let mta = [56u8; 32];
+        approve_bridge(
+            &state.db,
+            &mda,
+            crate::db::bridge_service_users::BridgeRole::Mda,
+        )
+        .await;
+        approve_bridge(
+            &state.db,
+            &mta,
+            crate::db::bridge_service_users::BridgeRole::Mta,
+        )
+        .await;
+        state
+            .db
+            .create_user_with_handle(&target, "personal", "victim", None)
+            .await
+            .unwrap();
+        state
+            .db
+            .put_wrapped_mls_blob(&target, "default", &[0xAB; 64])
+            .await
+            .unwrap();
+        state
+            .db
+            .put_wrapped_submission_token(&target, "default", &[0xCD; 64])
+            .await
+            .unwrap();
+        let blob = async || {
+            let req = FetchWrappedMlsBlobRequest {
+                actor_id: target.to_vec(),
+                credential_id: "default".into(),
+                extra: Default::default(),
+            };
+            let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+            fetch_wrapped_mls_blob_handler()(state.clone(), mda, payload).await
+        };
+        let token = async || {
+            let req = FetchWrappedSubmissionTokenRequest {
+                actor_id: target.to_vec(),
+                credential_id: "default".into(),
+                extra: Default::default(),
+            };
+            let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+            fetch_wrapped_submission_token_handler()(state.clone(), mta, payload).await
+        };
+        blob()
+            .await
+            .expect("a standing account's credential is served");
+        token().await.expect("a standing account's token is served");
+
+        let now = crate::db::now_epoch_secs();
+        state
+            .db
+            .set_locked_until(&target[..], Some(now + 3600))
+            .await
+            .unwrap();
+        assert_eq!(
+            blob().await.expect_err("locked").code,
+            "fauna.bridges.account_revoked"
+        );
+        assert_eq!(
+            token().await.expect_err("locked").code,
+            "fauna.bridges.account_revoked"
+        );
+
+        state
+            .db
+            .set_locked_until(&target[..], Some(now - 1))
+            .await
+            .unwrap();
+        blob().await.expect("a lapsed lock serves again");
+
+        state
+            .db
+            .suspend_user_now(&target, "abuse", "abuse")
+            .await
+            .unwrap();
+        assert_eq!(
+            blob().await.expect_err("suspended").code,
+            "fauna.bridges.account_revoked"
+        );
+        state.db.cancel_eviction(&target).await.unwrap();
+        blob().await.expect("the restore serves again");
+    }
+
+    /// The admin exemption: a locked admin's mail credential is still served,
+    /// as the dispatch gate and `fauna.auth.verify` exempt it — a locked sole
+    /// admin is the off-box brick `nest/common.md` § Client-state
+    /// recoverability forbids, and the exemption lifts at every door together.
+    #[tokio::test]
+    async fn a_locked_admin_s_mail_credential_is_still_served() {
+        let state = fixture_state().await;
+        let admin = [44u8; 32];
+        let mda = [55u8; 32];
+        approve_bridge(
+            &state.db,
+            &mda,
+            crate::db::bridge_service_users::BridgeRole::Mda,
+        )
+        .await;
+        state
+            .db
+            .create_user_with_handle(&admin, "personal", "root", None)
+            .await
+            .unwrap();
+        state.db.add_admin_actor(&admin[..]).await.unwrap();
+        state
+            .db
+            .set_locked_until(&admin[..], Some(crate::db::now_epoch_secs() + 3600))
+            .await
+            .unwrap();
+        state
+            .db
+            .put_wrapped_mls_blob(&admin, "default", &[0xAB; 64])
+            .await
+            .unwrap();
+        let req = FetchWrappedMlsBlobRequest {
+            actor_id: admin.to_vec(),
+            credential_id: "default".into(),
+            extra: Default::default(),
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        let reply: FetchWrappedMlsBlobReply = decode(
+            &fetch_wrapped_mls_blob_handler()(state, mda, payload)
+                .await
+                .expect("admin exempt"),
+        )
+        .unwrap();
+        assert!(reply.blob.is_some());
     }
 
     #[tokio::test]

@@ -290,6 +290,27 @@
                                 Visibility="Collapsed" HorizontalAlignment="Left" />
                     </StackPanel>
 
+                    <!-- The ephemeral member-review pass (settings.md § Recovery kit →
+                         The ephemeral member-review pass; succession-propagation.md
+                         § Propagation, ruling 1, item (ii)), directly beneath the sweep
+                         lines that report the roster it works through. Collapsed — and
+                         its rows REMOVED, so a member-review-row count reads 0 — unless
+                         all three gates hold: a succession sweep ran this app run, the
+                         user has not deferred, and items remain. The rows are the
+                         permanent page's own control; what is local here is the gate
+                         and member-review-defer-button, which hides the pass and
+                         decides nothing. -->
+                    <StackPanel x:Name="MemberReviewPassPanel" Visibility="Collapsed" Spacing="8">
+                        <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12"
+                                   Text="{loc:Localize Key=settings/recovery_kit/review_intro}" />
+                        <controls:MemberReviewList x:Name="MemberReviewPassList" />
+                        <Button x:Name="MemberReviewDeferButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.MemberReviewDeferButton}"
+                                Content="{loc:Localize Key=settings/recovery_kit/review_defer}"
+                                Click="MemberReviewDeferButton_Click"
+                                HorizontalAlignment="Left" />
+                    </StackPanel>
+
                     <!-- The post-succession aftermath's progress lines (settings.md
                          § Recovery kit → The post-succession aftermath's progress
                          lines), one per leg in the order the legs run — leg 7 (drafts)

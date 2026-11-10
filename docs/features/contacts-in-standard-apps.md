@@ -4,6 +4,9 @@ title: Your address book in standard contacts apps
 section: mail, calendar and contacts
 goal: docs/goal/behavior/carddav-server.md § Goal
 guide: docs/guides/calendar-and-contacts.md § Contacts: two different address books, on purpose
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -19,7 +22,7 @@ and how much you send.
 
 ## Coverage contract
 
-Stamped 2026-09-23 at 6605debcb9.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] A contacts app runs the full create, read, update, delete cycle, and finds the book from the server name alone — `docs/goal/behavior/carddav-server.md` § Address-book collection model + read / write / sync surface
    - `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip`
@@ -63,6 +66,8 @@ Stamped 2026-09-23 at 6605debcb9.
    - `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_on_a_home_nest_with_no_domain_contacts_are_reached_by_the_bare_address`
 20. [nest] Another user on the same nest can never see or change your address book, even when both books share a name — `docs/goal/behavior/carddav-server.md` § Architectural rules
    - `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_another_user_can_never_reach_your_address_book_even_with_the_same_name`
+21. [nest] A contacts app's conditional save is honoured: creating a card that already exists is refused rather than overwritten — `docs/goal/behavior/carddav-server.md` § Address-book collection model
+   - `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_editing_or_deleting_from_an_out_of_date_copy_is_refused`
 
 ## Status
 
@@ -76,6 +81,8 @@ Stamped 2026-09-23 at 6605debcb9.
 | ios | ✅ full | 0.1.5-dev+8755c14e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+8755c14e standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -101,4 +108,5 @@ Stamped 2026-09-23 at 6605debcb9.
 | 18 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_switching_contacts_off_closes_the_door_and_the_signpost` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 19 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_on_a_home_nest_with_no_domain_contacts_are_reached_by_the_bare_address` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 20 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_another_user_can_never_reach_your_address_book_even_with_the_same_name` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 21 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_editing_or_deleting_from_an_out_of_date_copy_is_refused` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 <!-- features-render:end -->

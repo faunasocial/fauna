@@ -98,11 +98,14 @@ fn decode_provider_snapshot(
         .collect())
 }
 
-/// The prefix every one of fauna's own provider-KV keys shares. Each is a
-/// **per-channel marker** of the shape `fauna:<name>:<32-byte channel id>` —
-/// every builder below appends the raw `ChannelId` last — which is what lets
-/// the launch swap carry a local-only group's markers beside the entries
-/// openMLS attributes to it ([`is_fauna_channel_key`]).
+/// The prefix every one of fauna's own provider-KV keys shares. Each but one
+/// is a **per-channel marker** of the shape `fauna:<name>:<32-byte channel
+/// id>` — every builder below appends the raw `ChannelId` last — which is
+/// what lets the launch swap carry a local-only group's markers beside the
+/// entries openMLS attributes to it ([`is_fauna_channel_key`]). The one
+/// account-global key is the spent key-package record
+/// ([`SPENT_KEY_PACKAGE_PREFIX`]), which names a key package, not a channel,
+/// and which the swap carries as a union of both sides.
 const FAUNA_KEY_PREFIX: &[u8] = b"fauna:";
 
 /// One local-only group the provider swap carries across
@@ -219,6 +222,27 @@ fn channel_kind_scheduling_key(channel_id: &ChannelId) -> Vec<u8> {
     key
 }
 
+/// Provider-KV key prefix of the **community room** marker: `channel_id` is a
+/// community room this account founded or joined — a chat channel with no MLS
+/// group by construction (`community-rooms.md`), so the provider's group
+/// listing never names it. The marker is how the replica lists it: the launch
+/// load fetches a `history/<ch>` slice for every group it lists AND every
+/// channel carrying this key, and without it a community room never came back
+/// after a relaunch. Deliberately not the chat marker, which also survives on
+/// a forgotten end-to-end group (inert there, every consumer requiring
+/// `has_group`) and so cannot say "list this group-less channel". Stamped at
+/// the two community bind sites; never cleared (a left room stays a thread,
+/// as it does in-session). Additive at-rest: old binaries carry it inertly.
+pub(crate) const CHANNEL_KIND_COMMUNITY_PREFIX: &[u8] = b"fauna:channel_kind_community:";
+
+/// The provider-KV key holding `channel_id`'s community-room marker.
+fn channel_kind_community_key(channel_id: &ChannelId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(CHANNEL_KIND_COMMUNITY_PREFIX.len() + 32);
+    key.extend_from_slice(CHANNEL_KIND_COMMUNITY_PREFIX);
+    key.extend_from_slice(&channel_id.0);
+    key
+}
+
 /// Provider-KV key prefix holding a **folder channel's owner** (the 32-byte
 /// ActorId of the set's sharer — the nest-side channel claimant). Presence is
 /// also the *positive* folder marker the commit policy keys on: unlike the
@@ -330,6 +354,116 @@ fn parked_folder_succession_key(channel_id: &ChannelId) -> Vec<u8> {
     key.extend_from_slice(PARKED_FOLDER_SUCCESSION_PREFIX);
     key.extend_from_slice(&channel_id.0);
     key
+}
+
+/// Provider-KV key prefix for the **forked folder seat** mark
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+/// append → *A forked seat is final, says so, and heals only by a fresh
+/// Welcome*, part (a)): the folder commit walk met a future-epoch commit on
+/// this channel, so the group has moved past an epoch transition this seat
+/// refused or skipped and can never rejoin the chain alone. One byte of
+/// flags ([`FolderSeatFork`]): bit 0 — a policy-refused memo stood at the
+/// seat's epoch when it was marked (the cause the log holds); bit 1 — the
+/// seat's own roster row on the set's home nest has been dropped (part (b),
+/// once). Derived, recreatable state — the next launch walk re-derives the
+/// mark, and losing it only costs one repeated self-scoped leave. Goes with
+/// the group ([`MlsEngine::forget_group`]). Additive at-rest, like every key
+/// above.
+const FOLDER_SEAT_FORKED_PREFIX: &[u8] = b"fauna:folder_seat_forked:";
+
+/// The provider-KV key holding `channel_id`'s forked-seat mark.
+fn folder_seat_forked_key(channel_id: &ChannelId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(FOLDER_SEAT_FORKED_PREFIX.len() + 32);
+    key.extend_from_slice(FOLDER_SEAT_FORKED_PREFIX);
+    key.extend_from_slice(&channel_id.0);
+    key
+}
+
+/// Provider-KV key prefix recording a key package this device **spent** on a
+/// Welcome join: `fauna:spent_key_package:<KeyPackageRef bytes>` → one
+/// constant byte (`federation-shared-folders.md` § Cross-nest shared folders +
+/// channel append → *A forked seat is final, says so, and heals only by a
+/// fresh Welcome*, part (c)). openMLS deletes a consumed key package at the
+/// join, so without this record the engine cannot tell a Welcome addressing a
+/// package it spent (the re-delivered original) from one addressing a package
+/// it never held (a sibling device's) — [`MlsEngine::classify_welcome_address`].
+///
+/// **One key per ref, constant value — never a set under one key:** two
+/// devices joining different Welcomes at once change different keys (no
+/// both-changed key for the replica merge to report), and two devices
+/// consuming the same Welcome write identical bytes. Written by the join
+/// itself ([`MlsEngine::join_from_welcome`] and the bytes door), so every join
+/// door records it, and it rides the `__mls` replica with the join's flush.
+/// **Account-global, never pruned** (a few dozen bytes per join ever) and
+/// **not a per-channel slot**: dropping a seat ([`MlsEngine::forget_group`],
+/// the re-invite seat replace) must keep it, because the old original may
+/// still be re-delivered after the seat is replaced. Additive at-rest.
+const SPENT_KEY_PACKAGE_PREFIX: &[u8] = b"fauna:spent_key_package:";
+
+/// The provider-KV key recording `key_package_ref` as spent.
+fn spent_key_package_key(key_package_ref: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SPENT_KEY_PACKAGE_PREFIX.len() + key_package_ref.len());
+    key.extend_from_slice(SPENT_KEY_PACKAGE_PREFIX);
+    key.extend_from_slice(key_package_ref);
+    key
+}
+
+/// The constant value of a [`SPENT_KEY_PACKAGE_PREFIX`] entry.
+const SPENT_KEY_PACKAGE_VALUE: &[u8] = &[1];
+
+/// What a Welcome's addressed key package is **to this device**, as
+/// [`MlsEngine::classify_welcome_address`] reads it, pre-decrypt
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+/// append → *A forked seat is final, says so, and heals only by a fresh
+/// Welcome*, part (c)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeAddress {
+    /// A key package this device still holds: a join may follow (a re-invite
+    /// on a channel the device already holds).
+    Live,
+    /// None held, but this device — or a sibling whose replica flush it
+    /// restored — spent one of the addressed packages on a join: the
+    /// re-delivered original.
+    Spent,
+    /// Neither held nor recorded spent: a sibling device's package, the
+    /// sibling's Welcome to join.
+    NotHeld,
+}
+
+const FORK_FLAG_POLICY_REFUSED: u8 = 0b01;
+const FORK_FLAG_UNLISTED: u8 = 0b10;
+
+/// A folder seat's forked mark ([`FOLDER_SEAT_FORKED_PREFIX`]), as
+/// [`MlsEngine::folder_seat_forked`] reads it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderSeatFork {
+    /// A policy-refused memo stood at the seat's current epoch when the fork
+    /// was marked — the owner's succession commit refused here — rather than
+    /// a hole the log alone explains.
+    pub policy_refused: bool,
+    /// The seat has dropped its own roster row on the set's home nest
+    /// (part (b)'s self-unlist, owed once per fork).
+    pub unlisted: bool,
+}
+
+impl FolderSeatFork {
+    fn from_byte(b: u8) -> Self {
+        Self {
+            policy_refused: b & FORK_FLAG_POLICY_REFUSED != 0,
+            unlisted: b & FORK_FLAG_UNLISTED != 0,
+        }
+    }
+
+    fn to_byte(self) -> u8 {
+        let mut b = 0;
+        if self.policy_refused {
+            b |= FORK_FLAG_POLICY_REFUSED;
+        }
+        if self.unlisted {
+            b |= FORK_FLAG_UNLISTED;
+        }
+        b
+    }
 }
 
 /// Provider-KV key prefix under which the engine **keeps a group's room-post
@@ -1661,7 +1795,10 @@ impl MlsEngine {
     /// not itself a not-addressed verdict, so it surfaces as
     /// [`MlsError::Storage`] rather than misreporting a real fault as the
     /// benign case.
-    fn ensure_addressed_to_this_device(&self, welcome: &Welcome) -> Result<()> {
+    ///
+    /// Answers the ref of the held package it found, which the join records
+    /// spent ([`Self::record_key_package_spent`]).
+    fn ensure_addressed_to_this_device(&self, welcome: &Welcome) -> Result<Vec<u8>> {
         use openmls_traits::storage::StorageProvider as _;
         for secrets in welcome.secrets() {
             let held = self
@@ -1670,10 +1807,58 @@ impl MlsEngine {
                 .key_package::<_, KeyPackageBundle>(&secrets.new_member())
                 .map_err(|e| MlsError::Storage(format!("read key package: {e:?}")))?;
             if held.is_some() {
-                return Ok(());
+                return Ok(secrets.new_member().as_slice().to_vec());
             }
         }
         Err(MlsError::NotAddressedToThisDevice)
+    }
+
+    /// Record `key_package_ref` spent ([`SPENT_KEY_PACKAGE_PREFIX`]). Called
+    /// by both join doors after the join succeeded and before the group is
+    /// persisted, so the record lands in the same snapshot save as the group.
+    fn record_key_package_spent(&self, key_package_ref: &[u8]) {
+        let mut values = self.provider.storage().values.write().unwrap();
+        values.insert(
+            spent_key_package_key(key_package_ref),
+            SPENT_KEY_PACKAGE_VALUE.to_vec(),
+        );
+    }
+
+    /// What the Welcome in `welcome_bytes` addresses **to this device** — the
+    /// three-way re-invite reading of `federation-shared-folders.md` § Cross-nest
+    /// shared folders + channel append → *A forked seat is final, says so, and
+    /// heals only by a fresh Welcome*, part (c): [`WelcomeAddress::Live`] — a
+    /// key package this device still holds (a re-invite); [`WelcomeAddress::Spent`]
+    /// — none held, but one of the addressed refs is recorded spent
+    /// ([`SPENT_KEY_PACKAGE_PREFIX`]: the re-delivered original, spent here or
+    /// by a sibling whose flush this device restored); [`WelcomeAddress::NotHeld`]
+    /// — neither (a sibling device's package). Asked through
+    /// [`Self::ensure_addressed_to_this_device`], pre-decrypt: nothing is staged
+    /// and no init key is spent, so a join may follow. Bytes that are no
+    /// Welcome, or a storage fault while answering, are an `Err`, never a
+    /// verdict.
+    pub fn classify_welcome_address(&self, welcome_bytes: &[u8]) -> Result<WelcomeAddress> {
+        let mls_msg_in = MlsMessageIn::tls_deserialize_exact(welcome_bytes)
+            .map_err(|e| MlsError::Encoding(format!("{e:?}")))?;
+        let welcome = match mls_msg_in.extract() {
+            MlsMessageBodyIn::Welcome(w) => w,
+            _ => return Err(MlsError::OpenMls("expected a Welcome message".into())),
+        };
+        match self.ensure_addressed_to_this_device(&welcome) {
+            Ok(_) => Ok(WelcomeAddress::Live),
+            Err(MlsError::NotAddressedToThisDevice) => {
+                let values = self.provider.storage().values.read().unwrap();
+                let spent = welcome.secrets().iter().any(|secrets| {
+                    values.contains_key(&spent_key_package_key(secrets.new_member().as_slice()))
+                });
+                Ok(if spent {
+                    WelcomeAddress::Spent
+                } else {
+                    WelcomeAddress::NotHeld
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Join an existing group from a Welcome message.
@@ -1709,7 +1894,7 @@ impl MlsEngine {
         // Classified before staging, for the same reason the sibling door is:
         // a Welcome no key of ours is addressed by is the multi-device steady
         // state, and it must not read as an ingest fault.
-        self.ensure_addressed_to_this_device(&welcome)?;
+        let spent_ref = self.ensure_addressed_to_this_device(&welcome)?;
 
         let staged_welcome = StagedWelcome::new_from_welcome(
             &self.provider,
@@ -1735,6 +1920,7 @@ impl MlsEngine {
 
         let channel_id = ChannelId::from_group_id(group.group_id().as_slice());
         self.record_welcome_sender(&channel_id, sender_identity, group.epoch().as_u64());
+        self.record_key_package_spent(&spent_ref);
 
         #[cfg(feature = "native")]
         self.persist_group(&channel_id, &group);
@@ -1856,7 +2042,7 @@ impl MlsEngine {
         // duplicate-body comment gives: this is the door the push arm and the
         // durable drain actually take, so a classification only there would
         // leave the production path unclassified.
-        self.ensure_addressed_to_this_device(&welcome)?;
+        let spent_ref = self.ensure_addressed_to_this_device(&welcome)?;
 
         let staged_welcome =
             StagedWelcome::new_from_welcome(&self.provider, &mls_group_config, welcome, None)
@@ -1878,6 +2064,7 @@ impl MlsEngine {
 
         let channel_id = ChannelId::from_group_id(group.group_id().as_slice());
         self.record_welcome_sender(&channel_id, sender_identity, group.epoch().as_u64());
+        self.record_key_package_spent(&spent_ref);
 
         #[cfg(feature = "native")]
         self.persist_group(&channel_id, &group);
@@ -1888,6 +2075,76 @@ impl MlsEngine {
             .insert(channel_id, group);
 
         Ok(channel_id)
+    }
+
+    /// Make room for a Welcome that **re-admits** this device to
+    /// `channel_id`'s group after it was removed. A device that processed its
+    /// removal keeps the group loaded but evicted ([`Self::is_group_active`]):
+    /// it can seal nothing and open nothing new, and openMLS refuses to stage
+    /// a Welcome for a group id it already stores (`GroupAlreadyExists`, raised
+    /// before the Welcome's group id can be read), so the caller — who knows
+    /// the channel the delivery names — drops the evicted seat first. The
+    /// evicted state is deleted from the provider and from the loaded set;
+    /// what it was kept for stays elsewhere (the messages the device already
+    /// opened are in its threads, a room's earlier post secrets in their own
+    /// record). Whether anything was dropped. A group this device still holds
+    /// a seat in, or holds none of, is left alone: re-joining a seated group
+    /// stays the openMLS refusal it was.
+    pub fn drop_evicted_seat(&self, channel_id: &ChannelId) -> Result<bool> {
+        self.ensure_live()?;
+        let mut groups = self.groups.lock().expect("lock poisoned");
+        let Some(group) = groups.get_mut(channel_id) else {
+            return Ok(false);
+        };
+        if group.is_active() {
+            return Ok(false);
+        }
+        group
+            .delete(self.provider.storage())
+            .map_err(|e| MlsError::Storage(format!("delete the evicted group: {e:?}")))?;
+        groups.remove(channel_id);
+        drop(groups);
+        // The pending stamp described the evicted seat.
+        self.forget_pending_commit_hash(channel_id);
+        // Off the durable `active_groups` set too, as `forget_group` does, so a
+        // relaunch before the join lands never reloads a group the provider no
+        // longer holds; the join writes the row afresh.
+        #[cfg(feature = "native")]
+        self.storage
+            .remove_active_group(&channel_id.0)
+            .map_err(|e| MlsError::Storage(e.to_string()))?;
+        Ok(true)
+    }
+
+    /// Make room for a re-invite Welcome by dropping this device's seat in
+    /// `channel_id`'s group **whole**, active or not — part (c) of
+    /// `federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*. The caller has already decided the seat is no longer current
+    /// (marked forked, or evicted) and that the Welcome addresses a live key
+    /// package. Unlike [`Self::drop_evicted_seat`] it also drops a seat openMLS
+    /// still calls active (a forked one: the group moved past it), and unlike
+    /// [`Self::forget_group`] alone it deletes the group's state from the
+    /// provider, which openMLS requires before it stages a Welcome for the same
+    /// group id (`GroupAlreadyExists`). Then [`Self::forget_group`] drops every
+    /// per-channel slot that goes with the seat (the park, the forked mark, the
+    /// replica listing, the durable `active_groups` row). Idempotent: a channel
+    /// this engine holds no group for only runs the forget. Crash-safe in the
+    /// drain's terms: the Welcome is acked only after the join, so a crash
+    /// between the drop and the join leaves a channel held by nobody, whose
+    /// next drain is a plain first join.
+    pub fn drop_seat_for_reinvite(&self, channel_id: &ChannelId) -> Result<()> {
+        self.ensure_live()?;
+        {
+            let mut groups = self.groups.lock().expect("lock poisoned");
+            if let Some(group) = groups.get_mut(channel_id) {
+                group.delete(self.provider.storage()).map_err(|e| {
+                    MlsError::Storage(format!("delete the replaced seat's group: {e:?}"))
+                })?;
+                groups.remove(channel_id);
+            }
+        }
+        self.forget_group(channel_id)
     }
 
     /// Durably record the Welcome sender's leaf-verified identity for a
@@ -2441,6 +2698,58 @@ impl MlsEngine {
         values.remove(&merge_failed_commit_key(channel_id));
     }
 
+    /// Durably mark `channel_id` as a **community room** (see
+    /// [`CHANNEL_KIND_COMMUNITY_PREFIX`] — the marker that lists a group-less
+    /// room in the replica). Idempotent; never cleared.
+    pub fn mark_channel_community(&self, channel_id: &ChannelId) {
+        let mut values = self.provider.storage().values.write().unwrap();
+        values.insert(channel_kind_community_key(channel_id), b"1".to_vec());
+    }
+
+    /// Whether `channel_id` carries the community-room marker
+    /// ([`Self::mark_channel_community`]).
+    pub fn is_channel_community(&self, channel_id: &ChannelId) -> bool {
+        let values = self.provider.storage().values.read().unwrap();
+        values.contains_key(&channel_kind_community_key(channel_id))
+    }
+
+    /// Copy every **channel-kind** marker `from` carries — chat
+    /// ([`CHANNEL_KIND_CHAT_PREFIX`]), scheduling
+    /// ([`CHANNEL_KIND_SCHEDULING_PREFIX`]) and community room
+    /// ([`CHANNEL_KIND_COMMUNITY_PREFIX`]) — onto this engine. Idempotent and
+    /// additive: a marker is never cleared, so one already here stays.
+    ///
+    /// The succession sweep's carry: a marker says what a *channel* is, not
+    /// which leaf sits in it, so it belongs to the account and moves to the
+    /// successor's engine with the seat. A community room has no group for
+    /// the sweep to join, so without this the successor's own snapshot lists
+    /// no room at all — and on web, whose ceremony publishes that snapshot
+    /// over the predecessor's before the page reloads, the successor lost
+    /// every community room it held (`succession-aftermath.md`
+    /// § Implementation status today, the `__mls` leg).
+    pub fn carry_channel_kind_markers_from(&self, from: &MlsEngine) {
+        let carried: Vec<Vec<u8>> = {
+            let values = from.provider.storage().values.read().unwrap();
+            values
+                .keys()
+                .filter(|k| {
+                    [
+                        CHANNEL_KIND_CHAT_PREFIX,
+                        CHANNEL_KIND_SCHEDULING_PREFIX,
+                        CHANNEL_KIND_COMMUNITY_PREFIX,
+                    ]
+                    .iter()
+                    .any(|prefix| k.starts_with(prefix))
+                })
+                .cloned()
+                .collect()
+        };
+        let mut values = self.provider.storage().values.write().unwrap();
+        for key in carried {
+            values.insert(key, b"1".to_vec());
+        }
+    }
+
     /// Durably mark `channel_id` as a **chat** channel (see
     /// [`CHANNEL_KIND_CHAT_PREFIX`] — the folder sweep must never treat an
     /// unbound chat group as a folder channel). Idempotent; never cleared.
@@ -2598,6 +2907,98 @@ impl MlsEngine {
         values
             .remove(&parked_folder_succession_key(channel_id))
             .is_some()
+    }
+
+    /// Mark `channel_id`'s folder seat **forked** ([`FOLDER_SEAT_FORKED_PREFIX`])
+    /// and answer the mark as it now stands. A first marking records
+    /// `policy_refused` as the cause; a re-marking keeps the recorded flags
+    /// (the cause is the one the first walk saw, and the unlist stays done).
+    /// Persists on native only when the mark is new.
+    pub fn mark_folder_seat_forked(
+        &self,
+        channel_id: &ChannelId,
+        policy_refused: bool,
+    ) -> FolderSeatFork {
+        let (fork, fresh) = {
+            let mut values = self.provider.storage().values.write().unwrap();
+            let key = folder_seat_forked_key(channel_id);
+            match values.get(&key).and_then(|v| v.first().copied()) {
+                Some(b) => (FolderSeatFork::from_byte(b), false),
+                None => {
+                    let fork = FolderSeatFork {
+                        policy_refused,
+                        unlisted: false,
+                    };
+                    values.insert(key, vec![fork.to_byte()]);
+                    (fork, true)
+                }
+            }
+        };
+        #[cfg(feature = "native")]
+        if fresh && let Err(e) = self.save_state() {
+            tracing::warn!("persist after marking a folder seat forked: {e}");
+        }
+        #[cfg(not(feature = "native"))]
+        let _ = fresh;
+        fork
+    }
+
+    /// `channel_id`'s forked-seat mark, if the folder rail has set one.
+    pub fn folder_seat_forked(&self, channel_id: &ChannelId) -> Option<FolderSeatFork> {
+        let values = self.provider.storage().values.read().unwrap();
+        values
+            .get(&folder_seat_forked_key(channel_id))
+            .and_then(|v| v.first().copied())
+            .map(FolderSeatFork::from_byte)
+    }
+
+    /// Record that a forked seat's self-unlist landed — its own roster row on
+    /// the set's home nest is dropped, owed no more for this fork. A no-op on
+    /// a seat not marked forked. Persists on native when it changes the mark.
+    pub fn note_folder_seat_unlisted(&self, channel_id: &ChannelId) {
+        let changed = {
+            let mut values = self.provider.storage().values.write().unwrap();
+            let key = folder_seat_forked_key(channel_id);
+            match values.get(&key).and_then(|v| v.first().copied()) {
+                Some(b) if b & FORK_FLAG_UNLISTED == 0 => {
+                    values.insert(key, vec![b | FORK_FLAG_UNLISTED]);
+                    true
+                }
+                _ => false,
+            }
+        };
+        #[cfg(feature = "native")]
+        if changed && let Err(e) = self.save_state() {
+            tracing::warn!("persist after a forked folder seat's unlist: {e}");
+        }
+        #[cfg(not(feature = "native"))]
+        let _ = changed;
+    }
+
+    /// The in-memory drop of `channel_id`'s forked-seat mark (the
+    /// [`Self::forget_group`] leg); answers whether one stood.
+    fn drop_folder_seat_forked(&self, channel_id: &ChannelId) -> bool {
+        let mut values = self.provider.storage().values.write().unwrap();
+        values.remove(&folder_seat_forked_key(channel_id)).is_some()
+    }
+
+    /// Whether `channel_id`'s policy-refused memo
+    /// ([`POLICY_REFUSED_COMMIT_PREFIX`]) holds a refusal at the group's
+    /// current epoch — the cause a forked folder seat's mark names. `false`
+    /// for a group this engine does not hold.
+    pub fn policy_refused_commit_at_current_epoch(&self, channel_id: &ChannelId) -> bool {
+        let Ok(epoch) = self.current_epoch(channel_id) else {
+            return false;
+        };
+        let values = self.provider.storage().values.read().unwrap();
+        values
+            .get(&policy_refused_commit_key(channel_id))
+            .is_some_and(|v| {
+                v.as_chunks::<40>()
+                    .0
+                    .iter()
+                    .any(|entry| u64::from_be_bytes(entry[32..40].try_into().unwrap()) == epoch)
+            })
     }
 
     /// The MLS-authenticated sender of the Welcome this device joined
@@ -3350,11 +3751,19 @@ impl MlsEngine {
         // A forgotten group carries no pending, so its identity stamp would be a
         // lie a later snapshot could restore.
         self.forget_pending_commit_hash(channel_id);
-        // The one per-channel marker that goes with the group: a statement
-        // rested for a channel this seat left holds no walk and re-points no
-        // marker, and a rejoin must not inherit a hold from the old seat. The
-        // other markers stay (never cleared, by their own contracts).
+        // The per-channel markers that go with the group: a statement rested
+        // for a channel this seat left holds no walk and re-points no marker,
+        // and a rejoin must not inherit a hold from the old seat; nor may it
+        // inherit the old seat's forked mark — a seat joined from a fresh
+        // Welcome is current. The other markers stay (never cleared, by their
+        // own contracts).
         self.forget_parked_folder_succession(channel_id);
+        if self.drop_folder_seat_forked(channel_id) {
+            #[cfg(feature = "native")]
+            if let Err(e) = self.save_state() {
+                tracing::warn!("persist after dropping a forked folder seat's mark: {e}");
+            }
+        }
         // Off the last-seen listing too: a rejoin before the next landed flush
         // is a join, and the swap must carry it, not read it as a sibling's
         // deletion.
@@ -3609,7 +4018,19 @@ impl MlsEngine {
         // coherent joined state.
         {
             let mut store = self.provider.storage().values.write().unwrap();
+            // The spent key-package records are a monotone account-global set
+            // ([`SPENT_KEY_PACKAGE_PREFIX`]): a join this device made after
+            // the snapshot was sealed must stay recorded, so the swap keeps
+            // the union of both sides.
+            let spent: Vec<(Vec<u8>, Vec<u8>)> = store
+                .iter()
+                .filter(|(k, _)| k.starts_with(SPENT_KEY_PACKAGE_PREFIX))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             *store = values;
+            for (k, v) in spent {
+                store.insert(k, v);
+            }
             for group in &carried {
                 for (k, v) in &group.entries {
                     store.insert(k.clone(), v.clone());
@@ -6793,6 +7214,119 @@ mod tests {
         let welcome_bytes = welcome_for_bob.tls_serialize_detached().unwrap();
         let result = charlie.join_from_welcome_bytes(&welcome_bytes);
         assert!(result.is_err(), "welcome meant for another party must fail");
+    }
+
+    /// The re-invite discriminator, pre-decrypt, read three ways
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*, part (c)): a Welcome addressing a key package this device
+    /// still holds is `Live` — and asking spends nothing (the join after the
+    /// question still succeeds); once the join spent it, `Spent`; a Welcome
+    /// for a package a sibling device of the same identity minted, which this
+    /// device never held, `NotHeld`. Bytes that are no Welcome are an error,
+    /// never a verdict.
+    #[test]
+    fn the_welcome_discriminator_reads_live_spent_and_not_held() {
+        let (alice, _a) = make_engine();
+        let bob_a = MlsEngine::new_in_memory(ActorKeypair::from_secret([44u8; 32])).unwrap();
+        let bob_b = MlsEngine::new_in_memory(ActorKeypair::from_secret([44u8; 32])).unwrap();
+        let bob_kps = bob_a.generate_key_packages(1).unwrap();
+        let (_channel, welcome) = alice.create_group(&bob_kps).unwrap();
+        let welcome_bytes = welcome.tls_serialize_detached().unwrap();
+
+        assert_eq!(
+            bob_a.classify_welcome_address(&welcome_bytes).unwrap(),
+            WelcomeAddress::Live,
+            "the key package is still held: a re-invite"
+        );
+        bob_a
+            .join_from_welcome_bytes(&welcome_bytes)
+            .expect("asking spent nothing: the join still succeeds");
+        assert_eq!(
+            bob_a.classify_welcome_address(&welcome_bytes).unwrap(),
+            WelcomeAddress::Spent,
+            "the join spent the key package: the re-delivered original"
+        );
+
+        let sibling_kps = bob_b.generate_key_packages(1).unwrap();
+        let (_other, sibling_welcome) = alice.create_group(&sibling_kps).unwrap();
+        let sibling_bytes = sibling_welcome.tls_serialize_detached().unwrap();
+        assert_eq!(
+            bob_a.classify_welcome_address(&sibling_bytes).unwrap(),
+            WelcomeAddress::NotHeld,
+            "a sibling's package this device never held: the sibling's to join"
+        );
+        assert!(
+            bob_a.classify_welcome_address(b"not a welcome").is_err(),
+            "junk bytes are no verdict"
+        );
+    }
+
+    /// The spent record ([`SPENT_KEY_PACKAGE_PREFIX`]) is durable state that
+    /// rides the provider snapshot: a device restored from the joining
+    /// device's export reads the original Welcome as `Spent`, a Welcome for a
+    /// package another engine of the same identity minted after that export
+    /// as `NotHeld`, and a package of its own as `Live` — and a whole-KV swap
+    /// onto a snapshot sealed before a later join keeps that join's record.
+    #[test]
+    fn a_consumed_key_package_ref_is_recorded_spent_and_survives_reload() {
+        let identity = || ActorKeypair::from_secret([45u8; 32]);
+        let (alice, _a) = make_engine();
+        let device_a = MlsEngine::new_in_memory(identity()).unwrap();
+        let kps = device_a.generate_key_packages(1).unwrap();
+        let (_channel, welcome) = alice.create_group(&kps).unwrap();
+        let welcome_bytes = welcome.tls_serialize_detached().unwrap();
+        device_a.join_from_welcome_bytes(&welcome_bytes).unwrap();
+
+        let reloaded = MlsEngine::new_in_memory(identity()).unwrap();
+        reloaded
+            .restore_from_provider_storage(
+                device_a.export_provider_storage(),
+                &device_a.list_groups_with_raw_ids(),
+            )
+            .unwrap();
+        assert_eq!(
+            reloaded.classify_welcome_address(&welcome_bytes).unwrap(),
+            WelcomeAddress::Spent,
+            "the record survives the reload: the original is a re-delivery"
+        );
+
+        let device_b = MlsEngine::new_in_memory(identity()).unwrap();
+        let b_kps = device_b.generate_key_packages(1).unwrap();
+        let (_b_channel, b_welcome) = alice.create_group(&b_kps).unwrap();
+        let b_bytes = b_welcome.tls_serialize_detached().unwrap();
+        assert_eq!(
+            reloaded.classify_welcome_address(&b_bytes).unwrap(),
+            WelcomeAddress::NotHeld,
+            "a package the sibling minted after the export was never held here"
+        );
+
+        let own_kps = reloaded.generate_key_packages(1).unwrap();
+        let (_own_channel, own_welcome) = alice.create_group(&own_kps).unwrap();
+        let own_bytes = own_welcome.tls_serialize_detached().unwrap();
+        assert_eq!(
+            reloaded.classify_welcome_address(&own_bytes).unwrap(),
+            WelcomeAddress::Live,
+            "a fresh package of its own is live"
+        );
+
+        // A join made after a snapshot was sealed — with a package minted
+        // after it too, so the older snapshot holds no copy of that init key —
+        // keeps its record across a swap onto that older snapshot.
+        let stale = reloaded.export_provider_storage();
+        let stale_listing = reloaded.list_groups_with_raw_ids();
+        let late_kps = reloaded.generate_key_packages(1).unwrap();
+        let (_late_channel, late_welcome) = alice.create_group(&late_kps).unwrap();
+        let late_bytes = late_welcome.tls_serialize_detached().unwrap();
+        reloaded.join_from_welcome_bytes(&late_bytes).unwrap();
+        reloaded
+            .restore_from_provider_storage(stale, &stale_listing)
+            .unwrap();
+        assert_eq!(
+            reloaded.classify_welcome_address(&late_bytes).unwrap(),
+            WelcomeAddress::Spent,
+            "the swap keeps the union of the spent records"
+        );
     }
 
     /// **A retired engine must not seal.** The probe this row was found by,

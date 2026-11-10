@@ -42,7 +42,7 @@ import pytest
 
 from helpers import waiting
 from helpers.app_log_section import app_text
-from helpers.app_surface import app_name, skip_environment
+from helpers.app_surface import app_name, launched_as_a_bundle, skip_environment
 
 
 def _why(driver):
@@ -80,31 +80,8 @@ pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
 # Every app has built the *firing* leg and publishes the log. The one short
 # column is a LAUNCH SHAPE, not an app: macOS shares every line of the firing leg
 # with `ios` (both are FaunaKit's `MessageBannerObserver`), and what decides its
-# column is run-level rather than per-app. See `_launched_as_a_bundle`.
+# column is run-level rather than per-app. See `helpers.app_surface.launched_as_a_bundle`.
 
-
-def _launched_as_a_bundle(driver) -> bool:
-    """Did this macOS launch come from the `.app`, or from the bare binary?
-
-    `NotificationHost.isAvailable` is `Bundle.main.bundleURL.pathExtension ==
-    "app" && bundleIdentifier != nil`, so a bare-binary process has no
-    notification host at all: the app hands no banner to the platform and — by
-    `MessageBannerObserver`'s deliberate design — records none rather than
-    recording around the guard. The driver already reports which of the two ran
-    (`drivers/macos.py::bundle_path`, `None` exactly for a bare-binary launch),
-    so this module asserts the column under `--macos-artifact` and declares it
-    short otherwise.
-
-    The flag is run-level and single-valued — `docs/goal/architecture/apps/
-    apple-e2e-automation.md` § Artifact launch mode, *"so any macOS journey can
-    be replayed against the artifact"* — so no per-module launch shape is
-    invented here; this module is simply one of the journeys that replay covers.
-    The default stays the bare binary (rule 9 of the same doc), which is why
-    The bare-binary launch is therefore a property of the run, declared as an
-    environment skip: it is not app work and not debt.
-    """
-    reader = getattr(driver, "bundle_path", None)
-    return bool(reader()) if callable(reader) else False
 
 #: Why the macOS bare-binary column is short, in the goal doc's own words. The
 #: pointer is the status row itself — `conversations.md` § Implementation status
@@ -124,7 +101,7 @@ _BARE_BINARY = (
 
 def _require_banner_leg(driver):
     """Skip with a declared reason when the launch shape cannot fire a banner."""
-    if app_name(driver) == "macos" and not _launched_as_a_bundle(driver):
+    if app_name(driver) == "macos" and not launched_as_a_bundle(driver):
         skip_environment(_BARE_BINARY)
 
 
@@ -245,3 +222,197 @@ def test_new_message_raises_a_banner_except_in_the_open_thread(logged_in_app):
         "app has stopped firing entirely rather than suppressing the open "
         f"thread. Full log: {waiting.message_banners(d)}{_why(d)}"
     )
+
+
+
+
+def _native_thread(conv, channel_hex: str):
+    """The FaunaMls thread for ``channel_hex`` in the app's current list, or
+    ``None`` — resolved by the channel id, which survives the reload an
+    identity switch performs (the app-assigned ``thread_id`` need not)."""
+    return next(
+        (
+            t
+            for t in conv.list_threads()
+            if t.rail == "FaunaMls" and t.channel_id_hex == channel_hex
+        ),
+        None,
+    )
+
+
+@pytest.mark.feature("conversations")
+@pytest.mark.real_conversations
+def test_switching_identity_raises_no_banner_for_the_incoming_identitys_threads(
+    logged_in_app, nest_instance, test_user, request
+):
+    """``conversations`` outcome 21 — ``message-banners.md`` § Where logic lives:
+    an identity change reseeds the tracker, so the incoming identity's restored
+    threads are not news.
+
+    The signed-in identity holds two native 1:1 threads with an unread message
+    each, delivered through the nest by two API-tier senders after this launch
+    (so their activity is past the launch floor, and an unseeded tracker WOULD
+    banner them). The app switches to a second identity and back, in the same
+    process (the session's own nest: no relaunch), and the restored threads
+    raise nothing; a genuinely new message afterwards still raises its banner,
+    which proves the tracker is live rather than silent altogether. The
+    fired-banner log is process-wide, so it spans both switches.
+
+    The new message is a third sender's first message, minted only once the
+    switch back has finished. A message minted with the planted ones and posted
+    later would carry the sender stamp of its minting, below the floor the
+    switch back reset (``message-banners.md``: the floor is compared with the
+    thread's newest stamp, so a backdated stamp raises no banner), and the
+    positive assertion would read the declared under-report instead of the
+    tracker; minting after the switch keeps the stamp past the floor however
+    long the switch took.
+
+    The threads are REAL nest-held channels, never the in-memory test inject:
+    an identity switch rebuilds the conversations state from the incoming
+    identity's store and the nest (tui replaces ``ConversationsState`` at both
+    ends of an identity's life), so an injected thread — which lives only in
+    the outgoing manager's memory — has nothing to restore from, and the
+    no-banner read after the switch back would read an empty list.
+    """
+    from common.auth import create_actor_and_register
+    from helpers.budgets import MLS_HANDSHAKE_S
+    from helpers.e2e_session import e2e_login_device_id, login_as
+    from tests.api import conv_api
+
+    d = logged_in_app.driver
+    conv = logged_in_app.conversations
+    _require_banner_leg(d)
+    port = nest_instance["port"]
+    me = test_user["actor_id_hex"]
+    conv.enable_real_faunamls()
+    waiting.await_account_runtime_assembled(d)
+
+    def _open_thread_from_a_new_sender(body: str) -> str:
+        """A fresh sender opens a 1:1 with the app's user and posts ``body``,
+        minted now; returns the channel hex."""
+        sender = create_actor_and_register(
+            port, admin_signing_key=nest_instance["admin"]["signing_key"]
+        )
+        # Each fetch consumes one key package: wait for one per sender.
+        waiting.wait_until(
+            lambda: conv_api.keypackage_count(port, test_user, me) > 0,
+            MLS_HANDSHAKE_S,
+            diagnose=lambda: "waiting for the app to publish a key package",
+        )
+        kp = conv_api.keypackage_fetch(port, sender, me)
+        assert kp is not None, "the app's user should have a fetchable key package"
+        channel_hex, welcome, msgs = conv_api.mint_group_welcome_with_messages(
+            bytes(sender["signing_key"]), kp, [body]
+        )
+        conv_api.accept_contact(port, test_user, sender["actor_id_hex"])
+        inbox_id = conv_api.welcome_deliver(port, sender, me, channel_hex, welcome)
+        conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S)
+        conv_api.channel_send(port, sender, channel_hex, msgs[0])
+        return channel_hex
+
+    # The outgoing identity's threads: two senders, one unread message each.
+    planted = waiting.require_message_banners(d)["started"]
+    first_hex = _open_thread_from_a_new_sender("unread before the switch")
+    second_hex = _open_thread_from_a_new_sender("also unread before the switch")
+    assert first_hex != second_hex, "two senders' 1:1s collapsed into one channel"
+
+    def _both_unread() -> bool:
+        a, b = _native_thread(conv, first_hex), _native_thread(conv, second_hex)
+        return bool(a and b and a.unread_count and b.unread_count)
+
+    waiting.wait_until(
+        _both_unread,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: (
+            "the two planted threads never showed unread before the switch; "
+            f"threads: {[(t.channel_id_hex, t.unread_count) for t in conv.list_threads()]}"
+        ),
+    )
+    waiting.await_banner_pass_after(d, planted, what="the threads planted before the switch")
+
+    def _login(user, handle):
+        login_as(
+            logged_in_app,
+            nest_instance,
+            user,
+            handle=handle,
+            device_id=e2e_login_device_id(logged_in_app),
+            request=request,
+            spa_url_fixture="spa_url",
+        )
+        conv.enable_real_faunamls()
+        waiting.await_account_runtime_assembled(d)
+
+    # Switch to a second identity: whatever it holds is its login load.
+    other = create_actor_and_register(
+        port,
+        base_url=nest_instance["url"],
+        admin_signing_key=nest_instance["admin"]["signing_key"],
+    )
+    before = waiting.fired_banner_threads(d)
+    planted = waiting.message_banners(d)["started"]
+    _login(other, other["handle"])
+    waiting.await_banner_pass_after(d, planted, what="the second identity's login load")
+    fired = waiting.fired_banner_threads(d)
+    assert fired[len(before):] == [], (
+        "switching to another identity raised banner(s) "
+        f"{fired[len(before):]} — its threads are its login load, not news. "
+        f"Full log: {waiting.message_banners(d)}{_why(d)}"
+    )
+
+    # Switch back: the first identity's threads restore, unread, silently.
+    planted = waiting.message_banners(d)["started"]
+    _login(test_user, test_user.get("handle") or "e2e-user")
+    restored: dict = {}
+
+    def _restored():
+        nonlocal restored
+        restored = {
+            t.channel_id_hex: t.unread_count
+            for t in conv.list_threads()
+            if t.rail == "FaunaMls"
+        }
+        return bool(restored.get(first_hex)) and bool(restored.get(second_hex))
+
+    waiting.wait_until(
+        _restored,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: (
+            f"the switched-back identity's channels {first_hex} and {second_hex} "
+            "never restored holding their unread message (the read positions "
+            "decide unread once they arrive — conversation-read-state.md § How "
+            "the carriers meet the in-memory set), so the no-banner assertion "
+            f"would read nothing; FaunaMls channels (hex → unread): {restored}"
+        ),
+    )
+    waiting.await_banner_pass_after(d, planted, what="the restored threads' snapshot")
+    fired = waiting.fired_banner_threads(d)
+    assert fired[len(before):] == [], (
+        "switching back raised banner(s) for the restored threads "
+        f"{fired[len(before):]} — an identity change reseeds the tracker, and "
+        f"restored threads are not news. Full log: {waiting.message_banners(d)}{_why(d)}"
+    )
+
+    # A genuinely new message after the switch still raises its banner —
+    # minted now, so its stamp is past the floor the switch back reset.
+    planted = waiting.message_banners(d)["started"]
+    new_hex = _open_thread_from_a_new_sender("a new message after the switch")
+    waiting.wait_until(
+        lambda: (_native_thread(conv, new_hex) or _ThreadAbsent).message_count >= 1,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: "the app never decrypted the message sent after the switch",
+    )
+    new_thread = _native_thread(conv, new_hex).thread_id
+    waiting.await_banner_pass_after(d, planted, what="the message after the switch")
+    fired = waiting.fired_banner_threads(d)
+    assert fired[len(before):] == [new_thread], (
+        "a new message after the identity switch must raise exactly one banner "
+        f"for its thread. Fired since the switch: {fired[len(before):]}; expected "
+        f"[{new_thread!r}]. Full log: {waiting.message_banners(d)}{_why(d)}"
+    )
+
+
+class _ThreadAbsent:
+    """Stand-in for a thread not (yet) in the list: reads zero messages."""
+
+    message_count = 0

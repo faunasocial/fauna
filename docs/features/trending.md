@@ -4,6 +4,9 @@ title: See what is trending
 section: everyday
 goal: docs/goal/behavior/trending.md § The Trending feed
 guide: docs/guides/app-tour.md § Feeds
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -14,7 +17,7 @@ refreshing.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 23b3189e2b.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] Choosing Trending shows public posts, and a refresh keeps you on Trending — `docs/goal/behavior/trending.md` § The Trending feed
    - `tests/e2e-unified/tests/test_feed.py::test_trending_feed_selection`
@@ -30,6 +33,10 @@ Stamped 2026-09-19 at 23b3189e2b.
    - `tests/e2e-unified/tests/test_feed.py::test_a_muted_word_still_sinks_a_post_on_trending`
 6. [nest] Your nest tells other nests a post is trending only once several different people here engaged with it, and never for a restricted post — `docs/goal/behavior/trending.md` § Federation exchange
    - `tests/e2e-unified/tests/api/test_trending_federation.py::test_export_withholds_below_k_and_restricted_posts`
+7. [nest] A post that gathers no new engagement fades out of Trending as time passes — `docs/goal/behavior/trending.md` § Local velocity
+   - `tests/e2e-unified/tests/api/test_trending_federation.py::test_a_post_with_no_new_engagement_fades_out_of_trending`
+8. [nest] A post Trending brings from another nest is the one its author signed; a peer cannot substitute content for it — `docs/goal/behavior/trending.md` § Import-triggered public-post fetch
+   - `tests/e2e-unified/tests/api/test_trending_federation.py::test_a_peer_cannot_substitute_content_for_a_trending_post`
 
 ## Status
 
@@ -43,6 +50,8 @@ Stamped 2026-09-19 at 23b3189e2b.
 | ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -54,4 +63,6 @@ Stamped 2026-09-19 at 23b3189e2b.
 | 5 | app | `tests/e2e-unified/tests/test_feed.py::test_a_global_factor_still_sinks_a_post_on_trending` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_feed.py::test_a_muted_word_still_sinks_a_post_on_trending` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_trending_federation.py::test_export_withholds_below_k_and_restricted_posts` | nest (linux): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_trending_federation.py::test_a_post_with_no_new_engagement_fades_out_of_trending` | nest (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_trending_federation.py::test_a_peer_cannot_substitute_content_for_a_trending_post` | nest (linux): passed |
 <!-- features-render:end -->

@@ -86,6 +86,18 @@
 //! closed set ([`Refusal`]), never a caller-supplied code: a test names a
 //! refusal the product can really meet, not a string it invented.
 //!
+//! **One caller only.** `…/refuse?actor=<64-hex>` refuses the kind for that
+//! ONE actor's requests and passes every other caller's (combinable with
+//! `as`). It exists for the journeys where two seats on one nest read the same
+//! kind and only one of them must be turned away: the parked floor delete
+//! (`community-rooms.md` § Implementation status today, residual (d)) needs
+//! the member's policy-version read refused while the founder's own floor
+//! delete — which reads the same `room.list_roster` for the version it signs
+//! under — still files. The actor is the per-actor connection's own, read off
+//! the dispatch subject; a federation or principal request has no actor and
+//! is never refused by a scoped gate. `refused` counts only the requests
+//! actually turned away.
+//!
 //! ## Dropping the reply — the lost-reply sibling
 //!
 //! `POST …/{kind}/drop-reply` switches the gate to the third failure a client
@@ -209,6 +221,11 @@ enum Mode {
     /// composer's failed send (`feed.md` § Errors & edge cases) has no ordinary
     /// input that provokes it.
     Refuse(Refusal),
+    /// [`Mode::Refuse`] for ONE caller (`POST …/{kind}/refuse?actor=<hex>`,
+    /// module doc § Refusal → *One caller only*): a request served as `actor`
+    /// on the per-actor plane is refused, every other request of the kind
+    /// passes.
+    RefuseFor { refusal: Refusal, actor: [u8; 32] },
     /// Run the handler, then close the connection instead of replying (`POST
     /// …/{kind}/drop-reply`) — a request that took effect and was never
     /// answered. Does not park: the hold's `park` passes it straight through,
@@ -337,6 +354,12 @@ impl HoldGate {
         self.mode.send_replace(Mode::Refuse(refusal));
     }
 
+    /// Refuse this kind for `actor` alone until `release` — waking the parked
+    /// ones: `actor`'s into the refusal, everyone else's to run.
+    fn refuse_for(&self, refusal: Refusal, actor: [u8; 32]) {
+        self.mode.send_replace(Mode::RefuseFor { refusal, actor });
+    }
+
     /// Drop the reply of every request of this kind until `release` — waking
     /// any parked ones to run their handler, whose reply is then dropped too.
     fn drop_replies(&self) {
@@ -376,7 +399,15 @@ impl HoldGate {
     /// `shutdown` is the nest's graceful-shutdown flag
     /// (`WsState::subscribe_shutdown`); only [`Mode::HoldUntilShutdown`] reads
     /// it. A receiver whose sender is gone counts as "never shutting down".
-    async fn park(&self, mut shutdown: watch::Receiver<bool>) -> Verdict {
+    ///
+    /// `actor` is who the request is served as on the per-actor plane, `None`
+    /// for a federation or principal request; only [`Mode::RefuseFor`] reads
+    /// it.
+    async fn park_as(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+        actor: Option<[u8; 32]>,
+    ) -> Verdict {
         let verdict = match self.current() {
             // Already stopping: the request this mode stages is one sent
             // BEFORE the stop, so a later arrival runs as usual.
@@ -385,6 +416,15 @@ impl HoldGate {
             // task's decision, made once the handler is done.
             Mode::Open | Mode::DropReply | Mode::DropReplyOnce => return Verdict::Pass,
             Mode::Refuse(refusal) => Verdict::Refuse(refusal),
+            Mode::RefuseFor {
+                refusal,
+                actor: target,
+            } => {
+                if actor != Some(target) {
+                    return Verdict::Pass;
+                }
+                Verdict::Refuse(refusal)
+            }
             // One request of the pass budget: spent here, atomically, so two
             // arriving together cannot both take the last one.
             Mode::Hold
@@ -440,6 +480,10 @@ impl HoldGate {
                 self.released.fetch_add(1, Ordering::SeqCst);
                 match woke_to {
                     Mode::Refuse(refusal) => Verdict::Refuse(refusal),
+                    Mode::RefuseFor {
+                        refusal,
+                        actor: target,
+                    } if actor == Some(target) => Verdict::Refuse(refusal),
                     _ => Verdict::Pass,
                 }
             }
@@ -448,6 +492,13 @@ impl HoldGate {
             self.refused.fetch_add(1, Ordering::SeqCst);
         }
         verdict
+    }
+
+    /// [`Self::park_as`] for a request with no actor — the unit tests'
+    /// shorthand.
+    #[cfg(test)]
+    async fn park(&self, shutdown: watch::Receiver<bool>) -> Verdict {
+        self.park_as(shutdown, None).await
     }
 }
 
@@ -491,7 +542,11 @@ impl HoldGate {
                     return false;
                 }
             }
-            Mode::Open | Mode::Hold | Mode::HoldUntilShutdown | Mode::Refuse(_) => return false,
+            Mode::Open
+            | Mode::Hold
+            | Mode::HoldUntilShutdown
+            | Mode::Refuse(_)
+            | Mode::RefuseFor { .. } => return false,
         }
         self.dropped.fetch_add(1, Ordering::SeqCst);
         true
@@ -557,9 +612,12 @@ impl RpcHoldRegistry {
 /// before the per-kind deadline timeout is started, so an armed hold does not
 /// consume the handler's own budget. A kind no test has ever named costs one
 /// mutex-guarded map lookup that misses.
-pub async fn hold_if_armed(state: &AppState, kind: &str) -> Verdict {
+///
+/// `actor` is the actor the request is served as on the per-actor plane, or
+/// `None` (federation, principal) — what a scoped refusal matches.
+pub async fn hold_if_armed(state: &AppState, kind: &str, actor: Option<[u8; 32]>) -> Verdict {
     match state.rpc_hold.existing(kind) {
-        Some(gate) => gate.park(state.ws.subscribe_shutdown()).await,
+        Some(gate) => gate.park_as(state.ws.subscribe_shutdown(), actor).await,
         None => Verdict::Pass,
     }
 }
@@ -618,6 +676,10 @@ async fn arm_hold(
 struct RefuseQuery {
     #[serde(default, rename = "as")]
     refusal: Refusal,
+    /// The one actor to refuse (64 hex), module doc § Refusal → *One caller
+    /// only*; absent refuses every caller.
+    #[serde(default)]
+    actor: Option<String>,
 }
 
 /// `POST /api/v1/test/rpc-hold/{kind}/hold-until-shutdown` — park every
@@ -639,9 +701,10 @@ async fn arm_hold_until_shutdown(
     Json(json!({ "ok": true, "kind": kind })).into_response()
 }
 
-/// `POST /api/v1/test/rpc-hold/{kind}/refuse[?as=outdated|unauthenticated]` — answer every
-/// request of `kind` with [`refused_error`] of that flavour until `release`,
-/// including any parked by an earlier hold. Returns `{"ok": true, "kind": <kind>}`.
+/// `POST /api/v1/test/rpc-hold/{kind}/refuse[?as=outdated|unauthenticated][&actor=<hex>]`
+/// — answer every request of `kind` (only `actor`'s, when named) with
+/// [`refused_error`] of that flavour until `release`, including any parked by
+/// an earlier hold. Returns `{"ok": true, "kind": <kind>}`.
 async fn refuse_kind(
     State(state): State<Arc<AppState>>,
     Path(kind): Path<String>,
@@ -654,7 +717,21 @@ async fn refuse_kind(
         ))
         .into_response();
     }
-    state.rpc_hold.gate(&kind).refuse(query.refusal);
+    match query.actor.as_deref() {
+        None => state.rpc_hold.gate(&kind).refuse(query.refusal),
+        Some(hex_actor) => match hex::decode(hex_actor)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        {
+            Some(actor) => state.rpc_hold.gate(&kind).refuse_for(query.refusal, actor),
+            None => {
+                return ApiError::bad_request(format!(
+                    "actor {hex_actor:?} is not a 64-hex actor id"
+                ))
+                .into_response();
+            }
+        },
+    }
     Json(json!({ "ok": true, "kind": kind })).into_response()
 }
 
@@ -719,7 +796,11 @@ async fn hold_status(
         Some(gate) => Json(json!({
             "armed": gate.is_armed(),
             "until_shutdown": gate.current() == Mode::HoldUntilShutdown,
-            "refusing": matches!(gate.current(), Mode::Refuse(_)),
+            "refusing": matches!(gate.current(), Mode::Refuse(_) | Mode::RefuseFor { .. }),
+            "refusing_actor": match gate.current() {
+                Mode::RefuseFor { actor, .. } => Some(hex::encode(actor)),
+                _ => None,
+            },
             "dropping": matches!(gate.current(), Mode::DropReply | Mode::DropReplyOnce),
             "holding": gate.holding.load(Ordering::SeqCst),
             "passing": gate.passing.load(Ordering::SeqCst),
@@ -734,6 +815,7 @@ async fn hold_status(
             "armed": false,
             "until_shutdown": false,
             "refusing": false,
+            "refusing_actor": null,
             "dropping": false,
             "holding": 0,
             "passing": 0,
@@ -973,6 +1055,63 @@ mod tests {
         gate.release();
         assert_eq!(gate.park(no_shutdown()).await, Verdict::Pass);
         assert_eq!(gate.refused.load(Ordering::SeqCst), 2);
+    }
+
+    /// A scoped refusal turns away the named actor's requests only: another
+    /// actor's request of the same kind, and an actor-less (federation)
+    /// request, pass — parked ones woken accordingly — and `refused` counts
+    /// only the ones turned away.
+    #[tokio::test]
+    async fn a_refusal_scoped_to_one_actor_refuses_that_actor_and_passes_another() {
+        let named = [7u8; 32];
+        let other = [9u8; 32];
+        let gate = Arc::new(HoldGate::new());
+        gate.arm();
+        // spawn-ok(test): a test-local park the test awaits after the refusal
+        let parked_named = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.park_as(no_shutdown(), Some(named)).await }
+        });
+        // spawn-ok(test): a test-local park the test awaits after the refusal
+        let parked_other = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move { gate.park_as(no_shutdown(), Some(other)).await }
+        });
+        wait_for(|| gate.holding.load(Ordering::SeqCst) == 2).await;
+
+        gate.refuse_for(Refusal::Unknown, named);
+        for (parked, expected) in [
+            (parked_named, Verdict::Refuse(Refusal::Unknown)),
+            (parked_other, Verdict::Pass),
+        ] {
+            let verdict = tokio::time::timeout(Duration::from_secs(5), parked)
+                .await
+                .expect("a scoped refusal wakes every parked request")
+                .expect("the parked task did not panic");
+            assert_eq!(verdict, expected);
+        }
+
+        assert_eq!(
+            gate.park_as(no_shutdown(), Some(named)).await,
+            Verdict::Refuse(Refusal::Unknown)
+        );
+        assert_eq!(
+            gate.park_as(no_shutdown(), Some(other)).await,
+            Verdict::Pass
+        );
+        assert_eq!(gate.park_as(no_shutdown(), None).await, Verdict::Pass);
+        assert_eq!(gate.refused.load(Ordering::SeqCst), 2);
+
+        gate.release();
+        assert_eq!(
+            gate.park_as(no_shutdown(), Some(named)).await,
+            Verdict::Pass
+        );
+
+        let parsed: RefuseQuery =
+            serde_json::from_value(json!({"actor": hex::encode(named)})).unwrap();
+        assert_eq!(parsed.actor.as_deref(), Some(hex::encode(named).as_str()));
+        assert_eq!(parsed.refusal, Refusal::Unknown);
     }
 
     /// `?as=outdated` refuses with the nest's own typed update code, which the

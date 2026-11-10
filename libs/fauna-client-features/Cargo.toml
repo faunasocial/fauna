@@ -29,6 +29,12 @@ fauna-core = { path = "../fauna-core", default-features = false }
 fauna-client-family = { path = "../fauna-client-family" }
 # The row shapes the faces serialize (`row.rs`) carry serde derives.
 serde = { workspace = true }
+# The generated `en.yaml` lookup + month/weekday name tables: `calendar_labels`
+# reads the names at runtime, and `every_emitted_key_resolves` proves this
+# crate's i18n keys exist (a typo'd key is invisible at compile time and renders
+# as the raw key on all 7 apps). A workspace leaf already in the graph via
+# fauna-protocol, so the shipped build gains no new crate.
+fauna-i18n = { path = "../fauna-i18n" }
 
 # wasm: forward fauna-protocol's `js` feature so the transitive wasm build
 # resolves. Off on native (same shape as fauna-client-family).
@@ -40,12 +46,6 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false, feature
 # tests drive (one owner for the `RpcRequester` seam's fake).
 fauna-client-testkit = { path = "../fauna-client-testkit" }
 serde = { workspace = true }
-# Dev-only: the generated `en.yaml` lookup, so `every_emitted_key_resolves` can
-# prove this crate's i18n keys exist. A typo'd key is invisible at compile time
-# and renders as the raw key on all 7 apps (`LocalizedText::resolve` falls back
-# to the key itself), so it needs a test rather than review. Already in the
-# graph via fauna-protocol, so this adds nothing to the shipped build.
-fauna-i18n = { path = "../fauna-i18n" }
 # `row.rs`'s serde round-trip pin — the web face serializes those shapes
 # straight to JS, so a field that cannot survive a round trip is a web bug.
 serde_json = { workspace = true }

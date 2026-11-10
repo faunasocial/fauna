@@ -1013,6 +1013,11 @@ pub(crate) async fn materialize_segment_set(
         }
         None => {}
     }
+    #[cfg(feature = "test-hooks")]
+    test_tear(
+        state,
+        crate::materialize_tear_test_hook::TearPoint::BetweenContainersAndHalves,
+    )?;
 
     let root = segments.scope_dir(&scope);
     std::fs::create_dir_all(&root)
@@ -1204,6 +1209,11 @@ pub(crate) async fn materialize_segment_set(
         None => None,
         Some(staged) => Some(staged.adopt(state, &scope, &ids).await?),
     };
+    #[cfg(feature = "test-hooks")]
+    test_tear(
+        state,
+        crate::materialize_tear_test_hook::TearPoint::AfterJournalAdopt,
+    )?;
 
     // A post corpus's records are read back through the store before the
     // transaction opens (the read is async; the write below is not).
@@ -1283,6 +1293,23 @@ pub(crate) async fn materialize_segment_set(
         remaining: None,
         landing_reclaimed,
     })
+}
+
+/// The test seam's tear ([`crate::materialize_tear_test_hook`]): stop the verb
+/// at `point` when a test armed it, leaving exactly what a crash there leaves.
+/// Compiled out of production with its two call sites.
+#[cfg(feature = "test-hooks")]
+fn test_tear(
+    state: &AppState,
+    point: crate::materialize_tear_test_hook::TearPoint,
+) -> Result<(), MaterializeRefusal> {
+    if state.materialize_tear.take(point) {
+        return Err(MaterializeRefusal::Integrity(anyhow::anyhow!(
+            "{} at {point:?}",
+            crate::materialize_tear_test_hook::TORN_DETAIL
+        )));
+    }
+    Ok(())
 }
 
 /// Reclaim a **whole** landing's set — the lifecycle half of

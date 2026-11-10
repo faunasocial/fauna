@@ -21,13 +21,16 @@
 //! `fauna.payments.unknown_provider`).
 
 use fauna_core::data::Timestamp;
-use fauna_protocol::RpcRequester;
+use fauna_core::encoding::EmbedAsBytes;
+use fauna_core::identity::{ActorId, ActorKeypair};
+use fauna_core::subscription::types::ClaimRedeemIntent;
 use fauna_protocol::payments::{
     ClaimItem, ClaimMintReply, ClaimMintRequest, ClaimRedeemReply, ClaimRedeemRequest,
     ClaimVoidReply, ClaimVoidRequest, ClaimsListReply, ClaimsListRequest, ProviderItem,
     ProviderRemoveReply, ProviderRemoveRequest, ProviderSetReply, ProviderSetRequest,
     ProvidersListReply, ProvidersListRequest,
 };
+use fauna_protocol::{CrossNestError, RpcRequester, normalize_home_nest_url};
 
 pub use fauna_payments::known_kinds;
 /// The visitor return door's creator-facing URL (the post-checkout redirect
@@ -44,6 +47,30 @@ pub use fauna_protocol::payments;
 pub use fauna_protocol::tips;
 
 use fauna_protocol::tips::{TipsListReply, TipsListRequest};
+
+/// The redeemer's own signed [`ClaimRedeemIntent`] (`federated-follow.md`
+/// § Decision 2 → *The redeem twin*), in the embed-as-bytes wire shape
+/// `ClaimRedeemRequest.intent` carries. Signed by `redeemer`'s identity key
+/// (which holds every capability, `Follow` included). `home_nest_id` is the
+/// redeemer's own nest — the only nest that may relay it — and `created_at`
+/// orders the redeemer's intents at the author's nest, so a caller passes now.
+pub fn mint_claim_redeem_intent(
+    redeemer: &ActorKeypair,
+    author: ActorId,
+    code: &str,
+    home_nest_id: [u8; 32],
+    created_at: Timestamp,
+) -> Result<EmbedAsBytes, fauna_core::error::Error> {
+    let intent = ClaimRedeemIntent {
+        redeemer: redeemer.actor_id(),
+        author,
+        code: code.to_string(),
+        home_nest_id,
+        created_at,
+    };
+    let (bytes, envelope) = fauna_core::encoding::sign_envelope(redeemer, &intent)?;
+    Ok(EmbedAsBytes::from_signed(bytes, envelope))
+}
 
 /// Typed `fauna.payments.*` call surface, generic over the WS-RPC transport
 /// (`R: RpcRequester`). Every kind but `claims.mint` is registered with
@@ -69,11 +96,20 @@ impl<R: RpcRequester> PaymentsClient<R> {
     /// The nest holds ONLY the webhook-verification secret; it is never
     /// echoed back (see [`Self::providers_list`]). Returns whether the
     /// config was saved.
+    ///
+    /// `product_ref` is the product the tier is sold as, in the provider's
+    /// own reference (Stripe: the Payment Link id, `plink_…`) — the wire
+    /// contract of [`ProviderSetRequest::product_ref`]: `None` keeps the
+    /// saved value, `Some("")` clears it so every verified payment maps
+    /// again (monetization.md § Pillar 3 → *Configuration*). A form that
+    /// shows the field sends what it shows — `Some(value)`, empty included —
+    /// so the saved mapping always reads back as the creator last saw it.
     pub async fn providers_set(
         &self,
         kind: impl Into<String>,
         webhook_secret: impl Into<String>,
         tier: impl Into<String>,
+        product_ref: Option<String>,
     ) -> Result<bool, R::Error> {
         let reply: ProviderSetReply = self
             .nest
@@ -83,7 +119,7 @@ impl<R: RpcRequester> PaymentsClient<R> {
                     kind: kind.into(),
                     webhook_secret: webhook_secret.into(),
                     tier: tier.into(),
-                    product_ref: None,
+                    product_ref,
                     extra: Default::default(),
                 },
             )
@@ -137,10 +173,58 @@ impl<R: RpcRequester> PaymentsClient<R> {
                 "fauna.payments.claims.redeem",
                 ClaimRedeemRequest {
                     code: code.into(),
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// The redeem gesture every app calls — [`Self::claims_redeem`] for a code
+    /// of this nest, and the **cross-nest redeem** for a code minted by an
+    /// author homed on another (`monetization.md` § Pillar 3 → *Which nest an
+    /// in-app redeem binds on*; the follow's
+    /// `SubscriptionsClient::subscribe_across_nests` shape). `author_home_url`
+    /// is the author's home as the app learned it (the profile's `actor_home`
+    /// slot); `None` or blank is this nest. Naming a home makes the redeemer
+    /// mint their own signed [`ClaimRedeemIntent`] — the buyer's act the
+    /// code's home must see, never their nest's word for it — naming the nest
+    /// this client is connected to as their home, and the nest relays it
+    /// verbatim. An author hosted here is a local redeem whatever home is
+    /// named (the nest's first arm). Typed errors: those of
+    /// [`Self::claims_redeem`], plus `fauna.payments.claim_admits_elsewhere`
+    /// (a membership code redeemed from another nest).
+    pub async fn claims_redeem_across_nests(
+        &self,
+        code: impl Into<String>,
+        redeemer: &ActorKeypair,
+        author_id: ActorId,
+        author_home_url: Option<String>,
+    ) -> Result<ClaimRedeemReply, CrossNestError<R::Error>> {
+        let code = code.into();
+        let Some(home) = normalize_home_nest_url(author_home_url) else {
+            return self.claims_redeem(code).await.map_err(CrossNestError::Nest);
+        };
+        let home_nest_id = fauna_protocol::read_nest_id(&self.nest).await?;
+        let intent = mint_claim_redeem_intent(
+            redeemer,
+            author_id,
+            code.trim(),
+            home_nest_id,
+            Timestamp::now(),
+        )
+        .map_err(|e| CrossNestError::Intent(e.to_string()))?;
+        self.nest
+            .request(
+                "fauna.payments.claims.redeem",
+                ClaimRedeemRequest {
+                    code,
+                    author_home_url: Some(home),
+                    intent: Some(intent),
                     extra: Default::default(),
                 },
             )
             .await
+            .map_err(CrossNestError::Nest)
     }
 
     /// `fauna.payments.claims.mint` — the author mints a claim code manually,
@@ -300,6 +384,12 @@ mod tests {
                     extra: Default::default(),
                 })
             }
+            "fauna.nest.info" => {
+                fauna_protocol::encode_canonical(&fauna_protocol::discovery::NestInfoReply {
+                    nest_id: fauna_core::hex32::encode(&OWN_NEST_ID),
+                    ..Default::default()
+                })
+            }
             "fauna.payments.claims.redeem" => fauna_protocol::encode_canonical(&ClaimRedeemReply {
                 author: ActorId([0xAB; 32]),
                 tier: "gold".into(),
@@ -356,7 +446,8 @@ mod tests {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = PaymentsClient::new(rec.clone());
         let saved =
-            block_on(client.providers_set("fake", "whsec_test", "gold")).expect("infallible mock");
+            block_on(client.providers_set("fake", "whsec_test", "gold", Some("prod_1".into())))
+                .expect("infallible mock");
         assert!(saved);
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.payments.providers.set");
@@ -364,6 +455,7 @@ mod tests {
         assert_eq!(req.kind, "fake");
         assert_eq!(req.webhook_secret, "whsec_test");
         assert_eq!(req.tier, "gold");
+        assert_eq!(req.product_ref.as_deref(), Some("prod_1"));
     }
 
     #[test]
@@ -496,5 +588,117 @@ mod tests {
         );
         let req: TipsListRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert!(req.extra.is_empty(), "no mechanism-shaped extra field");
+    }
+
+    // ── The cross-nest redeem (`monetization.md` § Pillar 3 → *Which nest an
+    //    in-app redeem binds on*) ───────────────────────────────────────────
+
+    /// The nest id the reply table's `fauna.nest.info` answers with — the id a
+    /// minted redeem intent must name as the redeemer's home.
+    const OWN_NEST_ID: [u8; 32] = [0x42; 32];
+
+    /// Decode and verify a carried intent exactly as both nests do: the
+    /// authoring envelope under `Capability::Follow`.
+    fn verified_intent(wire: &EmbedAsBytes) -> ClaimRedeemIntent {
+        let (bytes, env) = wire.clone().into_signed().expect("embed-as-bytes");
+        let intent: ClaimRedeemIntent =
+            fauna_core::encoding::decode_signed_bytes(&bytes).expect("decodes");
+        fauna_core::encoding::verify_authoring_envelope(
+            &intent,
+            &bytes,
+            &env,
+            wire.signer_auth.as_deref(),
+            &fauna_core::data::Capability::Follow,
+            intent.created_at,
+        )
+        .expect("the intent verifies under Capability::Follow");
+        intent
+    }
+
+    /// A redeem naming no home is today's local redeem: no intent, no home,
+    /// and no `fauna.nest.info` read.
+    #[test]
+    fn a_redeem_naming_no_home_is_the_local_redeem() {
+        let me = ActorKeypair::generate();
+        for home in [None, Some("  ".to_string())] {
+            let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+            let client = PaymentsClient::new(rec.clone());
+            let reply = block_on(client.claims_redeem_across_nests(
+                "ABCD-1234",
+                &me,
+                ActorId([0xAB; 32]),
+                home,
+            ))
+            .expect("infallible mock");
+            assert_eq!(reply.tier, "gold");
+            assert_eq!(rec.kinds(), vec!["fauna.payments.claims.redeem"]);
+            let req: ClaimRedeemRequest =
+                fauna_protocol::decode_strict(&rec.recorded().1).expect("decodes");
+            assert_eq!(req.code, "ABCD-1234");
+            assert_eq!(req.author_home_url, None);
+            assert!(req.intent.is_none(), "a local redeem carries no intent");
+        }
+    }
+
+    /// A redeem naming the author's home carries it and the redeemer's own
+    /// signed intent, naming the nest the client is connected to.
+    #[test]
+    fn a_redeem_naming_a_home_carries_the_redeemers_signed_intent_naming_this_nest() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = PaymentsClient::new(rec.clone());
+        block_on(client.claims_redeem_across_nests(
+            " ABCD-1234 ",
+            &me,
+            ActorId([0xAB; 32]),
+            Some(" https://author.test/ ".into()),
+        ))
+        .expect("infallible mock");
+        assert_eq!(
+            rec.kinds(),
+            vec!["fauna.nest.info", "fauna.payments.claims.redeem"]
+        );
+        let req: ClaimRedeemRequest =
+            fauna_protocol::decode_strict(&rec.recorded().1).expect("decodes");
+        assert_eq!(req.author_home_url.as_deref(), Some("https://author.test"));
+        let intent = verified_intent(req.intent.as_ref().expect("the intent rides"));
+        assert_eq!(intent.redeemer, me.actor_id());
+        assert_eq!(intent.author, ActorId([0xAB; 32]));
+        assert_eq!(
+            intent.code, "ABCD-1234",
+            "the intent names the trimmed code"
+        );
+        assert_eq!(intent.home_nest_id, OWN_NEST_ID);
+    }
+
+    /// A nest whose `nest.info` names no well-formed id gets no intent, and no
+    /// redeem is sent.
+    #[test]
+    fn a_malformed_own_nest_id_sends_no_redeem() {
+        fn bad_info(kind: &'static str) -> Vec<u8> {
+            match kind {
+                "fauna.nest.info" => {
+                    fauna_protocol::encode_canonical(&fauna_protocol::discovery::NestInfoReply {
+                        nest_id: "not-hex".into(),
+                        ..Default::default()
+                    })
+                    .expect("encode")
+                    .to_vec()
+                }
+                other => reply(other),
+            }
+        }
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::new(bad_info));
+        let client = PaymentsClient::new(rec.clone());
+        let err = block_on(client.claims_redeem_across_nests(
+            "ABCD-1234",
+            &me,
+            ActorId([0xAB; 32]),
+            Some("https://author.test".into()),
+        ))
+        .expect_err("no intent without this nest's id");
+        assert!(matches!(err, CrossNestError::Intent(_)), "{err}");
+        assert_eq!(rec.kinds(), vec!["fauna.nest.info"]);
     }
 }

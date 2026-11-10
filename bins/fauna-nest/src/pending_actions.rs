@@ -733,6 +733,16 @@ pub async fn finalize_user_deletion(state: &Arc<AppState>, actor_id: &[u8; 32]) 
     // still say where they are, and a failed unlink fails this pass with its
     // row intact for the retry (`mail-export.md` § Reclaim).
     crate::mail_export_blobs::unlink_export_blobs_for_actor(state, actor_id).await?;
+    // The actor's materialized view goes with their tables
+    // (`encryption-at-rest.md` § Capability tiering → *The materialization
+    // grant*, part (c)). Through the materializer when one runs, so its lock
+    // orders the delete against a walk; by path otherwise.
+    match &state.materializer {
+        Some(m) => m.purge_actor(actor_id).await,
+        None => {
+            crate::materializer::area::destroy_actor(state.mail_segments.data_dir(), actor_id)?;
+        }
+    }
     // The enumerable per-actor boundary: every
     // Policy::Purge table in db::actor_tables::ACTOR_TABLES, minus the
     // Policy::Retain tables (posts, financial/entitlement records,

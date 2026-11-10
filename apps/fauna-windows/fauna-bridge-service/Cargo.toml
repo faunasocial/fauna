@@ -11,11 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 fauna-ipc.workspace = true
+fauna-log = { path = "../../../libs/fauna-log" }
 fauna-mda-supervisor.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 clap.workspace = true
 
 [target.'cfg(windows)'.dependencies]

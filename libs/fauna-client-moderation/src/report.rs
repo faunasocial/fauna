@@ -237,6 +237,19 @@ pub fn report_acknowledgement(routed_to: &[String]) -> LocalizedText {
     }
 }
 
+/// The `report-status` line after a report went to the device's outbox with no
+/// nest (`account-offline-mutation.md` § The offline-mutation contract): it
+/// names no nest, because none answered yet — the report is sent on reconnect.
+pub fn report_queued() -> LocalizedText {
+    LocalizedText::key("moderation.report.queued")
+}
+
+/// The follow-up line when a queued report asked to block its author: the
+/// block is a separate kind that needs the nest, so it was not sent.
+pub fn report_block_not_sent() -> LocalizedText {
+    LocalizedText::key("moderation.report.block_not_sent")
+}
+
 /// The failure line a send renders on the page's `error-message`.
 pub fn report_failed(error: impl Into<String>) -> LocalizedText {
     LocalizedText::key_arg("moderation.report.failed", "error", error.into())

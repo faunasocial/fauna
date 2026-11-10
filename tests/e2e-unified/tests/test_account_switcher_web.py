@@ -47,7 +47,7 @@ from tests.test_sign_out_web import (  # noqa: F401
 )
 from drivers.machine_test_setter import set_handle_check_snapshot
 from helpers import web_store
-from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S
+from helpers.budgets import APP_RELAUNCH_S, HANDLE_CHECK_S, RPC_ROUNDTRIP_S
 from helpers.waiting import assert_no_relaunch, await_session_actor, wait_until
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
@@ -730,7 +730,7 @@ def test_web_add_account_offers_the_trust_to_an_admitted_identity(nest_instance,
         driver.click("handle-check-button")
         wait_until(
             lambda: driver.is_enabled(HANDLE_CONTINUE_BUTTON),
-            RPC_ROUNDTRIP_S, interval=0.5,
+            HANDLE_CHECK_S, interval=0.5,
             diagnose=lambda: (
                 f"the handle check for the admitted {handle!r} never enabled "
                 f"Continue (expected AlreadyOnNest). message: "
@@ -885,7 +885,9 @@ def test_web_add_account_abandon_recovers_prior_identity_on_current_load(nest_in
         # Mid-wizard the in-memory identity is the ABANDONED identity, nothing
         # durable names it, and the registry has NOT grown (no accountsAdd until
         # Continue → LoggedIn).
-        _wait_session_actor(driver, second_actor, timeout=15)
+        # The import's wasm login (seal chunk + a session mint) — the same
+        # round trips the file's other session waits size at three budgets.
+        _wait_session_actor(driver, second_actor, timeout=RPC_ROUNDTRIP_S * 3)
         assert driver.eval_js(f"localStorage.getItem('fauna/{second_actor}/secret')") is None, (
             "an append-mode confirm must not register the imported identity"
         )

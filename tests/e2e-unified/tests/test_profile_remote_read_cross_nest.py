@@ -124,7 +124,7 @@ def _open_author_by_find(reader: Seat, address: str, author_hex: str) -> None:
     )
 
 
-@pytest.mark.feature("profile")
+@pytest.mark.feature("profile", "feed-images-and-video")
 def test_a_remote_actors_profile_shows_their_name_only_once_they_open_it(
     remote_profile_seats, cross_nest_foreign_ephemeral
 ):

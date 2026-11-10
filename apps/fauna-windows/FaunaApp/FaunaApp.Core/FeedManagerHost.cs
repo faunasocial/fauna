@@ -93,6 +93,17 @@ internal static class FeedManagerHost
     public static FfiFeedManager? Current => _current;
 
     /// <summary>
+    /// Whether <paramref name="manager"/> is the session's live one: false for a
+    /// manager an actor change dropped (<see cref="ResetForActorChange"/>) or a
+    /// re-auth replaced. Such a manager can still tick — its last reload landing,
+    /// its transport closing — between the reset and the teardown of the page that
+    /// observes it, and anything that page does on that tick belongs to the outgoing
+    /// identity. The one rule behind the cue hydrate, the cue tracker and the Feed
+    /// page's repaint.
+    /// </summary>
+    public static bool Holds(FfiFeedManager manager) => ReferenceEquals(manager, _current);
+
+    /// <summary>
     /// The session's manager, built on first use over <paramref name="transport"/>
     /// and reused by every later Feed-page load. Rebuilt when
     /// <paramref name="transport"/> is a different object than the cached
@@ -159,7 +170,7 @@ internal static class FeedManagerHost
     /// silent fresh start).
     /// </summary>
     public static Task HydrateCuesOnceAsync(FfiFeedManager manager)
-        => ReferenceEquals(manager, _current)
+        => Holds(manager)
             ? CueHydrate.RunAsync(() => manager.HydrateCues())
             // A manager this host no longer holds (an actor change mid-load) is
             // hydrated where it stands and cached nowhere.
@@ -191,7 +202,7 @@ internal static class FeedManagerHost
     {
         lock (CueTrackerLock)
         {
-            if (!ReferenceEquals(manager, _current)) return new FfiCueTracker(LeaveModel.HoldUnmeasured);
+            if (!Holds(manager)) return new FfiCueTracker(LeaveModel.HoldUnmeasured);
             if (_cueTracker is { } live && ReferenceEquals(_cueTrackerManager, manager)) return live;
             // The replaced tracker is not disposed here: a sample or a player's
             // reading may still hold it, and the binding's finalizer frees it once

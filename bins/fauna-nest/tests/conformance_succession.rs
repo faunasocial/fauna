@@ -1947,7 +1947,7 @@ async fn a_live_socket_of_the_old_identity_is_torn_down_by_the_ceremony() {
 mod road {
     use super::*;
     use fauna_client_core::succession_delivery::{
-        Delivery, OwedNestReach, OwedReason, SignIn, deliver_owed_nests,
+        Delivery, OwedNestReach, OwedReason, ParkedOwedNests, SignIn, deliver_owed_nests,
     };
     use fauna_protocol::{RpcErrorClass, RpcRequester};
 
@@ -2113,7 +2113,7 @@ mod road {
                     vec![]
                 },
             };
-            deliver_owed_nests(&keeper, &reach)
+            deliver_owed_nests(&keeper, &reach, &ParkedOwedNests::default())
                 .await
                 .expect("H serves the successor its owed nests")
                 .into_iter()

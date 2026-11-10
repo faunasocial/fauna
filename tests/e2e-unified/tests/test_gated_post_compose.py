@@ -398,6 +398,7 @@ def test_gated_post_attachment_is_sealed_and_never_uploaded_in_plaintext(
 
 
 @pytest.mark.feature("feed-images-and-video")
+@pytest.mark.feature("paid-posts-and-tips")
 def test_a_restricted_post_s_picture_opens_for_an_entitled_reader(app, request, gated_nest):
     """A picture on an audience-restricted post opens for a reader the post is
     for — a subscriber of its tier — and never paints as scrambled bytes
@@ -413,6 +414,12 @@ def test_a_restricted_post_s_picture_opens_for_an_entitled_reader(app, request, 
     composer, and the same app then signs in as the subscriber, opens the post
     and must see the picture PAINT. A sealed item handed to the decoder unopened
     paints the placeholder, never a picture — which is the difference this reads.
+
+    It witnesses two catalog outcomes: `feed-images-and-video` (a restricted
+    post's picture opens for an entitled reader) and `paid-posts-and-tips`
+    outcome 22 (a subscriber who opens a tier-gated post sees its photo too,
+    unsealed — `behavior/restricted-posts.md` § Encryption at rest — broadcast
+    tiers).
     """
     admin_sk = _as_signing_key(gated_nest["admin"]["signing_key"])
     author = create_actor_and_register(
@@ -490,3 +497,102 @@ def test_a_restricted_post_s_picture_opens_for_an_entitled_reader(app, request, 
             "the restricted post's picture must rest sealed on the nest, never as "
             "the plain PNG"
         )
+
+
+@pytest.mark.feature("paid-posts-and-tips")
+def test_a_repost_of_a_tier_gated_post_shows_an_outsider_the_teaser_and_the_tier_badge(
+    app, request, gated_nest
+):
+    """`behavior/restricted-posts.md` § Encryption at rest, ruling 3 — the tier
+    arm of `test_room_restricted_post.py`'s room-repost witness: a repost is
+    wordless, so it stays public, and renders as the TARGET's own gated card,
+    teaser and badge, so the teaser never passes for a short public post.
+
+    The author creates a tier and gates a post to it through the composer; a
+    reader outside the tier then signs in on the same app and reposts it
+    through `feed-repost-button` (a wordless reference to a restricted post
+    composes public — `a_repost_or_wordless_quote_of_a_restricted_post_still_composes_public`).
+    That reader's REPOST-ROW card must read the teaser, none of the sealed
+    words, and a `gated-post-badge` naming the tier. The badge rides the nest's
+    projection of the target's gate onto the repost row (`reposted_gated_tier`),
+    pinned in shared Rust (`a_repost_row_carries_its_targets_gate_and_names_the_room_for_a_member`);
+    this is the app half for a tier (`paid-posts-and-tips` outcome 23)."""
+    admin_sk = _as_signing_key(gated_nest["admin"]["signing_key"])
+    author = create_actor_and_register(
+        gated_nest["port"], base_url=gated_nest["url"], admin_signing_key=admin_sk,
+    )
+    outsider = create_actor_and_register(
+        gated_nest["port"], base_url=gated_nest["url"], admin_signing_key=admin_sk,
+    )
+    _login_as(app, request, gated_nest, author, handle=_unique("e2e-repost-author"))
+
+    subs = app.subscriptions
+    feed = app.feed
+    tier = _unique("gold")
+    marker = _unique("tier-sealed-words")
+    preview = _unique("tier-teaser-to-repost")
+
+    # ── Author: the tier, then the gated post through the composer. ─────────
+    subs.navigate()
+    subs.open_tiers_tab()
+    subs.create_tier(tier, rank=1, price_hint="$5/mo")
+    assert subs.wait_for_tier(tier), (
+        f"created tier {tier!r} should appear in §1 My tiers; error={subs.error_text()!r}"
+    )
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.driver.wait_for("compose-text-field")
+    feed.create_gated_post(f"Only the tier reads this: {marker}", preview, tier)
+
+    # ── Outsider: the same app, signed in as a reader outside the tier. ─────
+    _login_as(app, request, gated_nest, outsider, handle=_unique("e2e-repost-outsider"))
+    target = feed.wait_for_post_state_by_text(preview, RPC_ROUNDTRIP_S)
+    assert target is not None, (
+        f"the outsider's feed should list the post teased {preview!r}; "
+        f"error={app.error_text()!r}"
+    )
+    target_id = target["post_id"]
+    feed.repost_post(feed.card_index_by_id(target_id))
+
+    # The repost row reaches this feed through a reload; re-enter the page
+    # until it is listed (deadline-bound, convention 14).
+    row = None
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S
+    while row is None and time.monotonic() < deadline:
+        row = feed.wait_for_repost_row_by_target(target_id, timeout=5.0)
+        if row is None:
+            feed.navigate()
+    assert row is not None, (
+        f"the outsider's repost of {target_id} should be listed; error={app.error_text()!r}"
+    )
+    repost_id = row["post_id"]
+
+    # ── The repost-row card: the tier badge, the teaser, none of the words. ─
+    badge = None
+    text = ""
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S
+    while True:
+        try:
+            card = feed.post_index_by_id(repost_id)
+            if card >= 0:
+                badge = app.driver.get_text("gated-post-badge", scope=f"post-card[{card}]")
+                # The repost row's own body is empty; its words are the folded
+                # embed, which some apps paint as `feed-post-text` and web as
+                # the `quoted-post` embed, resolved lazily after first paint.
+                text = (
+                    app.driver.get_text("feed-post-text", scope=f"post-card[{card}]") or ""
+                ) + (feed.quoted_post_text(card) or "")
+        except Exception:  # noqa: BLE001 — mid-render races are expected while polling
+            pass
+        if (badge == tier and preview in text) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.3)
+    assert badge == tier, (
+        f"the outsider's repost card should wear the target's badge naming the tier "
+        f"{tier!r}, got {badge!r}; error={app.error_text()!r}"
+    )
+    assert preview in text, f"the outsider's repost card shows the target's teaser, got {text!r}"
+    assert marker not in text, "the repost card must never show the sealed words"
+    card = feed.card_index_by_id(repost_id)
+    assert feed.repost_attribution_count(card) == 1, (
+        "the badged card is the repost row itself, not the original's"
+    )

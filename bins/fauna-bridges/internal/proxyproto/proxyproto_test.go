@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -264,25 +267,34 @@ var forgedSrc = &net.TCPAddr{IP: net.ParseIP("203.0.113.7"), Port: 54321}
 
 var proxyDst = &net.TCPAddr{IP: net.ParseIP("198.51.100.1"), Port: 443}
 
-// TestForgedHeaderWithoutAuthTLVKeepsGenuinePeer is the headline pin: a
-// loopback peer that cannot read the root-owned secret sends a well-formed
-// header with NO auth TLV; the conveyed source must be refused and the genuine
-// loopback peer kept, so the forger gains nothing.
-func TestForgedHeaderWithoutAuthTLVKeepsGenuinePeer(t *testing.T) {
+// assertUntrustedSource fails unless addr is UntrustedProxiedSource: neither
+// the conveyed (forged) source nor any loopback address — a refused header
+// forfeits loopback trust (security.md § Co-resident process trust boundary).
+func assertUntrustedSource(t *testing.T, addr net.Addr) {
+	t.Helper()
+	if addr.String() == forgedSrc.String() {
+		t.Fatalf("RemoteAddr = %v — a refused header spoofed the source", addr)
+	}
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok || tcp.IP.IsLoopback() {
+		t.Fatalf("RemoteAddr = %v, want the non-loopback untrusted-proxied sentinel (a refused header must not keep loopback trust)", addr)
+	}
+	if addr.String() != UntrustedProxiedSource.String() || addr.String() != "0.0.0.0:0" {
+		t.Fatalf("RemoteAddr = %v, want UntrustedProxiedSource 0.0.0.0:0 (the nest's UNTRUSTED_PROXIED_SOURCE)", addr)
+	}
+}
+
+// TestForgedHeaderWithoutAuthTLVForfeitsLoopbackTrust is the headline pin:
+// a loopback peer that cannot read the root-owned secret sends a well-formed
+// header with NO auth TLV; the conveyed source is refused and so is loopback
+// trust — the connection reports the untrusted-proxied sentinel, so neither a
+// forger nor a router holding a secret this bridge lacks gains anything.
+func TestForgedHeaderWithoutAuthTLVForfeitsLoopbackTrust(t *testing.T) {
 	secret := []byte("a-32-byte-ish-router-auth-secret")
 	payload := []byte{0x16, 0x03, 0x01, 0xDE, 0xAD}
 	sc := serveOneAuthed(t, append(encodeV2ForTest(forgedSrc, proxyDst), payload...), secret)
 
-	if sc.RemoteAddr().String() == forgedSrc.String() {
-		t.Fatalf("RemoteAddr = %v — an unauthenticated header spoofed the source", sc.RemoteAddr())
-	}
-	host, _, err := net.SplitHostPort(sc.RemoteAddr().String())
-	if err != nil {
-		t.Fatalf("split: %v", err)
-	}
-	if !net.ParseIP(host).IsLoopback() {
-		t.Fatalf("RemoteAddr host = %q, want the genuine loopback peer", host)
-	}
+	assertUntrustedSource(t, sc.RemoteAddr())
 	// The header is still CONSUMED — the stream must be positioned at the
 	// ClientHello for the TLS acceptor either way (nest does the same).
 	got := make([]byte, len(payload))
@@ -294,20 +306,91 @@ func TestForgedHeaderWithoutAuthTLVKeepsGenuinePeer(t *testing.T) {
 	}
 }
 
-// TestForgedHeaderWithWrongAuthTLVKeepsGenuinePeer: a guessed/stale secret is
-// refused exactly like an absent one.
-func TestForgedHeaderWithWrongAuthTLVKeepsGenuinePeer(t *testing.T) {
+// TestForgedHeaderWithWrongAuthTLVForfeitsLoopbackTrust: a guessed/stale
+// secret — or a router provisioned with a secret this bridge does not hold —
+// is refused exactly like an absent one.
+func TestForgedHeaderWithWrongAuthTLVForfeitsLoopbackTrust(t *testing.T) {
 	secret := []byte("a-32-byte-ish-router-auth-secret")
 	wrong := []byte("a-32-byte-ish-router-auth-secreT") // one bit off
 	header := encodeV2AuthedForTest(forgedSrc, proxyDst, wrong)
 	sc := serveOneAuthed(t, header, secret)
 
-	if sc.RemoteAddr().String() == forgedSrc.String() {
-		t.Fatalf("RemoteAddr = %v — a wrong-secret header spoofed the source", sc.RemoteAddr())
+	assertUntrustedSource(t, sc.RemoteAddr())
+}
+
+// TestMalformedHeaderForfeitsLoopbackTrust: every other way a loopback peer's
+// header goes unhonoured — a bad version, a LOCAL command, a declared length
+// over the cap, an address block too short for its family, a header cut short
+// — resolves to the sentinel too, with or without a secret configured: a
+// header was sent, so the peer is no longer a headerless same-box dial.
+func TestMalformedHeaderForfeitsLoopbackTrust(t *testing.T) {
+	good := encodeV2ForTest(forgedSrc, proxyDst)
+	mutate := func(f func([]byte) []byte) []byte {
+		return f(append([]byte(nil), good...))
 	}
-	host, _, _ := net.SplitHostPort(sc.RemoteAddr().String())
-	if !net.ParseIP(host).IsLoopback() {
-		t.Fatalf("RemoteAddr host = %q, want the genuine loopback peer", host)
+	cases := []struct {
+		name  string
+		bytes []byte
+	}{
+		{"bad version", mutate(func(h []byte) []byte { h[12] = 0x11; return h })},
+		{"bad signature tail", mutate(func(h []byte) []byte { h[11] = 0x00; return h })},
+		{"LOCAL command", mutate(func(h []byte) []byte { h[12] = 0x20; return h })},
+		{"declared length over the cap", mutate(func(h []byte) []byte {
+			binary.BigEndian.PutUint16(h[14:16], maxAddrLen+1)
+			return h
+		})},
+		{"address block too short for family", mutate(func(h []byte) []byte {
+			binary.BigEndian.PutUint16(h[14:16], 4)
+			return h[:PrefixLen+4]
+		})},
+		{"unsupported family", mutate(func(h []byte) []byte { h[13] = 0x31; return h })},
+		{"prefix cut short", good[:PrefixLen-3]},
+		{"block cut short", good[:PrefixLen+5]},
+	}
+	for _, tc := range cases {
+		for _, secret := range [][]byte{nil, []byte("a-32-byte-ish-router-auth-secret")} {
+			t.Run(fmt.Sprintf("%s/secret=%v", tc.name, secret != nil), func(t *testing.T) {
+				// A fakeConn with a loopback peer: its reader hits EOF after
+				// the canned bytes, so a truncated header fails fast rather
+				// than waiting out headerTimeout.
+				loop := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+				c := newTestConn(&fakeConn{r: bytes.NewReader(tc.bytes), remote: loop})
+				c.routerAuth = secret
+				assertUntrustedSource(t, c.RemoteAddr())
+			})
+		}
+	}
+}
+
+// TestRefusedHeaderLogIsRateLimited: a misprovisioned router refuses every
+// connection, so the warning naming the secret's provisioning fires once per
+// interval with a count, never once per connection.
+func TestRefusedHeaderLogIsRateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	prev := refusedLogger
+	refusedLogger = func() *slog.Logger { return slog.New(slog.NewTextHandler(&buf, nil)) }
+	refusedLastLog.Store(0)
+	refusedSince.Store(0)
+	t.Cleanup(func() { refusedLogger = prev; refusedLastLog.Store(0); refusedSince.Store(0) })
+
+	loop := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	for i := 0; i < 5; i++ {
+		c := newTestConn(&fakeConn{r: bytes.NewReader(encodeV2ForTest(forgedSrc, proxyDst)), remote: loop})
+		c.routerAuth = []byte("secret")
+		assertUntrustedSource(t, c.RemoteAddr())
+	}
+	out := buf.String()
+	if n := strings.Count(out, "PROXY-v2 header from loopback peer refused"); n != 1 {
+		t.Fatalf("refused-header warning logged %d times for 5 refusals, want 1 (rate-limited):\n%s", n, out)
+	}
+	if !strings.Contains(out, "/data/keys/router/proxy-secret") {
+		t.Fatalf("refused-header warning does not name the secret's provisioning:\n%s", out)
+	}
+	if !strings.Contains(out, "router-auth TLV missing or mismatched") {
+		t.Fatalf("refused-header warning does not carry the reason:\n%s", out)
+	}
+	if got := refusedSince.Load(); got != 4 {
+		t.Fatalf("refusals counted since the line = %d, want 4", got)
 	}
 }
 

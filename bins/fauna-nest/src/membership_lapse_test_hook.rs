@@ -5,7 +5,7 @@
 //! `testing.md` point 15: the automation surface is compiled out of release
 //! artifacts).
 //!
-//! **Why this exists.** [`crate::membership_lapse`] reconciles lapsed
+//! **Why this exists.** [`crate::entitlement_lapse`] reconciles lapsed
 //! memberships hourly, with its first tick at boot. A membership whose paid
 //! window has already ended when a test pays for it therefore stays at its
 //! paid quota tier for up to an hour, and the only other door that reconciles
@@ -25,13 +25,20 @@ use serde_json::json;
 use crate::api_error::ApiError;
 use crate::routes::AppState;
 
-/// `POST /api/v1/test/membership_lapse/run-now` — run exactly the reconcile
-/// one periodic tick runs (`reconcile_lapsed_memberships(None)`, every buyer)
-/// and return how many members it downgraded: `{"ok": true, "downgraded": N}`.
-/// `downgraded == 0` is a meaningful negative signal for a test, not an error.
+/// `POST /api/v1/test/membership_lapse/run-now` — run exactly the tick the
+/// periodic entitlement-lapse sweep runs ([`crate::entitlement_lapse::sweep_once`]:
+/// the membership reconcile for every buyer, then the content-tier removal past
+/// the grace) and return what it did:
+/// `{"ok": true, "downgraded": N, "removals_queued": M}`. A zero is a
+/// meaningful negative signal for a test, not an error.
 async fn handle_run_now(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.db.reconcile_lapsed_memberships(None).await {
-        Ok(n) => Json(json!({ "ok": true, "downgraded": n })).into_response(),
+    match crate::entitlement_lapse::sweep_once(&state).await {
+        Ok(swept) => Json(json!({
+            "ok": true,
+            "downgraded": swept.downgraded,
+            "removals_queued": swept.removals_queued,
+        }))
+        .into_response(),
         Err(e) => ApiError::internal(format!("membership lapse run_now: {e:#}")).into_response(),
     }
 }

@@ -257,6 +257,14 @@ window.__faunaTestAgent = {
       typeof window.__fauna_messageBanners === "function"
         ? window.__fauna_messageBanners()
         : null;
+    // --- Knock toasts fired (the witness for `notifications` outcome 15) ---
+    // `{seen, fired: [{key, text, replace_id}]}` — the shared `KnockNotices`
+    // log, `fauna_e2e_agent::KNOCK_NOTICES_KEY`. Absent hook ⇒ null, refused
+    // loudly by the witness.
+    const knockNotices =
+      typeof window.__fauna_knockNotices === "function"
+        ? window.__fauna_knockNotices()
+        : null;
     // --- The transport's state + the gate's verdict on it (the barrier) ---
     // `{state, online}` off `#lib/e2e-automation`'s accessor, which reads the
     // `connectionStatus` store and asks the `connectionIsOnline` wasm face.
@@ -286,6 +294,13 @@ window.__faunaTestAgent = {
     const launchToken =
       typeof window.__fauna_launchToken === "function"
         ? window.__fauna_launchToken()
+        : null;
+    // --- The launch-verdict counters (`fauna_e2e_agent::LAUNCH_VERDICTS_KEY`,
+    // `#lib/launch-currency`) — `{routed, superseded}`. OMITTED with no hook,
+    // which a witness reads as "not published" and refuses (convention 11).
+    const launchVerdicts =
+      typeof window.__fauna_launchVerdicts === "function"
+        ? window.__fauna_launchVerdicts()
         : null;
 
     // --- Data (from Svelte stores — direct passthrough, both use snake_case) ---
@@ -411,6 +426,13 @@ window.__faunaTestAgent = {
       // The quote carrier: an empty-commentary quote's card text is only its
       // folded embed, so a test finds it by the post it quotes. tui's key.
       quoted_post_id: p.quoted_post_id ?? null,
+      // The labels the render verdict reads — the served ones with the reader's
+      // own spam mark folded in by the shared manager's snapshot
+      // (report-sharing.md § Report capture → The post's mark-as-spam verb). tui's key.
+      labels: (p.labels || []).map((l) => ({
+        category: l.category,
+        confidence_per_mille: l.confidence_per_mille,
+      })),
       // The author face (feed.md § The read model → *The remote author's
       // byline*): null until the author's resolve has answered, then the
       // face — an empty one when the author shows none. tui's key.
@@ -514,6 +536,7 @@ window.__faunaTestAgent = {
       account_pump_cycles: accountPumpCycles,
       serving_enablement: servingEnablement,
       message_banners: messageBanners,
+      knock_notices: knockNotices,
       // Convention 17's `region-block-never-silent` counts (`#lib/region.svelte`):
       // OMITTED when the SPA has no hook, which the invariant reads as n/a.
       ...(typeof window.__fauna_regionBlockRender === "function"
@@ -549,6 +572,7 @@ window.__faunaTestAgent = {
       connection,
       ...(clock === null ? {} : { clock }),
       ...(launchToken === null ? {} : { launch_token: launchToken }),
+      ...(launchVerdicts === null ? {} : { launch_verdicts: launchVerdicts }),
       ...(messages === null ? {} : { messages }),
       settings: (() => {
         const checked = document.querySelector('input[name="inbox-mode"]:checked');
@@ -590,6 +614,26 @@ window.__faunaTestAgent = {
 
   applyPatch(patch) {
     const stores = window.__fauna_stores || {};
+
+    // Every navigation the patch starts is counted on `window.__faunaNavPending`
+    // until it lands, so the driver's `set_state` waits on the navigation having
+    // landed rather than on a fixed sleep (convention 14). A SvelteKit `goto`
+    // clears its count when its promise settles; a hard `location.href` load is
+    // never cleared on this document — the new document starts with no count,
+    // and the driver's probe carries across the load.
+    const navigate = (path) => {
+      window.__faunaNavPending = (window.__faunaNavPending || 0) + 1;
+      if (stores.goto) {
+        const done = () => { window.__faunaNavPending = Math.max(0, (window.__faunaNavPending || 1) - 1); };
+        Promise.resolve(stores.goto(path)).then(done, done);
+      } else {
+        location.href = path;
+      }
+    };
+    const hardNavigate = (path) => {
+      window.__faunaNavPending = (window.__faunaNavPending || 0) + 1;
+      location.href = path;
+    };
 
     // Erase the multi-account registry namespace (`fauna/index` +
     // `fauna/{actor}/*`). The product's `identity.logout()` does this via
@@ -705,7 +749,7 @@ window.__faunaTestAgent = {
       // seam's setter takes `None`).
       try { sessionStorage.removeItem("fauna_e2e_nest_dial_override"); } catch {}
       try { window.__fauna_resetOnboardingMachine?.(); } catch {}
-      location.href = "/app/onboarding";
+      hardNavigate("/app/onboarding");
     });
 
     if (patch.__action === "logout") return signedOut().then(sweepAccountStores).then(() => {
@@ -713,11 +757,7 @@ window.__faunaTestAgent = {
       // Always also clear the agent's authenticated-fallback flag, which
       // neither identity.logout() nor the registry sweep touches.
       localStorage.removeItem("fauna_registered");
-      if (stores.goto) {
-        stores.goto("/app/onboarding");
-      } else {
-        location.href = "/app/onboarding";
-      }
+      navigate("/app/onboarding");
     });
 
     // --- Session patch ---
@@ -726,6 +766,23 @@ window.__faunaTestAgent = {
     // The test patch already provides actor_id, so we don't need WASM at all.
     if (patch.session) {
       const s = patch.session;
+      // An authenticated patch IS the session now, so a launch still in flight
+      // on the onboarding page is superseded: retire it, and its verdict is
+      // dropped when it lands rather than rendered over the session built below
+      // (`#lib/launch-currency`; tui's `apply_session_patch` and linux's patch
+      // handler retire at the same point). The patch applies with no reload, so
+      // nothing else would stop that launch. REQUIRED, never `?.()` (convention
+      // 11): a missing hook would let a stale verdict paint over the patched
+      // session with no trace.
+      if (s.authenticated === true) {
+        if (typeof window.__fauna_retireInFlightLaunchForTest !== "function") {
+          throw new Error(
+            "session patch: __fauna_retireInFlightLaunchForTest is not installed " +
+            "(#lib/e2e-automation) — cannot retire the launch still in flight"
+          );
+        }
+        window.__fauna_retireInFlightLaunchForTest();
+      }
       // A genuine actor switch (this patch's secret_hex differs from whatever
       // was already stored) must reset the feed + conversations manager
       // singletons FIRST, the plain-JS half of what the product's real
@@ -865,7 +922,7 @@ window.__faunaTestAgent = {
           const path = isSelf
             ? "/app/profile"
             : "/app/profile/" + target + (hint ? "?home=" + encodeURIComponent(hint) : "");
-          if (stores.goto) { stores.goto(path); } else { location.href = path; }
+          navigate(path);
           return;
         }
         let id = stack.length > 1 ? stack[1].id : null;
@@ -883,11 +940,7 @@ window.__faunaTestAgent = {
         if (view === "admin" && id && id.startsWith("admin-")) id = id.slice("admin-".length);
         let path = "/app/" + view;
         if (id) path += "/" + id;
-        if (stores.goto) {
-          stores.goto(path);
-        } else {
-          location.href = path;
-        }
+        navigate(path);
       }
     }
 

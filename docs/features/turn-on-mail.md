@@ -4,6 +4,9 @@ title: Turn on mail for your account
 section: mail, calendar and contacts
 goal: docs/goal/ui/mail-settings.md § Goal
 guide: docs/guides/own-your-mail.md § Turning mail on
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -18,7 +21,7 @@ starts the mail server on the nest.
 
 ## Coverage contract
 
-Stamped 2026-09-23 at 039e9619ca.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] Turning mail on shows the mail-app settings and your first app password as a row — `docs/goal/ui/mail-settings.md` § Layout & flow
    - `tests/e2e-unified/tests/test_mail_credentials.py::test_mail_settings_page_reachable`
@@ -85,19 +88,23 @@ Stamped 2026-09-23 at 039e9619ca.
    - `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens`
 27. [app] On a nest set up without the virus scanner and spam filter mail needs, both Mail pages say mail can't be turned on there and no switch turns it on — `docs/goal/ui/mail-settings.md` § Layout & flow
    - `tests/e2e-unified/tests/test_mail_unavailable_without_scanners_ui.py::test_both_mail_pages_render_a_box_that_cannot_enable_mail`
+28. [app] While an app password is shown, the app keeps it out of screen recordings and screenshots as far as the device allows — `docs/goal/architecture/security.md` § On-screen secret exposure
+   - `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_mail_app_password_suppresses_capture_until_hidden_or_left`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | |
-| linux | ✅ full | |
+| web | ⚠ partial | |
+| linux | ⚠ partial | |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
-| tui | ✅ full | |
+| tui | ⚠ partial | |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -115,8 +122,8 @@ Stamped 2026-09-23 at 039e9619ca.
 | 3 | app | `tests/e2e-unified/tests/test_mail_relaunch_right_after_key_rotation.py::test_a_relaunch_right_after_a_key_rotation_keeps_imap_working` | tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_mail_stale_sibling_after_key_rotation.py::test_a_stale_sibling_reconnecting_after_a_rotation_keeps_imap_working` | tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_disable.py::test_disable_mail_keeps_every_credential_via_confirm_dialog` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_mail_auto_enable_first_setup.py::test_non_admin_first_setup_auto_mints_and_imap_logs_in` — requires `first-setup-mail-auto-mint` (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/platform/docker/test_mail_client_ui_enable_docker.py::test_linux_ui_enable_mail_boots_docker_bridge` — requires `mail-client-ui-enable-docker-drive` (test harness) (not built: windows, macos, ios, android) | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_mail_auto_enable_first_setup.py::test_non_admin_first_setup_auto_mints_and_imap_logs_in` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/platform/docker/test_mail_client_ui_enable_docker.py::test_linux_ui_enable_mail_boots_docker_bridge` — requires `mail-client-ui-enable-docker-drive` (test harness) (not built: windows, macos, ios, android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_mail_serving_toggle.py::test_serve_here_toggle_defaults_on_and_writes_through_to_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_status_line_reads_off_then_up_to_date_and_syncing_while_a_change_runs` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -125,8 +132,8 @@ Stamped 2026-09-23 at 039e9619ca.
 | 11 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_an_interrupted_rotation_is_shown_and_one_tap_finishes_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_password_marked_compromised_at_rotation_stops_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_revoking_one_password_leaves_the_others_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 14 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_enable_box_recovers` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 15 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_first_enable_shows_partial_and_resume_finishes` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_enable_box_recovers` — requires `unclean-kill` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_first_enable_shows_partial_and_resume_finishes` — requires `unclean-kill` (test harness) (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 16 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_brief_drop_while_turning_mail_on_is_retried_and_finishes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 17 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_turning_email_off_keeps_the_calendar_signed_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 18 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_turning_your_own_mail_off_leaves_another_users_mail_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -136,7 +143,8 @@ Stamped 2026-09-23 at 039e9619ca.
 | 22 | app | `tests/e2e-unified/tests/test_mail_account_settings.py::test_receiving_and_sending_are_switched_off_and_on_separately` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 23 | app | `tests/e2e-unified/tests/test_mail_settings_over_quota.py::test_a_full_mailbox_shows_the_notice_and_the_used_size` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 24 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_a_refused_change_says_why_and_can_be_tried_again` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 25 | app | `tests/e2e-unified/tests/test_mail_submission_token_refresh.py::test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired` — requires `mail-token-refresh-clock` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 25 | app | `tests/e2e-unified/tests/test_mail_submission_token_refresh.py::test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_mail_unavailable_without_scanners_ui.py::test_both_mail_pages_render_a_box_that_cannot_enable_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_mail_app_password_suppresses_capture_until_hidden_or_left` | macos (macos): passed, ios (macos): passed |
 <!-- features-render:end -->

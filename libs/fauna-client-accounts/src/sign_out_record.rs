@@ -26,10 +26,21 @@
 //! way, with no wipe owed, so a store its erase could not remove is retried at
 //! a later load.
 //!
-//! This is the web shape of the rule the native seats keep in
-//! `sign_out_residue` (paths and fingerprints there, store names here). It is
-//! pure over [`SecretStore`] so it is tested natively; the erase itself is
-//! `fauna-wasm`'s `account_scope`.
+//! **One record, one logic, two slots** (`apps/account-scoping.md` § Erasure
+//! follows scope → *The sign-out record is on all 7 apps*, decision 1). The
+//! logic here is pure over a [`SignOutRecordSlot`], the one place the record's
+//! bytes live:
+//!
+//! - **web**: the install-scoped `localStorage` key [`SIGN_OUT_RECORD_KEY`],
+//!   through any [`SecretStore`] (every `SecretStore` is a slot over that key);
+//! - **native**: the file [`SIGN_OUT_RECORD_FILE`] directly under the app's
+//!   install base ([`SignOutRecordFile`]), beside the residue record and
+//!   outside every actor scope a sweep removes. Never a credential-store key:
+//!   the native wipe deletes the app's whole namespace, and on a sealed arm a
+//!   key would sit behind the passphrase the launch has not taken yet.
+//!
+//! What a native finish does with the record is `crate::finish_sign_out`
+//! (`sign_out_finish`); web's is `fauna-wasm`'s `account_scope`.
 //!
 //! **Not under the cross-tab mutation lock.** Each operation is one
 //! synchronous read-modify-write of one key, and the worst a lost update can
@@ -39,6 +50,92 @@
 use serde::{Deserialize, Serialize};
 
 use crate::SecretStore;
+
+/// Where a [`SignOutRecord`]'s bytes live — the one-slot persistence seam.
+///
+/// `read` answers `None` when nothing is stored, and `Some` with whatever is
+/// there otherwise — even bytes that do not decode: a slot that holds anything
+/// at all holds a confirmed sign-out ([`SignOutRecord::load`]'s floor).
+pub trait SignOutRecordSlot {
+    fn read(&self) -> Option<String>;
+    fn write(&self, raw: &str);
+    fn clear(&self);
+}
+
+/// Web's slot: the [`SIGN_OUT_RECORD_KEY`] row of any [`SecretStore`] — the
+/// same key and the same bytes web has always stored.
+impl<T: SecretStore + ?Sized> SignOutRecordSlot for T {
+    fn read(&self) -> Option<String> {
+        self.get(SIGN_OUT_RECORD_KEY)
+    }
+    fn write(&self, raw: &str) {
+        self.set(SIGN_OUT_RECORD_KEY, raw);
+    }
+    fn clear(&self) {
+        self.delete(SIGN_OUT_RECORD_KEY);
+    }
+}
+
+/// The native record's file name, directly under the app's install base —
+/// beside `SIGN_OUT_RESIDUE_FILE`. Not a 64-hex name, so no sweep (which
+/// removes actor scopes and nothing else) ever reaches it.
+pub const SIGN_OUT_RECORD_FILE: &str = "sign-out-record.json";
+
+/// The native slot: [`SIGN_OUT_RECORD_FILE`] under `base`, written through a
+/// temp file and a rename (as `SignOutResidue::save` is), so a crash leaves the
+/// old record or the new one, never half of either.
+#[derive(Debug, Clone)]
+pub struct SignOutRecordFile {
+    base: std::path::PathBuf,
+}
+
+impl SignOutRecordFile {
+    /// The slot under the app's install base.
+    pub fn under(base: impl Into<std::path::PathBuf>) -> Self {
+        Self { base: base.into() }
+    }
+
+    /// The record file's path.
+    pub fn path(&self) -> std::path::PathBuf {
+        self.base.join(SIGN_OUT_RECORD_FILE)
+    }
+}
+
+impl SignOutRecordSlot for SignOutRecordFile {
+    fn read(&self) -> Option<String> {
+        let file = self.path();
+        match std::fs::read(&file) {
+            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // A record that is there but cannot be read is still a confirmed
+            // sign-out: the floor (`SignOutRecord::load`) finishes it.
+            Err(e) => {
+                tracing::warn!("sign-out record: {} unreadable: {e}", file.display());
+                Some(String::new())
+            }
+        }
+    }
+
+    fn write(&self, raw: &str) {
+        let file = self.path();
+        let tmp = self.base.join(format!("{SIGN_OUT_RECORD_FILE}.tmp"));
+        let written = std::fs::create_dir_all(&self.base)
+            .and_then(|()| std::fs::write(&tmp, raw))
+            .and_then(|()| std::fs::rename(&tmp, &file));
+        if let Err(e) = written {
+            tracing::warn!("sign-out record: {} not written: {e}", file.display());
+        }
+    }
+
+    fn clear(&self) {
+        let file = self.path();
+        if let Err(e) = std::fs::remove_file(&file)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("sign-out record: {} not removed: {e}", file.display());
+        }
+    }
+}
 
 /// The record's key. Install-scoped, and deliberately **outside** the `fauna/`
 /// prefix: the registry's all-accounts erase removes that namespace, and the
@@ -77,8 +174,8 @@ impl SignOutRecord {
     /// named: a record exists only because a sign-out was confirmed, so the
     /// load finishes that sign-out over the accounts the registry names rather
     /// than leave the user signed in.
-    pub fn load(store: &dyn SecretStore) -> Option<Self> {
-        let raw = store.get(SIGN_OUT_RECORD_KEY)?;
+    pub fn load(store: &(impl SignOutRecordSlot + ?Sized)) -> Option<Self> {
+        let raw = store.read()?;
         Some(serde_json::from_str::<Self>(&raw).unwrap_or(Self {
             wipe_owed: true,
             accounts: Vec::new(),
@@ -88,7 +185,7 @@ impl SignOutRecord {
     /// Whether a confirmed sign-out's credential wipe is still owed — the
     /// identity read's fail-closed gate: while it is, no account reads as
     /// signed in.
-    pub fn wipe_owed_in(store: &dyn SecretStore) -> bool {
+    pub fn wipe_owed_in(store: &(impl SignOutRecordSlot + ?Sized)) -> bool {
         Self::load(store).is_some_and(|r| r.wipe_owed)
     }
 
@@ -96,7 +193,7 @@ impl SignOutRecord {
     /// record names, and the wipe is owed. Written before the gesture's first
     /// await.
     pub fn record_sign_out(
-        store: &dyn SecretStore,
+        store: &(impl SignOutRecordSlot + ?Sized),
         reach: impl IntoIterator<Item = String>,
     ) -> Self {
         let mut record = Self::load(store).unwrap_or_default();
@@ -108,7 +205,7 @@ impl SignOutRecord {
 
     /// A remove-account's decision: `actor_id_hex` joins the record, and
     /// whether a wipe is owed is left as it was.
-    pub fn record_removal(store: &dyn SecretStore, actor_id_hex: &str) -> Self {
+    pub fn record_removal(store: &(impl SignOutRecordSlot + ?Sized), actor_id_hex: &str) -> Self {
         let mut record = Self::load(store).unwrap_or_default();
         record.name([actor_id_hex.to_owned()]);
         record.save(store);
@@ -138,7 +235,10 @@ impl SignOutRecord {
     /// The wipe is about to run over `reach`: name every reached account
     /// first, so a tab closed right after the wipe still knows whose stores
     /// are left — the registry that named them is gone by then.
-    pub fn before_wipe(store: &dyn SecretStore, reach: impl IntoIterator<Item = String>) {
+    pub fn before_wipe(
+        store: &(impl SignOutRecordSlot + ?Sized),
+        reach: impl IntoIterator<Item = String>,
+    ) {
         let mut record = Self::load(store).unwrap_or_default();
         record.wipe_owed = true;
         record.name(reach);
@@ -146,7 +246,7 @@ impl SignOutRecord {
     }
 
     /// The credential wipe ran.
-    pub fn wipe_done(store: &dyn SecretStore) {
+    pub fn wipe_done(store: &(impl SignOutRecordSlot + ?Sized)) {
         if let Some(mut record) = Self::load(store) {
             record.wipe_owed = false;
             record.save(store);
@@ -155,7 +255,7 @@ impl SignOutRecord {
 
     /// `actor_id_hex` owes nothing more: its store is gone, or it is signed in
     /// here again. The record goes with its last account.
-    pub fn settle(store: &dyn SecretStore, actor_id_hex: &str) {
+    pub fn settle(store: &(impl SignOutRecordSlot + ?Sized), actor_id_hex: &str) {
         if let Some(mut record) = Self::load(store) {
             record
                 .accounts
@@ -174,13 +274,13 @@ impl SignOutRecord {
         }
     }
 
-    fn save(&self, store: &dyn SecretStore) {
+    fn save(&self, store: &(impl SignOutRecordSlot + ?Sized)) {
         if !self.wipe_owed && self.accounts.is_empty() {
-            store.delete(SIGN_OUT_RECORD_KEY);
+            store.clear();
             return;
         }
         match serde_json::to_string(self) {
-            Ok(raw) => store.set(SIGN_OUT_RECORD_KEY, &raw),
+            Ok(raw) => store.write(&raw),
             Err(e) => tracing::warn!("sign-out record: not written: {e}"),
         }
     }
@@ -196,6 +296,65 @@ mod tests {
     }
     fn b() -> String {
         "bb".repeat(32)
+    }
+
+    #[test]
+    fn the_file_slot_round_trips_and_goes_with_its_last_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let slot = SignOutRecordFile::under(dir.path());
+        assert_eq!(SignOutRecord::load(&slot), None, "no file, nothing owed");
+        let record = SignOutRecord::record_sign_out(&slot, [a(), b()]);
+        assert!(slot.path().is_file(), "the record is a file under the base");
+        assert_eq!(SignOutRecord::load(&slot), Some(record));
+        SignOutRecord::wipe_done(&slot);
+        SignOutRecord::settle(&slot, &a());
+        SignOutRecord::settle(&slot, &b());
+        assert!(!slot.path().exists(), "the file goes with the last account");
+        assert!(
+            !dir.path()
+                .join(format!("{SIGN_OUT_RECORD_FILE}.tmp"))
+                .exists(),
+            "no temp file is left behind"
+        );
+    }
+
+    /// The write is a temp file and a rename: a temp file a crash left
+    /// mid-write is never read as the record — the old record still is.
+    #[test]
+    fn a_crash_mid_write_leaves_the_old_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let slot = SignOutRecordFile::under(dir.path());
+        let old = SignOutRecord::record_sign_out(&slot, [a()]);
+        std::fs::write(
+            dir.path().join(format!("{SIGN_OUT_RECORD_FILE}.tmp")),
+            r#"{"wipe_owed":fa"#,
+        )
+        .expect("a half-written temp file");
+        assert_eq!(SignOutRecord::load(&slot), Some(old));
+    }
+
+    #[test]
+    fn a_malformed_record_file_reads_as_a_wipe_owed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let slot = SignOutRecordFile::under(dir.path());
+        std::fs::write(slot.path(), [0xff, 0x00, b'{']).expect("garbage");
+        let record = SignOutRecord::load(&slot).expect("a record is there");
+        assert!(record.wipe_owed);
+        assert!(record.accounts.is_empty());
+    }
+
+    /// The record is no actor scope: the sweep — which removes actor scopes
+    /// and nothing else — cannot take it with the wipe it orders.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_record_file_is_no_actor_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let slot = SignOutRecordFile::under(dir.path());
+        SignOutRecord::record_sign_out(&slot, [a()]);
+        let sweep = fauna_account_store::db::erase_all_account_scopes(dir.path());
+        assert!(sweep.is_clean());
+        assert!(slot.path().is_file(), "the sweep left the record");
+        assert!(fauna_account_store::db::account_scopes_under(dir.path()).is_empty());
     }
 
     #[test]

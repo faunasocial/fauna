@@ -635,3 +635,74 @@ def test_trending_is_offered_as_a_factor_for_one_feed_or_every_feed(
         "the global toggle should put trending ×0.5 into the caller's global "
         f"factor set, got {by_factor!r}; error={logged_in_app.error_text()!r}"
     )
+
+
+@pytest.mark.feature("custom-feeds")
+def test_a_feed_weighing_engagement_lists_the_engaged_post_first(
+    logged_in_app, api_actor_peer
+):
+    """``trending.md`` § The ``engagement`` factor: a feed weighing
+    ``engagement`` orders its posts by their cumulative engagement, so an older
+    post someone liked lists above a newer one nobody engaged with — the reverse
+    of the recency order, which only the factor can produce — while a feed with
+    no factor, scoped to the same two posts, keeps them newest first.
+
+    Both feeds are scoped by a ``BodyContains`` rule on the journey's own token,
+    so the session nest's other posts cannot sit between the two."""
+    from helpers import budgets
+    from helpers.waiting import wait_until
+
+    app = logged_in_app
+    feed = app.feed
+    journey = _unique("engaged")
+    liked = f"{_unique('liked')} {journey}"
+    plain = f"{_unique('plain')} {journey}"
+
+    feed.navigate()
+    feed.create_post(text=liked)
+    row = feed.wait_for_post_state_by_text(liked)
+    assert row, f"post {liked!r} never reached the app's state; error={app.error_text()!r}"
+    time.sleep(1.2)  # sleep-ok: strictly-newer created_at (epoch-seconds resolution)
+    feed.create_post(text=plain)
+    assert feed.wait_for_post_state_by_text(plain), (
+        f"post {plain!r} never reached the app's state; error={app.error_text()!r}"
+    )
+    api_actor_peer.like_post(row["post_id"])
+
+    def _ranks():
+        bodies = [(feed.post_text(i) or "") for i in range(feed.post_count())]
+        return (
+            next((i for i, b in enumerate(bodies) if liked in b), None),
+            next((i for i, b in enumerate(bodies) if plain in b), None),
+            bodies,
+        )
+
+    # The plain feed over the same two posts: newest first.
+    chrono_name = _unique("chrono-feed")
+    feed.create_feed_with_rule(name=chrono_name, rule_type="BodyContains", value=journey)
+    feed.open_feed(chrono_name)
+    wait_until(
+        lambda: (lambda r: r if None not in r[:2] and r[1] < r[0] else None)(_ranks()),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"a feed with no factor lists the newer post first; (liked, plain, "
+            f"bodies)={_ranks()!r} error={app.error_text()!r}"
+        ),
+    )
+
+    # The feed weighing engagement over the same two posts: the liked one first.
+    ranked_name = _unique("engagement-feed")
+    feed.create_feed_with_factor(
+        name=ranked_name, factor_label="engagement", weight="2.0",
+        rule=("BodyContains", journey),
+    )
+    feed.open_feed(ranked_name)
+    wait_until(
+        lambda: (lambda r: r if None not in r[:2] and r[0] < r[1] else None)(_ranks()),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"a feed weighing engagement lists the liked post above the newer "
+            f"un-engaged one; (liked, plain, bodies)={_ranks()!r} "
+            f"error={app.error_text()!r}"
+        ),
+    )

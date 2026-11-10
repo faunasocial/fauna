@@ -226,27 +226,30 @@ class ScreenTimeStore @Inject constructor(
      * accrual steps a real caller would tick in, then run one production
      * heartbeat step — the android twin of linux `advance_test_clock` +
      * `flush_usage_report(true)` / web `advanceTestClock` +
-     * `tickUsageHeartbeat`. `active = true` throughout: the poke asserts what
-     * a ward actively using the app accrues. Driven only by the debug-only
+     * `tickUsageHeartbeat`. `active = focused` throughout: the default asserts
+     * what a ward actively using the app accrues, and `focused = false` moves
+     * the clock with the app out of front, billing nothing
+     * (`family-client-enforcement.md` § Implementation status today,
+     * decision (b)). Driven only by the debug-only
      * `TestAgent`'s `screen_time_heartbeat` command (testing.md § convention
      * 14's fake clock + `run_now` poke; § convention 15 keeps this whole path
      * out of release artifacts via [TestAgent]'s own build-type gate).
      */
-    suspend fun advanceTestClockAndTick(minutes: Int) {
+    suspend fun advanceTestClockAndTick(minutes: Int, focused: Boolean = true) {
         val step = 120L // fauna_core::screen_time::MAX_ACCRUAL_STEP_SECS
         var remaining = (minutes * 60).toLong().coerceAtLeast(0)
         // Prime the engine's reference point before advancing — it accrues
         // from the GAP between calls, so with no prior call the first step
         // would credit nothing and the poke would silently deliver less use
         // than it was asked for.
-        heartbeat.setActive(true, nowSecs())
+        heartbeat.setActive(focused, nowSecs())
         while (remaining > 0) {
             val bump = minOf(remaining, step)
             testClockSkewSecs += bump
             remaining -= bump
-            heartbeat.setActive(true, nowSecs())
+            heartbeat.setActive(focused, nowSecs())
         }
-        heartbeatStep(true)
+        heartbeatStep(focused)
     }
 
     companion object {

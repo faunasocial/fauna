@@ -4,13 +4,14 @@
   import {
     fetchKnocks,
     fetchContacts,
-    acceptKnock,
+    acceptKnockOrQueue,
     blockKnock,
     dismissKnock,
     confirmContact,
     sendKnock,
   } from '#lib/api';
   import { parseRecipient } from '#lib/resolve';
+  import { acceptKnock } from '#lib/knock-accept';
   import { goto } from '$app/navigation';
   import { profileHref } from '#lib/profile-nav';
   import type { Knock, Contact } from '#lib/types';
@@ -271,8 +272,16 @@
     const id = $identity;
     if (!id) return;
     try {
-      await acceptKnock(id.secretHex, peerId);
-      await refresh(id.secretHex);
+      const settled = await acceptKnock({
+        acceptOrQueue: () => acceptKnockOrQueue(id.secretHex, peerId),
+        reread: () => refresh(id.secretHex),
+      });
+      // Queued with no nest: the knock leaves the local list, no roster row is
+      // added — the nest's read after the drain is the word (tui's rule).
+      if (settled === 'queued') {
+        localKnocks = localKnocks.filter((k) => k.sender !== peerId);
+        knocksStore.set(localKnocks);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : 'Accept failed';
     }

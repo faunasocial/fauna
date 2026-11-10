@@ -15,13 +15,14 @@ struct ContentView: View {
         #endif
     }
 
-    /// The `nest_retire` entry in flight — always `nil` in the Fauna Kids build,
-    /// which compiles the retire surface out with the rest of nest setup.
-    private var retiring: RetireEntry? {
+    /// Whether a `nest_retire` entry is in flight — always `false` in the Fauna
+    /// Kids build, which compiles the retire surface (and `RetireEntry`) out with
+    /// the rest of nest setup.
+    private var retiring: Bool {
         #if FAUNA_KIDS
-        nil
+        false
         #else
-        appState.retiring
+        appState.retiring != nil
         #endif
     }
 
@@ -120,7 +121,7 @@ struct ContentView: View {
             // `identity_choice` nor the tabs are known to be right yet. The
             // shared FaunaKit `launch_progress` spinner, as macOS (priority #2).
             LaunchProgressView()
-        } else if retiring != nil {
+        } else if retiring {
             // `nest_retire` takes the shell over in place, as the wizard host does
             // (`nest-retirement.md` § Layout & flow) — over `launch_retry` (no
             // session, so ahead of the wizard below) or the live admin session.
@@ -468,6 +469,14 @@ struct MainTabView: View {
         // drop after a graduation ends the relationship. Also retries the search
         // local-index attach (mirrors macOS — the first attempt inside `configure`
         // can race the login-time `conversationsSession` build).
+        //
+        // The reporter-side hide list re-reads on every store-change notice
+        // wherever the user is (mirrors macOS and tui's `AccountStoreChanged`
+        // arm): another device of this account may have reported or shown
+        // something again.
+        .onStoreChange {
+            await appState.contentPolicy.resyncReported()
+        }
         .onReconnect {
             await refreshAdminStatus(keepingLastAnswer: true)
             await appState.familyStatus.refresh(api: client?.api)
@@ -555,12 +564,28 @@ struct MoreView: View {
     // Labels reuse the same canonical keys the macOS sidebar renders for these
     // nav concepts (`Fauna-macOS/App/AppState.swift` `SidebarItem.label`) —
     // one key per nav concept across all seven apps (priorities #1/#3).
-    private static let items: [MoreItem] = [
+    // The Bridges row is not in the Fauna Kids build: every bridge is excised
+    // (account-age-band.md § The account age band, the kids-app bullet, D-K5),
+    // and its destination already is — the row alone would open nothing. A
+    // collection literal takes no `#if`, so the list is built in two halves.
+    private static let items: [MoreItem] = itemsBeforeBridges + bridgesItem + itemsAfterBridges
+
+    private static let itemsBeforeBridges: [MoreItem] = [
         .init(id: "profile", label: L.profile.title, icon: "person.text.rectangle"),
         .init(id: "events", label: L.events.title, icon: "calendar"),
         .init(id: "media", label: L.media.title, icon: "photo.on.rectangle"),
         .init(id: "backups", label: L.backups.title, icon: "externaldrive"),
+    ]
+
+    #if FAUNA_KIDS
+    private static let bridgesItem: [MoreItem] = []
+    #else
+    private static let bridgesItem: [MoreItem] = [
         .init(id: "bridges", label: L.common.bridges, icon: "network"),
+    ]
+    #endif
+
+    private static let itemsAfterBridges: [MoreItem] = [
         .init(id: "notifications", label: L.common.notifications, icon: "bell"),
         // Standalone Moderation queue — the macOS-sidebar `moderation` peer (same
         // `shield.checkered` glyph + `moderation-tab` id), here as a More entry

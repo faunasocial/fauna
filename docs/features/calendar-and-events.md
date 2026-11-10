@@ -15,7 +15,7 @@ your locale says, and an event added from another app appears while you are look
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 8ac16765e4.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] Create and delete events; description, place and time survive to the detail view — `docs/goal/ui/events.md` § User actions
    - `tests/e2e-unified/tests/test_events.py::test_event_create_and_delete`
@@ -68,6 +68,11 @@ Stamped 2026-09-19 at 8ac16765e4.
    - `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_refused_cancel_is_listed_on_the_events_page`
 17. [app] An organizer who took their account back with their recovery kit can still cancel the events they invited you to, while a cancellation from anyone else is still refused — `docs/goal/behavior/inbound-scheduling-authority.md` § Who may mutate an existing event over the inbound rail
    - `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page`
+18. [app] Inviting someone by email from the Fauna app mails them the invitation, and answering an outside organizer's invitation in the Fauna app mails your reply back — `docs/goal/behavior/caldav-server.md` § Scheduling & invitations
+   - `tests/e2e-unified/tests/test_events_imip_outbound.py::test_inviting_someone_by_email_mails_them_the_invitation`
+   - `tests/e2e-unified/tests/test_events_imip_outbound.py::test_answering_an_outside_organizers_invitation_mails_the_reply_back`
+19. [nest] Only the organizer can rewrite an event by mail, and a mailed reply counts only for the attendee who sent it: anyone else's rewrite or reply is refused and leaves the event untouched — `docs/goal/behavior/inbound-scheduling-authority.md` § Scheduling & invitations
+   - `tests/e2e-unified/tests/api/test_scheduling_client_authority.py::test_only_the_organizer_can_rewrite_an_event_and_a_reply_counts_only_for_its_sender`
 
 ## Status
 
@@ -77,10 +82,12 @@ Stamped 2026-09-19 at 8ac16765e4.
 | web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.5-dev+ea6766b3 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+17b5832c standalone |
-| android | 🚧 unbuilt | |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+17b5832c standalone |
+| android | 🚧 unbuilt | 0.1.6-dev+eaa8b925.dirty standalone |
 | tui | ✅ full | 0.1.5 docker |
+| android-kids | 🚧 unbuilt | 0.1.6-dev+eaa8b925.dirty standalone |
+| ios-kids | 🚧 unbuilt | 0.1.6-dev+eaa8b925.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -91,15 +98,15 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_week_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_day_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_events.py::test_month_navigation` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_moves_one_visible_range_per_view` — requires `caltime-pan-visible-range` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_is_inert_in_the_date_unfiltered_agenda` — requires `caltime-pan-visible-range` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_day_cell_click_opens_day_view` — requires `events-day-cell` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_double_click_day_cell_opens_new_event_prefilled` — requires `events-day-cell` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_moves_one_visible_range_per_view` — requires `caltime-pan-visible-range` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_is_inert_in_the_date_unfiltered_agenda` — requires `caltime-pan-visible-range` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_day_cell_click_opens_day_view` — requires `events-day-cell` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_double_click_day_cell_opens_new_event_prefilled` — requires `events-day-cell` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_events.py::test_day_view_empty_slot_click_opens_quick_create_prefilled` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_events.py::test_week_view_empty_slot_click_opens_quick_create_with_slot_time` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_events.py::test_event_rsvp` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_events.py::test_event_card_rsvp` — requires `event-card-rsvp` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_events.py::test_event_invite_attendee` — requires `email-attendee-encrypted-caldav` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_events.py::test_event_card_rsvp` — requires `event-card-rsvp` (not built: android, android-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_events.py::test_event_invite_attendee` — requires `email-attendee-encrypted-caldav` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_events.py::test_event_reminder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_calendar_visibility_filters_the_displayed_union` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_events_locale_week_start.py::test_tui_month_grid_opens_on_the_locale_week_start` | tui (linux): passed |
@@ -118,4 +125,7 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 15 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_refused_cancel_is_listed_on_the_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_events_imip_outbound.py::test_inviting_someone_by_email_mails_them_the_invitation` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 18 | app | `tests/e2e-unified/tests/test_events_imip_outbound.py::test_answering_an_outside_organizers_invitation_mails_the_reply_back` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 19 | nest | `tests/e2e-unified/tests/api/test_scheduling_client_authority.py::test_only_the_organizer_can_rewrite_an_event_and_a_reply_counts_only_for_its_sender` | nest (linux): passed |
 <!-- features-render:end -->

@@ -450,6 +450,14 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         loopback_peer: sink.caller_loopback_peer(),
         served_name: sink.caller_served_name(),
     });
+    // Test-only: the actor a scoped refusal matches (`rpc_hold_test_hook`
+    // § Refusal → *One caller only*) — the subject's id on the per-actor plane
+    // only; a federation request's id is a nest, never an actor.
+    #[cfg(feature = "test-hooks")]
+    let hold_actor = match (&subject, caller.is_some()) {
+        (DispatchSubject::Id(id), true) => Some(*id),
+        _ => None,
+    };
     // spawn-ok(request-scoped): one RPC, bounded by two named mechanisms — the
     // `MAX_INFLIGHT_HANDLERS` permit moved in above, and the per-kind
     // `tokio::time::timeout` the body wraps itself in. It does hold
@@ -475,7 +483,8 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         // a test needs when no ordinary input provokes one.
         #[cfg(feature = "test-hooks")]
         if let crate::rpc_hold_test_hook::Verdict::Refuse(refusal) =
-            crate::rpc_hold_test_hook::hold_if_armed(&handler_state, &handler_kind).await
+            crate::rpc_hold_test_hook::hold_if_armed(&handler_state, &handler_kind, hold_actor)
+                .await
         {
             return Err(crate::rpc_hold_test_hook::refused_error(refusal));
         }

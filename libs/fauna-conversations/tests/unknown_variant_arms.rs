@@ -181,6 +181,7 @@ fn email(name: &str) -> TypedAddress {
 
 fn message(id: &str, ts: i64) -> MessageSnapshot {
     MessageSnapshot {
+        queued_send: None,
         message_id: MessageId(id.to_string()),
         sender: email("peer"),
         sender_display: String::new(),
@@ -207,6 +208,7 @@ fn message(id: &str, ts: i64) -> MessageSnapshot {
         labels: vec![],
         plane_ref: None,
         can_delete: false,
+        can_remove: false,
         undelivered: false,
         warmup_hold: None,
         scan_result_lines: Vec::new(),

@@ -17,7 +17,7 @@ Only the devices of your nest's own members can use it.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at dc4b94e0f1.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [nest] Once its relay is running, the relay serves at its own address on the standard port without being able to read the nest's own certificate key, and the nest advertises it — `docs/goal/behavior/p2p.md` § Architecture
    - `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_iroh_relay_sidecar_fetches_sealed_cert_and_serves`
@@ -31,7 +31,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_the_relay_reconnects_by_itself_after_the_nest_restarts`
 5. [nest] The released image runs its relay on a nest with a public name of its own, with nobody switching anything on — `docs/goal/behavior/p2p.md` § The relay
    - `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_image_runs_its_relay_with_nothing_switched_on`
-6. [nest] Two of your devices that cannot reach each other directly still connect through your nest's relay, which passes their traffic on without being able to read it — `docs/goal/behavior/p2p.md` § The relay
+6. [nest] Two of your devices that cannot reach each other directly still connect through your nest's relay, which passes their traffic on without being able to read it, and carries none of the bytes of what they share: those go through the nest — `docs/goal/behavior/p2p.md` § The relay
    - `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_two_member_devices_with_no_direct_path_connect_through_the_relay`
    - `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_two_seats_of_one_account_walk_through_the_relay_with_no_direct_path`
 7. [nest] The relay serves only the devices of your nest's own members; any other device is refused — `docs/goal/behavior/p2p.md` § The relay
@@ -51,6 +51,8 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | ios | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | android | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android-kids | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| ios-kids | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

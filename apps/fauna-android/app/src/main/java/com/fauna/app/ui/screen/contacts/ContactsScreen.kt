@@ -267,11 +267,15 @@ fun ContactsScreen(
                                 // `contact-actor-id-open-profile-button` — the found
                                 // actor's Profile, carrying the lookup's nest URL as
                                 // its home (`contacts.md` § Layout & flow region 3).
-                                OutlinedButton(
-                                    onClick = { onOpenProfile(resolved.actorId, resolved.nestUrl) },
-                                    modifier = Modifier.testTag(Ids.CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON)
-                                ) {
-                                    Text(stringResource(R.string.contacts_find_user_open_profile))
+                                // Kids build: excised (D-K5, profiles of non-contacts) —
+                                // the render is guarded, not only the click.
+                                if (!BuildConfig.KIDS) {
+                                    OutlinedButton(
+                                        onClick = { onOpenProfile(resolved.actorId, resolved.nestUrl) },
+                                        modifier = Modifier.testTag(Ids.CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON)
+                                    ) {
+                                        Text(stringResource(R.string.contacts_find_user_open_profile))
+                                    }
                                 }
                             }
                             // The pair belongs to the peer this lookup found

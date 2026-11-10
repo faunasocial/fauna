@@ -3097,17 +3097,41 @@ pub fn contact_toggle_block_label(is_blocked: bool) -> LocalizedText {
 /// Shared so the toggle wording can't drift per-app — previously hand-rolled on
 /// web/android (ternary over the same two keys), linux/windows (initial "Follow" +
 /// an on-success flip to "Following"), while apple rendered a bare always-"Follow"
-/// (no Following state at all — the drift this lift retires). The `is_following`
-/// *derivation* (subscription status / optimistic flip) and the `FOLLOWERS_TIER`
-/// constant stay per-app by ratified decision (`fauna_core::subscription`,
-/// 2026-07-08) — only the bool→label map is shared. Button *style* stays an
-/// idiomatic per-app render, the same split as [`contact_toggle_block_label`].
+/// (no Following state at all — the drift this lift retires). The bool comes from
+/// [`is_following`] over the status read; the optimistic post-press flip stays
+/// app-side. Button *style* stays an idiomatic per-app render, the same split as
+/// [`contact_toggle_block_label`].
 pub fn follow_toggle_label(is_following: bool) -> LocalizedText {
     if is_following {
         LocalizedText::key("profile.following")
     } else {
         LocalizedText::key("profile.follow")
     }
+}
+
+/// Whether the viewer follows the author, from the two fields of the viewer's
+/// `fauna.subscriptions.status.get` reply (`StatusGetReply::tier` and
+/// `StatusGetReply::follow_pending`): following ⇔ the status names a tier, or a
+/// follow is pending (`subscriptions.md` § The free followers tier — follow and
+/// unfollow, rule 4). Every paid subscriber holds `followers` by the cascade and
+/// the status pick skips post-unlock-designated tiers, so a paid subscriber reads
+/// *Following* and a pure buyer of a sold post reads *Follow*.
+///
+/// Takes the fields, not the reply: `fauna-protocol` depends on this crate, so
+/// the reply type is out of reach here. Shared since 2026-11-08, retiring the
+/// 2026-07-08 per-app derivation that had web read *Follow* for a paid
+/// subscriber (its test was `tier == "followers"`).
+pub fn is_following(tier: Option<&str>, follow_pending: bool) -> bool {
+    tier.is_some() || follow_pending
+}
+
+/// Whether pressing *Following* must be confirm-gated: the viewer's status
+/// names a tier other than the free `followers` one, so the unfollow ends a paid
+/// subscription too (`subscriptions.md` § The free followers tier — follow and
+/// unfollow, rules 1 and 4). The status reports the highest undesignated tier
+/// held, so any non-`followers` name is a paid tier.
+pub fn unfollow_ends_paid_tier(tier: Option<&str>) -> bool {
+    tier.is_some_and(|t| t != crate::subscription::FOLLOWERS_TIER)
 }
 
 /// One option in a guardian policy editor's select (`family-safety.md` § Guardian
@@ -6324,6 +6348,26 @@ mod value_format_tests {
         // § Element table — follow = subscribe to the free "followers" tier).
         assert_eq!(follow_toggle_label(true).key, "profile.following");
         assert_eq!(follow_toggle_label(false).key, "profile.follow");
+    }
+
+    #[test]
+    fn is_following_reads_a_named_tier_or_a_pending_follow() {
+        // A paid (`gold`) holder: the status reports the paid tier — following.
+        assert!(is_following(Some("gold"), false));
+        // A plain follower.
+        assert!(is_following(Some("followers"), false));
+        // A pure buyer of a sold post: the status pick skips designated tiers,
+        // so it names nothing — not following.
+        assert!(!is_following(None, false));
+        // A follow asked and waiting on the author's client — following.
+        assert!(is_following(None, true));
+    }
+
+    #[test]
+    fn unfollow_ends_paid_tier_only_for_a_paid_tier() {
+        assert!(unfollow_ends_paid_tier(Some("gold")));
+        assert!(!unfollow_ends_paid_tier(Some("followers")));
+        assert!(!unfollow_ends_paid_tier(None));
     }
 
     #[test]

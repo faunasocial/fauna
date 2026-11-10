@@ -180,6 +180,12 @@ pub enum RowRefusal {
     /// served/pulled. A stale cache denies a fresh writer until the next online
     /// roster read (which heals it).
     NotACachedWriter,
+    /// An UN-SEQUENCED signed row whose signed actor resolves only to a
+    /// FORMER writer (`writer-signed-change-records.md` ruling (12)(e)): no
+    /// nest has gated it at ingest, so the receiver stands in for that gate
+    /// and admits a pending row from a current writer alone. The same
+    /// former writer's sequenced rows are admitted.
+    NotACurrentWriter,
     /// An UNSIGNED row that names an author other than the channel-proven
     /// serving peer — an unsigned relay, which nothing can vouch for.
     RelayedThirdPartyRow,
@@ -207,6 +213,9 @@ impl RowRefusal {
         match self {
             Self::NotACachedWriter => {
                 "the cached roster records no writer role for the row's writer on this set"
+            }
+            Self::NotACurrentWriter => {
+                "an un-sequenced row's writer is a former writer of this set — only a current writer's pending row is admitted"
             }
             Self::RelayedThirdPartyRow => {
                 "an unsigned row names an author other than the channel-proven serving peer"
@@ -290,7 +299,11 @@ pub fn screen_peer_row(
 ///   verdict (`writer-signed-change-records.md` ruling (11)(i): the same
 ///   judge over the same binding, nothing of the door's own): verified ⇒
 ///   admitted whoever served it; refused ⇒ refused; history ⇒ refused as
-///   history; held ⇒ held.
+///   history; held ⇒ held. The one rule of the door's own is ruling (12)(e):
+///   a verified row that is NOT `sequenced` — no nest has gated it at ingest
+///   — is admitted only when the writer it resolves to is a CURRENT writer
+///   ([`RowReader::is_current_writer`]); a former writer's pending row is
+///   refused [`RowRefusal::NotACurrentWriter`], its sequenced rows admitted.
 /// - A reader with no roster at all — never read, and nothing cached to stand
 ///   in for it — places nobody but the owner: the row is refused, fail
 ///   closed. The serving peer's role is not asked.
@@ -312,7 +325,14 @@ pub fn judge_peer_row(
     match reader.judge(change) {
         // The signed actor comes from the verdict, never from the served
         // stamp (`writer-signed-change-records.md` ruling (8)(c)).
-        RowVerdict::Verified { signed_as, .. } => {
+        RowVerdict::Verified {
+            writer, signed_as, ..
+        } => {
+            // Ruling (12)(e): the reader stands in for the ingest gate an
+            // un-sequenced row has not met — standing, not admission.
+            if !sequenced && !reader.is_current_writer(&writer) {
+                return Err(RowRefusal::NotACurrentWriter);
+            }
             Ok(PeerRowAdmission::Verified { writer: signed_as })
         }
         RowVerdict::Held(Held::RosterUnread) => Err(RowRefusal::NotACachedWriter),
@@ -331,7 +351,8 @@ pub fn judge_peer_row(
 /// installed in its place, the last roster that stands offline
 /// (`writer-signed-change-records.md` rulings (3), (8)(e), (11)(c)/(i)).
 ///
-/// `cached` carries each writer's proven predecessors beside the writer,
+/// `cached` carries the former writers beside the current ones (ruling
+/// (12)(e)), and each one's proven predecessors beside it,
 /// nearest first, so the one judge places a retired identity by its chain —
 /// the owner's predecessor under a nonce its successor minted is refused, one
 /// under a retired nonce is history — instead of meeting it as a writer row.
@@ -339,7 +360,7 @@ pub fn judge_peer_row(
 /// [`judge_peer_row`] refuses every non-owner's row. A roster the reader read
 /// itself is never replaced.
 pub fn reader_over_cached_roster(mut reader: RowReader, cached: WriterRoster) -> RowReader {
-    if !reader.roster_read() && !cached.writers.is_empty() {
+    if !reader.roster_read() && !(cached.writers.is_empty() && cached.former_writers.is_empty()) {
         reader.install_roster(cached);
     }
     reader
@@ -788,6 +809,71 @@ mod tests {
         assert_eq!(
             judge(&listed, &signed(&old_owner, RETIRED)),
             Err(RowRefusal::History)
+        );
+    }
+
+    /// Ruling (12)(e): a former writer's SEQUENCED peer row is admitted — some
+    /// nest's ingest gate judged its writer at record time — while its
+    /// UN-SEQUENCED one, which no nest has gated, is refused: the receiver
+    /// stands in for that gate. A current writer's pending row still admits;
+    /// so does a never-writer's nothing. Over the reader's own roster read and
+    /// over the share leg's cache alike.
+    #[test]
+    fn a_former_writers_sequenced_row_admits_and_its_pending_row_refuses() {
+        let (owner, peer, demoted, writer, stranger) = (kp(1), kp(2), kp(3), kp(4), kp(5));
+        let roster = || WriterRoster {
+            writers: [owner.actor_id().0, writer.actor_id().0].into(),
+            former_writers: [demoted.actor_id().0].into(),
+            ..Default::default()
+        };
+        let mut read = unread(&owner);
+        read.install_roster(roster());
+        let over = reader_over_cached_roster(unread(&owner), roster());
+        for r in [&read, &over] {
+            let judge = |who: &ActorKeypair, sequenced: bool| {
+                judge_peer_row(r, &signed(who, NONCE), sequenced, &hex_of(&peer), true)
+            };
+            assert_eq!(
+                judge(&demoted, true),
+                Ok(PeerRowAdmission::Verified {
+                    writer: demoted.actor_id().0
+                })
+            );
+            assert_eq!(judge(&demoted, false), Err(RowRefusal::NotACurrentWriter));
+            assert_eq!(
+                judge(&writer, false),
+                Ok(PeerRowAdmission::Verified {
+                    writer: writer.actor_id().0
+                })
+            );
+            assert_eq!(
+                judge(&stranger, true),
+                Err(RowRefusal::DidNotVerify(ChangeVerifyError::NotAWriter))
+            );
+        }
+        assert_ne!(
+            RowRefusal::NotACurrentWriter.reason(),
+            RowRefusal::NotACachedWriter.reason(),
+            "the reason says which"
+        );
+    }
+
+    /// A cache that lists only former writers still stands in for an unread
+    /// roster: their sequenced rows are not refused for want of a roster.
+    #[test]
+    fn a_cache_of_former_writers_alone_still_installs() {
+        let (owner, peer, demoted) = (kp(1), kp(2), kp(3));
+        let cache = WriterRoster {
+            former_writers: [demoted.actor_id().0].into(),
+            ..Default::default()
+        };
+        let r = reader_over_cached_roster(unread(&owner), cache);
+        assert!(r.roster_read());
+        assert_eq!(
+            judge_peer_row(&r, &signed(&demoted, NONCE), true, &hex_of(&peer), false),
+            Ok(PeerRowAdmission::Verified {
+                writer: demoted.actor_id().0
+            })
         );
     }
 

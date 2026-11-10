@@ -17,6 +17,7 @@
 
 use crate::Value;
 use fauna_core::data::Timestamp;
+use fauna_core::encoding::EmbedAsBytes;
 use fauna_core::identity::ActorId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -133,9 +134,22 @@ pub struct ProviderRemoveReply {
 
 /// Redeem a post-payment claim code; the entitlement binds to the bearer
 /// actor (monetization.md § Pillar 3 Q4 — the universal fallback binding).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ClaimRedeemRequest {
     pub code: String,
+    /// The minting author's home nest, when the code was minted on another
+    /// nest than the caller's own (`monetization.md` § Pillar 3 → *Which nest
+    /// an in-app redeem binds on*): the caller's nest then relays the redeem
+    /// there. `None` = a code of this nest. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_home_url: Option<String>,
+    /// The redeemer's own signed
+    /// `fauna_core::subscription::types::ClaimRedeemIntent` in the
+    /// embed-as-bytes wire shape, required with `author_home_url` — what the
+    /// code's home verifies, since the caller's nest never signs for its user.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<EmbedAsBytes>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

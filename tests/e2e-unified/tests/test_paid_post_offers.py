@@ -7,7 +7,7 @@ and a badge naming the tier, never the post).
 `test_sell_post.py` pins the sale itself, the buyer's purchase legs and the §1
 exclusion; `test_gated_post_compose.py` pins an entitled reader's unlock. This
 module pins the other side of each: the reader who is NOT entitled, the
-subscriber a sale deliberately leaves out, the buyer the sale makes a follower,
+subscriber a sale deliberately leaves out, the buyer the sale enrolls in nothing else,
 and the three places a sold post's tier must never be offered.
 
 Every absence below is read behind a positive barrier from the same render
@@ -113,7 +113,7 @@ def _sell(app, preview: str, *, subscribers_get_it_free: bool = True) -> str:
     )
     row = feed.wait_for_post_state_by_text(preview)
     assert row is not None, f"the sold post should land; error={app.error_text()!r}"
-    card = feed.post_index_by_id(row["post_id"])
+    card = feed.card_index_by_id(row["post_id"])
     badge = app.driver.get_text("gated-post-badge", scope=f"post-card[{card}]")
     assert badge.startswith(UNLOCK_TIER_PREFIX), (
         f"a sold post's badge names its {UNLOCK_TIER_PREFIX}* tier, got {badge!r}; "
@@ -127,7 +127,7 @@ def _card_for(app, preview: str) -> int:
     assert row is not None, (
         f"the feed should list the post teased {preview!r}; error={app.error_text()!r}"
     )
-    card = app.feed.post_index_by_id(row["post_id"])
+    card = app.feed.card_index_by_id(row["post_id"])
     assert card >= 0, f"the post {row['post_id']} has no rendered card"
     return card
 
@@ -209,14 +209,16 @@ def test_a_post_sold_to_everyone_leaves_existing_subscribers_out(app, request, o
 
 
 @pytest.mark.feature("paid-posts-and-tips")
-def test_buying_a_subscribers_free_post_makes_you_a_follower(app, request, offers_nest):
-    """Outcome: buying a post that the author's subscribers read free also makes
-    you a follower of the author (`monetization.md` § Per-post pay-to-unlock —
-    a designated grant fans out to undesignated tiers at or below its rank, and
-    the free followers tier is rank 0).
+def test_buying_a_subscribers_free_post_does_not_make_you_a_follower(app, request, offers_nest):
+    """Outcome: buying a post makes you its reader and nothing more — not a
+    follower of the author (`monetization.md` § Per-post pay-to-unlock, rule (a),
+    re-ruled 2026-11-07: a designated grant fans out to nothing; why:
+    `subscriptions.md` § The free followers tier — follow and unfollow, rule 6).
 
     The followers tier exists once someone follows; a third actor's follow
-    provisions it, so the buyer is never a follower before the purchase."""
+    provisions it, so the old edge had a rank-0 target the buyer could have been
+    enrolled into. The absence is read behind the positive barrier of the same
+    approval pass (convention 14): the buyer reads the bought post first."""
     app.subscriptions.require_sell_post_seller_fanout_leg_supported()
     seller = _register(offers_nest)
     follower = _register(offers_nest)
@@ -239,7 +241,6 @@ def test_buying_a_subscribers_free_post_makes_you_a_follower(app, request, offer
     assert buyer_api.subscription_status(seller_id).get("tier") is None, (
         "precondition: the buyer holds nothing from the seller before buying"
     )
-    assert not _can_read_tier(buyer_api, seller_id, FOLLOWERS_TIER)
 
     # ── The buyer buys through the teaser (the mutation under test). ─────────
     _login_as(app, request, offers_nest, buyer, handle=_unique("e2e-buyer"))
@@ -252,20 +253,30 @@ def test_buying_a_subscribers_free_post_makes_you_a_follower(app, request, offer
         f"the purchase should land; error={app.error_text()!r}"
     )
 
-    # ── The seller's client grants it; the buyer becomes a follower too. ─────
+    # ── The seller's client grants the post — and only the post. ─────────────
     _login_as(app, request, offers_nest, seller, handle=seller_handle)
     assert app.subscriptions.approve_until(
-        lambda: _can_read_tier(buyer_api, seller_id, unlock)
-        and _can_read_tier(buyer_api, seller_id, FOLLOWERS_TIER),
+        lambda: _can_read_tier(buyer_api, seller_id, unlock),
     ), (
-        f"the buyer of a subscribers-free post should read it AND follow the "
-        f"author; unlock={_can_read_tier(buyer_api, seller_id, unlock)}, "
-        f"followers={_can_read_tier(buyer_api, seller_id, FOLLOWERS_TIER)}; "
+        f"barrier: the buyer of a subscribers-free post should read it; "
         f"error={app.subscriptions.error_text()!r}"
     )
-    followers = _api(offers_nest, seller).subscription_subscribers_list(FOLLOWERS_TIER)
-    assert any(bytes(s["subscriber_id"]) == buyer["actor_id_bytes"] for s in followers), (
-        f"the buyer should be on the seller's followers roster, got {followers!r}"
+    seller_api = _api(offers_nest, seller)
+    buyer_followers_requests = [
+        r for r in seller_api.subscription_requests_list()
+        if r.get("tier_name") == FOLLOWERS_TIER
+        and bytes(r["subscriber_id"]) == buyer["actor_id_bytes"]
+    ]
+    assert buyer_followers_requests == [], (
+        f"a purchase must not enqueue the buyer as a follower, got "
+        f"{buyer_followers_requests!r}"
+    )
+    followers = seller_api.subscription_subscribers_list(FOLLOWERS_TIER)
+    assert not any(bytes(s["subscriber_id"]) == buyer["actor_id_bytes"] for s in followers), (
+        f"the buyer must not be on the seller's followers roster, got {followers!r}"
+    )
+    assert not _can_read_tier(buyer_api, seller_id, FOLLOWERS_TIER), (
+        "the buyer must not read the followers tier on the strength of a purchase"
     )
 
 

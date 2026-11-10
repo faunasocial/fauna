@@ -77,7 +77,9 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     case mailListMembers
     case web
     #endif
+    #if !FAUNA_KIDS
     case subscriptions
+    #endif
     case linkedNests
     case taskDelegation
     #if !FAUNA_KIDS
@@ -117,7 +119,9 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailListMembers: "mail-list-members"
         case .web: "web"
         #endif
+        #if !FAUNA_KIDS
         case .subscriptions: "subscription-settings"
+        #endif
         case .linkedNests: "nests"
         case .taskDelegation: "task-delegation"
         #if !FAUNA_KIDS
@@ -197,7 +201,9 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case "mail-list-members": self = .mailListMembers
         case "web": self = .web
         #endif
+        #if !FAUNA_KIDS
         case "subscription-settings": self = .subscriptions
+        #endif
         case "nests": self = .linkedNests
         case "task-delegation": self = .taskDelegation
         #if !FAUNA_KIDS
@@ -237,7 +243,9 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailListMembers: L.mailLists.membersTitle
         case .web: L.webSettings.title
         #endif
+        #if !FAUNA_KIDS
         case .subscriptions: L.subscriptions.title
+        #endif
         case .linkedNests: L.nests.title
         case .taskDelegation: L.taskDelegation.title
         #if !FAUNA_KIDS
@@ -276,7 +284,9 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailListMembers: "person.2"
         case .web: "globe"
         #endif
+        #if !FAUNA_KIDS
         case .subscriptions: "star"
+        #endif
         case .linkedNests: "link"
         case .taskDelegation: "gearshape.2"
         #if !FAUNA_KIDS
@@ -340,9 +350,10 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         #if FAUNA_KIDS
         // The Fauna Kids build's reduced settings (family-safety.md § The account
         // age band, the kids-app bullet, item (4)): the excised planes' pages do
-        // not exist in this build at all.
+        // not exist in this build at all — Subscriptions included, monetization
+        // being excised (D-K5).
         [.status, .account, .memberReview, .privacy, .mutedWords, .general, .encryption,
-         .devices, .sessions, .folders, .subscriptions, .linkedNests, .taskDelegation, .logs]
+         .devices, .sessions, .folders, .linkedNests, .taskDelegation, .logs]
         #else
         [.status, .account, .memberReview, .privacy, .mutedWords, .personalization, .labelerCatalog, .general, .encryption,
          .devices, .sessions, .folders, .nostr, .atproto,

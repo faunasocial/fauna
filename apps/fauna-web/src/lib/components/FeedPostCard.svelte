@@ -45,8 +45,12 @@
   onrevealmuted={host.revealMuted}
   contentBlocked={host.isContentBlocked(post)}
   contentReported={host.isContentReported(post)}
+  showAgain={host.showAgainForPost(post)}
+  onshowagain={host.showAgainPost}
   contentReason={host.guardianReasonFor(post)}
   {onreport}
+  onmarkspam={host.markPostSpam}
+  spamMarked={host.isSpamMarked(post.post_id)}
   contentCollapsed={host.isContentCollapsed(post)}
   onrevealcontent={host.revealContent}
   regionPlaceholder={host.regionPlaceholderFor(post)}

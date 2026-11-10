@@ -49,6 +49,15 @@ pub fn build(
     dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
     dialog.set_default_response(Some("add"));
     dialog.set_close_response("cancel");
+    // The dialog is PERSISTENT — built once, presented on every add — and a
+    // MessageDialog closes itself the moment a response fires. A GTK4 close
+    // of a window without hide-on-close DESTROYS it, so the first add's
+    // response left a dead window and every later `present()` showed nothing
+    // (no `recipient-picker-input` in the tree on a seat's second add —
+    // `test_conversation_room_community_invitation_edges.py`'s re-invitation,
+    // `test_conversation_room_community_foreign_member.py`'s invite-back).
+    // Hide instead, so the same window comes back.
+    dialog.set_hide_on_close(true);
 
     // Tag the Add button with the e2e test id once the dialog's button
     // tree is materialised (tag_response_button walks the dialog tree, so

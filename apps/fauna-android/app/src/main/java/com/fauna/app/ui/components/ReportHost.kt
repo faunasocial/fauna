@@ -69,8 +69,11 @@ fun ReportHost(vm: ReportVM = hiltViewModel()) {
 
     // `error-message` is the shell's one banner (cross-app contract): a failed
     // send, or a follow-up that failed after a landed one, goes there.
-    LaunchedEffect(state.error, state.followupError) {
-        val text = resolveLocalized(context, state.error) ?: state.followupError
+    LaunchedEffect(state.error, state.followupError, state.followupNotice, state.showAgainError) {
+        val text = resolveLocalized(context, state.error)
+            ?: resolveLocalized(context, state.followupNotice)
+            ?: state.followupError
+            ?: state.showAgainError
         if (text != null) appMessages.showError(text)
     }
 

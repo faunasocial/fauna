@@ -4,6 +4,9 @@ title: AT Protocol
 section: bridges and other networks
 goal: docs/goal/ui/atproto.md § Goal
 guide: docs/guides/bridges-bluesky-nostr.md § Bluesky, the destination: your nest as your Bluesky home
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -17,7 +20,7 @@ can contest it.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at 065ed2e2c2.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] The depth selector moves between off, linked and hosted, with a card explaining each hosted step first — `docs/goal/ui/atproto.md` § Transition semantics
    - `tests/e2e-unified/tests/test_atproto_settings.py::test_atproto_settings_page_renders`
@@ -143,19 +146,53 @@ Stamped 2026-10-01 at 065ed2e2c2.
    - `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_bluesky_dm_arrives_as_a_bluesky_room_and_the_reply_reaches_that_peer_alone`
 51. [app] Typing a Bluesky handle, with or without its `@`, into the recipient picker starts a Bluesky conversation with the person it names, and your message reaches them alone; a handle Bluesky does not know starts nothing — `docs/goal/ui/conversations.md` § Where logic lives
    - `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_bluesky_room_started_from_the_picker_by_handle_reaches_the_resolved_peer_alone`
+52. [app] While a Bluesky app password is shown, the app keeps it out of screen recordings and screenshots as far as the device allows — `docs/goal/architecture/security.md` § On-screen secret exposure
+   - `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_bluesky_app_password_suppresses_capture_until_left`
+53. [nest] A cross-post that mentions someone who has not linked Bluesky themselves carries no Bluesky mention of them, so nothing of theirs is published there — `docs/goal/architecture/nest/network-exposure.md` § Rulings
+   - `tests/e2e-unified/tests/api/test_bluesky_crosspost_unlinked_mention.py::test_a_cross_post_carries_no_bluesky_mention_of_a_member_who_did_not_link`
+54. [nest] Taking down a post also deletes its cross-post on Bluesky, retrying until it is gone, and a restore does not re-post it — `docs/goal/behavior/takedown-and-block.md` § Legal takedown
+   - `tests/e2e-unified/tests/api/test_bluesky_takedown_and_media_proxy.py::test_a_takedown_deletes_the_bluesky_cross_post_retrying_and_a_restore_reposts_nothing`
+55. [nest] Pictures from Bluesky posts in your feed are fetched by your nest only from public internet addresses over HTTPS, following no redirects, and served only as inert image types — `docs/goal/behavior/web-content-hosting.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_bluesky_takedown_and_media_proxy.py::test_bluesky_pictures_are_fetched_only_over_public_https_without_redirects_and_served_inert`
+56. [app] The custody banner names the undo and where to find it, and a contest happens only on your confirm: a press that fails keeps the card open with the error and can be retried, and the alarm clears only once the directory shows the fix — `docs/goal/behavior/atproto-identity-custody.md` § The 72 h recovery-fork contest
+   - `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_recovery_fork_contest_end_to_end`
+   - `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds`
+57. [nest] After a contest your nest keeps publishing your posts but can never again write to the identity directory, so a later handle change stays unpublished there — `docs/goal/behavior/atproto-identity-custody.md` § The 72 h recovery-fork contest
+   - `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_after_a_contest_the_nest_keeps_publishing_but_never_writes_the_directory_again`
+58. [app] After you step down from hosting, each connected Bluesky app stays listed as suspended, with no expiry, and can still be revoked one by one; a fresh sign-in clears the mark — `docs/goal/behavior/atproto-oauth-provider.md` § Detailed design
+   - `tests/e2e-unified/tests/test_connected_apps.py::test_after_stepping_down_a_connected_app_reads_suspended_until_a_fresh_sign_in`
+59. [nest] A post under a legal takedown is never published to Bluesky or the fediverse, and one already published to Bluesky is withdrawn — `docs/goal/behavior/atproto-pds-bridge.md` § Projection & backfill
+   - `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_taken_down_post_is_never_published_to_the_hosted_account_and_a_published_one_is_withdrawn`
+   - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_a_taken_down_post_is_never_published_to_the_fediverse`
+60. [nest] When you rename your handle the old handle's DNS record is withdrawn, so someone else can claim it later — `docs/goal/behavior/atproto-pds-bridge.md` § Identity: DIDs and handles
+   - `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_handle_rename_withdraws_the_old_handle_txt`
+61. [nest] Coming back to hosting after deleting your presence restores the same identity and rebuilds your consented history — `docs/goal/behavior/atproto-pds-bridge.md` § Disable & revocation
+   - `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_coming_back_after_deleting_the_presence_restores_the_same_identity_and_history`
+62. [nest] A post with neither text nor a picture is never published blank — `docs/goal/behavior/atproto-pds-bridge.md` § Projection & backfill
+   - `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_post_with_neither_text_nor_a_picture_is_never_published_blank`
+63. [nest] What you do in another Bluesky app comes home: a reply, quote or deletion made there becomes the matching change in Fauna, and an image post made there shows its pictures on every app — `docs/goal/behavior/atproto-pds-full.md` § Problem 1
+   - `tests/e2e-unified/tests/test_atproto_external_write.py::test_external_app_write_becomes_a_fauna_post`
+64. [nest] Another Bluesky app can edit your profile, change or clear your profile picture and batch its writes, and your Bluesky preferences read and write through your nest from any such app — `docs/goal/behavior/atproto-pds-full.md` § Problem 1
+   - `tests/e2e-unified/tests/test_atproto_external_write.py::test_external_app_write_becomes_a_fauna_post`
+   - `tests/e2e-unified/tests/test_atproto_pds_auth.py::test_atproto_pds_f1_auth_core_end_to_end`
+65. [app] Letting other apps post as you survives stepping down and deleting your presence; only revoking it, its lapse or a succession ends it — `docs/goal/behavior/atproto-pds-full.md` § Problem 3
+   - `tests/e2e-unified/tests/test_atproto_settings.py::test_the_posting_permission_shows_and_stops_below_the_full_level`
+   - `tests/e2e-unified/tests/test_atproto_settings.py::test_the_posting_permission_survives_deleting_the_presence`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| web | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+02e5676e standalone |
+| tui | ⚠ partial | 0.1.5-dev+02e5676e standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -232,4 +269,22 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | 49 | app | `tests/e2e-unified/tests/test_bluesky_thread_view.py::test_a_thread_whose_post_is_gone_at_its_origin_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 50 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_bluesky_dm_arrives_as_a_bluesky_room_and_the_reply_reaches_that_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 51 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_bluesky_room_started_from_the_picker_by_handle_reaches_the_resolved_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 52 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_bluesky_app_password_suppresses_capture_until_left` | macos (macos): passed, ios (macos): passed |
+| 53 | nest | `tests/e2e-unified/tests/api/test_bluesky_crosspost_unlinked_mention.py::test_a_cross_post_carries_no_bluesky_mention_of_a_member_who_did_not_link` | nest (linux): passed |
+| 54 | nest | `tests/e2e-unified/tests/api/test_bluesky_takedown_and_media_proxy.py::test_a_takedown_deletes_the_bluesky_cross_post_retrying_and_a_restore_reposts_nothing` | nest (linux): passed |
+| 55 | nest | `tests/e2e-unified/tests/api/test_bluesky_takedown_and_media_proxy.py::test_bluesky_pictures_are_fetched_only_over_public_https_without_redirects_and_served_inert` | nest (linux): passed |
+| 56 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_recovery_fork_contest_end_to_end` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 56 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds` | tui (linux): passed |
+| 57 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_after_a_contest_the_nest_keeps_publishing_but_never_writes_the_directory_again` | nest (linux): passed |
+| 58 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_after_stepping_down_a_connected_app_reads_suspended_until_a_fresh_sign_in` | web (linux): passed, tui (linux): passed |
+| 59 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_taken_down_post_is_never_published_to_the_hosted_account_and_a_published_one_is_withdrawn` | nest (linux): passed |
+| 59 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_a_taken_down_post_is_never_published_to_the_fediverse` | nest (linux): passed |
+| 60 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_handle_rename_withdraws_the_old_handle_txt` | nest (linux): passed |
+| 61 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_coming_back_after_deleting_the_presence_restores_the_same_identity_and_history` | nest (linux): passed |
+| 62 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_a_post_with_neither_text_nor_a_picture_is_never_published_blank` | nest (linux): passed |
+| 63 | nest | `tests/e2e-unified/tests/test_atproto_external_write.py::test_external_app_write_becomes_a_fauna_post` | nest (linux): passed, nest (macos): passed |
+| 64 | nest | `tests/e2e-unified/tests/test_atproto_external_write.py::test_external_app_write_becomes_a_fauna_post` | nest (linux): passed, nest (macos): passed |
+| 64 | nest | `tests/e2e-unified/tests/test_atproto_pds_auth.py::test_atproto_pds_f1_auth_core_end_to_end` | nest (linux): passed, nest (macos): passed |
+| 65 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_the_posting_permission_shows_and_stops_below_the_full_level` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 65 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_the_posting_permission_survives_deleting_the_presence` | tui (linux): passed |
 <!-- features-render:end -->

@@ -86,13 +86,15 @@ pub enum FileOpenError {
     /// Decoded, but the reassembled bytes do not hash to `manifest.file_hash`.
     #[error("file hash mismatch")]
     Integrity,
-    /// A blob this walk must read is under a **legal-takedown withhold**
-    /// (`moderation.md` § Legal takedown → *The blob-serve door*). The bytes
-    /// are still on the box — tombstone-not-delete keeps the GC pin flag-blind
-    /// — but no route may serve them: answer 451, never a fallthrough that
-    /// emits them.
-    #[error("legally withheld blob")]
-    Withheld,
+    /// A blob this walk must read is withheld — by a **legal takedown** or the
+    /// admin's **block** of a reported item, the ground carried
+    /// (`takedown-and-block.md` § Legal takedown → *The blob-serve door*). The
+    /// bytes are still on the box — tombstone-not-delete keeps the GC pin
+    /// flag-blind — but no route may serve them: answer
+    /// `blob_routes::withheld_status(ground)` (451 / 403), never a fallthrough
+    /// that emits them.
+    #[error("withheld blob ({})", .0.token())]
+    Withheld(crate::db::blob_withhold::WithholdGround),
     /// The manifest's chunk list does not fit its own declared `total_size`:
     /// more chunks than the size has bytes, or chunks whose bytes pass it.
     /// Refused before the walk reads further (a manifest may name one stored
@@ -122,12 +124,13 @@ pub(crate) async fn fetch_decoded(
     at_rest_key: Option<&BackupKey>,
     hash: &ContentHash,
 ) -> Result<Option<Vec<u8>>, FileOpenError> {
-    if crate::blob_routes::is_legally_withheld(db, &hash.digest()).await {
+    if let Some(ground) = crate::blob_routes::withhold_ground(db, &hash.digest()).await {
         tracing::info!(
             blob = hex::encode(hash.digest()),
-            "file walk withheld — legal takedown"
+            ground = ground.token(),
+            "file walk withheld"
         );
-        return Err(FileOpenError::Withheld);
+        return Err(FileOpenError::Withheld(ground));
     }
     let Some(raw) = store.get(hash).await.ok().flatten() else {
         return Ok(None);
@@ -147,10 +150,10 @@ pub(crate) async fn fetch_decoded(
 ///
 /// A sealed manifest with no working key returns [`FileOpenError::Sealed`] —
 /// the caller must NOT fall back to serving raw bytes. A manifest, or any
-/// chunk it names, under a legal-takedown withhold returns
-/// [`FileOpenError::Withheld`], which every caller refuses on — 451 wherever
-/// the arm shapes its own response, and the built-in 404 page in the one arm
-/// where the withheld file *is* the site's custom `404.html` template (see
+/// chunk it names, under a withhold returns [`FileOpenError::Withheld`] with
+/// its ground, which every caller refuses on — 451 for a takedown and 403 for
+/// a block wherever the arm shapes its own response, and the built-in 404 page
+/// in the one arm where the withheld file *is* the site's custom `404.html` template (see
 /// [`fetch_decoded`] for why the gate is on the seam).
 pub async fn read_file_by_manifest(
     db: &crate::db::CacheDb,
@@ -533,7 +536,9 @@ mod tests {
         assert!(
             matches!(
                 read_file_by_manifest(&db, &store, None, &manifest_hash, &[]).await,
-                Err(FileOpenError::Withheld)
+                Err(FileOpenError::Withheld(
+                    crate::db::blob_withhold::WithholdGround::Legal
+                ))
             ),
             "a chunk under a withhold stops the walk — the compelled bytes must \
              not be reassembled into a share link or a site path"
@@ -547,7 +552,9 @@ mod tests {
         assert!(
             matches!(
                 read_file_by_manifest(&db, &store, None, &manifest_hash, &[]).await,
-                Err(FileOpenError::Withheld)
+                Err(FileOpenError::Withheld(
+                    crate::db::blob_withhold::WithholdGround::Legal
+                ))
             ),
             "and a withheld manifest is refused before its chunks are walked"
         );

@@ -512,3 +512,322 @@ def test_a_condition_arising_mid_session_is_announced_without_a_restart(
         f"come without a restart (session_generation {generation} → "
         f"{session_generation(driver)})"
     )
+
+
+@pytest.mark.feature("critical-alerts")
+def test_a_condition_arising_after_a_same_identity_re_establish_is_announced(
+    app, nest_instance, request
+):
+    """The loop keeps sweeping on the session's LIVE connection after the same
+    identity re-establishes — a condition that arises afterwards still reaches
+    the banner on the loop's next pass.
+
+    `critical-alerts.md` § Mechanism → *How often the detector runs*: a loop
+    rides one client and ends with it. An app that rebuilds its client on a
+    same-identity re-establish (windows disposes the session's client and builds
+    another on every one) must start the new client's loop; one that left the
+    identity's only loop on the disposed client had every later pass fail at its
+    first nest read, so nothing was announced again until a restart.
+    An app that keeps its client keeps its loop, and this journey holds for it
+    unchanged.
+
+    Same poke as the mid-session journey: ``alert_sweep_wake`` ends the loop's
+    wait instead of waiting out its six hours (convention 14), and the barrier is
+    the sweep's own pass counter.
+    """
+    from conftest import _login_app_as, _make_user
+    from helpers.succession import register_recovery_kit, request_seed_alone_replacement
+
+    driver = app.driver
+    user = _make_user(nest_instance)
+    seed_hex = bytes(user["signing_key"]).hex()
+    register_recovery_kit(
+        nest_instance["url"], actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+
+    before_login, _ = alert_sweep_passes(driver) or (0, 0)
+    _login_app_as(app, request, nest_instance, user)
+    driver.navigate_to("feed")
+    await_sweep_pass_after(driver, before_login, budget_s=ALERT_SWEEP_PASS_S, what="the session-start sweep")
+
+    # ── The same identity re-establishes: the post-auth hook runs again on the
+    #    same actor (a second `_login_app_as`, test_session_start_alert_sweep.py's
+    #    technique). ──
+    before_reestablish, _ = alert_sweep_passes(driver) or (0, 0)
+    _login_app_as(app, request, nest_instance, user)
+    driver.navigate_to("feed")
+    await_sweep_pass_after(
+        driver, before_reestablish, budget_s=ALERT_SWEEP_PASS_S, what="the re-establish's pass"
+    )
+    assert _REPLACEMENT_FRAGMENT not in _alert_text(driver), (
+        "precondition: nothing pends yet, so no pass may raise the replacement alarm"
+    )
+
+    # ── The condition arises after the re-establish, and the loop's clock comes
+    #    round (poked, never waited out). ──
+    planted, _ = alert_sweep_passes(driver) or (0, 0)
+    request_seed_alone_replacement(
+        nest_instance["url"], actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    driver.call_command(ALERT_SWEEP_WAKE)
+    await_sweep_pass_after(driver, planted, budget_s=ALERT_SWEEP_PASS_S, what="the woken re-sweep")
+    text = _poll_banner(driver, _REPLACEMENT_FRAGMENT, present=True)
+    assert _REPLACEMENT_FRAGMENT in text, (
+        "a replacement parked after a same-identity re-establish must reach the banner "
+        "on the loop's next pass — a loop left sweeping on the client the re-establish "
+        f"tore down fails every pass; banner reads {text!r}, error surface: "
+        f"{app.error_text()!r}"
+    )
+
+
+# ── Outcome 5, the arms that end an identity's session without the user
+#    leaving it: the nest is no longer the one the app trusted, the identity is
+#    succeeded elsewhere, the nest is reset. The first two are driven below;
+#    the factory-reset arm has no observable that tells a surviving alert from
+#    one the new session re-raised, see the module's closing note. ──
+
+from tests.test_nest_identity_pin_post_auth import (  # noqa: E402
+    BOGUS_PIN,
+    IDENTITY_WARNING,
+    _app_diagnostics,
+    _launch_authenticated,
+    _read_pin,
+    _seed_pin,
+    pin_env,  # noqa: F401  (fixture)
+)
+from common.launch_harness import reached_authenticated_app  # noqa: E402
+from helpers.budgets import IDENTITY_REFRESH_S  # noqa: E402
+from helpers.succession import register_recovery_kit, request_seed_alone_replacement, succeed_identity  # noqa: E402
+
+
+@pytest.fixture
+def pin_app():
+    """The nest-untrust arm is witnessed on tui (the lead app); the pin
+    harness's fixture otherwise spans every post-auth app."""
+    return "tui"
+
+
+@pytest.mark.tui
+@pytest.mark.feature("critical-alerts")
+def test_a_nest_the_app_no_longer_trusts_takes_every_standing_alert_with_it(
+    pin_env, request  # noqa: F811
+):
+    """A's standing alarm does not greet B after A's session is escalated to the
+    identity-changed surface (nest-untrust) and B signs in.
+
+    Same logic as the sign-out arm: the alarm is identity-scoped to A, so if it
+    is on B's screen after B's first sweep pass, it survived the escalation.
+    The pin is put back to the nest's genuine identity before B signs in, so B's
+    own session is not itself escalated.
+    """
+    from actions import ActionLayer
+    from conftest import _login_app_as, _make_user
+
+    env = pin_env
+    nest = env["nest"]
+    user_a = nest["user"]
+    driver = _launch_authenticated(env)
+    reached_authenticated_app(driver, timeout=90)
+    genuine = None
+
+    def _pin_settled():
+        nonlocal genuine
+        genuine = _read_pin(driver, env["node_url"])
+        return genuine not in (None, BOGUS_PIN)
+
+    wait_until(
+        _pin_settled, 30,
+        diagnose=lambda: f"the launch never pinned the nest's identity; pin={genuine!r}",
+    )
+
+    _plant_pending_replacement(nest, user_a)
+    started, _ = alert_sweep_passes(driver) or (0, 0)
+    driver.call_command(ALERT_SWEEP_WAKE)
+    await_sweep_pass_after(driver, started, budget_s=ALERT_SWEEP_PASS_S, what="the woken sweep")
+    text = _poll_banner(driver, _REPLACEMENT_FRAGMENT, present=True)
+    assert _REPLACEMENT_FRAGMENT in text, (
+        "precondition: A's parked replacement must be loud before the nest is "
+        f"untrusted; banner reads {text!r}, {_app_diagnostics(driver)}"
+    )
+
+    # nest-untrust: a pin the nest can no longer prove blocks the session.
+    started, _ = alert_sweep_passes(driver) or (0, 0)
+    _seed_pin(driver, env["node_url"], BOGUS_PIN)
+    driver.call_command("silent_sign_in")
+    try:
+        driver.wait_for(IDENTITY_WARNING, timeout=IDENTITY_REFRESH_S)
+    except TimeoutError as e:
+        raise AssertionError(f"{e}. {_app_diagnostics(driver)}") from e
+    _seed_pin(driver, env["node_url"], genuine)
+
+    # B signs in on the same nest.
+    user_b = _make_user(nest)
+    app = ActionLayer(driver)
+    _login_app_as(app, request, nest, user_b)
+    driver.navigate_to("feed")
+    await_sweep_pass_after(driver, started, budget_s=ALERT_SWEEP_PASS_S, what="B's first sweep")
+    text = _alert_text(driver)
+    assert _REPLACEMENT_FRAGMENT not in text, (
+        "A's alarm survived the nest-untrust escalation and now accuses B — "
+        "nest-untrust must drop every alert (critical-alerts.md § Mechanism → "
+        f"Lifetime); banner reads {text!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.feature("critical-alerts")
+def test_a_superseded_identity_takes_every_standing_alert_with_it(
+    succeedable_app, nest_instance, request
+):
+    """A's standing alarm does not greet A's SUCCESSOR after the live session is
+    superseded and the successor's seed is imported.
+
+    The successor is a different actor, so nothing its own sweep does can post or
+    clear A's identity-scoped alarm: on its screen after its first sweep pass,
+    it survived the supersession.
+    """
+    import secrets
+
+    app, user = succeedable_app
+    driver = app.driver
+    nest_url = nest_instance["url"]
+    seed_hex = bytes(user["signing_key"]).hex()
+
+    kit_secret = register_recovery_kit(
+        nest_url, actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    request_seed_alone_replacement(
+        nest_url, actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    started, _ = alert_sweep_passes(driver) or (0, 0)
+    driver.call_command(ALERT_SWEEP_WAKE)
+    await_sweep_pass_after(driver, started, budget_s=ALERT_SWEEP_PASS_S, what="the woken sweep")
+    driver.navigate_to("feed")
+    text = _poll_banner(driver, _REPLACEMENT_FRAGMENT, present=True)
+    assert _REPLACEMENT_FRAGMENT in text, (
+        "precondition: A's parked replacement must be loud before the "
+        f"supersession; banner reads {text!r}, error surface: {app.error_text()!r}"
+    )
+
+    successor_seed = secrets.token_bytes(32).hex()
+    successor_id = succeed_identity(
+        nest_url,
+        old_actor_id_hex=user["actor_id_hex"],
+        recovery_secret_hex=kit_secret,
+        successor_seed_hex=successor_seed,
+        old_seed_hex=seed_hex,
+    )
+    started, _ = alert_sweep_passes(driver) or (0, 0)
+    driver.call_command("silent_sign_in")
+    wait_until(
+        lambda: app.is_visible("paste-secret-field"),
+        APP_RELAUNCH_S,
+        diagnose=lambda: (
+            "the live session was never escalated to the identity-import "
+            f"surface; error surface: {app.error_text()!r}"
+        ),
+    )
+    # The device comes back as the successor (the import ceremony itself is
+    # test_identity_succession_refusal's journey; this one is about the alarm).
+    from common.auth import mint_and_hold_token
+    from conftest import _login_app_as
+    from nacl.signing import SigningKey
+
+    successor_sk = SigningKey(bytes.fromhex(successor_seed))
+    successor = {
+        "signing_key": successor_sk,
+        "actor_id_hex": successor_id,
+        "actor_id_bytes": bytes(successor_sk.verify_key),
+        "token": mint_and_hold_token(nest_url, successor_sk),
+        "handle": user.get("handle"),
+    }
+    _login_app_as(app, request, nest_instance, successor, verify_live_actor=True)
+    driver.navigate_to("feed")
+    await_sweep_pass_after(driver, started, budget_s=ALERT_SWEEP_PASS_S, what="the successor's first sweep")
+    text = _alert_text(driver)
+    assert _REPLACEMENT_FRAGMENT not in text, (
+        "A's alarm survived the supersession and now accuses the successor — "
+        "a superseded identity must drop every alert (critical-alerts.md § "
+        f"Mechanism → Lifetime); banner reads {text!r}"
+    )
+
+
+# ── Outcome 5, the factory-reset arm. The admin re-claims the wiped nest as the
+#    SAME identity, so the banner cannot tell a surviving alert from one the new
+#    session re-raised; the alert registry's own count (`alert_registry`) can. ──
+
+from tests.test_factory_reset_journeys import (  # noqa: E402
+    _APP_S,
+    _NEST_FRESH_S,
+    _admin_hex,
+    _claim_through_the_wizard,
+    _seat,
+    reset_nest,  # noqa: F401  (fixture)
+)
+from common.nest import _wait_nest_fresh, resume_after_self_exit  # noqa: E402
+from helpers.waiting import alert_state_snapshot  # noqa: E402
+
+
+@pytest.mark.tui
+@pytest.mark.destructive
+@pytest.mark.feature("critical-alerts")
+def test_a_factory_reset_takes_every_standing_alert_with_it(
+    request, reset_nest, tmp_path  # noqa: F811
+):
+    """The admin's standing alarm is gone from the alert registry once the app
+    has been reset, BEFORE the re-claimed session's first sweep pass can speak.
+
+    Non-vacuous: the alarm is read standing in the registry first; the count
+    after the reset is read in one snapshot with the pass counters and asserted
+    only while no sweep pass has finished since (``completed`` unmoved), so a
+    re-raise or a clearing by the fresh session cannot be what we see. The
+    re-claim then happens, which is the same-identity sign-in that makes the
+    banner a poor witness.
+    """
+    from actions import ActionLayer
+    from common.launch_harness import reached_authenticated_app
+
+    nest = reset_nest
+    actor_hex, secret_hex = _admin_hex(nest)
+    register_recovery_kit(nest["url"], actor_id_hex=actor_hex, identity_seed_hex=secret_hex)
+    request_seed_alone_replacement(
+        nest["url"], actor_id_hex=actor_hex, identity_seed_hex=secret_hex
+    )
+    with _seat(request, "tui", tmp_path, nest) as (harness, node_url):
+        driver = harness.launch_and_route(secret_hex=secret_hex, node_url=node_url, trust=nest)
+        reached_authenticated_app(driver, timeout=_APP_S)
+        app = ActionLayer(driver)
+        driver.navigate_to("feed")
+
+        started, _ = alert_sweep_passes(driver) or (0, 0)
+        driver.call_command(ALERT_SWEEP_WAKE)
+        await_sweep_pass_after(driver, started, budget_s=ALERT_SWEEP_PASS_S, what="the woken sweep")
+        text = _poll_banner(driver, _REPLACEMENT_FRAGMENT, present=True)
+        assert _REPLACEMENT_FRAGMENT in text, (
+            "precondition: the admin's parked replacement must be loud before the "
+            f"reset; banner reads {text!r}, error surface: {app.error_text()!r}"
+        )
+        before = alert_state_snapshot(driver)
+        assert before is not None and before[0] >= 1, (
+            "precondition: the alert registry must hold the standing alarm "
+            f"(count, started, completed) = {before!r}; the app publishes no "
+            "'alert_registry' if None"
+        )
+
+        app.admin.factory_reset_via_ui()
+        resume_after_self_exit(nest)
+        _wait_nest_fresh(nest["url"], timeout=_NEST_FRESH_S)
+
+        after = alert_state_snapshot(driver)
+        assert after is not None, "the app stopped publishing the alert registry after the reset"
+        assert after[2] == before[2], (
+            "a sweep pass finished between the reset and the read — the count can "
+            f"no longer tell a survivor from a re-raise (before {before!r}, after {after!r})"
+        )
+        assert after[0] == 0, (
+            "the admin's alarm survived the factory reset in the alert registry — a "
+            "reset must drop every alert (critical-alerts.md § Mechanism → Lifetime); "
+            f"snapshot (count, started, completed) = {after!r}"
+        )
+
+        _claim_through_the_wizard(app, nest, "the re-claim after the witnessed reset")

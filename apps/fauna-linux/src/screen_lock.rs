@@ -98,9 +98,13 @@ pub fn window_focused() -> bool {
 /// This is convention 14's fake clock: the alternative — a test that sleeps for
 /// a heartbeat — is *defunct* under `testing.md` § point 14, not merely slow.
 /// Compiled out of release artifacts (convention 15).
+///
+/// `focused == false` moves the clock with the app out of front, so the
+/// advanced time bills nothing (the shared
+/// `ScreenLockCore::advance_test_clock_focused`).
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
-pub fn advance_test_clock(secs: i64) {
-    CORE.with(|c| c.borrow_mut().advance_test_clock(secs));
+pub fn advance_test_clock_focused(secs: i64, focused: bool) {
+    CORE.with(|c| c.borrow_mut().advance_test_clock_focused(secs, focused));
 }
 
 /// Record the supervised viewer's own screen-time policy, guardian, and the

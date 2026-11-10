@@ -69,9 +69,9 @@ pub use fauna_text_model::topic::TopicModel;
 pub use snapshot::{
     ArchiveCommentRecord, ArchiveCommentSource, ArchiveCommentView, ArchiveCommentsFuture,
     AuthorDisplayView, AvailableBridge, BlobHome, BridgeFeedView, CardGate, FeedEmptyState,
-    FeedSnapshot, FeedStatus, FeedSummaryView, HeldVideo, PlaybackSource, PostReactionGroup,
-    PostResolution, PostSummary, QuotedPostView, ReplyAudience, TipSenderView, TipView,
-    UnlockOfferView, feed_empty_state, held_video_source, post_card_gate,
+    FeedSnapshot, FeedStatus, FeedSummaryView, HeldVideo, LikeState, PlaybackSource,
+    PostReactionGroup, PostResolution, PostSummary, QuotedPostView, ReplyAudience, TipSenderView,
+    TipView, UnlockOfferView, feed_empty_state, held_video_source, post_card_gate,
 };
 
 use fauna_core::source_glyph::{BridgeIdentitySnapshot, SourceGlyph};

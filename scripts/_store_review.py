@@ -377,3 +377,42 @@ def review_answered_on(submissions: list[dict], *, serving: str | None) -> _dt.d
     days = [s["since"] for s in submissions
             if serving is not None and s["version"] == serving and s["state"] in ANSWERED]
     return max(days, default=None)
+
+
+# ── the artifacts of a version ──────────────────────────────────────────────
+# Owner: docs/goal/architecture/release-table.md § Tag gate and release table,
+# *The artifacts of a version*: a store's `submitted` and `live` are written
+# when the store's verdict is recorded — by `just store-review` itself, in the
+# same act, wherever the release table is present (the table's own module,
+# `record_store_submission`, reads these maps).
+
+#: The release table's artifact names one store submission is: the Store takes
+#: one package per architecture under one submission.
+STORE_ARTIFACTS = {
+    "play": ("android-app",),
+    "app-store": ("ios-app",),
+    "microsoft-store": ("windows-store/arm64", "windows-store/x64"),
+}
+
+#: The one track per store where a serving build is the store's public release;
+#: a build serving any other (a testing track) is still only `built`.
+PUBLIC_TRACK = {"play": "production", "app-store": "app-store", "microsoft-store": "public"}
+
+#: A submission state → the artifact state it is; None: no act (a `superseded`
+#: build keeps whatever it reached).
+_ARTIFACT_STATE = {
+    "built": "built",
+    "uploaded": "built",
+    "in-review": "submitted",
+    "approved": "submitted",
+    "rejected": "submitted",
+    "withdrawn": "withdrawn",
+    "superseded": None,
+}
+
+
+def artifact_state(sub: dict) -> str | None:
+    """The release table's artifact state one submission's recorded state is."""
+    if sub["state"] == "serving":
+        return "live" if sub["track"] == PUBLIC_TRACK[sub["store"]] else "built"
+    return _ARTIFACT_STATE[sub["state"]]

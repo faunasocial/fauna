@@ -102,6 +102,10 @@ struct ContactsView: View {
                             CopyButton(Ids.contactActorIdCopyBtn, text: result.actorId)
                             // Open the found actor's Profile, carrying the lookup's nest
                             // URL as its home (`contacts.md` § Layout & flow region 3).
+                            // Not in the kids build: a Find User hit is a non-contact,
+                            // whose profile D-K5 excises (account-age-band.md); the
+                            // lookup, the knock and the guardian ask stay.
+                            #if !FAUNA_KIDS
                             Button(L.contacts.findUser.openProfile) {
                                 openProfile(result.actorId, home: vm.findNestUrl)
                             }
@@ -110,6 +114,7 @@ struct ContactsView: View {
                             .automationActivate(Ids.contactActorIdOpenProfileButton) {
                                 openProfile(result.actorId, home: vm.findNestUrl)
                             }
+                            #endif
                             Spacer()
                             Button(L.contacts.knock) {
                                 Task { await vm.addContact(actorId: result.actorId) }
@@ -308,7 +313,11 @@ struct ContactsView: View {
                                     }
                                 }
                                 .contentShape(Rectangle())
-                                .onTapGesture { openProfile(contact.peerId, home: contact.homeNestUrl) }
+                                .onTapGesture {
+                                    if opensProfile(status: contact.status) {
+                                        openProfile(contact.peerId, home: contact.homeNestUrl)
+                                    }
+                                }
                                 .accessibilityElement(children: .contain)
                                 .accessibilityIdentifier(Ids.contactRow)
                                 // Presence anchor for the indexed contact row. Env-gated no-op.
@@ -318,7 +327,9 @@ struct ContactsView: View {
                                 // clicks the row by its full hex actor_id (mirrors
                                 // linux's row widget-name), so register that id.
                                 .automationActivate(contact.peerId) {
-                                    openProfile(contact.peerId, home: contact.homeNestUrl)
+                                    if opensProfile(status: contact.status) {
+                                        openProfile(contact.peerId, home: contact.homeNestUrl)
+                                    }
                                 }
                                 // Outermost: every registration above — the row's
                                 // own presence anchor included — records
@@ -419,6 +430,19 @@ struct ContactsView: View {
         appState.profileHome = home
         appState.selectedTab = "more"
         appState.moreSelectedView = "profile"
+    }
+
+    /// Whether a contact row's tap opens the person's profile. Always, except in
+    /// the Fauna Kids build, where only a CONFIRMED contact's does: a pending or
+    /// accepted row is not yet an approved contact, and D-K5 excises profiles of
+    /// non-contacts (account-age-band.md § The account age band) — android's
+    /// `!BuildConfig.KIDS || contact.status == "confirmed"` (ContactsScreen.kt).
+    private func opensProfile(status: String) -> Bool {
+        #if FAUNA_KIDS
+        status == "confirmed"
+        #else
+        true
+        #endif
     }
 }
 

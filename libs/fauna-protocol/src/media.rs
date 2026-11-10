@@ -266,6 +266,39 @@ impl MediaItem {
             ..Default::default()
         })
     }
+
+    /// The item a head change row renders as — [`Self::as_change_row`]'s
+    /// inverse, for a scope that lists a set off its change log rather than
+    /// `fauna.media.list`: the foreign browse scope, whose heads come over
+    /// `fauna.sync.changes.list` (`ui/media.md` § Cross-nest shared sets).
+    /// The set's identity lives on the scope, never on the item: `folder` is
+    /// the scope's rendered name and `folder_id` stays `None`. A hex field
+    /// that does not decode is absent, never guessed; the item's
+    /// `source_online` is the scope's to stamp.
+    #[must_use]
+    pub fn from_change_row(folder: &str, row: &crate::sync::SyncChange) -> Self {
+        let bytes = |hex_str: &str| hex::decode(hex_str).ok().map(ByteBuf::from);
+        Self {
+            folder: folder.to_string(),
+            path: row.path.clone().unwrap_or_default(),
+            size_bytes: row.size_bytes,
+            updated_at: row.created_at,
+            thumbnail_hash: row.thumbnail_hash.clone(),
+            path_sealed: row.path_sealed.clone(),
+            path_hash: bytes(&row.path_hash),
+            manifest_hash: row.manifest_hash.as_deref().and_then(bytes),
+            device_id: row.device_id.as_deref().and_then(bytes),
+            author_actor_id: row.author_actor_id.as_deref().and_then(bytes),
+            change_type: Some(row.change_type.clone()),
+            content_key_version: row.content_key_version,
+            derived_through: row.derived_through,
+            is_resolution: row.is_resolution,
+            deposited_by: row.deposited_by.clone(),
+            signature: row.signature.clone(),
+            signer_key: row.signer_key.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 /// `fauna.media.list` reply — one keyset page plus the continuation cursor.
@@ -288,4 +321,38 @@ pub struct MediaListReply {
     pub signer_certs: Vec<fauna_core::encoding::EmbedAsBytes>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[cfg(test)]
+mod from_change_row_tests {
+    use super::*;
+
+    /// The inverse holds: a head row turned into an item projects back to the
+    /// very row the judge verified — so the foreign scope's items are opened,
+    /// signed-as stamped and thumbnailed off exactly the statement served.
+    #[test]
+    fn a_head_row_round_trips_through_the_item() {
+        let row = crate::sync::SyncChange {
+            seq: 7,
+            path_hash: hex::encode([1u8; 32]),
+            manifest_hash: Some(hex::encode([2u8; 32])),
+            size_bytes: 42,
+            change_type: "create".into(),
+            created_at: 1_700,
+            path: Some("trip/a.jpg".into()),
+            device_id: Some(hex::encode([3u8; 16])),
+            content_key_version: Some(2),
+            thumbnail_hash: Some(hex::encode([4u8; 32])),
+            author_actor_id: Some(hex::encode([5u8; 32])),
+            path_sealed: Some(ByteBuf::from(vec![9, 9])),
+            signature: Some(ByteBuf::from(vec![6; 64])),
+            signer_key: Some(ByteBuf::from(vec![7; 32])),
+            ..Default::default()
+        };
+        let item = MediaItem::from_change_row("trip", &row);
+        assert_eq!(item.folder, "trip");
+        assert_eq!(item.folder_id, None, "identity lives on the scope");
+        let back = item.as_change_row().expect("every statement field carried");
+        assert_eq!(back, crate::sync::SyncChange { seq: 0, ..row });
+    }
 }

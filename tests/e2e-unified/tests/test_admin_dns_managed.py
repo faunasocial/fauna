@@ -401,6 +401,93 @@ def test_admin_dns_managed_records_republished_and_superseded_policy_taken_down(
         _cleanup(admin_app, [domain])
 
 
+# The fake's planting line (`FAKE_DNS_PLANT_WITNESS`): a record the sentinel
+# token carried after its zones went into the fake zone as another tool's.
+_PLANT_WITNESS = "e2e fake DNS provider planted"
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_dns_managed_cleanup_leaves_records_fauna_did_not_write(
+    admin_app, nest_instance
+):
+    """A managed domain's publish and clean-up passes take down only what
+    Fauna wrote (`dns-management.md` § Records covered — every Fauna-exclusive
+    TXT slot is converged by `reconcile_exclusive_txt_slot`, which visits only
+    Fauna-known names and withdraws only values carrying the slot's marker).
+
+    Three foreign TXT records sit in the zone before the domain is opted in,
+    planted by the sentinel token as another tool would have left them:
+    another mailer's DKIM selector (a `p=` value, so only the visit set keeps
+    it safe), a site-verification token at the apex beside Fauna's SPF (a
+    name Fauna visits on every pass, so only the marker keeps it safe), and a
+    sibling `_fauna` key (`subhandles=`, never the `self=` Fauna publishes).
+    The passes then run — the opt-in's publish, and a clean-up that really
+    withdraws something (a DMARC policy softened elsewhere, its superseded
+    `p=reject` taken down) — and no withdrawal ever names a planted record:
+    the fake zone's only removal path is the withdrawal its log line reports,
+    so each planted value is still in the zone beside Fauna's own."""
+    zone = f"fg-{secrets.token_hex(4)}.test"
+    domain = f"m.{zone}"
+    tag = secrets.token_hex(4)
+    planted = [
+        (f"theirmailer._domainkey.{domain}", f"v=DKIM1; k=rsa; p=THEIRS{tag}"),
+        (domain, f"site-verification={tag}"),
+        (f"_fauna.{domain}", f"subhandles=bob{tag}"),
+    ]
+    token = f"fake-dns-ok:{zone}" + "".join(f"|{n}={v}" for n, v in planted)
+    _open_with_domains(admin_app, nest_instance, [domain])
+    _require_log_reader(admin_app, "the planted and withdrawn records")
+    try:
+        _add_credential(admin_app, token)
+        for name, value in planted:
+            assert _log_lines(admin_app.driver, _PLANT_WITNESS, name, value), (
+                f"the sentinel token did not plant TXT {name} {value!r} — the "
+                f"assertions below would hold vacuously. Plant lines: "
+                f"{_log_lines(admin_app.driver, _PLANT_WITNESS)!r}"
+            )
+
+        _toggle_mode(admin_app, domain)
+        _wait_mode(admin_app, domain, _LABEL_MANAGED, "the covered opt-in")
+        wait_until(
+            lambda: _log_lines(admin_app.driver, _PUBLISH_WITNESS, domain, "v=spf1") or None,
+            PROVIDER_VERIFY_S,
+            diagnose=lambda: (
+                f"the opt-in never published Fauna's SPF at {domain!r} beside the "
+                f"planted verification token (error: {_error_text(admin_app) or 'none'}; "
+                f"publishes: {_log_lines(admin_app.driver, _PUBLISH_WITNESS, domain)!r})"
+            ),
+        )
+
+        # A clean-up pass that withdraws: the policy edited elsewhere.
+        from helpers.admin_wire import admin_client
+
+        with admin_client(nest_instance) as client:
+            client.call(
+                "fauna.bridges.update_local_domain_config",
+                {"domain": domain, "dmarc_policy_mode": "quarantine"},
+            )
+        dmarc = f"_dmarc.{domain}"
+        wait_until(
+            lambda: _log_lines(admin_app.driver, _WITHDRAW_WITNESS, dmarc, "p=reject") or None,
+            PROVIDER_VERIFY_S,
+            diagnose=lambda: (
+                f"no clean-up pass withdrew the superseded p=reject at {dmarc} "
+                f"(withdrawals so far: {_log_lines(admin_app.driver, _WITHDRAW_WITNESS)!r}; "
+                f"error: {_error_text(admin_app) or 'none'})"
+            ),
+        )
+
+        withdrawn = _log_lines(admin_app.driver, _WITHDRAW_WITNESS)
+        for name, value in planted:
+            hits = [ln for ln in withdrawn if value in ln]
+            assert not hits, (
+                f"a managed pass withdrew TXT {name} {value!r}, a record Fauna "
+                f"never wrote: {hits!r}"
+            )
+    finally:
+        _cleanup(admin_app, [domain])
+
+
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_admin_dns_failed_publish_says_why_and_stays_managed(admin_app, nest_instance):
     """A provider that accepted the credential but refuses the write (a revoked

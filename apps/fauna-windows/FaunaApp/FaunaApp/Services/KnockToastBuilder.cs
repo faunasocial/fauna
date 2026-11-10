@@ -1,5 +1,6 @@
 using Microsoft.Windows.AppNotifications;
 using Microsoft.Windows.AppNotifications.Builder;
+using uniffi.fauna_ffi;
 
 namespace FaunaApp.Services;
 
@@ -14,9 +15,15 @@ namespace FaunaApp.Services;
 internal static class KnockToastBuilder
 {
     /// <summary>Every knock toast carries this one tag, so a flood of fresh-key
-    /// knocks replaces a single toast instead of stacking one per sender (linux
-    /// <c>NOTIF_ID_KNOCK</c>, android <c>KNOCK_NOTIFICATION_ID</c>).</summary>
-    internal const string Tag = "knock";
+    /// knocks replaces a single toast instead of stacking one per sender. Spelled
+    /// from the shared id (<c>knock_toast_replace_id</c>, the one every native app
+    /// tags its knock toast with), never a value of windows' own — so the
+    /// knock-toast log can record that id as the toast's <c>replace_id</c>, and the
+    /// tag reads the same as web's and apple's (<c>fauna-knock-1003</c>).</summary>
+    internal static readonly string Tag = $"fauna-knock-{ReplaceId}";
+
+    /// <summary>The shared knock-toast replace id the tag is spelled from.</summary>
+    internal static uint ReplaceId => FaunaFfiMethods.KnockToastReplaceId();
 
     /// <summary>The toast for (title, body). <c>AddText</c> escapes toast XML
     /// itself (checked 2026-10-11 by building a payload from <c>&lt;b&gt; &amp;</c>), so the knocker's text —

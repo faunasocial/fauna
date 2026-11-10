@@ -29,13 +29,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fauna_core::subscription::FOLLOWERS_TIER;
 use fauna_protocol::subscriptions::{
-    StatusGetReply, StatusGetRequest, SubscribeRequest, UnsubscribeReply, UnsubscribeRequest,
+    StatusGetReply, StatusGetRequest, SubscribeRequest, UnsubscribeRequest,
 };
 use fauna_protocol::{RpcError, decode_strict as decode};
 
 use super::{
     MLKEM768_ENCAPS_KEY_LEN, follow_pending, internal, malformed_upload, not_subscribed,
-    permission_denied, subscribe_core,
+    permission_denied, subscribe_core, unsubscribe_core,
 };
 use crate::principal_handlers::{PrincipalCaller, PrincipalHandler};
 use crate::routes::AppState;
@@ -129,18 +129,17 @@ fn unsubscribe_handler() -> PrincipalHandler {
                 ));
             }
             admit(&state, &caller).await?;
-            let request_id = state
-                .db
-                .insert_subscribe_request(
-                    &author_id,
-                    &caller.account,
-                    FOLLOWERS_TIER,
-                    "unsubscribe",
-                    None,
-                )
-                .await
-                .map_err(internal)?;
-            encode_reply(&UnsubscribeReply::Queued { request_id })
+            // The user door's floor, at `followers` (`subscriptions.md` § The
+            // free followers tier — follow and unfollow, rule 5).
+            let (reply, _tiers) = unsubscribe_core(
+                &state,
+                &author_id,
+                &caller.account,
+                None,
+                Some(FOLLOWERS_TIER),
+            )
+            .await?;
+            encode_reply(&reply)
         })
     })
 }

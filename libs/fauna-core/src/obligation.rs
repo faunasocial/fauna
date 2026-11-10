@@ -1096,6 +1096,54 @@ pub fn render_verdict_for_item(
     composed
 }
 
+/// The show-again control on a reported placeholder (`moderation.md`
+/// § Corollary — the reporter's hide is theirs to undo): what one activation
+/// of `content-policy-show-again-button` un-hides, and what the button says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowAgain {
+    /// Every hidden id that matched the item — its own id, its author's, or
+    /// both — in the list's stored spelling, each one `unhide_reported` call.
+    pub ids: Vec<String>,
+    /// The button's label, naming the scope: the item alone
+    /// (`moderation.report.show_again_item`), or the whole account
+    /// (`moderation.report.show_again_account`) when the author's id is among
+    /// the matches — undoing that hide brings back everything the account
+    /// authored, from whichever of its placeholders the user presses.
+    pub label: LocalizedText,
+}
+
+/// The show-again control for one identified item, or `None` when no hidden
+/// id matched it (the placeholder is not the viewer's own report, so there is
+/// nothing of theirs to undo). The one shared decision of *which* ids a press
+/// removes and *which* label the button carries — the reader twin of
+/// [`reported_by_viewer`], so an app never compares ids itself (priority #2).
+pub fn show_again_for_item(
+    hidden_content: &[String],
+    item_id: &str,
+    author_id: Option<&str>,
+) -> Option<ShowAgain> {
+    let mut ids = Vec::new();
+    let mut account = false;
+    for hidden in hidden_content {
+        let matches_item = hidden.eq_ignore_ascii_case(item_id);
+        let matches_author = author_id.is_some_and(|author| hidden.eq_ignore_ascii_case(author));
+        if matches_item || matches_author {
+            account |= matches_author;
+            if !ids.contains(hidden) {
+                ids.push(hidden.clone());
+            }
+        }
+    }
+    (!ids.is_empty()).then(|| ShowAgain {
+        ids,
+        label: LocalizedText::key(if account {
+            "moderation.report.show_again_account"
+        } else {
+            "moderation.report.show_again_item"
+        }),
+    })
+}
+
 /// The guardian categories a piece of content triggers, for Guardian Notify
 /// counting (`family-safety.md` § Guardian Notify). Given the item's
 /// post-decrypt [`ContentLabelEntry`](crate::content_category::ContentLabelEntry)
@@ -1398,6 +1446,12 @@ impl ContentPolicyState {
     /// a hide returns — never merged, since the store's own list is the truth).
     pub fn set_hidden_content(&mut self, ids: Vec<String>) {
         self.hidden_content = ids;
+    }
+
+    /// The show-again control for an item the viewer's own report hid
+    /// ([`show_again_for_item`] over the engine's hide list), or `None`.
+    pub fn show_again_for_item(&self, item_id: &str, author_id: Option<&str>) -> Option<ShowAgain> {
+        show_again_for_item(&self.hidden_content, item_id, author_id)
     }
 
     /// Set the region content policies in force for this device — every region
@@ -1978,6 +2032,48 @@ mod tests {
         let alone = render_verdict_composed(&labels, None, None, &[], &nest_collapses);
         assert_eq!(alone.verdict, RenderVerdict::Collapse);
         assert!(alone.nest().is_some());
+    }
+
+    /// The show-again control (`moderation.md` § Corollary — the reporter's
+    /// hide is theirs to undo): every hidden id that matched the item, in the
+    /// list's spelling, and a label naming the scope — the account whenever
+    /// the author's id is among the matches, the item otherwise; nothing when
+    /// no id matched.
+    #[test]
+    fn show_again_names_the_matching_ids_and_the_scope() {
+        let hidden = vec!["aa11".to_string(), "bb22".to_string(), "cc33".to_string()];
+        let item = show_again_for_item(&hidden, "AA11", Some("dd44")).expect("the item matched");
+        assert_eq!(item.ids, vec!["aa11".to_string()]);
+        assert_eq!(item.label.key, "moderation.report.show_again_item");
+
+        let account =
+            show_again_for_item(&hidden, "zz99", Some("BB22")).expect("the author matched");
+        assert_eq!(account.ids, vec!["bb22".to_string()]);
+        assert_eq!(account.label.key, "moderation.report.show_again_account");
+
+        let both = show_again_for_item(&hidden, "aa11", Some("bb22")).expect("both matched");
+        assert_eq!(both.ids, vec!["aa11".to_string(), "bb22".to_string()]);
+        assert_eq!(
+            both.label.key, "moderation.report.show_again_account",
+            "an account match widens the scope whatever else matched"
+        );
+
+        assert_eq!(show_again_for_item(&hidden, "zz99", Some("yy88")), None);
+        assert_eq!(show_again_for_item(&hidden, "zz99", None), None);
+        assert_eq!(show_again_for_item(&[], "aa11", Some("bb22")), None);
+    }
+
+    /// The engine's own reading agrees with the free function over its list.
+    #[test]
+    fn the_engine_offers_show_again_only_for_its_own_hidden_items() {
+        let mut state = ContentPolicyState::default();
+        assert_eq!(state.show_again_for_item("aa11", None), None);
+        state.set_hidden_content(vec!["aa11".to_string()]);
+        let again = state
+            .show_again_for_item("aa11", Some("bb22"))
+            .expect("hidden");
+        assert_eq!(again.ids, vec!["aa11".to_string()]);
+        assert_eq!(again.label.key, "moderation.report.show_again_item");
     }
 
     #[test]

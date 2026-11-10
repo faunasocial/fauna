@@ -209,8 +209,10 @@ public final class InlineVideoPlayer {
         }
         let item: AVPlayerItem
         switch media {
+        #if !FAUNA_KIDS
         case .file(let url, _, _):
             item = AVPlayerItem(url: url)
+        #endif
         case .stream(let nestUrl, let path):
             let loader = NestAssetResourceLoader(nestUrl: nestUrl, path: path)
             guard let asset = loader.asset(path: path) else {

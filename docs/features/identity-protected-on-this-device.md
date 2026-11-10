@@ -50,15 +50,17 @@ Stamped 2026-10-21 at 46bbdabb61.
 |---|---|---|
 | web | ✅ full | 0.1.5 docker |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | |
+| windows | ✅ full | |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | |
 | android | ❌ failing | |
 | tui | ✅ full | |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_confirmed_identity_survives_relaunch.py::test_a_confirmed_identity_is_found_by_the_next_launch` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_confirmed_identity_survives_relaunch.py::test_a_confirmed_identity_is_found_by_the_next_launch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_tui_headless_credential_store.py::test_headless_store_create_claim_relaunch_unlock` | tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_web_sealed_identity_store_journey` | web (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_identity_store_unreachable.py::test_no_protected_store_is_said_and_the_key_rests_only_sealed` | tui (linux): passed |

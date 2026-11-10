@@ -17,7 +17,8 @@ const NOTIF_ID_MESSAGE: u32 = 1001;
 // never reached from `app.rs`'s DataMessage dispatch.
 #[allow(dead_code)]
 const NOTIF_ID_GROUP_MESSAGE: u32 = 1002;
-const NOTIF_ID_KNOCK: u32 = 1003;
+// The knock toast's id is shared, so every app replaces under the same one.
+const NOTIF_ID_KNOCK: u32 = fauna_client_notifications::KNOCK_TOAST_REPLACE_ID;
 #[allow(dead_code)]
 const NOTIF_ID_GROUP_INVITE: u32 = 1004;
 const NOTIF_ID_UNIFIED: u32 = 1007;
@@ -117,7 +118,8 @@ fn spawn_action_listener(handle: notify_rust::NotificationHandle) {
 /// raises a system notification while the app is running, and names the open
 /// conversation as the one exception. The other notifiers below keep the gate —
 /// no ratified outcome covers them, so narrowing this to the message banner is
-/// the conformance fix and not a sweep.
+/// the conformance fix and not a sweep (the knock toast has since taken the
+/// same fix under its own outcome, [`notify_knock`]).
 pub fn notify_message(sender: &str, body_preview: &str) {
     show_with_action(build_message(sender, body_preview));
 }
@@ -156,14 +158,50 @@ fn build_group_message(group_name: &str, sender: &str, body_preview: &str) -> No
     notif
 }
 
-/// Show a desktop notification for a new knock (contact request).
-///
-/// `body` is the shared decision's text (`crate::i18n::knock_push_text`) — the
-/// knock row's own sentence, so the toast says what the row says.
-pub fn notify_knock(body: &str) {
-    if !should_show_notifications() {
+/// The knock toasts this process raised — `fauna_e2e_agent::KNOCK_NOTICES_KEY`,
+/// the witness for `notifications` outcome 15. Fed only by
+/// [`raise_knock_toast`]; tui holds its twin on `App`.
+static KNOCK_NOTICES: std::sync::LazyLock<std::sync::Mutex<fauna_e2e_agent::KnockNotices>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn knock_notices() -> std::sync::MutexGuard<'static, fauna_e2e_agent::KnockNotices> {
+    KNOCK_NOTICES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The `fauna_e2e_agent::KNOCK_NOTICES_KEY` value, for the state report.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub fn knock_notices_json() -> serde_json::Value {
+    knock_notices().json()
+}
+
+/// Raise the knock toast for an inbound knock push — linux's leg of
+/// `behavior/notifications.md` § Localized body, *The knock toast*, the twin of
+/// tui's `App::raise_knock_toast`. Both decisions are shared
+/// (`fauna_client_notifications::knock_toast`): rule 6 withholds the toast for a
+/// knock a muted word would collapse; otherwise it says the knock row's own
+/// sentence. The push is counted before the gate and the toast logged after
+/// the post, so the log means "the user was shown this".
+pub fn raise_knock_toast(
+    muted: &[fauna_core::data::MutedKeyword],
+    push: &fauna_protocol::push_events::KnockPayload,
+) {
+    knock_notices().observe();
+    let Some(text) = fauna_client_notifications::knock_toast(muted, push) else {
         return;
-    }
+    };
+    let (key, body) = crate::i18n::knock_toast_body(text);
+    notify_knock(&body);
+    knock_notices().record(key.as_deref(), &body, Some(NOTIF_ID_KNOCK));
+}
+
+/// Show a desktop notification for a new knock (contact request), always under
+/// the one shared replace id.
+///
+/// ⚠ **Does NOT consult [`should_show_notifications`]** — the same conformance
+/// fix [`notify_message`] took: `docs/features/notifications.md` outcome 15
+/// (ratified) says a stranger's knock shows one notice, with no exception for a
+/// focused window, and no other app gates its knock toast on focus.
+fn notify_knock(body: &str) {
     show_with_action(build_knock(body));
 }
 

@@ -190,18 +190,7 @@ def _local_bluesky_posts(nest, text: str, user: dict | None = None) -> list[dict
 
 def _await_card(app, post_id: str) -> int:
     """The app's feed-card index for ``post_id``, once it paints."""
-    def found():
-        i = app.feed.post_index_by_id(post_id)
-        return i + 1 if i >= 0 else 0  # truthy for index 0 too
-
-    return wait_until(
-        found, PAINT_S,
-        diagnose=lambda: (
-            f"the post {post_id} is on the wire but not in the app's feed; app "
-            f"feed ids={[p.get('post_id') for p in app.feed._feed_posts_from_state()]!r}; "
-            f"error={app.error_text()!r}"
-        ),
-    ) - 1
+    return app.feed.card_index_by_id(post_id, timeout=PAINT_S)
 
 
 def _card_author(app, post_id: str) -> str:
@@ -265,13 +254,7 @@ def test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_i
         spa_url_fixture="bluesky_feed_spa_url", verify_live_actor=True,
     )
     app.feed.navigate()
-    deadline = time.monotonic() + 30
-    index = -1
-    while time.monotonic() < deadline:
-        index = app.feed.post_index_by_id(post_id)
-        if index >= 0:
-            break
-        time.sleep(0.3)
+    index = app.feed.card_index_by_id(post_id, timeout=30)
     assert index >= 0, (
         f"the ingested Bluesky post {post_id} is on the wire but not in the "
         f"app's feed; app feed ids="

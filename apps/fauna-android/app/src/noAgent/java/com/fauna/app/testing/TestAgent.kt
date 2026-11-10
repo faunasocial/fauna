@@ -163,6 +163,16 @@ object TestAgent {
     fun observeConnectionReport(state: com.fauna.ffi.FfiConnectionState) {
     }
 
+    /** No-op twin: the knock-toast log is a `test-helpers` UniFFI export,
+     *  absent from the production-flavored bindings. */
+    fun observeKnockNotice() {
+    }
+
+    /** No-op twin — see [observeKnockNotice]. */
+    @Suppress("UNUSED_PARAMETER")
+    fun recordKnockNotice(key: String?, text: String, replaceId: Int) {
+    }
+
     /** Bare-clock twin: the auto-renew tick's wait is its clock alone — there is
      *  no `auto_renew_wake` to race it in a release build. */
     @Suppress("RedundantSuspendModifier")

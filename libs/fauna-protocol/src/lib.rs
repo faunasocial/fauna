@@ -92,6 +92,13 @@ pub mod oauth_issuer;
 /// apply locally, queue as an intent, or must refuse
 /// (`account-data-plane.md` § The offline-mutation contract).
 pub mod offline_class;
+/// The unsent-changes describer — an outbox intent in user words, per kind,
+/// and the state and failure-reason texts (`account-offline-mutation.md` §
+/// The offline-mutation contract → *The unsent-changes surface*).
+pub mod offline_describe;
+/// The `OfflineQueued` composer — send now, or queue durably while the app has
+/// no nest (`account-offline-mutation.md` § The offline-mutation contract).
+pub mod offline_intent;
 pub mod pair;
 /// The `fauna.payments.*` wire plane — a controversial-class feature, so it
 /// compiles away with the `payments` feature (`dynamic-features.md` § The cargo
@@ -175,7 +182,9 @@ pub use envelope::{Cancel, Frame, FrameError, Push, Reply, Request, decode_frame
 pub use error::{LocalizedText, RpcError, RpcErrorAction};
 pub use fauna_cbor::Value;
 pub use kind::{KindRegistry, RpcKindMeta};
-pub use nest_info_memo::{NestInfoMemo, read_nest_info};
+pub use nest_info_memo::{
+    CrossNestError, NestInfoMemo, normalize_home_nest_url, read_nest_id, read_nest_info,
+};
 pub use protocol_kinds::{EchoReply, EchoRequest};
 pub use push_events::{PushEvent, StaleSurfaces};
 pub use requester::{

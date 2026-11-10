@@ -45,3 +45,34 @@ export function approvalText(
   const time = when(a.kind, a.created_at);
   return time == null ? who : `${who} · ${time}`;
 }
+
+/** What the page's decide calls — rpc.ts / wasm.ts in production, fakes in
+ *  `family-approvals.test.ts` (this module stays wasm-free). */
+export interface DecideVerbs {
+  /** The composer's send-or-queue; `true` = queued. */
+  decideOrQueue: (entry: FamilyApprovalEntry, approve: boolean) => Promise<boolean>;
+  /** The shared fold of a queued decision. */
+  afterQueued: (approvals: FamilyApprovalEntry[], decided: FamilyApprovalEntry) => FamilyApprovalEntry[];
+  /** The page's full re-read, after a sent decision. */
+  reread: () => Promise<void>;
+}
+
+/**
+ * A guardian's approve/deny of one approvals-queue item
+ * (`account-offline-mutation.md` § Implementation status today, the family
+ * composer). Sent → the page re-reads (`null`: the re-read set the list).
+ * Queued with no nest → the item leaves the local list through the shared
+ * fold and nothing is re-read; the read after the drain is the nest's word.
+ */
+export async function decideApproval(
+  verbs: DecideVerbs,
+  approvals: FamilyApprovalEntry[],
+  entry: FamilyApprovalEntry,
+  approve: boolean,
+): Promise<FamilyApprovalEntry[] | null> {
+  if (await verbs.decideOrQueue(entry, approve)) {
+    return verbs.afterQueued(approvals, entry);
+  }
+  await verbs.reread();
+  return null;
+}

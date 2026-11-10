@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using FaunaApp.Core.Services;
+using uniffi.fauna_client_policy;
 using uniffi.fauna_ffi;
 using Xunit;
 
@@ -34,6 +35,9 @@ public class NestRulesRenderTests
         {
             ["nest_rules/blocked_notice"] = "Not shown on {nest} — blocked under this nest’s rules",
             ["nest_rules/collapsed_notice"] = "Hidden on {nest} under this nest’s rules — select to show",
+            ["nest_rules/rule_line_no_level"] = "{verdict} — {reason}",
+            ["rule_editor/verdict/block"] = "Block",
+            ["rule_editor/prompt_not_applied"] = "Not applied on this device",
         };
         public string Get(string key) => Map.TryGetValue(key, out var v) ? v : key;
     }
@@ -110,6 +114,33 @@ public class NestRulesRenderTests
         Assert.False(new RegionRenderDecision("collapse", null,
             NestPlaceholder: block with { Verb = "collapse" }).IsNestBlocked);
         Assert.False(new RegionRenderDecision("block", null).IsNestBlocked);
+    }
+
+    // ── The joining surface's rule line ────────────────────────────────────
+
+    private static NestRuleLine Rule(uniffi.fauna_core.LocalizedText? inert) => new(
+        new uniffi.fauna_core.LocalizedText("rule_editor.verdict.block", new Dictionary<string, string>()),
+        null,
+        "No gambling promotion.",
+        inert);
+
+    [Fact]
+    public void A_rule_this_device_cannot_apply_carries_its_note_under_its_line_at_joining()
+    {
+        // nest-rules.md § Acceptance at joining: the not-applied note on a second
+        // line of the same item, as tui's joining_rule_line paints it.
+        var rule = Rule(new uniffi.fauna_core.LocalizedText(
+            "rule_editor.prompt_not_applied", new Dictionary<string, string>()));
+        Assert.Equal("Block — No gambling promotion.", NestRulesHost.RuleLine(rule));
+        Assert.Equal("Block — No gambling promotion.\nNot applied on this device",
+            NestRulesHost.JoiningRuleLine(rule));
+    }
+
+    [Fact]
+    public void An_applied_rule_reads_at_joining_as_its_rule_line_alone()
+    {
+        var rule = Rule(null);
+        Assert.Equal(NestRulesHost.RuleLine(rule), NestRulesHost.JoiningRuleLine(rule));
     }
 
     // ── The composed face through the real shared plane ───────────────────

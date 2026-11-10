@@ -271,6 +271,32 @@ pub struct FollowIntent {
     pub created_at: Timestamp,
 }
 
+/// A buyer's own signed statement that they redeem a post-payment claim code
+/// minted by an author homed on **another nest** — the redeem twin of
+/// [`FollowIntent`] (`docs/goal/behavior/federated-follow.md` § Decision 2 →
+/// *The redeem twin*; the ruling `monetization.md` § Pillar 3 → *Which nest an
+/// in-app redeem binds on*). The buyer's nest carries it verbatim to the code's
+/// home, which verifies it under [`crate::data::Capability::Follow`] (its
+/// effect is a roster entry, as a follow's is) and binds `home_nest_id` to the
+/// carrying nest's verified identity, so a hostile nest can neither redeem for
+/// a user nor claim one homed elsewhere. `created_at` is stamped for the
+/// `(author, redeemer, tier)` the code names, so a later leave orders after it.
+///
+/// Signed via `fauna_cbor::SignedEnvelope` (sign-over-CID) by the redeemer's
+/// identity, or by a device whose `DeviceAuthorization` grants `Follow`; it
+/// rides in the embed-as-bytes wire shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRedeemIntent {
+    pub redeemer: ActorId,
+    pub author: ActorId,
+    pub code: String,
+    /// The nest id of the redeemer's own nest — the only nest that may carry
+    /// this intent.
+    #[serde(with = "serde_bytes")]
+    pub home_nest_id: [u8; 32],
+    pub created_at: Timestamp,
+}
+
 /// Broadcast key blob: period key encrypted to each subscriber's public key.
 ///
 /// Signed via `fauna_cbor::SignedEnvelope` (sign-over-CID); the envelope

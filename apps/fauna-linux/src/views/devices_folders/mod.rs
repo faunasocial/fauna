@@ -153,6 +153,18 @@ impl MlsQuery for LinuxMlsQuery {
         };
         session.engine().has_group(&channel_id)
     }
+
+    /// The forked-seat mark, read off the same engine tui reads; pre-login or
+    /// an undecodable id is the fail-safe `false`.
+    fn is_forked_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        let Some(session) = crate::conversations::conv_backend::active_session() else {
+            return false;
+        };
+        let Ok(channel_id) = crate::client::channel_id_from_group_id_hex(mls_group_id_hex) else {
+            return false;
+        };
+        session.engine().folder_seat_forked(&channel_id).is_some()
+    }
 }
 
 /// The `page-heading` title label (ui.yaml global rule). `set_test_id` so AT-SPI
@@ -540,9 +552,11 @@ fn run_custody_gesture(
 }
 
 /// The session's `DevicesMachine`, weakly — the E2E state serializer's one way
-/// to the refresh barrier (`fauna_e2e_agent::DEVICES_REFRESHES_KEY`). Weak so a
-/// settings shell torn down on sign-out or an actor switch takes its machine
-/// with it rather than leaving the outgoing actor's counts on the state path.
+/// to the refresh barrier (`fauna_e2e_agent::DEVICES_REFRESHES_KEY`), and the
+/// Settings pending-actions section's way to the folder roster
+/// ([`current_folder_name`]). Weak so a settings shell torn down on sign-out or
+/// an actor switch takes its machine with it rather than leaving the outgoing
+/// actor's counts — or folder names — on either path.
 fn current_machine_slot() -> &'static std::sync::Mutex<std::sync::Weak<DevicesMachine>> {
     static SLOT: std::sync::OnceLock<std::sync::Mutex<std::sync::Weak<DevicesMachine>>> =
         std::sync::OnceLock::new();
@@ -558,6 +572,21 @@ pub fn current_refresh_counts() -> Option<(u64, u64, u64)> {
         .unwrap()
         .upgrade()
         .map(|m| m.refresh_counts())
+}
+
+/// The name of the session's folder whose id is `id`, off the folder roster
+/// this machine already holds (`DevicesSnapshot::folder_name`) — the lookup the
+/// Settings pending-actions section hands
+/// `fauna_protocol::pending_actions::describe_pending_action_naming`, so an
+/// automatic prune's row names its folder (`ui/settings.md` § Pending
+/// actions). `None` before a machine is built or for a folder the roster
+/// cannot name: the row then paints the neutral sentence. No fetch of its own.
+pub(crate) fn current_folder_name(id: &str) -> Option<String> {
+    current_machine_slot()
+        .lock()
+        .unwrap()
+        .upgrade()
+        .and_then(|m| m.snapshot().folder_name(id))
 }
 
 /// The page machine's GTK-free sources that need the `FaunaClient`. Takes the

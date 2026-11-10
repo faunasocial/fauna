@@ -127,6 +127,12 @@ fauna-client-moderation = { path = "../fauna-client-moderation" }
 # subscriptions seam) — same default-features posture as fauna-client-config.
 fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
 
+# The e2e cue-hydration hold's bounded wait inside `hydrate_cues`
+# (`FeedManager::cue_hydration_held_for_test`). A workspace crate whose only
+# deps are tokio (native) and gloo-timers (wasm), both already in this crate's
+# consumers' graphs, so nothing new enters the dependency tree.
+fauna-sleep = { path = "../fauna-sleep" }
+
 # The gated-compose attachment seal (`FeedManager::seal_compose_attachment`):
 # `process_and_seal_with_mime` under `Audience::RestrictedPost { .. Period }`.
 # It lives HERE, not behind the FFI, because `ui/media.md` § Encryption at rest

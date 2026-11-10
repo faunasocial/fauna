@@ -33,7 +33,7 @@ struct BridgesSettingsView: View {
 
             if appState.isAdmin {
                 Section {
-                    PluginAdminSection(isAdmin: appState.isAdmin)
+                    PluginAdminSection(isAdmin: appState.isAdmin, reloadToken: appState.navGeneration)
                 }
             }
 
@@ -53,7 +53,12 @@ struct BridgesSettingsView: View {
         // whose drop rides a shell teardown must say where the guarantee comes from) —
         // which is exactly what iOS does not have, and why the seam lives on the view
         // model rather than at either site .
-        .task(id: SessionKey(client)) {
+        // Keyed on `navGeneration` too, as the other settings pages are: a
+        // navigate to the already-open page re-reads the bridges and the plugin
+        // cards (the e2e poll-by-re-navigate pattern), so a consent approved on
+        // Connected apps, or a fault counted after the first read, is painted
+        // on the next visit rather than never.
+        .task(id: SessionKey(client, reloadToken: appState.navGeneration)) {
             guard let client else {
                 vm.reset()
                 return
@@ -65,13 +70,19 @@ struct BridgesSettingsView: View {
             await familyStatus?.refresh(api: client.api)
             await vm.refresh()
         }
-        .task(id: SessionKey(client)) { await pluginCards.start(client: client) }
+        .task(id: SessionKey(client, reloadToken: appState.navGeneration)) {
+            await pluginCards.start(client: client)
+        }
     }
 
     @ViewBuilder
     private func bridgeSection(_ bridge: BridgeInfo, index: Int) -> some View {
-        Section(bridge.name) {
-            BridgeCardContent(bridge: bridge, vm: vm, isDesktop: true, compact: true, index: index)
+        // The title is the card's own first member (`bridge-card-name`), not a
+        // section header outside the `bridge-card[i]` scope.
+        Section {
+            BridgeCardContent(
+                bridge: bridge, vm: vm, isDesktop: true, compact: true, index: index,
+                showsTitle: true)
         }
     }
 }

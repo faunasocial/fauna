@@ -38,6 +38,21 @@ impl RemoteFollowState {
     }
 }
 
+/// Which of a reader's `remote_follows` rows of one author a leave marks on the
+/// reader's own nest, by name (`subscriptions.md` § The free followers tier —
+/// follow and unfollow, rule 2): the follower's nest holds no ranks, so it marks
+/// what the leave names and the home's `follow_state removed` pushes mark the
+/// rest of the at-or-above set as the author's client commits each tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteLeave<'a> {
+    /// The unfollow (`followers` named): every row of the author.
+    All,
+    /// A paid tier named: that row.
+    Only(&'a str),
+    /// No tier named: every row but the free follow (this one tier).
+    AllBut(&'a str),
+}
+
 /// One `remote_follows` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFollowRow {
@@ -175,30 +190,33 @@ impl CacheDb {
     }
 
     /// The reader's own leave, on the reader's own nest (§ Decision 2's state
-    /// leg): every `approved` row of `subscriber_id`'s follow of `author_id`
-    /// but the `keep_tier` row — the free follow, which a leave never ends —
-    /// moves to `removed` now, whatever the home later answers, so the feed and
-    /// the delivery gate stop admitting that home's deliveries for this reader.
-    /// Returns the number of rows moved.
+    /// leg): every `approved` or `pending` row of `subscriber_id`'s follow of
+    /// `author_id` that `leave` names moves to `removed`, so the feed and the
+    /// delivery gate stop admitting that home's deliveries for this reader and
+    /// a withdrawn request no longer reads as a follow asked. Returns the
+    /// number of rows moved.
     pub async fn leave_remote_follow(
         &self,
         subscriber_id: &[u8; 32],
         author_id: &[u8; 32],
-        keep_tier: &str,
+        leave: RemoteLeave<'_>,
     ) -> Result<usize> {
         let now = now_epoch_secs();
+        // ?3 is the named tier; the shape picks how it narrows the set.
+        let (tier, narrow) = match leave {
+            RemoteLeave::All => ("", "?3 = ?3"),
+            RemoteLeave::Only(t) => (t, "tier = ?3"),
+            RemoteLeave::AllBut(t) => (t, "tier != ?3"),
+        };
         let conn = self.conn.lock().await;
         let moved = conn
             .execute(
-                "UPDATE remote_follows SET state = 'removed', updated_at = ?4
-                  WHERE subscriber_id = ?1 AND author_id = ?2 AND tier != ?3
-                    AND state = 'approved'",
-                rusqlite::params![
-                    subscriber_id.as_slice(),
-                    author_id.as_slice(),
-                    keep_tier,
-                    now
-                ],
+                &format!(
+                    "UPDATE remote_follows SET state = 'removed', updated_at = ?4
+                      WHERE subscriber_id = ?1 AND author_id = ?2 AND {narrow}
+                        AND state IN ('approved', 'pending')"
+                ),
+                rusqlite::params![subscriber_id.as_slice(), author_id.as_slice(), tier, now],
             )
             .context("leave remote follow")?;
         Ok(moved)
@@ -212,6 +230,17 @@ impl CacheDb {
     /// re-opens only through the reader's own new subscribe, which rewrites the
     /// row. A push onto a `removed` row still answers `true` (the row is the
     /// home's), so a home's retry stays idempotent.
+    ///
+    /// **A tier the reader's follow includes opens its own row** (the rank
+    /// cascade, `monetization.md` § Per-post pay-to-unlock): the home enrolls
+    /// a paid subscriber into every per-post tier at or below the paid tier's
+    /// rank, and the follower's nest holds no ranks, so an `approved` push for
+    /// a tier this nest has no row of is recorded as a new `approved` row —
+    /// only while the reader holds a live (`approved` or `pending`) follow of
+    /// a paid tier of the same author homed at the same nest, whose home URL
+    /// the new row takes. Any other push for an unknown row still names
+    /// nothing, so a nest that is nobody's home for this follow, or a follow
+    /// the reader ended, opens nothing.
     pub async fn set_remote_follow_state_from(
         &self,
         subscriber_id: &[u8; 32],
@@ -239,7 +268,32 @@ impl CacheDb {
                 ],
             )
             .context("set remote follow state")?;
-        Ok(changed > 0)
+        if changed > 0 || state != RemoteFollowState::Approved {
+            return Ok(changed > 0);
+        }
+        let opened = conn
+            .execute(
+                "INSERT INTO remote_follows
+                     (subscriber_id, author_id, tier, home_nest_id, home_nest_url, state,
+                      request_id, latest_intent_at, created_at, updated_at)
+                 SELECT ?1, ?2, ?3, ?4, f.home_nest_url, 'approved', NULL, NULL, ?6, ?6
+                   FROM remote_follows f
+                  WHERE f.subscriber_id = ?1 AND f.author_id = ?2 AND f.home_nest_id = ?4
+                    AND f.tier <> ?5 AND f.state IN ('approved', 'pending')
+                  ORDER BY f.updated_at DESC
+                  LIMIT 1
+                 ON CONFLICT(subscriber_id, author_id, tier) DO NOTHING",
+                rusqlite::params![
+                    subscriber_id.as_slice(),
+                    author_id.as_slice(),
+                    tier,
+                    origin_nest_id.as_slice(),
+                    fauna_core::subscription::FOLLOWERS_TIER,
+                    now,
+                ],
+            )
+            .context("open an included remote follow")?;
+        Ok(opened > 0)
     }
 
     // ── Author side: home columns + the monotonic intent rule ─────────
@@ -453,6 +507,32 @@ impl CacheDb {
         Ok(home.flatten().and_then(|v| v.try_into().ok()))
     }
 
+    /// The home on a roster row, nest id with its URL — what a removal the
+    /// entitlement engine queues carries onto its request row
+    /// (`payment_core::void_entitlement_window`). `None` when there is no such
+    /// row or the subscriber is local.
+    pub async fn subscriber_home_with_url(
+        &self,
+        author_id: &[u8; 32],
+        subscriber_id: &[u8; 32],
+        tier_name: &str,
+    ) -> Result<Option<([u8; 32], Option<String>)>> {
+        let conn = self.conn.lock().await;
+        let home: Option<(Option<Vec<u8>>, Option<String>)> = conn
+            .query_row(
+                "SELECT home_nest_id, home_nest_url FROM subscribers
+                  WHERE author_id = ?1 AND subscriber_id = ?2 AND tier_name = ?3",
+                rusqlite::params![author_id.as_slice(), subscriber_id.as_slice(), tier_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("read subscriber home with url")?;
+        Ok(home.and_then(|(id, url)| {
+            id.and_then(|v| <[u8; 32]>::try_from(v).ok())
+                .map(|id| (id, url))
+        }))
+    }
+
     // ── Delivery (`federated-follow.md` § Decision 1, § Decision 3) ──────
 
     /// On an author's nest: the distinct home nests of the author's remote
@@ -565,6 +645,35 @@ impl CacheDb {
             .filter_map(|r| r.ok().and_then(|v| v.try_into().ok()))
             .collect();
         Ok(ids)
+    }
+
+    /// On an author's nest: whether `post_id` is one of `author_id`'s own posts
+    /// a non-author may read — the predicate [`Self::author_backfill_post_ids`]
+    /// applies, for the one designated post the approval of a per-post tier
+    /// backfills whatever its age (`federated-follow.md` § Decision 1).
+    pub async fn author_backfill_post_servable(
+        &self,
+        author_id: &[u8; 32],
+        post_id: &[u8; 32],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT 1 FROM content c
+               JOIN content_meta cm ON cm.content_id = c.id
+              WHERE c.id = ?1 AND c.author = ?2 AND c.schema LIKE 'post/%'
+                AND c.follow_delivered = 0 AND c.origin_nest_url IS NULL
+                AND {}",
+            super::public_servability::MODERATION_SERVABLE
+        );
+        Ok(conn
+            .query_row(
+                &sql,
+                rusqlite::params![post_id.as_slice(), author_id.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("read the designated post's servability")?
+            .is_some())
     }
 
     /// On a follower's nest: whether a local reader holds an `approved` follow

@@ -33,7 +33,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use fauna_core::resolve::{is_global_ip, resolve_permitted_addrs};
+use fauna_core::resolve::{is_global_ip, is_localhost_name, resolve_permitted_addrs};
 
 /// The text every refusal carries, so a caller (and a test) can tell a guard
 /// refusal from a far end that failed on its own.
@@ -79,10 +79,7 @@ pub fn dial_refusal(url: &url::Url, policy: DialPolicy) -> Option<String> {
     let loopback_host = match &host {
         url::Host::Ipv4(ip) => ip.is_loopback(),
         url::Host::Ipv6(ip) => ip.is_loopback(),
-        url::Host::Domain(d) => {
-            let d = d.trim_end_matches('.').to_ascii_lowercase();
-            d == "localhost" || d.ends_with(".localhost")
-        }
+        url::Host::Domain(d) => is_localhost_name(d),
     };
     let loopback_admitted = loopback_host && policy.admits_loopback();
     match url.scheme() {

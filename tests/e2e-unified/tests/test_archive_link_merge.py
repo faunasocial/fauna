@@ -50,6 +50,7 @@ arrive fails the assertion.
 from __future__ import annotations
 
 import dataclasses
+import re
 import sys
 import time
 import uuid
@@ -427,8 +428,20 @@ def test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_ba
             [(t.label, t.snippet) for t in b_app.conversations.list_threads()])
 
         # ── outcome 55: a newer import brings the new comment, nothing twice ─
-        _import(b_app, b_archive(second_comment=True).write(tmp_path / "b-3.zip"), b_name)
+        b3_done = _import(b_app, b_archive(second_comment=True).write(tmp_path / "b-3.zip"), b_name)
         done_at = time.monotonic()
+        # Outcome 58's link half: once links exist, the Done step adds how many
+        # of B's comments and reactions came back on A's posts and how many no
+        # post matched (ruling 11) — the first comment, the like and the love
+        # came back before this import finished, so the claimed count is read
+        # from B's ledger at this run's completion, never zero.
+        links_line = re.search(
+            r"· (\d+) comments and reactions came back from linked contacts · (\d+) could not be matched",
+            b3_done,
+        )
+        assert links_line and int(links_line.group(1)) >= 1, (
+            f"B's Done step after linking must say what came back from linked contacts: {b3_done!r}"
+        )
         a_app.driver.navigate_to("feed")
         _reload_feed_until(
             a_app, post_id, lambda r, i: r.get("reply_count") == 2,

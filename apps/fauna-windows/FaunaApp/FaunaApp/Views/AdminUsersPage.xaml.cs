@@ -107,23 +107,29 @@ public sealed partial class AdminUsersPage : Page
             case nameof(AdminUsersViewModel.IsCreatingCode):
                 InviteCreateForm.Visibility = _vm.IsCreatingCode ? Visibility.Visible : Visibility.Collapsed;
                 break;
+            // A pick sets its VM property, so these cases run INSIDE the picker's own
+            // gesture: they only ever move the selection. The tier and guardian pickers'
+            // options live in VM collections that can move on without a repaint, so they
+            // take Reconcile's selection half alone (a full Reconcile would rebuild there
+            // if the collection had moved); the age-band catalog is fixed, so its
+            // Reconcile never rebuilds after the first paint.
             case nameof(AdminUsersViewModel.NewCodeTier):
-                SelectTierInCombo(CreateFormTierSelect, _vm.NewCodeTier);
+                SelectTier(CreateFormTierSelect, _vm.NewCodeTier);
                 break;
             case nameof(AdminUsersViewModel.NewCodeGuardianActor):
-                SelectGuardianInCombo(CreateFormGuardianSelect, _vm.NewCodeGuardianActor);
+                SelectGuardian(CreateFormGuardianSelect, _vm.NewCodeGuardianActor);
                 break;
             case nameof(AdminUsersViewModel.NewCodeAgeBand):
-                SelectAgeBandInCombo(CreateFormAgeBandSelect, _vm.NewCodeAgeBand);
+                PopulateAgeBandCombo(CreateFormAgeBandSelect, _vm.NewCodeAgeBand);
                 break;
             case nameof(AdminUsersViewModel.NewCodeAgeBandEnabled):
                 CreateFormAgeBandSelect.IsEnabled = _vm.NewCodeAgeBandEnabled;
                 break;
             case nameof(AdminUsersViewModel.AdmitGuardianActor):
-                SelectGuardianInCombo(AdmitGuardianSelect, _vm.AdmitGuardianActor);
+                SelectGuardian(AdmitGuardianSelect, _vm.AdmitGuardianActor);
                 break;
             case nameof(AdminUsersViewModel.AdmitAgeBand):
-                SelectAgeBandInCombo(AdmitAgeBandSelect, _vm.AdmitAgeBand);
+                PopulateAgeBandCombo(AdmitAgeBandSelect, _vm.AdmitAgeBand);
                 break;
             case nameof(AdminUsersViewModel.AdmitAgeBandEnabled):
                 AdmitAgeBandSelect.IsEnabled = _vm.AdmitAgeBandEnabled;
@@ -181,24 +187,22 @@ public sealed partial class AdminUsersPage : Page
     // initialise a picker programmatically (populate is synchronous on the UI thread).
     private bool _initializingTierCombo;
 
-    /// <summary>Fill a tier ComboBox from <see cref="AdminUsersViewModel.Tiers"/> and
-    /// select <paramref name="selectedTier"/> — each item's Content is the tier name (so
-    /// the e2e <c>driver.select</c> matches the popup item, and <c>get_text</c> reads the
-    /// selection back). Programmatic, so the SelectionChanged handlers are suppressed.</summary>
+    /// <summary>Paint a tier ComboBox from <see cref="AdminUsersViewModel.Tiers"/> with
+    /// <paramref name="selectedTier"/> selected (the first tier when it is not offered) —
+    /// each item's Content is the tier name (so the e2e <c>driver.select</c> matches the
+    /// popup item, and <c>get_text</c> reads the selection back). Through
+    /// <see cref="FaunaApp.Helpers.PickerOption.Reconcile"/>, so a row's Loaded that
+    /// fires again (a refetch re-realizing the row after its own tier change) only
+    /// moves the selection while the tiers are unchanged; the echo of a pick goes
+    /// through <see cref="SelectTier"/>. Programmatic, so the SelectionChanged handlers
+    /// are suppressed.</summary>
     private void PopulateTierCombo(ComboBox combo, string selectedTier)
     {
         if (_vm is null) return;
         _initializingTierCombo = true;
         try
         {
-            combo.Items.Clear();
-            foreach (var tier in _vm.Tiers)
-            {
-                var item = new ComboBoxItem { Content = tier, Tag = tier };
-                combo.Items.Add(item);
-                if (tier == selectedTier) combo.SelectedItem = item;
-            }
-            if (combo.SelectedItem is null && combo.Items.Count > 0) combo.SelectedIndex = 0;
+            FaunaApp.Helpers.PickerOption.Reconcile(combo, _vm.Tiers, selectedTier, firstIfAbsent: true);
         }
         finally
         {
@@ -206,19 +210,16 @@ public sealed partial class AdminUsersPage : Page
         }
     }
 
-    /// <summary>Move a tier ComboBox's selection to <paramref name="tier"/> without
-    /// rebuilding its items (reflecting a VM-side change). Programmatic → suppressed.</summary>
-    private void SelectTierInCombo(ComboBox combo, string tier)
+    /// <summary>Move a tier ComboBox's selection to <paramref name="tier"/> (the first
+    /// tier when it is not offered) without touching its items — the echo of the
+    /// picker's own pick, or a VM-side reset (<see cref="FaunaApp.Helpers.PickerOption.Select"/>).
+    /// Programmatic → suppressed.</summary>
+    private void SelectTier(ComboBox combo, string tier)
     {
         _initializingTierCombo = true;
         try
         {
-            foreach (var obj in combo.Items)
-                if (obj is ComboBoxItem { Tag: string t } item && t == tier)
-                {
-                    combo.SelectedItem = item;
-                    break;
-                }
+            FaunaApp.Helpers.PickerOption.Select(combo, tier, firstIfAbsent: true);
         }
         finally
         {
@@ -235,32 +236,37 @@ public sealed partial class AdminUsersPage : Page
     // so a guardian-combo populate can't suppress a co-located tier SelectionChanged.
     private bool _initializingGuardianCombo;
 
-    /// <summary>Fill a guardian ComboBox from <see cref="AdminUsersViewModel.GuardianCandidates"/>
+    /// <summary>Paint a guardian ComboBox from <see cref="AdminUsersViewModel.GuardianCandidates"/>
     /// — every account on the nest, not just the paginated Users page it sits beside
     /// (admin.md § 2 → <i>Which accounts a picker offers</i>; family-safety.md § App
-    /// surface — admission surfaces): a leading "None" item (<c>Tag=null</c>) plus one
-    /// item per non-suspended account (<c>Tag</c> = actor id bytes; the nest
-    /// re-validates existence/suspension/non-supervision on submit — this filter is UX
-    /// only). Selects <paramref name="selectedGuardian"/> by actor id, or "None" if not
-    /// found/null.</summary>
+    /// surface — admission surfaces): a leading "None" item (dispatching "") plus one
+    /// item per non-suspended account, painting its picker label and dispatching its
+    /// actor id hex (the nest re-validates existence/suspension/non-supervision on
+    /// submit — this filter is UX only). No item carries a key: the suite drives a
+    /// guardian by the label it reads. Selects <paramref name="selectedGuardian"/> by
+    /// actor id, or "None" if not offered/null. Through
+    /// <see cref="FaunaApp.Helpers.PickerOption.Reconcile"/>, so a row's Loaded that
+    /// fires again finds the same candidates and keeps the items; a VM-side reset
+    /// goes through <see cref="SelectGuardian"/>. Programmatic → suppressed.</summary>
     private void PopulateGuardianCombo(ComboBox combo, byte[]? selectedGuardian)
     {
         if (_vm is null) return;
         _initializingGuardianCombo = true;
         try
         {
-            combo.Items.Clear();
-            var none = new ComboBoxItem { Content = S.Get("admin/users_page/guardian_none"), Tag = null };
-            combo.Items.Add(none);
-            combo.SelectedItem = none;
+            var options = new List<(string Label, string Key, string Value)>
+            {
+                (S.Get("admin/users_page/guardian_none"), "", ""),
+            };
+            var selected = "";
             foreach (var user in _vm.GuardianCandidates)
             {
                 if (user.Suspended) continue;
-                var item = new ComboBoxItem { Content = user.PickerOption, Tag = user.ActorId };
-                combo.Items.Add(item);
+                options.Add((user.PickerOption, "", user.ActorIdHex));
                 if (selectedGuardian is not null && user.ActorId.AsSpan().SequenceEqual(selectedGuardian))
-                    combo.SelectedItem = item;
+                    selected = user.ActorIdHex;
             }
+            FaunaApp.Helpers.PickerOption.Reconcile(combo, options, selected);
         }
         finally
         {
@@ -270,28 +276,24 @@ public sealed partial class AdminUsersPage : Page
 
     /// <summary>The actor id currently selected in a guardian <paramref name="combo"/>,
     /// or <c>null</c> for "None"/no selection.</summary>
-    private byte[]? SelectedGuardian(ComboBox combo)
-        => combo.SelectedItem is ComboBoxItem { Tag: byte[] g } ? g : null;
+    private static byte[]? SelectedGuardian(ComboBox combo)
+        => combo.SelectedItem is ComboBoxItem { Tag: string { Length: > 0 } hex }
+            ? Convert.FromHexString(hex)
+            : null;
 
     /// <summary>Move a guardian ComboBox's selection to <paramref name="guardian"/>
-    /// (or "None" if not found/null) without rebuilding its items (reflecting a
-    /// VM-side change, e.g. <c>BeginCreateCode</c> resetting the mint form).
+    /// ("None" when it is null or not offered) without touching its items — the echo
+    /// of the picker's own pick, or a VM-side reset (e.g. <c>BeginCreateCode</c>
+    /// resetting the mint form; <see cref="FaunaApp.Helpers.PickerOption.Select"/>).
     /// Programmatic → suppressed.</summary>
-    private void SelectGuardianInCombo(ComboBox combo, byte[]? guardian)
+    private void SelectGuardian(ComboBox combo, byte[]? guardian)
     {
         _initializingGuardianCombo = true;
         try
         {
-            foreach (var obj in combo.Items)
-            {
-                if (guardian is not null && obj is ComboBoxItem { Tag: byte[] g } item
-                    && g.AsSpan().SequenceEqual(guardian))
-                {
-                    combo.SelectedItem = item;
-                    return;
-                }
-            }
-            if (combo.Items.Count > 0) combo.SelectedIndex = 0; // "None" is always item 0
+            // "None" dispatches "" and is always item 0.
+            var value = guardian is null ? "" : uniffi.fauna_ffi.FaunaFfiMethods.HexFull(guardian);
+            FaunaApp.Helpers.PickerOption.Select(combo, value, firstIfAbsent: true);
         }
         finally
         {
@@ -304,46 +306,24 @@ public sealed partial class AdminUsersPage : Page
     //    rationale as _initializingGuardianCombo. ─────────────────────────────────
     private bool _initializingAgeBandCombo;
 
-    /// <summary>Fill an age-band ComboBox from the shared <c>age_band_options()</c>
-    /// catalog (not-set + the four bands, in the ratified order) and select
-    /// <paramref name="selectedValue"/> — Content is the localized label while
-    /// AutomationProperties.Name is the option VALUE, so FlaUI's exact-Name
-    /// <c>Select()</c>/<c>get_text</c> speak what <c>driver.select(id, value)</c> sends
-    /// (the registration-mode picker's shape). No per-app spelling of the vocabulary.</summary>
+    /// <summary>Paint an age-band ComboBox from the shared <c>age_band_options()</c>
+    /// catalog (not-set + the four bands, in the ratified order) with
+    /// <paramref name="selectedValue"/> selected (the first option, not-set, when it is
+    /// not offered) — each item paints the localized label and is keyed by the option
+    /// VALUE (<see cref="FaunaApp.Helpers.PickerOption"/>), what
+    /// <c>driver.select(id, value)</c> sends. No per-app spelling of the vocabulary.
+    /// A VM- or guardian-driven reset only moves the selection
+    /// (<see cref="FaunaApp.Helpers.PickerOption.Reconcile"/>).
+    /// Programmatic → suppressed.</summary>
     private void PopulateAgeBandCombo(ComboBox combo, string selectedValue)
     {
         _initializingAgeBandCombo = true;
         try
         {
-            combo.Items.Clear();
-            foreach (var option in uniffi.fauna_ffi.FaunaFfiMethods.AgeBandOptions())
-            {
-                var item = new ComboBoxItem { Content = S.Resolve(option.@label), Tag = option.@value };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.@value);
-                combo.Items.Add(item);
-                if (option.@value == selectedValue) combo.SelectedItem = item;
-            }
-            if (combo.SelectedItem is null && combo.Items.Count > 0) combo.SelectedIndex = 0;
-        }
-        finally
-        {
-            _initializingAgeBandCombo = false;
-        }
-    }
-
-    /// <summary>Move an age-band ComboBox to <paramref name="value"/> without rebuilding
-    /// its items (a VM- or guardian-driven reset). Programmatic → suppressed.</summary>
-    private void SelectAgeBandInCombo(ComboBox combo, string value)
-    {
-        _initializingAgeBandCombo = true;
-        try
-        {
-            foreach (var obj in combo.Items)
-                if (obj is ComboBoxItem { Tag: string v } item && v == value)
-                {
-                    combo.SelectedItem = item;
-                    break;
-                }
+            var options = uniffi.fauna_ffi.FaunaFfiMethods.AgeBandOptions()
+                .Select(o => (S.Resolve(o.@label), o.@value))
+                .ToList();
+            FaunaApp.Helpers.PickerOption.Reconcile(combo, options, selectedValue, firstIfAbsent: true);
         }
         finally
         {
@@ -431,29 +411,33 @@ public sealed partial class AdminUsersPage : Page
     //    SelectionChanged) ───────────────────────────────────────────────
     private bool _initializingRegistrationCombo;
 
-    /// <summary>Fill the registration-mode ComboBox from the shared
-    /// <c>registration_mode_options()</c> catalog (wire value + localized label) and
-    /// select <paramref name="selectedWireValue"/> — Content is the LOCALIZED label
-    /// (display) while AutomationProperties.Name is the raw wire value: the two
-    /// must differ so FlaUI's exact-Name <c>Select()</c>/<c>get_text</c> can target
-    /// what <c>driver.select(id, value)</c> drives and dispatches — mirrors
-    /// <c>TaskDelegationRowVm.OptionKey</c>'s picker (SettingsTaskDelegationPage) /
-    /// <c>EmailFilterPanel</c>'s static items, since the tier pickers' Content==wire
-    /// shortcut doesn't hold here (the mode's label is genuinely localized text).</summary>
+    /// <summary>Paint the registration-mode ComboBox from the shared
+    /// <c>registration_mode_options()</c> catalog (wire value + localized label) with
+    /// <paramref name="selectedWireValue"/> selected (the first mode when it is not
+    /// offered) — each item paints the LOCALIZED label and is keyed by the raw wire
+    /// value (<see cref="FaunaApp.Helpers.PickerOption"/>), what
+    /// <c>driver.select(id, value)</c> drives and the page dispatches; the tier
+    /// pickers' Content==wire shortcut doesn't hold here (the mode's label is
+    /// genuinely localized text).
+    /// <para>Through <see cref="FaunaApp.Helpers.PickerOption.Reconcile"/>,
+    /// and that is required, not just cheaper, on the live-selection path:
+    /// <see cref="RegistrationModeSelect_SelectionChanged"/> sets
+    /// <c>RegistrationModeDraft</c> from INSIDE FlaUI's own <c>SelectionItem.Select()</c>
+    /// call on a popup <c>ListItem</c>, so <see cref="UpdateRegistrationDisplay"/>
+    /// re-enters synchronously on the SAME UI-thread callback; an
+    /// <c>Items.Clear()</c>-and-rebuild there tears down the very item FlaUI is
+    /// mid-selecting and reliably crashed the app process (measured — 500 "process is
+    /// not running" from the FlaUI bridge on the very first live re-select in this
+    /// section's e2e coverage). Programmatic → suppressed.</para></summary>
     private void PopulateRegistrationModeCombo(ComboBox combo, string selectedWireValue)
     {
         _initializingRegistrationCombo = true;
         try
         {
-            combo.Items.Clear();
-            foreach (var option in uniffi.fauna_ffi.FaunaFfiMethods.RegistrationModeOptions())
-            {
-                var item = new ComboBoxItem { Content = S.Resolve(option.@label), Tag = option.@value };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.@value);
-                combo.Items.Add(item);
-                if (option.@value == selectedWireValue) combo.SelectedItem = item;
-            }
-            if (combo.SelectedItem is null && combo.Items.Count > 0) combo.SelectedIndex = 0;
+            var options = uniffi.fauna_ffi.FaunaFfiMethods.RegistrationModeOptions()
+                .Select(o => (S.Resolve(o.@label), o.@value))
+                .ToList();
+            FaunaApp.Helpers.PickerOption.Reconcile(combo, options, selectedWireValue, firstIfAbsent: true);
         }
         finally
         {
@@ -466,57 +450,23 @@ public sealed partial class AdminUsersPage : Page
     private static string SelectedRegistrationMode(ComboBox combo)
         => combo.SelectedItem is ComboBoxItem { Tag: string t } ? t : "";
 
-    /// <summary>Move the registration-mode <paramref name="combo"/>'s selection to
-    /// <paramref name="wireValue"/> WITHOUT rebuilding its items (reflecting a
-    /// VM-side change) — mirrors <see cref="SelectTierInCombo"/>. Required (not
-    /// just cheaper) on the live-selection path: <see cref="RegistrationModeSelect_SelectionChanged"/>
-    /// sets <c>RegistrationModeDraft</c> from INSIDE FlaUI's own
-    /// <c>SelectionItem.Select()</c> call on a popup <c>ListItem</c>, so
-    /// <see cref="UpdateRegistrationDisplay"/> re-enters synchronously on the SAME
-    /// UI-thread callback; <c>Items.Clear()</c>-and-rebuild there tears down the
-    /// very item FlaUI is mid-selecting and reliably crashed the app process
-    /// (measured — 500 "process is not running" from the FlaUI bridge on the
-    /// very first live re-select in this section's e2e coverage).</summary>
-    private void SelectRegistrationModeInCombo(ComboBox combo, string wireValue)
-    {
-        _initializingRegistrationCombo = true;
-        try
-        {
-            foreach (var obj in combo.Items)
-                if (obj is ComboBoxItem { Tag: string t } item && t == wireValue)
-                {
-                    combo.SelectedItem = item;
-                    break;
-                }
-        }
-        finally
-        {
-            _initializingRegistrationCombo = false;
-        }
-    }
-
     /// <summary>Paint the Registration section from the VM's persisted posture
     /// (admin.md § 2 Users → Section 2) — the read-only explainer when the posture
     /// is unknown/absent (never a picker+save, which could overwrite the nest's
     /// real posture with a guess — public-mode.md § Implementation status today),
     /// else the picker+input+save. Mirrors tui's <c>registration_section</c> /
-    /// AdminVM.swift's <c>registrationSection</c>. Full item rebuild only when the
-    /// panel is newly becoming visible; an already-visible panel only moves its
-    /// selection (<see cref="SelectRegistrationModeInCombo"/> — see its doc for why
-    /// a rebuild there is unsafe, not just wasteful).</summary>
+    /// AdminVM.swift's <c>registrationSection</c>. The picker repaints through
+    /// <see cref="PopulateRegistrationModeCombo"/> (see its doc for why a rebuild on an
+    /// already-visible panel is unsafe, not just wasteful).</summary>
     private void UpdateRegistrationDisplay()
     {
         if (_vm is null) return;
-        var wasKnown = RegistrationKnownPanel.Visibility == Visibility.Visible;
         var known = !string.IsNullOrEmpty(_vm.RegistrationModeDraft);
         RegistrationUnknownText.Visibility = known ? Visibility.Collapsed : Visibility.Visible;
         RegistrationKnownPanel.Visibility = known ? Visibility.Visible : Visibility.Collapsed;
         if (known)
         {
-            if (wasKnown)
-                SelectRegistrationModeInCombo(RegistrationModeSelect, _vm.RegistrationModeDraft);
-            else
-                PopulateRegistrationModeCombo(RegistrationModeSelect, _vm.RegistrationModeDraft);
+            PopulateRegistrationModeCombo(RegistrationModeSelect, _vm.RegistrationModeDraft);
         }
         else
         {
@@ -623,7 +573,7 @@ public sealed partial class AdminUsersPage : Page
         if (guardian is null) _approveAgeBand[row.Id] = uniffi.fauna_ffi.FaunaFfiMethods.AgeBandNotSetValue();
         if (_requestAgeBandCombos.TryGetValue(row.Id, out var bandCombo))
         {
-            if (guardian is null) SelectAgeBandInCombo(bandCombo, _approveAgeBand[row.Id]);
+            if (guardian is null) PopulateAgeBandCombo(bandCombo, _approveAgeBand[row.Id]);
             bandCombo.IsEnabled = guardian is not null;
         }
     }

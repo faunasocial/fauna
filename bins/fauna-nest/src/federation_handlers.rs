@@ -248,10 +248,30 @@ pub struct FedWelcomeDeliverRequest {
     pub owner_domain: Option<String>,
 }
 
-/// `fauna.federation.welcome.deliver` reply — the inbox row id created.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `fauna.federation.welcome.deliver` reply — the inbox row id created, and,
+/// on a folder relay, the recipient's name as THIS nest (their home, the
+/// authority for handles at its domain) joins it from its own `users` row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FedWelcomeDeliverReply {
     pub inbox_id: i64,
+    /// The recipient's bare handle, off this nest's own `users` row — the
+    /// one-shot carrier of the id→handle announce on the folder plane
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append, the id→handle bullet → *The folder roster*): the set's home
+    /// holds no row for a cross-nest member, never asks, and would otherwise
+    /// show the owner a hex roster row until the member's first drain carries
+    /// the standing announce. Both-or-neither with [`Self::recipient_domain`];
+    /// folder relays only; never client-asserted. Additive: an old origin
+    /// ignores it, an old recipient nest omits it (the member stays nameless
+    /// until their drain, the shipped fallback). The origin records it only
+    /// after binding the domain to this nest's key
+    /// ([`record_welcomed_member_name`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_handle: Option<String>,
+    /// This nest's handle domain (`handle_domain_if_set()`), the half the pair
+    /// [`Self::recipient_handle`] is joined with at display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_domain: Option<String>,
 }
 
 /// `fauna.federation.channel.fetch` request — the cross-nest pull of a channel's
@@ -593,6 +613,68 @@ pub struct FedRoomLeaveReply {
     pub ack: fauna_protocol::conversations::RoomLeaveReply,
 }
 
+/// `fauna.federation.conversation.room.remove` request — a room's foreign
+/// owner or admin REMOVING a member, through its own home nest: the
+/// rank-scoped twin of [`FedRoomLeaveRequest`] (`../architecture/federation.md`
+/// § Federation residue surface, the *Conversation room remove* row). The home
+/// gates the requester with [`require_foreign_member`] and reads its rank off
+/// its own floor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomRemoveRequest {
+    pub requesting_actor_id: String,
+    pub room_id: String,
+    /// Hex-encoded principal id (32 bytes) to remove.
+    pub principal: String,
+}
+
+/// `fauna.federation.conversation.room.remove` reply — the same-nest
+/// [`fauna_protocol::conversations::RoomRemoveReply`], forwarded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomRemoveReply {
+    pub ack: fauna_protocol::conversations::RoomRemoveReply,
+}
+
+/// `fauna.federation.conversation.room.publish_generation` request — a room's
+/// foreign owner or admin minting a generation through its own home nest
+/// (`../architecture/federation.md` § Federation residue surface, the
+/// *Conversation room generation publish and backfill* row).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomPublishGenerationRequest {
+    pub requesting_actor_id: String,
+    pub room_id: String,
+    /// Canonical dag-cbor `GroupGenerationMintRecord`, as on the same-nest door.
+    #[serde(with = "serde_bytes")]
+    pub mint: Vec<u8>,
+}
+
+/// `fauna.federation.conversation.room.publish_generation` reply — the
+/// same-nest [`fauna_protocol::conversations::RoomPublishGenerationReply`],
+/// forwarded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomPublishGenerationReply {
+    pub ack: fauna_protocol::conversations::RoomPublishGenerationReply,
+}
+
+/// `fauna.federation.conversation.room.backfill_generations` request — a
+/// room's foreign owner or admin covering a newcomer through its own home nest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomBackfillGenerationsRequest {
+    pub requesting_actor_id: String,
+    pub room_id: String,
+    pub target_actor_id: String,
+    /// Canonical dag-cbor `GroupTopupRecord` values, as on the same-nest door.
+    #[serde(with = "fauna_core::byte_array::vec_of_bufs")]
+    pub wraps: Vec<Vec<u8>>,
+}
+
+/// `fauna.federation.conversation.room.backfill_generations` reply — the
+/// same-nest [`fauna_protocol::conversations::RoomBackfillGenerationsReply`],
+/// forwarded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedRoomBackfillGenerationsReply {
+    pub ack: fauna_protocol::conversations::RoomBackfillGenerationsReply,
+}
+
 /// `fauna.federation.conversation.room.invite` request — a room's home nest
 /// delivers a **community-room invitation** to an invitee homed here
 /// (`../behavior/conversation-rooms.md` § Join rules and invites → *A
@@ -886,6 +968,39 @@ pub fn register_conversations_federation_handlers(b: &mut FederationRouterBuilde
             forbid_replay: false,
             default_deadline: Duration::from_secs(30),
             handler: room_leave_handler(),
+        },
+    );
+    b.add(
+        "fauna.federation.conversation.room.remove",
+        RpcKindMeta {
+            // Idempotent for its re-send, `room.leave`'s posture: a target the
+            // floor positively stamped removed is answered with the live count,
+            // so a §4.D re-send of a removal that landed reports the unseat and
+            // the client's severance mint follows; a target never seated is
+            // still refused (`fauna_protocol::conversations::RoomRemoveRemoteRequest`).
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(30),
+            handler: room_remove_handler(),
+        },
+    );
+    b.add(
+        "fauna.federation.conversation.room.publish_generation",
+        RpcKindMeta {
+            // NOT idempotent by ratified posture — the keying acts claim none;
+            // the mint is a strict ratchet the body refuses a replay of anyway,
+            // and the retry is a fresh mint (`invite_issue`'s precedent).
+            forbid_replay: true,
+            default_deadline: Duration::from_secs(30),
+            handler: room_publish_generation_handler(),
+        },
+    );
+    b.add(
+        "fauna.federation.conversation.room.backfill_generations",
+        RpcKindMeta {
+            // Hands out key material — the same-nest door's flag.
+            forbid_replay: true,
+            default_deadline: Duration::from_secs(30),
+            handler: room_backfill_generations_handler(),
         },
     );
     b.add(
@@ -1292,7 +1407,27 @@ fn welcome_deliver_handler() -> RpcHandler {
                 }
             }
 
-            encode_reply(&FedWelcomeDeliverReply { inbox_id: row_id })
+            // The one-shot id→handle carrier of the folder plane: this nest is
+            // the recipient's home and the authority for handles at its own
+            // domain, so it volunteers the recipient's `handle@domain` on the
+            // reply to the relay the set's home originates — joined from its
+            // own `users` row, never the client's word — and the set's home
+            // records it only after binding the domain to this nest's key
+            // (`federation-shared-folders.md` § Cross-nest shared folders +
+            // channel append, the id→handle bullet → *The folder roster*).
+            // Folder relays only, like the owner label it mirrors: the room
+            // plane names a member on its own drain.
+            let (recipient_handle, recipient_domain) =
+                if req.channel_type.as_deref() == Some("folder") {
+                    local_name_stamp(&state, &recipient).await
+                } else {
+                    (None, None)
+                };
+            encode_reply(&FedWelcomeDeliverReply {
+                inbox_id: row_id,
+                recipient_handle,
+                recipient_domain,
+            })
         })
     })
 }
@@ -1747,6 +1882,96 @@ fn room_leave_handler() -> RpcHandler {
     })
 }
 
+/// `fauna.federation.conversation.room.remove` — a foreign owner or admin
+/// removes a member of a room homed here, through its own home nest
+/// (`../architecture/federation.md` § Federation residue surface, the
+/// *Conversation room remove* row).
+///
+/// **Authorization**: [`require_foreign_member`] on the REQUESTER (a removal
+/// purges the binding with the seat, so a removed admin's own relayed removal
+/// is refused here), then the floor's rank, read by
+/// [`crate::conversations_handlers::room_remove_apply`] — the body the
+/// same-nest door runs, so the two cannot drift. The purge is the TARGET's
+/// binding, to whichever nest it binds.
+///
+/// **Idempotent for the re-send** (`RoomRemoveRepeat::Converge`): a target the
+/// floor stamped removed is answered with the live count; one never seated is
+/// refused.
+fn room_remove_handler() -> RpcHandler {
+    Box::new(|state, origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedRoomRemoveRequest = decode(&payload)?;
+            let requester = parse_actor(&req.requesting_actor_id)?;
+            let room_id = parse_id32(&req.room_id, "room_id")?;
+            let target = parse_actor(&req.principal)?;
+            require_foreign_member(&state, &room_id, &requester, &origin_nest_id).await?;
+            let ack = crate::conversations_handlers::room_remove_apply(
+                &state,
+                &room_id,
+                &requester,
+                &target,
+                crate::conversations_handlers::RoomRemoveRepeat::Converge,
+            )
+            .await?;
+            encode_reply(&FedRoomRemoveReply { ack })
+        })
+    })
+}
+
+/// `fauna.federation.conversation.room.publish_generation` — a foreign owner
+/// or admin's generation mint for a room homed here
+/// (`../architecture/federation.md` § Federation residue surface, the
+/// *Conversation room generation publish and backfill* row).
+///
+/// **Authorization**: the signed act's binding first — the mint's minter IS
+/// the requesting actor and its signature verifies
+/// ([`crate::conversations_handlers::verify_room_generation_mint`], which the
+/// relaying nest ran too) — then [`require_foreign_member`], then
+/// [`crate::conversations_handlers::room_publish_generation_apply`], the
+/// same-nest admission body: rank, ratchet, coverage against THIS floor, the
+/// revoke arm. Not idempotent (`forbid_replay=true`).
+fn room_publish_generation_handler() -> RpcHandler {
+    Box::new(|state, origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedRoomPublishGenerationRequest = decode(&payload)?;
+            let requester = parse_actor(&req.requesting_actor_id)?;
+            let room_id = parse_id32(&req.room_id, "room_id")?;
+            crate::conversations_handlers::verify_room_generation_mint(&req.mint, &requester)?;
+            require_foreign_member(&state, &room_id, &requester, &origin_nest_id).await?;
+            let ack = crate::conversations_handlers::room_publish_generation_apply(
+                &state, &room_id, &requester, &req.mint,
+            )
+            .await?;
+            encode_reply(&FedRoomPublishGenerationReply { ack })
+        })
+    })
+}
+
+/// `fauna.federation.conversation.room.backfill_generations` — a foreign owner
+/// or admin covers a newcomer of a room homed here. [`require_foreign_member`]
+/// on the requester, then
+/// [`crate::conversations_handlers::room_backfill_generations_apply`], the
+/// same-nest body and its five checks (the healer binding among them).
+fn room_backfill_generations_handler() -> RpcHandler {
+    Box::new(|state, origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedRoomBackfillGenerationsRequest = decode(&payload)?;
+            let requester = parse_actor(&req.requesting_actor_id)?;
+            let room_id = parse_id32(&req.room_id, "room_id")?;
+            require_foreign_member(&state, &room_id, &requester, &origin_nest_id).await?;
+            let ack = crate::conversations_handlers::room_backfill_generations_apply(
+                &state,
+                &room_id,
+                &requester,
+                &req.target_actor_id,
+                &req.wraps,
+            )
+            .await?;
+            encode_reply(&FedRoomBackfillGenerationsReply { ack })
+        })
+    })
+}
+
 /// The home URL a relayed delivery binds to its **verified** origin — the
 /// routing datum the recipient's client addresses its next hop back to the
 /// delivering nest by (a Welcome's `nest_url`, a room invitation's
@@ -1886,6 +2111,10 @@ async fn invitee_node_for_issue(
 ///    ([`resolve_origin_home_url`]) — the `room_node` the invitee's
 ///    acceptance is relayed to. No resolvable home means an invitation the
 ///    invitee could never act on, so it is refused rather than delivered.
+///    The connection's verified identity rides beside it as
+///    `home_nest_actor_id`, the Welcome relay's stamp: a community room is
+///    joined by this knock, so it is the member's only source of the identity
+///    the room's attachment legs pin its home by.
 /// 5. **Deliver the knock** under the invitee's inbox quota, and nudge the
 ///    device, exactly as the same-nest invite door does.
 fn room_invite_deliver_handler() -> RpcHandler {
@@ -1940,6 +2169,11 @@ fn room_invite_deliver_handler() -> RpcHandler {
                 &fauna_protocol::inbox::RoomInviteInbox {
                     signed_invite: req.signed_invite.clone(),
                     room_node: Some(room_node),
+                    // The home's identity beside its URL, from this nest's
+                    // own handshake proof of the delivering peer — the
+                    // Welcome relay's stamp, for the class joined by a knock:
+                    // what the member's byte plane pins the room's home by.
+                    home_nest_actor_id: Some(hex::encode(origin_nest_id)),
                     extra: std::collections::BTreeMap::new(),
                 },
             )
@@ -2137,7 +2371,8 @@ fn inbox_deliver_handler() -> RpcHandler {
 
 /// The structural authz gate shared by every member-scoped cross-nest kind
 /// (`channel.append`, `channel.leave`, `folder.changes.fetch`,
-/// `folder.content_key.fetch` — the `channel.fetch` gate reused verbatim):
+/// `folder.versions.list`, `folder.content_key.fetch` — the `channel.fetch`
+/// gate reused verbatim):
 /// the requesting actor must be a recorded foreign member of the channel AND
 /// the connection's verified `origin_nest_id` must be that member's recorded
 /// home nest. Absent row and mismatched binding fold to one `forbidden` (no
@@ -2304,27 +2539,29 @@ impl Drop for VerificationInFlight {
     }
 }
 
-/// The owner label a set's HOME nest stamps on the two carriers it
-/// originates — the cross-nest folder Welcome relay and the federated
-/// content-key read reply (`federation-shared-folders.md` § Cross-nest shared folders +
-/// channel append → *The cross-nest owner label*, *Carrier*): `owner`'s
-/// handle off this nest's own `users` row and this nest's handle domain,
-/// **both or neither** (a handle without a domain would cross a nest boundary
-/// bare, which the receiving nest never forwards anyway). Never
+/// The `(handle, domain)` THIS nest stamps for one of its OWN users on a
+/// carrier it originates or answers — the set owner's label on the cross-nest
+/// folder Welcome relay and the federated content-key read reply
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel append
+/// → *The cross-nest owner label*, *Carrier*), and the recipient's name on the
+/// Welcome relay's reply (the id→handle bullet → *The folder roster*): the
+/// user's handle off this nest's own `users` row and this nest's handle
+/// domain, **both or neither** (a handle without a domain would cross a nest
+/// boundary bare, which the receiving nest never forwards anyway). Never
 /// client-asserted. Best-effort: a lookup error stamps nothing — a share or a
 /// read never fails for a name.
-pub(crate) async fn owner_label_stamp(
+pub(crate) async fn local_name_stamp(
     state: &AppState,
-    owner: &[u8; 32],
+    user: &[u8; 32],
 ) -> (Option<String>, Option<String>) {
     let Some(domain) = state.handle_domain_if_set().filter(|d| !d.is_empty()) else {
         return (None, None);
     };
-    match state.db.get_handle(owner).await {
+    match state.db.get_handle(user).await {
         Ok(Some(handle)) if !handle.is_empty() => (Some(handle), Some(domain)),
         Ok(_) => (None, None),
         Err(e) => {
-            tracing::warn!("owner label stamp: resolve the set owner's handle: {e}");
+            tracing::warn!("local name stamp: resolve the user's handle: {e}");
             (None, None)
         }
     }
@@ -2476,22 +2713,91 @@ pub(crate) async fn verified_owner_label(
     handle: Option<&str>,
     domain: Option<&str>,
 ) -> (Option<String>, Option<String>) {
-    const CONTEXT: &str = "federation welcome relay: owner label";
+    verified_asserted_name(
+        state,
+        origin_nest_id,
+        handle,
+        domain,
+        "federation welcome relay: owner label",
+    )
+    .await
+}
+
+/// A `(handle, domain)` a peer asserted for one of its own users, believed
+/// only once the asserted domain binds — by the ordinary discovery chain run
+/// from the domain end — to the peer's verified identity `peer_nest_id`,
+/// AWAITED inline under the shared cap: the one-shot carriers' half of the
+/// trust rule the owner label and the folder roster's member name share
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+/// append → *The cross-nest owner label*, trust rule; the id→handle bullet →
+/// *The folder roster*). Any failure — malformed, past the cap, a slow or
+/// unreachable domain, a mismatch — yields `(None, None)`: a name is never
+/// worth refusing a share for, and a mismatch is logged by the binding as the
+/// signal it is.
+async fn verified_asserted_name(
+    state: &Arc<AppState>,
+    peer_nest_id: &[u8; 32],
+    handle: Option<&str>,
+    domain: Option<&str>,
+    context: &'static str,
+) -> (Option<String>, Option<String>) {
     let Some((handle, domain)) = well_formed_asserted_name(
         handle,
         domain,
-        origin_nest_id,
-        CONTEXT,
+        peer_nest_id,
+        context,
         state.peer_fetch_loopback.is_some(),
     ) else {
         return (None, None);
     };
-    let Some(_in_flight) = start_domain_verification(state, origin_nest_id, CONTEXT) else {
+    let Some(_in_flight) = start_domain_verification(state, peer_nest_id, context) else {
         return (None, None);
     };
-    match bind_domain_to_origin(state, domain, origin_nest_id, CONTEXT).await {
+    match bind_domain_to_origin(state, domain, peer_nest_id, context).await {
         DomainBinding::Bound => (Some(handle.to_string()), Some(domain.to_string())),
         DomainBinding::Refused | DomainBinding::Unresolved(_) => (None, None),
+    }
+}
+
+/// Record the name a cross-nest folder member's own nest volunteered on its
+/// reply to the Welcome relay ([`FedWelcomeDeliverReply::recipient_handle`] /
+/// `recipient_domain`) on the `channel_foreign_members` binding the relaying
+/// branch of `welcome_deliver_core` just wrote — the folder plane's one-shot
+/// id→handle carrier (`federation-shared-folders.md` § Cross-nest shared
+/// folders + channel append, the id→handle bullet → *The folder roster*).
+/// `home_nest_id` is the pool's verified identity behind the URL the relay
+/// dialled (`resolve_peer_nest_id`), the same identity the binding row names:
+/// the pair is believed only once its domain binds to that key
+/// ([`verified_asserted_name`], awaited inline, so the roster row the share
+/// created is named the moment the owner's client re-reads it), and the
+/// standing `channel.fetch` announce ([`record_announced_handle`]) heals
+/// whatever a failed binding left nameless. Display only, as every recorded
+/// name is: membership keys on the actor id, and a pair for an actor with no
+/// binding row writes nothing (`CacheDb::record_foreign_member_handle`).
+pub(crate) async fn record_welcomed_member_name(
+    state: &Arc<AppState>,
+    channel_id: &[u8; 32],
+    member: &[u8; 32],
+    home_nest_id: &[u8; 32],
+    handle: Option<&str>,
+    domain: Option<&str>,
+) {
+    const CONTEXT: &str = "federation welcome relay: member name";
+    let (Some(handle), Some(domain)) =
+        verified_asserted_name(state, home_nest_id, handle, domain, CONTEXT).await
+    else {
+        return;
+    };
+    match state
+        .db
+        .record_foreign_member_handle(channel_id, member, &handle, &domain)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!("{CONTEXT}: a name for an actor with no binding row — not recorded")
+        }
+        Err(e) => tracing::warn!("{CONTEXT}: record_foreign_member_handle: {e}"),
     }
 }
 
@@ -3209,11 +3515,46 @@ pub struct FedFolderChangesFetchReply {
     /// The folder's content residency — see [`residency_stamp`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub residency: Option<String>,
+    /// The folder's content-reachability verdict as this (the home) nest
+    /// computes it — [`crate::chunk_relay::folder_content_reachable`] of the
+    /// claimed row, the one verdict `file-sync.md` § Content reachability
+    /// defines. Always stated, like [`Self::residency`]; the member's nest
+    /// relays it verbatim onto `fauna.sync.changes.list`'s reply, and its one
+    /// consumer is the member's Media page (`federation-shared-folders.md`
+    /// § Relay serving across nests, the `reachable` stamp). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
     /// The page's `signer_certs` side table — the same one a same-nest
     /// `changes.list` carries (`SyncChangesListReply::signer_certs`), which the
     /// relaying nest passes through verbatim. Wire-additive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signer_certs: Vec<fauna_core::encoding::EmbedAsBytes>,
+}
+
+/// `fauna.federation.folder.versions.list` request — the cross-nest read of
+/// one file's version history in a shared set, relayed by the member's own
+/// nest (`ui/media.md` § Cross-nest shared sets). `path_hash` is the hex of the
+/// file's 32-byte path hash, exactly the `path_hash` a same-nest
+/// `fauna.files.versions.list` carries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedFolderVersionsListRequest {
+    pub requesting_actor_id: String,
+    pub channel_id: String,
+    pub path_hash: String,
+}
+
+/// `fauna.federation.folder.versions.list` reply — the same version rows a
+/// same-nest `fauna.files.versions.list` serves over the claimed set
+/// (oldest→newest, the default projection), with their `signer_certs` side
+/// table, which the relaying nest passes through verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedFolderVersionsListReply {
+    pub versions: Vec<fauna_protocol::files::FileVersionInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signer_certs: Vec<fauna_core::encoding::EmbedAsBytes>,
+    /// The requester's current access grant — see [`caller_access_stamp`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_access: Option<String>,
 }
 
 /// `fauna.federation.folder.content_key.fetch` request — the cross-nest read
@@ -3291,6 +3632,11 @@ pub struct FedFolderActorsFetchReply {
     /// The folder's content residency — see [`residency_stamp`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub residency: Option<String>,
+    /// The set's former writers, ids only — the same list the same-nest door
+    /// carries ([`fauna_protocol::folders::ActorMembersListReply::former_writers`];
+    /// `writer-signed-change-records.md` ruling (12)(c)). Additive: absent ⇒ none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_writers: Vec<fauna_protocol::folders::FolderFormerWriter>,
 }
 
 /// `fauna.federation.channel.append` — gate ([`require_foreign_member`]), then
@@ -3416,6 +3762,18 @@ fn channel_leave_handler() -> RpcHandler {
                         .remove_foreign_channel_member(&channel_id, &requester)
                         .await
                         .map_err(internal)?;
+                    // The member's access grant leaves with them, as the
+                    // same-nest `folders.leave` drops it — and a `writer`
+                    // grant ending here records them as a former writer, so
+                    // what they recorded stays admitted
+                    // (`writer-signed-change-records.md` ruling (12)(a), the
+                    // cross-nest member "the same way"). A no-op on a channel
+                    // that is no folder set.
+                    state
+                        .db
+                        .delete_folder_member_role(&channel_id, &requester)
+                        .await
+                        .map_err(internal)?;
                     encode_reply(&FedChannelLeaveReply { removed })
                 }
                 Some(_) => Err(forbidden(
@@ -3465,7 +3823,43 @@ fn folder_changes_fetch_handler() -> RpcHandler {
                     .collect(),
                 caller_access: caller_access_stamp(&state, &channel_id, &requester).await,
                 residency: residency_stamp(&fs),
+                reachable: Some(crate::chunk_relay::folder_content_reachable(
+                    &state.ws,
+                    state.sync.chunk_resolver.foreign_seats(),
+                    &fs,
+                )),
                 signer_certs,
+            })
+        })
+    })
+}
+
+/// `fauna.federation.folder.versions.list` — gate, resolve the claimed set
+/// ([`claimed_folder_for_channel`], S7), then serve one file's version history
+/// in it through the same projection the same-nest `fauna.files.versions.list`
+/// serves (`files_handlers::versions_in_sets`), default projection only: the
+/// recovery browse and the snapshot licence read are the owner's, never a
+/// member's across nests.
+fn folder_versions_list_handler() -> RpcHandler {
+    Box::new(|state, origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedFolderVersionsListRequest = decode(&payload)?;
+            let requester = parse_actor(&req.requesting_actor_id)?;
+            let channel_id = parse_id32(&req.channel_id, "channel_id")?;
+            let path_hash = parse_id32(&req.path_hash, "path_hash")?;
+            require_foreign_member(&state, &channel_id, &requester, &origin_nest_id).await?;
+            let fs = claimed_folder_for_channel(&state, &channel_id).await?;
+            let reply = crate::files_handlers::versions_in_sets(
+                &state,
+                &[&fs],
+                &path_hash,
+                crate::db::VersionScope::default(),
+            )
+            .await?;
+            encode_reply(&FedFolderVersionsListReply {
+                versions: reply.versions,
+                signer_certs: reply.signer_certs,
+                caller_access: caller_access_stamp(&state, &channel_id, &requester).await,
             })
         })
     })
@@ -3616,7 +4010,7 @@ fn folder_content_key_fetch_handler() -> RpcHandler {
                     .flatten(),
             );
             let (owner_handle, owner_domain) = match <[u8; 32]>::try_from(fs.actor_id.as_slice()) {
-                Ok(owner) => owner_label_stamp(&state, &owner).await,
+                Ok(owner) => local_name_stamp(&state, &owner).await,
                 Err(_) => (None, None),
             };
             encode_reply(&FedFolderContentKeyFetchReply {
@@ -3655,15 +4049,19 @@ fn folder_actors_fetch_handler() -> RpcHandler {
             let fs = claimed_folder_for_channel(&state, &channel_id).await?;
             let owner = <[u8; 32]>::try_from(fs.actor_id.as_slice())
                 .map_err(|_| internal("folder owner id is not 32 bytes"))?;
-            let mut members =
-                crate::folder_handlers::actor_roster_for_channel(&state.db, &channel_id, &owner)
-                    .await
-                    .map_err(internal)?;
+            let crate::folder_handlers::ActorRoster {
+                mut members,
+                former_writers,
+            } = crate::folder_handlers::actor_roster_for_channel(&state.db, &channel_id, &owner)
+                .await
+                .map_err(internal)?;
             for m in &mut members {
                 m.handle.clear();
+                m.domain = None;
             }
             encode_reply(&FedFolderActorsFetchReply {
                 members,
+                former_writers,
                 caller_access: caller_access_stamp(&state, &channel_id, &requester).await,
                 residency: residency_stamp(&fs),
             })
@@ -4048,6 +4446,10 @@ pub fn register_folder_federation_handlers(b: &mut FederationRouterBuilder) {
     b.add(
         "fauna.federation.folder.content_key.fetch",
         meta(folder_content_key_fetch_handler()),
+    );
+    b.add(
+        "fauna.federation.folder.versions.list",
+        meta(folder_versions_list_handler()),
     );
     b.add(
         "fauna.federation.folder.actors.fetch",
@@ -4497,12 +4899,23 @@ async fn resolve_backup_custody_set(
         )
         .await;
 
-    let fs = state
+    let Some(fs) = state
         .db
         .get_folder_for_actor(&name, owner)
         .await
         .map_err(internal)?
-        .ok_or_else(|| internal("backup custody set missing immediately after create"))?;
+    else {
+        // The create lost to the owner's own set created by hash alone on
+        // this name's address: the coded, recoverable refusal.
+        state
+            .db
+            .refuse_a_squatted_rail_address(&name, owner)
+            .await
+            .map_err(internal)?;
+        return Err(internal(
+            "backup custody set missing immediately after create",
+        ));
+    };
     // A concurrent rail mint may have won the race: the same refusal as above.
     if !crate::db::snapshots::is_reserved_custody_copy(fs.custody_copy, &fs.name) {
         return Err(forbidden(
@@ -6011,6 +6424,11 @@ fn post_get_handler() -> RpcHandler {
             // `caller = None` (mirrors the HTTP twin's no-bearer cross-nest fetch).
             match get_post_core(&state, None, post_id).await {
                 GetPostOutcome::Found(bytes) => encode_reply(&FedPostGetReply {
+                    // Test builds only: the substituted-bytes peer seam
+                    // (`trending_test_hook`); production serves `bytes` as stored.
+                    #[cfg(feature = "test-hooks")]
+                    post: crate::trending_test_hook::maybe_tamper(bytes),
+                    #[cfg(not(feature = "test-hooks"))]
                     post: bytes,
                     legal_takedown: None,
                     admin_block: None,
@@ -6222,11 +6640,14 @@ pub async fn import_report_entries(
                 factor: entry.factor.clone(),
                 content_kind: "mail".to_string(),
             };
-            state
+            for actor in state
                 .db
                 .recompute_report_score(&key)
                 .await
-                .map_err(PeerImportError::Db)?;
+                .map_err(PeerImportError::Db)?
+            {
+                crate::segments::notify_mail_flags_changed(&state.ws, &actor);
+            }
         }
     }
     // The table-wide cap, once per batch: the per-peer cap is keyed on an id
@@ -6243,6 +6664,7 @@ pub async fn import_report_entries(
             factor,
             content_kind: "mail".to_string(),
         };
+        // An eviction only lowers an aggregate: nothing re-opens, nothing to wake.
         state
             .db
             .recompute_report_score(&key)

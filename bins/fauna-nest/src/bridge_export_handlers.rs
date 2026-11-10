@@ -35,13 +35,14 @@ use std::time::Duration;
 
 use fauna_protocol::bridge_routing::{
     BridgeExportCompletePush, BridgeExportErrorPush, BridgeExportProgressPush,
-    DiscardExportBlobReply, EXPORT_STREAM_SUPERSEDED, ExportCiphertextMessage, ExportMailboxEntry,
-    ExportSessionActionReply, ExportSessionActionRequest, ExportSessionInfo,
-    FailExportSessionRequest, FetchExportChunkCiphertextReply, FetchExportChunkCiphertextRequest,
-    ListExportSessionsReply, ListExportSessionsRequest, ListOwnMailboxesReply,
-    ListOwnMailboxesRequest, MAX_EXPORT_FETCH_BYTES, MAX_EXPORT_FETCH_MESSAGES,
-    RestartExportSessionRequest, StartExportSessionReply, StartExportSessionRequest,
-    UploadExportChunkReply, UploadExportChunkRequest,
+    BridgeExportSessionChangedPush, DiscardExportBlobReply, EXPORT_STREAM_SUPERSEDED,
+    ExportCiphertextMessage, ExportMailboxEntry, ExportSessionActionReply,
+    ExportSessionActionRequest, ExportSessionInfo, FailExportSessionRequest,
+    FetchExportChunkCiphertextReply, FetchExportChunkCiphertextRequest, ListExportSessionsReply,
+    ListExportSessionsRequest, ListOwnMailboxesReply, ListOwnMailboxesRequest,
+    MAX_EXPORT_FETCH_BYTES, MAX_EXPORT_FETCH_MESSAGES, RestartExportSessionRequest,
+    StartExportSessionReply, StartExportSessionRequest, UploadExportChunkReply,
+    UploadExportChunkRequest,
 };
 use fauna_protocol::decode_strict as decode;
 
@@ -243,6 +244,25 @@ fn notify_export_progress(
             exported_count: row.exported_count,
             skipped_count: row.skipped_count,
             errored_count: row.errored_count,
+            extra: Default::default(),
+        }),
+    );
+}
+
+/// Nudge the owner's other devices that a session was cancelled or discarded
+/// — the two moves no other export event announces (`mail-export.md` § A
+/// failed export is a record the wizard shows until the user moves on). An
+/// open Export page that holds no run of the session re-reads its listing and
+/// lets the dead session go without waiting for its next visit.
+fn notify_export_session_changed(
+    state: &crate::routes::AppState,
+    actor: &[u8; 32],
+    session_id: &str,
+) {
+    state.ws.notify_push(
+        actor,
+        fauna_protocol::PushEvent::BridgeExportSessionChanged(BridgeExportSessionChangedPush {
+            session_id: session_id.to_string(),
             extra: Default::default(),
         }),
     );
@@ -822,6 +842,7 @@ fn session_transition_handler(
                         .await
                         .map_err(internal)?;
                 }
+                notify_export_session_changed(&state, &actor_id, &row.session_id);
             }
             if new_state == ExportState::Completed {
                 state.ws.notify_push(
@@ -959,6 +980,7 @@ fn discard_export_blob_handler() -> crate::rpc_router::RpcHandler {
                 .await
                 .map_err(internal)?
             {
+                notify_export_session_changed(&state, &actor_id, &req.session_id);
                 return encode_reply(&DiscardExportBlobReply {
                     existed: true,
                     ..Default::default()
@@ -1940,6 +1962,87 @@ mod tests {
         );
         assert_eq!(list_one(&state, USER, &sid).await.state, "running");
         assert!(blob_file(&dir, &sid).exists());
+    }
+
+    /// The next push frame on `rx`, classified — or a panic naming the wait.
+    async fn next_push(rx: &mut tokio::sync::mpsc::Receiver<Bytes>) -> fauna_protocol::PushEvent {
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for a push")
+            .expect("push channel closed");
+        match fauna_protocol::decode_frame(&bytes).expect("decode frame") {
+            fauna_protocol::Frame::Push(p) => {
+                fauna_protocol::PushEvent::from_push(&p.kind, p.payload)
+            }
+            other => panic!("expected a Push frame, got {other:?}"),
+        }
+    }
+
+    /// `mail-export.md` § A failed export is a record the wizard shows until
+    /// the user moves on: a wizard left open on another device re-reads on a
+    /// push, so a cancel and a discard — the two moves no other export event
+    /// announces — must each send one, or that wizard keeps painting the dead
+    /// session until its next visit. A discard that found nothing moved
+    /// nothing and sends none.
+    #[tokio::test]
+    async fn cancel_and_discard_nudge_the_owners_other_devices() {
+        let (state, _dir) = fixture().await;
+        let sid = start(&state, USER).await;
+        upload(&state, USER, &sid, 0, b"frame-0").await.unwrap();
+        // Subscribe after the upload, so its progress push is not in the queue.
+        let (_conn, mut rx) = state.ws.subscribe(USER);
+
+        action(
+            &state,
+            USER,
+            "fauna.bridges.cancel_export_session",
+            ExportState::Cancelled,
+            &[ExportState::Running, ExportState::Paused],
+            &sid,
+        )
+        .await
+        .unwrap();
+        match next_push(&mut rx).await {
+            fauna_protocol::PushEvent::BridgeExportSessionChanged(p) => {
+                assert_eq!(p.session_id, sid)
+            }
+            other => panic!(
+                "expected export_session_changed on cancel, got {}",
+                other.kind()
+            ),
+        }
+
+        let req = ExportSessionActionRequest {
+            session_id: sid.clone(),
+            ..Default::default()
+        };
+        discard_export_blob_handler()(state.clone(), USER, payload(&req))
+            .await
+            .unwrap();
+        let event = next_push(&mut rx).await;
+        assert_eq!(
+            event.invalidates(),
+            fauna_protocol::StaleSurfaces {
+                mail_export: true,
+                ..fauna_protocol::StaleSurfaces::NONE
+            },
+            "the nudge must stale the open Export page"
+        );
+        match event {
+            fauna_protocol::PushEvent::BridgeExportSessionChanged(p) => {
+                assert_eq!(p.session_id, sid)
+            }
+            other => panic!(
+                "expected export_session_changed on discard, got {}",
+                other.kind()
+            ),
+        }
+
+        // A second discard finds no row: nothing moved, nothing to announce.
+        discard_export_blob_handler()(state.clone(), USER, payload(&req))
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err(), "a no-op discard sends no push");
     }
 
     /// § Reclaim rule 2 — file before row. The row is gone only once the file

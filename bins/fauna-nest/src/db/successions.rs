@@ -1358,6 +1358,9 @@ pub struct PeerSuccessionApplied {
     /// `folder_member_access` rows carried to the successor with those roster
     /// rows (a predecessor's grant dropped on a collision is not counted).
     pub member_grants: usize,
+    /// `folder_former_writers` rows of the predecessor, now naming the
+    /// successor (ruling (12)(c); one already there is absorbed).
+    pub former_writers: usize,
     /// `contacts` rows whose `peer_id` now names the successor.
     pub contact_edges: usize,
     /// `remote_follows` rows whose `author_id` now names the successor — a
@@ -1620,6 +1623,17 @@ impl CacheDb {
         //    destinations are kept as this succession's owed nests before the
         //    loop deletes the rows.
         keep_owed_nests(&tx, &old)?;
+        // 4b. The connected-apps roster burns below, but each row's writer key
+        //     outlives it as a record (`third-party-kinds.md` § Principal write
+        //     authority → *A reconnecting app keeps its writer*): written here
+        //     under the OLD id, so step 5b's registry-driven plain move carries
+        //     it to the successor with the account's `sync_changes` — never a
+        //     write under the new id from inside the burn.
+        super::third_party_principals::record_former_writers_before_burn(
+            &tx,
+            &old,
+            super::now_epoch_millis(),
+        )?;
         let burned = execute_burn_legs(&tx, &old)?;
         let capability_grants_revoked = burned.get("capability_grants").copied().unwrap_or(0);
         //    Succession outranks a pending seed-initiated replacement
@@ -2110,6 +2124,26 @@ impl CacheDb {
         let member_grants = {
             const MOVING_SEATS: &str = "SELECT channel_id FROM channel_foreign_members
                                          WHERE actor_id = ?1";
+            // A collision that drops the predecessor's `writer` grant in favour
+            // of a successor grant that is not `writer` takes the grant away
+            // from the member: the successor is recorded as a former writer
+            // first (ruling (12)(c)), so the rows the predecessor recorded,
+            // which a reader places under the successor's chain, stay admitted.
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO folder_former_writers (channel_id, actor_id)
+                     SELECT o.channel_id, ?2 FROM folder_member_access o
+                      WHERE o.actor_id = ?1 AND o.access = 'writer'
+                        AND o.channel_id IN ({MOVING_SEATS})
+                        AND EXISTS (SELECT 1 FROM folder_member_access n
+                                     WHERE n.channel_id = o.channel_id AND n.actor_id = ?2
+                                       AND n.access <> 'writer')"
+                ),
+                rusqlite::params![old, new],
+            )
+            .context(
+                "record the successor as a former writer where the collision drops a writer grant",
+            )?;
             tx.execute(
                 &format!(
                     "DELETE FROM folder_member_access
@@ -2129,6 +2163,26 @@ impl CacheDb {
                 rusqlite::params![old, new],
             )
             .context("carry the member's grant with its roster row")?
+        };
+        // **The former-writer bit follows the identity** (ruling (12)(c)): a
+        // foreign actor's own nest moves its rows in the ceremony's registry
+        // walk (`folder_former_writers` is `Move(Plain)`), but the set's home
+        // nest holds the bit, so it moves here — on every channel, seat or
+        // none, since an evicted or departed writer has no seat left and the
+        // bit authorizes no write. A reader then places the predecessor's rows
+        // under the successor's carried chain, and the succession cut applies.
+        let former_writers = {
+            tx.execute(
+                "INSERT OR IGNORE INTO folder_former_writers (channel_id, actor_id)
+                 SELECT channel_id, ?2 FROM folder_former_writers WHERE actor_id = ?1",
+                rusqlite::params![old, new],
+            )
+            .context("carry the former-writer bit to the successor")?;
+            tx.execute(
+                "DELETE FROM folder_former_writers WHERE actor_id = ?1",
+                rusqlite::params![old],
+            )
+            .context("drop the predecessor's former-writer bit")?
         };
         let foreign_memberships = {
             Self::warn_on_discarded_foreign_bindings(&tx, &old, &new)?;
@@ -2195,6 +2249,7 @@ impl CacheDb {
         Ok(Ok(PeerSuccessionApplied {
             foreign_memberships,
             member_grants,
+            former_writers,
             contact_edges,
             remote_follows,
             reader_entitlements,
@@ -3464,6 +3519,100 @@ mod tests {
         )
         .optional()
         .unwrap()
+    }
+
+    /// `third-party-kinds.md` § Principal write authority → *A reconnecting
+    /// app keeps its writer*, the succession clause: the burned roster row's
+    /// writer is recorded before the burn and moves with the account, so the
+    /// successor authorizing the same app with the same writer key — whose
+    /// rows moved to the successor's id — is admitted.
+    #[tokio::test]
+    async fn a_successor_authorizing_the_same_app_again_keeps_its_writer() {
+        use crate::db::third_party_principals::{
+            AttestedKeys, ExecutionForm, PrincipalAttestation,
+        };
+        const CLIENT: &str = "https://app.example/client.json";
+        const WRITER: [u8; 32] = [0x57; 32];
+        async fn consent(db: &CacheDb, actor: [u8; 32], grant: &[u8], holder: u8) -> Result<()> {
+            db.record_atproto_oauth_grant(
+                &actor,
+                grant,
+                CLIENT,
+                Some("Example App"),
+                "atproto",
+                &[],
+                "jkt",
+                i64::MAX,
+                None,
+                crate::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+                &PrincipalAttestation {
+                    keys: AttestedKeys {
+                        holder_x25519: Some([holder; 32]),
+                        writer_ed25519: Some(WRITER),
+                    },
+                    execution_form: ExecutionForm::Device,
+                    manifest: None,
+                },
+            )
+            .await
+        }
+        async fn former(db: &CacheDb, actor: [u8; 32]) -> Vec<(String, Vec<u8>)> {
+            let conn = db.conn.lock().await;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT client_id, writer_ed25519 FROM third_party_former_writers
+                      WHERE actor_id = ?1",
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![&actor[..]], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+        }
+
+        let db = CacheDb::open_in_memory().unwrap();
+        seed_account(&db, &OLD, "alice").await;
+        consent(&db, OLD, b"family-1", 5).await.unwrap();
+        let fs = db
+            .get_or_create_state_scope(&OLD, fauna_protocol::account_state::ACCOUNT_STATE_SCOPE)
+            .await
+            .unwrap();
+        db.record_account_state_entry(&OLD, fs, &[1; 32], &WRITER, 1, "state-put", b"e", None, &[])
+            .await
+            .unwrap()
+            .unwrap();
+
+        db.record_succession(&OLD, &NEW, b"s", 1)
+            .await
+            .unwrap()
+            .expect("succession applies");
+        assert!(
+            db.list_third_party_principals(&OLD)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            former(&db, OLD).await.is_empty(),
+            "nothing left under the predecessor"
+        );
+        assert_eq!(
+            former(&db, NEW).await,
+            vec![(CLIENT.to_string(), WRITER.to_vec())],
+            "the burned row's writer moved with the account"
+        );
+
+        consent(&db, NEW, b"family-2", 6)
+            .await
+            .expect("the same app's own writer is admitted");
+        assert_eq!(
+            db.list_third_party_principals(&NEW).await.unwrap()[0]
+                .writer_ed25519
+                .as_deref(),
+            Some(&WRITER[..])
+        );
     }
 
     #[tokio::test]

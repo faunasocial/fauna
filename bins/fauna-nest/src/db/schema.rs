@@ -155,9 +155,18 @@ pub const SCHEMA_CONTENT_META: &str = "
         like_count INTEGER NOT NULL DEFAULT 0,
         reply_count INTEGER NOT NULL DEFAULT 0,
         repost_count INTEGER NOT NULL DEFAULT 0,
-        preview    TEXT
+        preview    TEXT,
+        nostr_advertised_at INTEGER
     );
 ";
+// `nostr_advertised_at` (nullable, additive 2026-11-07): the author's standing
+// intent to advertise this SOLD post on Nostr with its asking price
+// (`monetization.md` § The Nostr advertisement of a sold post → *The flag at
+// rest*). NULL = not advertised, else the act's epoch seconds. Read by
+// `public_servability::ADVERTISED_TEASER_SERVABLE`; the materializer converges
+// on it, so a crash between the act and the publication heals at the next
+// sweep. Written only by `fauna.nostr.advertise.{set,clear}` and the asking-
+// price lifecycle (a cleared price clears it).
 // `admin_block_report_id` (nullable, additive 2026-10-16): the admin's block of
 // one reported item (`moderation.md` § Admin block of a reported item) — the
 // second withhold flag beside `legal_takedown_ref`, the value being the

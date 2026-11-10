@@ -45,6 +45,22 @@ pub enum SetLifecycleError<E> {
     Custody(anyhow::Error),
     /// The nest call failed (its own error, refusal or fault).
     Nest(E),
+    /// A `public` create was asked of a client holding no audience attestor
+    /// ([`FoldersClient::with_audience_attestor`]): refused before any custody
+    /// write or wire call, since a public row no seat can verify would rest
+    /// sealed everywhere while the nest served it (`ui/folders.md` § Audience
+    /// and website serving → *Born public*, ruling 3).
+    Unattestable,
+    /// A `public` create landed, but the attesting `fauna.folders.update` that
+    /// follows it failed. The folder EXISTS — public and unattested, which
+    /// every seat reads as sealed (the verifier's fail-safe) — and the owner
+    /// row's re-confirm door heals it, so the caller treats the create as done.
+    Unattested {
+        /// The create's reply: the folder the nest minted.
+        reply: FolderCreateReply,
+        /// The update's own error.
+        error: E,
+    },
 }
 
 impl<E: core::fmt::Display> core::fmt::Display for SetLifecycleError<E> {
@@ -52,6 +68,12 @@ impl<E: core::fmt::Display> core::fmt::Display for SetLifecycleError<E> {
         match self {
             Self::Custody(e) => write!(f, "folder custody write failed: {e:#}"),
             Self::Nest(e) => write!(f, "{e}"),
+            Self::Unattestable => f.write_str(
+                "a public folder needs the owner's identity key to attest it; this client holds none",
+            ),
+            Self::Unattested { error, .. } => {
+                write!(f, "folder created public, but its attestation failed: {error}")
+            }
         }
     }
 }
@@ -63,7 +85,10 @@ impl<E> SetLifecycleError<E> {
     pub fn nest_error(&self) -> Option<&E> {
         match self {
             Self::Nest(e) => Some(e),
-            Self::Custody(_) => None,
+            // The create itself succeeded on `Unattested`: its update's error
+            // is not the create's refusal, and a caller classifying a name
+            // conflict must not read it as one.
+            Self::Custody(_) | Self::Unattestable | Self::Unattested { .. } => None,
         }
     }
 }
@@ -98,6 +123,16 @@ where
 /// wizard: an owner-only custody on a client that could later `update` a
 /// bound set would seal that set's labels under the wrong root). A new set is
 /// owner-only, so the owner key is the whole of what a create seals under.
+///
+/// **Born public** (`ui/folders.md` § Audience and website serving → *Born
+/// public*, ruling 3): a request whose `audience` is `public` is refused
+/// before anything moves unless `files` can attest
+/// ([`SetLifecycleError::Unattestable`]); it travels by name (the nest rests a
+/// public folder's name as its URL segment — [`fauna_protocol::folders::addressed`]
+/// keeps it), and once the reply names the minted id the owner's attestation
+/// over that id and the name rides an immediate `fauna.folders.update`. The
+/// attestation cannot ride the create itself: it signs over the id the INSERT
+/// mints.
 pub async fn create_set_with_owner_root<R>(
     files: &FoldersClient<R>,
     custody_store: &dyn FolderKeyStore,
@@ -108,6 +143,10 @@ where
     R: RpcRequester,
     R::Error: RpcErrorClass,
 {
+    let born_public = req.audience.as_deref() == Some(fauna_protocol::folders::AUDIENCE_PUBLIC);
+    if born_public && !files.can_attest_public() {
+        return Err(SetLifecycleError::Unattestable);
+    }
     let nonce: [u8; 32] = *fauna_core::secret::fresh_secret_32();
     let name = req.name.clone();
     // The creating identity is the nonce's minter (ruling (11)(a)); a store
@@ -121,6 +160,10 @@ where
     req.set_nonce = Some(ByteBuf::from(nonce.to_vec()));
     seal_at_create(owner, &mut req);
     match files.create(req).await {
+        Ok(reply) if born_public => match files.attest_born_public(reply.id, &name).await {
+            Ok(()) => Ok(reply),
+            Err(error) => Err(SetLifecycleError::Unattested { reply, error }),
+        },
         Ok(reply) => Ok(reply),
         Err(e) => {
             if e.is_rejection() {
@@ -656,6 +699,47 @@ where
     }
 }
 
+/// [`reconcile_set_custody`] as the author's launch pass runs it: a pass that
+/// may start before the replica has listed custody — the launch trigger fires
+/// once the runtime has assembled, which on a successor's fresh store is
+/// before its first listing lands. A refusal as not ready
+/// ([`crate::custody_not_ready`]) is retried at each custody change notice,
+/// as [`remint_owned_sets_once_listed`] retries the aftermath's cut, so the
+/// launch tail behind it — the succession's content-key rotation, the
+/// envelope convergence — runs over a custody the cut has reached, whichever
+/// side cut first (`succession-aftermath.md` § Re-key scope, the MLS groups
+/// row). Answers the not-ready refusal once the store has no notice left to
+/// wait on; any other error at once.
+pub async fn reconcile_set_custody_once_listed<R>(
+    files: &FoldersClient<R>,
+    custody_store: &dyn FolderKeyStore,
+    identity: fauna_core::identity::ActorId,
+) -> Result<SetCustodyReconcile, SetLifecycleError<R::Error>>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    // Taken before the first read, so a listing between the two is not lost.
+    let mut notices = custody_store.change_notices().await;
+    loop {
+        match reconcile_set_custody(files, custody_store, identity).await {
+            Err(SetLifecycleError::Custody(e)) if crate::custody_not_ready(&e) => {
+                let Some(source) = notices.as_mut() else {
+                    return Err(SetLifecycleError::Custody(e));
+                };
+                tracing::info!(
+                    "folders: the launch's set-custody reconcile waits for custody's first \
+                     listing; it re-reads at the next custody change"
+                );
+                if !source.changed().await {
+                    return Err(SetLifecycleError::Custody(e));
+                }
+            }
+            other => return other,
+        }
+    }
+}
+
 /// [`remint_owned_sets`] as the succession aftermath's post-store-ready pass
 /// runs it (`fauna_client_config::FolderCustodyCut`, the seam the recovery
 /// crate declares): the folders client and the account's custody store a host
@@ -812,6 +896,8 @@ mod tests {
         updates: Mutex<Vec<FolderUpdateRequest>>,
         /// Recorded `fauna.folders.create` requests.
         creates: Mutex<Vec<FolderCreateRequest>>,
+        /// Make every `fauna.folders.update` a transport fault.
+        update_fault: Mutex<bool>,
     }
 
     impl FakeNest {
@@ -843,6 +929,9 @@ mod tests {
             if kind == KIND_FOLDERS_UPDATE {
                 let req: FolderUpdateRequest = fauna_protocol::decode_strict(&bytes).unwrap();
                 self.updates.lock().unwrap().push(req);
+                if *self.update_fault.lock().unwrap() {
+                    return Err(FakeErr::Fault);
+                }
                 let out = fauna_protocol::encode_canonical(&FolderUpdateReply {
                     ok: true,
                     extra: Default::default(),
@@ -905,6 +994,7 @@ mod tests {
             listed: Mutex::new(Vec::new()),
             updates: Mutex::new(Vec::new()),
             creates: Mutex::new(Vec::new()),
+            update_fault: Mutex::new(false),
         });
         let files = FoldersClient::new(nest.clone());
         (nest, files, custody)
@@ -970,6 +1060,129 @@ mod tests {
         );
         assert_eq!(sent.name_sealed, None);
         assert_eq!(sent.retention_policy_sealed, None);
+    }
+
+    // ── born public (`ui/folders.md` § Audience and website serving → *Born public*)
+
+    fn public_create_req(name: &str) -> FolderCreateRequest {
+        FolderCreateRequest {
+            audience: Some(fauna_protocol::folders::AUDIENCE_PUBLIC.into()),
+            ..create_req(name)
+        }
+    }
+
+    /// A public create is two calls inside the one shared site: the create,
+    /// public from its INSERT and carrying the plaintext name the nest
+    /// requires of it, then the update carrying an attestation that verifies
+    /// over the id the create minted and the name, under the client's key.
+    #[test]
+    fn a_public_create_is_attested_over_the_reply_id_at_once() {
+        use fauna_protocol::folders::{AUDIENCE_PUBLIC, AttestationMemory};
+        let (nest, files, config) = harness(Outcome::Ok);
+        let owner = Arc::new(fauna_core::identity::ActorKeypair::from_secret([3; 32]));
+        let files = files.with_audience_attestor(Arc::clone(&owner));
+        let owner_root = fauna_core::crypto::BackupKey::from_bytes([7u8; 32]);
+        let reply = block_on(create_set_with_owner_root(
+            &files,
+            &*config,
+            public_create_req("docs"),
+            Some(owner_root),
+        ))
+        .expect("a public create");
+        assert_eq!(reply.id, 1);
+
+        let creates = nest.creates.lock().unwrap().clone();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0].audience.as_deref(), Some(AUDIENCE_PUBLIC));
+        assert_eq!(
+            creates[0].name, "docs",
+            "a public create travels by name, as the nest requires"
+        );
+
+        let updates = nest.updates.lock().unwrap().clone();
+        assert_eq!(updates.len(), 1, "one attesting update follows the create");
+        let update = &updates[0];
+        assert_eq!(update.audience.as_deref(), Some(AUDIENCE_PUBLIC));
+        assert_eq!(update.name, "docs", "a public update keeps the name");
+        let att = update
+            .audience_attestation
+            .clone()
+            .expect("the update carries the attestation");
+
+        let served = FolderSummary {
+            id: reply.id,
+            name: "docs".into(),
+            audience: AUDIENCE_PUBLIC.into(),
+            audience_attestation: Some(att.clone()),
+            ..Default::default()
+        };
+        let trusted = owner.actor_id();
+        assert!(
+            served
+                .judge_declassification("docs", Some(&trusted), AttestationMemory::default())
+                .0,
+            "the attestation verifies over the reply's id and the name"
+        );
+        let other_row = FolderSummary {
+            id: reply.id + 1,
+            ..served
+        };
+        assert!(
+            !other_row
+                .judge_declassification("docs", Some(&trusted), AttestationMemory::default())
+                .0,
+            "…and over no other row's id"
+        );
+    }
+
+    /// A client that cannot attest refuses a public create before any call
+    /// and before any custody write — never a public row no seat will unseal.
+    #[test]
+    fn a_keyless_client_refuses_a_public_create_before_any_call() {
+        let (nest, files, config) = harness(Outcome::Ok);
+        let before = config.snapshot();
+        let r = block_on(create_set_with_owner_root(
+            &files,
+            &*config,
+            public_create_req("docs"),
+            None,
+        ));
+        assert!(matches!(r, Err(SetLifecycleError::Unattestable)), "{r:?}");
+        assert!(nest.creates.lock().unwrap().is_empty());
+        assert!(nest.updates.lock().unwrap().is_empty());
+        assert_eq!(config.snapshot(), before, "no custody write either");
+    }
+
+    /// The attestation's failure leaves the folder created — public and
+    /// unattested, which every seat reads as sealed — and says so with the
+    /// reply in hand, so the caller marks the create done.
+    #[test]
+    fn a_failed_attestation_reports_the_folder_created() {
+        let (nest, files, config) = harness(Outcome::Ok);
+        *nest.update_fault.lock().unwrap() = true;
+        let owner = Arc::new(fauna_core::identity::ActorKeypair::from_secret([3; 32]));
+        let files = files.with_audience_attestor(owner);
+        let r = block_on(create_set_with_owner_root(
+            &files,
+            &*config,
+            public_create_req("docs"),
+            None,
+        ));
+        match r {
+            Err(SetLifecycleError::Unattested { reply, .. }) => assert_eq!(reply.id, 1),
+            other => panic!("expected Unattested, got {other:?}"),
+        }
+        assert_eq!(nest.creates.lock().unwrap().len(), 1);
+    }
+
+    /// A private create is unchanged: one call, no attestation.
+    #[test]
+    fn a_private_create_sends_no_update() {
+        let (nest, files, config) = harness(Outcome::Ok);
+        let owner = Arc::new(fauna_core::identity::ActorKeypair::from_secret([3; 32]));
+        let files = files.with_audience_attestor(owner);
+        block_on(create_set(&files, &*config, create_req("docs"))).unwrap();
+        assert!(nest.updates.lock().unwrap().is_empty());
     }
 
     fn create_req(name: &str) -> FolderCreateRequest {

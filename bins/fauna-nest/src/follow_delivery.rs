@@ -100,30 +100,43 @@ async fn enqueue_to_homes(state: &AppState, author: &[u8; 32], payload: &[u8], e
     }
 }
 
-/// A remote subscriber homed at `home` was just approved: unless another of
-/// the author's subscribers is already homed there (its index holds the posts
-/// already), queue the author's newest servable posts to it (§ Decision 1's
-/// backfill). The same entry, the same queue — never a pull.
-pub(crate) async fn backfill_new_home(state: &AppState, author: &[u8; 32], home: &[u8; 32]) {
-    match state.db.subscribers_homed_at(author, home).await {
-        Ok(1) => {}
-        Ok(_) => return,
+/// A remote subscriber homed at `home` was just approved for `tier`: unless
+/// another of the author's subscribers is already homed there (its index holds
+/// the posts already), queue the author's newest servable posts to it
+/// (§ Decision 1's backfill). A tier designated `unlocks_post` adds the
+/// designated post whatever its age, deduplicated with the window — the buyer
+/// bought that post, and the newest-50 window will not hold an old one, nor
+/// another subscriber's earlier backfill to that home. The same entry, the
+/// same queue — never a pull.
+pub(crate) async fn backfill_new_home(
+    state: &AppState,
+    author: &[u8; 32],
+    home: &[u8; 32],
+    tier: &str,
+) {
+    let mut ids = match state.db.subscribers_homed_at(author, home).await {
+        Ok(1) => match state
+            .db
+            .author_backfill_post_ids(author, BACKFILL_POSTS)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("follow backfill: list the author's posts: {e:#}");
+                Vec::new()
+            }
+        },
+        Ok(_) => Vec::new(),
         Err(e) => {
             tracing::warn!("follow backfill: count the home's subscribers: {e:#}");
             return;
         }
-    }
-    let ids = match state
-        .db
-        .author_backfill_post_ids(author, BACKFILL_POSTS)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            tracing::warn!("follow backfill: list the author's posts: {e:#}");
-            return;
-        }
     };
+    if let Some(post) = designated_post(state, author, tier).await
+        && !ids.contains(&post)
+    {
+        ids.push(post);
+    }
     for id in ids {
         let body =
             match crate::segments::post::read_body_by_post_id(&state.post_segments, &state.db, &id)
@@ -148,6 +161,27 @@ pub(crate) async fn backfill_new_home(state: &AppState, author: &[u8; 32], home:
             .await
         {
             tracing::warn!("follow backfill: enqueue: {e:#}");
+        }
+    }
+}
+
+/// The post a tier sells (`unlocks_post`), when it is the author's own and
+/// servable to a non-author.
+async fn designated_post(state: &AppState, author: &[u8; 32], tier: &str) -> Option<[u8; 32]> {
+    let designation = match state.db.get_subscription_tier(author, tier).await {
+        Ok(t) => t?.unlocks_post?,
+        Err(e) => {
+            tracing::warn!("follow backfill: read the tier's designation: {e:#}");
+            return None;
+        }
+    };
+    let post = fauna_core::hex32::decode(&designation).ok()?;
+    match state.db.author_backfill_post_servable(author, &post).await {
+        Ok(true) => Some(post),
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!("follow backfill: read the designated post: {e:#}");
+            None
         }
     }
 }
@@ -884,5 +918,111 @@ mod tests {
         );
         rebuild_withhold(&state).await;
         assert_eq!(door(&state, &photo).await, None);
+    }
+
+    /// A subscriber homed at [`HOME`] on `tier`, as an approved relayed
+    /// request leaves the roster row.
+    async fn homed_subscriber(state: &AppState, author: &[u8; 32], tier: &str) -> [u8; 32] {
+        let sub = ActorKeypair::generate().actor_id().0;
+        let id = state
+            .db
+            .insert_subscribe_request(author, &sub, tier, "subscribe", None)
+            .await
+            .unwrap();
+        state
+            .db
+            .set_subscribe_request_home(id, &HOME, Some(HOME_URL))
+            .await
+            .unwrap();
+        state
+            .db
+            .add_subscriber(author, &sub, tier, None)
+            .await
+            .unwrap();
+        state
+            .db
+            .copy_subscribe_request_home(id, author, &sub, tier)
+            .await
+            .unwrap();
+        sub
+    }
+
+    /// § Decision 1's backfill, the bought post (ruled with the redeem twin):
+    /// the approval of a per-post tier's request enqueues the designated post
+    /// to the buyer's home even when the newest-50 window is skipped — another
+    /// subscriber already homed there — and exactly once beside the window.
+    #[tokio::test]
+    async fn a_per_post_tiers_approval_backfills_the_designated_post_whatever_the_window() {
+        let state = fixture_state();
+        let author = ActorKeypair::generate();
+        let author_id = author.actor_id().0;
+        state
+            .db
+            .create_user(&author_id, "free", "author")
+            .await
+            .unwrap();
+        let (wire, post_id) = signed(&author);
+        crate::segments::post::store_post(&state.post_segments, &state.db, &post_id, &wire, None)
+            .await
+            .unwrap();
+        let designation = fauna_core::hex32::encode(&post_id);
+        state
+            .db
+            .create_subscription_tier(
+                &author_id,
+                "post-sale",
+                1,
+                None,
+                None,
+                None,
+                false,
+                Some(&designation),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .create_subscription_tier(
+                &author_id, "gold", 1, None, None, None, false, None, None, false,
+            )
+            .await
+            .unwrap();
+        let deliveries = || async {
+            state
+                .db
+                .outbox_pending_follow(100)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| {
+                    e.entry_type == ENTRY_TYPE_FOLLOW_DELIVER
+                        && e.peer_nest_id.as_deref() == Some(HOME.as_slice())
+                        && e.payload == wire
+                })
+                .count()
+        };
+
+        // The first subscriber homed there: the window carries the post, and
+        // the designation adds no second copy.
+        homed_subscriber(&state, &author_id, "post-sale").await;
+        backfill_new_home(&state, &author_id, &HOME, "post-sale").await;
+        assert_eq!(deliveries().await, 1, "deduplicated with the window");
+
+        // A second buyer homed at the same nest: the window is skipped, the
+        // bought post still goes.
+        homed_subscriber(&state, &author_id, "post-sale").await;
+        backfill_new_home(&state, &author_id, &HOME, "post-sale").await;
+        assert_eq!(
+            deliveries().await,
+            2,
+            "the bought post goes whatever the window"
+        );
+
+        // An undesignated tier's approval with the window skipped sends nothing.
+        homed_subscriber(&state, &author_id, "gold").await;
+        backfill_new_home(&state, &author_id, &HOME, "gold").await;
+        assert_eq!(deliveries().await, 2);
     }
 }

@@ -4,6 +4,9 @@ title: Mail health at a glance
 section: admin area
 goal: docs/goal/behavior/mail-deliverability.md § Admin-pane Deliverability surface
 guide: docs/guides/admin-tour.md § Mail
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -106,6 +109,8 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | ios | ✅ full | 0.1.5-dev+5beed650 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+79cc323c standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

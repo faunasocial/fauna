@@ -624,6 +624,113 @@ where
         }
     }
 
+    /// A forked seat's self-unlist ([`FolderCustodySink::unlist_forked_seat`]):
+    /// the self-scoped [`FoldersClient::leave_with_home`], the decline's nest
+    /// half. Landed on any reply (`left == false` is the idempotent repeat);
+    /// a transport failure is logged and answered `false`, so the backend
+    /// asks again on its next marking pass.
+    async fn do_unlist_forked_seat(
+        &self,
+        group_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> bool {
+        // A same-nest set leaves the nest's list with this drop: keep its
+        // Folders row in a durable record first (a cross-nest set's
+        // `ForeignFolder` already does). Best-effort — the drop goes ahead
+        // whatever the record write answers.
+        if home_nest_url.is_none() {
+            self.do_record_forked_seat(&group_id_hex).await;
+        }
+        match self
+            .folders
+            .leave_with_home(group_id_hex, home_nest_url)
+            .await
+        {
+            Ok(reply) => {
+                tracing::info!(
+                    left = reply.left,
+                    "forked folder seat: own roster row dropped on the set's home nest"
+                );
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "forked folder seat: roster self-drop failed, retried on the next walk: {e}"
+                );
+                false
+            }
+        }
+    }
+
+    /// The forked same-nest seat's durable row
+    /// ([`fauna_core::data::ForkedFolderSeat`]), written from the row the
+    /// member-visible list names the set by right now — the same rendered
+    /// list the Folders page reads, so the name, owner and access are the
+    /// ones the member last saw. A list that fails, or no longer names the
+    /// set (a repeat after the drop landed), writes the group id alone and
+    /// keeps any display fields a record already holds.
+    async fn do_record_forked_seat(&self, group_id_hex: &str) -> bool {
+        let Ok(raw) = hex::decode(group_id_hex) else {
+            return false;
+        };
+        let row = match self.folders.list_owned_and_shared().await {
+            Ok(reply) => reply.folders.into_iter().find(|f| {
+                f.role.as_deref() == Some("member")
+                    && f.mls_group_id
+                        .as_deref()
+                        .is_some_and(|g| g.eq_ignore_ascii_case(group_id_hex))
+            }),
+            Err(e) => {
+                tracing::debug!(
+                    "forked folder seat: list read failed, recording the id alone: {e}"
+                );
+                None
+            }
+        };
+        let record = fauna_core::data::ForkedFolderSeat {
+            channel_id: ChannelId::from_group_id(&raw).0,
+            mls_group_id: raw,
+            set_name: row
+                .as_ref()
+                .map(|r| r.name.clone())
+                .filter(|n| !n.is_empty()),
+            owner_handle: row.as_ref().and_then(|r| r.owner_handle.clone()),
+            owner_actor_id: row.as_ref().and_then(|r| r.owner_actor_id.clone()),
+            access: row.as_ref().and_then(|r| r.access.clone()),
+            forked_at: 0,
+            cleared_at: None,
+        };
+        match update(&*self.custody, move |cfg| {
+            custody::record_forked_seat(cfg, record, fauna_core::data::Timestamp::now().0)
+        })
+        .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("forked folder seat: durable row write failed: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// The forked-seat record's clear ([`FolderCustodySink::clear_forked_seat`]).
+    async fn do_clear_forked_seat(&self, channel_id: &[u8; 32]) -> bool {
+        let cid = *channel_id;
+        match update(&*self.custody, move |cfg| {
+            custody::clear_forked_seat(cfg, &cid, fauna_core::data::Timestamp::now().0)
+        })
+        .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::debug!(
+                    "forked-seat record clear failed (a stale record is display-only): {e:#}"
+                );
+                false
+            }
+        }
+    }
+
     /// Tri-state (see [`FolderCustodySink::foreign_home_url`]): an unreadable
     /// custody record is `Err`, never `Ok(None)`.
     async fn do_foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
@@ -695,6 +802,19 @@ impl FolderCustodySink for NestFolderCustodySink<Arc<fauna_client::NestClient>> 
         self.do_drop_share_endpoints(channel_id).await
     }
 
+    async fn unlist_forked_seat(
+        &self,
+        group_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> bool {
+        self.do_unlist_forked_seat(group_id_hex, home_nest_url)
+            .await
+    }
+
+    async fn clear_forked_seat(&self, channel_id: &[u8; 32]) -> bool {
+        self.do_clear_forked_seat(channel_id).await
+    }
+
     async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
         self.do_foreign_home_url(channel_id).await
     }
@@ -750,6 +870,19 @@ impl FolderCustodySink for NestFolderCustodySink<fauna_rpc_wasm::WsRpcClient> {
 
     async fn drop_share_endpoints(&self, channel_id: &[u8; 32]) -> bool {
         self.do_drop_share_endpoints(channel_id).await
+    }
+
+    async fn unlist_forked_seat(
+        &self,
+        group_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> bool {
+        self.do_unlist_forked_seat(group_id_hex, home_nest_url)
+            .await
+    }
+
+    async fn clear_forked_seat(&self, channel_id: &[u8; 32]) -> bool {
+        self.do_clear_forked_seat(channel_id).await
     }
 
     async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
@@ -1159,6 +1292,16 @@ impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
         ))
     }
 
+    async fn do_foreign_sets(&self) -> anyhow::Result<Vec<fauna_core::data::ForeignFolder>> {
+        // Custody alone — a foreign set has no roster row on this nest.
+        let cfg = self
+            .custody
+            .load()
+            .await
+            .map_err(|e| e.context("custody read failed listing foreign sets"))?;
+        Ok(custody::live_foreign_sets(&cfg).cloned().collect())
+    }
+
     async fn do_resolve(&self, name_hash: &[u8; 32]) -> anyhow::Result<ResolvedCustody> {
         // Both reads must SUCCEED for any answer at all — a transport failure
         // is `Err` ("could not determine"), never `Ok(None)`: the old
@@ -1251,6 +1394,10 @@ impl FolderKeyResolver for PinnedFolderKeyResolver {
         ))
     }
 
+    async fn foreign_sets(&self) -> anyhow::Result<Vec<fauna_core::data::ForeignFolder>> {
+        Ok(custody::live_foreign_sets(&self.cfg).cloned().collect())
+    }
+
     // `read_scope` keeps its `None` default: a scope is already one read.
 }
 
@@ -1291,6 +1438,10 @@ impl FolderKeyResolver for NestFolderKeyResolver<Arc<fauna_client::NestClient>> 
     async fn read_scope(&self) -> Option<Arc<dyn FolderKeyResolver>> {
         self.do_read_scope().await
     }
+
+    async fn foreign_sets(&self) -> anyhow::Result<Vec<fauna_core::data::ForeignFolder>> {
+        self.do_foreign_sets().await
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1329,6 +1480,10 @@ impl FolderKeyResolver for NestFolderKeyResolver<fauna_rpc_wasm::WsRpcClient> {
 
     async fn read_scope(&self) -> Option<Arc<dyn FolderKeyResolver>> {
         self.do_read_scope().await
+    }
+
+    async fn foreign_sets(&self) -> anyhow::Result<Vec<fauna_core::data::ForeignFolder>> {
+        self.do_foreign_sets().await
     }
 }
 
@@ -1388,6 +1543,27 @@ mod tests {
                     },
                 )
                 .expect("encode reply");
+                return Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"));
+            }
+            if kind == fauna_protocol::folders::KIND_FOLDERS_LEAVE {
+                // The self-scoped leave: this member's roster row goes.
+                let sent = fauna_protocol::encode_canonical(&payload).expect("encode request");
+                let req: fauna_protocol::folders::MemberLeaveRequest =
+                    fauna_protocol::decode_strict(&sent).expect("decode request");
+                let mut rows = self.rows.lock().unwrap();
+                let before = rows.len();
+                rows.retain(|r| {
+                    !(r.role.as_deref() == Some("member")
+                        && r.mls_group_id.as_deref() == Some(req.group_id.as_str()))
+                });
+                let reply =
+                    fauna_protocol::encode_canonical(&fauna_protocol::folders::MemberLeaveReply {
+                        ok: true,
+                        channel_id: String::new(),
+                        left: rows.len() < before,
+                        extra: Default::default(),
+                    })
+                    .expect("encode reply");
                 return Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"));
             }
             assert_eq!(kind, fauna_protocol::folders::KIND_FOLDERS_LIST);
@@ -1721,6 +1897,63 @@ mod tests {
         let mut sink = NestFolderCustodySink::new(Arc::clone(&nest), store);
         sink.refetch_check_interval = interval;
         (sink, nest)
+    }
+
+    /// `federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*, part (b): a same-nest forked seat's self-unlist first keeps
+    /// the row the member-visible list names the set by in a durable record —
+    /// a repeat after the drop (the list names nothing now) keeps its name,
+    /// owner and access — and the clear tombstones it. A cross-nest set's
+    /// unlist records nothing (its foreign record keeps its row).
+    #[test]
+    fn a_same_nest_forked_seat_unlist_records_its_row_first_and_the_clear_tombstones_it() {
+        use fauna_client_testkit::block_on;
+        let group_hex = hex::encode(GROUP);
+        let shared = FolderSummary {
+            id: 9,
+            role: Some("member".into()),
+            access: Some("writer".into()),
+            owner_handle: Some("alice".into()),
+            ..row("photos", Some(group_hex.clone()))
+        };
+        let store = Arc::new(crate::MemoryFolderKeyStore::default());
+        let (sink, nest) = refetch_sink(vec![shared], Arc::clone(&store), 0);
+
+        assert!(block_on(
+            sink.do_unlist_forked_seat(group_hex.clone(), None)
+        ));
+        assert!(
+            nest.rows.lock().unwrap().is_empty(),
+            "the roster row dropped"
+        );
+        let held = block_on(store.load()).unwrap();
+        let live: Vec<_> = custody::live_forked_seats(&held).collect();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].channel_id, group_channel());
+        assert_eq!(live[0].mls_group_id, GROUP.to_vec());
+        assert_eq!(live[0].set_name.as_deref(), Some("photos"));
+        assert_eq!(live[0].owner_handle.as_deref(), Some("alice"));
+        assert_eq!(live[0].access.as_deref(), Some("writer"));
+
+        // A repeat: the list names nothing now; the record keeps its fields.
+        assert!(block_on(
+            sink.do_unlist_forked_seat(group_hex.clone(), None)
+        ));
+        let held = block_on(store.load()).unwrap();
+        let live: Vec<_> = custody::live_forked_seats(&held).collect();
+        assert_eq!(live[0].set_name.as_deref(), Some("photos"));
+
+        assert!(block_on(sink.do_clear_forked_seat(&group_channel())));
+        let held = block_on(store.load()).unwrap();
+        assert_eq!(custody::live_forked_seats(&held).count(), 0);
+        assert_eq!(held.forked_seats.len(), 1, "a tombstone");
+
+        // Cross-nest: no record.
+        let store = Arc::new(crate::MemoryFolderKeyStore::default());
+        let (sink, _) = refetch_sink(vec![], Arc::clone(&store), 0);
+        block_on(sink.do_unlist_forked_seat(group_hex, Some("https://home.example".into())));
+        assert!(block_on(store.load()).unwrap().forked_seats.is_empty());
     }
 
     /// `set-addressing.md` § The row form → *Whoever holds the row sends it*:
@@ -2229,6 +2462,30 @@ mod tests {
             content_key_floor: None,
             ..Default::default()
         }
+    }
+
+    /// The resolver enumerates the holder's LIVE foreign sets from the custody
+    /// it reads — the Media page's foreign browse options (`ui/media.md`
+    /// § Cross-nest shared sets → *Which sets are offered*); a left record is
+    /// a tombstone and is never offered.
+    #[test]
+    fn foreign_sets_lists_the_live_records_and_never_a_tombstone() {
+        let mut c = cfg();
+        let live = foreign_record("away");
+        let left = fauna_core::data::ForeignFolder {
+            channel_id: [0xBB; 32],
+            left_at: Some(5),
+            ..foreign_record("gone")
+        };
+        c.foreign_sets.push(live.clone());
+        c.foreign_sets.push(left);
+        let pinned = PinnedFolderKeyResolver {
+            roster: Vec::new(),
+            cfg: c,
+        };
+        let sets = fauna_client_testkit::block_on(pinned.foreign_sets()).expect("pinned reads");
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].channel_id, live.channel_id);
     }
 
     /// A record's nonce resolves by the same name resolution as its custody:

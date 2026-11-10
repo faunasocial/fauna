@@ -8,10 +8,12 @@ struct NotificationsView: View {
     /// cross-page deep-link slot a `search-result-item` activation uses.
     #if !FAUNA_KIDS
     @Environment(FeedVM.self) private var feedVM
+    #endif
     /// Owner of the private-overlay projection a knock / like row's sender is
     /// named through (`notifications.md` § Localized body → *The sender arg*).
+    /// Kept in the kids build: conversations is a kept plane, and the app
+    /// provides it there too.
     @Environment(ConversationsVM.self) private var conversationsVM
-    #endif
     @State private var vm = NotificationsVM()
 
     var body: some View {

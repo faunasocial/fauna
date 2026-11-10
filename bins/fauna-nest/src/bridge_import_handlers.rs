@@ -26,11 +26,11 @@ use std::time::Duration;
 use fauna_mail::segments::placement::MailPlacementRecord;
 use fauna_protocol::bridge_routing::{
     BridgeImportCompletePush, BridgeImportErrorPush, BridgeImportProgressPush,
-    ClientImportOutcomeKind, DiscardImportSessionReply, FailImportSessionRequest,
-    IMPORT_SKIP_QUOTA_EXCEEDED, ImportMailboxCursor, ImportMessageBatchReply,
-    ImportMessageBatchRequest, ImportMessageItem, ImportMessageOutcome, ImportMessageReply,
-    ImportMessageRequest, ImportSessionActionReply, ImportSessionActionRequest, ImportSessionInfo,
-    ListImportSessionsReply, ListImportSessionsRequest, MailboxStateEvent,
+    BridgeImportSessionChangedPush, ClientImportOutcomeKind, DiscardImportSessionReply,
+    FailImportSessionRequest, IMPORT_SKIP_QUOTA_EXCEEDED, ImportMailboxCursor,
+    ImportMessageBatchReply, ImportMessageBatchRequest, ImportMessageItem, ImportMessageOutcome,
+    ImportMessageReply, ImportMessageRequest, ImportSessionActionReply, ImportSessionActionRequest,
+    ImportSessionInfo, ListImportSessionsReply, ListImportSessionsRequest, MailboxStateEvent,
     RecordImportOutcomesReply, RecordImportOutcomesRequest, StartImportSessionReply,
     StartImportSessionRequest,
 };
@@ -117,6 +117,24 @@ fn notify_import_progress(
             imported_count: row.imported_count,
             skipped_count: row.skipped_count,
             errored_count: row.errored_count,
+        }),
+    );
+}
+
+/// Nudge the owner's other devices that an import session was cancelled or
+/// discarded — the two moves no other import event announces
+/// (`mailbox-migration.md` § A failed import is a record the wizard shows
+/// until the user moves on; the export twin's `notify_export_session_changed`).
+fn notify_import_session_changed(
+    state: &crate::routes::AppState,
+    actor: &[u8; 32],
+    session_id: &str,
+) {
+    state.ws.notify_push(
+        actor,
+        fauna_protocol::PushEvent::BridgeImportSessionChanged(BridgeImportSessionChangedPush {
+            session_id: session_id.to_string(),
+            extra: Default::default(),
         }),
     );
 }
@@ -834,6 +852,9 @@ fn session_transition_handler(
                 None,
             )
             .await?;
+            if new_state == ImportState::Cancelled {
+                notify_import_session_changed(&state, &actor_id, &row.session_id);
+            }
             if new_state == ImportState::Completed {
                 state.ws.notify_push(
                     &actor_id,
@@ -898,10 +919,13 @@ fn discard_import_session_handler() -> crate::rpc_router::RpcHandler {
                 .await
                 .map_err(internal)?
             {
-                DiscardImportSessionOutcome::Deleted => encode_reply(&DiscardImportSessionReply {
-                    existed: true,
-                    ..Default::default()
-                }),
+                DiscardImportSessionOutcome::Deleted => {
+                    notify_import_session_changed(&state, &actor_id, &req.session_id);
+                    encode_reply(&DiscardImportSessionReply {
+                        existed: true,
+                        ..Default::default()
+                    })
+                }
                 // The answer a second discard gives — Dismiss pressed twice,
                 // or on two devices, is not a failure.
                 DiscardImportSessionOutcome::Missing => encode_reply(&DiscardImportSessionReply {
@@ -2189,6 +2213,76 @@ mod tests {
         );
         assert!(!discard(&state, &sid).await.unwrap().existed);
         assert!(!discard(&state, "never-was").await.unwrap().existed);
+    }
+
+    /// The next push frame on `rx`, classified — or a panic naming the wait.
+    async fn next_push(rx: &mut tokio::sync::mpsc::Receiver<Bytes>) -> fauna_protocol::PushEvent {
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for a push")
+            .expect("push channel closed");
+        match fauna_protocol::decode_frame(&bytes).expect("decode frame") {
+            fauna_protocol::Frame::Push(p) => {
+                fauna_protocol::PushEvent::from_push(&p.kind, p.payload)
+            }
+            other => panic!("expected a Push frame, got {other:?}"),
+        }
+    }
+
+    /// The export twin's nudge (`mailbox-migration.md` § A failed import is a
+    /// record the wizard shows until the user moves on): a cancel and a
+    /// discard each tell the owner's other devices, so an Import wizard left
+    /// open elsewhere re-reads instead of painting the dead session until its
+    /// next visit. A discard that found nothing sends none.
+    #[tokio::test]
+    async fn cancel_and_discard_nudge_the_owners_other_devices() {
+        let state = fixture_state().await;
+        let sid = start_session(&state, "src").await;
+        let (_conn, mut rx) = state.ws.subscribe(USER);
+
+        let req = ImportSessionActionRequest {
+            session_id: sid.clone(),
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        session_transition_handler(
+            "fauna.bridges.cancel_import_session",
+            ImportState::Cancelled,
+            &[ImportState::Running, ImportState::Paused],
+        )(state.clone(), USER, payload)
+        .await
+        .expect("cancel ok");
+        match next_push(&mut rx).await {
+            fauna_protocol::PushEvent::BridgeImportSessionChanged(p) => {
+                assert_eq!(p.session_id, sid)
+            }
+            other => panic!(
+                "expected import_session_changed on cancel, got {}",
+                other.kind()
+            ),
+        }
+
+        assert!(discard(&state, &sid).await.unwrap().existed);
+        let event = next_push(&mut rx).await;
+        assert_eq!(
+            event.invalidates(),
+            fauna_protocol::StaleSurfaces {
+                mail_import: true,
+                ..fauna_protocol::StaleSurfaces::NONE
+            },
+            "the nudge must stale the open Import page"
+        );
+        match event {
+            fauna_protocol::PushEvent::BridgeImportSessionChanged(p) => {
+                assert_eq!(p.session_id, sid)
+            }
+            other => panic!(
+                "expected import_session_changed on discard, got {}",
+                other.kind()
+            ),
+        }
+
+        assert!(!discard(&state, &sid).await.unwrap().existed);
+        assert!(rx.try_recv().is_err(), "a no-op discard sends no push");
     }
 
     /// A new start is the user's answer to a failure: the caller's `errored`

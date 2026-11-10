@@ -426,7 +426,10 @@ fn parse_ordered_item(line: &str) -> Option<(u8, &str)> {
     if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some((list_depth(&line[..indent_len]), &body[dot_pos + 2..]))
+    // The content starts at its first non-blank, as a bullet item's does: htmd aligns
+    // an ordered item's content with two spaces (`1.  first`).
+    let content = body[dot_pos + 2..].trim_start_matches([' ', '\t']);
+    Some((list_depth(&line[..indent_len]), content))
 }
 
 /// `[indent]- item` / `* item` / `+ item` → `(depth, task, content)`, with optional leading
@@ -592,6 +595,15 @@ fn scan_inline(text: &str) -> Vec<InlineToken> {
     let mut i = 0;
 
     while i < chars.len() {
+        // Backslash escape: the punctuation it escapes is plain text, never a delimiter.
+        if is_escape(&chars, i) {
+            if normal.is_empty() {
+                normal_start = byte_at[i];
+            }
+            normal.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
         // Inline code: `code`
         if chars[i] == '`'
             && let Some(end) = find_char(&chars, i + 1, '`')
@@ -657,13 +669,14 @@ fn scan_inline(text: &str) -> Vec<InlineToken> {
             && let Some(end) = find_seq(&chars, i + 2, &['*', '*'])
         {
             flush_plain(&mut normal, normal_start, byte_at[i], &mut tokens);
-            tokens.push(InlineToken {
-                kind: InlineKind::Bold,
-                content: byte_at[i + 2]..byte_at[end],
-                text: chars[i + 2..end].iter().collect(),
-                url: String::new(),
-                markers: vec![byte_at[i]..byte_at[i + 2], byte_at[end]..byte_at[end + 2]],
-            });
+            tokens.push(emphasis_token(
+                &chars,
+                &byte_at,
+                i,
+                (i + 2, end),
+                end + 2,
+                InlineKind::Bold,
+            ));
             i = end + 2;
             continue;
         }
@@ -693,13 +706,14 @@ fn scan_inline(text: &str) -> Vec<InlineToken> {
             && !(end + 1 < chars.len() && chars[end + 1] == '*')
         {
             flush_plain(&mut normal, normal_start, byte_at[i], &mut tokens);
-            tokens.push(InlineToken {
-                kind: InlineKind::Italic,
-                content: byte_at[i + 1]..byte_at[end],
-                text: chars[i + 1..end].iter().collect(),
-                url: String::new(),
-                markers: vec![byte_at[i]..byte_at[i + 1], byte_at[end]..byte_at[end + 1]],
-            });
+            tokens.push(emphasis_token(
+                &chars,
+                &byte_at,
+                i,
+                (i + 1, end),
+                end + 1,
+                InlineKind::Italic,
+            ));
             i = end + 1;
             continue;
         }
@@ -734,13 +748,14 @@ fn scan_inline(text: &str) -> Vec<InlineToken> {
             && underscore_closes(&chars, end + 2)
         {
             flush_plain(&mut normal, normal_start, byte_at[i], &mut tokens);
-            tokens.push(InlineToken {
-                kind: InlineKind::Bold,
-                content: byte_at[i + 2]..byte_at[end],
-                text: chars[i + 2..end].iter().collect(),
-                url: String::new(),
-                markers: vec![byte_at[i]..byte_at[i + 2], byte_at[end]..byte_at[end + 2]],
-            });
+            tokens.push(emphasis_token(
+                &chars,
+                &byte_at,
+                i,
+                (i + 2, end),
+                end + 2,
+                InlineKind::Bold,
+            ));
             i = end + 2;
             continue;
         }
@@ -753,13 +768,14 @@ fn scan_inline(text: &str) -> Vec<InlineToken> {
             && underscore_closes(&chars, end + 1)
         {
             flush_plain(&mut normal, normal_start, byte_at[i], &mut tokens);
-            tokens.push(InlineToken {
-                kind: InlineKind::Italic,
-                content: byte_at[i + 1]..byte_at[end],
-                text: chars[i + 1..end].iter().collect(),
-                url: String::new(),
-                markers: vec![byte_at[i]..byte_at[i + 1], byte_at[end]..byte_at[end + 1]],
-            });
+            tokens.push(emphasis_token(
+                &chars,
+                &byte_at,
+                i,
+                (i + 1, end),
+                end + 1,
+                InlineKind::Italic,
+            ));
             i = end + 1;
             continue;
         }
@@ -770,6 +786,13 @@ fn scan_inline(text: &str) -> Vec<InlineToken> {
         i += 1;
     }
     flush_plain(&mut normal, normal_start, byte_at[chars.len()], &mut tokens);
+    // A styled run's words resolve their escapes too (code spans keep them, as in
+    // CommonMark); plain runs resolved theirs as they were scanned.
+    for tok in &mut tokens {
+        if !matches!(tok.kind, InlineKind::Plain | InlineKind::Code) && tok.text.contains('\\') {
+            tok.text = unescape(&tok.text);
+        }
+    }
     tokens
 }
 
@@ -1254,6 +1277,75 @@ fn parse_link(chars: &[char], start: usize) -> Option<ParsedLink> {
         consumed: close_paren + 1 - start,
         close_bracket,
     })
+}
+
+/// One emphasis run: the outer delimiters span `[open, s)` and `[e, close_end)` in chars,
+/// `kind` is the outer run's own (`Bold` or `Italic`). A run whose whole content is itself
+/// wrapped in the OTHER emphasis — `**_x_**`, `__*x*__`, `_**x**_`, `*__x__*` — is
+/// bold-italic: that is how the inbound HTML→markdown converter writes `<strong><em>` /
+/// `<em><strong>`, and the flat span model has no nesting to carry it otherwise.
+fn emphasis_token(
+    chars: &[char],
+    byte_at: &[usize],
+    open: usize,
+    (s, e): (usize, usize),
+    close_end: usize,
+    kind: InlineKind,
+) -> InlineToken {
+    let w = if matches!(kind, InlineKind::Bold) {
+        1
+    } else {
+        2
+    };
+    let nested = e > s + 2 * w
+        && matches!(chars[s], '*' | '_')
+        && (0..w).all(|k| chars[s + k] == chars[s] && chars[e - 1 - k] == chars[s])
+        && chars[s + w] != chars[s]
+        && chars[e - 1 - w] != chars[s];
+    if nested {
+        return InlineToken {
+            kind: InlineKind::BoldItalic,
+            content: byte_at[s + w]..byte_at[e - w],
+            text: chars[s + w..e - w].iter().collect(),
+            url: String::new(),
+            markers: vec![
+                byte_at[open]..byte_at[s],
+                byte_at[s]..byte_at[s + w],
+                byte_at[e - w]..byte_at[e],
+                byte_at[e]..byte_at[close_end],
+            ],
+        };
+    }
+    InlineToken {
+        kind,
+        content: byte_at[s]..byte_at[e],
+        text: chars[s..e].iter().collect(),
+        url: String::new(),
+        markers: vec![byte_at[open]..byte_at[s], byte_at[e]..byte_at[close_end]],
+    }
+}
+
+/// CommonMark backslash escapes: `\` before an ASCII punctuation character stands for
+/// that character, literally. The inbound HTML→markdown converter escapes every markdown
+/// punctuation in a mail's text (`keep_snake_case` arrives as `keep\_snake\_case`), so
+/// without this the backslashes were painted as text.
+fn is_escape(chars: &[char], at: usize) -> bool {
+    chars[at] == '\\' && at + 1 < chars.len() && chars[at + 1].is_ascii_punctuation()
+}
+
+/// `text` with its backslash escapes resolved (see [`is_escape`]).
+fn unescape(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if is_escape(&chars, i) {
+            i += 1;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Index of the next `needle` at or after `from`, or `None`.
@@ -1835,6 +1927,42 @@ mod tests {
     }
 
     #[test]
+    fn backslash_escapes_render_their_punctuation_literally() {
+        // The inbound HTML→markdown converter escapes markdown punctuation in a
+        // mail's text: `keep_snake_case` arrives as `keep\_snake\_case`.
+        let spans = parse_inline(r"keep\_snake\_case and \*not italic\*");
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(spans[0].text, "keep_snake_case and *not italic*");
+        assert!(!spans[0].italic && !spans[0].bold);
+        assert_eq!(markdown_to_html(r"a\_b"), "<p>a_b</p>");
+        // Inside a styled run too; a code span keeps its backslashes.
+        let spans = parse_inline(r"**a\_b** `c\_d`");
+        assert_eq!(spans[0].text, "a_b");
+        assert_eq!(spans[2].text, r"c\_d");
+        // A backslash before anything but ASCII punctuation is itself.
+        assert_eq!(parse_inline(r"C:\path")[0].text, r"C:\path");
+    }
+
+    #[test]
+    fn emphasis_wrapped_in_the_other_emphasis_is_bold_italic() {
+        // `<strong><em>x</em></strong>` converts to `**_x_**` — and the other
+        // three spellings of the same nesting.
+        for src in ["**_x y_**", "__*x y*__", "_**x y**_", "*__x y__*"] {
+            let spans = parse_inline(src);
+            assert_eq!(spans.len(), 1, "{src}: {spans:?}");
+            assert!(spans[0].bold && spans[0].italic, "{src}: {spans:?}");
+            assert_eq!(spans[0].text, "x y", "{src}");
+        }
+        assert_eq!(
+            markdown_to_html("a **_both_** word"),
+            "<p>a <strong><em>both</em></strong> word</p>"
+        );
+        // Only a WHOLE wrap nests: emphasis beside other words stays as it was.
+        let spans = parse_inline("**_x_ y**");
+        assert!(spans[0].bold && !spans[0].italic, "{spans:?}");
+    }
+
+    #[test]
     fn headings_levels_1_to_4() {
         assert_eq!(markdown_to_html("# H1"), "<h1>H1</h1>");
         assert_eq!(markdown_to_html("#### H4"), "<h4>H4</h4>");
@@ -2076,6 +2204,17 @@ mod tests {
         // `>` without a trailing space is not a blockquote — stays a paragraph.
         let p = parse_markdown(">nospace");
         assert_eq!(p[0].kind, "paragraph");
+    }
+
+    #[test]
+    fn ordered_item_content_starts_at_its_first_non_blank() {
+        // htmd writes `<ol><li>first</li></ol>` as `1.  first` (two spaces).
+        let blocks = parse_markdown("1.  first\n2.  second");
+        assert_eq!(blocks[0].kind, "ordered_list");
+        assert_eq!(
+            blocks[0].lines[0].spans,
+            vec![MdSpan::plain("first".into())]
+        );
     }
 
     #[test]

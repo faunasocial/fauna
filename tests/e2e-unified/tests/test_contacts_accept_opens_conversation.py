@@ -46,6 +46,7 @@ def _client(node_url: str, actor: dict) -> WsRpcAdminClient:
 
 
 @pytest.mark.feature("contacts")
+@pytest.mark.feature("notifications")
 def test_accepting_a_contact_request_lets_you_start_the_conversation(
     logged_in_app, nest_instance, test_user
 ):

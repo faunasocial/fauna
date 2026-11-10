@@ -163,6 +163,18 @@ type Session struct {
 	// construction time so all Sessions share one push consumer
 	// goroutine on the wsrpc reader.
 	router *notificationRouter
+	// live is the Backend's index of AUTH'd sessions by actor; the session
+	// joins it at AUTH success and leaves at Close, so an
+	// `account_revoked` push can end it (revocation_teardown.go). nil in
+	// hand-built test sessions.
+	live *liveSessions
+	// revoked closes when the account stops standing (endForRevocation);
+	// revokedClosed guards the close. idling is true from PrepareIdle until
+	// the IDLE loop exits: such a session is ended by the loop answering
+	// `BYE`, any other by closing its connection. All three under mu.
+	revoked       chan struct{}
+	revokedClosed bool
+	idling        bool
 	// preparedIdle is the push subscription PrepareIdle registered ahead of
 	// the `+ idling` continuation; the IDLE loop that follows takes it over.
 	// Non-nil only between the two — Close releases one whose IDLE never ran.
@@ -262,6 +274,9 @@ func (s *Session) Close() error {
 		s.router.Unregister(s.preparedIdle.subscriptionID)
 	}
 	s.preparedIdle = nil
+	if s.live != nil && s.actorID != nil {
+		s.live.remove(s.actorID, s)
+	}
 	// Report only when AUTH succeeded (actorID is non-nil).
 	if s.actorID != nil && s.client != nil {
 		// Use a short deadline so a stuck nest doesn't block conn

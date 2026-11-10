@@ -20,7 +20,10 @@
 //!   same four scopes with no per-app code and no app can forget one.
 //! - **The member half is a membership read**, so it stays the caller's to
 //!   supply: the joined `__conv` channels come from the app's live MLS
-//!   session, and the set changes as the account joins and leaves. Callers
+//!   session — or, for the seedless sync agent that links no MLS engine, from
+//!   the membership record the signed-in app beside it writes into the shared
+//!   store ([`crate::membership_record`]) — and the set changes as the account
+//!   joins and leaves. Callers
 //!   pass channels to [`derive_content_scopes`] and register the difference
 //!   (`fauna_sync_engine::account_runtime::AccountStoreHandle::register_content_scope`).
 //!

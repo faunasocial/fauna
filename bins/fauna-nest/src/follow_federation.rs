@@ -31,13 +31,17 @@ use fauna_core::data::{Capability, Timestamp};
 use fauna_core::encoding::EmbedAsBytes;
 use fauna_core::identity::ActorId;
 use fauna_core::subscription::FOLLOWERS_TIER;
+#[cfg(feature = "payments")]
+use fauna_core::subscription::types::ClaimRedeemIntent;
 use fauna_core::subscription::types::{FollowIntent, FollowIntentKind};
+#[cfg(feature = "payments")]
+use fauna_protocol::payments::{ClaimRedeemReply, ClaimRedeemRequest};
 use fauna_protocol::subscriptions::{
     KeyBlobGetReply, SubscribeReply, SubscribeRequest, UnsubscribeReply, UnsubscribeRequest,
 };
 use fauna_protocol::{RpcError, decode_strict};
 
-use crate::db::remote_follows::RemoteFollowState;
+use crate::db::remote_follows::{RemoteFollowState, RemoteLeave};
 use crate::federation_router::{FederationRouterBuilder, RpcHandler, RpcKindMeta};
 use crate::routes::AppState;
 use crate::rpc_errors::{encode_reply, internal};
@@ -54,6 +58,12 @@ pub const STATE_KIND: &str = "fauna.federation.follow.state";
 /// `fauna.federation.follow.key_blob.fetch` — the follower's nest reads the
 /// author's current `KeyBlob` for its own subscriber.
 pub const KEY_BLOB_FETCH_KIND: &str = "fauna.federation.follow.key_blob.fetch";
+/// `fauna.federation.claims.redeem` — a buyer's nest carries its user's claim
+/// redeem intent to the code's home (`federated-follow.md` § Decision 2 →
+/// *The redeem twin*). The request is the follow twin's
+/// [`FedFollowIntentRequest`] shape; the answer is the local door's
+/// [`ClaimRedeemReply`].
+pub const CLAIM_REDEEM_KIND: &str = "fauna.federation.claims.redeem";
 
 /// The most pending requests from remote subscribers one hosted author holds:
 /// past it, a subscriber this nest has never seen is refused `rate_limited`
@@ -145,24 +155,43 @@ fn relay_failed(what: &str, err: impl std::fmt::Display) -> RpcError {
 /// otherwise lock the subscriber out of every later act under the monotonic
 /// rule). Both nests run it.
 pub(crate) fn verify_intent(wire: &EmbedAsBytes) -> Result<FollowIntent, RpcError> {
+    verify_signed_intent(wire, "follow intent", |i: &FollowIntent| i.created_at)
+}
+
+/// [`verify_intent`] for the redeem twin's [`ClaimRedeemIntent`] — the same
+/// envelope, capability and future bound (`federated-follow.md` § Decision 2
+/// → *The redeem twin*).
+#[cfg(feature = "payments")]
+pub(crate) fn verify_redeem_intent(wire: &EmbedAsBytes) -> Result<ClaimRedeemIntent, RpcError> {
+    verify_signed_intent(wire, "claim redeem intent", |i: &ClaimRedeemIntent| {
+        i.created_at
+    })
+}
+
+fn verify_signed_intent<T: fauna_core::encoding::Signed>(
+    wire: &EmbedAsBytes,
+    what: &str,
+    created_at: impl Fn(&T) -> Timestamp,
+) -> Result<T, RpcError> {
     let (bytes, env) = wire
         .clone()
         .into_signed()
-        .map_err(|_| malformed_upload("follow intent: invalid envelope"))?;
-    let intent: FollowIntent = fauna_core::encoding::decode_signed_bytes(&bytes)
-        .map_err(|_| malformed_upload("follow intent: does not decode"))?;
+        .map_err(|_| malformed_upload(format!("{what}: invalid envelope")))?;
+    let intent: T = fauna_core::encoding::decode_signed_bytes(&bytes)
+        .map_err(|_| malformed_upload(format!("{what}: does not decode")))?;
+    let at = created_at(&intent);
     fauna_core::encoding::verify_authoring_envelope(
         &intent,
         &bytes,
         &env,
         wire.signer_auth.as_deref(),
         &Capability::Follow,
-        intent.created_at,
+        at,
     )
-    .map_err(|_| invalid_signature("follow intent signature does not verify"))?;
-    if let Err(reason) = crate::storage::reject_future_created_at(intent.created_at) {
+    .map_err(|_| invalid_signature(&format!("{what} signature does not verify")))?;
+    if let Err(reason) = crate::storage::reject_future_created_at(at) {
         return Err(malformed_upload(format!(
-            "follow intent: {}",
+            "{what}: {}",
             reason.as_snake_case()
         )));
     }
@@ -311,11 +340,105 @@ pub(crate) async fn remote_subscribe(
     Ok(reply)
 }
 
-/// `fauna.subscriptions.unsubscribe`'s remote arm. The leave is the reader's
-/// own act, so it first moves the reader's own rows — every approved paid tier
-/// of the follow to `removed`, whatever the home answers — and is then relayed
-/// to the home stored on the follow, never to a URL the caller names
-/// (`federated-follow.md` § Decision 2, the state leg).
+/// The buyer's-nest check of a redeem intent its own user hands it: genuine,
+/// the bearer's, for this code, and naming THIS nest as the redeemer's home.
+#[cfg(feature = "payments")]
+pub(crate) fn check_own_redeem_intent(
+    state: &AppState,
+    wire: &EmbedAsBytes,
+    bearer: &[u8; 32],
+    code: &str,
+) -> Result<ClaimRedeemIntent, RpcError> {
+    let intent = verify_redeem_intent(wire)?;
+    if intent.redeemer.0 != *bearer {
+        return Err(sub_forbidden("the claim redeem intent is not the caller's"));
+    }
+    if intent.code != code {
+        return Err(malformed_upload(
+            "claim redeem intent: names another code than the request",
+        ));
+    }
+    if intent.home_nest_id != state.nest_identity.public_key_bytes() {
+        return Err(sub_forbidden(
+            "the claim redeem intent names another nest as the redeemer's home",
+        ));
+    }
+    Ok(intent)
+}
+
+/// `fauna.payments.claims.redeem`'s remote arm (`monetization.md` § Pillar 3 →
+/// *Which nest an in-app redeem binds on*): the code's author is not hosted
+/// here and the caller named the author's home. Relays the caller's own
+/// checked intent and returns the home's answer — or its typed refusal —
+/// verbatim, recording the subscription it implies as a remote follow, so the
+/// state leg, the key-blob relay, delivery and the leave apply unchanged.
+#[cfg(feature = "payments")]
+pub(crate) async fn remote_redeem(
+    state: &Arc<AppState>,
+    bearer: [u8; 32],
+    req: &ClaimRedeemRequest,
+    intent: &ClaimRedeemIntent,
+    home_url: &str,
+) -> Result<ClaimRedeemReply, RpcError> {
+    let wire = req.intent.as_ref().ok_or_else(|| {
+        malformed_upload("a redeem on another nest carries the redeemer's signed intent")
+    })?;
+    let home_url = home_url.trim().trim_end_matches('/');
+    let home_nest_id = state
+        .federation_pool
+        .resolve_peer_nest_id(home_url)
+        .await
+        .map_err(|e| relay_failed("resolve the author's home nest", e))?;
+    let fed_req = split_intent(state, wire, None)?;
+    let reply = match crate::federation_pool::originate_claim_redeem(
+        &state.federation_pool,
+        state,
+        home_url,
+        &home_nest_id,
+        fed_req,
+    )
+    .await
+    {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(peer_err)) => {
+            return Err(crate::rpc_errors::map_peer_relay_error(
+                peer_err,
+                "the cross-nest claim redeem",
+            ));
+        }
+        Err(e) => return Err(relay_failed("relay the redeem to its home nest", e)),
+    };
+    let follow_state = if reply.queued {
+        RemoteFollowState::Pending
+    } else {
+        RemoteFollowState::Approved
+    };
+    state
+        .db
+        .upsert_remote_follow(
+            &bearer,
+            &intent.author.0,
+            &reply.tier,
+            &home_nest_id,
+            home_url,
+            follow_state,
+            None,
+            intent.created_at.as_i64(),
+        )
+        .await
+        .map_err(internal)?;
+    Ok(reply)
+}
+
+/// `fauna.subscriptions.unsubscribe`'s remote arm. The leave is relayed to the
+/// home stored on the follow, never to a URL the caller names, and the reader's
+/// own rows the leave names move to `removed` once the home has answered it or
+/// could not be reached — the leave is the reader's act over the reader's own
+/// data, so an unreachable home holds nothing back — but never when the home
+/// refuses it, so a refused leave leaves no half-state here
+/// (`federated-follow.md` § Decision 2, the state leg). A row still `pending`
+/// moves too: the home withdraws the waiting request (`subscriptions.md`
+/// § The free followers tier — follow and unfollow, rule 4).
 pub(crate) async fn remote_unsubscribe(
     state: &Arc<AppState>,
     bearer: [u8; 32],
@@ -326,7 +449,7 @@ pub(crate) async fn remote_unsubscribe(
             "an unsubscribe from an author on another nest carries the subscriber's signed intent",
         )
     })?;
-    check_own_intent(
+    let intent = check_own_intent(
         state,
         wire,
         &bearer,
@@ -351,27 +474,45 @@ pub(crate) async fn remote_unsubscribe(
                 "no follow of this author is recorded on this nest",
             )
         })?;
-    state
-        .db
-        .leave_remote_follow(&bearer, &req.author_id.0, FOLLOWERS_TIER)
-        .await
-        .map_err(internal)?;
+    // Marked by name, from the signed intent's tier (`subscriptions.md` § The
+    // free followers tier — follow and unfollow, rule 2): the unfollow marks
+    // every row, a paid tier its own; the home's `removed` pushes mark the
+    // rest of the at-or-above set as the author's client commits each tier.
+    let leave = if intent.tier == FOLLOWERS_TIER {
+        RemoteLeave::All
+    } else {
+        RemoteLeave::Only(&intent.tier)
+    };
     let fed_req = split_intent(state, wire, None)?;
-    match crate::federation_pool::originate_follow_unsubscribe(
+    let relayed = crate::federation_pool::originate_follow_unsubscribe(
         &state.federation_pool,
         state,
         &home_url,
         &home_nest_id,
         fed_req,
     )
-    .await
-    {
-        Ok(Ok(reply)) => Ok(reply),
+    .await;
+    let mark = || async {
+        state
+            .db
+            .leave_remote_follow(&bearer, &req.author_id.0, leave)
+            .await
+            .map_err(internal)
+    };
+    match relayed {
+        Ok(Ok(reply)) => {
+            mark().await?;
+            Ok(reply)
+        }
+        // The home refused: nothing moved there, so nothing moves here.
         Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
             peer_err,
             "the federated unsubscribe",
         )),
-        Err(e) => Err(relay_failed("relay the unsubscribe to its home nest", e)),
+        Err(e) => {
+            mark().await?;
+            Err(relay_failed("relay the unsubscribe to its home nest", e))
+        }
     }
 }
 
@@ -464,7 +605,7 @@ pub(crate) async fn enqueue_follow_state(
     // approval before the first delivery reaches its follow gate.
     match follow_state {
         RemoteFollowState::Approved => {
-            crate::follow_delivery::backfill_new_home(state, author, home_nest_id).await
+            crate::follow_delivery::backfill_new_home(state, author, home_nest_id, tier).await
         }
         RemoteFollowState::Removed => {
             crate::follow_delivery::discard_if_home_left(state, author, home_nest_id).await
@@ -659,11 +800,14 @@ fn unsubscribe_handler() -> RpcHandler {
                 nest_id: &origin_nest_id,
                 url: home_url.as_deref(),
             };
+            // The intent's tier is the leave's floor (`subscriptions.md`
+            // § The free followers tier — follow and unfollow, rule 2).
             let (reply, tiers) = crate::subscription_handlers::unsubscribe_core(
                 &state,
                 &author,
                 &subscriber,
                 Some(home),
+                Some(&intent.tier),
             )
             .await?;
             for tier in tiers {
@@ -678,9 +822,105 @@ fn unsubscribe_handler() -> RpcHandler {
     })
 }
 
+/// The redeem twin on the code's home (`federated-follow.md` § Decision 2 →
+/// *The redeem twin*): the follow twin's admission — the envelope, the home
+/// bound to the verified origin, the author hosted here (else
+/// `claim_not_found`, so the kind tells a guesser nothing a wrong code would
+/// not) — then the author's stranger budget, spent by EVERY relayed redeem
+/// (a miss answers whether a code exists), and the pending cap for a redeemer
+/// holding no row; then the redeem for the remote redeemer with their home.
+#[cfg(feature = "payments")]
+fn claim_redeem_handler() -> RpcHandler {
+    Box::new(|state, origin_nest_id, payload| {
+        Box::pin(async move {
+            let req: FedFollowIntentRequest = decode(&payload)?;
+            let intent = verify_redeem_intent(&intent_wire(&req)?)?;
+            if intent.home_nest_id != origin_nest_id {
+                return Err(fed_forbidden(
+                    "the claim redeem intent names another nest as the redeemer's home",
+                ));
+            }
+            let (author, redeemer) = (intent.author.0, intent.redeemer.0);
+            if state
+                .db
+                .get_user(&author)
+                .await
+                .map_err(internal)?
+                .is_none()
+            {
+                return Err(crate::payment_handlers::claim_not_found());
+            }
+            if !state
+                .db
+                .holds_follow_row(&author, &redeemer)
+                .await
+                .map_err(internal)?
+                && state
+                    .db
+                    .count_remote_pending_subscribe_requests(&author)
+                    .await
+                    .map_err(internal)?
+                    >= MAX_REMOTE_PENDING_SUBSCRIBE_REQUESTS
+            {
+                return Err(crate::rpc_errors::rate_limited());
+            }
+            if !state.federation_target_budget.check_with_max(
+                &author,
+                &[0u8; 32],
+                "follow_intent",
+                crate::bridge_rate_limit::FOLLOW_INTENT_TARGET_MAX,
+            ) {
+                return Err(crate::rpc_errors::rate_limited());
+            }
+            let home_url = crate::federation_handlers::resolve_origin_home_url(
+                &state,
+                &origin_nest_id,
+                req.origin_nest_url.as_deref(),
+            )
+            .await?;
+            // The code names the tier; a code of another author is unknown here.
+            let code = intent.code.trim();
+            let claim = state
+                .db
+                .get_payment_claim(code)
+                .await
+                .map_err(internal)?
+                .filter(|c| c.author_id.as_slice() == author.as_slice())
+                .ok_or_else(crate::payment_handlers::claim_not_found)?;
+            // Stamped once the code has named the tier, so a later leave orders
+            // after it — and an older redeem replayed after a leave changes
+            // nothing (the follow twin's monotonic rule).
+            if !state
+                .db
+                .admit_follow_intent(
+                    &author,
+                    &redeemer,
+                    &claim.tier_name,
+                    intent.created_at.as_i64(),
+                )
+                .await
+                .map_err(internal)?
+            {
+                return Err(fed_forbidden("a newer intent supersedes this redeem"));
+            }
+            let home = SubscriberHome {
+                nest_id: &origin_nest_id,
+                url: home_url.as_deref(),
+            };
+            let redeemed =
+                crate::payment_core::redeem_claim_from(&state, &redeemer, code, Some(home))
+                    .await
+                    .map_err(crate::payment_handlers::redeem_error)?;
+            encode_reply(&crate::payment_handlers::redeemed_reply(redeemed))
+        })
+    })
+}
+
 /// Receive side, on the follower's nest: the home says what became of a
 /// follow. Accepted only for a row whose home is the verified origin — a nest
-/// that is nobody's home for this follow moves nothing.
+/// that is nobody's home for this follow moves nothing. An `approved` push for
+/// a tier the reader's paid follow includes (the home's rank cascade) opens
+/// that tier's row beside it (`CacheDb::set_remote_follow_state_from`).
 fn state_handler() -> RpcHandler {
     Box::new(|state, origin_nest_id, payload| {
         Box::pin(async move {
@@ -763,6 +1003,8 @@ pub fn register_follow_federation_handlers(b: &mut FederationRouterBuilder) {
         (UNSUBSCRIBE_KIND, unsubscribe_handler()),
         (STATE_KIND, state_handler()),
         (KEY_BLOB_FETCH_KIND, key_blob_fetch_handler()),
+        #[cfg(feature = "payments")]
+        (CLAIM_REDEEM_KIND, claim_redeem_handler()),
         (
             crate::follow_delivery::DELIVER_KIND,
             crate::follow_delivery::deliver_handler(),
@@ -1127,6 +1369,90 @@ mod tests {
         );
     }
 
+    /// The rank cascade (`monetization.md` § Per-post pay-to-unlock): an
+    /// `approved` push for a tier the reader has no row of opens one, from the
+    /// home of the reader's live paid follow of that author and only from it;
+    /// the free follow alone, a stranger nest, a non-approval push, or a paid
+    /// follow the reader left opens nothing.
+    #[tokio::test]
+    async fn an_approved_push_opens_an_included_tier_beside_a_live_paid_follow() {
+        let state = fixture_state();
+        let reader = ActorKeypair::generate().actor_id().0;
+        let author = [0x35; 32];
+        let push = |origin: [u8; 32], tier: &'static str, to: &'static str| {
+            let req = FedFollowStateRequest {
+                author: ActorId(author),
+                subscriber: ActorId(reader),
+                tier: tier.into(),
+                state: to.into(),
+                at: Timestamp::now(),
+            };
+            state_handler()(
+                state.clone(),
+                origin,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+        };
+        let tiers = || async {
+            state
+                .db
+                .remote_follows_of(&reader, &author)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.tier, r.state, r.home_nest_url))
+                .collect::<Vec<_>>()
+        };
+        let follow = |tier: &'static str, at: RemoteFollowState| {
+            let db = state.db.clone();
+            async move {
+                db.upsert_remote_follow(
+                    &reader,
+                    &author,
+                    tier,
+                    &HOME_A,
+                    "https://a.example",
+                    at,
+                    None,
+                    ago(5) as i64,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        // The free follow alone includes nothing.
+        follow(FOLLOWERS_TIER, RemoteFollowState::Approved).await;
+        let err = push(HOME_A, "post-1", "approved")
+            .await
+            .expect_err("a free follow includes no per-post tier");
+        assert_eq!(err.code, "fauna.federation.forbidden");
+        // A pending paid follow: its home's approval opens the included tier.
+        follow("gold", RemoteFollowState::Pending).await;
+        for (origin, to) in [(STRANGER_NEST, "approved"), (HOME_A, "rejected")] {
+            push(origin, "post-1", to)
+                .await
+                .expect_err("only the home's approval opens a row");
+        }
+        push(HOME_A, "post-1", "approved")
+            .await
+            .expect("the home's cascade approval opens the included tier");
+        assert!(tiers().await.contains(&(
+            "post-1".into(),
+            RemoteFollowState::Approved,
+            "https://a.example".into()
+        )));
+        // A paid follow the reader left opens nothing more.
+        state
+            .db
+            .leave_remote_follow(&reader, &author, RemoteLeave::AllBut(FOLLOWERS_TIER))
+            .await
+            .unwrap();
+        push(HOME_A, "post-2", "approved")
+            .await
+            .expect_err("a left follow includes nothing");
+        assert!(!tiers().await.iter().any(|(t, ..)| t == "post-2"));
+    }
+
     /// `removed` is terminal for a home's `follow.state` push (§ Decision 2):
     /// a home that answers a leave with `rejected` and then `approved` cannot
     /// walk the row back open, and a `removed` push onto a `removed` row is
@@ -1152,7 +1478,7 @@ mod tests {
             .unwrap();
         state
             .db
-            .leave_remote_follow(&reader, &author, FOLLOWERS_TIER)
+            .leave_remote_follow(&reader, &author, RemoteLeave::AllBut(FOLLOWERS_TIER))
             .await
             .unwrap();
         let push = |to: &str| {
@@ -1275,6 +1601,7 @@ mod tests {
                 state.nest_identity.public_key_bytes(),
                 ago(5),
             )),
+            tier: None,
             extra: Default::default(),
         };
         let _ = tokio::time::timeout(
@@ -1345,6 +1672,7 @@ mod tests {
                 state.nest_identity.public_key_bytes(),
                 ago(5),
             )),
+            tier: None,
             extra: Default::default(),
         };
         let err = remote_unsubscribe(&state, reader_id, &req)
@@ -1381,5 +1709,412 @@ mod tests {
             RemoteFollowState::Approved,
             "the free follow survives a leave"
         );
+
+        // The unfollow — the intent names `followers` — marks every row,
+        // the free follow included (`subscriptions.md` § The free followers
+        // tier — follow and unfollow, rule 2).
+        let unfollow = UnsubscribeRequest {
+            intent: Some(intent(
+                &reader,
+                author_id,
+                FOLLOWERS_TIER,
+                FollowIntentKind::Unsubscribe,
+                state.nest_identity.public_key_bytes(),
+                ago(4),
+            )),
+            tier: Some(FOLLOWERS_TIER.into()),
+            ..req.clone()
+        };
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            remote_unsubscribe(&state, reader_id, &unfollow),
+        )
+        .await;
+        assert_eq!(
+            state
+                .db
+                .remote_follows_of(&reader_id, &author_id)
+                .await
+                .unwrap()[0]
+                .state,
+            RemoteFollowState::Removed,
+            "the unfollow ends the free follow on the reader's own nest"
+        );
+    }
+
+    /// The by-name marking's three shapes on the reader's own nest: `All`
+    /// marks every row, `Only` the named one, `AllBut` every row but it.
+    #[tokio::test]
+    async fn a_leave_marks_the_readers_rows_by_name() {
+        use crate::db::remote_follows::RemoteLeave;
+        let author = [0x35; 32];
+        for (leave, want_removed) in [
+            (RemoteLeave::All, vec!["followers", "gold", "silver"]),
+            (RemoteLeave::Only("gold"), vec!["gold"]),
+            (RemoteLeave::AllBut(FOLLOWERS_TIER), vec!["gold", "silver"]),
+        ] {
+            let state = fixture_state();
+            let reader = ActorKeypair::generate().actor_id().0;
+            for tier in [FOLLOWERS_TIER, "silver", "gold"] {
+                state
+                    .db
+                    .upsert_remote_follow(
+                        &reader,
+                        &author,
+                        tier,
+                        &HOME_A,
+                        "https://a.example",
+                        RemoteFollowState::Approved,
+                        None,
+                        ago(5) as i64,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let moved = state
+                .db
+                .leave_remote_follow(&reader, &author, leave)
+                .await
+                .unwrap();
+            let mut removed: Vec<String> = state
+                .db
+                .remote_follows_of(&reader, &author)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.state == RemoteFollowState::Removed)
+                .map(|r| r.tier)
+                .collect();
+            removed.sort();
+            assert_eq!(removed, want_removed, "{leave:?}");
+            assert_eq!(moved, want_removed.len(), "{leave:?}");
+        }
+    }
+
+    /// An unfollow in the pending window: the reader's `pending` followers row
+    /// moves to `removed` with the leave, so `status.get` no longer reports a
+    /// follow asked (`subscriptions.md` § The free followers tier — follow and
+    /// unfollow, rule 4) — while a `rejected` row stays as the home left it.
+    #[tokio::test]
+    async fn an_unfollow_withdraws_the_readers_pending_row() {
+        use crate::db::remote_follows::RemoteLeave;
+        let state = fixture_state();
+        let reader = ActorKeypair::generate().actor_id().0;
+        let author = [0x36; 32];
+        for (tier, row_state) in [
+            (FOLLOWERS_TIER, RemoteFollowState::Pending),
+            ("gold", RemoteFollowState::Rejected),
+        ] {
+            state
+                .db
+                .upsert_remote_follow(
+                    &reader,
+                    &author,
+                    tier,
+                    &HOME_A,
+                    "https://a.example",
+                    row_state,
+                    None,
+                    ago(5) as i64,
+                )
+                .await
+                .unwrap();
+        }
+        let rows = state.db.remote_follows_of(&reader, &author).await.unwrap();
+        assert!(crate::subscription_handlers::remote_status(&rows).follow_pending);
+        let moved = state
+            .db
+            .leave_remote_follow(&reader, &author, RemoteLeave::All)
+            .await
+            .unwrap();
+        assert_eq!(moved, 1);
+        let rows = state.db.remote_follows_of(&reader, &author).await.unwrap();
+        let status = crate::subscription_handlers::remote_status(&rows);
+        assert!(!status.follow_pending, "the withdrawn follow is not asked");
+        assert_eq!(status.tier, None);
+        assert!(
+            rows.iter()
+                .any(|r| r.tier == "gold" && r.state == RemoteFollowState::Rejected)
+        );
+    }
+
+    // ── The redeem twin (`federated-follow.md` § Decision 2 → *The redeem
+    //    twin*) — the author's-nest arm, driven by its handler directly ──────
+
+    #[cfg(feature = "payments")]
+    mod claim_redeem_twin {
+        use super::*;
+
+        fn redeem_intent(
+            redeemer: &ActorKeypair,
+            author: [u8; 32],
+            code: &str,
+            home: [u8; 32],
+            at: u64,
+        ) -> EmbedAsBytes {
+            let intent = ClaimRedeemIntent {
+                redeemer: redeemer.actor_id(),
+                author: ActorId(author),
+                code: code.to_string(),
+                home_nest_id: home,
+                created_at: Timestamp(at),
+            };
+            let (bytes, env) = fauna_core::encoding::sign_envelope(redeemer, &intent).unwrap();
+            EmbedAsBytes::from_signed(bytes, env)
+        }
+
+        /// A hosted author with a paid `gold` tier and one unredeemed code.
+        async fn author_with_code(state: &Arc<AppState>, code: &str) -> [u8; 32] {
+            let author = hosted_author(state).await;
+            state
+                .db
+                .create_subscription_tier(
+                    &author, "gold", 1, None, None, None, false, None, None, false,
+                )
+                .await
+                .unwrap();
+            mint(state, &author, "gold", code).await;
+            author
+        }
+
+        async fn mint(state: &Arc<AppState>, author: &[u8; 32], tier: &str, code: &str) {
+            state
+                .db
+                .insert_payment_claim(code, author, tier, "manual", code, None)
+                .await
+                .unwrap();
+        }
+
+        async fn redeem(
+            state: &Arc<AppState>,
+            origin: [u8; 32],
+            wire: &EmbedAsBytes,
+        ) -> Result<ClaimRedeemReply, RpcError> {
+            claim_redeem_handler()(state.clone(), origin, twin_payload(wire))
+                .await
+                .map(|b| decode_strict(&b).unwrap())
+        }
+
+        /// The redeem lands for the remote buyer exactly as a local one does —
+        /// the claim stamped to them — and the payment-entitled request carries
+        /// their home, so the approval copies it onto the roster.
+        #[tokio::test]
+        async fn a_relayed_redeem_binds_the_remote_buyer_and_carries_their_home() {
+            let state = fixture_state();
+            let author = author_with_code(&state, "CODE-0001").await;
+            let buyer = ActorKeypair::generate();
+            let reply = redeem(
+                &state,
+                HOME_A,
+                &redeem_intent(&buyer, author, "CODE-0001", HOME_A, ago(5)),
+            )
+            .await
+            .expect("the code's home admits its own buyer's nest");
+            assert_eq!((reply.tier.as_str(), reply.queued), ("gold", true));
+            assert_eq!(reply.author, ActorId(author));
+            let claim = state
+                .db
+                .get_payment_claim("CODE-0001")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.redeemed_by, Some(buyer.actor_id().0.to_vec()));
+            let rows = state.db.list_subscribe_requests(&author).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].payment_entitled);
+            assert_eq!(
+                state.db.subscribe_request_home(rows[0].id).await.unwrap(),
+                Some(HOME_A),
+                "the request row names the buyer's home"
+            );
+        }
+
+        /// § Decision 2's structural half holds for the redeem: an intent
+        /// naming another home is refused and stamps nothing.
+        #[tokio::test]
+        async fn a_redeem_intent_naming_another_home_is_forbidden() {
+            let state = fixture_state();
+            let author = author_with_code(&state, "CODE-0002").await;
+            let buyer = ActorKeypair::generate();
+            let err = redeem(
+                &state,
+                STRANGER_NEST,
+                &redeem_intent(&buyer, author, "CODE-0002", HOME_A, ago(5)),
+            )
+            .await
+            .expect_err("a nest carrying another home's intent is refused");
+            assert_eq!(err.code, "fauna.federation.forbidden");
+            let claim = state
+                .db
+                .get_payment_claim("CODE-0002")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(claim.redeemed_at.is_none(), "the claim is not consumed");
+        }
+
+        /// An author not hosted here, and a code of another author hosted here,
+        /// both answer as a wrong code does: the kind tells a guesser nothing.
+        #[tokio::test]
+        async fn an_unhosted_author_or_another_authors_code_is_claim_not_found() {
+            let state = fixture_state();
+            let _author = author_with_code(&state, "CODE-0003").await;
+            let other = hosted_author(&state).await;
+            let buyer = ActorKeypair::generate();
+            for author in [ActorKeypair::generate().actor_id().0, other] {
+                let err = redeem(
+                    &state,
+                    HOME_A,
+                    &redeem_intent(&buyer, author, "CODE-0003", HOME_A, ago(5)),
+                )
+                .await
+                .expect_err("refused");
+                assert_eq!(err.code, "fauna.payments.claim_not_found");
+            }
+            let claim = state
+                .db
+                .get_payment_claim("CODE-0003")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(claim.redeemed_at.is_none());
+        }
+
+        /// A voided code is refused across nests as at the local door.
+        #[tokio::test]
+        async fn a_voided_code_is_refused_across_nests() {
+            let state = fixture_state();
+            let author = author_with_code(&state, "CODE-0004").await;
+            assert!(state.db.void_payment_claim("CODE-0004").await.unwrap());
+            let err = redeem(
+                &state,
+                HOME_A,
+                &redeem_intent(
+                    &ActorKeypair::generate(),
+                    author,
+                    "CODE-0004",
+                    HOME_A,
+                    ago(5),
+                ),
+            )
+            .await
+            .expect_err("refused");
+            assert_eq!(err.code, "fauna.payments.claim_voided");
+        }
+
+        /// A membership tier's code admits an account to this nest, which a
+        /// redeem across nests never grants: refused before the claim is
+        /// stamped, so the buyer can still register here with it.
+        #[tokio::test]
+        async fn a_membership_code_is_refused_with_claim_admits_elsewhere_and_stays_unredeemed() {
+            let state = fixture_state();
+            let author = author_with_code(&state, "CODE-0005").await;
+            state
+                .db
+                .upsert_membership_tier(&author, "gold", "personal", "free")
+                .await
+                .unwrap();
+            let err = redeem(
+                &state,
+                HOME_A,
+                &redeem_intent(
+                    &ActorKeypair::generate(),
+                    author,
+                    "CODE-0005",
+                    HOME_A,
+                    ago(5),
+                ),
+            )
+            .await
+            .expect_err("refused");
+            assert_eq!(err.code, "fauna.payments.claim_admits_elsewhere");
+            let claim = state
+                .db
+                .get_payment_claim("CODE-0005")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(claim.redeemed_at.is_none(), "the code stays redeemable");
+            assert!(
+                state
+                    .db
+                    .list_subscribe_requests(&author)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "nothing is enqueued"
+            );
+        }
+
+        /// The budget is spent by EVERY relayed redeem, a seen subscriber's
+        /// included — a miss answers whether a code exists. A buyer holding a
+        /// row keeps guessing; the window refuses past its bound.
+        #[tokio::test]
+        async fn every_relayed_redeem_spends_the_authors_budget_a_seen_buyers_too() {
+            let state = fixture_state();
+            let author = author_with_code(&state, "CODE-0006").await;
+            let buyer = ActorKeypair::generate();
+            redeem(
+                &state,
+                HOME_A,
+                &redeem_intent(&buyer, author, "CODE-0006", HOME_A, ago(5)),
+            )
+            .await
+            .expect("the first redeem is admitted");
+            let budget = crate::bridge_rate_limit::FOLLOW_INTENT_TARGET_MAX as usize;
+            let mut misses = 0usize;
+            loop {
+                let guess = format!("GUESS-{misses:04}");
+                match redeem(
+                    &state,
+                    HOME_A,
+                    &redeem_intent(&buyer, author, &guess, HOME_A, ago(5)),
+                )
+                .await
+                {
+                    Err(e) if e.code.ends_with(".rate_limited") => break,
+                    Err(e) => assert_eq!(e.code, "fauna.payments.claim_not_found"),
+                    Ok(r) => panic!("a guessed code redeemed: {r:?}"),
+                }
+                misses += 1;
+                assert!(misses <= budget, "the window never refused");
+            }
+            assert_eq!(
+                misses + 1,
+                budget,
+                "the redeem and the misses share one budget"
+            );
+        }
+
+        /// An older redeem replayed after a newer intent for the tier changes
+        /// nothing: the monotonic rule a leave relies on.
+        #[tokio::test]
+        async fn an_older_redeem_after_a_newer_intent_for_the_tier_changes_nothing() {
+            let state = fixture_state();
+            let author = author_with_code(&state, "CODE-0007").await;
+            let buyer = ActorKeypair::generate();
+            assert!(
+                state
+                    .db
+                    .admit_follow_intent(&author, &buyer.actor_id().0, "gold", ago(5) as i64)
+                    .await
+                    .unwrap()
+            );
+            let err = redeem(
+                &state,
+                HOME_A,
+                &redeem_intent(&buyer, author, "CODE-0007", HOME_A, ago(60)),
+            )
+            .await
+            .expect_err("a stale intent is refused");
+            assert_eq!(err.code, "fauna.federation.forbidden");
+            let claim = state
+                .db
+                .get_payment_claim("CODE-0007")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(claim.redeemed_at.is_none());
+        }
     }
 }

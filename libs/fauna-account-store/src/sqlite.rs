@@ -279,7 +279,10 @@ const CREATE_TABLES_SQL: &str = "
         retry_count     INTEGER NOT NULL DEFAULT 0,
         created_at      INTEGER NOT NULL,
         last_attempt_at INTEGER,
-        sealed          INTEGER NOT NULL DEFAULT 0
+        sealed          INTEGER NOT NULL DEFAULT 0,
+        -- Why the drain parked the intent: a stable code, NULL while pending
+        -- (the unsent-changes surface, account-offline-mutation.md).
+        failure_reason  TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS outbox_scope_fifo
         ON outbox (scope, channel_seq);
@@ -3148,7 +3151,8 @@ impl StoreBackend for SqliteBackend {
             .conn
             .prepare(
                 "SELECT intent_id, kind, scope, payload, drainer, channel_seq,
-                        status, retry_count, created_at, last_attempt_at, sealed
+                        status, retry_count, created_at, last_attempt_at, sealed,
+                        failure_reason
                  FROM outbox ORDER BY scope, channel_seq",
             )
             .context("prepare outbox list")?;
@@ -3166,6 +3170,7 @@ impl StoreBackend for SqliteBackend {
                     r.get::<_, u64>(8)?,
                     r.get::<_, Option<u64>>(9)?,
                     r.get::<_, bool>(10)?,
+                    r.get::<_, Option<String>>(11)?,
                 ))
             })
             .context("query outbox")?;
@@ -3183,6 +3188,7 @@ impl StoreBackend for SqliteBackend {
                 created,
                 last,
                 sealed,
+                failure_reason,
             ) = row.context("read outbox row")?;
             let payload = self
                 .value_for_read(&outbox_aad(&id, &kind, &scope), payload, sealed)
@@ -3201,6 +3207,7 @@ impl StoreBackend for SqliteBackend {
                 retry_count: retries,
                 created_at: created,
                 last_attempt_at: last,
+                failure_reason,
             });
         }
         Ok(out)
@@ -3217,15 +3224,40 @@ impl StoreBackend for SqliteBackend {
         Ok(deleted > 0)
     }
 
-    async fn outbox_mark_failed(&self, intent_id: &[u8; 16]) -> Result<bool> {
+    async fn outbox_mark_failed(&self, intent_id: &[u8; 16], reason: &str) -> Result<bool> {
         let updated = self
             .conn
             .execute(
-                "UPDATE outbox SET status = 'failed' WHERE intent_id = ?1",
-                params![intent_id.as_slice()],
+                "UPDATE outbox SET status = 'failed', failure_reason = ?2 WHERE intent_id = ?1",
+                params![intent_id.as_slice(), reason],
             )
             .context("outbox mark failed")?;
         Ok(updated > 0)
+    }
+
+    async fn outbox_retry(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE outbox
+                 SET status = 'pending', retry_count = 0, last_attempt_at = NULL,
+                     failure_reason = NULL
+                 WHERE intent_id = ?1 AND status = 'failed'",
+                params![intent_id.as_slice()],
+            )
+            .context("outbox retry")?;
+        Ok(updated > 0)
+    }
+
+    async fn outbox_discard(&self, intent_id: &[u8; 16]) -> Result<bool> {
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM outbox WHERE intent_id = ?1 AND status = 'failed'",
+                params![intent_id.as_slice()],
+            )
+            .context("outbox discard")?;
+        Ok(deleted > 0)
     }
 
     async fn outbox_record_attempt(&self, intent_id: &[u8; 16]) -> Result<bool> {

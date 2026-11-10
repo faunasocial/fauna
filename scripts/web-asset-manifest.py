@@ -196,6 +196,12 @@ def main(argv=None) -> int:
     w.add_argument("--commit")
     w.add_argument("--repo", type=Path, default=Path("."))
     w.add_argument("--static", type=Path)
+    # A tree built inside the image's Dockerfile was compiled by the stage's
+    # pinned clang, which the host running this script does not hold: the
+    # build exports that clang's `--version` output (the `wasm32-cc-version`
+    # stage) and the workflow hands it here, so the manifest records the
+    # compiler that built the tree, never a probe of the host.
+    w.add_argument("--wasm32-cc-version-file", type=Path)
     c = sub.add_parser("check")
     c.add_argument("manifest", type=Path)
     c.add_argument("tree", type=Path)
@@ -221,6 +227,12 @@ def main(argv=None) -> int:
                 print(f"  {rel}", file=sys.stderr)
             return 1
         pins = toolchains(args.repo)
+        if args.wasm32_cc_version_file:
+            lines = args.wasm32_cc_version_file.read_text(encoding="utf-8").strip().splitlines()
+            if lines:
+                pins["wasm32-cc"] = lines[0]
+            else:
+                pins.pop("wasm32-cc", None)
         problem = wasm32_cc_problem(pins.get("wasm32-cc"), wasm32_cc_pin(args.repo))
         if problem:
             print(

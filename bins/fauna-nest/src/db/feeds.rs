@@ -2016,7 +2016,7 @@ impl CacheDb {
 /// "Unpublish" would silently no-op against a row the caller doesn't own.
 /// Keying on the post's author makes the projection the post's canonical page,
 /// deterministic regardless of who else republished it.
-fn project_web_slug(
+pub(crate) fn project_web_slug(
     conn: &rusqlite::Connection,
     post_id: &[u8],
     author: &[u8],
@@ -2200,7 +2200,47 @@ fn project_content_labels(
             confidence_per_mille,
         });
     }
+    fold_report_spam(conn, post_id, &mut labels)?;
     Ok(labels)
+}
+
+/// Fold the post's community `report:spam` aggregate into its `spam` category
+/// (`report-sharing.md` § Applying the aggregate — the user's own threshold):
+/// the nest-written tier-3 bus row's score IS the entry's confidence, and the
+/// highest `spam` confidence wins, as between two labelers. The row exists only
+/// at or above the k-gate (the aggregate writer withdraws it below k), so a
+/// post nobody reported, or one a ham mark took back under k, carries nothing.
+/// The nest decides nothing here: each viewer's own spam slider, read by the
+/// shared render verdict, is what collapses the post.
+fn fold_report_spam(
+    conn: &rusqlite::Connection,
+    post_id: &[u8],
+    labels: &mut Vec<fauna_core::content_category::ContentLabelEntry>,
+) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let score: Option<i64> = conn
+        .query_row(
+            "SELECT score FROM content_scores WHERE content_id = ?1 AND factor = ?2",
+            rusqlite::params![post_id, fauna_core::scoring::factor::REPORT_SPAM],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("query report:spam row")?;
+    let Some(score) = score else {
+        return Ok(());
+    };
+    let confidence_per_mille = score.clamp(0, 1000) as u16;
+    match labels.iter_mut().find(|l| l.category == "spam") {
+        Some(entry) => {
+            entry.confidence_per_mille = entry.confidence_per_mille.max(confidence_per_mille);
+        }
+        None => labels.push(fauna_core::content_category::ContentLabelEntry {
+            category: "spam".into(),
+            confidence_per_mille,
+        }),
+    }
+    labels.sort_by_key(|l| std::cmp::Reverse(l.confidence_per_mille));
+    Ok(())
 }
 
 /// The most per-emoji groups one post's reaction tally carries on any read

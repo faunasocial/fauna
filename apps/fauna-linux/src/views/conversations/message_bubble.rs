@@ -299,6 +299,20 @@ pub fn build(
             crate::testid::set_test_attr(&placeholder, "source", "reported");
         }
         bubble.append(&placeholder);
+        // The reporter's show-again beside their own placeholder
+        // (`moderation.md` § Corollary — the reporter's hide is theirs to
+        // undo), over the same keys the verdict matched.
+        if composed.reported() {
+            let report_id = msg
+                .plane_ref
+                .as_ref()
+                .map_or(msg.message_id.0.as_str(), |p| p.record_digest.as_str());
+            if let Some(button) =
+                crate::report::show_again_button(client, report_id, sender_hex.as_deref())
+            {
+                bubble.append(&button);
+            }
+        }
         // The guardian rule's reason, verbatim beside the frame (`nest-rules.md`
         // § The shared rule editor → *The reason is the member's to read*).
         if let Some(reason) = crate::content_policy::reason_label(&composed) {

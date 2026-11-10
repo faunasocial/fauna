@@ -66,6 +66,7 @@ def _run(root, body, tmp_path, extra_env=None):
     empty_target.mkdir()
     env = dict(os.environ)
     env.pop("FAUNA_E2E_FFI_NO_BUILD", None)
+    env.pop("FAUNA_E2E_PLAN_ONLY", None)
     env["CARGO_TARGET_DIR"] = str(empty_target)
     env["PYTHONPATH"] = str(root)
     env.update(extra_env or {})
@@ -120,6 +121,22 @@ def test_the_no_build_opt_out_skips_the_import_time_build(tmp_path):
         f"the opt-out must run no build recipe at import: {proc.stdout!r}"
     )
     assert "RAISED" in proc.stdout and "fauna_ffi" in proc.stdout, proc.stdout
+
+
+def test_a_plan_only_preflight_skips_the_import_time_build(tmp_path):
+    """`just e2e-preflight --plan` (`FAUNA_E2E_PLAN_ONLY=1`) compiles nothing and
+    takes no slot (e2e-warm-pass.md § The preflight), yet its collection imports
+    this module from every test file that imports it at the top — and that import
+    built the release cdylib under a real `build` grant, over an hour on a loaded
+    box (2026-11-08). The plan header reads the cdylib's warmth through its own
+    probe instead; the import must run no build recipe."""
+    root = _fake_checkout(tmp_path)
+    proc = _run(root, _SPY_BUILD_RECIPE, tmp_path, extra_env={"FAUNA_E2E_PLAN_ONLY": "1"})
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "BUILDS 0" in proc.stdout, (
+        f"a plan-only run must run no build recipe at import: {proc.stdout!r}"
+    )
+    assert "RAISED" in proc.stdout and "FAUNA_E2E_PLAN_ONLY" in proc.stdout, proc.stdout
 
 
 def test_without_the_opt_out_the_import_still_builds(tmp_path):

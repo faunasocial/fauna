@@ -2,8 +2,9 @@
 convergence test (``tests/test_filesync_multiseat_live.py``).
 
 The whole point is that the operator sets **no environment variables**: the
-account seed is resolved per box (:func:`resolve_secret` — the box's own
-staging-box identity, else ``~/.fauna-id``), the handle / nest URL are fixed to
+seat account's seed is read from its one file (:func:`resolve_seat_secret` —
+the non-admin ``multiseat-seat`` account, never the box's admin seed; the
+admin resolver :func:`resolve_secret` serves the other live modules), the handle / nest URL are fixed to
 the shared live account, the per-phase window has a sane default, and the run
 id is derived by READING THE SET's own files (see below). Every value is still
 overridable by its matching env var for a one-off manual run.
@@ -189,6 +190,46 @@ def load_secret(url: str | None = None) -> str | None:
     """Account seed hex for the box at ``url`` (:func:`resolve_secret`'s
     precedence). Returns None (the test skips) only when nothing provides it."""
     return resolve_secret(url)[0]
+
+
+def seat_account_path(url: str | None = None) -> Path | None:
+    """Where THIS machine keeps the round's seat account for the box at ``url``
+    (default :func:`nest_url`): ``staging_box.account_path(<host>,
+    "multiseat-seat")``, absolute. None only when the URL names no host."""
+    from urllib.parse import urlparse
+
+    from helpers import staging_box
+
+    host = urlparse(url or nest_url()).hostname
+    return staging_box.account_path(host, staging_box.MULTISEAT_SEAT_ACCOUNT) if host else None
+
+
+def resolve_seat_secret(url: str | None = None) -> tuple[str | None, str]:
+    """``(seed hex, the seat file's absolute path)`` of the one account every
+    seat of the three-machine round signs in as — the non-admin
+    ``multiseat-seat`` account the provisioning drive mints on Linux and
+    admits by public key (``staging_box.SEAT_ACCOUNTS``). It reads that file
+    and NOTHING else: no env var, no ``~/.fauna-id``, and never the box's admin
+    seed (:func:`resolve_secret`), so the admin key stays an admin key and a
+    machine without the file is told exactly which file is missing. The path
+    is returned either way, for the skip text; the seed is None when the file
+    is absent, unreadable or not this box's seat account."""
+    import json
+
+    from helpers import staging_box
+
+    path = seat_account_path(url)
+    if path is None:
+        return None, "(no host in the nest URL)"
+    try:
+        account = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, str(path)
+    if not isinstance(account, dict) or account.get("localpart") != staging_box.MULTISEAT_SEAT_ACCOUNT:
+        return None, str(path)
+    seed = account.get("secret_hex")
+    seed = seed.strip() if isinstance(seed, str) else ""
+    return (seed or None), str(path)
 
 
 def today_str() -> str:

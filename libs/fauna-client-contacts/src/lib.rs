@@ -20,6 +20,7 @@ use fauna_protocol::contacts::{
     InboxModeGetReply, InboxModeGetRequest, InboxModeSetReply, InboxModeSetRequest,
     KnockActionReply, KnockActionRequest, KnockListReply, KnockListRequest,
 };
+use fauna_protocol::offline_intent::{ComposeError, Composed, OfflineIntentQueue, send_or_queue};
 
 pub use fauna_protocol::contacts;
 
@@ -67,6 +68,38 @@ impl<R: RpcRequester> ContactsClient<R> {
                 },
             )
             .await
+    }
+
+    /// [`knocks_accept`](Self::knocks_accept) through the `OfflineQueued`
+    /// composer (`fauna_protocol::offline_intent::send_or_queue`,
+    /// `account-offline-mutation.md` § The offline-mutation contract): sent now
+    /// while the app has a nest, or — when `queue` is wired and reports no nest
+    /// — appended to the device's outbox and drained once the nest is back,
+    /// the intent id its idempotency key. The drain FIFO scope is the one knock
+    /// (`knocks.accept:<peer>`), so a refused accept of one sender never holds
+    /// another's. The payload names the sender, never the writer (the nest takes
+    /// the accepting actor from the connection).
+    pub async fn knocks_accept_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        peer_id: String,
+    ) -> Result<Composed<()>, ComposeError<R::Error>> {
+        let scope = format!("knocks.accept:{peer_id}");
+        let composed: Composed<KnockActionReply> = send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.knocks.accept",
+            &scope,
+            KnockActionRequest {
+                peer_id,
+                extra: std::collections::BTreeMap::new(),
+            },
+        )
+        .await?;
+        Ok(match composed {
+            Composed::Sent(_) => Composed::Sent(()),
+            Composed::Queued(id) => Composed::Queued(id),
+        })
     }
 
     /// `fauna.knocks.block` — block the knock sender `peer_id` (hex),
@@ -421,6 +454,40 @@ mod tests {
         let req: contacts::InboxModeSetRequest =
             fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.mode, "contacts_only");
+    }
+
+    // ── The `OfflineQueued` composer (`account-offline-mutation.md`) ────────
+
+    /// A knock accepted with no nest rests in the outbox — kind, the one
+    /// knock's scope, the canonical request — and nothing is sent.
+    #[test]
+    fn a_knock_accept_with_no_nest_is_queued_scoped_to_its_sender() {
+        let (rec, c) = client();
+        let queue = fauna_client_testkit::RecordingQueue::new("disconnected");
+        let out = block_on(c.knocks_accept_or_queue(Some(&queue), hex32()));
+        assert_eq!(out.unwrap(), Composed::Queued([7; 16]));
+        assert!(rec.last().is_none(), "no nest: nothing may be sent");
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        let (kind, scope, payload) = &queued[0];
+        assert_eq!(*kind, "fauna.knocks.accept");
+        assert_eq!(*scope, format!("knocks.accept:{}", hex32()));
+        let req: contacts::KnockActionRequest = fauna_protocol::decode_strict(payload).unwrap();
+        assert_eq!(req.peer_id, hex32());
+    }
+
+    /// Connected, the same call is the plain send exactly; the outbox stays empty.
+    #[test]
+    fn a_knock_accept_with_the_nest_connected_is_sent_not_queued() {
+        let (rec, c) = client();
+        let queue = fauna_client_testkit::RecordingQueue::new("connected");
+        let out = block_on(c.knocks_accept_or_queue(Some(&queue), hex32()));
+        assert_eq!(out.unwrap(), Composed::Sent(()));
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.knocks.accept");
+        let req: contacts::KnockActionRequest = fauna_protocol::decode_strict(&payload).unwrap();
+        assert_eq!(req.peer_id, hex32());
+        assert!(queue.queued().is_empty());
     }
 
     #[test]

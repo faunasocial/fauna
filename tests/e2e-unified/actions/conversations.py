@@ -4,6 +4,8 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from drivers.base import ViewportUndecided
+
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
 
@@ -558,6 +560,28 @@ class ConversationsActions:
         self.driver.type_text("dm-text-field", body)
         self.driver.click("dm-send-button")
 
+    def send_attachment_in_open_thread(self, path: str, body: str = "") -> None:
+        """Attach ``path`` through the open thread's `attachment-button` (the
+        picker-free ``set_input_files`` route), wait for its
+        `dm-compose-attachment-chip`, type ``body`` when given, and click
+        `dm-send-button` — an empty ``body`` sends an attachment-only message
+        (the compose gate is body OR attachments)."""
+        from helpers.budgets import UI_SETTLE_S
+        from helpers.waiting import wait_until
+
+        self.driver.wait_for("dm-text-field", timeout=10.0)
+        staged = self.driver.count("dm-compose-attachment-chip") + 1
+        self.driver.set_input_files("attachment-button", str(path))
+        wait_until(
+            lambda: self.driver.count("dm-compose-attachment-chip") >= staged,
+            UI_SETTLE_S,
+            diagnose=lambda: f"attaching {path} never staged a chip: "
+            f"{self.driver.diagnose('dm-compose-attachment-chip')}",
+        )
+        if body:
+            self.driver.type_text("dm-text-field", body)
+        self.driver.click("dm-send-button")
+
     def home_nest_included(self) -> bool:
         """Whether the open new-thread composer seats the home nest — the
         `checked` attribute of `recipient-picker-home-nest-toggle`."""
@@ -575,6 +599,15 @@ class ConversationsActions:
         none do — the section is absent, not empty)."""
         self.navigate()
         return self.driver.count("room-invitation")
+
+    def room_notice(self) -> str:
+        """The open thread's `thread-room-notice` text, or "" while no room
+        fact holds — the element is absent then, never empty
+        (`ui/conversations.md` § Element IDs; which notice speaks is
+        `RoomSnapshot::notice`'s, never the app's)."""
+        if not self.driver.is_visible("thread-room-notice"):
+            return ""
+        return self.driver.get_text("thread-room-notice") or ""
 
     def room_invitation_text(self, index: int = 0) -> str:
         return self.driver.get_text("room-invitation", index=index)
@@ -1082,11 +1115,40 @@ class ConversationsActions:
         has not realized it). A listed one is asked through
         ``driver.in_viewport``, which raises on an app that cannot answer
         rather than reading every row as in view.
+
+        True means PROVEN in view. A reading the driver cannot decide
+        (``ViewportUndecided``: windows sees a rect clipped to the viewport
+        and cannot always prove it whole) reads ``False``, and both uses stay
+        sound with that. The journey's wait for the jump polls until a reading
+        proves the bubble in view, so a frame caught mid-scroll is only "not
+        yet". The precondition before the jump may read an undecided bubble
+        as not in view, but an undecided reading only becomes a proven one
+        when the layout around it changes, so the later proof still shows the
+        jump moved something.
         """
         for i, text in enumerate(self.driver.get_texts("dm-message-text")):
             if body in (text or ""):
-                return self.driver.in_viewport("dm-message-text", index=i)
+                try:
+                    return self.driver.in_viewport("dm-message-text", index=i)
+                except ViewportUndecided:
+                    return False
         return False
+
+    def message_painted_lines(self, index: int) -> list[str]:
+        """The open thread's message body at bubble ``index`` AS PAINTED, one
+        string per painted line — a task item's box (``☑`` ticked, ``☐``
+        unticked) and a nested item's leading indent kept.
+
+        ``get_text("dm-message-text")`` is the shared one-line plaintext, which
+        drops both the box state and the nesting, so it cannot witness the
+        render model's task lists and nested lists (render-model.md § D7). Each
+        app answers from what holds the paint
+        (:func:`helpers.painted_lines.painted_lines`); an app that publishes no
+        such read is declared unbuilt there (convention 7). The feed's twin is
+        ``FeedActions.post_painted_lines``."""
+        from helpers.painted_lines import painted_lines
+
+        return painted_lines(self.driver, "dm-message-text", index=index)
 
     def scan_result_rows(self) -> list[str]:
         """The open thread's ``dm-message-scan-result`` rows, in bubble order —

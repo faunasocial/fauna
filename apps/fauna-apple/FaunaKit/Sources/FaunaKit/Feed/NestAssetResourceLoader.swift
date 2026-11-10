@@ -18,9 +18,13 @@ public enum VideoPlaybackMedia: Equatable, Sendable {
     /// `path` (its query carried verbatim — the playback ticket) on `nestUrl`, the
     /// exact string the WS login minted on, so the reader's pin-store key matches.
     case stream(nestUrl: String, path: String)
+    #if !FAUNA_KIDS
     /// Bytes the app holds, played from `URL`; `held` is the arm the resolve
     /// carried and `hash` the blob, which together are what `source` spells.
+    /// Feed-only (`HeldVideo` is the feed plane's): the kids build has no feed,
+    /// so it streams and never plays held bytes.
     case file(URL, held: HeldVideo, hash: String)
+    #endif
 
     /// What the element publishes as `source`: the nest-relative path for a
     /// stream (as every app publishes it), the shared `<arm>:<hash>` spelling
@@ -28,7 +32,9 @@ public enum VideoPlaybackMedia: Equatable, Sendable {
     public var source: String {
         switch self {
         case .stream(_, let path): return path
+        #if !FAUNA_KIDS
         case .file(_, let held, let hash): return heldVideoSource(held: held, hash: hash)
+        #endif
         }
     }
 }

@@ -211,6 +211,7 @@ impl PluginsSection {
             name.set_halign(gtk::Align::Start);
             name.set_xalign(0.0);
             name.add_css_class("heading");
+            set_test_id(&name, ids::BRIDGE_CARD_NAME);
             item.append(&name);
 
             let by_line = format!("{}\n{}", resolve(&card.badge), resolve(&card.publisher));

@@ -37,6 +37,12 @@ const SENT_MSGID_RETENTION_SECS: i64 = 30 * 86_400;
 /// long leaves a stale duty offer dangling in someone's prompt.
 const PENDING_TRANSFER_TTL_SECS: i64 = 7 * 86_400;
 
+/// The closed-enum text knobs of `guardian_policies` the test hook may store a
+/// raw value into (`CacheDb::test_set_guardian_policy_knob`).
+#[cfg(feature = "test-hooks")]
+pub const TEST_SETTABLE_POLICY_KNOBS: &[&str] =
+    &["unknown_sender_mail", "feed_sources", "unknown_peer_dm"];
+
 /// A pending child-initiated contact ask expires lazily after 30 days
 /// (`family-safety.md` § Child-initiated contact requests: between transfer's
 /// 7 and the knock TTL's 90 — an ask survives a guardian's vacation week and
@@ -419,6 +425,80 @@ impl CacheDb {
             return Ok(Err("supervised"));
         }
         Ok(Ok(()))
+    }
+
+    /// Overwrite the ward's stored guardian rule document with raw `bytes`,
+    /// unvalidated — the `guardian_content_document_test_hook` seam, so a
+    /// tier_3 can stand a document this build cannot read in the ward's row
+    /// (the write path refuses one). Returns the number of rows written: 0
+    /// when the ward has no policy row yet.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_set_guardian_content_document(
+        &self,
+        supervised: &[u8; 32],
+        bytes: &[u8],
+    ) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE guardian_policies SET content_document = ?1
+                 WHERE supervised_actor_id = ?2",
+                rusqlite::params![bytes, supervised.as_slice()],
+            )
+            .context("test_set_guardian_content_document")?;
+        Ok(n as u64)
+    }
+
+    /// Overwrite one closed-enum knob of the ward's policy row with a raw,
+    /// unvalidated string — the `guardian_policy_test_hook` seam, so a tier_3
+    /// can stand in for a newer nest that stored a value this build cannot
+    /// name (`fauna.family.policy.update` refuses one). `knob` must be one of
+    /// [`TEST_SETTABLE_POLICY_KNOBS`]; anything else is refused before SQL.
+    /// Returns the rows written: 0 when the ward has no policy row.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_set_guardian_policy_knob(
+        &self,
+        supervised: &[u8; 32],
+        knob: &str,
+        value: &str,
+    ) -> Result<u64> {
+        // The column name is spliced into SQL, so it comes from the closed
+        // list, never from the caller's string.
+        let Some(column) = TEST_SETTABLE_POLICY_KNOBS.iter().find(|k| **k == knob) else {
+            anyhow::bail!("knob must be one of {TEST_SETTABLE_POLICY_KNOBS:?}");
+        };
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                &format!(
+                    "UPDATE guardian_policies SET {column} = ?1 WHERE supervised_actor_id = ?2"
+                ),
+                rusqlite::params![value, supervised.as_slice()],
+            )
+            .context("test_set_guardian_policy_knob")?;
+        Ok(n as u64)
+    }
+
+    /// Move the ward's pending transfer proposal `seconds` into the past — the
+    /// `guardian_policy_test_hook` seam for the 7-day lapse (`family-safety.md`
+    /// § Graduation & transfer → *Expiry*), whose lazy expiry reads the wall
+    /// clock. Touches `created_at` only; every read then applies the production
+    /// cutoff unchanged. Returns the rows written: 0 when nothing is pending.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_age_pending_transfer(
+        &self,
+        supervised: &[u8; 32],
+        seconds: i64,
+    ) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE guardian_transfers SET created_at = created_at - ?1
+                 WHERE supervised_actor_id = ?2",
+                rusqlite::params![seconds, supervised.as_slice()],
+            )
+            .context("test_age_pending_transfer")?;
+        Ok(n as u64)
     }
 
     /// Update the ward's reach-policy document (`fauna.family.policy.update`).
@@ -3451,5 +3531,65 @@ mod tests {
         // The ward's own link is untouched — only the proposal died.
         let link = db.get_guardian_of(&ward[..]).await.unwrap().unwrap();
         assert_eq!(link.guardian_actor_id, guardian.to_vec());
+    }
+
+    /// The `guardian_policy_test_hook` seams: a raw knob value lands verbatim
+    /// (only on the closed column list), and an aged proposal is invisible to
+    /// every transfer read — the production cutoff, untouched.
+    #[cfg(feature = "test-hooks")]
+    #[tokio::test]
+    async fn the_policy_test_hook_seams_store_a_raw_knob_and_lapse_an_aged_transfer() {
+        let (db, guardian, ward, adult) = family().await;
+
+        assert_eq!(
+            db.test_set_guardian_policy_knob(&ward, "unknown_sender_mail", "quarantine")
+                .await
+                .unwrap(),
+            1
+        );
+        let row = db.get_guardian_policy(&ward[..]).await.unwrap().unwrap();
+        assert_eq!(row.unknown_sender_mail, "quarantine");
+        // No policy row (an unsupervised account) writes nothing.
+        assert_eq!(
+            db.test_set_guardian_policy_knob(&adult, "feed_sources", "x")
+                .await
+                .unwrap(),
+            0
+        );
+        // A column off the closed list is refused before any SQL.
+        assert!(
+            db.test_set_guardian_policy_knob(&ward, "updated_at", "0")
+                .await
+                .is_err()
+        );
+
+        db.upsert_pending_transfer(&ward[..], &adult[..], &guardian[..])
+            .await
+            .unwrap();
+        assert!(db.get_pending_transfer(&ward[..]).await.unwrap().is_some());
+        // A day short of the lapse: still live.
+        assert_eq!(
+            db.test_age_pending_transfer(&ward, 6 * 86_400)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(db.get_pending_transfer(&ward[..]).await.unwrap().is_some());
+        // Past seven days: invisible, absent from the prompt, un-acceptable.
+        db.test_age_pending_transfer(&ward, 86_400 + 60)
+            .await
+            .unwrap();
+        assert!(db.get_pending_transfer(&ward[..]).await.unwrap().is_none());
+        assert!(
+            db.list_incoming_transfers(&adult[..])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !db.accept_pending_transfer(&ward[..], &adult[..])
+                .await
+                .unwrap()
+        );
     }
 }

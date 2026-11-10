@@ -36,6 +36,7 @@ import com.fauna.app.ui.screen.LaunchIdentityForkedScreen
 import com.fauna.app.ui.screen.LaunchNeedsUpdateScreen
 import com.fauna.app.ui.screen.LaunchSignInRefusedScreen
 import com.fauna.app.ui.screen.LaunchRetryScreen
+import com.fauna.app.ui.screen.LaunchProgressScreen
 import com.fauna.app.ui.screen.onboarding.*
 import com.fauna.app.ui.screen.conversations.*
 import com.fauna.app.ui.screen.contacts.ContactsScreen
@@ -535,14 +536,24 @@ fun FaunaNavHost(
         // while the user is mid-ceremony on `identity_stolen_entry`.
         var shownLock by remember { mutableStateOf<ULong?>(null) }
         var stolenEntry by remember { mutableStateOf(false) }
-        val routed = launchVm.navTargetFor(
-            snapshot.phase,
-            snapshot.accountIndexRefusal,
-            snapshot.signInRefused,
-            supersededSuccessor = snapshot.supersededSuccessor,
-            identityFork = snapshot.identityFork,
-            lockedUntilSecs = snapshot.lockedUntilSecs,
-        )
+        // A cold boot whose sign-out finish was refused while its record still
+        // owes the wipe FAILS CLOSED: the machine was never started, so nothing
+        // routes over the registry — the wizard lands on `identity_choice`
+        // painting the retry's refusal line (`account-scoping.md` § Erasure
+        // follows scope → *The sign-out record is on all 7 apps*, decision 4).
+        val failedClosed by launchVm.failedClosed.collectAsState()
+        val routed = if (failedClosed) {
+            com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Wizard("onboarding/identity-choice")
+        } else {
+            launchVm.navTargetFor(
+                snapshot.phase,
+                snapshot.accountIndexRefusal,
+                snapshot.signInRefused,
+                supersededSuccessor = snapshot.supersededSuccessor,
+                identityFork = snapshot.identityFork,
+                lockedUntilSecs = snapshot.lockedUntilSecs,
+            )
+        }
         val followed = launchVm.followLock(routed, snapshot, shownLock, stolenEntry)
         LaunchedEffect(followed) {
             val locked = followed as? com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.AccountLocked
@@ -551,7 +562,12 @@ fun FaunaNavHost(
         }
 
         when (val target = followed) {
-            null -> { /* in-flight: cold-start blank screen */ }
+            null -> {
+                // In flight (`launch_progress`): the bound account's cached
+                // identity, absent while nothing is cached.
+                val line = remember { launchVm.launchIdentityLine() }
+                LaunchProgressScreen(identityLine = line)
+            }
             is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.AccountLocked -> {
                 LockedSurfaceHost(
                     launchVm = launchVm,
@@ -583,7 +599,9 @@ fun FaunaNavHost(
                         onExit = { retiring = false },
                     )
                 } else {
+                    val identityLine = remember { launchVm.launchIdentityLine() }
                     LaunchRetryScreen(
+                        identityLine = identityLine,
                         onRetry = { scope.launch { launchVm.retry() } },
                         onUseDifferentNest = {
                             launchVm.seedForFallthrough()
@@ -681,24 +699,25 @@ fun FaunaNavHost(
             }
             is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Wizard -> {
                 val scope = rememberCoroutineScope()
-                // The signed-out launch re-sweeps a residue a previous sign-out
-                // recorded FIRST, and paints only what is still left
-                // (`account-scoping.md` § Erasure follows scope → *the residue
-                // surface*). Skipped when this process's own sign-out already
-                // handed one over — that one is fresh.
-                LaunchedEffect(Unit) {
-                    if (appState.signOutResidue == null) {
-                        appState.signOutResidue = launchVm.recheckSignOutResidue()
-                    }
+                // What the cold boot's sign-out finish left — re-swept before
+                // routing, by the launch's own call (`AppLaunchVM.start`) — paints
+                // here (`account-scoping.md` § Erasure follows scope → *The
+                // sign-out record is on all 7 apps*, decision 3). A residue this
+                // process's own sign-out already handed over is fresher and wins.
+                val launchResidue by launchVm.launchResidue.collectAsState()
+                LaunchedEffect(launchResidue) {
+                    val left = launchResidue ?: return@LaunchedEffect
+                    if (appState.signOutResidue == null) appState.signOutResidue = left
+                    launchVm.consumeLaunchResidue()
                 }
                 OnboardingWizardNavHost(
                     navController,
                     target.startDestination,
                     onWizardExit,
                     signOutResidue = appState.signOutResidue,
-                    onRemoveAgain = { residue ->
+                    onRemoveAgain = { _ ->
                         scope.launch {
-                            appState.signOutResidue = launchVm.retrySignOutResidue(residue)
+                            appState.signOutResidue = launchVm.retrySignOutResidue()
                         }
                     },
                 )

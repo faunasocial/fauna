@@ -68,13 +68,13 @@ public sealed partial class FamilyPage : Page
         IncomingTransfersList.ItemsSource = _vm.IncomingTransfers;
         DevicesList.ItemsSource = _vm.Devices;
         BlockedPeersList.ItemsSource = _vm.BlockedPeers;
-        PopulateSelect(UnknownSenderSelect, FaunaFfiMethods.UnknownSenderOptions(), _vm.PolicyUnknownSenderMail, failClosed: "hold");
-        PopulateSelect(FeedSourcesSelect, FaunaFfiMethods.FeedSourcesOptions(), _vm.PolicyFeedSources, failClosed: "block");
-        PopulateSelect(UnknownPeerDmSelect, FaunaFfiMethods.UnknownPeerDmOptions(), _vm.PolicyUnknownPeerDm, failClosed: "hold");
+        PaintUnknownSenderSelect();
+        PaintFeedSourcesSelect();
+        PaintUnknownPeerDmSelect();
         await _vm.LoadCommand.ExecuteAsync(null);
-        PopulateSelect(UnknownSenderSelect, FaunaFfiMethods.UnknownSenderOptions(), _vm.PolicyUnknownSenderMail, failClosed: "hold");
-        PopulateSelect(FeedSourcesSelect, FaunaFfiMethods.FeedSourcesOptions(), _vm.PolicyFeedSources, failClosed: "block");
-        PopulateSelect(UnknownPeerDmSelect, FaunaFfiMethods.UnknownPeerDmOptions(), _vm.PolicyUnknownPeerDm, failClosed: "hold");
+        PaintUnknownSenderSelect();
+        PaintFeedSourcesSelect();
+        PaintUnknownPeerDmSelect();
         ReloadRulesEditor();
         UpdateGuardianSectionVisibility();
         UpdateSupervisedSectionVisibility();
@@ -167,13 +167,13 @@ public sealed partial class FamilyPage : Page
                     FederationToggle.IsOn = _vm.PolicyFederationContact;
                     Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
                         FederationToggle, _vm.PolicyFederationContact ? "on" : "off");
-                    SelectInCombo(UnknownSenderSelect, _vm.PolicyUnknownSenderMail);
-                    SelectInCombo(FeedSourcesSelect, _vm.PolicyFeedSources);
+                    PaintUnknownSenderSelect();
+                    PaintFeedSourcesSelect();
                     // unknown_peer_dm belongs in this unconditional resync for the
                     // same reason: `allow` is both its compile-time default AND the
                     // overwhelmingly common rendered value (an absent wire), so the
                     // per-property case below would rarely fire on a ward switch.
-                    SelectInCombo(UnknownPeerDmSelect, _vm.PolicyUnknownPeerDm);
+                    PaintUnknownPeerDmSelect();
                     // Notify belongs in this unconditional resync for exactly the
                     // reason above: off is both its default and the common stored
                     // value, so its per-property case below almost never fires.
@@ -212,13 +212,13 @@ public sealed partial class FamilyPage : Page
                     FederationToggle, _vm.PolicyFederationContact ? "on" : "off");
                 break;
             case nameof(FamilyViewModel.PolicyUnknownSenderMail):
-                SelectInCombo(UnknownSenderSelect, _vm.PolicyUnknownSenderMail);
+                PaintUnknownSenderSelect();
                 break;
             case nameof(FamilyViewModel.PolicyFeedSources):
-                SelectInCombo(FeedSourcesSelect, _vm.PolicyFeedSources);
+                PaintFeedSourcesSelect();
                 break;
             case nameof(FamilyViewModel.PolicyUnknownPeerDm):
-                SelectInCombo(UnknownPeerDmSelect, _vm.PolicyUnknownPeerDm);
+                PaintUnknownPeerDmSelect();
                 break;
             case nameof(FamilyViewModel.PolicyContentNotify):
                 if (ContentNotifyToggle.IsOn != _vm.PolicyContentNotify)
@@ -449,29 +449,22 @@ public sealed partial class FamilyPage : Page
     // ── Fixed-value-set ComboBoxes (allow/hold/reject, allow/block) ─────────
     // Same programmatic-suppression shape as AdminUsersPage's tier combo.
 
+    /// <summary>Paint <paramref name="combo"/> from a shared-Rust catalog with
+    /// <paramref name="selected"/> picked by value — <see cref="PickerOption.ReconcileCatalog"/>,
+    /// the one shape AdminMailPage's knobs use too. Unkeyed here: the suite drives and
+    /// reads these knobs by their painted label, and the wire value rides the Tag.
+    /// A pick sets its VM property, whose change repaints this very picker inside
+    /// the gesture; the idempotent repaint only confirms the selection there. An
+    /// unmatched value renders as <paramref name="failClosed"/>, the strictest option,
+    /// never the permissive one (family-safety.md § "A knob value a client cannot
+    /// parse renders fail-closed" — the VM normalizes on load, so this is defense in
+    /// depth).</summary>
     private void PopulateSelect(ComboBox combo, ReachPolicyOption[] options, string selected, string failClosed)
     {
         _initializingSelect = true;
         try
         {
-            combo.Items.Clear();
-            foreach (var opt in options)
-            {
-                var item = new ComboBoxItem { Content = Strings.Resolve(opt.label), Tag = opt.value };
-                combo.Items.Add(item);
-                if (opt.value == selected) combo.SelectedItem = item;
-            }
-            // An unmatched value renders as the strictest option, never the
-            // permissive one (family-safety.md § "A knob value a client cannot
-            // parse renders fail-closed" — the VM normalizes on load, so this
-            // is defense in depth).
-            if (combo.SelectedItem is null)
-                foreach (var obj in combo.Items)
-                    if (obj is ComboBoxItem { Tag: string t } item && t == failClosed)
-                    {
-                        combo.SelectedItem = item;
-                        break;
-                    }
+            PickerOption.ReconcileCatalog(combo, options, selected, failClosed, keyed: false);
         }
         finally
         {
@@ -479,23 +472,14 @@ public sealed partial class FamilyPage : Page
         }
     }
 
-    private void SelectInCombo(ComboBox combo, string value)
-    {
-        _initializingSelect = true;
-        try
-        {
-            foreach (var obj in combo.Items)
-                if (obj is ComboBoxItem { Tag: string t } item && t == value)
-                {
-                    combo.SelectedItem = item;
-                    break;
-                }
-        }
-        finally
-        {
-            _initializingSelect = false;
-        }
-    }
+    private void PaintUnknownSenderSelect() => PopulateSelect(UnknownSenderSelect,
+        FaunaFfiMethods.UnknownSenderOptions(), _vm!.PolicyUnknownSenderMail, failClosed: "hold");
+
+    private void PaintFeedSourcesSelect() => PopulateSelect(FeedSourcesSelect,
+        FaunaFfiMethods.FeedSourcesOptions(), _vm!.PolicyFeedSources, failClosed: "block");
+
+    private void PaintUnknownPeerDmSelect() => PopulateSelect(UnknownPeerDmSelect,
+        FaunaFfiMethods.UnknownPeerDmOptions(), _vm!.PolicyUnknownPeerDm, failClosed: "hold");
 
     private string SelectedValue(ComboBox combo, string fallback)
         => combo.SelectedItem is ComboBoxItem { Tag: string t } ? t : fallback;
@@ -515,7 +499,7 @@ public sealed partial class FamilyPage : Page
     /// <summary>Unlike every sibling reach-knob handler above, this one also arms
     /// <c>PolicyUnknownPeerDmEdited</c> — the guard <see cref="_initializingSelect"/>
     /// already suppresses is exactly what makes "only a genuine user edit reaches
-    /// here" true (a programmatic <see cref="PopulateSelect"/>/<see cref="SelectInCombo"/>
+    /// here" true (a programmatic <see cref="PopulateSelect"/>
     /// call always sets it first), so no separate mechanism is needed
     /// (family-safety.md § The bridge-DM gate → App affordance).</summary>
     private void UnknownPeerDmSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)

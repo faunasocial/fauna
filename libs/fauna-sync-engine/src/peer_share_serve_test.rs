@@ -216,7 +216,7 @@ async fn the_resident_loop_ingests_a_spooled_share_page_and_advances_the_cursor(
     // The peer must be a cached WRITER for its rows to be accepted (the
     // fail-closed consult) — seeded before the engine takes the DB.
     let db = SyncDb::open_in_memory().unwrap();
-    db.cache_share_writer_roster(&[(peer_hex.clone(), true)], &[], None)
+    db.cache_share_writer_roster(&[(peer_hex.clone(), true)], &[], None, &[])
         .unwrap();
     let engine = ingest_engine_with_db(dir.path().to_path_buf(), db);
 

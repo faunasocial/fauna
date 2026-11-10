@@ -35,6 +35,8 @@ Stamped 2026-10-27 at 7942c4870f.
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+2b0759a1 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

@@ -12,7 +12,7 @@ This text is being written and will appear here once it has been reviewed.
 
 ## Coverage contract
 
-Stamped 2026-10-27 at 7942c4870f.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] An admin writes a rule and the reason members will read, saves it, and sees which version of the nest's rules is now in force — `docs/goal/behavior/nest-rules.md` § The shared rule editor
    - `tests/e2e-unified/tests/test_nest_rules.py::test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced`
@@ -26,19 +26,25 @@ Stamped 2026-10-27 at 7942c4870f.
    - `tests/e2e-unified/tests/test_nest_rules.py::test_joining_shows_the_nests_rules_with_the_terms_notice`
 6. [nest] The nest's public web pages show the same notice in place of what its rules block — `docs/goal/behavior/nest-rules.md` § The nest content policy
    - `tests/e2e-unified/tests/api/test_nest_rules_web_notice.py::test_the_public_web_pages_show_the_rules_notice_in_place_of_what_they_block`
+7. [app] A rule this app cannot apply — written in a newer rule language, or needing a newer app — is listed as not applied on this device, at joining and in Settings — `docs/goal/behavior/nest-rules.md` § Acceptance at joining, and a change of rules
+   - `tests/e2e-unified/tests/test_nest_rules.py::test_a_rule_this_device_cannot_apply_is_listed_as_not_applied_at_joining_and_in_settings`
+8. [app] A nest rule set to collapse folds matching content behind a reveal instead of hiding it outright — `docs/goal/behavior/nest-rules.md` § The nest content policy
+   - `tests/e2e-unified/tests/test_nest_rules.py::test_a_nest_collapse_rule_folds_the_post_behind_a_reveal`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| macos | ✅ full | 0.1.5-dev+76b81e1c standalone |
-| ios | ✅ full | 0.1.5-dev+76b81e1c standalone |
+| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| linux | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| macos | ⚠ partial | 0.1.5-dev+76b81e1c standalone |
+| ios | ⚠ partial | 0.1.5-dev+76b81e1c standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -48,4 +54,6 @@ Stamped 2026-10-27 at 7942c4870f.
 | 4 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_joining_shows_the_nests_rules_with_the_terms_notice` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_nest_rules_web_notice.py::test_the_public_web_pages_show_the_rules_notice_in_place_of_what_they_block` | nest (linux): passed, nest (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_rule_this_device_cannot_apply_is_listed_as_not_applied_at_joining_and_in_settings` | windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_nest_collapse_rule_folds_the_post_behind_a_reveal` | tui (macos): passed |
 <!-- features-render:end -->

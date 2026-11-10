@@ -189,3 +189,101 @@ def test_a_capped_account_is_told_on_the_devices_page_and_the_remedy_clears_it(
     # And the machine is enrolled now — its row is the roster.
     _writer, latched_row, roster = enrollment.await_enrollment(app, nest_url, user)
     assert latched_row in roster and slot_holder not in roster, (latched_row, roster)
+
+
+@pytest.fixture
+def sibling_seats(request, nest_instance):
+    """Second enrolled seats on the session nest (`helpers.fleet.SiblingSeats`)."""
+    from helpers.fleet import SiblingSeats
+
+    seats = SiblingSeats(request, nest_instance)
+    try:
+        yield seats
+    finally:
+        seats.teardown()
+
+
+@pytest.mark.feature("devices")
+def test_a_capped_account_removes_a_dead_enrolled_seat_holding_its_slot(
+    app, request, nest_instance, sibling_seats
+):
+    """The slot is held by a REAL enrolled seat that died without a sign-out —
+    its roster row carries its principal and its ``Enrolled`` row is on the
+    fleet plane (measured 2026-11-09 on a staging box: every such row was
+    refused ``NotAMember`` on the capped machine, whose pass never listed the
+    fleet scope). This machine is refused at the cap; its pass lists the fleet
+    scope over the app session (``account-client-lifecycle.md`` § The
+    client-side lifecycle → *A cap-refused pass lists the fleet scope over the
+    app session*), so ``device-remove-button`` resolves the dead seat, deletes
+    its row, and on a pump holder the next pass enrolls this machine."""
+    from conftest import _make_user
+
+    nest_url = nest_instance["url"]
+    port = nest_instance["port"]
+    admin_sk = nest_instance["admin"]["signing_key"]
+    notice = S.error.sync.device_limit_exceeded
+
+    user = _make_user(nest_instance)
+    ensure_tier(port, admin_signing_key=admin_sk, name=CAPPED_TIER, base_url=nest_url, max_devices=1)
+    set_user_tier(port, user["actor_id_hex"], CAPPED_TIER, admin_signing_key=admin_sk, base_url=nest_url)
+
+    # ── The slot holder: a real seat, enrolled, then stopped with no sign-out ──
+    sibling = sibling_seats.launch(user=user)
+    _writer, dead_row, roster = enrollment.await_enrollment(sibling, nest_url, user)
+    assert set(roster) == {dead_row}, roster
+    sibling.driver.teardown()
+
+    # ── The refusal ──
+    enrollment.sign_in(app, request, nest_instance, user)
+    _wait_on_devices_page(
+        app,
+        lambda text: notice in text,
+        REFUSAL_VISIBLE_S,
+        what="the Devices page never named the device-cap refusal",
+    )
+    assert set(enrollment.roster(nest_url, user)) == {dead_row}
+
+    # ── The remedy: the row gesture on the dead seat's principal-carrying row ──
+    app.backups.navigate_devices()
+    app.driver.wait_for("device-card", timeout=15)
+    assert app.backups.device_count() == 1, app.driver.diagnose("device-card")
+    last: dict = {}
+
+    def removed():
+        last["roster"] = list(enrollment.roster(nest_url, user))
+        last["error"] = _devices_error_text(app)
+        return dead_row not in last["roster"]
+
+    app.backups.remove_device(0)
+    wait_until(
+        removed,
+        60.0,
+        interval=1.0,
+        diagnose=lambda: (
+            f"the dead seat's row was never removed (roster {last.get('roster')!r}, "
+            f"error-message {last.get('error')!r}): a NotAMember refusal = the "
+            "cap-refused pass did not list the fleet scope"
+        ),
+    )
+
+    role = account_pump_role(app.driver)
+    assert role is not None, "guarded by enrollment.sign_in's role check"
+    _runtime_up, is_holder = role
+    print(
+        f"[device-cap dead seat] slot freed; pump role={role!r} → "
+        f"{'asserting the enrollment' if is_holder else 'non-holder: enrollment unwitnessed here'}",
+        flush=True,
+    )
+    if not is_holder:
+        return
+    baseline = account_pump_cycles(app.driver)[0]
+    poke_account_pump(app.driver)
+    await_pump_cycle_after(app.driver, baseline, budget_s=60.0, what="the freed slot")
+    _wait_on_devices_page(
+        app,
+        lambda text: notice not in text,
+        CLEARED_VISIBLE_S,
+        what="the device-cap notice stayed up after the dead seat was removed",
+    )
+    _writer, latched_row, roster = enrollment.await_enrollment(app, nest_url, user)
+    assert latched_row in roster and dead_row not in roster, (latched_row, roster)

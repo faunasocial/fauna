@@ -2,7 +2,9 @@ package com.fauna.app.core
 
 import com.fauna.ffi.FfiContentPolicy
 import com.fauna.ffi.FfiSupervisionSnapshot
+import com.fauna.ffi.FfiShowAgain
 import com.fauna.ffi.contentRenderForItem
+import com.fauna.ffi.reportedShowAgain
 import com.fauna.ffi.contentRenderVerdict
 import com.fauna.ffi.guardianEnforcedCategories
 import kotlinx.coroutines.CoroutineScope
@@ -92,16 +94,33 @@ class ContentPolicyStore @Inject constructor(
      * report filed from a card the hide then replaces still has to paint its
      * acknowledgement ([ReportSheetStore]).
      */
-    val report = ReportSheetStore(api) { setHiddenContent(it) }
+    val report = ReportSheetStore(api, onHiddenContent = { setHiddenContent(it) })
 
     /** Replace the reporter-side hide list (a `hideReported` reply, or the `loadHiddenContent` read). */
     fun setHiddenContent(ids: List<String>) {
         _inputs.update { it.copy(hiddenContent = ids) }
     }
 
+    private val _spamMarked = MutableStateFlow<List<String>>(emptyList())
+
+    /**
+     * The post ids the viewer marked as spam — the `spam_marked` list on the same
+     * sealed record (`report-sharing.md` § Report capture → *The post's
+     * mark-as-spam verb*). Not a render input here: the feed hands it to the
+     * shared manager, whose snapshot folds `spam`@1000 into each marked post's
+     * labels, so the verdict this store's inputs drive collapses it.
+     */
+    val spamMarked: StateFlow<List<String>> = _spamMarked.asStateFlow()
+
+    /** Replace the spam marks (a `markSpam`/`unmarkSpam` reply, or the load). */
+    fun setSpamMarked(ids: List<String>) {
+        _spamMarked.value = ids
+    }
+
     init {
         accountStores.registerCloser("content-policy") {
             _inputs.value = ContentPolicyInputs()
+            _spamMarked.value = emptyList()
             // The reporter-side hide list and the open report sheet are one
             // account's (`account-scoping.md`): a departing account's reports
             // must never hide, or be acknowledged on, the next one. The reset
@@ -184,6 +203,12 @@ class ContentPolicyStore @Inject constructor(
             } catch (_: Exception) {
                 null
             }
+            // Its sibling on the same record, the post spam marks — the same
+            // keep-on-failure read.
+            try {
+                _spamMarked.value = api.loadSpamMarked()
+            } catch (_: Exception) {
+            }
             _inputs.update { prev ->
                 ContentPolicyInputs(
                     hiddenContent = hidden ?: prev.hiddenContent,
@@ -245,6 +270,19 @@ data class ContentPolicyInputs(
             ownPhishingPermille = null,
             regionPolicies = emptyList(),
         ).reported
+    }
+
+    /**
+     * The reporter's show-again for an item [isReported] hid (`moderation.md`
+     * § Corollary — the reporter's hide is theirs to undo): the shared
+     * `reportedShowAgain` fold over the same keys — the hidden ids one press of
+     * `content-policy-show-again-button` removes and the label naming the
+     * scope — or `null` when nothing of the viewer's matched. Short-circuits
+     * (no FFI call) for an empty list.
+     */
+    fun showAgainFor(itemId: String?, authorId: String?): FfiShowAgain? {
+        if (hiddenContent.isEmpty() || (itemId == null && authorId == null)) return null
+        return reportedShowAgain(hiddenContent, itemId.orEmpty(), authorId)
     }
 
     /**

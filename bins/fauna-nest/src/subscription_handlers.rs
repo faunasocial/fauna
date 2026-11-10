@@ -146,6 +146,19 @@ fn wrong_request_kind(reason: &str) -> RpcError {
     e
 }
 
+/// `requests.approve` on a half-row (`db::subscriptions::REQUEST_COMPLETE_SQL`):
+/// the payment is in, the buyer's relayed intent — which carries their home —
+/// is not, so there is no one to deliver the tier to yet (`monetization.md`
+/// § Pillar 3 → *A checkout-bound buyer homed on another nest*, rule (3)).
+fn request_incomplete(reason: &str) -> RpcError {
+    let mut e = RpcError::new(
+        "fauna.subscriptions.request_incomplete",
+        "error.subscriptions.request_incomplete",
+    );
+    e.details = Some(Box::new(Value::String(reason.into())));
+    e
+}
+
 fn tier_already_exists(reason: &str) -> RpcError {
     let mut e = RpcError::new(
         "fauna.subscriptions.tier_already_exists",
@@ -561,7 +574,7 @@ fn status_get_handler() -> RpcHandler {
 /// is one, else the approved `followers` tier (this nest holds no ranks for a
 /// foreign author's tiers); `follow_pending` is the `followers` row still
 /// waiting on the author.
-fn remote_status(rows: &[crate::db::remote_follows::RemoteFollowRow]) -> StatusGetReply {
+pub(crate) fn remote_status(rows: &[crate::db::remote_follows::RemoteFollowRow]) -> StatusGetReply {
     use crate::db::remote_follows::RemoteFollowState;
     let approved = || {
         rows.iter()
@@ -615,7 +628,11 @@ fn requests_list_handler() -> RpcHandler {
                 .map_err(internal)?;
 
             let mut requests = Vec::with_capacity(rows.len());
-            for r in rows {
+            // A half-row is not a request (Q13 rule (3)): a payment-entitled
+            // row for a buyer this nest neither hosts nor holds a home for
+            // waits, unlisted, for the buyer's relayed intent — the author's
+            // drain approves every payment-entitled row it is shown.
+            for r in rows.into_iter().filter(|r| r.complete) {
                 let sub: [u8; 32] = r
                     .subscriber_id
                     .as_slice()
@@ -1477,6 +1494,18 @@ fn tiers_update_handler() -> RpcHandler {
                     .await
                     .map_err(internal)?;
             }
+            // A new price retracts an advertised post's note so it is re-signed
+            // with the new tag (`monetization.md` § The Nostr advertisement of
+            // a sold post → *Lifecycle* (1)).
+            #[cfg(feature = "nostr")]
+            crate::nostr::advertise::on_tier_price_changed(
+                &state,
+                &author_id,
+                current.unlocks_post.as_deref(),
+                current.asking_price().as_ref(),
+                asking.as_ref(),
+            )
+            .await;
             encode_reply(&TierUpdateReply {
                 updated: true,
                 extra: Default::default(),
@@ -1538,6 +1567,19 @@ fn tiers_clear_field_handler() -> RpcHandler {
             if !updated {
                 return Err(tier_not_found("tier not found"));
             }
+            // A cleared asking price withdraws the advertisement and clears
+            // its flag — an advertisement without a price cannot stand
+            // (`monetization.md` § The Nostr advertisement of a sold post →
+            // *Lifecycle* (2)).
+            #[cfg(feature = "nostr")]
+            crate::nostr::advertise::on_tier_price_changed(
+                &state,
+                &author_id,
+                current.unlocks_post.as_deref(),
+                current.asking_price().as_ref(),
+                asking.as_ref(),
+            )
+            .await;
             encode_reply(&TierClearFieldReply {
                 cleared: true,
                 extra: Default::default(),
@@ -1557,6 +1599,12 @@ fn tiers_delete_handler() -> RpcHandler {
         Box::pin(async move {
             let req: TierDeleteRequest = decode(&payload).map_err(malformed_upload)?;
 
+            #[cfg(feature = "nostr")]
+            let before = state
+                .db
+                .get_subscription_tier(&author_id, &req.name)
+                .await
+                .map_err(internal)?;
             let deleted = state
                 .db
                 .delete_subscription_tier(&author_id, &req.name)
@@ -1564,6 +1612,21 @@ fn tiers_delete_handler() -> RpcHandler {
                 .map_err(internal)?;
             if !deleted {
                 return Err(tier_not_found("tier not found"));
+            }
+            // A deleted selling tier sells nothing: its advertised post's
+            // priced note would misstate the offer, so it is withdrawn
+            // (`monetization.md` § The Nostr advertisement of a sold post →
+            // *Lifecycle*).
+            #[cfg(feature = "nostr")]
+            if let Some(tier) = before {
+                crate::nostr::advertise::on_tier_price_changed(
+                    &state,
+                    &author_id,
+                    tier.unlocks_post.as_deref(),
+                    tier.asking_price().as_ref(),
+                    None,
+                )
+                .await;
             }
             encode_reply(&TierDeleteReply {
                 deleted: true,
@@ -1816,7 +1879,7 @@ async fn subscribe_core(
 /// (`federated-follow.md` § Decision 2). Stamped on every request row the
 /// twin writes, and copied onto the roster row at approval.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SubscriberHome<'a> {
+pub struct SubscriberHome<'a> {
     pub nest_id: &'a [u8; 32],
     pub url: Option<&'a str>,
 }
@@ -1951,7 +2014,7 @@ pub(crate) async fn subscribe_core_from(
         // by re-subscribing. Best-effort like the enqueue proper.
         if let Err(e) = state
             .db
-            .enqueue_unlock_fanout(&author_id, &subscriber_id, &req.tier)
+            .enqueue_unlock_fanout(&author_id, &subscriber_id, &req.tier, None)
             .await
         {
             tracing::error!("subscribe: unlock fan-out re-check({}): {e}", req.tier);
@@ -2123,27 +2186,36 @@ fn encaps_key_publish_handler() -> RpcHandler {
     })
 }
 
-/// `fauna.subscriptions.unsubscribe` — subscriber-initiated unsubscribe from an
-/// author's **paid** tiers.
+/// `fauna.subscriptions.unsubscribe` — the subscriber's leave of an author's
+/// tiers, the unfollow included (`subscriptions.md` § The free followers tier —
+/// follow and unfollow, rule 1).
 ///
-/// **Scope: rank ≥ 1 only — the free rank-0 `followers` tier is never touched.**
-/// Cancelling a paid subscription must not silently unfollow; following is a
-/// separate act with its own affordance (`monetization.md` § Pillar 1 — follow =
-/// subscribe to the free tier). This preserves the retired *plaintext* arm's
-/// scope (`remove_subscriber_from_tiers_at_or_above(.., min_rank = 1)`). The
-/// retired *encrypted* arm enqueued a row for **every** held tier, the free one
-/// included, so an unsubscribe there also unfollowed — a latent bug the mode
-/// collapse surfaced, resolved onto the richer arm rather than replicated
-/// (priority #4).
+/// **Scope: at or above the leave's floor, designated tiers never.**
+/// [`UnsubscribeRequest::tier`] names the floor: `Some(name)` ends `name` and
+/// every tier the subscriber holds at a higher rank, so `Some("followers")` is
+/// the unfollow and ends every paid tier too; `None` is floor rank 1 — every
+/// paid tier, the follow kept (cancelling a paid subscription never silently
+/// unfollows). A rank floor is the one leave set the rank cascade leaves
+/// stable: a leave below a tier still held would be re-enrolled by the
+/// cascade's reconcile. A designated (`unlocks_post`) tier is in no leave set —
+/// a purchase is a good, not a relationship, and survives any leave.
 ///
 /// Each in-scope tier gets a `kind='unsubscribe'` row: the removal rotation
 /// needs the author's client, so the subscriber stays in the roster until it
 /// commits the removal via `subscribers.remove`.
 ///
-/// Reply is `Queued` with the FIRST enqueued row's id (the rest are
-/// discoverable via `requests.list`). No paid tiers held →
-/// `fauna.subscriptions.not_subscribed`. `UnsubscribeReply::Removed` stays on
-/// the wire as a variant this nest no longer answers.
+/// **A request still pending is withdrawn, not left.** The subscriber's own
+/// `kind='subscribe'` rows at or above the floor are deleted at once — a
+/// follow asked but not yet approved reads *Following* (`status.get`'s
+/// `follow_pending`), and its press takes the request back (`subscriptions.md`
+/// § The free followers tier — follow and unfollow, rule 4). A floor the
+/// subscriber only has pending is a floor like a held one.
+///
+/// Reply is `Queued` with the FIRST enqueued leave row's id (the rest are
+/// discoverable via `requests.list`), or `Removed` when the leave only
+/// withdrew pending requests (nothing for the author's client to commit).
+/// Nothing in scope held or asked, or a floor the subscriber neither holds nor
+/// has asked for (or a designated one) → `fauna.subscriptions.not_subscribed`.
 fn unsubscribe_handler() -> RpcHandler {
     Box::new(|state, subscriber_id, payload| {
         Box::pin(async move {
@@ -2168,68 +2240,172 @@ fn unsubscribe_handler() -> RpcHandler {
                 return encode_reply(&reply);
             }
 
-            let (reply, _tiers) =
-                unsubscribe_core(&state, &author_id, &subscriber_id, None).await?;
+            let (reply, _tiers) = unsubscribe_core(
+                &state,
+                &author_id,
+                &subscriber_id,
+                None,
+                req.tier.as_deref(),
+            )
+            .await?;
             encode_reply(&reply)
         })
     })
 }
 
 /// The unsubscribe door's body, shared with the federated twin (which passes
-/// the remote subscriber's `home`). Returns the reply and the tiers a leave
-/// was queued for.
+/// the remote subscriber's `home` and its intent's tier) and the principal
+/// arm. `floor` is the leave's floor (the scope note above
+/// `unsubscribe_handler`). Returns the reply and every tier the leave touched:
+/// those a leave was queued for and those whose pending request it withdrew.
 pub(crate) async fn unsubscribe_core(
     state: &Arc<AppState>,
     author_id: &[u8; 32],
     subscriber_id: &[u8; 32],
     home: Option<SubscriberHome<'_>>,
+    floor: Option<&str>,
 ) -> Result<(UnsubscribeReply, Vec<String>), RpcError> {
-    // Held tiers, narrowed to rank >= 1 (the scope note above).
     let held = state
         .db
         .get_subscribed_tiers(author_id, subscriber_id)
         .await
         .map_err(internal)?;
-    let mut tiers: Vec<String> = Vec::new();
+    // (name, rank, designated) per held tier.
+    let mut ranked: Vec<(String, i64, bool)> = Vec::with_capacity(held.len());
     for name in held {
-        let rank = state
+        let row = state
             .db
             .get_subscription_tier(author_id, &name)
             .await
-            .map_err(internal)?
-            .map(|t| t.rank)
-            .unwrap_or(FOLLOWERS_TIER_RANK);
-        if rank >= 1 {
-            tiers.push(name);
+            .map_err(internal)?;
+        let rank = row.as_ref().map(|t| t.rank).unwrap_or(FOLLOWERS_TIER_RANK);
+        let designated = row.is_some_and(|t| t.unlocks_post.is_some());
+        ranked.push((name, rank, designated));
+    }
+    // The subscriber's subscribe requests still waiting on the author, as
+    // (request id, tier, rank) for each undesignated tier that still exists:
+    // what a leave withdraws at or above its floor (the pending window of
+    // `subscriptions.md` § The free followers tier — follow and unfollow,
+    // rule 4).
+    let mut asked: Vec<(i64, String, i64)> = Vec::new();
+    for row in state
+        .db
+        .list_subscribe_requests(author_id)
+        .await
+        .map_err(internal)?
+    {
+        if row.kind != "subscribe" || row.subscriber_id.as_slice() != subscriber_id.as_slice() {
+            continue;
+        }
+        let tier = state
+            .db
+            .get_subscription_tier(author_id, &row.tier_name)
+            .await
+            .map_err(internal)?;
+        if let Some(tier) = tier.filter(|t| t.unlocks_post.is_none()) {
+            asked.push((row.id, row.tier_name, tier.rank));
         }
     }
-    if tiers.is_empty() {
+    let floor_rank = match floor {
+        None => 1,
+        Some(name) => ranked
+            .iter()
+            .find(|(held, _, designated)| held == name && !designated)
+            .map(|(_, rank, _)| *rank)
+            .or_else(|| {
+                asked
+                    .iter()
+                    .find(|(_, tier, _)| tier == name)
+                    .map(|(_, _, rank)| *rank)
+            })
+            .ok_or_else(|| {
+                not_subscribed(
+                    "the tier named is not one this subscriber holds or has asked for and may leave",
+                )
+            })?,
+    };
+    let tiers: Vec<String> = ranked
+        .into_iter()
+        .filter(|(_, rank, designated)| !designated && *rank >= floor_rank)
+        .map(|(name, _, _)| name)
+        .collect();
+    let withdrawn: Vec<(i64, String)> = asked
+        .into_iter()
+        .filter(|(_, _, rank)| *rank >= floor_rank)
+        .map(|(id, tier, _)| (id, tier))
+        .collect();
+    if tiers.is_empty() && withdrawn.is_empty() {
         return Err(not_subscribed(
             "no active subscription under this author to unsubscribe from",
         ));
     }
 
-    let mut first_queued: Option<i64> = None;
-    for tier_name in &tiers {
-        // The author's client owns the removal rotation.
-        let id = state
+    // A request not yet approved is the subscriber's own to withdraw: no
+    // roster holds them and no key was wrapped to them, so no rotation is
+    // owed and the row simply goes.
+    for (id, _) in &withdrawn {
+        state
             .db
-            .insert_subscribe_request(
-                author_id,
-                subscriber_id,
-                tier_name,
-                "unsubscribe",
-                None, // unsubscribe carries no published ek
-            )
+            .delete_subscribe_request(*id)
             .await
             .map_err(internal)?;
-        stamp_request_home(state, id, home).await?;
+    }
+
+    let mut first_queued: Option<i64> = None;
+    for tier_name in &tiers {
+        let id = enqueue_removal(state, author_id, subscriber_id, tier_name, home)
+            .await
+            .map_err(internal)?;
         first_queued.get_or_insert(id);
     }
 
-    // `tiers` is non-empty (checked above), so a row was enqueued.
-    let request_id = first_queued.ok_or_else(|| internal("unsubscribe enqueued no request"))?;
-    Ok((UnsubscribeReply::Queued { request_id }, tiers))
+    // Every tier the leave touched, withdrawn ones included, so the federated
+    // twin stamps each and no older subscribe replayed later revives one.
+    let mut touched = tiers;
+    touched.extend(withdrawn.into_iter().map(|(_, tier)| tier));
+    // Nothing held in scope: the leave was only a withdrawal, done now.
+    let reply = match first_queued {
+        Some(request_id) => UnsubscribeReply::Queued { request_id },
+        None => UnsubscribeReply::Removed,
+    };
+    Ok((reply, touched))
+}
+
+/// Queue the removal of `subscriber_id` from `author_id`'s `tier_name` for the
+/// author's client — the ONE removal path (`subscriptions.md` § The free
+/// followers tier — follow and unfollow, rule 3): a `kind='unsubscribe'`
+/// request row carrying the subscriber's `home`, which the author's drain
+/// commits through the removal rotation and `subscribers.remove` (the state
+/// leg's `removed` to a remote subscriber's home included). A leave
+/// ([`unsubscribe_core`]) and the end of a paid window
+/// (`payment_core::void_entitlement_window`; `monetization.md` § Pillar 3 →
+/// *Expiry & revocation*) both reach it. Idempotent: a removal already queued
+/// answers its own row's id. The sweep's lapse half queues the same row in one
+/// statement (`CacheDb::queue_lapsed_paid_window_removals`).
+pub(crate) async fn enqueue_removal(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    subscriber_id: &[u8; 32],
+    tier_name: &str,
+    home: Option<SubscriberHome<'_>>,
+) -> anyhow::Result<i64> {
+    let id = state
+        .db
+        .insert_subscribe_request(
+            author_id,
+            subscriber_id,
+            tier_name,
+            "unsubscribe",
+            None, // unsubscribe carries no published ek
+        )
+        .await?;
+    if let Some(home) = home {
+        state
+            .db
+            .set_subscribe_request_home(id, home.nest_id, home.url)
+            .await?;
+    }
+    Ok(id)
 }
 
 // ── requests.approve / subscribers.remove ──────────────────────
@@ -2336,6 +2512,23 @@ fn requests_approve_handler() -> RpcHandler {
                 .try_into()
                 .map_err(|_| internal("subscribe_request.subscriber_id is not 32 bytes"))?;
 
+            // A half-row is not a request (Q13 rule (3)): refused before any
+            // roster write, for a client that approves by id what
+            // `requests.list` withheld.
+            if state
+                .db
+                .subscribe_request_is_complete(req.request_id)
+                .await
+                .map_err(internal)?
+                == Some(false)
+            {
+                return Err(request_incomplete(
+                    "the payment is in but the buyer's subscribe, which names \
+                     their home nest, has not arrived; the request completes \
+                     when it does",
+                ));
+            }
+
             // Read the request's verified-payment window BEFORE the approve
             // deletes the row; a payment-entitled approval stamps it on the
             // subscribers row afterwards (monetization.md § Pillar 3 —
@@ -2399,10 +2592,15 @@ fn requests_approve_handler() -> RpcHandler {
             // tier is itself designated). Best-effort — the approve has
             // landed and must not be un-reported; a missed enqueue heals at
             // the next boot reconcile (`reconcile_unlock_fanout_requests`) or
-            // the subscriber's idempotent re-subscribe.
+            // the subscriber's idempotent re-subscribe. A subscriber homed on
+            // another nest keeps that home on every included tier's request,
+            // so its approval pushes the state leg there too.
+            let fanout_home = subscriber_home
+                .as_ref()
+                .map(|nest_id| SubscriberHome { nest_id, url: None });
             if let Err(e) = state
                 .db
-                .enqueue_unlock_fanout(&author_id, &subscriber_id, &tier_name)
+                .enqueue_unlock_fanout(&author_id, &subscriber_id, &tier_name, fanout_home)
                 .await
             {
                 tracing::error!("requests.approve: unlock fan-out enqueue({tier_name}): {e}");
@@ -5096,6 +5294,7 @@ mod tests {
             home_nest_url: None,
             intent: None,
             author_id: ActorId(author),
+            tier: None,
             extra: Default::default(),
         };
         let bytes = unsubscribe_handler()(state.clone(), subscriber, encode_req(&req))
@@ -5148,6 +5347,7 @@ mod tests {
             home_nest_url: None,
             intent: None,
             author_id: ActorId(author),
+            tier: None,
             extra: Default::default(),
         };
         let bytes = unsubscribe_handler()(state.clone(), subscriber, encode_req(&req))
@@ -5214,6 +5414,7 @@ mod tests {
             home_nest_url: None,
             intent: None,
             author_id: ActorId(author),
+            tier: None,
             extra: Default::default(),
         };
 
@@ -5268,12 +5469,244 @@ mod tests {
             home_nest_url: None,
             intent: None,
             author_id: ActorId(author),
+            tier: None,
             extra: Default::default(),
         };
         let err = unsubscribe_handler()(state, stranger, encode_req(&req))
             .await
             .expect_err("unsubscribe with no paid subscriptions must error");
         assert_eq!(err.code, "fauna.subscriptions.not_subscribed");
+    }
+
+    // ── the leave's floor (`subscriptions.md` § The free followers tier —
+    //    follow and unfollow, rule 1) ──────────────────────────────
+
+    /// The author `seed` names holds `followers` (0), `silver` (1), `gold` (2)
+    /// and a designated `unlock-p1` tier minted above them (3); `subscriber`
+    /// holds every one of them.
+    async fn seed_leave_floor_fixture(
+        state: &Arc<AppState>,
+        author: &[u8; 32],
+        subscriber: &[u8; 32],
+    ) {
+        for (name, rank, unlocks) in [
+            (FOLLOWERS_TIER, FOLLOWERS_TIER_RANK, None),
+            ("silver", 1, None),
+            ("gold", 2, None),
+            ("unlock-p1", 3, Some("p1")),
+        ] {
+            state
+                .db
+                .create_subscription_tier(
+                    author, name, rank, None, None, None, false, unlocks, None, false,
+                )
+                .await
+                .unwrap();
+            state
+                .db
+                .add_subscriber(author, subscriber, name, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Leave at `floor` through the user door; the tiers a leave row was
+    /// queued for, sorted.
+    async fn leave_at(
+        state: &Arc<AppState>,
+        author: &[u8; 32],
+        subscriber: &[u8; 32],
+        floor: Option<&str>,
+    ) -> Result<Vec<String>, RpcError> {
+        let req = UnsubscribeRequest {
+            home_nest_url: None,
+            intent: None,
+            author_id: ActorId(*author),
+            tier: floor.map(str::to_owned),
+            extra: Default::default(),
+        };
+        unsubscribe_handler()(state.clone(), *subscriber, encode_req(&req)).await?;
+        let mut left: Vec<String> = state
+            .db
+            .list_subscribe_requests(author)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == "unsubscribe")
+            .map(|r| r.tier_name)
+            .collect();
+        left.sort();
+        Ok(left)
+    }
+
+    /// No tier named: floor rank 1 — every paid tier, the follow kept, and
+    /// the bought post's tier kept too (a purchase survives any leave).
+    #[tokio::test]
+    async fn a_leave_naming_no_tier_ends_every_paid_tier_and_keeps_the_follow_and_the_purchase() {
+        let state = fixture_state().await;
+        let (author, subscriber) = (actor_from_seed(0x61), actor_from_seed(0x62));
+        seed_leave_floor_fixture(&state, &author, &subscriber).await;
+        assert_eq!(
+            leave_at(&state, &author, &subscriber, None).await.unwrap(),
+            vec!["gold", "silver"]
+        );
+    }
+
+    /// `followers` named: the unfollow — every tier held, paid ones included,
+    /// but never the designated one.
+    #[tokio::test]
+    async fn an_unfollow_ends_the_follow_and_every_paid_tier_but_not_the_purchase() {
+        let state = fixture_state().await;
+        let (author, subscriber) = (actor_from_seed(0x63), actor_from_seed(0x64));
+        seed_leave_floor_fixture(&state, &author, &subscriber).await;
+        assert_eq!(
+            leave_at(&state, &author, &subscriber, Some(FOLLOWERS_TIER))
+                .await
+                .unwrap(),
+            vec![FOLLOWERS_TIER, "gold", "silver"]
+        );
+    }
+
+    /// A paid tier named: it and every tier held above it, nothing below.
+    #[tokio::test]
+    async fn a_leave_of_a_paid_tier_ends_it_and_every_tier_above_it() {
+        let state = fixture_state().await;
+        let (author, subscriber) = (actor_from_seed(0x65), actor_from_seed(0x66));
+        seed_leave_floor_fixture(&state, &author, &subscriber).await;
+        assert_eq!(
+            leave_at(&state, &author, &subscriber, Some("silver"))
+                .await
+                .unwrap(),
+            vec!["gold", "silver"]
+        );
+        let state = fixture_state().await;
+        seed_leave_floor_fixture(&state, &author, &subscriber).await;
+        assert_eq!(
+            leave_at(&state, &author, &subscriber, Some("gold"))
+                .await
+                .unwrap(),
+            vec!["gold"]
+        );
+    }
+
+    /// A tier the subscriber does not hold, or a designated one, is no floor:
+    /// `not_subscribed`, nothing queued.
+    #[tokio::test]
+    async fn a_leave_naming_an_unheld_or_designated_tier_is_not_subscribed() {
+        let state = fixture_state().await;
+        let (author, subscriber) = (actor_from_seed(0x67), actor_from_seed(0x68));
+        seed_leave_floor_fixture(&state, &author, &subscriber).await;
+        for floor in ["platinum", "unlock-p1"] {
+            let err = leave_at(&state, &author, &subscriber, Some(floor))
+                .await
+                .expect_err("no such floor");
+            assert_eq!(err.code, "fauna.subscriptions.not_subscribed", "{floor}");
+        }
+        assert!(
+            state
+                .db
+                .list_subscribe_requests(&author)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The pending window (`subscriptions.md` § The free followers tier —
+    /// follow and unfollow, rule 4): a follow asked but not yet approved reads
+    /// *Following*, and its press withdraws the request — `Removed`, no row
+    /// left, no leave queued, and `status.get` back to no follow.
+    #[tokio::test]
+    async fn an_unfollow_of_a_pending_follow_withdraws_the_request() {
+        let state = fixture_state().await;
+        let (author, subscriber) = (actor_from_seed(0x69), actor_from_seed(0x6A));
+        state
+            .db
+            .create_subscription_tier(
+                &author,
+                FOLLOWERS_TIER,
+                FOLLOWERS_TIER_RANK,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .insert_subscribe_request(&author, &subscriber, FOLLOWERS_TIER, "subscribe", None)
+            .await
+            .unwrap();
+        let req = UnsubscribeRequest {
+            home_nest_url: None,
+            intent: None,
+            author_id: ActorId(author),
+            tier: Some(FOLLOWERS_TIER.into()),
+            extra: Default::default(),
+        };
+        let reply = unsubscribe_handler()(state.clone(), subscriber, encode_req(&req))
+            .await
+            .expect("a pending follow is withdrawn, not refused");
+        let reply: UnsubscribeReply = decode_reply(&reply);
+        assert_eq!(reply, UnsubscribeReply::Removed);
+        assert!(
+            state
+                .db
+                .list_subscribe_requests(&author)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the subscribe request is gone and no leave is queued"
+        );
+        assert!(
+            !state
+                .db
+                .has_pending_subscribe_request(&author, &subscriber, FOLLOWERS_TIER)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// A leave also withdraws what is asked at or above its floor: an
+    /// unfollow with a paid tier still pending leaves no request behind that
+    /// the author could later approve back into a follow by the cascade.
+    #[tokio::test]
+    async fn an_unfollow_withdraws_a_pending_request_above_the_floor_too() {
+        let state = fixture_state().await;
+        let (author, subscriber) = (actor_from_seed(0x6B), actor_from_seed(0x6C));
+        seed_leave_floor_fixture(&state, &author, &subscriber).await;
+        state
+            .db
+            .create_subscription_tier(
+                &author, "platinum", 4, None, None, None, false, None, None, false,
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .insert_subscribe_request(&author, &subscriber, "platinum", "subscribe", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            leave_at(&state, &author, &subscriber, Some(FOLLOWERS_TIER))
+                .await
+                .unwrap(),
+            vec![FOLLOWERS_TIER, "gold", "silver"]
+        );
+        assert!(
+            !state
+                .db
+                .list_subscribe_requests(&author)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.kind == "subscribe"),
+            "the pending platinum subscribe is withdrawn"
+        );
     }
 
     // ── requests.approve / subscribers.remove ──────────────────

@@ -7,7 +7,8 @@ import SwiftUI
 /// Shared by macOS (`MacAppState.LaunchGate.retrying`) and iOS
 /// (`AppState.launchRetryError`: a launch whose optimistic entry did not enter,
 /// or an entered session left by `LostNestOffer`) per priority #2. Elements per `ui.yaml`
-/// `onboarding.launch_retry`: the error sentence in `launch-transient-error`,
+/// `onboarding.launch_retry`: the cached identity in `launch-identity-label`
+/// (absent while the cache holds no handle), the error sentence in `launch-transient-error`,
 /// Retry, "Use a different nest", *Retire a server* (always shown —
 /// `nest-retirement.md` § Layout & flow — when the host passes `onRetire`; the
 /// Fauna Kids build compiles nest setup out and passes `nil`), and the
@@ -23,6 +24,9 @@ public struct LaunchRetryView: View {
     private let onRecover: ([String]) -> Void
     private let onRetire: (() -> Void)?
 
+    /// `launch-identity-label`: the bound account's cached identity
+    /// (`FaunaAccounts.launchIdentityLine`); `nil` → absent.
+    @State private var identityLine: String? = FaunaAccounts.launchIdentityLine()
     /// The custodied boxes the launch-time read found.
     @State private var recoverableBoxes: [String] = []
     /// This instance's claim on the error slot (`AppMessages.bannerAppeared`).
@@ -46,6 +50,9 @@ public struct LaunchRetryView: View {
 
     public var body: some View {
         VStack(spacing: 16) {
+            if let identityLine {
+                LaunchIdentityLabel(line: identityLine)
+            }
             #if os(macOS)
             Text(L.launch.retryTitle)
                 .font(.title3)
@@ -80,11 +87,15 @@ public struct LaunchRetryView: View {
                     .accessibilityIdentifier(Ids.launchRecoverButton)
                     .automationActivate(Ids.launchRecoverButton) { onRecover(recoverableBoxes) }
             }
+            #if !FAUNA_KIDS
+            // Nest retirement is excised from the kids build (its id sits in the
+            // kids-gated `Ids` extension).
             if let onRetire {
                 Button(L.onboarding.launch.retireServer) { onRetire() }
                     .accessibilityIdentifier(Ids.launchRetireButton)
                     .automationActivate(Ids.launchRetireButton) { onRetire() }
             }
+            #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()

@@ -40,6 +40,22 @@ struct MacStatusView: View {
                                 }
                             }
                         }
+                        // The identity cell (`settings.md` § Layout & flow item 1),
+                        // beside the actor id, off the registry's server-data cache
+                        // (never the quota reply): the bare values carry the ids, the
+                        // shared `common.*` labels sit beside them. Absent while the
+                        // cache holds no handle.
+                        if let cell = appState.session.identityCell {
+                            LabeledContent(L.common.handle) {
+                                automationText(Ids.settingsHandleLabel, cell.handle)
+                                    .textSelection(.enabled)
+                            }
+                            if let tier = cell.tier {
+                                LabeledContent(L.common.tier) {
+                                    automationText(Ids.settingsTierLabel, tier)
+                                }
+                            }
+                        }
                         if let nodeUrl = appState.session.nodeUrl {
                             LabeledContent("\(L.status.node.title):") {
                                 HStack(spacing: 4) {
@@ -61,7 +77,6 @@ struct MacStatusView: View {
                 if let quota = vm.quota {
                     GroupBox(L.status.quota.title) {
                         VStack(alignment: .leading, spacing: 8) {
-                            LabeledContent(L.common.tier) { Text(quota.tier) }
                             QuotaBar(label: L.common.inbox,
                                      used: quota.inbox.usedBytes,
                                      max: quota.inbox.maxBytes)

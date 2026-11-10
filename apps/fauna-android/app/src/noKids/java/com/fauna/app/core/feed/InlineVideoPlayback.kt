@@ -56,14 +56,6 @@ object InlineVideoPlayback {
 
     val ffiReaderOpener = ReaderOpener { nestUrl, path -> FfiRangedNestReader.open(nestUrl, path) }
 
-    /** The block a post's `video-thumbnail` plays: its `Video` by hash, else a bridged
-     *  post's `ProxiedVideo` by path (render-model.md § D6b, § D6c → *Proxied video*). */
-    fun videoBlock(hash: String?, proxiedPath: String?): RenderBlock? = when {
-        hash != null -> RenderBlock.Video(hash = hash, alt = "")
-        proxiedPath != null -> RenderBlock.ProxiedVideo(path = proxiedPath, alt = "")
-        else -> null
-    }
-
     /**
      * Resolve what [block] plays. `null` when nothing does: the projection named it
      * unplayable, the reader could not open (an unreachable nest, a refused cert), or

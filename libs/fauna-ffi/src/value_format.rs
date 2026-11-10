@@ -591,12 +591,28 @@ pub fn contact_toggle_block_label(is_blocked: bool) -> LocalizedText {
 /// the `profile-follow-button`: already following → `profile.following`, else
 /// `profile.follow`. Lifts the bool→2-key map the apps hand-rolled divergently
 /// (web/android ternary, linux/windows on-success flip, apple always-"Follow") onto
-/// one source of truth (priority #2/#4); the `is_following` derivation and the
-/// followers-tier constant stay per-app by ratified decision. See profile.md
-/// § Element table → `profile-follow-button`.
+/// one source of truth (priority #2/#4); the bool comes from [`is_following`]. See
+/// profile.md § Element table → `profile-follow-button`.
 #[uniffi::export]
 pub fn follow_toggle_label(is_following: bool) -> LocalizedText {
     fauna_core::format::follow_toggle_label(is_following)
+}
+
+/// `fauna_core::format::is_following` → whether the viewer follows the author, from
+/// the `status.get` reply's `tier` and `follow_pending` (following ⇔ a tier is named
+/// or a follow is pending; `subscriptions.md` § The free followers tier — follow and
+/// unfollow, rule 4). Feeds [`follow_toggle_label`].
+#[uniffi::export]
+pub fn is_following(tier: Option<String>, follow_pending: bool) -> bool {
+    fauna_core::format::is_following(tier.as_deref(), follow_pending)
+}
+
+/// `fauna_core::format::unfollow_ends_paid_tier` → whether a press on *Following*
+/// is confirm-gated: the status names a paid tier, which the unfollow ends too
+/// (`subscriptions.md` § The free followers tier — follow and unfollow, rule 4).
+#[uniffi::export]
+pub fn unfollow_ends_paid_tier(tier: Option<String>) -> bool {
+    fauna_core::format::unfollow_ends_paid_tier(tier.as_deref())
 }
 
 /// `fauna_core::format::contact_row_blocks_actor` → does this contact roster row mean

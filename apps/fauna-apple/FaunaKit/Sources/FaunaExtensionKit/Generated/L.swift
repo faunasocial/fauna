@@ -1684,6 +1684,12 @@ public enum L {
 
         public static let reportPost = "Report post"
 
+        public static let markAsSpam = "Mark as spam"
+
+        public static func errorMarkSpam(message: String) -> String {
+            "Could not mark the post as spam: \(message)"
+        }
+
         public static func errorMutedKeywords(message: String) -> String {
             "Your muted words are not being applied: \(message)"
         }
@@ -1777,6 +1783,8 @@ public enum L {
 
             public static let factorSkip = "Skipped past"
 
+            public static let factorReportedSpam = "Reported as spam"
+
             public static let factorWeightPlaceholder = "1.0"
 
             public static let factorGlobalToggle = "Apply to all feeds"
@@ -1802,6 +1810,10 @@ public enum L {
             public static let whatsOnYourMind = "What's on your mind?"
 
             public static let hasMedia = "[media]"
+
+            public static let imageAltFallback = "Picture"
+
+            public static let videoAltFallback = "Video"
 
             public static let viewThread = "View Thread"
 
@@ -2061,8 +2073,14 @@ public enum L {
                 "their undelivered earlier invitation was removed first, so they are no longer in the group — adding them again starts cleanly. The re-invitation failed: \(reason)"
             }
 
+            public static let errorAddParticipantUnconfirmed = "they are already in this group, but whether their invitation reached them cannot be confirmed right now. If they never received it, remove them from the group and add them again."
+
             public static func errorRemoveParticipant(message: String) -> String {
                 "Could not remove them from this conversation: \(message)"
+            }
+
+            public static func errorRemoveParticipantUnsevered(name: String) -> String {
+                "\(name) is out of this room, but the room's key has not been changed yet, so they can still read new messages until the next owner's or admin's app finishes the removal. Nothing for you to do."
             }
 
             public static func errorRenameThread(message: String) -> String {
@@ -2071,6 +2089,14 @@ public enum L {
 
             public static func errorLeaveRoom(message: String) -> String {
                 "Could not leave this conversation: \(message)"
+            }
+
+            public static func errorRemoveMessage(message: String) -> String {
+                "Could not remove this message from your nest: \(message)"
+            }
+
+            public static func errorRemoveThread(message: String) -> String {
+                "Could not remove this conversation from your nest: \(message)"
             }
 
             public static func errorSetRoomPolicy(message: String) -> String {
@@ -3479,6 +3505,8 @@ public enum L {
         }
 
         public static let errorFollowedReadOnly = "You follow this folder — it's read-only here. Switch to one of your own folders to upload."
+
+        public static let errorForeignRemoved = "You no longer have access to this shared folder. Its owner may have removed you, or stopped sharing it."
 
         public static let errorMetadataOnlyFolder = "This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it."
 
@@ -4996,6 +5024,10 @@ public enum L {
             "Shared by \(who)"
         }
 
+        public static func sharedByOwnerChanged(who: String) -> String {
+            "Shared by \(who) · owner changed, ask them to share it again"
+        }
+
         public static func errorAcceptShare(message: String) -> String {
             "Failed to accept share: \(message)"
         }
@@ -5093,6 +5125,12 @@ public enum L {
 
             public static func createMemberError(message: String) -> String {
                 "Folder created, but some devices could not be enrolled: \(message)"
+            }
+
+            public static let reviewAudience = "Who can see it"
+
+            public static func createAttestError(message: String) -> String {
+                "Folder created, but making it public did not finish: \(message). Choose Public again on the folder to finish."
             }
 
             public static let noDevicesAvailable = "No devices available. Register a device first."
@@ -5875,6 +5913,18 @@ public enum L {
                 "Delete snapshot \(snapshot)"
             }
 
+            public static func pruneVersionsIn(folder: String) -> String {
+                "Remove old versions in \(folder)"
+            }
+
+            public static let pruneVersions = "Remove old versions in a folder"
+
+            public static func pruneSnapshotsOf(folder: String) -> String {
+                "Remove old snapshots of \(folder)"
+            }
+
+            public static let pruneSnapshots = "Remove old snapshots of a folder"
+
             public static func adminDeleteUser(target: String) -> String {
                 "Delete the account \(target)"
             }
@@ -5889,6 +5939,68 @@ public enum L {
 
             public static func adminChangeRole(target: String) -> String {
                 "Change the admin role of \(target)"
+            }
+        }
+
+        public enum unsentChanges {
+            public static let kindLike = "Like on a post"
+
+            public static let kindUnlike = "Removed like on a post"
+
+            public static let kindPostInteraction = "Interaction on a post"
+
+            public static func kindMessage(excerpt: String) -> String {
+                "Message: \(excerpt)"
+            }
+
+            public static let kindApprovalApprove = "Approval of a request"
+
+            public static let kindApprovalDeny = "Refusal of a request"
+
+            public static let kindContactPreApprove = "Pre-approved contact"
+
+            public static func kindEmailFilterCreate(name: String) -> String {
+                "New email filter: \(name)"
+            }
+
+            public static func kindBridgeFollowAdd(account: String) -> String {
+                "Follow: \(account)"
+            }
+
+            public static func kindBridgeFollowRemove(account: String) -> String {
+                "Unfollow: \(account)"
+            }
+
+            public static let kindKnockAccept = "Accepted contact request"
+
+            public static func kindKnockSend(recipient: String) -> String {
+                "Contact request: \(recipient)"
+            }
+
+            public static let kindAbuseReport = "Report to the admins"
+
+            public static func kindOther(kind: String) -> String {
+                "\(kind)"
+            }
+
+            public static let stateWaiting = "Waiting to send"
+
+            public static let stateHeld = "Waiting behind a change that was not sent"
+
+            public static let stateUnsent = "Not sent"
+
+            public static let reasonUnknownKind = "This version of the app cannot send this change"
+
+            public static let reasonUndecodable = "This change could not be read"
+
+            public static let reasonMlsNoChannel = "The conversation could not be found"
+
+            public static let reasonMlsNotAMember = "You are no longer a member of this conversation"
+
+            public static let reasonMlsSendFailed = "The message could not be sent"
+
+            public static func reasonFallback(code: String) -> String {
+                "Your nest refused this change (\(code))"
             }
         }
 
@@ -6299,6 +6411,8 @@ public enum L {
         public static let scopeMail = "Mail — and the spam-filter model and training history derived from it"
 
         public static let scopeCalendar = "Calendar"
+
+        public static let scopeCard = "Contacts"
 
         public static let scopePosts = "Posts"
 
@@ -9679,11 +9793,19 @@ public enum L {
                 "Report sent to the admins of \(nest) and forwarded, without your name, to the admins of \(homeNest)."
             }
 
+            public static let queued = "Report saved. It will be sent when you are back online."
+
+            public static let blockNotSent = "The block was not sent because you are offline. Block this person again once you are back online."
+
             public static func failed(error: String) -> String {
                 "The report could not be sent: \(error)"
             }
 
             public static let hiddenPlaceholder = "You reported this"
+
+            public static let showAgainItem = "Show it again"
+
+            public static let showAgainAccount = "Show this account again"
 
             public static let ledgerTitle = "Your reports"
 
@@ -10714,6 +10836,8 @@ public enum L {
 
         public static let follow = "Follow"
 
+        public static let unfollowConfirm = "Unfollow and end your paid subscription?"
+
         public static let copyId = "Copy ID"
 
         public static let startDm = "Message"
@@ -10872,6 +10996,10 @@ public enum L {
 
         public static let webhookSecret = "Webhook secret"
 
+        public static let productLabel = "Payment Link (optional)"
+
+        public static let productHint = "Only payments through this link grant the tier. Leave empty to grant it for every payment on the account."
+
         public static let webhookUrlLabel = "Webhook URL:"
 
         public static let returnUrlLabel = "Return URL:"
@@ -10883,6 +11011,14 @@ public enum L {
         public static let claimCode = "Claim code"
 
         public static let redeem = "Redeem"
+
+        public static func claimDeliveryDm(code: String) -> String {
+            "Thank you for your purchase. Your claim code is \(code). To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
+        }
+
+        public static func claimDeliveryDmLink(code: String, url: String) -> String {
+            "Thank you for your purchase. Your claim code is \(code). Enter it at \(url) to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
+        }
 
         public static let offerStatusNone = "Not subscribed"
 
@@ -11056,6 +11192,8 @@ public enum L {
             public static let forbidden = "This person isn't accepting new conversations right now. You can send them a contact request instead."
 
             public static let rateLimited = "This is happening too quickly. Please wait a moment and try again."
+
+            public static let inviteeInboxFull = "This person's inbox is full, so the invitation couldn't be delivered. Try again later."
         }
 
         public enum profile {
@@ -11132,6 +11270,10 @@ public enum L {
             public static let noRelaysConfigured = "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first."
 
             public static let repliesOff = "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page."
+
+            public static let notSold = "Only a post you sell can be advertised on Nostr. Sell this post first."
+
+            public static let noAskingPrice = "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it."
         }
 
         public enum nest {
@@ -11210,6 +11352,8 @@ public enum L {
             public static let roomOwnerCannotLeave = "Hand the room over to someone else before you leave — a room always has an owner."
 
             public static let roomLeaveFailed = "Leaving this room did not go through. Try again."
+
+            public static let roomAwaitingKey = "You can't send in this room until an owner or admin keys you in."
 
             public static let attachmentUploadForeignFailed = "The attachment couldn't be uploaded to this conversation's home server. Try sending it again."
 
@@ -11317,6 +11461,8 @@ public enum L {
         public static let recoveryPriorKitRequired = "A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead."
 
         public static let recoveryPriorKitMismatch = "That kit does not match the one currently registered for this identity."
+
+        public static let recoveryKitForAnotherAccount = "That recovery kit belongs to a different account, not this one. Nothing was changed."
 
         public static func recoveryPriorEscrowUnreadable(reason: String) -> String {
             "Your existing recovery data could not be read (\(reason)), so replacing it now would destroy it. Try again from a device and connection that can read it."
@@ -11793,6 +11939,8 @@ public enum L {
         public static let signerRevoked = "Access revoked — connect this signer app again with a new connection"
 
         public static let paused = "Paused — turn Allow external apps back on to let this app work again"
+
+        public static let pausedSuspended = "Paused — turn Bluesky back on, then sign in to this app again"
 
         public static func created(time: String) -> String {
             "Added \(time)"
@@ -13578,6 +13726,7 @@ private enum _LFlat {
         "connected_apps.oracle_requests_one": "1 request answered in all",
         "connected_apps.oracle_summary": "{ops} · {requests}",
         "connected_apps.paused": "Paused — turn Allow external apps back on to let this app work again",
+        "connected_apps.paused_suspended": "Paused — turn Bluesky back on, then sign in to this app again",
         "connected_apps.publisher": "From {domain}",
         "connected_apps.publisher_line": "{publisher} — {client_id}",
         "connected_apps.requests_heading": "Requests",
@@ -13709,9 +13858,13 @@ private enum _LFlat {
         "conversations.unified.dm_message_warmup_queue_one": "1 message ahead in the queue.",
         "conversations.unified.error_add_participant": "Could not add them to this conversation: {message}",
         "conversations.unified.error_add_participant_after_heal": "their undelivered earlier invitation was removed first, so they are no longer in the group — adding them again starts cleanly. The re-invitation failed: {reason}",
+        "conversations.unified.error_add_participant_unconfirmed": "they are already in this group, but whether their invitation reached them cannot be confirmed right now. If they never received it, remove them from the group and add them again.",
         "conversations.unified.error_attachment_no_composer": "Open a message composer before attaching a file.",
         "conversations.unified.error_leave_room": "Could not leave this conversation: {message}",
+        "conversations.unified.error_remove_message": "Could not remove this message from your nest: {message}",
         "conversations.unified.error_remove_participant": "Could not remove them from this conversation: {message}",
+        "conversations.unified.error_remove_participant_unsevered": "{name} is out of this room, but the room's key has not been changed yet, so they can still read new messages until the next owner's or admin's app finishes the removal. Nothing for you to do.",
+        "conversations.unified.error_remove_thread": "Could not remove this conversation from your nest: {message}",
         "conversations.unified.error_rename_thread": "Could not rename this conversation: {message}",
         "conversations.unified.error_room_invitation": "Could not answer this invitation: {message}",
         "conversations.unified.error_room_search": "Could not search this room: {message}",
@@ -14069,6 +14222,7 @@ private enum _LFlat {
         "devices.share_button": "Share…",
         "devices.shared_badge": "Shared · {count}",
         "devices.shared_by": "Shared by {who}",
+        "devices.shared_by_owner_changed": "Shared by {who} · owner changed, ask them to share it again",
         "devices.shared_with": "Shared with",
         "devices.shared_with_you": "Shared with you",
         "devices.show_on_demand_files": "Show in Files",
@@ -14104,6 +14258,7 @@ private enum _LFlat {
         "devices.version_retention_days": "Keep versions for at most (days)",
         "devices.wizard.back": "Back",
         "devices.wizard.create": "Create",
+        "devices.wizard.create_attest_error": "Folder created, but making it public did not finish: {message}. Choose Public again on the folder to finish.",
         "devices.wizard.create_error": "Failed to create folder: {message}",
         "devices.wizard.create_member_error": "Folder created, but some devices could not be enrolled: {message}",
         "devices.wizard.creating_folder": "Creating folder...",
@@ -14124,6 +14279,7 @@ private enum _LFlat {
         "devices.wizard.retention_snapshots": "Keep snapshots",
         "devices.wizard.retention_summary": "{snapshots} snapshots, {days} days",
         "devices.wizard.review": "Review",
+        "devices.wizard.review_audience": "Who can see it",
         "devices.wizard.review_devices": "Devices",
         "devices.wizard.review_name": "Name",
         "devices.wizard.review_no_devices": "None selected",
@@ -14157,6 +14313,7 @@ private enum _LFlat {
         "error.bridges.sender_not_owned": "The From address isn't one of yours. Send from your own address or one of your aliases.",
         "error.bridges.submitter_not_proven": "Your mail app's sign-in couldn't be verified. Sign in again with a current app password, then resend.",
         "error.conversations.forbidden": "This person isn't accepting new conversations right now. You can send them a contact request instead.",
+        "error.conversations.invitee_inbox_full": "This person's inbox is full, so the invitation couldn't be delivered. Try again later.",
         "error.conversations.rate_limited": "This is happening too quickly. Please wait a moment and try again.",
         "error.email.no_handle": "You need to set a handle for your account before you can send email.",
         "error.email.permission_denied": "You can only send email from your own address. Check the account you are sending from.",
@@ -14171,9 +14328,11 @@ private enum _LFlat {
         "error.folders.residency_blocked_by_website": "This folder is served as a website, which needs its content on the nest. Turn off website serving first, then choose Metadata only.",
         "error.nest.outdated": "This nest is running an outdated version and must be updated before you can connect.",
         "error.nest.schema_mismatch": "This nest's database does not match its software version and must be updated.",
+        "error.nostr.no_asking_price": "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.",
         "error.nostr.no_custodial_key": "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.",
         "error.nostr.no_relays_configured": "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.",
         "error.nostr.not_linked": "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.",
+        "error.nostr.not_sold": "Only a post you sell can be advertised on Nostr. Sell this post first.",
         "error.nostr.replies_off": "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.",
         "error.profile.handle_cooldown": "That handle was released recently and can't be taken yet. Choose a different one, or try again later.",
         "error.profile.handle_taken": "That handle already belongs to someone else on your nest. Choose a different one.",
@@ -14193,6 +14352,7 @@ private enum _LFlat {
         "error.send.no_recipients": "There are no recipients to send this message to.",
         "error.send.not_supported": "This action is not available for this conversation.",
         "error.send.room_admins_owner_only": "Only the room's owner can appoint or demote admins.",
+        "error.send.room_awaiting_key": "You can't send in this room until an owner or admin keys you in.",
         "error.send.room_invite_not_permitted": "Only the room's owner and admins can invite people to this room.",
         "error.send.room_leave_failed": "Leaving this room did not go through. Try again.",
         "error.send.room_owner_cannot_leave": "Hand the room over to someone else before you leave — a room always has an owner.",
@@ -14230,6 +14390,7 @@ private enum _LFlat {
         "errors.recovery_group_ceremony": "Updating your groups failed: {detail}",
         "errors.recovery_identity_unreadable": "This session's identity secret is unreadable: {detail}",
         "errors.recovery_invalid_nonce": "That recovery request has expired or was already used. Please try again.",
+        "errors.recovery_kit_for_another_account": "That recovery kit belongs to a different account, not this one. Nothing was changed.",
         "errors.recovery_kit_not_current": "This is not your most recently created recovery kit. Enter your newest kit instead.",
         "errors.recovery_malformed": "The nest sent back something unexpected: {detail}",
         "errors.recovery_no_escrow": "The copy of your secret key that only this recovery kit opens is not stored, so the kit cannot recover this account right now.",
@@ -14563,6 +14724,7 @@ private enum _LFlat {
         "feed.create.combination": "Combination",
         "feed.create.factor_engagement": "Engagement",
         "feed.create.factor_global_toggle": "Apply to all feeds",
+        "feed.create.factor_reported_spam": "Reported as spam",
         "feed.create.factor_skip": "Skipped past",
         "feed.create.factor_trending": "Trending",
         "feed.create.factor_watch_complete": "Watched to the end",
@@ -14590,6 +14752,7 @@ private enum _LFlat {
         "feed.error_feeds": "Failed to load feeds: {message}",
         "feed.error_gated_unlock": "Could not unseal this post: {message}",
         "feed.error_load": "Failed to load posts: {message}",
+        "feed.error_mark_spam": "Could not mark the post as spam: {message}",
         "feed.error_muted_keywords": "Your muted words are not being applied: {message}",
         "feed.error_submit": "Failed to post: {message}",
         "feed.error_subscribe": "Failed to subscribe: {message}",
@@ -14611,6 +14774,7 @@ private enum _LFlat {
         "feed.list.title": "Feeds",
         "feed.list.trending": "Trending",
         "feed.list.unsubscribe": "Unsubscribe",
+        "feed.mark_as_spam": "Mark as spam",
         "feed.more_like_this": "More like this",
         "feed.post.add_comment": "Add your comment...",
         "feed.post.attach_image": "Attach Image",
@@ -14627,6 +14791,7 @@ private enum _LFlat {
         "feed.post.gated_badge_room_tooltip": "Room members only: {room}",
         "feed.post.gated_badge_tooltip": "Subscribers only: {tier}",
         "feed.post.has_media": "[media]",
+        "feed.post.image_alt_fallback": "Picture",
         "feed.post.no_bridge_feeds": "No bridge feeds available.",
         "feed.post.no_feeds_configured": "No feeds configured.",
         "feed.post.no_thread_data": "No thread data",
@@ -14649,6 +14814,7 @@ private enum _LFlat {
         "feed.post.sell_subscribers_free": "Subscribers get it free",
         "feed.post.tags_placeholder": "Tags (comma-separated)",
         "feed.post.thread": "Thread",
+        "feed.post.video_alt_fallback": "Video",
         "feed.post.view_thread": "View Thread",
         "feed.post.whats_on_your_mind": "What's on your mind?",
         "feed.post.write_post": "Write a post...",
@@ -15121,6 +15287,7 @@ private enum _LFlat {
         "media.error_followed_fetch": "Couldn't read that followed folder: {message}",
         "media.error_followed_read_only": "You follow this folder — it's read-only here. Switch to one of your own folders to upload.",
         "media.error_followed_unavailable": "This folder is no longer shared publicly. Its owner may have stopped sharing it, or removed it.",
+        "media.error_foreign_removed": "You no longer have access to this shared folder. Its owner may have removed you, or stopped sharing it.",
         "media.error_metadata_only_folder": "This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it.",
         "media.error_no_set": "You don't have a folder to upload into yet. Create a folder under Settings → Folders first.",
         "media.error_read_only_shared_folder": "This folder was shared with you to read, not to add to. Ask its owner for write access, or pick one of your own folders.",
@@ -15225,6 +15392,7 @@ private enum _LFlat {
         "moderation.phishing_hint": "Content scoring above this threshold is flagged as phishing.",
         "moderation.queue.issued_by": "decided by {nest}",
         "moderation.report.block_author_label": "Also block this person",
+        "moderation.report.block_not_sent": "The block was not sent because you are offline. Block this person again once you are back online.",
         "moderation.report.blocked_no_reason": "Choose a reason before sending the report.",
         "moderation.report.blocked_note_too_long": "The note is too long. Shorten it before sending the report.",
         "moderation.report.cancel": "Cancel",
@@ -15238,6 +15406,7 @@ private enum _LFlat {
         "moderation.report.note_label": "Anything the admins should know? (optional)",
         "moderation.report.outcome_acted": "Acted on",
         "moderation.report.outcome_dismissed": "Dismissed",
+        "moderation.report.queued": "Report saved. It will be sent when you are back online.",
         "moderation.report.reason.harassment": "Harassment",
         "moderation.report.reason.hate": "Hateful content",
         "moderation.report.reason.illegal": "Illegal content",
@@ -15249,6 +15418,8 @@ private enum _LFlat {
         "moderation.report.reason_label": "Why are you reporting this?",
         "moderation.report.sent_forwarded": "Report sent to the admins of {nest} and forwarded, without your name, to the admins of {home_nest}.",
         "moderation.report.sent_local": "Report sent to the admins of {nest}.",
+        "moderation.report.show_again_account": "Show this account again",
+        "moderation.report.show_again_item": "Show it again",
         "moderation.report.status_open": "Open",
         "moderation.report.status_resolved": "Resolved",
         "moderation.report.status_withdrawn": "Withdrawn",
@@ -15368,6 +15539,7 @@ private enum _LFlat {
         "nests.renew": "Renew",
         "nests.revoke": "Revoke",
         "nests.scope_calendar": "Calendar",
+        "nests.scope_card": "Contacts",
         "nests.scope_folder": "Your folder \"{folder}\"",
         "nests.scope_folder_deleted": "A folder you have since deleted",
         "nests.scope_labeler_labels": "Write labels for community labeler {labeler}",
@@ -16020,6 +16192,7 @@ private enum _LFlat {
         "profile.tiers": "Tiers",
         "profile.title": "Profile",
         "profile.unblock": "Unblock",
+        "profile.unfollow_confirm": "Unfollow and end your paid subscription?",
         "provisioning.bundled.account": "Account",
         "provisioning.bundled.base_url": "Provider address (https://…)",
         "provisioning.bundled.help": "One company that registers your domain, hosts its DNS and rents you the server — you sign up and pay once, there. Paste the address the company gave you, then sign in; it must implement the open Fauna Bundled Provider API (the link above).",
@@ -16425,6 +16598,10 @@ private enum _LFlat {
         "settings.pending_actions.delete_account": "Delete this account",
         "settings.pending_actions.delete_snapshot": "Delete snapshot {snapshot}",
         "settings.pending_actions.none_scheduled": "Nothing is scheduled.",
+        "settings.pending_actions.prune_snapshots": "Remove old snapshots of a folder",
+        "settings.pending_actions.prune_snapshots_of": "Remove old snapshots of {folder}",
+        "settings.pending_actions.prune_versions": "Remove old versions in a folder",
+        "settings.pending_actions.prune_versions_in": "Remove old versions in {folder}",
         "settings.pending_actions.title": "Pending actions",
         "settings.pending_actions.title_count": "Pending actions ({count})",
         "settings.privacy": "Privacy",
@@ -16587,6 +16764,29 @@ private enum _LFlat {
         "settings.sync_page.title": "Sync Settings",
         "settings.terms_link": "Terms and content guidelines",
         "settings.title": "Settings",
+        "settings.unsent_changes.kind_abuse_report": "Report to the admins",
+        "settings.unsent_changes.kind_approval_approve": "Approval of a request",
+        "settings.unsent_changes.kind_approval_deny": "Refusal of a request",
+        "settings.unsent_changes.kind_bridge_follow_add": "Follow: {account}",
+        "settings.unsent_changes.kind_bridge_follow_remove": "Unfollow: {account}",
+        "settings.unsent_changes.kind_contact_pre_approve": "Pre-approved contact",
+        "settings.unsent_changes.kind_email_filter_create": "New email filter: {name}",
+        "settings.unsent_changes.kind_knock_accept": "Accepted contact request",
+        "settings.unsent_changes.kind_knock_send": "Contact request: {recipient}",
+        "settings.unsent_changes.kind_like": "Like on a post",
+        "settings.unsent_changes.kind_message": "Message: {excerpt}",
+        "settings.unsent_changes.kind_other": "{kind}",
+        "settings.unsent_changes.kind_post_interaction": "Interaction on a post",
+        "settings.unsent_changes.kind_unlike": "Removed like on a post",
+        "settings.unsent_changes.reason_fallback": "Your nest refused this change ({code})",
+        "settings.unsent_changes.reason_mls_no_channel": "The conversation could not be found",
+        "settings.unsent_changes.reason_mls_not_a_member": "You are no longer a member of this conversation",
+        "settings.unsent_changes.reason_mls_send_failed": "The message could not be sent",
+        "settings.unsent_changes.reason_undecodable": "This change could not be read",
+        "settings.unsent_changes.reason_unknown_kind": "This version of the app cannot send this change",
+        "settings.unsent_changes.state_held": "Waiting behind a change that was not sent",
+        "settings.unsent_changes.state_unsent": "Not sent",
+        "settings.unsent_changes.state_waiting": "Waiting to send",
         "settings.up_to_date": "Up to date",
         "settings.update_available_notice": "Version {version} is available. Get it at {url}",
         "settings.update_button": "Update",
@@ -16733,6 +16933,8 @@ private enum _LFlat {
         "subscriptions.auto_approve": "Auto-approve",
         "subscriptions.cancel": "Cancel",
         "subscriptions.claim_code": "Claim code",
+        "subscriptions.claim_delivery_dm": "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.",
+        "subscriptions.claim_delivery_dm_link": "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.",
         "subscriptions.claim_status_redeemed": "Redeemed",
         "subscriptions.claim_status_unredeemed": "Unredeemed",
         "subscriptions.claim_status_voided": "Voided",
@@ -16760,6 +16962,8 @@ private enum _LFlat {
         "subscriptions.payment_url": "Payment Link",
         "subscriptions.pending_requests": "Pending Requests",
         "subscriptions.price_hint": "Price",
+        "subscriptions.product_hint": "Only payments through this link grant the tier. Leave empty to grant it for every payment on the account.",
+        "subscriptions.product_label": "Payment Link (optional)",
         "subscriptions.provider_kind_label": "Provider:",
         "subscriptions.provider_status_configured": "Configured",
         "subscriptions.provider_status_error": "Error",

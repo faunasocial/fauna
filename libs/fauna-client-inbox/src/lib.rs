@@ -640,6 +640,10 @@ pub struct PendingRoomInvite {
     /// the invitee's nest bound from the delivering connection's verified
     /// identity, and what the relayed accept is aimed at; `None` same-nest.
     pub room_node: Option<String>,
+    /// That home's verified identity, stamped by the invitee's nest beside
+    /// [`Self::room_node`] (`RoomInviteInbox::home_nest_actor_id`); `None`
+    /// same-nest.
+    pub home_nest_actor_id: Option<String>,
 }
 
 /// Peek the caller's durable inbox and return every staged room invitation — a
@@ -700,6 +704,7 @@ fn collect_room_invites(
             inbox_id: item.id,
             signed_invite: invite.signed_invite,
             room_node: invite.room_node,
+            home_nest_actor_id: invite.home_nest_actor_id,
         });
     }
 }
@@ -1184,6 +1189,7 @@ mod tests {
         InboxEnvelope::room_invite(&fauna_protocol::inbox::RoomInviteInbox {
             signed_invite: signed.to_vec(),
             room_node: node.map(str::to_string),
+            home_nest_actor_id: node.map(|_| "ab".repeat(32)),
             extra: Default::default(),
         })
         .unwrap()
@@ -1257,11 +1263,13 @@ mod tests {
                     inbox_id: 2,
                     signed_invite: vec![0x01, 0x02],
                     room_node: None,
+                    home_nest_actor_id: None,
                 },
                 PendingRoomInvite {
                     inbox_id: 9,
                     signed_invite: vec![0x03],
                     room_node: Some("https://other.example".into()),
+                    home_nest_actor_id: Some("ab".repeat(32)),
                 },
             ]
         );
@@ -1301,6 +1309,7 @@ mod tests {
                 inbox_id: 51,
                 signed_invite: vec![0xff],
                 room_node: None,
+                home_nest_actor_id: None,
             }],
             "an invitation behind a page of residue is still discoverable"
         );

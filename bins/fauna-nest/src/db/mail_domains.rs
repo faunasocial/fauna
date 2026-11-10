@@ -247,6 +247,13 @@ pub struct MailDomainUpdate {
     /// `None` ⇒ leave untouched. Never written to SQL NULL by the flip (the
     /// NULL→"default" projection default is an add-time concern).
     pub dkim_selector: Option<String>,
+    /// The `dkim_selector_activated_at` stamp a flip writes, in epoch ms;
+    /// `None` ⇒ the wall clock. The scheduled flip passes its own clock (the
+    /// outbound clock seam) so the due check that reads the stamp back runs
+    /// on the same clock — else, under a test clock moved forward, a domain
+    /// just flipped would read due again at once. Ignored without
+    /// `dkim_selector`.
+    pub dkim_selector_activated_at_ms: Option<i64>,
 }
 
 impl CacheDb {
@@ -617,7 +624,11 @@ impl CacheDb {
             // construction — the rotation due-detector reads this (else
             // `added_at`). `mail-multidomain.md` § Rotation.
             set_clauses.push("dkim_selector_activated_at = ?");
-            params.push(Box::new(now_epoch_millis()));
+            params.push(Box::new(
+                update
+                    .dkim_selector_activated_at_ms
+                    .unwrap_or_else(now_epoch_millis),
+            ));
         }
 
         if !set_clauses.is_empty() {
@@ -783,13 +794,16 @@ impl CacheDb {
             .context("collect list_active_mail_domains")
     }
 
-    /// Active rows whose DKIM selector is **due for rotation** as of now
-    /// (`now - activated_at ≥ effective rotation_days`). Isolates the clock +
-    /// the deployment-wide default inside the db layer; the scheduled-rotation
-    /// tick logs these and feeds them to `flip_to_newest_dkim_selector`.
+    /// Active rows whose DKIM selector is **due for rotation** as of `now_ms`
+    /// (`now - activated_at ≥ effective rotation_days`). Isolates the
+    /// deployment-wide default inside the db layer; the clock is the caller's:
+    /// the scheduled ticks pass the outbound clock seam
+    /// (`AppState::outbound_now`), the one mail clock the mint's label, the
+    /// publication stamp and the flip's activation stamp also read, so a test
+    /// clock moved past the window reaches the whole rotation.
     /// `mail-multidomain.md` § Rotation.
-    pub async fn dkim_rotation_due_domains(&self) -> Result<Vec<MailDomain>> {
-        let now = now_epoch_millis();
+    pub async fn dkim_rotation_due_domains(&self, now_ms: i64) -> Result<Vec<MailDomain>> {
+        let now = now_ms;
         Ok(self
             .list_active_mail_domains()
             .await?
@@ -861,6 +875,7 @@ impl CacheDb {
                 &row.domain_name,
                 MailDomainUpdate {
                     dkim_selector: Some(newest),
+                    dkim_selector_activated_at_ms: Some(now_ms),
                     ..Default::default()
                 },
             )
@@ -1227,7 +1242,12 @@ mod tests {
         .await
         .unwrap();
         // Default-window domain isn't due; nothing flagged yet.
-        assert!(db.dkim_rotation_due_domains().await.unwrap().is_empty());
+        assert!(
+            db.dkim_rotation_due_domains(now_epoch_millis())
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // Accelerate one domain to rotation_days = 0 (the test lever; no wire
         // surface exposes it, so this exercises the DB-API tri-state directly).
         db.update_mail_domain_config(
@@ -1239,9 +1259,73 @@ mod tests {
         )
         .await
         .unwrap();
-        let due = db.dkim_rotation_due_domains().await.unwrap();
+        let due = db
+            .dkim_rotation_due_domains(now_epoch_millis())
+            .await
+            .unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].domain_name, "due.example");
+    }
+
+    /// One mail clock for the whole rotation (`mail-multidomain.md` § Rotation):
+    /// the due check reads the CALLER's clock, so a clock past the default
+    /// window makes an untouched domain due with no admin lever; and a flip
+    /// stamps its activation at the clock it was given, so the same clock
+    /// reads the flipped domain as not due — a test clock moved forward never
+    /// leaves a just-flipped domain due again at once.
+    #[tokio::test]
+    async fn rotation_due_check_and_flip_stamp_share_the_callers_clock() {
+        let db = CacheDb::open_in_memory().unwrap();
+        db.add_mail_domain(
+            "clock.example",
+            true,
+            "enforce",
+            "expand_primary",
+            None,
+            Some("default"),
+        )
+        .await
+        .unwrap();
+        let now = now_epoch_millis();
+        let day_ms = 24 * 60 * 60 * 1000;
+        assert!(
+            db.dkim_rotation_due_domains(now).await.unwrap().is_empty(),
+            "a fresh domain is inside its default window"
+        );
+        let later = now + (DEFAULT_DKIM_ROTATION_DAYS + 1) * day_ms;
+        let due = db.dkim_rotation_due_domains(later).await.unwrap();
+        assert_eq!(
+            due.iter()
+                .map(|d| d.domain_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clock.example"],
+            "past the default window the domain is due by itself"
+        );
+
+        let label = dkim_rotation_selector(later);
+        assert!(
+            db.mint_mail_dkim_key("clock.example", &label)
+                .await
+                .unwrap()
+        );
+        let flipped = db
+            .flip_to_newest_dkim_selector(&due[0], 0, later)
+            .await
+            .unwrap()
+            .expect("flip onto the minted label");
+        assert_eq!(flipped.dkim_selector.as_deref(), Some(label.as_str()));
+        assert_eq!(
+            flipped.dkim_selector_activated_at,
+            Some(later),
+            "the flip stamps its activation at the clock it was given"
+        );
+        assert!(
+            db.dkim_rotation_due_domains(later + day_ms)
+                .await
+                .unwrap()
+                .is_empty(),
+            "on that same clock the flipped domain is no longer due"
+        );
     }
 
     #[tokio::test]

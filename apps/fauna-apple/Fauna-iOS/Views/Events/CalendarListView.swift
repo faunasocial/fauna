@@ -348,6 +348,8 @@ struct CalendarListView: View {
                 async let i: () = vm.loadInvitedEvents()
                 _ = await (c, i)
                 appState.lastEvents = vm.events
+                // A search Event-arm target staged before the page mounted.
+                await vm.openPendingEvent()
                 // Runs until this view disappears (task cancellation) — surfaces
                 // an externally-written CalDAV calendar/event while the user
                 // stays on the page (events.md § Implementation status,
@@ -356,6 +358,8 @@ struct CalendarListView: View {
             }
             // Re-pull on a fauna.calendar.changed push — cuts the poll's
             // latency down to push latency; the poll above stays as backstop.
+            // A search Event-arm target staged while the page is already mounted.
+            .task(id: vm.pendingEventOpen) { await vm.openPendingEvent() }
             .onCalendarChanged { await vm.refreshFromPush() }
             // A dropped push (offline, or the socket flapped) is recovered on
             // the next reconnect — the same diff-before-swap refresh the push

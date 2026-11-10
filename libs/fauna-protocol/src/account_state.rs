@@ -164,8 +164,9 @@ pub const MAX_STATE_ENTRIES_PER_SCOPE: i64 = 4096;
 /// The most rows one [`AccountStatePutRequest::replaces`] list may name
 /// (`delegable-scope-reclamation.md` § Delegable-scope reclamation, part (2)).
 /// The nest keeps one live row per `(item, writer)`, and a put names only rows
-/// of its own item, so a list is as long as the number of other writers that
-/// hold a live row of the item — a handful in every measured flow. The bound
+/// of its own scope (a carry names the predecessor's row at another item key),
+/// so a list is as long as the number of other writers' rows the put covers — a
+/// handful in every measured flow. The bound
 /// keeps one put's transaction bounded; the nest refuses a longer list
 /// `invalid_request`.
 pub const MAX_REPLACED_ROWS_PER_PUT: usize = 64;

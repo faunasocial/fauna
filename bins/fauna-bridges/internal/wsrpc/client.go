@@ -237,6 +237,15 @@ const CodeSubmitterNotProven = "fauna.bridges.submitter_not_proven"
 // mail app would retry for ever.
 const CodeMailDisabledByUser = "fauna.bridges.mail_disabled_by_user"
 
+// CodeAccountRevoked is the `RpcError.code` every nest handler that resolves a
+// user's credential or serves a user's data through a bridge returns while the
+// target account is locked or suspended
+// (`docs/goal/architecture/transport-connection.md` § Revocation teardown, the
+// bridge-held sessions paragraph). The submission MTA maps it to a permanent
+// `550 5.7.1`; the IMAP MDA ends the session with a `BYE`, so a mail app
+// signed in before the lock is disconnected at its next command.
+const CodeAccountRevoked = "fauna.bridges.account_revoked"
+
 // CodeProtocolMalformed is the shared `fauna.protocol.malformed` `RpcError.code`:
 // the request itself is invalid (empty msgid or sender, no or too many
 // recipients, an oversize body, an invalid recipient address), so re-sending

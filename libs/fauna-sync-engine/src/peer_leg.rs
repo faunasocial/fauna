@@ -228,22 +228,24 @@ pub(crate) struct PeerLegState {
     /// custody predicate at the admit door and on every request, and by the
     /// dialer over a custodian's reply witness.
     pub(crate) revoked: WithdrawalSnapshot<Vec<u8>>,
-    /// The removed-device snapshot — this account's own fleet ids carrying a
-    /// `Removed` row, derived per pump pass from merged
-    /// `fauna.state.device-set` state ([`refresh_removed_devices`]). The
-    /// device twin of `revoked`, read by the same two halves.
+    /// The fleet-member snapshot — this account's own verified fleet members
+    /// (enrolled under the account root, no `Removed` row), derived per pump
+    /// pass from merged `fauna.state.device-set` state
+    /// ([`refresh_fleet_members`]). The device twin of `revoked`, read by the
+    /// same two halves: an own-account `DeviceAuthorization` is admitted only
+    /// for a device this set names — the dial filter's own predicate.
     ///
     /// Own-account only, by construction rather than by omission: a
     /// custodied account's device-set rows rest sealed to its owner's fleet,
     /// so this machine cannot read them. For those accounts the view answers
     /// from `custodied_exclusions` instead
-    /// ([`WithdrawalSnapshot::device_removed_view`]).
-    pub(crate) removed_devices: WithdrawalSnapshot<[u8; 32]>,
+    /// ([`MemberSnapshot::device_refused_view`]).
+    pub(crate) fleet_members: MemberSnapshot,
     /// The custodied accounts' removed-device map — the owner-signed
     /// exclusion lists on the custody grants this machine holds, unioned per
     /// account, re-derived each pass from the `custodies-held` rows where the
     /// serve registry is fed (`custody_leg::CustodyLegState::serve_refresh`).
-    /// Read live by both halves beside `removed_devices`; absent admits.
+    /// Read live by both halves beside `fleet_members`; absent admits.
     pub(crate) custodied_exclusions: fauna_peer_sync::admission::CustodiedExclusions,
 }
 
@@ -266,7 +268,7 @@ impl PeerLegState {
             facts: None,
             server: None,
             revoked: WithdrawalSnapshot::underived(),
-            removed_devices: WithdrawalSnapshot::underived(),
+            fleet_members: MemberSnapshot::underived(),
             custodied_exclusions: Default::default(),
         }
     }
@@ -278,20 +280,22 @@ impl PeerLegState {
     }
 }
 
-/// One pump-refreshed **withdrawal snapshot** — the evaluating side's second
-/// store, beside the witness verifier: "has the account since withdrawn this
+/// One pump-refreshed snapshot an evaluating side reads beside the witness
+/// verifier — its second store: "has the account since withdrawn this
 /// self-contained witness?" (`account-sync-plane.md` § The admission seam →
-/// *Validity and severance*). [`PeerLegState`] holds two, one per witness
-/// arm: revoked custody-grant ids and removed fleet device ids.
+/// *Validity and severance*). [`PeerLegState`] holds one per witness arm:
+/// [`WithdrawalSnapshot`] — revoked custody-grant ids, refused when listed —
+/// and [`MemberSnapshot`] — this account's verified fleet members, refused
+/// when NOT listed. Both share this posture, in [`DerivedSet`]:
 ///
 /// **Not yet derived is not "nothing withdrawn".** A snapshot starts
 /// underived and stays so until its first successful refresh, and a view
 /// over an underived snapshot answers *withdrawn* for every id of its arm —
 /// fail-closed, the posture a serve side with no custody view already has.
 /// So a leg that binds before its first refresh, or while every refresh so
-/// far has failed, refuses that arm rather than answering from an empty set
-/// that would admit every withdrawn witness. The other arm is untouched: one broken
-/// read never takes the whole leg down.
+/// far has failed, refuses that arm rather than answering from a set that
+/// would admit every withdrawn witness. The other arm is untouched: one broken read
+/// never takes the whole leg down.
 ///
 /// **A refresh that fails after one succeeded keeps the last derived set.**
 /// A withdrawal merged since then waits for the next success — the window a
@@ -301,30 +305,63 @@ impl PeerLegState {
 /// Clones share one snapshot (an `Arc`): every view built over it reads it
 /// live, so a refresh reaches an already-bound server's admit door, its live
 /// connections' next requests and the next dial — no rebind.
-pub struct WithdrawalSnapshot<T>(Arc<std::sync::RwLock<Option<std::collections::HashSet<T>>>>);
+struct DerivedSet<T>(Arc<std::sync::RwLock<Option<std::collections::HashSet<T>>>>);
+
+impl<T> Clone for DerivedSet<T> {
+    fn clone(&self) -> Self {
+        DerivedSet(Arc::clone(&self.0))
+    }
+}
+
+impl<T: Eq + std::hash::Hash> DerivedSet<T> {
+    fn underived() -> Self {
+        DerivedSet(Arc::new(std::sync::RwLock::new(None)))
+    }
+
+    fn replace(&self, next: std::collections::HashSet<T>) {
+        *self.0.write().unwrap() = Some(next);
+    }
+
+    fn is_derived(&self) -> bool {
+        self.0.read().unwrap().is_some()
+    }
+
+    /// `None` while underived, else whether the derived set lists `id`.
+    fn lists<Q>(&self, id: &Q) -> Option<bool>
+    where
+        T: std::borrow::Borrow<Q>,
+        Q: Eq + std::hash::Hash + ?Sized,
+    {
+        self.0.read().unwrap().as_ref().map(|set| set.contains(id))
+    }
+}
+
+/// The custody arm's snapshot ([`DerivedSet`] owns the shared posture):
+/// revoked custody-grant ids, refused when listed.
+pub struct WithdrawalSnapshot<T>(DerivedSet<T>);
 
 impl<T> Clone for WithdrawalSnapshot<T> {
     fn clone(&self) -> Self {
-        WithdrawalSnapshot(Arc::clone(&self.0))
+        WithdrawalSnapshot(self.0.clone())
     }
 }
 
 impl<T: Eq + std::hash::Hash> WithdrawalSnapshot<T> {
     /// A snapshot no refresh has derived yet — every view over it refuses.
     pub fn underived() -> Self {
-        WithdrawalSnapshot(Arc::new(std::sync::RwLock::new(None)))
+        WithdrawalSnapshot(DerivedSet::underived())
     }
 
     /// Install a freshly derived set. An empty set is a real answer ("the
     /// merged state withdraws nothing") and admits; only never having
     /// derived refuses.
     pub fn replace(&self, next: std::collections::HashSet<T>) {
-        *self.0.write().unwrap() = Some(next);
+        self.0.replace(next);
     }
 
     /// Whether any refresh has succeeded yet.
     pub fn is_derived(&self) -> bool {
-        self.0.read().unwrap().is_some()
+        self.0.is_derived()
     }
 
     /// Whether a view must refuse `id`: listed in the derived set, or no set
@@ -334,11 +371,7 @@ impl<T: Eq + std::hash::Hash> WithdrawalSnapshot<T> {
         T: std::borrow::Borrow<Q>,
         Q: Eq + std::hash::Hash + ?Sized,
     {
-        self.0
-            .read()
-            .unwrap()
-            .as_ref()
-            .is_none_or(|set| set.contains(id))
+        self.0.lists(id).unwrap_or(true)
     }
 }
 
@@ -352,18 +385,52 @@ impl WithdrawalSnapshot<Vec<u8>> {
     }
 }
 
-impl WithdrawalSnapshot<[u8; 32]> {
-    /// The removed-device view for `account` (this machine's own), in the
+/// The device arm's snapshot ([`DerivedSet`] owns the shared posture): this
+/// account's verified fleet members — enrolled under the account root, no
+/// `Removed` row — and an own-account `DeviceAuthorization` is admitted only
+/// for a device it lists, the dial filter's own predicate
+/// (`FleetView::is_verified_member`). An allowlist, not
+/// an exclusion set: a valid, never-expiring account-root cert over a device
+/// this replica's merged state does not enroll — one it never saw, or one
+/// whose removal evidence it never merged — is refused like a removed one.
+#[derive(Clone)]
+pub struct MemberSnapshot(DerivedSet<[u8; 32]>);
+
+impl MemberSnapshot {
+    /// A snapshot no refresh has derived yet — every own-account device is
+    /// refused.
+    pub fn underived() -> Self {
+        MemberSnapshot(DerivedSet::underived())
+    }
+
+    /// Install a freshly derived member set. An empty set is a real answer
+    /// ("no member verifies") and refuses every device.
+    pub fn replace(&self, next: std::collections::HashSet<[u8; 32]>) {
+        self.0.replace(next);
+    }
+
+    /// Whether any refresh has succeeded yet.
+    pub fn is_derived(&self) -> bool {
+        self.0.is_derived()
+    }
+
+    /// Whether a view must refuse `device`: not a listed member, or no set
+    /// derived yet.
+    pub fn refuses(&self, device: &[u8; 32]) -> bool {
+        !self.0.lists(device).unwrap_or(false)
+    }
+
+    /// The refused-device view for `account` (this machine's own), in the
     /// shape both halves take — the serve config's `device_removed` and the
     /// dialer's `AdmissionViews::device_removed`. Two sources, split by
     /// account: this machine holds device-set rows for its OWN account only,
-    /// so that account answers from this snapshot (underived refuses), and
-    /// any other — a custodied account — answers from `custodied`, the
-    /// owner-signed lists on the grants held for it (absent admits; the
-    /// bound `DeviceRemovedFn`'s doc states). No refresh here could ever
-    /// read a custodied account's rows, so the snapshot never answers for
-    /// one, derived or not.
-    pub fn device_removed_view(
+    /// so that account answers from this snapshot (refused unless a verified
+    /// member; underived refuses), and any other — a custodied account —
+    /// answers from `custodied`, the owner-signed lists on the grants held
+    /// for it (absent admits; the bound `DeviceRemovedFn`'s doc states). No
+    /// refresh here could ever read a custodied account's rows, so the
+    /// snapshot never answers for one, derived or not.
+    pub fn device_refused_view(
         &self,
         account: [u8; 32],
         custodied: &fauna_peer_sync::admission::CustodiedExclusions,
@@ -372,7 +439,7 @@ impl WithdrawalSnapshot<[u8; 32]> {
         let custodied = custodied.clone();
         move |acct: &[u8; 32], device_key: &[u8; 32]| {
             if *acct == account {
-                snapshot.withdraws(device_key)
+                snapshot.refuses(device_key)
             } else {
                 custodied.excludes(acct, device_key)
             }
@@ -380,30 +447,29 @@ impl WithdrawalSnapshot<[u8; 32]> {
     }
 }
 
-/// Re-derive the removed-device snapshot from merged plane state — the
-/// device twin of the custody leg's revocation refresh, run beside it right
-/// after the fleet walk so this pass's rows are already in.
+/// Re-derive the fleet-member snapshot from merged plane state — the device
+/// twin of the custody leg's revocation refresh, run beside it right after
+/// the fleet walk so this pass's rows are already in.
 ///
-/// The derivation is the plane's own: [`FleetView`] over the live
-/// `fauna.state.device-set` rows, whose `Removed` exclusion is unconditional
-/// (`fauna_core::generation`'s module ruling — attribution is advisory, so a
-/// "stop trusting" signal is never refused on verification grounds). Runs
+/// The derivation is the plane's own: [`FleetView`]'s verified members over
+/// the live `fauna.state.device-set` rows, the same set the dial pass
+/// filters its candidates by (`fleet_removal::verified_member_ids`). Runs
 /// whether or not the leg is bound, so a bind that happens later starts
 /// derived; an unbound pass costs one `states_of_kind` read. **On failure
 /// the snapshot is left as it was** — underived before a first success
-/// (every view over it refuses), the last derived set after one
-/// ([`WithdrawalSnapshot`] owns both halves of that posture).
-pub(crate) async fn refresh_removed_devices<B: StoreBackend>(
+/// (every own-account device refused), the last derived set after one
+/// ([`DerivedSet`] owns both halves of that posture). Returns how many
+/// members the set names.
+pub(crate) async fn refresh_fleet_members<B: StoreBackend>(
     state: &PeerLegState,
     store: &AccountStore<B>,
     trust: &crate::generation_tip::GenerationTrust,
 ) -> Result<usize> {
-    let next = crate::fleet_removal::removed_device_ids(store, trust).await?;
+    let next = crate::fleet_removal::verified_member_ids(store, trust).await?;
     let n = next.len();
-    state.removed_devices.replace(next);
+    state.fleet_members.replace(next);
     Ok(n)
 }
-
 /// The pump's peer-leg ensure step. Holder-only by placement (module docs,
 /// gate 1); runs before the device-endpoints step so a first bind's facts
 /// publish on the same pass. While bound it doubles as the **facts refresh**:
@@ -559,16 +625,16 @@ where
             // bound. A revoked grant is refused at its next handshake AND at
             // its next request on a live connection.
             custody_revoked: Some(Arc::new(state.revoked.custody_revoked_view())),
-            // The device twin, same shape and same cadence: a sibling the
-            // fleet removed is refused at its next handshake AND at its next
-            // request on a live connection. Both views read their snapshot
-            // live, so one this pass could not derive refuses its arm until a
-            // later pass does (`WithdrawalSnapshot`), never answering from an
-            // empty set.
+            // The device twin, same shape and same cadence: a device this
+            // replica's fleet view does not verify — removed, or never enrolled
+            // here — is refused at its next handshake AND at its next request
+            // on a live connection. Both views read their snapshot live, so
+            // one this pass could not derive refuses its arm until a later
+            // pass does (`DerivedSet`).
             device_removed: Some(Arc::new(
                 state
-                    .removed_devices
-                    .device_removed_view(account, &state.custodied_exclusions),
+                    .fleet_members
+                    .device_refused_view(account, &state.custodied_exclusions),
             )),
             // The host's engines, through the one serve core — a sibling's
             // chunk pull is that core's further consumer (`file-sync.md`
@@ -722,12 +788,12 @@ where
     // snapshot the serve side reads, so an owner-side revoke severs BOTH
     // directions at the next evaluation.
     let revoked = &state.revoked;
-    // The dialer's removed-device view over `DeviceAuthorization` REPLY
+    // The dialer's fleet-member view over `DeviceAuthorization` REPLY
     // witnesses (a sibling answers with its fleet cert): the same
     // pump-refreshed snapshot the serve side reads, so a removal severs BOTH
     // directions at the next evaluation — a sibling never walks a removed
     // device's relay plane either.
-    let removed_devices = &state.removed_devices;
+    let fleet_members = &state.fleet_members;
     let custodied_exclusions = &state.custodied_exclusions;
     // Every target connects and admits AT ONCE, so a pass with several
     // unreachable siblings pays one connect budget, not one each; the walks
@@ -746,7 +812,7 @@ where
                 &witness.wire,
                 &account,
                 revoked,
-                removed_devices,
+                fleet_members,
                 custodied_exclusions,
                 own_endpoints,
             ),
@@ -970,7 +1036,7 @@ async fn connect_and_admit_sibling(
     own_witness: &fauna_core::encoding::EmbedAsBytes,
     account: &[u8; 32],
     revoked: &WithdrawalSnapshot<Vec<u8>>,
-    removed_devices: &WithdrawalSnapshot<[u8; 32]>,
+    fleet_members: &MemberSnapshot,
     custodied_exclusions: &fauna_peer_sync::admission::CustodiedExclusions,
     own_endpoints: Option<&DeviceEndpoints>,
 ) -> Result<(
@@ -988,7 +1054,7 @@ async fn connect_and_admit_sibling(
     // be evaluated at all (fail-closed without one, and while it has not
     // derived).
     let revoked_view = revoked.custody_revoked_view();
-    let removed_view = removed_devices.device_removed_view(*account, custodied_exclusions);
+    let removed_view = fleet_members.device_refused_view(*account, custodied_exclusions);
     // T13 step 4: a CUSTODIAN among these targets cannot read our fleet-only
     // `device-endpoints` kind, so this exchange is the only way it learns
     // where we moved — and its reply is the only way we learn where it did.
@@ -2280,10 +2346,11 @@ mod tests {
     }
 
     /// The first-bind failure path, over the PRODUCTION ensure step: the
-    /// removed-device refresh fails on the very first pass, the ensure step
+    /// fleet-member refresh fails on the very first pass, the ensure step
     /// binds anyway (nothing else is wrong), and the bound server must NOT
-    /// answer from the never-derived snapshot — an empty set there would admit
-    /// every device the fleet has removed, at the door and on every request.
+    /// answer from the never-derived snapshot as if it held an answer — a set
+    /// it never read cannot tell a removed device from a live one, at the
+    /// door or on any request.
     /// It refuses the whole `DeviceAuthorization` arm instead, and the next
     /// successful refresh heals the already-bound server in place, no rebind.
     ///
@@ -2297,34 +2364,20 @@ mod tests {
         let enrolled = Enrolled::at(dir.path()).await;
         let net = fauna_transport::testing::listeners();
         let me = enrolled.key.verifying_key().to_bytes();
-        let factory: PeerTransportFactory = {
-            let net = Arc::clone(&net);
-            Arc::new(move |_inputs: PeerLegFactoryInputs| {
-                let net = Arc::clone(&net);
-                Box::pin(async move {
-                    let transport: Arc<dyn PeerTransport> =
-                        Arc::new(fauna_transport::testing::MemTransport {
-                            me: fauna_transport::EndpointKey::from_bytes(me),
-                            listeners: net,
-                        });
-                    Ok(PeerLegBinding {
-                        transport,
-                        bound_addrs: Vec::new(),
-                        file_sync: None,
-                    })
-                })
-            })
-        };
         let mut state = PeerLegState::new(
-            Some(factory),
+            Some(mem_factory(&net, me)),
             dir.path().to_path_buf(),
             enrolled.actor_hex.clone(),
         );
-        let sibling = [0x51u8; 32];
+        let sibling_key = SigningKey::from_bytes(&[0x51; 32]);
+        let sibling = sibling_key.verifying_key().to_bytes();
+        // A verified member here, so only the never-derived snapshot can
+        // refuse it.
+        stage_enrollment(&enrolled.store, &enrolled.account, &sibling_key).await;
 
         // Pass 1, in the pump's order: the refresh fails, the ensure step binds.
         plant_unreadable_device_set_row(dir.path());
-        refresh_removed_devices(&state, &enrolled.store, &enrolled.trust())
+        refresh_fleet_members(&state, &enrolled.store, &enrolled.trust())
             .await
             .expect_err("the planted row fails the device-set read");
         let pass = ensure_bound(
@@ -2340,12 +2393,12 @@ mod tests {
         assert_eq!(pass, PeerLegPass::Bound);
         fauna_transport::testing::await_listening(&net, &me).await;
         // Refused at the admit door (the dialer sees only the wire code; the
-        // server's details stay server-side). That it was the removal view
+        // server's details stay server-side). That it was the membership view
         // and nothing else is pass 2's job: the same server, the same
         // witness, admitted the moment the snapshot derives.
         let refused = sibling_admits(&net, &enrolled, sibling)
             .await
-            .expect_err("a server whose removed-device snapshot never derived must refuse");
+            .expect_err("a server whose fleet-member snapshot never derived must refuse");
         assert!(
             format!("{refused:#}").contains("witness_refused"),
             "refused at the admit door: {refused:#}"
@@ -2355,10 +2408,11 @@ mod tests {
         // the SAME server now admits — the view reads the snapshot live.
         lift_unreadable_device_set_row(dir.path());
         assert_eq!(
-            refresh_removed_devices(&state, &enrolled.store, &enrolled.trust())
+            refresh_fleet_members(&state, &enrolled.store, &enrolled.trust())
                 .await
                 .expect("the device-set read works again"),
-            0
+            1,
+            "the sibling is the one verified member"
         );
         let pass = ensure_bound(
             &mut state,
@@ -2373,7 +2427,98 @@ mod tests {
         assert_eq!(pass, PeerLegPass::AlreadyBound, "healed without a rebind");
         sibling_admits(&net, &enrolled, sibling)
             .await
-            .expect("a derived snapshot that lists no one admits every sibling");
+            .expect("a derived snapshot that lists the sibling admits it");
+    }
+
+    /// A transport factory over the in-memory network, bound as `me`.
+    fn mem_factory(
+        net: &fauna_transport::testing::Listeners,
+        me: [u8; 32],
+    ) -> PeerTransportFactory {
+        let net = Arc::clone(net);
+        Arc::new(move |_inputs: PeerLegFactoryInputs| {
+            let net = Arc::clone(&net);
+            Box::pin(async move {
+                let transport: Arc<dyn PeerTransport> =
+                    Arc::new(fauna_transport::testing::MemTransport {
+                        me: fauna_transport::EndpointKey::from_bytes(me),
+                        listeners: net,
+                    });
+                Ok(PeerLegBinding {
+                    transport,
+                    bound_addrs: Vec::new(),
+                    file_sync: None,
+                })
+            })
+        })
+    }
+
+    /// **Admission refuses a peer this replica's fleet view does not verify —
+    /// not only the dial**. The stranger holds a valid,
+    /// never-expiring account-root cert over its own key, and this replica's
+    /// merged device-set state carries no row of it at all: never enrolled
+    /// here, and no `Removed` row either — the state of a device enrolled
+    /// after the removal evidence of an earlier device was retired
+    /// everywhere. A view that only refused on a `Removed` row admitted it.
+    /// Over the PRODUCTION refresh and ensure step; the dialer's reply check
+    /// reads the same view (`connect_and_admit_sibling`), pinned at the end.
+    /// Enrolling it then admits it on the SAME server, so the refusal was the
+    /// membership view and nothing else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_valid_cert_this_fleet_view_does_not_verify_is_refused_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let enrolled = Enrolled::at(dir.path()).await;
+        let net = fauna_transport::testing::listeners();
+        let me = enrolled.key.verifying_key().to_bytes();
+        let own = enrolled.account.actor_id().0;
+        let mut state = PeerLegState::new(
+            Some(mem_factory(&net, me)),
+            dir.path().to_path_buf(),
+            enrolled.actor_hex.clone(),
+        );
+        let stranger_key = SigningKey::from_bytes(&[0x52; 32]);
+        let stranger = stranger_key.verifying_key().to_bytes();
+
+        stage_enrollment(&enrolled.store, &enrolled.account, &enrolled.key).await;
+        refresh_fleet_members(&state, &enrolled.store, &enrolled.trust())
+            .await
+            .expect("the device-set read works");
+        let pass = ensure_bound(
+            &mut state,
+            &enrolled.store,
+            &enrolled.key,
+            &enrolled.slot,
+            &UnreachableNest,
+            &[],
+        )
+        .await
+        .expect("every bind gate is open");
+        assert_eq!(pass, PeerLegPass::Bound);
+        fauna_transport::testing::await_listening(&net, &me).await;
+
+        let refused = sibling_admits(&net, &enrolled, stranger)
+            .await
+            .expect_err("a cert whose device this fleet view does not verify must be refused");
+        assert!(
+            format!("{refused:#}").contains("witness_refused"),
+            "refused at the admit door: {refused:#}"
+        );
+        let view = state
+            .fleet_members
+            .device_refused_view(own, &state.custodied_exclusions);
+        assert!(
+            view(&own, &stranger),
+            "the dialer's reply check refuses it too"
+        );
+
+        stage_enrollment(&enrolled.store, &enrolled.account, &stranger_key).await;
+        refresh_fleet_members(&state, &enrolled.store, &enrolled.trust())
+            .await
+            .expect("the device-set read works");
+        sibling_admits(&net, &enrolled, stranger)
+            .await
+            .expect("once enrolled here, the same server admits it");
+        assert!(!view(&own, &stranger), "and so does the dialer's view");
     }
 
     /// **A stood-down leg has CLOSED its serve connection by the time
@@ -2461,9 +2606,10 @@ mod tests {
     }
 
     /// The snapshot's whole answer table, through the two views production
-    /// hands the serve config and the dialer. Underived refuses; derived
-    /// admits all but what it lists (an empty set is an answer, the
-    /// absent-row-admits rule); another account's devices are never this
+    /// hands the serve config and the dialer. Underived refuses; the device
+    /// arm, derived, admits only the members it lists (an empty set is an
+    /// answer, and refuses everyone); the custody arm, derived, refuses only
+    /// what it lists; another account's devices are never this
     /// snapshot's to answer, since no refresh on this machine could ever read
     /// that account's device-set rows — they answer from the custodied
     /// exclusion map (the held grants' owner-signed lists) alone.
@@ -2473,9 +2619,9 @@ mod tests {
         let custodied = [0x0Bu8; 32];
         let (listed, unlisted) = ([0x21u8; 32], [0x22u8; 32]);
 
-        let removed = WithdrawalSnapshot::<[u8; 32]>::underived();
+        let members = MemberSnapshot::underived();
         let exclusions = fauna_peer_sync::admission::CustodiedExclusions::default();
-        let device_view = removed.device_removed_view(own, &exclusions);
+        let device_view = members.device_refused_view(own, &exclusions);
         assert!(
             device_view(&own, &unlisted),
             "underived refuses every device"
@@ -2496,11 +2642,17 @@ mod tests {
             "and only what it lists"
         );
         exclusions.replace(Default::default());
-        removed.replace(std::collections::HashSet::new());
-        assert!(!device_view(&own, &unlisted), "derived and empty admits");
-        removed.replace([listed].into());
-        assert!(device_view(&own, &listed), "a listed device is refused");
-        assert!(!device_view(&own, &unlisted), "an unlisted one is not");
+        members.replace(std::collections::HashSet::new());
+        assert!(
+            device_view(&own, &listed),
+            "derived and empty refuses everyone"
+        );
+        members.replace([listed].into());
+        assert!(!device_view(&own, &listed), "a listed member is admitted");
+        assert!(
+            device_view(&own, &unlisted),
+            "an unlisted device is refused — no Removed row needed"
+        );
 
         let revoked = WithdrawalSnapshot::<Vec<u8>>::underived();
         let custody_view = revoked.custody_revoked_view();
@@ -2512,8 +2664,8 @@ mod tests {
 
     /// The other half of the failure posture: a refresh that fails AFTER one
     /// succeeded leaves the last derived set in force — neither cleared (that
-    /// would admit every device it lists) nor reset to underived (that would
-    /// sever every sibling over one bad read). A removal merged while the
+    /// would refuse every sibling it lists) nor reset to underived (the same,
+    /// over one bad read). A removal merged while the
     /// read keeps failing therefore waits for the next success: the window
     /// `account-sync-plane.md` states as part of the bound.
     #[tokio::test]
@@ -2523,20 +2675,23 @@ mod tests {
         let state = PeerLegState::new(None, dir.path().to_path_buf(), enrolled.actor_hex.clone());
         let own = enrolled.account.actor_id().0;
         let view = state
-            .removed_devices
-            .device_removed_view(own, &state.custodied_exclusions);
+            .fleet_members
+            .device_refused_view(own, &state.custodied_exclusions);
         let (listed, unlisted) = ([0x21u8; 32], [0x22u8; 32]);
-        // An earlier pass derived a set naming one removed device.
-        state.removed_devices.replace([listed].into());
+        // An earlier pass derived a set naming one member.
+        state.fleet_members.replace([listed].into());
 
         plant_unreadable_device_set_row(dir.path());
-        refresh_removed_devices(&state, &enrolled.store, &enrolled.trust())
+        refresh_fleet_members(&state, &enrolled.store, &enrolled.trust())
             .await
             .expect_err("the planted row fails the device-set read");
-        assert!(view(&own, &listed), "the last derived removal still severs");
         assert!(
-            !view(&own, &unlisted),
-            "and the last derived set still admits the rest — not fail-closed"
+            !view(&own, &listed),
+            "the last derived member is still admitted"
+        );
+        assert!(
+            view(&own, &unlisted),
+            "and every other device is still refused, from the same set"
         );
     }
 }

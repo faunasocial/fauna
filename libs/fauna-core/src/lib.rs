@@ -130,6 +130,7 @@ pub mod notification_glyph;
 pub mod notification_type;
 pub mod obligation;
 pub mod observer;
+pub mod offline_intent;
 pub mod path_crypto;
 pub mod path_guard;
 pub mod peer_anchor_rows;
@@ -161,11 +162,20 @@ pub mod succession_ledger;
 pub mod text_heuristic;
 #[cfg(test)]
 mod text_heuristic_parity;
+pub mod vcard;
 pub mod version;
 pub mod web;
 #[cfg(all(target_arch = "wasm32", feature = "js"))]
 pub mod web_lock;
 pub mod windows_names;
+
+/// Spawn `work` on the browser's microtask queue — `fauna_sleep::spawn_background`'s
+/// wasm leg, here because this crate's `js` feature already carries the
+/// spawner, so the leg adds no third-party manifest entry anywhere.
+#[cfg(all(target_arch = "wasm32", feature = "js"))]
+pub fn spawn_local(work: impl core::future::Future<Output = ()> + 'static) {
+    wasm_bindgen_futures::spawn_local(work);
+}
 
 #[cfg(feature = "format_text")]
 pub mod format_text;

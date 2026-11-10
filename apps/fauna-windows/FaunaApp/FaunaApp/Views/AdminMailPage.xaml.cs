@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using uniffi.fauna_client_mail_settings;
 using uniffi.fauna_core;
 using uniffi.fauna_ffi;
@@ -159,8 +160,14 @@ public sealed partial class AdminMailPage : Page
         // Value-addressed, not position-addressed: the value set has ONE owner
         // (mail-policy-config.md § Architectural rules), the shared
         // FcrdnsModeOptions() catalog — never a hand-typed array here that a
-        // grown ORDER could silently desync from.
-        PopulateSelect(FcrdnsModeSelect, FaunaClientMailSettingsMethods.FcrdnsModeOptions(), s.FcrdnsMode, failClosed: "score_signal");
+        // grown ORDER could silently desync from. Keyed by the wire value (the suite
+        // drives these knobs by value), and repainted through ReconcileCatalog
+        // because this render runs after every Save and toggle: only a changed option
+        // set may tear the items down. Each knob's failClosed is its own established
+        // default, not necessarily the strictest option (fcrdns' is the
+        // observability-first middle default; delete-nonempty's is the safer one) —
+        // both mirror admin_policy.rs's own from_wire_or_default.
+        PickerOption.ReconcileCatalog(FcrdnsModeSelect, FaunaClientMailSettingsMethods.FcrdnsModeOptions(), s.FcrdnsMode, failClosed: "score_signal", keyed: true);
         HeloIdentityRequiredToggle.IsOn = s.HeloIdentityRequired;
         RejectFcrdnsFailToggle.IsOn = s.RejectFcrdnsFail;
         MaxMessageBytesInput.Text = s.MaxMessageBytes.ToString();
@@ -249,7 +256,7 @@ public sealed partial class AdminMailPage : Page
         ImapTombstoneRetentionInput.Text = i.TombstoneRetentionDays.ToString();
         // Same rule as the fcrdns select above — value-addressed off the shared
         // ImapDeleteNonemptyOptions() catalog.
-        PopulateSelect(ImapDeleteNonemptySelect, FaunaClientMailSettingsMethods.ImapDeleteNonemptyOptions(), i.DeleteNonempty, failClosed: "forbidden");
+        PickerOption.ReconcileCatalog(ImapDeleteNonemptySelect, FaunaClientMailSettingsMethods.ImapDeleteNonemptyOptions(), i.DeleteNonempty, failClosed: "forbidden", keyed: true);
         ImapBodystructureCacheInput.Text = i.BodystructureCacheMax.ToString();
         ImapStorageBytesInput.Text = i.StorageBytesDefault.ToString();
         ImapMessageCountInput.Text = i.MessageCountDefault.ToString();
@@ -277,7 +284,7 @@ public sealed partial class AdminMailPage : Page
         // ── DMARC reports ──
         var dm = _vm.Dmarc;
         DmarcRufPublishToggle.IsOn = dm.RufPublish;
-        PopulateSelect(DmarcFoModeSelect, FaunaClientMailSettingsMethods.DmarcForensicModeOptions(), dm.FoMode, failClosed: "0", rawValueName: true);
+        PickerOption.ReconcileCatalog(DmarcFoModeSelect, FaunaClientMailSettingsMethods.DmarcForensicModeOptions(), dm.FoMode, failClosed: "0", keyed: true);
         DmarcAggregateRetentionInput.Text = dm.AggregateRetentionDays.ToString();
         DmarcForensicRetentionInput.Text = dm.ForensicRetentionDays.ToString();
         DmarcOutboundAggregateToggle.IsOn = dm.OutboundAggregateEnabled;
@@ -630,40 +637,8 @@ public sealed partial class AdminMailPage : Page
         return parsed;
     }
 
-    /// <summary>Populate <paramref name="combo"/> from a shared-Rust
-    /// <see cref="ReachPolicyOption"/> catalog and select <paramref name="selected"/>
-    /// by VALUE, never by position — the same shape <c>FamilyPage.PopulateSelect</c>
-    /// uses for its own enumerated knobs. An unmatched value (a stored token this
-    /// build's catalog no longer lists) selects <paramref name="failClosed"/> instead
-    /// of leaving nothing selected; each call site's <paramref name="failClosed"/> is
-    /// that field's own established default, not necessarily the strictest option
-    /// (fcrdns' is the observability-first middle default; delete-nonempty's is the
-    /// safer one) — both mirror `admin_policy.rs`'s own `from_wire_or_default`.</summary>
-    private static void PopulateSelect(ComboBox combo, ReachPolicyOption[] options, string selected, string failClosed, bool rawValueName = false)
-    {
-        combo.Items.Clear();
-        foreach (var opt in options)
-        {
-            var item = new ComboBoxItem { Content = Strings.Resolve(opt.@label), Tag = opt.@value };
-            // A raw-value picker (the `fo=` tags): the FlaUI bridge's select/get_text match
-            // a ComboBoxItem by its Name, so the Name is the wire tag (AdminDnsPage's
-            // per-domain DMARC picker precedent).
-            if (rawValueName)
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.@value);
-            combo.Items.Add(item);
-            if (opt.@value == selected) combo.SelectedItem = item;
-        }
-        if (combo.SelectedItem is null)
-            foreach (var obj in combo.Items)
-                if (obj is ComboBoxItem { Tag: string t } item && t == failClosed)
-                {
-                    combo.SelectedItem = item;
-                    break;
-                }
-    }
-
     /// <summary>The wire value of <paramref name="combo"/>'s selected item (a
-    /// <see cref="PopulateSelect"/>-populated ComboBox's <c>Tag</c>), or <c>null</c>
+    /// <see cref="PickerOption.ReconcileCatalog"/>-painted ComboBox's <c>Tag</c>), or <c>null</c>
     /// if nothing is selected — the caller falls back to the persisted value, the
     /// same "never send a value we can't read back" rule the numeric parsers follow.</summary>
     private static string? SelectedValue(ComboBox combo) => (combo.SelectedItem as ComboBoxItem)?.Tag as string;

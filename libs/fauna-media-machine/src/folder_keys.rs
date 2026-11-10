@@ -47,4 +47,50 @@ pub trait ForeignBlobFetcherFactory: fauna_core::MaybeSendSync {
         base_url: &str,
         home_nest_actor_id: Option<&str>,
     ) -> std::sync::Arc<dyn fauna_core::file_download::BlobFetcher>;
+
+    /// The **member door**: a fetcher over `home` for a member of the
+    /// cross-nest shared set whose channel is `channel_id`. Its folder reads
+    /// carry the member's short-lived byte-plane read token, minted through
+    /// the member's OWN nest (`fauna.folders.read_token.get`, which relays
+    /// `fauna.federation.folder.read_token.mint` to the home nest behind its
+    /// member gate), beside the folder hint — the bearer the home nest's
+    /// store-miss arm names the caller by, so a metadata-only folder's chunk
+    /// is relayed from a seat instead of missing (`relay-serving.md` § Relay
+    /// serving → *A member on another nest*, step (5)). A refused mint — the
+    /// member was removed — fails the read with
+    /// [`fauna_core::file_download::MembershipRefused`] in its chain.
+    ///
+    /// Built per download, so every download mints afresh and a removal is
+    /// met at its first read. The default is the plain door
+    /// ([`Self::fetcher_for`]): a platform with no member door reads only
+    /// what rests in the home nest's store.
+    fn member_fetcher_for(
+        &self,
+        home: &fauna_core::folder_keys::ForeignHome,
+        channel_id: [u8; 32],
+    ) -> std::sync::Arc<dyn fauna_core::file_download::BlobFetcher> {
+        let _ = channel_id;
+        self.fetcher_for(&home.nest_url, home.nest_actor_id.as_deref())
+    }
+
+    /// The member door's **write twin**: an uploader whose chunk and manifest
+    /// POSTs address `home` under the short-lived write token the member's OWN
+    /// nest mints for the set whose channel is `channel_id`
+    /// (`fauna.folders.write_token.get`, which relays
+    /// `fauna.federation.folder.write_token.mint` to the home nest behind its
+    /// foreign-member + `access == 'writer'` gate), the home's TLS verified
+    /// against the grant-delivered identity as the read door's is
+    /// (`ui/media.md` § Cross-nest shared sets, *Upload*). A refused mint — the
+    /// writer grant is gone — fails the POST.
+    ///
+    /// `None` (the default) means this platform has no write door: the upload
+    /// into a foreign set is refused loudly, never sent to the own nest.
+    fn member_uploader_for(
+        &self,
+        home: &fauna_core::folder_keys::ForeignHome,
+        channel_id: [u8; 32],
+    ) -> Option<std::sync::Arc<dyn crate::blob_uploader::MediaBlobUploader>> {
+        let _ = (home, channel_id);
+        None
+    }
 }

@@ -40,7 +40,7 @@ import javax.inject.Singleton
  * **Order is load-bearing.** The closers run FIRST, while the nest client is
  * still up: they include the native teardowns that must complete before the
  * client they were built over goes away, and — on sign-out — before
- * [AccountStores.eraseAllAccounts] deletes the very directories they hold open.
+ * [AccountStores.finishSignOut] deletes the very directories they hold open.
  * `clearAuth()` follows, tearing down the session rails and the client itself.
  *
  * **A drop is only half of it.** A background loop that holds no cancellation

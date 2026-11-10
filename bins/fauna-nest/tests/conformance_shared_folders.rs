@@ -3909,6 +3909,143 @@ async fn public_audience_exempts_a_member_unstamped_record_from_the_content_key_
     assert_eq!(err.code, "fauna.sync.stale_content_key");
 }
 
+/// A sealed-label envelope stamped with `generation`, as `path_sealed` carries
+/// it. The nest reads only the envelope's header (it holds no key to open the
+/// ciphertext), so a fixed ciphertext is enough for the floor's question.
+fn label_sealed_at(generation: Option<u64>) -> fauna_protocol::ByteBuf {
+    let label = fauna_core::path_crypto::SealedLabel {
+        v: fauna_core::path_crypto::SEALED_LABEL_V1,
+        generation,
+        nonce: None,
+        ct: serde_bytes::ByteBuf::from(vec![0x5Au8; 48]),
+    };
+    fauna_protocol::ByteBuf::from(label.to_bytes().expect("label encodes"))
+}
+
+/// A writer MEMBER's delete on a bound `shared`-audience folder lands when its
+/// sealed label is at the content-key floor — the tombstone has no content, so
+/// its label is the only sealed material whose freshness the floor can ask
+/// about (`mls-group-key-material.md` § M2, the version floor).
+///
+/// Before this arm every member delete was refused `stale_content_key`: a
+/// tombstone carries `content_key_version: None` by its shape (the engine's
+/// `handle_delete`, the Media `delete_member`), and an absent stamp never
+/// satisfies `>= floor`. The refusal could not heal — the documented heal
+/// re-seals CONTENT under the current generation, and a tombstone has none — so
+/// a writer member could never delete in a shared folder, from Media or from a
+/// synced folder (the engine kept the row and retried for ever). Found by
+/// share-a-folder outcome 26's tui witness, whose member delete never reached
+/// the nest.
+///
+/// The floor still bounds the rotation race: a delete whose label is sealed
+/// BELOW the floor, or carries no generation at all, is refused exactly as a
+/// stale content record is.
+#[tokio::test]
+async fn a_member_delete_is_judged_at_the_floor_by_its_sealed_label() {
+    let w = served_writer_plane().await;
+
+    // The owner rotates + publishes generation 2 → the nest floor is now 2.
+    dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.a_actor,
+        "fauna.folders.content_key.put",
+        enc(&fauna_protocol::folders::addressed(
+            fauna_protocol::folders::ContentKeyPutRequest {
+                name: "shared".into(),
+                epoch: 2,
+                sealed: "cd".repeat(48),
+                current_version: 2,
+                ..Default::default()
+            },
+        )),
+    )
+    .await
+    .expect("gen-2 envelope publish (floor := 2)");
+
+    let record = |path: &str,
+                  change_type: &str,
+                  manifest: Option<[u8; 32]>,
+                  stamp: Option<u64>,
+                  label: Option<u64>| {
+        enc(&fauna_protocol::folders::addressed(common::signed_record(
+            fauna_protocol::sync::SyncChangeRecordRequest {
+                path_sealed: Some(label_sealed_at(label)),
+                folder: "shared".into(),
+                device_id: hex::encode(w.dev_b),
+                path: path.into(),
+                change_type: change_type.into(),
+                size_bytes: if manifest.is_some() { 100 } else { 0 },
+                manifest_hash: manifest.map(hex::encode),
+                content_key_version: stamp,
+                ..Default::default()
+            },
+            &ActorKeypair::from_secret(B_SECRET),
+        )))
+    };
+
+    // The member records a file at the floor, then deletes it with a label
+    // sealed at the floor. The delete must LAND.
+    dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record("doomed.bin", "create", Some([0xE1; 32]), Some(2), Some(2)),
+    )
+    .await
+    .expect("the member's at-floor create lands");
+    dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record("doomed.bin", "delete", None, None, Some(2)),
+    )
+    .await
+    .expect("a member's delete whose label is sealed at the floor lands");
+
+    let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
+    let listed = a_sync
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await
+        .expect("owner lists");
+    let doomed = hex::encode(fauna_core::sync::path_hash("doomed.bin"));
+    let head = listed
+        .changes
+        .iter()
+        .filter(|c| c.path_hash == doomed)
+        .max_by_key(|c| c.seq)
+        .expect("the path has records");
+    assert_eq!(
+        head.change_type, "delete",
+        "the member's tombstone is the head"
+    );
+    assert_eq!(
+        head.author_actor_id.as_deref(),
+        Some(hex::encode(w.b_actor).as_str()),
+        "nest-stamped to the writer member"
+    );
+
+    // GUARD: the floor still bounds the rotation race for a tombstone — a label
+    // sealed below it, or one naming no generation, is refused.
+    for (label, why) in [
+        (Some(1), "a label sealed below the floor"),
+        (None, "a label naming no generation"),
+    ] {
+        let err = dispatch(
+            w.router.as_ref(),
+            w.state.clone(),
+            w.b_actor,
+            "fauna.sync.changes.record",
+            record("kept.bin", "delete", None, None, label),
+        )
+        .await
+        .expect_err(why);
+        assert_eq!(err.code, "fauna.sync.stale_content_key", "{why}");
+    }
+}
+
 /// The SUCCESS arm, and the end-to-end pin for both of its defects: a
 /// writer MEMBER's seat declassifies a bound folder the owner published, its
 /// change records LAND, and only then does the corpus stamp itself converged.

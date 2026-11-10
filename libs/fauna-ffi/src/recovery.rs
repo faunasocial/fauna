@@ -1178,12 +1178,16 @@ pub async fn recovery_veto_pending_replacement(
     let kit = parse_kit(&held_kit_input).map_err(general_err)?;
     // At the bound nest and every linked nest, each over its own challenge
     // (clause (c)); the bound nest's refusal is the gesture's error, a linked
-    // nest that could not be asked is logged.
+    // nest that could not be asked is logged. The gesture settles the
+    // pending-replacement banner from the answers in the same call, in the
+    // process-wide registry the sweep posts to.
     let (bound, linked) = veto_everywhere(
         &client,
         &kit,
         identity.actor_id(),
         &NativeLinkedNestDial::new(&identity),
+        &veto_alerts_registry(),
+        fauna_core::data::Timestamp::now_secs(),
     )
     .await;
     Ok(bound.map_err(general_err)?
@@ -1191,6 +1195,20 @@ pub async fn recovery_veto_pending_replacement(
             .nests
             .iter()
             .any(|n| matches!(n.outcome, LinkedNestOutcome::Answered(true))))
+}
+
+/// The registry the veto settles: the process-wide one every feeder posts
+/// to, where the build carries the banner (`atproto-settings`, the feature
+/// that holds the critical-alerts surface); a build without it renders no
+/// banner, so the readings are settled against a registry nothing reads.
+#[cfg(feature = "atproto-settings")]
+fn veto_alerts_registry() -> Arc<fauna_client_recovery::alerts::CriticalAlerts> {
+    crate::critical_alerts::critical_alerts_registry()
+}
+
+#[cfg(not(feature = "atproto-settings"))]
+fn veto_alerts_registry() -> Arc<fauna_client_recovery::alerts::CriticalAlerts> {
+    Arc::new(fauna_client_recovery::alerts::CriticalAlerts::new())
 }
 
 /// `recovery-kit-escrow-reseal-button` — the no-escrow repair: re-put the escrow

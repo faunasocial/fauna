@@ -414,8 +414,11 @@ fn pending_actions_elements(state: &SettingsState) -> Vec<Element> {
                 Element::label(ids::PENDING_ACTION_ITEM, " ").within(ids::PENDING_ACTION_ITEM, i),
             );
             els.push(
-                Element::label(ids::PENDING_ACTION_DESCRIPTION, pending_description(row))
-                    .within(ids::PENDING_ACTION_ITEM, i),
+                Element::label(
+                    ids::PENDING_ACTION_DESCRIPTION,
+                    pending_description(row, state.devices.snapshot.as_ref()),
+                )
+                .within(ids::PENDING_ACTION_ITEM, i),
             );
             els.push(
                 Element::label(
@@ -444,10 +447,17 @@ fn pending_actions_elements(state: &SettingsState) -> Vec<Element> {
 /// a thin delegate rather than the rendering rule itself — see
 /// [`fauna_protocol::pending_actions::describe_pending_action`] for that
 /// (shared with linux's identical rendering).
-pub(super) fn pending_description(row: &super::PendingActionRow) -> String {
-    fauna_protocol::pending_actions::describe_pending_action(
+///
+/// An automatic prune names its folder from the folder roster this page
+/// already holds (`folders`, the devices snapshot), else the neutral sentence.
+pub(super) fn pending_description(
+    row: &super::PendingActionRow,
+    folders: Option<&fauna_devices_machine::DevicesSnapshot>,
+) -> String {
+    fauna_protocol::pending_actions::describe_pending_action_naming(
         &row.action_type,
         row.target.as_deref(),
+        |id| folders.and_then(|f| f.folder_name(id)),
     )
 }
 
@@ -713,9 +723,31 @@ mod tests {
     #[test]
     fn pending_description_delegates_to_the_shared_renderer() {
         assert_eq!(
-            pending_description(&row("handle.change", Some("bob"), 1)),
+            pending_description(&row("handle.change", Some("bob"), 1), None),
             fauna_protocol::pending_actions::describe_pending_action("handle.change", Some("bob"))
         );
+    }
+
+    /// An automatic prune's row names its folder from the folder roster this
+    /// page holds, and with no roster reads the neutral sentence — never the
+    /// folder id (`ui/settings.md` § Pending actions).
+    #[test]
+    fn pending_description_names_a_pruned_folder_from_the_roster() {
+        use fauna_i18n::strings::settings::pending_actions as pa;
+        let roster = fauna_devices_machine::DevicesSnapshot {
+            folders: vec![fauna_devices_machine::FolderSummary {
+                id: 42,
+                name: "Photos".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let prune = row("version.bulk_prune", Some("42"), 1);
+        assert_eq!(
+            pending_description(&prune, Some(&roster)),
+            pa::prune_versions_in("Photos")
+        );
+        assert_eq!(pending_description(&prune, None), pa::PRUNE_VERSIONS);
     }
 
     /// `settings.md` § Credential store: the section renders ONLY while the

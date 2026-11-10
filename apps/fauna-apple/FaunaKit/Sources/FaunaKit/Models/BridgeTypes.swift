@@ -19,6 +19,11 @@ public struct BridgeInfo: Codable, Identifiable {
     /// absent from this struct, so apple decoded the wire and threw the
     /// sentence away, leaving a user with a dead Link control and no reason.
     public let error: String?
+    /// The glyph id a consented bridge app declared (`third-party.md` § the
+    /// `bridge` block) — nil on a first-party row. Painted only through the
+    /// shared `bridgeCardTitle` (`cardTitle`), never a Swift emoji map.
+    /// FFI-only: not in `CodingKeys`, so a JSON decode leaves it nil.
+    public var glyph: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, name, available, linked, identity, mode, settings, error

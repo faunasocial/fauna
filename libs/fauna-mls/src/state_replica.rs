@@ -660,6 +660,43 @@ impl ProviderReplica {
             .collect()
     }
 
+    /// The **community rooms** this replica lists: every channel whose
+    /// community marker ([`MlsEngine::mark_channel_community`]) rides this
+    /// blob's own KV. A community room has no MLS group, so
+    /// [`Self::channel_ids`] never names it; the launch load reads this
+    /// beside it to fetch the room's `history/<ch>` slice. Sorted, and may
+    /// overlap [`Self::channel_ids`] only if a future build ever gives a
+    /// community room a group — callers dedupe.
+    pub fn community_channel_ids(&self) -> Vec<ChannelId> {
+        let prefix = crate::engine::CHANNEL_KIND_COMMUNITY_PREFIX;
+        self.values
+            .iter()
+            .filter_map(|(k, _)| {
+                let rest = k.as_slice().strip_prefix(prefix)?;
+                let bytes: [u8; 32] = rest.try_into().ok()?;
+                Some(ChannelId(bytes))
+            })
+            .collect()
+    }
+
+    /// Every channel whose `history/<ch>` slice this replica names: each
+    /// listed group ([`Self::channel_ids`]), then each community room
+    /// ([`Self::community_channel_ids`]) the group listing does not already
+    /// name. The ONE enumeration of the replica's slice paths — the launch
+    /// load reads it, and so does the post-succession re-seal, which must
+    /// re-key exactly the set the load will then try to open (a re-seal that
+    /// walked the groups alone left a community room's slice under the
+    /// retired key, and the successor's load failed on it).
+    pub fn history_channel_ids(&self) -> Vec<ChannelId> {
+        let mut channels = self.channel_ids();
+        for room in self.community_channel_ids() {
+            if !channels.contains(&room) {
+                channels.push(room);
+            }
+        }
+        channels
+    }
+
     /// Whether this replica's own bytes carry `channel_id`'s **durable chat
     /// marker** ([`MlsEngine::mark_channel_chat`] — stamped at bind, riding
     /// the provider KV this blob is a snapshot of). Answered from the

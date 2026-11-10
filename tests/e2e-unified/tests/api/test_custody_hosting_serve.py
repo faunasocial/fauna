@@ -154,6 +154,7 @@ def test_a_held_copy_comes_back_sealed_and_byte_identical_and_the_nest_never_hel
 
 
 @pytest.mark.feature("admin-held-custody")
+@pytest.mark.feature("devices")
 def test_the_nest_hands_a_held_copy_back_only_to_the_owners_own_devices(serve_nest):
     """The owner's device reads; the host's own device, a stranger's device
     and a device the owner removed are each refused at the handshake with one

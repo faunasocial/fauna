@@ -19,9 +19,9 @@ namespace FaunaApp.Core.Services;
 /// there would trade a shoulder-surfing risk for an account-loss risk — the irreversible
 /// one. <b>Never take a hold from those screens.</b> The mail / Bluesky / Nostr reveals are
 /// safe to suppress because losing one costs a revoke-and-re-mint and nothing else.
-/// On windows only <c>secret-key-display</c> is rendered at all
-/// (<c>Views/Onboarding/IdentityCreatedView.xaml</c>); the recovery kit has no windows
-/// surface yet, so the rule covers one screen here and will cover two when it gains one.</para>
+/// On windows <c>secret-key-display</c> renders in <c>Views/Onboarding/IdentityCreatedView.xaml</c>
+/// and <c>recovery-kit-secret-display</c> in <c>Views/SettingsAccountPage.xaml</c> and
+/// <c>Views/Onboarding/RecoveryKitView.xaml</c>; none of the three takes a hold.</para>
 ///
 /// <para><b>Why the affinity is refcounted rather than set-and-cleared per call site.</b>
 /// It is a property of the <i>window</i>, not of a control, and more than one reveal can be
@@ -118,6 +118,34 @@ public sealed class ScreenCaptureGuard
         {
             return _holds.TryGetValue(hwnd, out var hold) ? hold.Count : 0;
         }
+    }
+
+    /// <summary>Every live hold, across windows — the e2e <c>capture_posture</c>'s
+    /// <c>holds</c> (<c>security.md</c> § Implementation status today, the running-app
+    /// witness): how many revealed secrets hold a suppression right now.</summary>
+    public int TotalHolds
+    {
+        get
+        {
+            lock (_lock)
+            {
+                var total = 0;
+                foreach (var hold in _holds.Values) total += hold.Count;
+                return total;
+            }
+        }
+    }
+
+    /// <summary>Whether <paramref name="hwnd"/>'s REAL display affinity reads
+    /// <see cref="WdaExcludeFromCapture"/> — the platform bit read back, never this guard's
+    /// own belief, so a hold that never reached the window (or a release that never
+    /// restored it) shows. <c>null</c> when there is no window or the platform will not
+    /// answer: the e2e <c>window_excluded</c> is then left out, never a stand-in
+    /// <c>false</c>.</summary>
+    public bool? WindowExcluded(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return null;
+        return _affinity.TryGet(hwnd, out var affinity) ? affinity == WdaExcludeFromCapture : null;
     }
 }
 

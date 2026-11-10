@@ -321,7 +321,7 @@ def test_the_e2e_harness_points_at_the_private_slot():
     justfile alone is not enough."""
     conftest = (_REPO / "tests/e2e-unified/conftest.py").read_text(encoding="utf-8")
     fn = re.search(
-        r"def _mail_bridge_ffi_dir\(\).*?(?=\n(?:def|@|class)\s)", conftest, re.S
+        r"def _mail_bridge_ffi_dir\([^)]*\).*?(?=\n(?:def|@|class)\s)", conftest, re.S
     )
     assert fn, (
         "conftest.py has no `_mail_bridge_ffi_dir()` — the bridge's "

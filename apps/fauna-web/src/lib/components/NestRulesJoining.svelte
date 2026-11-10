@@ -26,7 +26,7 @@
   {#if summary.rules.length > 0}
     <ul>
       {#each summary.rules as rule, i (i)}
-        <li data-testid={IDS.ONBOARDING_NEST_RULES_ITEM} data-index={i}>{nestRuleLine(rule)}</li>
+        <li data-testid={IDS.ONBOARDING_NEST_RULES_ITEM} data-index={i} style="white-space: pre-line">{rule.inert ? `${nestRuleLine(rule)}\n${resolveLocalized(rule.inert)}` : nestRuleLine(rule)}</li>
       {/each}
     </ul>
   {/if}

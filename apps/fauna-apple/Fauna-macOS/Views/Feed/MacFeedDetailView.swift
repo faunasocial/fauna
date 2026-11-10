@@ -278,14 +278,15 @@ struct MacFeedDetailView: View {
                             Divider()
                         }
 
+                        // The next page loads as the reader reaches this end
+                        // (`feedScrollEdge`, below) — no load-more element.
                         if vm.hasMore {
-                            Button(L.common.loadMore) {
-                                Task { await vm.loadMore() }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
+                            Color.clear.frame(height: 1).feedScrollEdgeSentinel()
                         }
                     }
+                }
+                .feedScrollEdge(itemCount: vm.posts.count, hasMore: vm.hasMore) {
+                    Task { await vm.loadMore() }
                 }
                 // Engagement-cue capture: reads this ScrollView's frame as the
                 // viewport every `cueCard` row is measured against, ticks while
@@ -546,27 +547,12 @@ private struct PostDetailSheet: View {
                 .automationActivate(Ids.loadRemoteContentButton) { vm.revealRemoteImages(post.postId) }
             }
 
-            // Media — the document's folded `Image` block (render-model.md § D6), via `post-image`.
-            // The detail is where a gated post is unlocked, so it is the first place a
-            // sealed item becomes openable; `vm.documentPostImage` picks the source
-            // (`ui/media.md` § Encryption at rest), or a bridged post's `ProxiedImage`
-            // (render-model.md § D6c) when it has no blob image.
-            let blobHome = postBlobHome(post: livePost)
-            let mediaSource = vm.documentPostImage(livePost.document, home: blobHome)
-            if let mediaSource, !mediaSource.isUnavailable {
-                PostImage(source: mediaSource)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md § D6b);
-            // mutually exclusive with the image branch above, same fold. A tap plays it in
-            // place off the shared `playback_source` (§ D6c → Inline playback).
-            if let hash = documentMediaVideoHash(livePost.document) {
-                VideoThumbnailView(hash: hash, resolve: { await vm.videoPlayback(hash, home: blobHome) })
-            } else if let path = documentMediaProxiedVideoPath(livePost.document) {
-                // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path; a tap
-                // plays it through the nest's media proxy on the shared ticket.
-                VideoThumbnailView(proxiedPath: path, resolve: { await vm.proxiedVideoPlayback(path) })
-            }
+            // Media — every folded picture and video block (render-model.md § D6b), in body order,
+            // each with its `alt` (§ D6c, the `alt` paragraph), through the shared `PostMediaList`.
+            // The detail is where a gated post is unlocked, so it is the first place a sealed item
+            // becomes openable; the view model picks each picture's source (`ui/media.md` §
+            // Encryption at rest). A tap on a video plays it in place (§ D6c → Inline playback).
+            PostMediaList(vm: vm, document: livePost.document, home: postBlobHome(post: livePost))
 
             // Quoted post — the document's folded `QuotedPost` block (render-model.md § D6).
             if let quote = documentQuotedPost(livePost.document) {

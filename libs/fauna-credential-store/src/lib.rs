@@ -474,6 +474,12 @@ pub fn account_registry_with_lock(
 /// One home for the sequence, so the two freedesktop apps cannot drift on it —
 /// they did hold it as two hand-kept copies, each with its own comment
 /// explaining the order.
+///
+/// **The composition of the two halves a recorded sign-out runs apart**
+/// ([`wipe_own_credentials`], then [`erase_account_credentials`] per account —
+/// `account-scoping.md` § Erasure follows scope → *The sign-out record is on
+/// all 7 apps*, decision 2), kept whole for the seats whose sign-out does not
+/// run behind the record yet.
 pub fn erase_all_credentials(
     registry: &AccountRegistry,
     namespace: &CredentialStore,
@@ -487,6 +493,39 @@ pub fn erase_all_credentials(
         sweep.record_wipe_failure();
     }
     registry.reverify(sweep)
+}
+
+/// **The wipe** of a recorded sign-out: the app's own namespace alone — the
+/// index and the app's own per-actor slots (`AccountRegistry::wipe_own`),
+/// then the wholesale `delete_namespace`, then a read-back of that namespace.
+/// The auxiliary namespaces are not touched: each account's slots there ride
+/// with its scopes ([`erase_account_credentials`]), refused and retried with
+/// the store a sibling app may be running under them.
+///
+/// The wipe's own failure is kept, as in [`erase_all_credentials`].
+pub fn wipe_own_credentials(
+    registry: &AccountRegistry,
+    namespace: &CredentialStore,
+) -> fauna_client_accounts::CredentialSweep {
+    let mut sweep = registry.wipe_own();
+    if let Err(e) = namespace.delete_namespace() {
+        tracing::warn!(
+            "[account-store] wiping the {:?} credential namespace failed: {e:#}",
+            namespace.app
+        );
+        sweep.record_wipe_failure();
+    }
+    registry.reverify_own(sweep)
+}
+
+/// **One recorded account's credential erase**: its slots in every auxiliary
+/// account-scoped namespace (the writer key, the principal bundles), deleted
+/// and read back (`AccountRegistry::erase_account_aux_slots`). Idempotent.
+pub fn erase_account_credentials(
+    registry: &AccountRegistry,
+    actor_id_hex: &str,
+) -> fauna_client_accounts::CredentialSweep {
+    registry.erase_account_aux_slots(actor_id_hex)
 }
 
 /// The credential half of a sign-out residue retry
@@ -2567,6 +2606,34 @@ mod tests {
         assert!(sweep.is_clean(), "{sweep:?}");
         assert!(account_store_survivors(&account_store, &actor).is_empty());
         assert_eq!(app_store.get(&format!("fauna/{actor}/secret")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The recorded sign-out's two halves, apart: the wipe takes the app's own
+    /// namespace and leaves the shared `fauna-account-store` slots for the
+    /// account's own erase — which then takes them. Together they leave what
+    /// `erase_all_credentials` leaves.
+    #[test]
+    fn the_wipe_spares_the_shared_namespace_and_the_account_erase_takes_it() {
+        let dir = fresh_dir();
+        let (reg, account_store, actor) = seeded_split(&dir);
+        let app_store = CredentialStore::new("fauna-desktop");
+        let shared_before = account_store_survivors(&account_store, &actor);
+        assert!(!shared_before.is_empty(), "the seed wrote shared slots");
+
+        let wipe = wipe_own_credentials(&reg, &app_store);
+        assert!(wipe.is_clean(), "{wipe:?}");
+        assert_eq!(app_store.get(&format!("fauna/{actor}/secret")), None);
+        assert!(reg.list().is_empty(), "the index went with the wipe");
+        assert_eq!(
+            account_store_survivors(&account_store, &actor),
+            shared_before,
+            "the wipe never reaches the shared namespace"
+        );
+
+        let erase = erase_account_credentials(&reg, &actor);
+        assert!(erase.is_clean(), "{erase:?}");
+        assert!(account_store_survivors(&account_store, &actor).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

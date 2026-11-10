@@ -244,6 +244,15 @@ fn create_handler() -> RpcHandler {
                             "a create names its set by name or by a 32-byte name_hash",
                         )
                     })?;
+                // The `__` refusal above tests `req.name`, empty on this arm:
+                // refuse the address of a reserved rail too.
+                if crate::db::snapshots::is_reserved_set_hash(&hash) {
+                    return Err(coded(
+                        FS,
+                        "invalid_request",
+                        "the \"__\" folder namespace is reserved for the nest",
+                    ));
+                }
                 if req.name_sealed.is_none() {
                     return Err(coded(
                         FS,
@@ -1993,12 +2002,16 @@ async fn actor_members_list_core(
     let owner = <[u8; 32]>::try_from(fs.actor_id.as_slice())
         .map_err(|_| coded(FS, "internal", "folder owner id is not 32 bytes"))?;
 
-    let members = actor_roster_for_channel(db, &channel_id, &owner)
+    let ActorRoster {
+        members,
+        former_writers,
+    } = actor_roster_for_channel(db, &channel_id, &owner)
         .await
         .map_err(|e| internal(FS, e))?;
 
     Ok(fauna_protocol::folders::ActorMembersListReply {
         members,
+        former_writers,
         // Same-nest read: the caller's own nest already projects `access` onto
         // the member `FolderSummary`. The stamp exists for the relay arm
         // (`members.list_actors_remote`).
@@ -2018,12 +2031,13 @@ async fn actor_members_list_core(
 /// with the cross-nest `channel_foreign_members`, each member carrying its
 /// `folder_member_access` grant — and, on the owner row and each `writer` row,
 /// the succession statements that end at it
-/// ([`carried_succession_statements`]).
+/// ([`carried_succession_statements`]) — and, apart from the membership, the
+/// set's former writers ([`ActorRoster::former_writers`]).
 pub(crate) async fn actor_roster_for_channel(
     db: &crate::db::CacheDb,
     channel_id: &[u8; 32],
     owner: &[u8; 32],
-) -> anyhow::Result<Vec<fauna_protocol::folders::FolderActorMember>> {
+) -> anyhow::Result<ActorRoster> {
     let owner = *owner;
     let actors = db.list_channel_actors(channel_id).await?;
 
@@ -2067,9 +2081,15 @@ pub(crate) async fn actor_roster_for_channel(
     // membership IS the `channel_foreign_members` row this nest wrote at
     // Welcome-relay time — so without this union the owner's "Shared with"
     // roster silently omits them. `remote: true` is the additive marker; the
-    // handle stays empty (a foreign member is not a local `users` row) and the
-    // access projection is the same grant table (a Phase-3 cross-nest writer's
-    // grant renders identically).
+    // name is the `handle@domain` the member's OWN nest announced and this nest
+    // verified (`federation-shared-folders.md` § Cross-nest shared folders +
+    // channel append, the id→handle bullet → *The folder roster*: a foreign
+    // member is not a local `users` row and this nest never asks another what
+    // handle an actor wears — the pair is recorded off the member's own drains
+    // and the Welcome relay's reply), carried split as every wire carries it
+    // and empty/absent until an announce lands; the access projection is the
+    // same grant table (a Phase-3 cross-nest writer's grant renders
+    // identically).
     for actor in db.list_foreign_channel_members(channel_id).await? {
         let (access, byte_cap, bytes_used) = match roles.get(&actor) {
             Some(r) => (Some(r.access.clone()), r.byte_cap, Some(r.bytes_used)),
@@ -2077,9 +2097,14 @@ pub(crate) async fn actor_roster_for_channel(
         };
         let succession_statements =
             carried_succession_statements(db, &actor, "member", access.as_deref()).await?;
+        let (handle, domain) = match db.foreign_member_handle(channel_id, &actor).await? {
+            Some((handle, domain)) => (handle, Some(domain)),
+            None => (String::new(), None),
+        };
         members.push(fauna_protocol::folders::FolderActorMember {
             actor_id: hex::encode(actor),
-            handle: String::new(),
+            handle,
+            domain,
             role: "member".to_string(),
             access,
             byte_cap,
@@ -2090,7 +2115,34 @@ pub(crate) async fn actor_roster_for_channel(
         });
     }
 
-    Ok(members)
+    // The writers of record who hold the grant no longer
+    // (`writer-signed-change-records.md` ruling (12)(c)) — a separate list, so
+    // `members` stays the membership the UI counts. Each carries the chain that
+    // ends at it, as a `writer` row does: a former writer's predecessor-signed
+    // rows must place too.
+    let mut former_writers = Vec::new();
+    for actor in db.list_folder_former_writers(channel_id).await? {
+        let succession_statements =
+            carried_succession_statements(db, &actor, "member", Some("writer")).await?;
+        former_writers.push(fauna_protocol::folders::FolderFormerWriter {
+            actor_id: hex::encode(actor),
+            succession_statements,
+            ..Default::default()
+        });
+    }
+
+    Ok(ActorRoster {
+        members,
+        former_writers,
+    })
+}
+
+/// What [`actor_roster_for_channel`] projects: the membership, and the former
+/// writers beside it (never inside it — `ui/folders.md` § Sharing →
+/// *Member-list read* counts `members`).
+pub(crate) struct ActorRoster {
+    pub(crate) members: Vec<fauna_protocol::folders::FolderActorMember>,
+    pub(crate) former_writers: Vec<fauna_protocol::folders::FolderFormerWriter>,
 }
 
 /// The succession statements one roster row carries
@@ -2249,6 +2301,7 @@ fn actor_members_list_remote_handler() -> RpcHandler {
                     members: fetched.members,
                     caller_access: fetched.caller_access,
                     residency: fetched.residency,
+                    former_writers: fetched.former_writers,
                     extra: Default::default(),
                 }),
                 Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
@@ -4064,6 +4117,79 @@ use fauna_protocol::encode_canonical;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cross-nest member's roster row carries the `handle@domain` its own
+    /// nest announced and this nest verified, split as every wire splits the
+    /// pair (`federation-shared-folders.md` § Cross-nest shared folders +
+    /// channel append, the id→handle bullet → *The folder roster*); until an
+    /// announce lands the row is remote and nameless, as before. A local row
+    /// carries no domain — bare means one of this nest's own users.
+    #[tokio::test]
+    async fn actor_roster_names_a_foreign_member_from_its_verified_announce() {
+        let db = std::sync::Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let owner = [0x01u8; 32];
+        let named = [0x02u8; 32];
+        let nameless = [0x03u8; 32];
+        let channel = [0x0cu8; 32];
+        let peer_nest = [0x0fu8; 32];
+        db.create_user_with_handle(&owner, "free", "alice", None)
+            .await
+            .unwrap();
+        db.register_actor_channel(&owner, &channel).await.unwrap();
+        for member in [&named, &nameless] {
+            db.register_foreign_channel_member(
+                &channel,
+                member,
+                &peer_nest,
+                None,
+                crate::db::channels::RebindPower::InsertOnly,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            db.record_foreign_member_handle(&channel, &named, "bob", "other.test")
+                .await
+                .unwrap()
+        );
+
+        let roster = actor_roster_for_channel(&db, &channel, &owner)
+            .await
+            .unwrap();
+        let row = |actor: &[u8; 32]| {
+            roster
+                .members
+                .iter()
+                .find(|m| m.actor_id == hex::encode(actor))
+                .expect("on the roster")
+        };
+
+        let bob = row(&named);
+        assert_eq!(bob.remote, Some(true));
+        assert_eq!(bob.handle, "bob");
+        assert_eq!(bob.domain.as_deref(), Some("other.test"));
+        assert_eq!(
+            fauna_core::format::account_display_label(
+                fauna_core::format::qualified_handle(Some(&bob.handle), bob.domain.as_deref())
+                    .as_deref(),
+                &bob.actor_id,
+            ),
+            "bob@other.test",
+            "the apps join the pair only at display, through the shared formatter"
+        );
+
+        let anon = row(&nameless);
+        assert_eq!(anon.remote, Some(true));
+        assert_eq!(
+            anon.handle, "",
+            "no announce yet: nameless, the short-id fallback"
+        );
+        assert_eq!(anon.domain, None);
+
+        let alice = row(&owner);
+        assert_eq!(alice.handle, "alice");
+        assert_eq!(alice.domain, None, "a local row carries no domain");
+    }
 
     /// A `for_test` state with the web-content service wired, plus a rendered
     /// one-template website for `actor` — the transition tests' shared
@@ -5921,6 +6047,78 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.code.contains("not_shared"), "got {}", err.code);
+    }
+
+    /// The owner's identity succession must not leave its retired identity
+    /// counted as a member of its own set
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final*, part (b)). The succession moves the
+    /// folder row and the claim but leaves the predecessor's roster row
+    /// (`actor_channels` is `Stay`); the successor's sweep seats it through the
+    /// claimant's auto-register on `channel.send`, which must retire that row
+    /// as the claimant's Welcome does for a member's successor (ruling
+    /// (8)(j)(2)). Then a member whose forked seat leaves takes the list to
+    /// zero members.
+    #[tokio::test]
+    async fn a_succeeded_owner_whose_member_left_lists_no_member() {
+        use crate::conversations_handlers::{
+            folder_channel_claim, register_actor_channel_gated_with_claim,
+        };
+        use fauna_protocol::folders::ActorMembersListRequest;
+        let db = crate::db::CacheDb::open_in_memory().unwrap();
+        let old = [0xa1u8; 32];
+        let new = [0xa2u8; 32];
+        let member = [0xb2u8; 32];
+        db.create_user(&old, "free", "test").await.unwrap();
+        db.create_user(&member, "free", "test").await.unwrap();
+        let channel = share_and_add_member(&db, "shared", &old, &member).await;
+
+        db.record_succession(&old, &new, b"statement", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The successor's sweep joins its own set in-process and posts; the
+        // post's auto-register is the claimant seating itself.
+        let claim = folder_channel_claim(&db, &channel).await;
+        register_actor_channel_gated_with_claim(&db, &channel, claim, &new, &new, "test").await;
+
+        // The member's forked seat unlists itself.
+        assert!(
+            db.evict_actor_from_channel(&member, &channel)
+                .await
+                .unwrap()
+        );
+
+        let reply = actor_members_list_core(
+            &db,
+            &new,
+            &ActorMembersListRequest {
+                name: "shared".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let members: Vec<_> = reply
+            .members
+            .iter()
+            .filter(|m| m.role == "member")
+            .map(|m| m.actor_id.clone())
+            .collect();
+        assert!(
+            members.is_empty(),
+            "the successor's list must name no member once M left; it named {members:?} \
+             (retired owner id {})",
+            hex::encode(old)
+        );
+        assert!(
+            reply
+                .members
+                .iter()
+                .any(|m| m.role == "owner" && m.actor_id == hex::encode(new)),
+            "the successor is the set's owner row"
+        );
     }
 
     /// Re-publish upserts (one envelope per group, the latest wins).

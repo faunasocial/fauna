@@ -581,6 +581,24 @@ pub fn account_display_handle(
     )
 }
 
+/// The launch surfaces' cached identity — `<handle>@<domain> · <tier>` from the
+/// bound account's cached handle/domain/tier
+/// (`fauna_client_accounts::identity_line`; `onboarding.md` § App-launch
+/// routing → *The cached identity on the launch surfaces*). `undefined` while
+/// the cache holds no handle — the label is then absent.
+#[wasm_bindgen(js_name = accountIdentityLine)]
+pub fn account_identity_line(
+    entry_handle: Option<String>,
+    entry_domain: Option<String>,
+    entry_tier: Option<String>,
+) -> Option<String> {
+    fauna_client_accounts::identity_line(
+        entry_handle.as_deref(),
+        entry_domain.as_deref(),
+        entry_tier.as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     //! Run by `just wasm-test-check` (headless Firefox — `critical_alerts.rs`

@@ -475,6 +475,96 @@ async fn a_rename_opens_under_the_owner_key_and_survives_a_synthetic_re_register
     );
 }
 
+/// The next push frame's kind on a test subscriber, `None` when none is queued.
+fn next_push_kind(rx: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>) -> Option<String> {
+    let bytes = rx.try_recv().ok()?;
+    match fauna_protocol::decode_frame(&bytes).expect("a frame") {
+        fauna_protocol::Frame::Push(push) => Some(push.kind),
+        other => panic!("expected a push, got {other:?}"),
+    }
+}
+
+/// `devices.md` § Listing Devices → *An open roster follows a sibling's
+/// write*: a committed rename and a committed removal each tell every connected
+/// socket of the owner that the roster is stale — so a Devices page open on a
+/// sibling re-reads it — while a refused rename tells nobody, and another
+/// actor's sockets never hear the owner's roster move.
+#[tokio::test]
+async fn a_committed_roster_write_nudges_every_owner_socket_and_nobody_else() {
+    let (router, state) = router_and_state().await;
+    let (actor, stranger) = ([31u8; 32], [32u8; 32]);
+    let (renamed_id, removed_id) = ([0xd1u8; 32], [0xd2u8; 32]);
+    let (renamed, removed) = (hex::encode(renamed_id), hex::encode(removed_id));
+    register_device(&router, &state, actor, &renamed, "fauna-tui").await;
+    register_device(&router, &state, actor, &removed, "fauna-tui").await;
+    let (_a, mut sibling_one) = state.ws.subscribe(actor);
+    let (_b, mut sibling_two) = state.ws.subscribe(actor);
+    let (_s, mut strangers) = state.ws.subscribe(stranger);
+    let root = fauna_core::path_crypto::LabelRoot::owner_of(
+        &fauna_core::crypto::BackupKey::from_bytes([10u8; 32]),
+    );
+    let sealed = fauna_core::label_custody::seal_device_label(&root, &renamed_id, "desk")
+        .unwrap()
+        .unwrap();
+
+    // A refused rename (no such row) moves nothing, so nothing is pushed.
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.devices.rename",
+        rename(id_hex(0xd3), sealed.clone()),
+    )
+    .await
+    .expect_err("no such row");
+    assert_eq!(next_push_kind(&mut sibling_one), None);
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.devices.rename",
+        rename(renamed.clone(), sealed),
+    )
+    .await
+    .expect("rename ok");
+    for rx in [&mut sibling_one, &mut sibling_two] {
+        let kind = next_push_kind(rx).expect("the rename is pushed");
+        assert_eq!(kind, "fauna.sync.devices.changed");
+        assert!(
+            fauna_protocol::StaleSurfaces::for_kind(&kind).devices,
+            "the push stales the Devices pages"
+        );
+        assert_eq!(next_push_kind(rx), None, "one nudge per write");
+    }
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.devices.delete",
+        encode(&SyncDeviceDeleteRequest {
+            device_id: removed,
+            extra: Default::default(),
+        }),
+    )
+    .await
+    .expect("delete ok");
+    for rx in [&mut sibling_one, &mut sibling_two] {
+        assert_eq!(
+            next_push_kind(rx).as_deref(),
+            Some("fauna.sync.devices.changed"),
+            "the removal is pushed"
+        );
+    }
+
+    assert_eq!(
+        next_push_kind(&mut strangers),
+        None,
+        "another actor never hears this roster move"
+    );
+}
+
 /// Actor-scoped like `devices.delete`: another actor's row — and an id no
 /// row carries — answers `not_found`, and the row is left as it was.
 #[tokio::test]

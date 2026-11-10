@@ -62,11 +62,25 @@ pub async fn remove_account_gesture(
         tracing::warn!("[settings/account] remove-account REFUSED ({blocked:?}) — {actor_id_hex}");
         return Ok(Some(blocked));
     }
+    // The removal joins the sign-out record before its registry step, so the
+    // store that step's crash-safety argument leaves unreached is finished by
+    // the next launch's `sign_out_finish` (`account-scoping.md` § Erasure
+    // follows scope → *The sign-out record is on all 7 apps*, decision 1);
+    // settled after the erase below — or at once, when the registry refuses.
+    let slot = base_dirs
+        .first()
+        .map(fauna_client_accounts::SignOutRecordFile::under);
+    if let Some(slot) = &slot {
+        fauna_client_accounts::SignOutRecord::record_removal(slot, &actor_id_hex);
+    }
     let removed = registry
         .registry()
         .remove_with_snapshot(&actor_id_hex)
         .map_err(|e| {
             tracing::error!("[settings/account] remove account failed: {e:#}");
+            if let Some(slot) = &slot {
+                fauna_client_accounts::SignOutRecord::settle(slot, &actor_id_hex);
+            }
             crate::general_err(e)
         })?;
     let removed = Arc::new(removed);
@@ -98,6 +112,9 @@ pub async fn remove_account_gesture(
         ) {
             tracing::warn!("[settings/account] remove-account erase under {base} failed: {e}");
         }
+    }
+    if let Some(slot) = &slot {
+        fauna_client_accounts::SignOutRecord::settle(slot, &actor_id_hex);
     }
     Ok(None)
 }

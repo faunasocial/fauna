@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex};
 use fauna_client::NestClient;
 use fauna_client_bridges::conversations::BridgedConversationClient;
 use fauna_conversations::backend::{
-    BridgedOutbound, BridgedRecord, BridgedResolved, BridgedSent, BridgedSink, BridgedSource,
+    BridgedOutbound, BridgedRecord, BridgedResolved, BridgedRoomRef, BridgedSent, BridgedSink,
+    BridgedSource,
 };
 use fauna_conversations::backends::bridged::{BridgeIdentity, BridgedRoomRecord};
 use fauna_conversations::capabilities::declared_bridge_capabilities;
@@ -149,6 +150,13 @@ pub struct NestBridgedGlue<R: RpcRequester, K> {
     /// the room, so nothing new is stamped while it stays so — and dropped
     /// when the room is served again, so a later disconnection reads afresh.
     swept: Mutex<HashMap<Vec<u8>, Vec<i64>>>,
+    /// Per room, by room id: the nest's `last_removed_at` this glue last
+    /// acted on (`bridged-adapter.md` § Removing bridged rows, rule 5). The
+    /// first sight of a room is the baseline — this glue's own inbox read
+    /// starts from the beginning and skips tombstones — and a later read
+    /// whose value has moved past it re-reads the room for the tombstones
+    /// ([`Self::removed_rows`]).
+    removals_seen: Mutex<HashMap<Vec<u8>, i64>>,
 }
 
 impl<R, K> NestBridgedGlue<R, K>
@@ -166,6 +174,7 @@ where
             rooms: Mutex::new(HashMap::new()),
             read_through: Mutex::new(0),
             swept: Mutex::new(HashMap::new()),
+            removals_seen: Mutex::new(HashMap::new()),
         })
     }
 
@@ -187,6 +196,61 @@ where
             .values()
             .find(|r| r.bridge_id == bridge_id && r.participants == [peer])
             .cloned()
+    }
+
+    /// The known room `room` names — its bridge and its far participants,
+    /// compared sorted.
+    fn room_of(&self, room: &BridgedRoomRef) -> Option<KnownRoom> {
+        self.rooms
+            .lock()
+            .unwrap()
+            .values()
+            .find(|r| {
+                let mut far = r.participants.clone();
+                far.sort();
+                r.bridge_id == room.bridge_id && far == room.participants
+            })
+            .cloned()
+    }
+
+    /// [`Self::room_of`], re-listing once when the room is not known yet.
+    async fn room_id_of(&self, room: &BridgedRoomRef) -> Result<Vec<u8>, String> {
+        if let Some(known) = self.room_of(room) {
+            return Ok(known.room_id);
+        }
+        self.list_rooms().await?;
+        self.room_of(room)
+            .map(|known| known.room_id)
+            .ok_or_else(fauna_conversations::backends::bridged::room_not_known_refusal)
+    }
+
+    async fn remove_messages_inner(
+        &self,
+        room: BridgedRoomRef,
+        ids: Vec<i64>,
+    ) -> Result<u32, String> {
+        let room_id = self.room_id_of(&room).await?;
+        let mut removed = 0;
+        for chunk in ids.chunks(BRIDGED_PAGE_MAX as usize) {
+            removed += self
+                .client
+                .messages_remove(room_id.clone(), chunk.to_vec())
+                .await
+                .map_err(user_sentence)?;
+        }
+        Ok(removed)
+    }
+
+    async fn remove_room_inner(&self, room: BridgedRoomRef) -> Result<u32, String> {
+        let room_id = self.room_id_of(&room).await?;
+        let removed = self
+            .client
+            .rooms_remove(room_id.clone())
+            .await
+            .map_err(user_sentence)?;
+        // Hidden from `rooms.list` now; the next live row lists it again.
+        self.rooms.lock().unwrap().remove(&room_id);
+        Ok(removed)
     }
 
     async fn list_rooms(&self) -> Result<Vec<BridgedRoomInfo>, String> {
@@ -268,6 +332,7 @@ where
             } else {
                 self.swept.lock().unwrap().remove(&info.room_id);
             }
+            record.removed_rows = self.removed_rows(info).await;
             out.push(record);
         }
         Ok(out)
@@ -285,6 +350,52 @@ where
         if let Some(rows) = self.swept.lock().unwrap().get(room_id) {
             return rows.clone();
         }
+        let Some(page) = self.read_room(room_id).await else {
+            return Vec::new();
+        };
+        let rows = undelivered_sent_rows(&page);
+        self.swept
+            .lock()
+            .unwrap()
+            .insert(room_id.to_vec(), rows.clone());
+        rows
+    }
+
+    /// The tombstones of `info`'s room another device's remove left behind
+    /// (`bridged-adapter.md` § Removing bridged rows, rule 5): one one-room
+    /// re-read from the start whenever the room's `last_removed_at` has moved
+    /// past the value this glue last acted on. The first sight of a room is
+    /// the baseline and reads nothing; a failed read answers empty and is
+    /// tried again at the next read, the value left unmoved.
+    async fn removed_rows(&self, info: &BridgedRoomInfo) -> Vec<i64> {
+        let seen = self
+            .removals_seen
+            .lock()
+            .unwrap()
+            .get(&info.room_id)
+            .copied();
+        if !removal_reread_due(seen, info.last_removed_at) {
+            if seen.is_none() {
+                self.removals_seen
+                    .lock()
+                    .unwrap()
+                    .insert(info.room_id.clone(), info.last_removed_at);
+            }
+            return Vec::new();
+        }
+        let Some(page) = self.read_room(&info.room_id).await else {
+            return Vec::new();
+        };
+        self.removals_seen
+            .lock()
+            .unwrap()
+            .insert(info.room_id.clone(), info.last_removed_at);
+        tombstoned_rows(&page)
+    }
+
+    /// Every row of `room_id`, from the start, paged — `None` when a page
+    /// fails. Nothing is opened: what a re-read looks for is in the clear.
+    async fn read_room(&self, room_id: &[u8]) -> Option<Vec<BridgedMessageInfo>> {
         let mut rows = Vec::new();
         let mut after_id = 0;
         loop {
@@ -296,22 +407,17 @@ where
                 Ok(page) => page,
                 Err(e) => {
                     tracing::debug!(error = %e, "bridged room re-read failed");
-                    return rows;
+                    return None;
                 }
             };
-            rows.extend(undelivered_sent_rows(&page.messages));
-            match page.messages.last() {
-                Some(last) if page.messages.len() as u32 >= BRIDGED_PAGE_MAX => {
-                    after_id = last.id;
-                }
-                _ => break,
+            let full = page.messages.len() as u32 >= BRIDGED_PAGE_MAX;
+            let last = page.messages.last().map(|m| m.id);
+            rows.extend(page.messages);
+            match last {
+                Some(last) if full => after_id = last,
+                _ => return Some(rows),
             }
         }
-        self.swept
-            .lock()
-            .unwrap()
-            .insert(room_id.to_vec(), rows.clone());
-        rows
     }
 
     async fn fetch_inner(&self, after_id: i64, limit: u32) -> Result<Vec<BridgedRecord>, String> {
@@ -333,6 +439,17 @@ where
                 .map_err(user_sentence)?;
             let mut out = Vec::with_capacity(page.messages.len());
             for msg in &page.messages {
+                // A tombstone carries no content to open: it is handed across
+                // as it is, so the driver forgets a row held under its id and
+                // never ingests it.
+                if msg.removed {
+                    out.push(inbox_record(
+                        msg,
+                        self.known(&msg.room_id).as_ref(),
+                        String::new(),
+                    ));
+                    continue;
+                }
                 let body = match keys.open_bridged(&msg.sealed_content, msg.received_at) {
                     Some(body) => Some(body),
                     // A miss against a stale key set is not a fact about the
@@ -427,7 +544,22 @@ fn room_record(info: &BridgedRoomInfo) -> BridgedRoomRecord {
         disconnected: info.disconnected,
         // Filled by the room's re-read (`NestBridgedGlue::undelivered_rows`).
         undelivered_rows: Vec::new(),
+        last_removed_at: info.last_removed_at,
+        // Filled by the room's re-read (`NestBridgedGlue::removed_rows`).
+        removed_rows: Vec::new(),
     }
+}
+
+/// Whether a room's tombstones are due a re-read: its `last_removed_at` has
+/// moved past `seen`, the value last acted on. The first sight (`None`) is
+/// the baseline, never a re-read.
+fn removal_reread_due(seen: Option<i64>, last_removed_at: i64) -> bool {
+    seen.is_some_and(|seen| last_removed_at > seen)
+}
+
+/// The ids of the tombstones on `page` — the rows the nest serves removed.
+fn tombstoned_rows(page: &[BridgedMessageInfo]) -> Vec<i64> {
+    page.iter().filter(|m| m.removed).map(|m| m.id).collect()
 }
 
 /// The ids of the account's own Sent copies on `page` the nest stamped
@@ -481,6 +613,7 @@ fn inbox_record(msg: &BridgedMessageInfo, room: Option<&KnownRoom>, body: String
         outbound: msg.outbound,
         timestamp_ms: msg.received_at,
         undelivered: msg.outbound && msg.undelivered,
+        removed: msg.removed,
     }
 }
 
@@ -535,6 +668,14 @@ impl BridgedSink for NestBridgedGlue<Arc<NestClient>, MailKeyCache> {
     async fn send(&self, outbound: BridgedOutbound) -> Result<BridgedSent, String> {
         self.send_inner(outbound).await
     }
+
+    async fn remove_messages(&self, room: BridgedRoomRef, ids: Vec<i64>) -> Result<u32, String> {
+        self.remove_messages_inner(room, ids).await
+    }
+
+    async fn remove_room(&self, room: BridgedRoomRef) -> Result<u32, String> {
+        self.remove_room_inner(room).await
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -558,6 +699,14 @@ impl<K: BridgedKeySource> BridgedSink for NestBridgedGlue<fauna_rpc_wasm::WsRpcC
 
     async fn send(&self, outbound: BridgedOutbound) -> Result<BridgedSent, String> {
         self.send_inner(outbound).await
+    }
+
+    async fn remove_messages(&self, room: BridgedRoomRef, ids: Vec<i64>) -> Result<u32, String> {
+        self.remove_messages_inner(room, ids).await
+    }
+
+    async fn remove_room(&self, room: BridgedRoomRef) -> Result<u32, String> {
+        self.remove_room_inner(room).await
     }
 }
 
@@ -760,5 +909,211 @@ mod tests {
             },
         ];
         assert_eq!(undelivered_sent_rows(&page), vec![7]);
+    }
+
+    // ── The local remove (`bridged-adapter.md` § Removing bridged rows) ──
+
+    /// A transport answering scripted replies in order, recording each kind
+    /// and payload — the glue's whole conversation with the nest.
+    #[derive(Default)]
+    struct Scripted {
+        replies: Mutex<std::collections::VecDeque<Vec<u8>>>,
+        sent: Mutex<Vec<(&'static str, Vec<u8>)>>,
+    }
+
+    #[derive(Debug)]
+    struct NoErr;
+
+    impl std::fmt::Display for NoErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "never constructed")
+        }
+    }
+
+    impl RpcErrorClass for NoErr {
+        fn is_rejection(&self) -> bool {
+            false
+        }
+    }
+
+    impl Scripted {
+        fn script<T: serde::Serialize>(&self, reply: &T) {
+            self.replies
+                .lock()
+                .unwrap()
+                .push_back(fauna_protocol::encode_canonical(reply).unwrap().to_vec());
+        }
+
+        fn kinds(&self) -> Vec<&'static str> {
+            self.sent.lock().unwrap().iter().map(|(k, _)| *k).collect()
+        }
+    }
+
+    impl RpcRequester for &Scripted {
+        type Error = NoErr;
+
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            let bytes = fauna_protocol::encode_canonical(&payload).unwrap().to_vec();
+            self.sent.lock().unwrap().push((kind, bytes));
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| panic!("no scripted reply for {kind}"));
+            Ok(fauna_protocol::decode_strict(&reply).unwrap())
+        }
+    }
+
+    /// No mail key: the room reads and the removes need none.
+    struct NoKeys;
+
+    impl BridgedKeySource for NoKeys {
+        type Keys = MailKeys;
+
+        async fn get(&self) -> Option<MailKeys> {
+            None
+        }
+
+        async fn refresh(&self) -> Option<MailKeys> {
+            None
+        }
+    }
+
+    use fauna_protocol::bridged_conversations::{
+        InboxFetchReply, KIND_INBOX_FETCH, KIND_MESSAGES_REMOVE, KIND_ROOMS_LIST,
+        KIND_ROOMS_REMOVE, MessagesRemoveRequest, RemoveReply, RoomsListReply, RoomsRemoveRequest,
+    };
+
+    fn listing(last_removed_at: i64) -> RoomsListReply {
+        RoomsListReply {
+            rooms: vec![BridgedRoomInfo {
+                last_removed_at,
+                ..info()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Rule 5: the first sight of a room is the baseline and reads nothing;
+    /// a read whose `last_removed_at` has moved re-reads the room from the
+    /// start and hands the tombstones across; an unmoved value reads nothing.
+    #[test]
+    fn a_moved_last_removed_at_rereads_the_room_for_its_tombstones() {
+        let nest = Scripted::default();
+        let glue = NestBridgedGlue::new(&nest, Arc::new(NoKeys));
+
+        nest.script(&listing(5));
+        let rooms = fauna_client_testkit::block_on(glue.rooms_inner()).unwrap();
+        assert!(
+            rooms[0].removed_rows.is_empty(),
+            "the first sight is the baseline"
+        );
+        assert_eq!(rooms[0].last_removed_at, 5);
+        assert_eq!(nest.kinds(), vec![KIND_ROOMS_LIST]);
+
+        nest.script(&listing(9));
+        nest.script(&InboxFetchReply {
+            messages: vec![
+                BridgedMessageInfo {
+                    id: 3,
+                    room_id: vec![9; 32],
+                    ..Default::default()
+                },
+                BridgedMessageInfo {
+                    id: 4,
+                    room_id: vec![9; 32],
+                    removed: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let rooms = fauna_client_testkit::block_on(glue.rooms_inner()).unwrap();
+        assert_eq!(rooms[0].removed_rows, vec![4]);
+        assert_eq!(
+            nest.kinds(),
+            vec![KIND_ROOMS_LIST, KIND_ROOMS_LIST, KIND_INBOX_FETCH]
+        );
+
+        nest.script(&listing(9));
+        let rooms = fauna_client_testkit::block_on(glue.rooms_inner()).unwrap();
+        assert!(rooms[0].removed_rows.is_empty(), "acted on once");
+        assert_eq!(nest.kinds().len(), 4);
+    }
+
+    /// Rule 6: the two removes reach the nest under the room id the
+    /// participants name; a room the glue has not seen yet is listed first.
+    #[test]
+    fn the_removes_name_the_room_the_participants_make() {
+        let nest = Scripted::default();
+        let glue = NestBridgedGlue::new(&nest, Arc::new(NoKeys));
+        let room = BridgedRoomRef {
+            bridge_id: "matrix".into(),
+            participants: vec!["@bob:example.org".into()],
+        };
+        nest.script(&listing(0));
+        nest.script(&RemoveReply {
+            removed: 1,
+            ..Default::default()
+        });
+        let n = fauna_client_testkit::block_on(glue.remove_messages_inner(room.clone(), vec![7]))
+            .unwrap();
+        assert_eq!(n, 1);
+        let sent = nest.sent.lock().unwrap().clone();
+        assert_eq!(sent[0].0, KIND_ROOMS_LIST);
+        assert_eq!(sent[1].0, KIND_MESSAGES_REMOVE);
+        let req: MessagesRemoveRequest = fauna_protocol::decode_strict(&sent[1].1).unwrap();
+        assert_eq!((req.room_id, req.ids), (vec![9; 32], vec![7]));
+
+        nest.script(&RemoveReply {
+            removed: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            fauna_client_testkit::block_on(glue.remove_room_inner(room.clone())).unwrap(),
+            2
+        );
+        let sent = nest.sent.lock().unwrap().clone();
+        assert_eq!(sent[2].0, KIND_ROOMS_REMOVE);
+        let req: RoomsRemoveRequest = fauna_protocol::decode_strict(&sent[2].1).unwrap();
+        assert_eq!(req.room_id, vec![9; 32]);
+
+        // A room no listing makes is refused by name, after one re-list.
+        nest.script(&RoomsListReply::default());
+        let refused = fauna_client_testkit::block_on(glue.remove_room_inner(room));
+        assert_eq!(
+            refused,
+            Err(fauna_conversations::backends::bridged::room_not_known_refusal())
+        );
+    }
+
+    /// A tombstone the inbox serves reaches the driver flagged removed, with
+    /// no body; the baseline rule reads only a moved value.
+    #[test]
+    fn a_tombstone_reaches_the_driver_flagged_removed() {
+        let room = KnownRoom::of(&info());
+        let tomb = BridgedMessageInfo {
+            id: 5,
+            room_id: vec![9; 32],
+            bridge_id: "matrix".into(),
+            removed: true,
+            ..Default::default()
+        };
+        let rec = inbox_record(&tomb, Some(&room), String::new());
+        assert!(rec.removed);
+        assert!(rec.body.is_empty());
+        assert_eq!(tombstoned_rows(&[tomb]), vec![5]);
+        assert!(!removal_reread_due(None, 9));
+        assert!(!removal_reread_due(Some(9), 9));
+        assert!(removal_reread_due(Some(5), 9));
     }
 }

@@ -366,6 +366,51 @@ fn tombstone_up_to_seq_with_coordinates(
     Ok(total)
 }
 
+/// Live mail **heads** (inline records and continuation heads — never a part,
+/// which is a byte range of one seal, not a record) for one actor with
+/// `seq > after_seq`, oldest first, up to `limit`: `(seq, record_cid)`. The
+/// materializer's catch-up walk and its retire sweep's live set.
+pub fn list_mail_heads_after_seq(
+    conn: &Connection,
+    scope_id: &[u8; 32],
+    after_seq: i64,
+    limit: i64,
+) -> Result<Vec<(i64, Cid)>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, record_cid
+               FROM segment_records
+              WHERE scope_id = ?1 AND kind = 'mail' AND seq > ?2 AND tombstoned = 0
+                AND continuation_role != 1
+              ORDER BY seq ASC
+              LIMIT ?3",
+        )
+        .context("prepare list_mail_heads_after_seq")?;
+    let rows = stmt
+        .query_map(params![&scope_id[..], after_seq, limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })
+        .context("query_map list_mail_heads_after_seq")?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (seq, cid_blob) = r.context("row list_mail_heads_after_seq")?;
+        out.push((seq, cid_from_blob(cid_blob)?));
+    }
+    Ok(out)
+}
+
+/// How many live mail heads one actor holds — the materializer's cheap
+/// "did anything retire?" probe before a full retire sweep.
+pub fn count_live_mail_heads(conn: &Connection, scope_id: &[u8; 32]) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM segment_records \
+         WHERE scope_id = ?1 AND kind = 'mail' AND tombstoned = 0 AND continuation_role != 1",
+        params![&scope_id[..]],
+        |row| row.get(0),
+    )
+    .context("count_live_mail_heads")
+}
+
 /// Tombstone every live mail record for `scope_id` with `seq <= up_to_seq`. Mail
 /// sibling of [`tombstone_conv_up_to_seq`] — the relay-ack purge step. Returns
 /// the number of rows newly tombstoned (already-tombstoned rows are skipped by

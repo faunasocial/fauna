@@ -19,7 +19,6 @@ import secrets
 
 import pytest
 
-from helpers.app_surface import require_surface
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -540,7 +539,6 @@ def test_after_a_rename_the_profile_shows_the_handle_on_the_new_primary(
     from helpers.relaunch import relaunch, require_relaunchable
 
     app = lifecycle_admin_app
-    require_surface(app.driver, "profile-handle-primary-domain")
     require_relaunchable(app.driver)
     handle = admin_user(lifecycle_nest).get("handle")
     assert handle, "the claimed admin must hold a handle for the header to show"

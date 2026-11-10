@@ -31,6 +31,17 @@ pub struct BridgesViewHandles {
     pub plugins: Rc<plugins::PluginsSection>,
 }
 
+/// Re-read the whole page when the Bridges page is entered (the real sidebar
+/// edge in `app.rs` and the test agent's navigate in `lib.rs` both call this):
+/// the bridge list — a row that reached the nest since the last read, such as
+/// a bridge app consented on Connected apps, pushes nothing here — and the
+/// plugin cards under it (`plugins::refresh`). web re-reads on mount and tui
+/// on every page load; this is the same edge.
+pub fn refresh(client: &FaunaClient) {
+    client.fetch_bridges();
+    plugins::refresh(client);
+}
+
 /// Build the full bridges view: NavigationSplitView with bridge list on the
 /// left and bridge detail on the right.
 pub fn build_bridges_view(

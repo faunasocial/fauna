@@ -246,6 +246,9 @@ def _await_text(app, body):
 
 
 @pytest.mark.feature("conversations")
+# Its transport-only header is group-conversations outcome 11's
+# another-network arm (`conversation-rooms.md` § The three classes).
+@pytest.mark.feature("group-conversations")
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
@@ -496,7 +499,7 @@ def held_ward(consent_nest):
     unknown peers — arranged over the wire, as ``test_family.py``'s fixtures
     arrange theirs (fixture setup, convention 8's exemption: the admission and
     the knob are ``test_family.py``'s own subjects). One anonymous invite-request
-    submit per use — two tests use it; this module spends no other. Carries the
+    submit per use — three tests use it; this module spends no other. Carries the
     guardian's identity as ``ward["guardian"]`` for the test that Approves.
 
     The ward is taken to ``hosted_full`` exactly as ``consent_nest`` takes its
@@ -741,6 +744,168 @@ def test_a_guardian_lets_a_held_bridged_conversation_through_and_later_messages_
     states = app.driver.get_attrs("conversation-guardian-state", "state")
     assert not states, (
         f"a conversation the guardian let through must carry no guardian marker: {states!r}"
+    )
+
+
+LOOSE_PEER = "@sometimes:example.org"
+REFUSED_PEER = "@notforyou:example.org"
+REFUSED_REPLY = "please let me talk to you"
+
+
+@pytest.mark.feature("family-safety")
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+def test_relaxing_the_bridge_dm_setting_releases_held_rooms_but_a_guardian_block_holds(
+    request, app, consent_nest, consent_bridge, metadata_server, held_ward
+):
+    """family-safety outcome 65 — `family-safety.md` § The bridge-DM gate:
+    "relaxing the knob releases everything by construction" (placement is
+    computed, never stored), while a guardian's **Deny** writes verdict `block`,
+    which binds whatever the knob says; and "a send to a guardian-`block`ed peer
+    is refused with the typed guardian-approval error".
+
+    Two cold peers write; both rooms are held. On their Family page the guardian
+    Denies one and then turns the setting to allow (both the real gestures). The
+    nest answers first at each step (convention 5); then the ward's app shows
+    the released room unmarked, the refused room still marked `blocked`, and the
+    ward's own reply into the refused room is refused, nothing queued for the
+    bridge.
+
+    tui, web, linux, android, macos and ios; windows joins with its
+    trickle-down batch, as this file's other family tests already have."""
+    from conftest import _login_app_as
+
+    ward_nest = _as_user(consent_nest, held_ward)
+    guardian = held_ward["guardian"]
+    conv = app.conversations
+
+    def _sign_in(nest, identity) -> None:
+        app.driver.reset()
+        _login_app_as(
+            app, request, nest, identity, spa_url_fixture="consent_spa_url", verify_live_actor=True
+        )
+
+    def _room_state(far_room: str):
+        room = next((r for r in _rooms(ward_nest) if r["far_room_id"] == far_room), None)
+        assert room is not None, f"the nest lists no room {far_room!r} for the ward"
+        return room.get("guardian_state")
+
+    # ── Two cold peers write; both rooms are held. ──
+    _sign_in(ward_nest, held_ward)
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+    session, _holder_secret, key = _consented_bridge(ward_nest, metadata_server)
+    tail = os.urandom(3).hex()
+    loose_room = f"!loose-{tail}:example.org"
+    refused_room = f"!refused-{tail}:example.org"
+    _deposit(session, key, far_room_id=loose_room, far_message_id="$loose-1",
+             sender=LOOSE_PEER, body="hello, loosely")
+    _deposit(session, key, far_room_id=refused_room, far_message_id="$refused-1",
+             sender=REFUSED_PEER, body="hello, refused")
+    assert _room_state(loose_room) == "held" and _room_state(refused_room) == "held", (
+        "precondition: both cold peers' rooms must be held"
+    )
+
+    # ── The guardian denies one, then relaxes the setting. ──
+    _sign_in(_as_user(consent_nest, guardian), guardian)
+    app.family.navigate()
+
+    def _queue_row(peer: str) -> list[int] | None:
+        for i in range(app.family.approval_count()):
+            if peer in (app.family.approval_text(i) or ""):
+                return [i]
+        app.family.reload()
+        return None
+
+    (row,) = wait_until(
+        lambda: _queue_row(REFUSED_PEER),
+        RPC_ROUNDTRIP_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"no dm_hold row naming {REFUSED_PEER}; rows: "
+            f"{[app.family.approval_text(i) for i in range(app.family.approval_count())]!r}, "
+            f"error: {_page_error(app)!r}"
+        ),
+    )
+    app.family.deny(row)
+    wait_until(
+        lambda: _room_state(refused_room) == "blocked",
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"after the Deny the nest reports the room as {_room_state(refused_room)!r}; "
+            f"error: {_page_error(app)!r}"
+        ),
+    )
+
+    app.family.select_ward_by_handle(held_ward["handle"])
+    assert app.family.policy_editor_visible(), (
+        f"policy editor did not load. error: {_page_error(app)!r}"
+    )
+    app.family.set_unknown_peer_dm("allow")
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {_page_error(app)!r}"
+    wait_until(
+        lambda: _room_state(loose_room) is None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            "relaxing the setting must release the held room; the nest reports "
+            f"{_room_state(loose_room)!r}; error: {_page_error(app)!r}"
+        ),
+    )
+    assert _room_state(refused_room) == "blocked", (
+        "a guardian's block must hold whatever the setting says"
+    )
+
+    # ── The ward's app: released unmarked, refused still marked, reply refused. ──
+    _sign_in(ward_nest, held_ward)
+    conv.navigate()
+
+    def _thread(peer: str):
+        for t in conv.list_threads():
+            if peer in (t.label or ""):
+                return t
+        return None
+
+    def _both_threads():
+        a, b = _thread(LOOSE_PEER), _thread(REFUSED_PEER)
+        return (a, b) if a and b else None
+
+    loose, refused = wait_until(
+        _both_threads,
+        RECEIVE_CYCLE_S,
+        diagnose=lambda: f"threads={_threads(conv)!r}, error: {_page_error(app)!r}",
+    )
+    states = wait_until(
+        lambda: app.driver.get_attrs("conversation-guardian-state", "state") or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            "the refused room must still carry its marker; "
+            f"threads={_threads(conv)!r}, error: {_page_error(app)!r}"
+        ),
+    )
+    assert states == ["blocked"], (
+        "exactly one marker — the refused room's `blocked`; the released room carries "
+        f"none: {states!r}"
+    )
+
+    conv.open_thread_by_id(refused.thread_id)
+    conv.send_in_open_thread(REFUSED_REPLY)
+    wait_until(
+        lambda: "<no error-message" not in _page_error(app) and _page_error(app) != "",
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            "the ward's reply to a peer the guardian refused must be refused and say so; "
+            f"error-message: {_page_error(app)!r}"
+        ),
+    )
+    queued = _ok(session, "fauna.bridges.conversation.outbox.fetch", {})["items"]
+    session.ws.close()
+    assert not any(i.get("far_room_id") == refused_room for i in queued), (
+        f"a refused reply must queue nothing for the bridge: {queued!r}"
     )
 
 

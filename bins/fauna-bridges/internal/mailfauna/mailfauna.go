@@ -431,6 +431,16 @@ func CombinedSpamScoreMilli(rspamdScaledMilli, weightedBayesianMilli int32) int3
 	return faunaMail.CombinedSpamScoreMilli(rspamdScaledMilli, weightedBayesianMilli)
 }
 
+// EffectiveSpamScoreMilli is the score a post-delivery scoring position
+// compares against a message's own threshold: CombinedSpamScoreMilli plus the
+// `report:spam` aggregate's term (reportPm × 15 — the curve's 1000‰ maps onto
+// the 0–15 scale's 15 points), additive on top of the max, never inside it
+// (report-sharing.md § Applying the aggregate). reportPm = 0 (no live row)
+// leaves the combination unchanged. Thin pass-through to the shared Rust.
+func EffectiveSpamScoreMilli(rspamdScaledMilli, weightedBayesianMilli int32, reportPm int64) int32 {
+	return faunaMail.EffectiveSpamScoreMilli(rspamdScaledMilli, weightedBayesianMilli, reportPm)
+}
+
 // ApplyUnlistedRecipientPenaltyMilli adds the deployment-wide unlisted-recipient
 // penalty (points × 1000) to a combined milli-score, the canonical arithmetic
 // the MTA per-recipient loop applies for a catch-all (not-on-whitelist)
@@ -493,6 +503,17 @@ func FoldSpamModelBaseline(modelBytes, baselineBytes []byte, fullConfidenceSampl
 // (mail-spam.md § Scoring placement).
 func WeightedBayesianMilliForModel(modelBytes []byte, text string, knobs BayesianKnobs) int32 {
 	return faunaMail.WeightedBayesianMilliForModel(modelBytes, text, knobs)
+}
+
+// BayesianHasSayForModel reports whether the per-user Bayesian term over
+// the (already baseline-folded) model has a say at the account's
+// spam-folder tier: confidence above zero and a maximal 15-point verdict,
+// weighted, reaching the tier (mail-spam.md § Scoring placement → *The
+// scorer's say*). Without a say the MDA scores only reported copies.
+// Unreadable / empty model bytes ⇒ false. The shared
+// `bayesian_has_say_for_model`, byte-identical with the app scorer.
+func BayesianHasSayForModel(modelBytes []byte, knobs BayesianKnobs, spamFolderTier uint32) bool {
+	return faunaMail.BayesianHasSayForModel(modelBytes, knobs, spamFolderTier)
 }
 
 // SpamTrainingMutation re-exports the FFI mutation result (the mutated

@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 from helpers.fixture_closure import real_fixture_closure
 
@@ -183,11 +184,29 @@ def _kind_literals(node: ast.AST, vocabulary: frozenset[str]) -> set[str]:
     The literal must be the *whole* constant, so a docstring mentioning a kind
     in prose never counts.
     """
-    out: set[str] = set()
+    return _strings(node) & vocabulary
+
+
+def _strings(node: ast.AST) -> set[str]:
+    """Every string constant under `node` — what `_kind_literals` and
+    `_route_literals` filter, and what the reach graph keeps per node in place
+    of the AST (`_graph`), so each selector filters it without a parse."""
+    return {
+        sub.value for sub in ast.walk(node)
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+    }
+
+
+def _subscript_keys(node: ast.AST) -> set:
+    """Every constant a mapping under `node` is subscripted by in LOAD context
+    — what `_key_reads` filters (its note says why only a load counts), kept
+    per node by the reach graph like `_strings`."""
+    out: set = set()
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-            if sub.value in vocabulary:
-                out.add(sub.value)
+        if not isinstance(sub, ast.Subscript) or not isinstance(sub.ctx, ast.Load):
+            continue
+        if isinstance(sub.slice, ast.Constant):
+            out.add(sub.slice.value)
     return out
 
 
@@ -209,18 +228,12 @@ def _key_reads(node: ast.AST, keys: frozenset[str]) -> set[str]:
     `setdefault`, a subscript in store context) is the harness furnishing the
     handle, which every test does transitively and which classifies nothing.
     """
-    out: set[str] = set()
-    for sub in ast.walk(node):
-        if not isinstance(sub, ast.Subscript) or not isinstance(sub.ctx, ast.Load):
-            continue
-        index = sub.slice
-        if isinstance(index, ast.Constant) and index.value in keys:
-            out.add(index.value)
-    return out
+    return _subscript_keys(node) & keys
 
 
-def _module_constants(tree: ast.AST, select) -> dict[str, set[str]]:
-    """What each top-level assignment of a module holds, by its target name.
+def _module_constants(tree: ast.AST) -> dict[str, tuple[set[str], set]]:
+    """What each top-level assignment of a module holds, by its target name —
+    its `_strings` and its `_subscript_keys`, which every selector filters.
 
     A test reaches a string it keeps in a module constant as surely as one in
     its body: a `@pytest.mark.parametrize("kind,payload", _PUT_CASES)` table,
@@ -229,7 +242,7 @@ def _module_constants(tree: ast.AST, select) -> dict[str, set[str]]:
     assignment of its OWN module that it names (`build_reach`) — a name is
     resolved where Python resolves a global, never across modules.
     """
-    out: dict[str, set[str]] = {}
+    out: dict[str, tuple[set[str], set]] = {}
     for stmt in getattr(tree, "body", ()):
         if isinstance(stmt, ast.Assign):
             targets, value = stmt.targets, stmt.value
@@ -237,12 +250,14 @@ def _module_constants(tree: ast.AST, select) -> dict[str, set[str]]:
             targets, value = [stmt.target], stmt.value
         else:
             continue
-        found = select(value)
-        if not found:
+        strings, reads = _strings(value), _subscript_keys(value)
+        if not strings and not reads:
             continue
         for target in targets:
             if isinstance(target, ast.Name):
-                out.setdefault(target.id, set()).update(found)
+                held = out.setdefault(target.id, (set(), set()))
+                held[0].update(strings)
+                held[1].update(reads)
     return out
 
 
@@ -344,12 +359,40 @@ def _route_literals(node: ast.AST, prefix: str) -> set[str]:
     `/api/v1/test/` is safe where a bare kind prefix was not: nest serves nothing
     else under it, and there is no "error code shaped like a route" to admit.
     """
-    out: set[str] = set()
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-            if sub.value.startswith(prefix):
-                out.add(sub.value)
-    return out
+    return _with_prefix(_strings(node), prefix)
+
+
+def _with_prefix(strings, prefix: str) -> set[str]:
+    return {s for s in strings if s.startswith(prefix)}
+
+
+#: How many source files the reach graph has parsed in this process. The graph
+#: is selector-independent, so it is parsed once whatever vocabularies,
+#: prefixes and key sets are asked of it (`_graph`); a test pins that by this
+#: count. A whole-tree parse is the dominant cost of a docker/live
+#: classification — 34 MB of source, measured at 30–80 s on a loaded Windows host,
+#: where one parse per selector put the first classifying test within 72 s of
+#: the 900 s timeout that ends the whole run.
+_graph_parses = 0
+
+
+def graph_parse_count() -> int:
+    """Source files the reach graph has parsed so far in this process."""
+    return _graph_parses
+
+
+class _Graph(NamedTuple):
+    """The selector-independent half of `build_reach`, built once per process.
+
+    The ASTs are not kept — holding every tree is ~890 MB — only what every
+    selector filters: each node's string constants (`_strings`) and its
+    subscript-load keys (`_subscript_keys`), the module constants it loads
+    folded in, plus the resolved call edges.
+    """
+
+    strings: dict[str, frozenset[str]]
+    reads: dict[str, frozenset]
+    calls: dict[str, frozenset[str]]
 
 
 def build_reach(
@@ -373,143 +416,28 @@ def build_reach(
     `prefix` (route paths) or `keys` (contract keys read off a handle) selects
     what counts. The graph itself is the same walk every way, which is the
     point: a second scanner would drift from this one, and every caller depends
-    on the same "usually one wrapper away" fact.
+    on the same "usually one wrapper away" fact. It is built once per process
+    (`_graph`); a selector only filters each node's summary and runs the
+    fixpoint.
     """
     selectors = [vocabulary is not None, prefix is not None, keys is not None]
     if sum(selectors) != 1:
         raise ValueError("pass exactly one of vocabulary=, prefix= or keys=")
-    roots = (root,) if root is not None else _ROOTS
+    graph = _graph((root,)) if root is not None else _default_graph()
 
-    def select(fn):
-        if prefix is not None:
-            return _route_literals(fn, prefix)
-        if keys is not None:
-            return _key_reads(fn, keys)
-        return _kind_literals(fn, vocabulary)
+    if prefix is not None:
+        reach = {
+            key: _with_prefix(strings, prefix) for key, strings in graph.strings.items()
+        }
+    elif keys is not None:
+        reach = {key: set(reads & keys) for key, reads in graph.reads.items()}
+    else:
+        reach = {key: set(strings & vocabulary) for key, strings in graph.strings.items()}
 
-    # Graph keys: a public function is its bare name (merged across modules —
-    # the over-approximation above); a private one (`_is_private`) is keyed
-    # `<module>::<name>`, so each module's `_state` is its own node. A bare call
-    # to a private name is resolved to the caller's own module when that
-    # module defines it (what the leading underscore means in Python); a bare
-    # call the module does not define (a private name imported from elsewhere,
-    # rare) and every attribute call (`self._state()`, a private method on an
-    # object from anywhere) keep the merge, over every module's node of that
-    # name — still the safe direction.
-    direct: dict[str, set[str]] = {}
-    # node → module → the calls that node's definition(s) in that module make. A
-    # public name is one merged node across modules, and each definition's
-    # private calls must resolve in ITS OWN module: keeping only the first
-    # module's namespace let `observe` in one helper (calling its own `_open`)
-    # resolve against another module and merge with every module's `_open`.
-    raw_calls: dict[str, dict[str, set[tuple[bool, str]]]] = {}
-    private_nodes: dict[str, set[str]] = {}  # bare private name → its nodes
-    imported: dict[str, dict[str, str]] = {}  # module → `_imported_privates`
-    private_methods: dict[str, set[str]] = {}  # bare private name → method nodes
-    self_calls: dict[str, set[str]] = {}  # node → private names called on self/cls
-    other_calls: dict[str, set[str]] = {}  # node → private names called on anything else
-    for path in (path for r in roots for path in _iter_sources(r)):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError:
-            # A file the interpreter could not parse cannot contribute reach.
-            # Skipping it is not a silent hole: it cannot run either.
-            continue
-        module = str(path)
-        constants = (
-            {} if path.name in _VOCABULARY_MODULES else _module_constants(tree, select)
-        )
-        aliases = _module_aliases(tree)
-        imported[module] = _imported_privates(tree, roots)
-        methods = _method_ids(tree)
-
-        def unaliased(callees: set[tuple[bool, str]]) -> set[tuple[bool, str]]:
-            # A bare call to a module alias is a bare call to what it names;
-            # chains (`a = b`, `b = c`) resolve to the end, cycles stop.
-            out = set()
-            for is_bare, name in callees:
-                seen = {name}
-                while is_bare and name in aliases and aliases[name] not in seen:
-                    name = aliases[name]
-                    seen.add(name)
-                out.add((is_bare, name))
-            return out
-
-        for fn in _functions(tree):
-            key = f"{module}::{fn.name}" if _is_private(fn.name) else fn.name
-            if _is_private(fn.name):
-                private_nodes.setdefault(fn.name, set()).add(key)
-                if id(fn) in methods:
-                    private_methods.setdefault(fn.name, set()).add(key)
-            direct.setdefault(key, set()).update(select(fn))
-            for name in _names_loaded(fn) & constants.keys():
-                direct[key] |= constants[name]
-            callees = unaliased(_callees(fn))
-            raw_calls.setdefault(key, {}).setdefault(module, set()).update(callees)
-            on_self = _self_private_calls(fn)
-            self_calls.setdefault(key, set()).update(on_self)
-            other_calls.setdefault(key, set()).update(
-                name for is_bare, name in callees
-                if not is_bare and _is_private(name) and name not in on_self
-            )
-        # A class is a node too, keyed by its own name: `FailingNestArm(port)`
-        # is a call to the class, and what that call sets running is the
-        # class's OWN protocol methods (`_CLASS_PROTOCOL`). `_callees` drops
-        # dunder calls because merging every `__enter__` by bare name would
-        # drag one class's reach onto every `with` block in the tree; keying
-        # the dunders under their class restores the one edge that merge
-        # threw away. Measured 2026-10-05: three search journeys armed the
-        # `/api/v1/test/rpc-hold/` hook through `FailingNestArm.__enter__`,
-        # class (6) never saw it, and a live run recorded them as failed.
-        for cls in _classes(tree):
-            key = f"{module}::{cls.name}" if _is_private(cls.name) else cls.name
-            if _is_private(cls.name):
-                private_nodes.setdefault(cls.name, set()).add(key)
-            slot = raw_calls.setdefault(key, {}).setdefault(module, set())
-            for method in _protocol_methods(cls):
-                direct.setdefault(key, set()).update(select(method))
-                for name in _names_loaded(method) & constants.keys():
-                    direct[key] |= constants[name]
-                callees = unaliased(_callees(method))
-                slot.update(callees)
-                on_self = _self_private_calls(method)
-                self_calls.setdefault(key, set()).update(on_self)
-                other_calls.setdefault(key, set()).update(
-                    name for is_bare, name in callees
-                    if not is_bare and _is_private(name) and name not in on_self
-                )
-            direct.setdefault(key, set())
-
-    calls: dict[str, set[str]] = {}
-    for key, by_module in raw_calls.items():
-        resolved: set[str] = set()
-        for module, callees in by_module.items():
-            for is_bare, name in callees:
-                if not _is_private(name):
-                    resolved.add(name)
-                    continue
-                own = f"{module}::{name}"
-                source = imported.get(module, {}).get(name)
-                if is_bare and own in direct:
-                    resolved.add(own)
-                elif is_bare and source in direct:
-                    resolved.add(source)
-                elif (
-                    not is_bare
-                    and name in self_calls.get(key, ())
-                    and name not in other_calls.get(key, ())
-                    and name in private_methods
-                ):
-                    resolved |= private_methods[name]
-                else:
-                    resolved |= private_nodes.get(name, set())
-        calls[key] = resolved
-
-    reach = {key: set(kinds) for key, kinds in direct.items()}
     grew = True
     while grew:
         grew = False
-        for key, callees in calls.items():
+        for key, callees in graph.calls.items():
             before = len(reach[key])
             for callee in callees:
                 if (callee in reach and callee != key
@@ -529,6 +457,149 @@ def build_reach(
         name = key.rsplit("::", 1)[-1] if "::" in key else key
         out[name] = frozenset(out.get(name, frozenset()) | kinds)
     return out
+
+
+def _default_graph() -> _Graph:
+    """The graph of the e2e and common trees, parsed once per process. An
+    explicit `root` (a pin's scratch tree, rewritten between calls) is parsed
+    afresh every time instead."""
+    return _cached_graph(_ROOTS)
+
+
+@lru_cache(maxsize=2)
+def _cached_graph(roots: tuple[Path, ...]) -> _Graph:
+    return _graph(roots)
+
+
+def _graph(roots: tuple[Path, ...]) -> _Graph:
+    """Parse `roots` and keep the selector-independent graph (`_Graph`)."""
+    global _graph_parses
+    # Graph keys: a public function is its bare name (merged across modules —
+    # the over-approximation above); a private one (`_is_private`) is keyed
+    # `<module>::<name>`, so each module's `_state` is its own node. A bare call
+    # to a private name is resolved to the caller's own module when that
+    # module defines it (what the leading underscore means in Python); a bare
+    # call the module does not define (a private name imported from elsewhere,
+    # rare) and every attribute call (`self._state()`, a private method on an
+    # object from anywhere) keep the merge, over every module's node of that
+    # name — still the safe direction.
+    strings: dict[str, set[str]] = {}  # node → `_strings`, its constants folded in
+    reads: dict[str, set] = {}  # node → `_subscript_keys`, its constants folded in
+    # node → module → the calls that node's definition(s) in that module make. A
+    # public name is one merged node across modules, and each definition's
+    # private calls must resolve in ITS OWN module: keeping only the first
+    # module's namespace let `observe` in one helper (calling its own `_open`)
+    # resolve against another module and merge with every module's `_open`.
+    raw_calls: dict[str, dict[str, set[tuple[bool, str]]]] = {}
+    private_nodes: dict[str, set[str]] = {}  # bare private name → its nodes
+    imported: dict[str, dict[str, str]] = {}  # module → `_imported_privates`
+    private_methods: dict[str, set[str]] = {}  # bare private name → method nodes
+    self_calls: dict[str, set[str]] = {}  # node → private names called on self/cls
+    other_calls: dict[str, set[str]] = {}  # node → private names called on anything else
+    for path in (path for r in roots for path in _iter_sources(r)):
+        _graph_parses += 1
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            # A file the interpreter could not parse cannot contribute reach.
+            # Skipping it is not a silent hole: it cannot run either.
+            continue
+        module = str(path)
+        constants = {} if path.name in _VOCABULARY_MODULES else _module_constants(tree)
+        aliases = _module_aliases(tree)
+        imported[module] = _imported_privates(tree, roots)
+        methods = _method_ids(tree)
+
+        def unaliased(callees: set[tuple[bool, str]]) -> set[tuple[bool, str]]:
+            # A bare call to a module alias is a bare call to what it names;
+            # chains (`a = b`, `b = c`) resolve to the end, cycles stop.
+            out = set()
+            for is_bare, name in callees:
+                seen = {name}
+                while is_bare and name in aliases and aliases[name] not in seen:
+                    name = aliases[name]
+                    seen.add(name)
+                out.add((is_bare, name))
+            return out
+
+        def summarize(key: str, fn: ast.AST) -> set[tuple[bool, str]]:
+            # What any selector can find in `fn` — its own constants and keyed
+            # reads, and those of every module constant it names — and the
+            # calls it makes.
+            own_strings = strings.setdefault(key, set())
+            own_reads = reads.setdefault(key, set())
+            own_strings |= _strings(fn)
+            own_reads |= _subscript_keys(fn)
+            for name in _names_loaded(fn) & constants.keys():
+                held_strings, held_reads = constants[name]
+                own_strings |= held_strings
+                own_reads |= held_reads
+            callees = unaliased(_callees(fn))
+            on_self = _self_private_calls(fn)
+            self_calls.setdefault(key, set()).update(on_self)
+            other_calls.setdefault(key, set()).update(
+                name for is_bare, name in callees
+                if not is_bare and _is_private(name) and name not in on_self
+            )
+            return callees
+
+        for fn in _functions(tree):
+            key = f"{module}::{fn.name}" if _is_private(fn.name) else fn.name
+            if _is_private(fn.name):
+                private_nodes.setdefault(fn.name, set()).add(key)
+                if id(fn) in methods:
+                    private_methods.setdefault(fn.name, set()).add(key)
+            callees = summarize(key, fn)
+            raw_calls.setdefault(key, {}).setdefault(module, set()).update(callees)
+        # A class is a node too, keyed by its own name: `FailingNestArm(port)`
+        # is a call to the class, and what that call sets running is the
+        # class's OWN protocol methods (`_CLASS_PROTOCOL`). `_callees` drops
+        # dunder calls because merging every `__enter__` by bare name would
+        # drag one class's reach onto every `with` block in the tree; keying
+        # the dunders under their class restores the one edge that merge
+        # threw away. Measured 2026-10-05: three search journeys armed the
+        # `/api/v1/test/rpc-hold/` hook through `FailingNestArm.__enter__`,
+        # class (6) never saw it, and a live run recorded them as failed.
+        for cls in _classes(tree):
+            key = f"{module}::{cls.name}" if _is_private(cls.name) else cls.name
+            if _is_private(cls.name):
+                private_nodes.setdefault(cls.name, set()).add(key)
+            slot = raw_calls.setdefault(key, {}).setdefault(module, set())
+            for method in _protocol_methods(cls):
+                slot.update(summarize(key, method))
+            strings.setdefault(key, set())
+            reads.setdefault(key, set())
+
+    calls: dict[str, frozenset[str]] = {}
+    for key, by_module in raw_calls.items():
+        resolved: set[str] = set()
+        for module, callees in by_module.items():
+            for is_bare, name in callees:
+                if not _is_private(name):
+                    resolved.add(name)
+                    continue
+                own = f"{module}::{name}"
+                source = imported.get(module, {}).get(name)
+                if is_bare and own in strings:
+                    resolved.add(own)
+                elif is_bare and source in strings:
+                    resolved.add(source)
+                elif (
+                    not is_bare
+                    and name in self_calls.get(key, ())
+                    and name not in other_calls.get(key, ())
+                    and name in private_methods
+                ):
+                    resolved |= private_methods[name]
+                else:
+                    resolved |= private_nodes.get(name, set())
+        calls[key] = frozenset(resolved)
+
+    return _Graph(
+        strings={key: frozenset(found) for key, found in strings.items()},
+        reads={key: frozenset(found) for key, found in reads.items()},
+        calls=calls,
+    )
 
 
 @lru_cache(maxsize=8)
@@ -718,16 +789,29 @@ def capability_helpers(keys: frozenset[str]) -> dict[str, frozenset[str]]:
 
     table: dict[str, set[str]] = {}
 
+    # A public name several modules define (`observe`, `write`) is merged in the
+    # table, so an ATTRIBUTE call to it (`f.write(...)` on a file) inside a
+    # helper cannot be told from a call to the capability-reading one — that
+    # taints every helper that writes a file (measured 2026-11-06: the store
+    # reviewer journey deselected as "reads db_path"). Such a call does not
+    # propagate; a BARE call resolves in its own module first, not by the
+    # merged name.
+    defined_in: dict[str, int] = {}
+    for fns in modules:
+        for name in fns:
+            defined_in[name] = defined_in.get(name, 0) + 1
+    ambiguous = {name for name, n in defined_in.items() if n > 1}
+
     def reads(fn, fns, seen):
         if id(fn) in seen:
             return set()
         seen.add(id(fn))
         out = set(_key_reads(fn, keys))
         for is_bare, callee in _callees(fn):
-            if callee in table:
-                out |= table[callee]
-            elif is_bare and _is_private(callee) and callee in fns:
+            if is_bare and callee in fns:
                 out |= reads(fns[callee], fns, seen)
+            elif callee in table and (is_bare or callee not in ambiguous):
+                out |= table[callee]
         return out
 
     grew = True

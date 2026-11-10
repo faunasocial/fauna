@@ -442,6 +442,7 @@ pub async fn serve_changes_list(
         changes,
         caller_access: None,
         residency: None,
+        reachable: None,
         // Never echoed, and deliberately: a store serves `(writer,
         // writer_seq)` order, with no cross-writer order a watermark could
         // be a coordinate in — the ruling defers the store-served legs

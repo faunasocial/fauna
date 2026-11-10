@@ -141,6 +141,10 @@ export interface FolderSummary {
   // `owner_handle` or the actor id locally. Empty on your OWN rows (which show
   // "Shared · N" instead), so empty ⇒ not a recipient badge.
   owner_display?: string;
+  // The folder rail marked this recipient seat forked (the owner changed identity;
+  // only their re-share heals it): the badge reads its third text. Shared Rust's
+  // `FolderSummary::seat_forked`; absent/false otherwise.
+  seat_forked?: boolean;
   // This caller's access on a member row: "reader" (default) | "writer". Advisory
   // for UI only — never an authz input (the nest gates every write itself).
   access?: string | null;
@@ -178,8 +182,15 @@ export interface FolderSummary {
 // row label is `accountDisplayLabel(handle, actor_id)` (handle-else-shortid).
 export interface FolderActorMember {
   actor_id: string;
-  // Nest-resolved handle; empty ("") when unknown or a cross-nest member.
+  // Nest-resolved handle; empty ("") when unknown. For a cross-nest member it
+  // is the bare handle their own nest announced (empty until it has).
   handle: string;
+  // The handle's domain, present only on a cross-nest member whose own nest
+  // announced it; absent on every local row. Joined with `handle` only at
+  // display, through `qualifiedHandle` (federation-shared-folders.md
+  // § Cross-nest shared folders + channel append, the id→handle bullet →
+  // *The folder roster*).
+  domain?: string | null;
   // "owner" | "member" — the owner-side "Shared with" list renders "member" rows
   // only (the count feeds "Shared · N").
   role: string;
@@ -190,7 +201,8 @@ export interface FolderActorMember {
   byte_cap?: number | null;
   // Bytes this member has recorded against the owner's quota (abuse counter).
   bytes_used?: number | null;
-  // Some(true) ⇒ a cross-nest member (handle is empty).
+  // Some(true) ⇒ a cross-nest member (`handle` + `domain` carry their
+  // announced name once their nest has announced it).
   remote?: boolean | null;
 }
 // One entry of a folder's enrolled DEVICE roster, read on demand via
@@ -322,10 +334,16 @@ export interface RetentionPolicy {
   max_snapshots: number;
   max_age_days: number;
 }
-/** Step 1 — the name. A folder has no type, so there is no mode picker. */
+/** Step 1 — the name, and who can see the folder. A folder has no type, so
+ *  there is no mode picker. `audience` is the create-time audience (`private`
+ *  | `public`, `ui/folders.md` § Audience and website serving → *Born
+ *  public*); `audience_offered` false → the seam cannot attest a born-public
+ *  create, and the select must not paint. */
 export interface NameSnapshot {
   name: string;
   continue_enabled: boolean;
+  audience: string;
+  audience_offered: boolean;
 }
 /** Step 2 (`Devices`) as the three place-flag checkboxes render it. Every flag
  *  point is a valid place, so `continue_enabled` carries no refusal for the SPA
@@ -365,6 +383,11 @@ export interface ReviewSnapshot {
   created: boolean;
   failed_members: string[];
   error: LocalizedText | null;
+  /** The chosen create-time audience, painted read-only on Review. */
+  audience: string;
+  /** A Public wizard's Create armed the declassify confirm
+   *  (`folder-audience-public-confirm`); answering it is what creates. */
+  declassify_armed: boolean;
 }
 export interface WizardSnapshot {
   step: string;

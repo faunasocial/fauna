@@ -518,6 +518,14 @@ public sealed partial class FeedPage : Page, IPostCardPage
     private void Refresh()
     {
         if (_viewModel is null || _navigatedAway) return;
+        // An actor change drops the session's manager (App.DropActorScopedState →
+        // FeedManagerHost.ResetForActorChange, beside AppDataSnapshot.Clear) BEFORE
+        // this page's OnNavigatedFrom runs, and the dropped manager still ticks in
+        // between. Repainting on that tick re-published the outgoing identity's
+        // window to the e2e state after the clear, so the incoming account's first
+        // reads got the old ♥ and the old card order. It also blanked or faked the
+        // error mirror. A page whose manager the host no longer holds paints nothing.
+        if (!Core.FeedManagerHost.Holds(_viewModel.Manager)) return;
 
         SyncFeeds(_viewModel.Feeds);
         // The imported-posts selection's notice + clear ← snapshot.imported_selected.
@@ -667,29 +675,22 @@ public sealed partial class FeedPage : Page, IPostCardPage
             bridges.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         // Rebuild the option set only when it changed (the frequent post-resolution
-        // ticks must not churn the dropdown / drop the user's in-progress selection).
+        // ticks must not churn the dropdown / drop the user's in-progress selection):
+        // PickerOption.Reconcile, keeping the user's pick while it is still offered and
+        // the first bridge otherwise.
         //
         // Hand-built items, not an ItemsSource: `bridge-form-bridge-select` is a
         // stable-KEY select on every app — the bridge `id` is what `select` takes, the
         // human `name` is paint-only (tui's `BridgeKind`, the same key-vs-display split
-        // as the factor and rule-type selects) — and the FlaUI bridge's `Select` matches
-        // the item's UIA Name EXACTLY. So Content is the visible name, Tag the id, and
-        // the UIA Name the id. An ItemsSource + DisplayMemberPath="name" named every
-        // option by its display text, so a cross-app `select("nostr")` never matched
+        // as the factor and rule-type selects). So each item paints the name and is
+        // keyed by the id (PickerOption). An ItemsSource + DisplayMemberPath="name"
+        // carried no key at all, so a cross-app `select("nostr")` never matched
         // `Nostr` (test_feed_bridge_subscribe.py).
-        var currentIds = BridgeTypeSelector.Items.OfType<ComboBoxItem>().Select(i => i.Tag as string);
-        var same = currentIds.SequenceEqual(bridges.Select(b => b.id));
-        if (!same)
-        {
-            BridgeTypeSelector.Items.Clear();
-            foreach (var bridge in bridges)
-            {
-                var item = new ComboBoxItem { Content = bridge.name, Tag = bridge.id };
-                AutomationProperties.SetName(item, bridge.id);
-                BridgeTypeSelector.Items.Add(item);
-            }
-            if (bridges.Count > 0) BridgeTypeSelector.SelectedIndex = 0;
-        }
+        PickerOption.Reconcile(
+            BridgeTypeSelector,
+            bridges.Select(b => (b.name, b.id)).ToList(),
+            (BridgeTypeSelector.SelectedItem as ComboBoxItem)?.Tag as string,
+            firstIfAbsent: true);
 
         // A nest that lost its last bridge mid-session: close the open form so a
         // stale, unsubscribable selector can't linger.
@@ -1183,18 +1184,11 @@ public sealed partial class FeedPage : Page, IPostCardPage
         // inline exactly as the card does (§ D6c → Inline playback), off the same block. A
         // bridged post's `ProxiedVideo` paints its nest-relative path where the hash goes
         // (§ D6c → Proxied video), is never byte-loaded before the tap, and plays off the
-        // ticketed path the shared decision answers for it.
-        if (DocumentRenderer.MediaVideoBlock(item.Document) is { } videoBlock)
-        {
-            var video = new Controls.VideoThumbnailView
-            {
-                Block = videoBlock,
-                Home = item.BlobHome,
-                Margin = new Thickness(0, 4, 0, 0),
-            };
-            AutomationProperties.SetAutomationId(video, Ids.VideoThumbnail);
+        // ticketed path the shared decision answers for it. Like post-image, a gated post's
+        // teaser carries no Video block, so UnlockGatedDetailAsync inserts this SAME element
+        // right after the image slot once the unsealed document folds one in.
+        if (BuildPostDetailVideoElement(item.Document, item.BlobHome) is { } video)
             panel.Children.Add(video);
-        }
 
         // The author alone carries the id — the same resolved label the card paints (the
         // viewer's nickname, else the public name, else the canonical short id), as web's
@@ -1419,6 +1413,28 @@ public sealed partial class FeedPage : Page, IPostCardPage
         return button;
     }
 
+    /// <summary>Builds the detail dialog's <c>video-thumbnail</c> element — the SAME
+    /// <see cref="Controls.VideoThumbnailView"/> the list card shows — from <paramref
+    /// name="document"/>'s folded <c>Video</c> or <c>ProxiedVideo</c> block; <c>null</c> when
+    /// the document carries no video. Like <see cref="BuildPostDetailImageElement"/>, the one
+    /// construction site for both the initial <see cref="BuildPostDetailPanel"/> build and
+    /// <see cref="UnlockGatedDetailAsync"/>'s post-unlock insert: a gated post's teaser folds
+    /// no video, and its unsealed document's sealed <c>Video</c> plays the opened bytes through
+    /// the view's held-bytes arm (render-model.md § D6c → Inline playback, answer (1)).</summary>
+    private static Controls.VideoThumbnailView? BuildPostDetailVideoElement(
+        uniffi.fauna_core.RenderDocument document, object? home)
+    {
+        if (DocumentRenderer.MediaVideoBlock(document) is not { } videoBlock) return null;
+        var video = new Controls.VideoThumbnailView
+        {
+            Block = videoBlock,
+            Home = home,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        AutomationProperties.SetAutomationId(video, Ids.VideoThumbnail);
+        return video;
+    }
+
     // Shows the post_detail dialog for the ordinary post-card-click path — the
     // post is already loaded by construction, so this is a pure paint, no
     // resolve. The search-nav deep-link door (<see cref="OpenPostDetailByIdAsync"/>)
@@ -1458,9 +1474,10 @@ public sealed partial class FeedPage : Page, IPostCardPage
     }
 
     /// <summary>Unlock a gated post opened in the detail dialog and repaint its body — and, when
-    /// the unsealed document folds in an <c>Image</c> block the pre-unlock teaser did not carry,
-    /// insert the SAME <c>post-image</c> element <see cref="BuildPostDetailPanel"/> would have
-    /// built at open time (<paramref name="postImageInsertIndex"/> marks that slot). Fetches the
+    /// the unsealed document folds in an <c>Image</c> or <c>Video</c> block the pre-unlock teaser
+    /// did not carry, insert the SAME <c>post-image</c> / <c>video-thumbnail</c> element
+    /// <see cref="BuildPostDetailPanel"/> would have built at open time (<paramref
+    /// name="postImageInsertIndex"/> marks the image slot; the video follows it). Fetches the
     /// sealed full-body blob (<c>gated_blob_hash</c> → <c>GET /api/v1/blob/{hash}</c>), decrypts it
     /// (<c>unlock_gated_post</c> — author custody or the subscriber's KeyBlob wrap entry), then
     /// re-applies <see cref="DocumentPainter"/> to the dialog's <c>feed-post-detail-body</c> from
@@ -1540,11 +1557,18 @@ public sealed partial class FeedPage : Page, IPostCardPage
 
             DocumentPainter.Apply(bodyText, updated.document);
 
-            // The pre-unlock teaser carried no Image block, so BuildPostDetailPanel added no
-            // post-image element for it; insert the same element it would have built, at the
-            // slot it would have taken, now that the unsealed document folds one in.
+            // The pre-unlock teaser carried no media blocks, so BuildPostDetailPanel added no
+            // post-image or video-thumbnail element for it; insert the same elements it would
+            // have built, at the slots they would have taken (the video right after the
+            // image), now that the unsealed document folds them in. Without the video insert
+            // a sealed video's detail never painted a video-thumbnail at all, so it could
+            // never be played inline.
+            var mediaSlot = System.Math.Min(postImageInsertIndex, panel.Children.Count);
             if (BuildPostDetailImageElement(updated.document, home) is { } postImage)
-                panel.Children.Insert(System.Math.Min(postImageInsertIndex, panel.Children.Count), postImage);
+                panel.Children.Insert(mediaSlot++, postImage);
+            if (!panel.Children.OfType<Controls.VideoThumbnailView>().Any()
+                && BuildPostDetailVideoElement(updated.document, home) is { } video)
+                panel.Children.Insert(mediaSlot, video);
         }
         catch (System.Exception ex)
         {
@@ -1627,16 +1651,11 @@ public sealed partial class FeedPage : Page, IPostCardPage
         var ruleTypeCombo = new ComboBox { MinWidth = 200 };
         AutomationProperties.SetAutomationId(ruleTypeCombo, Ids.FeedRuleTypeSelect);
         // value = the canonical FilterRule variant — the logic value AND the
-        // driver.select key, mirrored onto AutomationProperties.Name (the
-        // reminder-combo pattern: the FlaUI bridge selects by Name, so the e2e
-        // keeps passing "HasMedia" while the user sees the localized label).
+        // driver.select key (PickerOption), so the e2e keeps passing "HasMedia"
+        // while the user sees the localized label.
         var ruleOptions = FaunaFfiMethods.RuleTypeOptions();
         foreach (var option in ruleOptions)
-        {
-            var item = new ComboBoxItem { Content = S.Resolve(option.label), Tag = option.value };
-            AutomationProperties.SetName(item, option.value);
-            ruleTypeCombo.Items.Add(item);
-        }
+            ruleTypeCombo.Items.Add(PickerOption.Create(S.Resolve(option.label), option.value));
         ruleTypeCombo.SelectedIndex = 0;
 
         var ruleValueBox = new TextBox { PlaceholderText = "Rule value" };
@@ -1720,12 +1739,8 @@ public sealed partial class FeedPage : Page, IPostCardPage
 
         var combinationCombo = new ComboBox { MinWidth = 100 };
         AutomationProperties.SetAutomationId(combinationCombo, Ids.FeedCombinationSelect);
-        var allItem = new ComboBoxItem { Content = S.Get("feed/create/mode_all"), Tag = "all", IsSelected = true };
-        AutomationProperties.SetName(allItem, "all");
-        combinationCombo.Items.Add(allItem);
-        var anyItem = new ComboBoxItem { Content = S.Get("feed/create/mode_any"), Tag = "any" };
-        AutomationProperties.SetName(anyItem, "any");
-        combinationCombo.Items.Add(anyItem);
+        combinationCombo.Items.Add(PickerOption.Create(S.Get("feed/create/mode_all"), "all"));
+        combinationCombo.Items.Add(PickerOption.Create(S.Get("feed/create/mode_any"), "any"));
         combinationCombo.SelectedIndex = 0;
 
         // ── Factor-weight editor (content-moderation-and-ranking.md § Composition) ──
@@ -1735,14 +1750,17 @@ public sealed partial class FeedPage : Page, IPostCardPage
         // `global: true` read-merge-written into the caller's global factor set.
         var factorCombo = new ComboBox { MinWidth = 160, HorizontalAlignment = HorizontalAlignment.Stretch };
         AutomationProperties.SetAutomationId(factorCombo, Ids.FeedFactorSelect);
-        // Each option is a FactorOption: the painted label as its Name, the stable
-        // factor key as its Tag and AutomationId (see FactorOption). The built-in
-        // head (engagement, trending, …) comes from the shared FFI (feed.md § Where
-        // logic lives → Feed factor-picker built-ins), so a new built-in reaches
-        // every app without a per-app literal; subscribed labeler:<hex> factors and
-        // trained topics append once the fetches below resolve.
+        // Each option paints its label and is keyed by the stable factor key, what
+        // the composition stores (PickerOption) — so the picker lists a trained topic
+        // by the name the user gave it and a Layer-B signal as "Watched to the end",
+        // never `topic:<hex>` or `signal:watch-complete` (topic-factors.md § Authoring
+        // surface & picker). The built-in head (engagement, trending, …) comes from
+        // the shared FFI (feed.md § Where logic lives → Feed factor-picker
+        // built-ins), so a new built-in reaches every app without a per-app literal;
+        // subscribed labeler:<hex> factors and trained topics append once the
+        // fetches below resolve.
         foreach (var option in FaunaFfiMethods.BuiltinFactorOptions())
-            factorCombo.Items.Add(FactorOption(S.Resolve(option.label), option.value));
+            factorCombo.Items.Add(PickerOption.Create(S.Resolve(option.label), option.value));
         factorCombo.SelectedIndex = 0;
 
         var factorWeightBox = new TextBox
@@ -1906,30 +1924,13 @@ public sealed partial class FeedPage : Page, IPostCardPage
                 if (!entry.subscribed) continue;
                 // A labeler has no display name anywhere in the system: its key IS
                 // what the picker paints.
-                factorCombo.Items.Add(FactorOption(entry.factor, entry.factor));
+                factorCombo.Items.Add(PickerOption.Create(entry.factor, entry.factor));
             }
         }
         catch (Exception ex)
         {
             ShellLog.Warn(nameof(FeedPage), $"factor options fetch failed: {ex.Message}");
         }
-    }
-
-    /// <summary>One <c>feed-factor-select</c> option. Its Name is the label it paints —
-    /// what a screen reader reads, and what the bridge's <c>options</c> attribute answers,
-    /// so the picker lists a trained topic by the name the user gave it and a Layer-B
-    /// signal as "Watched to the end", never <c>topic:&lt;hex&gt;</c> or
-    /// <c>signal:watch-complete</c> (the cross-app <c>option_texts</c> contract,
-    /// <c>drivers/base.py</c>; topic-factors.md § Authoring surface &amp; picker). The
-    /// stable key is its Tag (what the composition stores) and its AutomationId, which the
-    /// bridge's <c>Select</c> matches as well as the Name, so <c>driver.select</c> keeps
-    /// naming the key exactly as on every other app.</summary>
-    private static ComboBoxItem FactorOption(string label, string key)
-    {
-        var item = new ComboBoxItem { Content = label, Tag = key };
-        AutomationProperties.SetName(item, label);
-        AutomationProperties.SetAutomationId(item, key);
-        return item;
     }
 
     /// <summary>Grow the create-feed factor picker with the owner's trained topics
@@ -1944,7 +1945,7 @@ public sealed partial class FeedPage : Page, IPostCardPage
             foreach (var row in await _rpc.TrainedTopicsListAsync())
             {
                 if (row.factorKey is not { } key) continue;
-                factorCombo.Items.Add(FactorOption(row.name, key));
+                factorCombo.Items.Add(PickerOption.Create(row.name, key));
             }
         }
         catch (Exception ex)

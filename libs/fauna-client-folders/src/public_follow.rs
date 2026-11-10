@@ -533,22 +533,13 @@ pub use fauna_core::followed_media::FollowedFileEntry;
 /// delete is not listed.**
 ///
 /// The public plane serves raw change rows above the floor
-/// (`bins/fauna-nest/src/folder_public.rs`) — it is a *log*, not a listing —
-/// and no other fold of it exists client-side, so this is the one place the
-/// head rule lives. Pure and transport-free, like everything else in this
-/// module that carries a rule.
+/// (`bins/fauna-nest/src/folder_public.rs`) — it is a *log*, not a listing.
+/// The head rule itself — highest `seq` per path (never page position),
+/// retention rows and non-file rows invisible, a delete head unlisted — is
+/// [`fauna_protocol::sync::head_rows`], the one fold the foreign browse scope
+/// runs too (`ui/media.md` § Cross-nest shared sets). What is
+/// follower-specific is only the last step:
 ///
-/// The fold's skip rules, each load-bearing:
-///
-/// * **"Latest" means highest `seq`**, never page position — a caller may
-///   concatenate pages or receive rows in any order.
-/// * **Retention rows are invisible** (`is_retention` — nest-minted
-///   loser-retention vehicles): the contract on the field says receivers
-///   account them and *never adopt* them, so one must not shadow the real head
-///   here either.
-/// * **Non-file rows are invisible** (`entry.is_some()`, or an `item_class`
-///   other than the chunk-manifest one): the public plane serves ordinary
-///   folders, but the strip does not re-class rows, so fold defensively.
 /// * **An unrenderable head is skipped, not an error**: a non-delete head with
 ///   no plaintext `path` (possible on rows recorded before the sealed-paths
 ///   expand wrote plaintext alongside) or no `manifest_hash` cannot be listed
@@ -558,34 +549,10 @@ pub use fauna_core::followed_media::FollowedFileEntry;
 /// Output is in stable `path` order — the render default; the Media machine
 /// re-sorts by the active sort key.
 pub fn listing_from_changes(changes: &[SyncChange]) -> Vec<FollowedFileEntry> {
-    // The wire spelling `ItemClass::ChunkManifest` carries; an ordinary file
-    // row (what `folder_public.rs` writes today) carries `None`.
-    const FILE_CLASS: &str = "chunk-manifest";
-
-    let mut heads: std::collections::HashMap<&str, &SyncChange> = std::collections::HashMap::new();
-    for c in changes {
-        if c.is_retention == Some(true) {
-            continue;
-        }
-        if c.entry.is_some()
-            || matches!(c.item_class.as_deref(), Some(class) if class != FILE_CLASS)
-        {
-            continue;
-        }
-        match heads.entry(c.path_hash.as_str()) {
-            std::collections::hash_map::Entry::Occupied(mut slot) if slot.get().seq < c.seq => {
-                slot.insert(c);
-            }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(c);
-            }
-            _ => {}
-        }
-    }
-
-    let mut out: Vec<FollowedFileEntry> = heads
-        .into_values()
-        .filter(|head| head.change_type != "delete")
+    // The one head fold every scope runs (`fauna_protocol::sync::head_rows`);
+    // what is follower-specific is only the keyless skip below.
+    let mut out: Vec<FollowedFileEntry> = fauna_protocol::sync::head_rows(changes)
+        .into_iter()
         .filter_map(|head| {
             let path = head.path.clone()?;
             let manifest_hash = head.manifest_hash.clone()?;

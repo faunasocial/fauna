@@ -36,18 +36,20 @@ use fauna_protocol::conversations::{
     KeypackageAddressableRequest, KeypackageCountReply, KeypackageCountRequest,
     KeypackageFetchReply, KeypackageFetchRequest, KeypackageUploadReply, KeypackageUploadRequest,
     RoomAcceptInviteRemoteRequest, RoomAcceptInviteReply, RoomAcceptInviteRequest,
-    RoomBackfillGenerationsReply, RoomBackfillGenerationsRequest, RoomCreateReply,
-    RoomCreateRequest, RoomGenerationsRemoteRequest, RoomGenerationsReply, RoomGenerationsRequest,
+    RoomBackfillGenerationsRemoteRequest, RoomBackfillGenerationsReply,
+    RoomBackfillGenerationsRequest, RoomCreateReply, RoomCreateRequest,
+    RoomGenerationsRemoteRequest, RoomGenerationsReply, RoomGenerationsRequest,
     RoomInviteRemoteRequest, RoomInviteReply, RoomInviteRequest, RoomLeaveRemoteRequest,
     RoomLeaveReply, RoomLeaveRequest, RoomListInvitesReply, RoomListInvitesRequest,
     RoomListRosterRemoteRequest, RoomListRosterReply, RoomListRosterRequest,
-    RoomPublishGenerationReply, RoomPublishGenerationRequest, RoomRemoveReply, RoomRemoveRequest,
-    RoomRevokeInviteReply, RoomRevokeInviteRequest, RoomRosterEntryWire,
-    RoomRosterReportRemoteRequest, RoomRosterReportReply, RoomRosterReportRequest,
-    RoomSearchRemoteRequest, RoomSearchReply, RoomSearchRequest, RoomSetLabelersReply,
-    RoomSetLabelersRequest, RoomSetPolicyReply, RoomSetPolicyRequest, RoomSetReceptionKeyReply,
-    RoomSetReceptionKeyRequest, RoomTransferOwnershipReply, RoomTransferOwnershipRequest,
-    WelcomeDeliverReply, WelcomeDeliverRequest, WelcomeKind,
+    RoomPublishGenerationRemoteRequest, RoomPublishGenerationReply, RoomPublishGenerationRequest,
+    RoomRemoveRemoteRequest, RoomRemoveReply, RoomRemoveRequest, RoomRevokeInviteReply,
+    RoomRevokeInviteRequest, RoomRosterEntryWire, RoomRosterReportRemoteRequest,
+    RoomRosterReportReply, RoomRosterReportRequest, RoomSearchRemoteRequest, RoomSearchReply,
+    RoomSearchRequest, RoomSetLabelersReply, RoomSetLabelersRequest, RoomSetPolicyReply,
+    RoomSetPolicyRequest, RoomSetReceptionKeyReply, RoomSetReceptionKeyRequest,
+    RoomTransferOwnershipReply, RoomTransferOwnershipRequest, WelcomeDeliverReply,
+    WelcomeDeliverRequest, WelcomeKind,
 };
 use fauna_protocol::discovery::{ActorByHandleReply, ActorByHandleRequest};
 use fauna_protocol::{RpcErrorAction, RpcErrorClass, RpcRequester};
@@ -131,7 +133,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 #[cfg(not(target_arch = "wasm32"))]
 use fauna_client_bridges::MailAccountClient;
 #[cfg(not(target_arch = "wasm32"))]
-use fauna_client_mail_settings::{InboxSpamScorer, judge_inbox_copy};
+use fauna_client_mail_settings::{InboxSpamScorer, judge_held_inbox_copy, judge_inbox_copy};
 #[cfg(not(target_arch = "wasm32"))]
 use fauna_mail::spam::BayesianKnobs;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1313,6 +1315,78 @@ where
             .await
     }
 
+    /// `fauna.conversations.room.remove_remote` — the same removal for a room
+    /// homed on **another nest**: this nest relays
+    /// `fauna.federation.conversation.room.remove` to `nest_url` and hands back
+    /// the room home's ack unchanged. The rank-scoped twin of
+    /// [`Self::room_leave_remote`]; see [`RoomRemoveRemoteRequest`].
+    pub async fn room_remove_remote(
+        &self,
+        room_id: impl Into<String>,
+        principal: impl Into<String>,
+        nest_url: impl Into<String>,
+    ) -> Result<RoomRemoveReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.conversations.room.remove_remote",
+                RoomRemoveRemoteRequest {
+                    room_id: room_id.into(),
+                    principal: principal.into(),
+                    nest_url: nest_url.into(),
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.conversations.room.publish_generation_remote` — the same keying
+    /// act for a room homed on **another nest**: this nest checks the mint's
+    /// minter binding, relays `fauna.federation.conversation.room.publish_generation`
+    /// to `nest_url` and hands back the home's ack unchanged; see
+    /// [`RoomPublishGenerationRemoteRequest`].
+    pub async fn room_publish_generation_remote(
+        &self,
+        room_id: impl Into<String>,
+        mint: Vec<u8>,
+        nest_url: impl Into<String>,
+    ) -> Result<RoomPublishGenerationReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.conversations.room.publish_generation_remote",
+                RoomPublishGenerationRemoteRequest {
+                    room_id: room_id.into(),
+                    mint,
+                    nest_url: nest_url.into(),
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.conversations.room.backfill_generations_remote` — the same
+    /// backfill for a room homed on **another nest**; see
+    /// [`RoomBackfillGenerationsRemoteRequest`].
+    pub async fn room_backfill_generations_remote(
+        &self,
+        room_id: impl Into<String>,
+        target_actor_id: impl Into<String>,
+        wraps: Vec<Vec<u8>>,
+        nest_url: impl Into<String>,
+    ) -> Result<RoomBackfillGenerationsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.conversations.room.backfill_generations_remote",
+                RoomBackfillGenerationsRemoteRequest {
+                    room_id: room_id.into(),
+                    target_actor_id: target_actor_id.into(),
+                    wraps,
+                    nest_url: nest_url.into(),
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
     /// `fauna.conversations.room.set_policy` — store a replacement policy at
     /// `stored + 1`. Answers the version now stored.
     ///
@@ -2120,6 +2194,31 @@ fn room_role_wire(role: fauna_conversations::room::RoomRole) -> &'static str {
     }
 }
 
+/// Whether a failed floor-roster read was a **confirmed refusal** — the nest
+/// answered "no floor, or not a member of it" — rather than a read that never
+/// reached an answer.
+///
+/// Two doors give that answer, and both are the same fact. The same-nest door
+/// (and the room home's own door behind a relay) answers
+/// `fauna.conversations.permission_denied`
+/// (`bins/fauna-nest/src/conversations_handlers.rs`, forwarded unchanged by
+/// `map_peer_relay_error`). A **relayed** read is first gated on the room
+/// home's federation door, which refuses a member it no longer admits — one
+/// who left or was removed, whose binding the home purged
+/// (`community-rooms.md` § Implementation status today, *A removal severs*)
+/// — with `fauna.federation.forbidden` "not a member of this channel from this
+/// nest" (`require_foreign_member` / `refuse_removed_room_member`). Read as a
+/// failure, that refusal never marked the room unseated, so every
+/// re-invitation into it was settled as spent (group-conversations outcome
+/// 41). The federation code counts only on the relayed read: the same-nest
+/// door never mints it.
+fn roster_read_refused<E: RpcErrorClass>(e: &E, relayed: bool) -> bool {
+    e.as_rpc_error().is_some_and(|rpc| {
+        rpc.code == "fauna.conversations.permission_denied"
+            || (relayed && rpc.code == "fauna.federation.forbidden")
+    })
+}
+
 /// Read a room's floor roster and project it onto
 /// [`fauna_conversations::backend::RoomRosterKnownMember`], for both the
 /// native and wasm arms — the read twin of [`report_roster`].
@@ -2168,6 +2267,7 @@ where
     // the room's home; a same-nest room stays on the plain read. Both answer
     // the same `RoomListRosterReply`, because the relay forwards the room
     // home's reply unchanged.
+    let relayed = home_nest_url.is_some();
     let read = match home_nest_url {
         Some(url) => {
             client
@@ -2178,16 +2278,10 @@ where
     };
     let reply = match read {
         Ok(reply) => reply,
-        // "not a member of this room" / "no such room" both answer this exact
-        // code (`bins/fauna-nest/src/conversations_handlers.rs`'s
-        // `permission_denied`, forwarded unchanged through the relay by
-        // `map_peer_relay_error`) — a clean, confirmed refusal, not a failed
+        // A clean, confirmed refusal ([`roster_read_refused`]), not a failed
         // read. Anything else — disconnect, timeout — did not say "no", it just didn't answer.
         Err(e) => {
-            return if e
-                .as_rpc_error()
-                .is_some_and(|rpc| rpc.code == "fauna.conversations.permission_denied")
-            {
+            return if roster_read_refused(&e, relayed) {
                 tracing::debug!(
                     "floor-roster read: no floor, or not a member — members stay elided"
                 );
@@ -2224,6 +2318,9 @@ where
         // Opaque for the same reason — the backend verifies the set, and that
         // it names this room, before a name of it renders.
         labelers: reply.labelers.map(|l| l.into_vec()),
+        // Forwarded as served — the relayed read carries the room home's
+        // answer unchanged, so a foreign governor reads the same debt.
+        severance_owed: reply.severance_owed,
     })
 }
 
@@ -2279,6 +2376,7 @@ where
     R::Error: RpcErrorClass,
 {
     use fauna_conversations::backend::RoomPolicyVersionsRead;
+    let relayed = home_nest_url.is_some();
     let read = match home_nest_url {
         Some(url) => {
             client
@@ -2307,12 +2405,7 @@ where
                 }
             }
         }
-        Err(e)
-            if e.as_rpc_error()
-                .is_some_and(|rpc| rpc.code == "fauna.conversations.permission_denied") =>
-        {
-            RoomPolicyVersionsRead::NotHeld
-        }
+        Err(e) if roster_read_refused(&e, relayed) => RoomPolicyVersionsRead::NotHeld,
         Err(e) => {
             tracing::debug!(error = %e, "policy-version read failed — the record stays unpainted");
             RoomPolicyVersionsRead::Unavailable
@@ -2586,6 +2679,7 @@ where
             id: i.inbox_id,
             signed_invite: i.signed_invite,
             room_node: i.room_node,
+            home_nest_actor_id: i.home_nest_actor_id,
         })
         .collect())
 }
@@ -2609,20 +2703,29 @@ where
 /// The removal behind [`fauna_conversations::backend::RoomCeremonyRpc`],
 /// shared by both targets' glue objects. It unseats and nothing more — the
 /// severance rotation is the caller's second act.
+///
+/// The kind pick is [`leave_room`]'s: a foreign-homed room rides the distinct
+/// relay kind `room.remove_remote`, which this account's own nest originates
+/// on to the room's home; a same-nest room stays on the plain remove.
 async fn remove_from_room<R>(
     client: &ConversationsClient<R>,
     room_id_hex: String,
     principal_hex: String,
+    home_nest_url: Option<String>,
 ) -> Result<u32, ConvRpcError>
 where
     R: RpcRequester,
     R::Error: RpcErrorClass,
 {
-    client
-        .room_remove(room_id_hex, principal_hex)
-        .await
-        .map(|reply| reply.members)
-        .map_err(conv_rpc_error)
+    let removed = match home_nest_url {
+        Some(url) => {
+            client
+                .room_remove_remote(room_id_hex, principal_hex, url)
+                .await
+        }
+        None => client.room_remove(room_id_hex, principal_hex).await,
+    };
+    removed.map(|reply| reply.members).map_err(conv_rpc_error)
 }
 
 /// The departure behind [`fauna_conversations::backend::RoomCeremonyRpc`],
@@ -2809,21 +2912,33 @@ where
 /// The add-side backfill behind
 /// [`fauna_conversations::backend::RoomCeremonyRpc`], shared by both targets'
 /// glue objects.
+///
+/// The kind pick is [`leave_room`]'s: a foreign-homed room rides the distinct
+/// relay kind `room.backfill_generations_remote`.
 async fn backfill_room_generations<R>(
     client: &ConversationsClient<R>,
     room_id_hex: String,
     target_actor_id_hex: String,
     wraps: Vec<Vec<u8>>,
+    home_nest_url: Option<String>,
 ) -> Result<(), ConvRpcError>
 where
     R: RpcRequester,
     R::Error: RpcErrorClass,
 {
-    client
-        .room_backfill_generations(room_id_hex, target_actor_id_hex, wraps)
-        .await
-        .map(|_| ())
-        .map_err(conv_rpc_error)
+    let stored = match home_nest_url {
+        Some(url) => {
+            client
+                .room_backfill_generations_remote(room_id_hex, target_actor_id_hex, wraps, url)
+                .await
+        }
+        None => {
+            client
+                .room_backfill_generations(room_id_hex, target_actor_id_hex, wraps)
+                .await
+        }
+    };
+    stored.map(|_| ()).map_err(conv_rpc_error)
 }
 
 /// The seat's own wrap target behind
@@ -2891,25 +3006,30 @@ where
 /// The keying act behind [`fauna_conversations::backend::RoomCeremonyRpc`],
 /// shared by both targets' glue objects.
 ///
-/// Same-nest only for the sharper version of [`create_room`]'s reason: a
-/// mint is admitted against the floor roster and the generation tip, both of
-/// which live on the room's home nest alone. A member homed elsewhere reaches
-/// them through a relay kind that does not exist yet, which is why an app that
-/// mints today is one seated on the room's own home.
+/// A mint is admitted against the floor roster and the generation tip, both of
+/// which live on the room's home nest alone, so the kind pick is
+/// [`leave_room`]'s: a foreign-homed room rides the distinct relay kind
+/// `room.publish_generation_remote`, which this account's own nest forwards to
+/// the room's home — how a foreign owner or admin mints.
 async fn publish_room_generation<R>(
     client: &ConversationsClient<R>,
     room_id_hex: String,
     mint: Vec<u8>,
+    home_nest_url: Option<String>,
 ) -> Result<(), ConvRpcError>
 where
     R: RpcRequester,
     R::Error: RpcErrorClass,
 {
-    client
-        .room_publish_generation(room_id_hex, mint)
-        .await
-        .map(|_| ())
-        .map_err(conv_rpc_error)
+    let published = match home_nest_url {
+        Some(url) => {
+            client
+                .room_publish_generation_remote(room_id_hex, mint, url)
+                .await
+        }
+        None => client.room_publish_generation(room_id_hex, mint).await,
+    };
+    published.map(|_| ()).map_err(conv_rpc_error)
 }
 
 // The floor-roster report seam (`conversation-rooms.md` § The floor roster) —
@@ -3007,8 +3127,9 @@ impl fauna_conversations::backend::RoomCeremonyRpc for NestConversationsRpc {
         &self,
         room_id_hex: String,
         mint: Vec<u8>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError> {
-        publish_room_generation(&self.client, room_id_hex, mint).await
+        publish_room_generation(&self.client, room_id_hex, mint, home_nest_url).await
     }
     async fn room_invite(
         &self,
@@ -3033,8 +3154,16 @@ impl fauna_conversations::backend::RoomCeremonyRpc for NestConversationsRpc {
         room_id_hex: String,
         target_actor_id_hex: String,
         wraps: Vec<Vec<u8>>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError> {
-        backfill_room_generations(&self.client, room_id_hex, target_actor_id_hex, wraps).await
+        backfill_room_generations(
+            &self.client,
+            room_id_hex,
+            target_actor_id_hex,
+            wraps,
+            home_nest_url,
+        )
+        .await
     }
 
     async fn room_pending_invitations(
@@ -3066,8 +3195,9 @@ impl fauna_conversations::backend::RoomCeremonyRpc for NestConversationsRpc {
         &self,
         room_id_hex: String,
         principal_hex: String,
+        home_nest_url: Option<String>,
     ) -> Result<u32, ConvRpcError> {
-        remove_from_room(&self.client, room_id_hex, principal_hex).await
+        remove_from_room(&self.client, room_id_hex, principal_hex, home_nest_url).await
     }
 
     async fn room_leave(
@@ -3123,6 +3253,63 @@ impl fauna_conversations::backend::RoomCeremonyRpc for NestConversationsRpc {
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
+    // The MLS outbox drain's keyed appends (`devices.md` § Offline compose →
+    // *Idempotency*): the requests `channel_send` / `channel_send_remote` make,
+    // ungated, with the queued intent's id as the envelope key.
+    async fn channel_send_keyed(
+        &self,
+        channel_id_hex: String,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<i64, ConvRpcError> {
+        use fauna_protocol::KeyedRpcRequester;
+        self.nest
+            .as_ref()
+            .request_keyed::<_, ChannelSendReply>(
+                "fauna.conversations.channel.send",
+                idempotency_key,
+                ChannelSendRequest {
+                    channel_id: channel_id_hex,
+                    envelope,
+                    attachment_refs,
+                    expect_no_commit_since: None,
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+            .map(|r| r.seq)
+            .map_err(channel_send_error)
+    }
+
+    async fn channel_send_remote_keyed(
+        &self,
+        channel_id_hex: String,
+        home_nest_url: String,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<i64, ConvRpcError> {
+        use fauna_protocol::KeyedRpcRequester;
+        self.nest
+            .as_ref()
+            .request_keyed::<_, ChannelSendReply>(
+                "fauna.conversations.channel.send_remote",
+                idempotency_key,
+                ChannelSendRemoteRequest {
+                    channel_id: channel_id_hex,
+                    nest_url: home_nest_url,
+                    envelope,
+                    expect_no_commit_since: None,
+                    attachment_refs,
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+            .map(|r| r.seq)
+            .map_err(channel_send_error)
+    }
+
     async fn own_withheld_records(
         &self,
     ) -> Result<Vec<fauna_conversations::message::WithheldRecord>, ConvRpcError> {
@@ -3678,6 +3865,13 @@ struct ConvPushSubs {
     /// this loop hears it whatever its central push dispatch does with the
     /// kind. A bare wake: any frame maps to `ConvPushEvent::MailFlagsChanged`.
     mail_flags: fauna_client::push::KindSubscriber,
+    /// `fauna.bridges.push.spam_model_updated` — every lesson sends it to the
+    /// actor's own sessions; the receive loop hears it as a read-state wake
+    /// beside `flags_changed`, running the mail sweep whose catch-up files held
+    /// un-watermarked copies a model that first exists mid-run can score
+    /// (`mail-spam.md` § Scoring placement → *The app's catch-up*). A bare
+    /// wake: any frame maps to `ConvPushEvent::MailSpamModelChanged`.
+    spam_model: fauna_client::push::KindSubscriber,
     /// `fauna.bridges.push.conversation_changed` — a bridged room changed (a
     /// deposit, a room report, a receipt). The bridged rail rides this loop
     /// like mail does; the payload names a room the loop does not need (it
@@ -3702,6 +3896,11 @@ struct ConvPushSubs {
     /// with no per-set cursor, so the nudge's `folder` name would narrow
     /// nothing, and it is a sealed label this seat may not be able to render.
     sync_files: fauna_client::push::KindSubscriber,
+    /// `fauna.calendar.changed` — an event or calendar write landed in one of
+    /// this actor's calendars. The address-book wake's twin, for the calendar
+    /// reconcile walk; payload unread, so any frame maps to
+    /// `ConvPushEvent::CalendarChanged`.
+    calendar: fauna_client::push::KindSubscriber,
     /// The shared reconnect signal (`NestClient::subscribe_reconnects`, a
     /// `watch<u64>` bumped on every `Connected` **after the first**). Not a push
     /// *kind* — it rides this seam because the receive loop's push arm is the one
@@ -3737,11 +3936,13 @@ impl NestConversationsPush {
                 channel: nest.subscribe_kind("fauna.conversations.channel.message"),
                 mail: nest.subscribe_kind("fauna.mail.received"),
                 mail_flags: nest.subscribe_kind("fauna.mail.flags_changed"),
+                spam_model: nest.subscribe_kind("fauna.bridges.push.spam_model_updated"),
                 bridged: nest.subscribe_kind(
                     fauna_client_bridges::conversations::CONVERSATION_CHANGED_PUSH_KIND,
                 ),
                 addressbook: nest.subscribe_kind("fauna.addressbook.changed"),
                 sync_files: nest.subscribe_kind("fauna.sync.changed"),
+                calendar: nest.subscribe_kind("fauna.calendar.changed"),
                 reconnects: nest.subscribe_reconnects(),
             }),
         }
@@ -3853,6 +4054,13 @@ impl fauna_conversations::backend::ConversationsPush for NestConversationsPush {
                     Ok(_) | Err(RecvError::Lagged(_)) => return Some(ConvPushEvent::MailFlagsChanged),
                     Err(RecvError::Closed) => return None,
                 },
+                s = subs.spam_model.recv() => match s {
+                    // The spam model changed — the mail sweep's catch-up takes
+                    // the held un-watermarked set through it. A lag is the same
+                    // wake: the set carries correctness.
+                    Ok(_) | Err(RecvError::Lagged(_)) => return Some(ConvPushEvent::MailSpamModelChanged),
+                    Err(RecvError::Closed) => return None,
+                },
                 b = subs.bridged.recv() => match b {
                     // A bridged room changed — a lag is the same wake: the
                     // row cursor carries correctness.
@@ -3874,6 +4082,12 @@ impl fauna_conversations::backend::ConversationsPush for NestConversationsPush {
                     // into one wake loses nothing. Which is also why the payload
                     // goes unread.
                     Ok(_) | Err(RecvError::Lagged(_)) => return Some(ConvPushEvent::SyncFilesChanged),
+                    Err(RecvError::Closed) => return None,
+                },
+                c = subs.calendar.recv() => match c {
+                    // A calendar moved. A lag is the same wake: the walk
+                    // reconciles the whole corpus by ctag.
+                    Ok(_) | Err(RecvError::Lagged(_)) => return Some(ConvPushEvent::CalendarChanged),
                     Err(RecvError::Closed) => return None,
                 },
                 r = subs.reconnects.changed() => match r {
@@ -4127,12 +4341,17 @@ pub struct NestMailInboundSource {
     keys: Arc<MailKeyCache>,
     /// This pass's on-device INBOX spam scorer — the native twin of the web
     /// `WasmConversationsManager::spam_scorer`. `Some` only on the `INBOX` source,
-    /// only while a *trained* model + the scoring policy were fetched this
-    /// pass ([`Self::begin_pass`]); [`Self::fetch`] feeds each just-decrypted
-    /// message to it, [`Self::end_pass`] flushes the accumulated disposition.
-    /// `None` = cold start (no model) / mail off → no scoring,
-    /// so no un-based watermarking (the `InboxSpamScorer` construction contract).
+    /// only while the scoring policy (and the model, when the actor has trained
+    /// one) were fetched this pass ([`Self::begin_pass`]); [`Self::fetch`] feeds
+    /// each just-decrypted message to it, [`Self::end_pass`] flushes the
+    /// accumulated disposition. An untrained actor's scorer is report-only (the
+    /// `InboxSpamScorer` construction contract); `None` = mail off or a failed
+    /// fetch → no scoring this pass.
     spam_scorer: std::sync::Mutex<Option<InboxSpamScorer>>,
+    /// What the scorer [`Self::begin_pass`] built last could score — kept past
+    /// `end_pass`'s flush, so the catch-up's take reads it without a round
+    /// trip ([`InboundMailSource::scorer_state`]).
+    scorer_state: std::sync::Mutex<fauna_conversations::SpamScorerState>,
     /// Where a refused mailed `REPLY` is recorded — the session manager's
     /// inbox ([`fauna_conversations::refused_changes`]), which reaches the
     /// account plane once the host's account store is up.
@@ -4169,6 +4388,7 @@ impl NestMailInboundSource {
             mailbox: MailFeed::Inbox,
             keys: Arc::clone(&keys),
             spam_scorer: std::sync::Mutex::new(None),
+            scorer_state: std::sync::Mutex::new(fauna_conversations::SpamScorerState::Absent),
             refused: Arc::clone(&refused),
         });
         let sent = Arc::new(Self {
@@ -4178,6 +4398,7 @@ impl NestMailInboundSource {
             mailbox: MailFeed::Sent,
             keys,
             spam_scorer: std::sync::Mutex::new(None),
+            scorer_state: std::sync::Mutex::new(fauna_conversations::SpamScorerState::Absent),
             refused,
         });
         (inbox, sent)
@@ -4243,11 +4464,12 @@ impl NestMailInboundSource {
     /// Bayesian knobs (so the client's Junk line matches the MDA/nest —
     /// `mail-spam.md` § Architectural rules).
     ///
-    /// `None` — a cold-start / untrained actor (`fetch_spam_model` → `None`), mail
-    /// off, or any transport/unwrap failure — means "score nothing this pass":
-    /// best-effort (a failure never degrades delivery), and an untrained actor is
-    /// never watermarked without a basis (the [`InboxSpamScorer`] construction
-    /// contract). `spam_folder_threshold == 0` (auto-Junk disabled) still builds a
+    /// An untrained actor (`fetch_spam_model` → `None`) gets a report-only scorer
+    /// ([`InboxSpamScorer::report_only`]): it scores only the copies carrying a
+    /// community `report:spam` row and watermarks nothing else (the
+    /// [`InboxSpamScorer`] construction contract; the MDA's `scoreSelectedInbox`
+    /// step 2). `None` — mail off, or any transport/unwrap failure — means "score
+    /// nothing this pass": best-effort, a failure never degrades delivery. `spam_folder_threshold == 0` (auto-Junk disabled) still builds a
     /// scorer: it is only the fallback for a message without a delivery stamp, and
     /// a user's own stamped threshold still sorts theirs (mirroring the MDA / web).
     async fn build_pass_scorer(&self, keys: &MailKeys) -> Option<InboxSpamScorer> {
@@ -4262,16 +4484,18 @@ impl NestMailInboundSource {
                 return None;
             }
         };
-        let sealed = match reply.blob {
-            Some(sealed) => sealed.into_vec(),
-            // Untrained actor → cold start, no scorer (no un-based watermarking).
-            None => return None,
-        };
         let policy = match self.mail_account.get_spam_scoring_policy().await {
             Ok(p) => p,
             Err(e) => {
                 tracing::debug!("get_spam_scoring_policy (best-effort, no scoring this pass): {e}");
                 return None;
+            }
+        };
+        let sealed = match reply.blob {
+            Some(sealed) => sealed.into_vec(),
+            // Untrained actor → the report term alone, on reported copies only.
+            None => {
+                return Some(InboxSpamScorer::report_only(policy.spam_folder_threshold));
             }
         };
         // The model is sealed to the CURRENT generation's keypair (the client
@@ -4312,18 +4536,21 @@ impl NestMailInboundSource {
         ))
     }
 
-    /// One page of decrypted records with `uid > after_uid` — the body of both
-    /// [`InboundMailSource::fetch`] (`delivery = true`) and
-    /// [`InboundMailSource::fetch_one`] (`delivery = false`). A delivery runs the
-    /// INBOX-only work a message gets once, as it arrives: the iTIP-REPLY route
-    /// to the calendar layer and the pass's spam scorer. A re-read (the
-    /// attachment store refilling an evicted attachment) is not a delivery, so it
-    /// resolves and opens the record identically and does neither.
+    /// One page of decrypted records with `uid > after_uid` — the body of
+    /// [`InboundMailSource::fetch`] ([`PageRead::Delivery`]),
+    /// [`InboundMailSource::fetch_one`] ([`PageRead::Reread`]) and
+    /// [`InboundMailSource::rescore_held`] ([`PageRead::Rescore`]). A delivery
+    /// runs the INBOX-only work a message gets once, as it arrives: the
+    /// iTIP-REPLY route to the calendar layer and the pass's spam scorer. A
+    /// re-read (the attachment store refilling an evicted attachment) is not a
+    /// delivery, so it resolves and opens the record identically and does
+    /// neither. A re-score runs the scorer alone, on a held copy the nest
+    /// re-opened.
     async fn fetch_page(
         &self,
         after_uid: u32,
         limit: u32,
-        delivery: bool,
+        read: PageRead,
     ) -> Result<InboundMailPage, String> {
         // Mail not configured yet → no-op page (the receive loop idles on this rail
         // until the user enables mail; the cache stays `None` so the next tick
@@ -4420,16 +4647,35 @@ impl NestMailInboundSource {
             // `.await` here, so the scorer lock is never held across one
             // (mail-spam.md § Re-file timing; the native twin of
             // `WasmConversationsManager`).
+            // The copy's `scores` carry the community `report:spam` row the
+            // scorer adds on top of its own terms (`report-sharing.md`
+            // § Applying the aggregate).
             let verdict = {
                 let text = String::from_utf8_lossy(&rfc5322);
-                judge_inbox_copy(
-                    self.spam_scorer.lock().unwrap().as_mut(),
-                    self.mailbox == MailFeed::Inbox,
-                    delivery,
-                    m.uid,
-                    &m.flags,
-                    &text,
-                )
+                let mut scorer = self.spam_scorer.lock().unwrap();
+                match read {
+                    PageRead::Rescore if self.mailbox == MailFeed::Inbox => {
+                        fauna_client_mail_settings::InboxCopyVerdict {
+                            junk: judge_held_inbox_copy(
+                                scorer.as_mut(),
+                                m.uid,
+                                &m.flags,
+                                &m.scores,
+                                &text,
+                            ),
+                            merge_reply: false,
+                        }
+                    }
+                    _ => judge_inbox_copy(
+                        scorer.as_mut(),
+                        self.mailbox == MailFeed::Inbox,
+                        read == PageRead::Delivery,
+                        m.uid,
+                        &m.flags,
+                        &m.scores,
+                        &text,
+                    ),
+                }
             };
             if verdict.merge_reply {
                 self.spawn_reply_merge(&rfc5322, &keys);
@@ -4443,6 +4689,7 @@ impl NestMailInboundSource {
                 rfc5322,
                 suppress_from_view,
                 has_seen_flag: fauna_conversations::carries_seen_flag(&m.flags),
+                spam: mail_spam_facts(&m.flags, &m.scores),
                 // Only a `Sent` record can carry one; the nest leaves it off
                 // every INBOX message (`mail-deliverability.md` § Enforcement
                 // at submission time).
@@ -4462,6 +4709,18 @@ impl NestMailInboundSource {
             highest_modseq,
         })
     }
+}
+
+/// What one [`NestMailInboundSource::fetch_page`] read is for — which of the
+/// INBOX-only post-decrypt steps it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageRead {
+    /// Mail arriving: the pass's scorer, then the `REPLY` merge.
+    Delivery,
+    /// The attachment store re-reading a record: neither.
+    Reread,
+    /// A held copy the nest re-opened for scoring: the scorer alone.
+    Rescore,
 }
 
 /// A mail read-state call's error: every nest serves the kinds, so any
@@ -4492,8 +4751,30 @@ where
         .map_err(mail_flag_call_error)
 }
 
+/// What a mail copy's feed `flags` and `scores` say for the spam catch-up —
+/// the watermark, the `$NotJunk` veto and the `report:spam` score
+/// (`mail-spam.md` § Scoring placement → *The app's catch-up*). The ONE
+/// reading the ingest (native page read, web `ingest_sealed_inbound`) and the
+/// flag-change mapping share; the keywords match the scorer's own test
+/// (`InboxSpamScorer::observe`).
+pub fn mail_spam_facts(
+    flags: &[String],
+    scores: &[fauna_core::scoring::ScoreEntry],
+) -> fauna_conversations::MailSpamFacts {
+    fauna_conversations::MailSpamFacts {
+        scored: flags
+            .iter()
+            .any(|f| f == fauna_protocol::email::SPAM_SCORED_KEYWORD),
+        not_junk: flags
+            .iter()
+            .any(|f| f == fauna_protocol::email::NOT_JUNK_KEYWORD),
+        report_spam_pm: fauna_core::scoring::reports::report_spam_pm(scores),
+    }
+}
+
 /// `fauna.email.inbox.flag_changes`, each change reduced to whether it
-/// carries `\Seen` — the other half of [`inbox_mark_seen_call`].
+/// carries `\Seen` and its spam facts ([`mail_spam_facts`]) — the other half
+/// of [`inbox_mark_seen_call`], and the ONE mapping native and web share.
 pub async fn inbox_flag_changes_call<R>(
     email: &EmailClient<R>,
     since_modseq: u64,
@@ -4516,6 +4797,7 @@ where
                 uid: c.uid,
                 modseq: c.modseq,
                 has_seen_flag: fauna_conversations::carries_seen_flag(&c.flags),
+                spam: mail_spam_facts(&c.flags, &c.scores),
             })
             .collect(),
         highest_modseq: reply.highest_modseq,
@@ -4527,7 +4809,7 @@ where
 #[async_trait::async_trait]
 impl InboundMailSource for NestMailInboundSource {
     async fn fetch(&self, after_uid: u32, limit: u32) -> Result<InboundMailPage, String> {
-        self.fetch_page(after_uid, limit, true).await
+        self.fetch_page(after_uid, limit, PageRead::Delivery).await
     }
 
     /// `fauna.email.inbox.mark_seen` — the `INBOX` source only; the `Sent`
@@ -4564,8 +4846,33 @@ impl InboundMailSource for NestMailInboundSource {
         let Some(after_uid) = uid.checked_sub(1) else {
             return Ok(None);
         };
-        let page = self.fetch_page(after_uid, 1, false).await?;
+        let page = self.fetch_page(after_uid, 1, PageRead::Reread).await?;
         Ok(page.records.into_iter().find(|r| r.uid == uid))
+    }
+
+    /// Re-read one held `INBOX` copy the nest re-opened for scoring and judge it
+    /// with this pass's scorer ([`PageRead::Rescore`]) — the record's
+    /// `suppress_from_view` carries the junk verdict. `None` once the mailbox no
+    /// longer holds it (another agent filed or expunged it).
+    async fn rescore_held(
+        &self,
+        uid: u32,
+    ) -> Result<Option<bool>, fauna_conversations::MailFlagCallError> {
+        if self.mailbox != MailFeed::Inbox {
+            return Err(fauna_conversations::MailFlagCallError::Unsupported);
+        }
+        let Some(after_uid) = uid.checked_sub(1) else {
+            return Ok(None);
+        };
+        let page = self
+            .fetch_page(after_uid, 1, PageRead::Rescore)
+            .await
+            .map_err(fauna_conversations::MailFlagCallError::Failed)?;
+        Ok(page
+            .records
+            .into_iter()
+            .find(|r| r.uid == uid)
+            .map(|r| r.suppress_from_view))
     }
 
     /// Refresh this pass's INBOX spam scorer before the page loop — the native twin
@@ -4584,6 +4891,10 @@ impl InboundMailSource for NestMailInboundSource {
             Some(keys) => self.build_pass_scorer(&keys).await,
             None => None,
         };
+        *self.scorer_state.lock().unwrap() = scorer.as_ref().map_or(
+            fauna_conversations::SpamScorerState::Absent,
+            InboxSpamScorer::state,
+        );
         *self.spam_scorer.lock().unwrap() = scorer;
     }
 
@@ -4594,27 +4905,46 @@ impl InboundMailSource for NestMailInboundSource {
     /// already suppressed from the view is still watermarked + moved. Clears the
     /// scorer so an errored pass can't leak into the next (rebuilt in `begin_pass`).
     /// Best-effort — a failure never degrades delivery (the un-watermarked messages
-    /// are simply re-scored next pass).
-    async fn end_pass(&self) {
+    /// stay in the held un-watermarked set and are re-scored next pass). Returns
+    /// the UIDs it watermarked, for the driver to take out of that set.
+    async fn end_pass(&self) -> Vec<u32> {
         if self.mailbox != MailFeed::Inbox {
-            return;
+            return Vec::new();
         }
         let disposition = {
             let mut guard = self.spam_scorer.lock().unwrap();
             guard.take().map(|mut scorer| scorer.take())
         };
         let Some((scored_uids, junk_uids)) = disposition else {
-            return;
+            return Vec::new();
         };
         if scored_uids.is_empty() {
-            return;
+            return Vec::new();
         }
-        if let Err(e) = self
+        match self
             .email
-            .apply_spam_disposition(scored_uids, junk_uids)
+            .apply_spam_disposition(scored_uids.clone(), junk_uids)
             .await
         {
-            tracing::debug!("apply_spam_disposition (best-effort): {e}");
+            Ok(_) => scored_uids,
+            Err(e) => {
+                tracing::debug!("apply_spam_disposition (best-effort): {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// What the scorer the latest [`Self::begin_pass`] built could score —
+    /// `Absent` on the `Sent` source, with mail off, or after a failed fetch.
+    fn scorer_state(&self) -> fauna_conversations::SpamScorerState {
+        *self.scorer_state.lock().unwrap()
+    }
+
+    /// A held `$NotJunk` copy the catch-up took: recorded scored, never junk,
+    /// on this pass's scorer — no fetch, no decrypt (the MDA's `vetoedUIDs`).
+    fn record_vetoed(&self, uid: u32) {
+        if let Some(scorer) = self.spam_scorer.lock().unwrap().as_mut() {
+            scorer.record_vetoed(uid);
         }
     }
 }
@@ -4952,6 +5282,13 @@ pub struct NestMailIndexLauncher {
     /// with nothing anywhere reporting it. The stager's type doc carries the
     /// full account.
     master_builder: std::sync::Mutex<Option<Arc<fauna_client_index::DirectStager>>>,
+    /// The **mail** arm's staging door, kept so the **calendar reconcile walk**
+    /// can stage into it — [`Self::master_builder`]'s mail/calendar-class twin.
+    /// Calendar is third-class under the mail/calendar key, so its corpus rides
+    /// the mail arm's builder and manifest, never the master one
+    /// (`content-index-ingest.md` § Ingest triggers, v1 → *The
+    /// third-ingest-class template*, the orthogonality note).
+    mail_builder: std::sync::Mutex<Option<Arc<fauna_client_index::DirectStager>>>,
     /// The shared-folder key resolver, when app glue wired one — what lets the
     /// File arm render the sealed names of sets shared **with** this actor.
     ///
@@ -4999,6 +5336,7 @@ impl NestMailIndexLauncher {
             arms: Arc::new(FanOutObserver::default()),
             lease: std::sync::Mutex::new(None),
             master_builder: std::sync::Mutex::new(None),
+            mail_builder: std::sync::Mutex::new(None),
             folder_keys: std::sync::Mutex::new(None),
             predecessors: std::sync::Mutex::new(Vec::new()),
         })
@@ -5077,11 +5415,20 @@ impl NestMailIndexLauncher {
             // zeroize-on-drop segment keys (`key-material-hierarchy.md`
             // § Carrier shape; the same posture `NestContactCorpus` took for the
             // contacts arm).
-            members.push(Arc::new(fauna_client_index::MailLocalSearch::new(
-                keys.index_ring(),
-                Arc::clone(&self.publisher),
-                Arc::clone(&lookup),
-            )));
+            //
+            // The calendar resolver attaches with the reader that holds the
+            // kind: it rides the same MSEK, so the claim is always projectable.
+            members.push(Arc::new(
+                fauna_client_index::MailLocalSearch::new(
+                    keys.index_ring(),
+                    Arc::clone(&self.publisher),
+                    Arc::clone(&lookup),
+                )
+                .with_calendar(Arc::new(NestCalendarCorpus {
+                    nest: Arc::clone(&self.nest),
+                    keys: Arc::clone(&self.keys),
+                })),
+            ));
         }
         if let Some(master_key) = self.master_index_key() {
             let mut master = fauna_client_index::MasterLocalSearch::new(
@@ -5210,6 +5557,7 @@ impl IndexBuilderLauncher for NestMailIndexLauncher {
         // The third-class corpora have no receive loop to re-present them, so
         // the walks at attach are the only thing that indexes them this launch.
         self.run_contacts_walk().await;
+        self.run_calendar_walk().await;
         self.run_posts_walk().await;
         self.run_files_walk().await;
 
@@ -5244,6 +5592,12 @@ impl IndexBuilderLauncher for NestMailIndexLauncher {
         // attaching sweep finds no MSEK and a later one does. The ctag precheck
         // makes each unchanged re-run one `list_addressbooks` and no publish.
         self.run_contacts_walk().await;
+        // The calendar walk rides the same sweeps, for the same reason as the
+        // contacts walk: it is the calendar arm's correctness carrier, and it
+        // needs the MSEK — here because the arm it stages into IS the mail arm,
+        // which attaches only once mail is provisioned. Ctag-suppressed, so an
+        // unchanged re-run is one `list_calendars` and no publish.
+        self.run_calendar_walk().await;
         // The posts walk rides the same sweeps: no push event exists for posts,
         // so attach + sweep cadence IS its freshness (another seat's post is
         // found on the next sweep). The marker precheck makes an unchanged
@@ -5276,6 +5630,9 @@ impl IndexBuilderLauncher for NestMailIndexLauncher {
             }
             fauna_conversations::backend::NestCorpus::Files => {
                 self.run_files_walk().await;
+            }
+            fauna_conversations::backend::NestCorpus::Calendar => {
+                self.run_calendar_walk().await;
             }
         }
     }
@@ -5329,6 +5686,60 @@ struct NestContactCorpus {
 const _NEST_CONTACT_CORPUS_HOLDS_NO_BARE_KEY: () = {
     assert!(std::mem::size_of::<NestContactCorpus>() == 2 * std::mem::size_of::<usize>());
 };
+
+/// The production [`fauna_client_index::CalendarCorpusRead`] — the query-time
+/// read that resolves event hits. [`NestContactCorpus`]'s twin: it holds the
+/// [`MailKeyCache`] **handle**, never a key, and reads the whole corpus once
+/// per query.
+#[cfg(not(target_arch = "wasm32"))]
+struct NestCalendarCorpus {
+    nest: Arc<NestClient>,
+    keys: Arc<MailKeyCache>,
+}
+
+/// The `_NEST_CONTACT_CORPUS_HOLDS_NO_BARE_KEY` pin, for the calendar twin.
+#[cfg(not(target_arch = "wasm32"))]
+const _NEST_CALENDAR_CORPUS_HOLDS_NO_BARE_KEY: () = {
+    assert!(std::mem::size_of::<NestCalendarCorpus>() == 2 * std::mem::size_of::<usize>());
+};
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl fauna_client_index::CalendarCorpusRead for NestCalendarCorpus {
+    /// One `list_calendars` + one event read per calendar, for the whole result
+    /// set. A hit no calendar resolves is dropped by the projection.
+    async fn read_events(&self) -> Result<Vec<fauna_client_index::LocatedEvent>, String> {
+        let keys = self
+            .keys
+            .get()
+            .await
+            .ok_or_else(|| "mail keys unavailable".to_string())?;
+        let dav_keys = fauna_client_carddav::DavRecipientKeys::from_mseks(
+            fauna_client_carddav::DavKind::Calendar,
+            &keys.msek,
+            &keys.prior_mseks,
+        );
+        let enumeration = NestCalendarEnumeration {
+            nest: Arc::clone(&self.nest),
+            keys,
+            dav_keys,
+        };
+        let mut out = Vec::new();
+        for (calendar_id, _) in enumeration.list_calendars().await? {
+            for event in enumeration
+                .read_calendar(calendar_id)
+                .await?
+                .unwrap_or_default()
+            {
+                out.push(fauna_client_index::LocatedEvent {
+                    body: event.summary.unwrap_or_default(),
+                    uid_hash: event.uid_hash,
+                });
+            }
+        }
+        Ok(out)
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
@@ -5647,6 +6058,156 @@ impl ContactsEnumeration for NestContactsEnumeration {
                 &self.dav_keys,
             )
             .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// The calendar walk's wire seam — the [`ContactsEnumeration`] twin for the
+/// actor's CalDAV calendars, so the marker / abandon logic in
+/// [`plan_calendar_walk`] is provable without a nest.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+trait CalendarEnumeration: Send + Sync {
+    /// Every calendar, as `(calendar_id, ctag)` — what the corpus marker digests.
+    async fn list_calendars(&self) -> Result<Vec<(Vec<u8>, i64)>, String>;
+    /// One calendar's events, whole. `Ok(None)` when the calendar was deleted
+    /// between the listing and this read — its events are genuinely gone.
+    async fn read_calendar(
+        &self,
+        calendar_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_client_index::IndexableEvent>>, String>;
+}
+
+/// What a calendar walk decided — [`ContactsWalkPlan`]'s shape exactly, with the
+/// same teeth on `Abandoned`: calendar stages as a snapshot, so a partial corpus
+/// would retire the events of every calendar that failed to read.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, PartialEq)]
+enum CalendarWalkPlan {
+    /// Every calendar's `ctag` is where the marker left it — one RPC.
+    Unchanged,
+    /// A read failed mid-walk. Stage nothing, move no marker.
+    Abandoned,
+    /// The whole corpus (possibly empty — an event, not a no-op), plus the
+    /// marker digesting the calendar set it was read from.
+    Stage {
+        events: Vec<fauna_client_index::IndexableEvent>,
+        marker: Vec<u8>,
+    },
+}
+
+/// The calendar corpus marker: a digest of every `(calendar_id, ctag)` pair,
+/// order-independent — [`contacts_corpus_marker`]'s twin. Any event write bumps
+/// its calendar's ctag; a calendar added or removed changes the set.
+#[cfg(not(target_arch = "wasm32"))]
+fn calendar_corpus_marker(calendars: &[(Vec<u8>, i64)]) -> Vec<u8> {
+    let mut rows = calendars.to_vec();
+    rows.sort();
+    let mut hasher = blake3::Hasher::new();
+    // Domain-separated from the contacts marker.
+    hasher.update(b"fauna.index.calendar-corpus-marker.v1");
+    for (id, ctag) in rows {
+        hasher.update(&(id.len() as u64).to_le_bytes());
+        hasher.update(&id);
+        hasher.update(&ctag.to_le_bytes());
+    }
+    hasher.finalize().as_bytes().to_vec()
+}
+
+/// List the calendars, precheck the marker, then read **every calendar whole**
+/// and return the result as the Calendar kind's snapshot — the contacts walk's
+/// shape (`content-index-ingest.md` § Ingest triggers, v1 → *The
+/// third-ingest-class template*, piece 2).
+#[cfg(not(target_arch = "wasm32"))]
+async fn plan_calendar_walk(
+    enumeration: &dyn CalendarEnumeration,
+    prev_marker: Option<&[u8]>,
+) -> CalendarWalkPlan {
+    let calendars = match enumeration.list_calendars().await {
+        Ok(calendars) => calendars,
+        Err(e) => {
+            tracing::debug!(error = %e, "index: calendar walk could not list calendars, retrying on the next signal");
+            return CalendarWalkPlan::Abandoned;
+        }
+    };
+    let marker = calendar_corpus_marker(&calendars);
+    if prev_marker == Some(marker.as_slice()) {
+        return CalendarWalkPlan::Unchanged;
+    }
+    // Per KIND, not per calendar: one staged call carries every calendar's
+    // events, or each call would retire the previous calendar's segment.
+    let mut events = Vec::new();
+    for (calendar_id, _) in &calendars {
+        match enumeration.read_calendar(calendar_id.clone()).await {
+            Ok(Some(found)) => events.extend(found),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "index: calendar walk could not read a calendar, leaving the staged corpus untouched");
+                return CalendarWalkPlan::Abandoned;
+            }
+        }
+    }
+    CalendarWalkPlan::Stage { events, marker }
+}
+
+/// One stored event → the index's view of it: the `SUMMARY` as the title, the
+/// description and location as the body, keyed by the hex `uid_hash`.
+#[cfg(not(target_arch = "wasm32"))]
+fn indexable_event(event: &fauna_client_caldav::FlatEvent) -> fauna_client_index::IndexableEvent {
+    let (summary, text) = fauna_core::ical::event_search_parts(&event.fields);
+    fauna_client_index::IndexableEvent {
+        // Hex-lowercase, the spelling every id surface uses (and the Events
+        // page's own row id); a malformed id is a row this build cannot address.
+        uid_hash: <[u8; 32]>::try_from(event.uid_hash.as_slice())
+            .map(|h| fauna_core::hex32::encode(&h))
+            .unwrap_or_default(),
+        summary,
+        text,
+    }
+}
+
+/// The production [`CalendarEnumeration`]: CalDAV over the launcher's own
+/// connection. Holds a [`MailKeys`] for the walk's duration (the carrier rule),
+/// and derives the event recipient keys once — current MSEK plus every grace
+/// generation, so events sealed before a mail-key rotation still read.
+#[cfg(not(target_arch = "wasm32"))]
+struct NestCalendarEnumeration {
+    nest: Arc<NestClient>,
+    keys: MailKeys,
+    dav_keys: fauna_client_carddav::DavRecipientKeys,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl CalendarEnumeration for NestCalendarEnumeration {
+    async fn list_calendars(&self) -> Result<Vec<(Vec<u8>, i64)>, String> {
+        fauna_client_caldav::CalDavClient::new(Arc::clone(&self.nest))
+            .list_calendars(fauna_protocol::bridge_routing::ListCalendarsRequest {
+                actor_id: self.keys.actor_id.to_vec(),
+            })
+            .await
+            .map(|reply| {
+                reply
+                    .calendars
+                    .into_iter()
+                    .map(|c| (c.calendar_id, c.ctag))
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    async fn read_calendar(
+        &self,
+        calendar_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_client_index::IndexableEvent>>, String> {
+        let Ok(id) = <[u8; 32]>::try_from(calendar_id.as_slice()) else {
+            // Not a calendar id this build can address — nothing to read.
+            return Ok(None);
+        };
+        fauna_client_caldav::CalDavClient::new(Arc::clone(&self.nest))
+            .events_flat_in_calendar(&self.keys.actor_id, &id, &self.dav_keys)
+            .await
+            .map(|found| found.map(|events| events.iter().map(indexable_event).collect()))
             .map_err(|e| e.to_string())
     }
 }
@@ -6246,58 +6807,8 @@ fn indexable_contact(
             .map(|h| fauna_core::hex32::encode(&h))
             .unwrap_or_default(),
         display_name: Some(card.parsed.formatted_name.clone()).filter(|n| !n.is_empty()),
-        text: contact_search_text(&card.parsed),
+        text: fauna_client_carddav::vcard::search_text(&card.parsed),
     }
-}
-
-/// The searchable text of one card: every field a user would plausibly recall,
-/// joined by newlines.
-///
-/// The **parsed** fields rather than the raw vCard, so the index holds what a
-/// person would search for and not the format's scaffolding — `BEGIN:VCARD`,
-/// property names and encoding parameters would otherwise be tokens that every
-/// single card matches on, which is worse than useless in a ranked result list.
-#[cfg(not(target_arch = "wasm32"))]
-fn contact_search_text(card: &fauna_client_carddav::vcard::ParsedVCard) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut push = |s: String| {
-        if !s.is_empty() {
-            parts.push(s);
-        }
-    };
-    push(card.formatted_name.clone());
-    if let Some(n) = card.name.as_ref() {
-        push(
-            [
-                n.prefixes.as_str(),
-                n.given.as_str(),
-                n.additional.as_str(),
-                n.family.as_str(),
-                n.suffixes.as_str(),
-            ]
-            .iter()
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" "),
-        );
-    }
-    for e in &card.emails {
-        push(e.value.clone());
-    }
-    for t in &card.tels {
-        push(t.value.clone());
-    }
-    for u in &card.urls {
-        push(u.value.clone());
-    }
-    for a in &card.addresses {
-        push(a.one_line());
-    }
-    push(card.org_line());
-    push(card.title.clone());
-    push(card.note.clone());
-    parts.join("\n")
 }
 
 /// The master-class kinds this seat's builder stages today.
@@ -6402,7 +6913,8 @@ impl NestMailIndexLauncher {
         .await
         {
             Ok(builder) => {
-                let (observer, _builder) = self.spawn_arm(builder, "mail");
+                let (observer, stager) = self.spawn_arm(builder, "mail");
+                *self.mail_builder.lock().unwrap() = Some(Arc::new(stager));
                 self.arms.push(observer);
                 true
             }
@@ -6584,6 +7096,46 @@ impl NestMailIndexLauncher {
             ContactsWalkPlan::Stage { contacts, marker } => {
                 if let Err(e) = stager.stage_contact_corpus(&contacts, marker) {
                     tracing::debug!(error = %e, "index: could not record the contacts corpus marker");
+                }
+            }
+        }
+    }
+
+    /// The **calendar reconcile walk** — the calendar arm's producer, the third
+    /// ingest class under the mail/calendar key (`content-index-ingest.md`
+    /// § Ingest triggers, v1 → *The third-ingest-class template*).
+    ///
+    /// `list_calendars` (one RPC, each calendar's `ctag`) → compare the corpus
+    /// marker → on any difference read every calendar whole and stage it as the
+    /// Calendar kind's snapshot through the **mail** arm's door. Same run sites
+    /// and idempotence contract as the contacts walk: arm attach, every sweep,
+    /// and the `fauna.calendar.changed` nudge; every early return is an
+    /// ordinary state the next run retries.
+    async fn run_calendar_walk(&self) {
+        // The mail arm attaches only once the MSEK exists, so a stager here
+        // already implies mail is provisioned; not yet attached is ordinary.
+        let Some(stager) = self.mail_builder.lock().unwrap().clone() else {
+            return;
+        };
+        let Some(keys) = self.keys.get().await else {
+            return;
+        };
+        let dav_keys = fauna_client_carddav::DavRecipientKeys::from_mseks(
+            fauna_client_carddav::DavKind::Calendar,
+            &keys.msek,
+            &keys.prior_mseks,
+        );
+        let enumeration = NestCalendarEnumeration {
+            nest: Arc::clone(&self.nest),
+            keys,
+            dav_keys,
+        };
+        let prev = stager.corpus_marker(fauna_client_index::ContentKind::Calendar);
+        match plan_calendar_walk(&enumeration, prev.as_deref()).await {
+            CalendarWalkPlan::Unchanged | CalendarWalkPlan::Abandoned => {}
+            CalendarWalkPlan::Stage { events, marker } => {
+                if let Err(e) = stager.stage_calendar_corpus(&events, marker) {
+                    tracing::debug!(error = %e, "index: could not record the calendar corpus marker");
                 }
             }
         }
@@ -7474,8 +8026,9 @@ impl fauna_conversations::backend::RoomCeremonyRpc for WsConversationsRpc {
         &self,
         room_id_hex: String,
         mint: Vec<u8>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError> {
-        publish_room_generation(&self.client, room_id_hex, mint).await
+        publish_room_generation(&self.client, room_id_hex, mint, home_nest_url).await
     }
     async fn room_invite(
         &self,
@@ -7500,8 +8053,16 @@ impl fauna_conversations::backend::RoomCeremonyRpc for WsConversationsRpc {
         room_id_hex: String,
         target_actor_id_hex: String,
         wraps: Vec<Vec<u8>>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError> {
-        backfill_room_generations(&self.client, room_id_hex, target_actor_id_hex, wraps).await
+        backfill_room_generations(
+            &self.client,
+            room_id_hex,
+            target_actor_id_hex,
+            wraps,
+            home_nest_url,
+        )
+        .await
     }
 
     async fn room_pending_invitations(
@@ -7533,8 +8094,9 @@ impl fauna_conversations::backend::RoomCeremonyRpc for WsConversationsRpc {
         &self,
         room_id_hex: String,
         principal_hex: String,
+        home_nest_url: Option<String>,
     ) -> Result<u32, ConvRpcError> {
-        remove_from_room(&self.client, room_id_hex, principal_hex).await
+        remove_from_room(&self.client, room_id_hex, principal_hex, home_nest_url).await
     }
 
     async fn room_leave(
@@ -8088,6 +8650,79 @@ mod tests {
         }
         fn as_rpc_error(&self) -> Option<&fauna_protocol::RpcError> {
             Some(&self.0)
+        }
+    }
+
+    /// Refuses every request with one fixed wire code — a nest that answered
+    /// and said "no", for the roster read's refusal classification.
+    #[derive(Clone)]
+    struct RefusingRequester(&'static str);
+
+    impl RpcRequester for RefusingRequester {
+        type Error = WireErr;
+
+        async fn request<Req, Reply>(
+            &self,
+            _kind: &'static str,
+            _payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            Err(WireErr(fauna_protocol::RpcError::new(self.0, "error.test")))
+        }
+    }
+
+    /// **A confirmed "not a member" reads as `NoFloor` whichever door answered
+    /// it** (group-conversations outcome 41). A foreign-homed room's roster
+    /// read rides the relay, and a member the room's home no longer admits —
+    /// one who left, or was removed, and whose binding the home purged — is
+    /// refused there by the federation gate's `fauna.federation.forbidden`,
+    /// not the same-nest door's `fauna.conversations.permission_denied`. Read
+    /// as `Unavailable`, that refusal never marked the room unseated, so every
+    /// re-invitation into it was settled as spent before the member saw it.
+    ///
+    /// Mutation: drop the relayed arm of [`roster_read_refused`] and the
+    /// relayed case reds (`Unavailable`). The same-nest case pins that the
+    /// federation code is NOT read as a refusal where no relay answered.
+    #[test]
+    fn a_relayed_not_a_member_refusal_reads_as_no_floor() {
+        use fauna_conversations::backend::{RoomPolicyVersionsRead, RoomRosterRead};
+        let channel = "ab".repeat(32);
+        let home = Some("https://home.test".to_string());
+        for (code, home_nest_url, no_floor) in [
+            ("fauna.conversations.permission_denied", None, true),
+            ("fauna.conversations.permission_denied", home.clone(), true),
+            ("fauna.federation.forbidden", home.clone(), true),
+            ("fauna.federation.forbidden", None, false),
+            ("fauna.protocol.internal", home.clone(), false),
+        ] {
+            let relayed = home_nest_url.is_some();
+            let client = ConversationsClient::new(RefusingRequester(code));
+            let read = block_on(read_roster(&client, channel.clone(), home_nest_url.clone()));
+            let read_no_floor = matches!(read, RoomRosterRead::NoFloor);
+            let read_unavailable = matches!(read, RoomRosterRead::Unavailable);
+            assert_eq!(
+                read_no_floor, no_floor,
+                "{code} (relayed: {relayed}) roster read: NoFloor expected {no_floor}"
+            );
+            assert!(
+                no_floor || read_unavailable,
+                "{code}: an unconfirmed failure stays Unavailable"
+            );
+            let policies = block_on(read_policy_versions(
+                &client,
+                channel.clone(),
+                home_nest_url.clone(),
+                1,
+                None,
+            ));
+            assert_eq!(
+                matches!(policies, RoomPolicyVersionsRead::NotHeld),
+                no_floor,
+                "{code} (relayed: {relayed}) policy read: NotHeld expected {no_floor}"
+            );
         }
     }
 
@@ -9279,6 +9914,113 @@ mod tests {
                 .map(|(_, outcome)| outcome.clone())
                 .unwrap_or_else(|| Err("the fixture has no such book".into()))
         }
+    }
+
+    // ── The calendar walk ──────────────────────────────────────────────────
+
+    /// One calendar read's fixture outcome: its events, `None` for a
+    /// calendar gone between the listing and the read, or the read's error.
+    type CalendarRead = Result<Option<Vec<fauna_client_index::IndexableEvent>>, String>;
+
+    struct Calendars {
+        listing: Result<Vec<(Vec<u8>, i64)>, String>,
+        reads: Vec<(Vec<u8>, CalendarRead)>,
+        read: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CalendarEnumeration for Calendars {
+        async fn list_calendars(&self) -> Result<Vec<(Vec<u8>, i64)>, String> {
+            self.listing.clone()
+        }
+        async fn read_calendar(
+            &self,
+            calendar_id: Vec<u8>,
+        ) -> Result<Option<Vec<fauna_client_index::IndexableEvent>>, String> {
+            self.read.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.reads
+                .iter()
+                .find(|(id, _)| *id == calendar_id)
+                .map(|(_, outcome)| outcome.clone())
+                .unwrap_or_else(|| Err("the fixture has no such calendar".into()))
+        }
+    }
+
+    fn cal_event(uid: u8, summary: &str) -> fauna_client_index::IndexableEvent {
+        fauna_client_index::IndexableEvent {
+            uid_hash: fauna_core::hex32::encode(&[uid; 32]),
+            summary: Some(summary.into()),
+            text: String::new(),
+        }
+    }
+
+    /// A first walk reads every calendar whole and stages ONE corpus for the
+    /// kind; the same listing again is recognized from the marker alone.
+    #[tokio::test]
+    async fn a_calendar_walk_stages_every_calendar_once_and_then_costs_one_rpc() {
+        let listing = vec![(vec![1; 32], 4), (vec![2; 32], 9)];
+        let fixture = Calendars {
+            listing: Ok(listing.clone()),
+            reads: vec![
+                (vec![1; 32], Ok(Some(vec![cal_event(10, "Harbour picnic")]))),
+                (vec![2; 32], Ok(Some(vec![cal_event(20, "Dentist")]))),
+            ],
+            read: Default::default(),
+        };
+        let CalendarWalkPlan::Stage { events, marker } = plan_calendar_walk(&fixture, None).await
+        else {
+            panic!("a first walk stages");
+        };
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e.summary.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Harbour picnic", "Dentist"]
+        );
+        assert_eq!(marker, calendar_corpus_marker(&listing));
+
+        let again = plan_calendar_walk(&fixture, Some(&marker)).await;
+        assert_eq!(again, CalendarWalkPlan::Unchanged);
+        assert_eq!(
+            fixture.read.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the unchanged walk read no calendar"
+        );
+    }
+
+    /// A calendar that fails to read abandons the whole walk — staging the
+    /// rest would retire the failed calendar's events from search.
+    #[tokio::test]
+    async fn a_calendar_that_fails_to_read_abandons_the_calendar_walk() {
+        let fixture = Calendars {
+            listing: Ok(vec![(vec![1; 32], 4), (vec![2; 32], 9)]),
+            reads: vec![
+                (vec![1; 32], Ok(Some(vec![cal_event(10, "Harbour picnic")]))),
+                (vec![2; 32], Err("offline".into())),
+            ],
+            read: Default::default(),
+        };
+        assert_eq!(
+            plan_calendar_walk(&fixture, None).await,
+            CalendarWalkPlan::Abandoned
+        );
+    }
+
+    /// A calendar deleted between the listing and its read contributes nothing,
+    /// and an empty corpus (the last event gone) still stages.
+    #[tokio::test]
+    async fn a_vanished_calendar_contributes_an_empty_corpus_that_still_stages() {
+        let fixture = Calendars {
+            listing: Ok(vec![(vec![1; 32], 4)]),
+            reads: vec![(vec![1; 32], Ok(None))],
+            read: Default::default(),
+        };
+        let CalendarWalkPlan::Stage { events, .. } = plan_calendar_walk(&fixture, None).await
+        else {
+            panic!("an empty corpus is staged, not skipped");
+        };
+        assert!(events.is_empty());
     }
 
     fn staged_names(plan: &ContactsWalkPlan) -> Vec<String> {

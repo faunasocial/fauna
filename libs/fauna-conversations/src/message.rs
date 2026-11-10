@@ -204,6 +204,17 @@ pub struct MessageSnapshot {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub can_delete: bool,
+    /// Whether **this viewer** may remove the nest's copy of this message —
+    /// the one fact behind `dm-message-remove-button`: a *remove*, never a
+    /// *delete*, the far side keeping its copy (`bridged-adapter.md`
+    /// § Removing bridged rows, rule 1). Assigned on every message of a thread
+    /// whose `capabilities.supports_local_remove` holds — the user's own Sent
+    /// copies included — by [`crate::ConversationsManager::thread_detail`],
+    /// never stored, like [`Self::can_delete`]. Additive (`serde` + UniFFI
+    /// defaults), so the at-rest slice stays byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub can_remove: bool,
     /// Whether this is the viewer's **own message that its bridge never
     /// took**: the bridge that carried the room was disconnected with the
     /// message still queued, and the nest deleted the undeliverable item and
@@ -277,6 +288,34 @@ pub struct MessageSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub withheld: Option<WithheldOwnMessage>,
+    /// The state of an own copy a send made with no nest left in the device's
+    /// outbox — the `queued:<intent>` copy (`devices.md` § Offline compose;
+    /// `account-offline-mutation.md` § The offline-mutation contract →
+    /// *The unsent-changes surface*, point 2): `Queued` paints
+    /// `dm-message-queued`, `Unsent` paints `dm-message-unsent` with its
+    /// reason and offers retry and discard. Projected on every
+    /// [`crate::ConversationsManager::thread_detail`] from the outbox rows
+    /// [`crate::ConversationsManager::refresh_unsent_sends`] reads; never
+    /// stored. `None` on every message that is not a queued own copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub queued_send: Option<QueuedSendState>,
+}
+
+/// Where a queued own copy's intent stands ([`MessageSnapshot::queued_send`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum QueuedSendState {
+    /// Waiting to send — pending in the outbox, or held behind a parked
+    /// message of the same conversation.
+    Queued,
+    /// Not sent: the drain parked it. `reason_code` is the stored stable code;
+    /// `reason` is it in words (`fauna_protocol::offline_describe::reason_text`).
+    Unsent {
+        reason_code: String,
+        reason: fauna_core::localized::LocalizedText,
+    },
 }
 
 /// Why the nest withholds a message from the conversation — the two

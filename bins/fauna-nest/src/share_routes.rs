@@ -195,10 +195,11 @@ async fn serve_plaintext(state: &AppState, token: &ShareToken) -> Response {
         Ok(bytes) => bytes,
         // A share link is the most open consumer of the walk, and a share
         // token can be minted over a manifest that names any digest — so this
-        // is the arm the legal-takedown withhold exists for. 451, no body, the
-        // same answer the four routes onto the store give.
-        Err(crate::web_content::file_bytes::FileOpenError::Withheld) => {
-            return StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response();
+        // is the arm the withhold exists for. The ground's status (451 for a
+        // takedown, 403 for a block), no body, the same answer the routes onto
+        // the store give.
+        Err(crate::web_content::file_bytes::FileOpenError::Withheld(ground)) => {
+            return crate::blob_routes::withheld_status(ground).into_response();
         }
         Err(crate::web_content::file_bytes::FileOpenError::Sealed) => {
             return (
@@ -281,8 +282,8 @@ async fn private_manifest(
         match fetch_decoded(&state.db, &store, backup_svc.encryption_key(), &hash).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Err(StatusCode::NOT_FOUND.into_response()),
-            Err(FileOpenError::Withheld) => {
-                return Err(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response());
+            Err(FileOpenError::Withheld(ground)) => {
+                return Err(crate::blob_routes::withheld_status(ground).into_response());
             }
             Err(e) => {
                 tracing::error!("share: manifest read error: {e}");
@@ -309,8 +310,8 @@ async fn private_manifest(
     // withheld; so does this arm, on every answer — the viewer page included —
     // rather than serving a link that dies part-way through.
     for key in manifest.store_keys() {
-        if crate::blob_routes::is_legally_withheld(&state.db, &key.digest()).await {
-            return Err(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response());
+        if let Some(ground) = crate::blob_routes::withhold_ground(&state.db, &key.digest()).await {
+            return Err(crate::blob_routes::withheld_status(ground).into_response());
         }
     }
     Ok((envelope, manifest_bytes, manifest))
@@ -444,7 +445,9 @@ pub async fn handle_share_chunk(
         )
             .into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(FileOpenError::Withheld) => StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response(),
+        Err(FileOpenError::Withheld(ground)) => {
+            crate::blob_routes::withheld_status(ground).into_response()
+        }
         Err(e) => {
             tracing::error!("share: chunk read error: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "storage error").into_response()

@@ -11,7 +11,17 @@
 //!   left, persist it under the install base, and hand back the paint.
 //! - [`FfiSignOutResidue::retry`] — `sign-out-residue-retry-button`.
 //! - [`sign_out_residue_recheck_at_launch`] — the signed-out launch's silent
-//!   re-sweep, which paints only if something is still left.
+//!   re-sweep, which paints only if something is still left. Retired into
+//!   [`sign_out_finish`] on every seat that has wired the sign-out record
+//!   (android, apple); kept, unchanged, for windows until its row wires it.
+//!
+//! **The sign-out record** (`account-scoping.md` § Erasure follows scope → *The
+//! sign-out record is on all 7 apps*) joins this face: the gesture writes it
+//! with [`sign_out_record_begin`] before its first await, and its tail, the
+//! launch and Remove Again all run [`sign_out_finish`] — the shared
+//! `fauna_client_accounts::finish_sign_out_with` over the seat's bases and its
+//! own acts ([`FfiSignOutHost`]). A remove-account joins the record inside
+//! `remove_account_gesture`.
 //!
 //! The one thing only a seat knows is **its own credential erase** — android's
 //! `clear_all` then `SecureStorage.clear()` then `reverify_erase`, apple's and
@@ -138,6 +148,309 @@ pub fn sign_out_residue_recheck_at_launch(
     )
 }
 
+/// The seat's own acts inside the sign-out record's finish
+/// ([`sign_out_finish`]) — what only a seat can do to its own credential store.
+///
+/// - [`Self::wipe_own_store`] — the platform store's wholesale reset of the
+///   app's OWN credential store, run after the registry's own wipe
+///   (`AccountRegistry::wipe_own`): android's `SecureStorage.clear()`. It must
+///   not reach an auxiliary account-scoped namespace — each account's slots
+///   there ride with its scopes (`account-scoping.md` § Erasure follows scope
+///   → *The sign-out record is on all 7 apps*, decision 2).
+/// - [`Self::erase_credentials`] — the residue retry's credential erase, as
+///   [`FfiResidueCredentialEraser::erase_credentials`].
+#[uniffi::export(with_foreign)]
+pub trait FfiSignOutHost: Send + Sync {
+    /// Reset the app's own credential store wholesale. `false` when the reset
+    /// failed — the finish then reports the wipe as failed.
+    fn wipe_own_store(&self) -> bool;
+
+    /// Run the residue retry's credential erase and report what is still
+    /// readable.
+    fn erase_credentials(&self) -> FfiCredentialSweep;
+}
+
+/// What a [`sign_out_finish`] run answers — the seat's paint.
+#[derive(uniffi::Record, Debug)]
+pub struct FfiSignOutFinish {
+    /// The launch must not route over the registry: another instance serves an
+    /// account the run would reach and the sign-out record still owes its
+    /// wipe. Land on `identity_choice` painting [`Self::residue`] (the retry's
+    /// refusal line), whose Remove Again re-runs [`sign_out_finish`].
+    pub fails_closed: bool,
+    /// The run was refused — nothing wiped or erased — whether or not it fails
+    /// closed.
+    pub refused: bool,
+    /// The `sign-out-residue` view: the retry's refusal for a refused run, the
+    /// residue line for a run that left something, `None` for clean.
+    pub residue: Option<Arc<FfiSignOutResidue>>,
+    /// A credential wipe (or re-erase) ran.
+    pub credentials_wiped: bool,
+    /// A sign-out record was found (a refused run reports whether the record
+    /// still owes its wipe).
+    pub found_record: bool,
+}
+
+/// **The sign-out's decision**, written by the seat's gesture before anything
+/// else — after the serving question passed, before the runtime's stop is
+/// awaited (`account-scoping.md` § Erasure follows scope → *The sign-out record
+/// is on all 7 apps*, decision 1). The native record (`sign-out-record.json`
+/// under `base_dir`, the app's install base) names every account the registry
+/// lists plus `served_actor` — the account this process serves, which an
+/// unreadable index would not name — and owes the credential wipe. A process
+/// killed anywhere after this call is finished by the next launch's
+/// [`sign_out_finish`].
+///
+/// The unreadable-index floor's start-over calls it with the registry naming
+/// nobody and no served actor: a wipe owed with no accounts, whose finish
+/// sweeps every scope under the bases.
+///
+/// Returns the accounts recorded — the gesture hands them to its own
+/// [`sign_out_finish`] as `written`, so a record the install base refused still
+/// finishes in this process.
+#[uniffi::export]
+pub fn sign_out_record_begin(
+    registry: Arc<FfiAccountRegistry>,
+    base_dir: String,
+    served_actor: Option<String>,
+) -> Vec<String> {
+    let reach = registry
+        .registry()
+        .list()
+        .into_iter()
+        .map(|entry| entry.actor_id)
+        .chain(served_actor);
+    let record = fauna_client_accounts::SignOutRecord::record_sign_out(
+        &fauna_client_accounts::SignOutRecordFile::under(&base_dir),
+        reach,
+    );
+    tracing::info!(
+        "[sign-out] recorded for {} account(s)",
+        record.accounts.len()
+    );
+    record.accounts
+}
+
+/// Whether a sign-out record under `base_dir` still owes anything — so a
+/// launch closes its open account-scoped handles before a finish that will
+/// erase under them, and leaves them alone when there is nothing to finish.
+#[uniffi::export]
+pub fn sign_out_record_pending(base_dir: String) -> bool {
+    fauna_client_accounts::SignOutRecord::load(&fauna_client_accounts::SignOutRecordFile::under(
+        &base_dir,
+    ))
+    .is_some()
+}
+
+/// **The one routine** a seat's sign-out tail, its launch and Remove Again
+/// (`sign-out-residue-retry-button`) run — the shared
+/// [`fauna_client_accounts::finish_sign_out_with`] over the seat's bases, its
+/// registry and its own acts ([`FfiSignOutHost`]).
+///
+/// - `base_dirs` — the app's own state bases the erase sweeps; the FIRST is the
+///   install base, home of both records and where an instance of this app
+///   declares itself (android passes its two roots).
+/// - `store_container_dir` — exactly what the seat passes to the account
+///   runtime (`None` on desktops); its root is swept and asked about too.
+/// - `own_lock` — a lock this process still holds, put down around the run;
+///   `None` at the launch, which holds none yet.
+/// - `dismiss_agent` — dismiss the sync agent from each recorded account
+///   before the erase (decision 5): `true` for the launch and Remove Again,
+///   `false` for the gesture, whose own stop already dismissed it.
+/// - `written` — the accounts [`sign_out_record_begin`] returned, from the
+///   gesture only: stands in for a record the install base refused.
+///
+/// Blocking file I/O and, with `dismiss_agent`, up to the agent budget per
+/// recorded account: call it off the main thread.
+#[uniffi::export]
+pub fn sign_out_finish(
+    registry: Arc<FfiAccountRegistry>,
+    base_dirs: Vec<String>,
+    store_container_dir: Option<String>,
+    own_lock: Option<Arc<FfiAccountInstanceLock>>,
+    host: Arc<dyn FfiSignOutHost>,
+    dismiss_agent: bool,
+    written: Option<Vec<String>>,
+) -> FfiSignOutFinish {
+    let store_root = store_root_or_logged(store_container_dir.map(PathBuf::from));
+    let outcome = with_own_lock_down(own_lock.as_deref(), || {
+        finish_under(
+            &registry,
+            &base_dirs,
+            store_root.as_deref(),
+            host.as_ref(),
+            dismiss_agent,
+            written,
+        )
+    });
+    painted_finish(outcome)
+}
+
+/// The pure half of [`sign_out_finish`], every base passed in.
+fn finish_under(
+    registry: &FfiAccountRegistry,
+    base_dirs: &[String],
+    store_root: Option<&Path>,
+    host: &dyn FfiSignOutHost,
+    dismiss_agent: bool,
+    written: Option<Vec<String>>,
+) -> fauna_client_accounts::SignOutFinish {
+    let Some(install_base) = base_dirs.first().map(PathBuf::from) else {
+        tracing::error!("[sign-out] finish called with no base — nothing to finish");
+        return fauna_client_accounts::SignOutFinish::NOTHING;
+    };
+    let swept: Vec<PathBuf> = base_dirs
+        .iter()
+        .map(PathBuf::from)
+        .chain(store_root.map(Path::to_path_buf))
+        .collect();
+    let mut seat_host = FfiFinishHost {
+        registry,
+        host,
+        dismiss_agent,
+    };
+    fauna_client_accounts::finish_sign_out_with(
+        fauna_client_accounts::FinishSeat {
+            install_base: &install_base,
+            swept_bases: &swept,
+            serving: serving_bases(&install_base, store_root),
+            registry: registry.registry(),
+        },
+        &mut seat_host,
+        written.map(|accounts| fauna_client_accounts::SignOutRecord {
+            wipe_owed: true,
+            accounts,
+        }),
+    )
+}
+
+/// The FFI seats' acts inside the shared finish: the wipe is the registry's
+/// own store (`wipe_own`) then the seat's wholesale reset of it, read back over
+/// that store alone; each account's slots in the auxiliary namespaces ride with
+/// its scopes; the residue retry's credential half is the retry's own.
+struct FfiFinishHost<'a> {
+    registry: &'a FfiAccountRegistry,
+    host: &'a dyn FfiSignOutHost,
+    dismiss_agent: bool,
+}
+
+impl fauna_client_accounts::FinishHost for FfiFinishHost<'_> {
+    fn wipe(&mut self) -> CredentialSweep {
+        let mut sweep = self.registry.registry().wipe_own();
+        if !self.host.wipe_own_store() {
+            tracing::warn!("[sign-out] the seat's own credential store reset failed");
+            sweep.record_wipe_failure();
+        }
+        self.registry.registry().reverify_own(sweep)
+    }
+
+    fn erase_account_slots(&mut self, actor_id_hex: &str) -> CredentialSweep {
+        self.registry
+            .registry()
+            .erase_account_aux_slots(actor_id_hex)
+    }
+
+    fn dismiss_agent(&mut self, actor_id_hex: &str) {
+        if self.dismiss_agent {
+            dismiss_agent_from(actor_id_hex);
+        }
+    }
+
+    fn re_erase_credentials(&mut self, recorded: CredentialSweep) -> CredentialSweep {
+        let fresh: CredentialSweep = self.host.erase_credentials().into();
+        merge_read_back(self.registry, fresh, recorded)
+    }
+}
+
+/// How long the finish waits on the sync agent's dismissal of one recorded
+/// account (decision 5) — tui's `AGENT_DISMISS_BUDGET`. Two IPC round trips;
+/// an agent that answers neither in this long meets the revoke at the nest.
+#[cfg(all(any(unix, windows), feature = "sync-agent-provisioning"))]
+const AGENT_DISMISS_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Dismiss the sync agent from a recorded account, awaited — the actor-matched
+/// exchange (`signed_out_onboarding_reconcile_with_marker`) over a marker built
+/// from the record, since a provisioner killed inside its stop never wrote one.
+/// Its own thread and runtime, so a synchronous export can wait on it; an
+/// unresolvable endpoint (no agent on this platform) answers at once.
+#[cfg(all(any(unix, windows), feature = "sync-agent-provisioning"))]
+fn dismiss_agent_from(actor_id_hex: &str) {
+    let Ok(actor) = fauna_core::hex32::decode(actor_id_hex) else {
+        return;
+    };
+    let Ok(endpoint) = fauna_ipc::endpoint::AgentEndpoint::default_for_user() else {
+        return;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let marker = fauna_ipc::sync::SignedOutMarker::new(actor.to_vec(), now_ms);
+    let label = actor_id_hex.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("sign-out-agent".into())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let exchange =
+                    fauna_client_sync::agent::signed_out_onboarding_reconcile_with_marker(
+                        &endpoint, &marker,
+                    );
+                if tokio::time::timeout(AGENT_DISMISS_BUDGET, exchange)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "[sign-out] the sync agent did not answer its dismissal from {label} \
+                         within {AGENT_DISMISS_BUDGET:?} — erasing all the same"
+                    );
+                }
+            });
+        });
+    if let Ok(handle) = spawned {
+        let _ = handle.join();
+    }
+}
+
+/// No local agent seam in this build: nothing to dismiss.
+#[cfg(not(all(any(unix, windows), feature = "sync-agent-provisioning")))]
+fn dismiss_agent_from(_actor_id_hex: &str) {}
+
+/// A finish's outcome as the seat paints it.
+fn painted_finish(outcome: fauna_client_accounts::SignOutFinish) -> FfiSignOutFinish {
+    let fails_closed = outcome.fails_closed();
+    match outcome {
+        fauna_client_accounts::SignOutFinish::Refused {
+            residue, wipe_owed, ..
+        } => FfiSignOutFinish {
+            fails_closed,
+            refused: true,
+            residue: Some(Arc::new(FfiSignOutResidue {
+                record: residue.unwrap_or_default(),
+                line: fauna_client_accounts::sign_out_residue_retry_blocked_copy(),
+            })),
+            credentials_wiped: false,
+            found_record: wipe_owed,
+        },
+        fauna_client_accounts::SignOutFinish::Finished {
+            residue,
+            credentials_wiped,
+            found_record,
+        } => FfiSignOutFinish {
+            fails_closed,
+            refused: false,
+            residue: residue.and_then(painted),
+            credentials_wiped,
+            found_record,
+        },
+    }
+}
+
 /// The one re-sweep both gestures run, behind the sign-out's serving-lock
 /// question asked about exactly the two bases its erase reaches.
 fn run_retry(
@@ -175,6 +488,16 @@ fn re_erase_credentials(
     recorded: CredentialSweep,
 ) -> CredentialSweep {
     let fresh: CredentialSweep = eraser.erase_credentials().into();
+    merge_read_back(registry, fresh, recorded)
+}
+
+/// A fresh credential erase plus the read-back of the keys a sign-out recorded
+/// as surviving, as one answer.
+fn merge_read_back(
+    registry: &FfiAccountRegistry,
+    fresh: CredentialSweep,
+    recorded: CredentialSweep,
+) -> CredentialSweep {
     let read_back = registry.registry().reverify(CredentialSweep {
         survivors: recorded.survivors,
         wipe_failed: false,
@@ -519,5 +842,196 @@ mod tests {
         assert!(device.recheck(device.eraser(true)).is_none());
         assert!(dir.join("mls.db").exists(), "nothing was swept");
         assert!(device.record_file().exists(), "the record waits");
+    }
+
+    // ── The sign-out record (`account-scoping.md` § Erasure follows scope →
+    //    *The sign-out record is on all 7 apps*) ──────────────────────────────
+
+    /// The seat's own acts: its wholesale reset clears the app store, and the
+    /// residue retry's erase does the same; both counted.
+    struct Host {
+        store: Arc<MapStore>,
+        wipes: AtomicUsize,
+    }
+
+    impl FfiSignOutHost for Host {
+        fn wipe_own_store(&self) -> bool {
+            self.wipes.fetch_add(1, Ordering::SeqCst);
+            self.store.0.lock().unwrap().clear();
+            true
+        }
+        fn erase_credentials(&self) -> FfiCredentialSweep {
+            self.store.0.lock().unwrap().clear();
+            FfiCredentialSweep::default()
+        }
+    }
+
+    impl Device {
+        fn host(&self) -> Arc<Host> {
+            Arc::new(Host {
+                store: self.store.clone(),
+                wipes: AtomicUsize::new(0),
+            })
+        }
+
+        /// A signed-in account; its actor id.
+        fn sign_in(&self, secret_fill: char) -> String {
+            self.registry
+                .add_account(
+                    secret_fill.to_string().repeat(64),
+                    Some("https://a.example".into()),
+                    None,
+                )
+                .expect("sign in")
+        }
+
+        /// `actor`'s scope under the install base, holding one file.
+        fn scope_of(&self, actor: &str) -> PathBuf {
+            let dir = self.base.join(actor);
+            std::fs::create_dir_all(&dir).expect("scope");
+            std::fs::write(dir.join("mls.db"), b"the user's data").expect("file");
+            dir
+        }
+
+        fn sign_out_record_file(&self) -> PathBuf {
+            self.base.join(fauna_client_accounts::SIGN_OUT_RECORD_FILE)
+        }
+
+        /// The launch's call: no lock held, the agent dismissed, no record in
+        /// hand.
+        fn finish(&self, host: Arc<Host>) -> FfiSignOutFinish {
+            sign_out_finish(
+                self.registry.clone(),
+                vec![self.base()],
+                self.container(),
+                None,
+                host,
+                true,
+                None,
+            )
+        }
+    }
+
+    /// The gesture's decision is on disk before anything awaits: every account
+    /// the registry lists plus the one this process serves, a wipe owed.
+    #[test]
+    fn the_gesture_records_every_listed_account_and_the_served_one_on_disk() {
+        let device = Device::new();
+        let listed = device.sign_in('1');
+        let served = ACTOR.to_string();
+
+        let recorded =
+            sign_out_record_begin(device.registry.clone(), device.base(), Some(served.clone()));
+
+        assert!(
+            device.sign_out_record_file().exists(),
+            "the record is on disk"
+        );
+        let on_disk = fauna_client_accounts::SignOutRecord::load(
+            &fauna_client_accounts::SignOutRecordFile::under(&device.base),
+        )
+        .expect("a record");
+        assert!(on_disk.wipe_owed);
+        assert_eq!(on_disk.accounts, vec![listed.clone(), served.clone()]);
+        assert_eq!(recorded, on_disk.accounts);
+    }
+
+    /// A launch over a sign-out killed after its record: the wipe, every
+    /// recorded account's scope, and the record itself — the launch lands
+    /// signed out and clean.
+    #[test]
+    fn a_launch_over_a_seeded_record_wipes_erases_and_clears() {
+        let device = Device::new();
+        let actor = device.sign_in('1');
+        let dir = device.scope_of(&actor);
+        sign_out_record_begin(device.registry.clone(), device.base(), None);
+
+        let host = device.host();
+        let outcome = device.finish(host.clone());
+
+        assert!(!outcome.fails_closed && !outcome.refused);
+        assert!(outcome.found_record && outcome.credentials_wiped);
+        assert!(outcome.residue.is_none(), "a clean finish paints nothing");
+        assert_eq!(host.wipes.load(Ordering::SeqCst), 1, "the seat's reset ran");
+        assert!(device.registry.list().is_empty(), "the registry is wiped");
+        assert!(device.store.0.lock().unwrap().is_empty(), "so is the store");
+        assert!(!dir.exists(), "the recorded scope is erased");
+        assert!(
+            !device.sign_out_record_file().exists(),
+            "and the record cleared"
+        );
+
+        let again = device.finish(device.host());
+        assert!(
+            !again.found_record && again.residue.is_none(),
+            "nothing is owed"
+        );
+    }
+
+    /// The serving question first: an account another instance serves refuses
+    /// the whole run — nothing wiped, nothing erased, the record standing — and
+    /// the launch fails closed onto the retry's refusal line.
+    #[test]
+    fn a_served_account_refuses_everything_and_the_launch_fails_closed() {
+        let device = Device::new();
+        let actor = device.sign_in('1');
+        let dir = device.scope_of(&actor);
+        sign_out_record_begin(device.registry.clone(), device.base(), None);
+        let _sibling =
+            acquire_account_instance_lock_shared(device.base(), actor.clone(), device.container())
+                .expect("the sibling's acquire");
+
+        let host = device.host();
+        let outcome = device.finish(host.clone());
+
+        assert!(outcome.fails_closed && outcome.refused);
+        assert_eq!(
+            outcome.residue.expect("the refusal paints").line(),
+            fauna_client_accounts::sign_out_residue_retry_blocked_copy()
+        );
+        assert_eq!(host.wipes.load(Ordering::SeqCst), 0, "nothing wiped");
+        assert_eq!(device.registry.list().len(), 1, "the registry stands");
+        assert!(
+            dir.join("mls.db").exists(),
+            "a served store is never touched"
+        );
+        assert!(device.sign_out_record_file().exists(), "the record stands");
+    }
+
+    /// A remove-account killed after its registry step: the removal joined the
+    /// record, so the next launch erases that account's scope alone — no wipe,
+    /// the other account kept — and clears the record.
+    #[test]
+    fn a_removal_joins_the_record_and_the_launch_erases_only_that_account() {
+        let device = Device::new();
+        let removed = device.sign_in('1');
+        let kept = device.sign_in('2');
+        let removed_dir = device.scope_of(&removed);
+        let kept_dir = device.scope_of(&kept);
+        fauna_client_accounts::SignOutRecord::record_removal(
+            &fauna_client_accounts::SignOutRecordFile::under(&device.base),
+            &removed,
+        );
+        device
+            .registry
+            .remove(removed.clone())
+            .expect("registry step");
+
+        let host = device.host();
+        let outcome = device.finish(host.clone());
+
+        assert!(!outcome.fails_closed && outcome.found_record);
+        assert!(!outcome.credentials_wiped, "a removal owes no wipe");
+        assert_eq!(host.wipes.load(Ordering::SeqCst), 0);
+        assert!(
+            !removed_dir.exists(),
+            "the removed account's scope is erased"
+        );
+        assert!(
+            kept_dir.join("mls.db").exists(),
+            "the other account is kept"
+        );
+        assert_eq!(device.registry.list().len(), 1);
+        assert!(!device.sign_out_record_file().exists());
     }
 }

@@ -179,6 +179,12 @@ pub struct ConversationsManager {
     /// shows the thread while keeping the new-thread draft recoverable via `+`
     /// (`start_new_conversation` re-activates and restores it).
     new_thread_active: RwLock<bool>,
+    /// The device's offline outbox, lent by the app
+    /// ([`Self::set_offline_queue`]): with it, a send on a bound MLS group
+    /// made while the app knows it has no nest queues as a plaintext intent
+    /// instead of failing (`devices.md` § Offline compose). `None` — the old
+    /// behaviour exactly: always send.
+    offline_queue: RwLock<Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>>,
     sort: RwLock<SortOrder>,
     search: RwLock<Option<String>>,
     /// The community room's search strip, while open — view state on one
@@ -336,6 +342,12 @@ pub struct ConversationsManager {
     /// row per record); `None` until a read answered. Projected onto
     /// [`MessageSnapshot::withheld`] by [`thread_detail`](Self::thread_detail).
     withheld_records: RwLock<Option<HashMap<String, crate::message::WithheldRecord>>>,
+    /// The MLS sends parked in the device's outbox, by intent id (hex) → the
+    /// stored failure code, as [`Self::refresh_unsent_sends`] last read them —
+    /// projected onto [`MessageSnapshot::queued_send`] by
+    /// [`thread_detail`](Self::thread_detail): a `queued:<intent>` copy named
+    /// here is not sent, any other is queued.
+    unsent_sends: RwLock<HashMap<String, String>>,
     /// The home-nest link-preview seam ([`LinkPreviewRpc`]), wired alongside the FaunaMls
     /// backend's [`ConversationsRpc`](crate::backend::ConversationsRpc) by the native + wasm
     /// glue. `None` on the receive-only / SMTP-only constructors — `resolve_link_preview`
@@ -956,6 +968,7 @@ impl ConversationsManager {
             selected: RwLock::new(None),
             selected_message: RwLock::new(None),
             new_thread_active: RwLock::new(false),
+            offline_queue: RwLock::new(None),
             sort: RwLock::new(SortOrder::default()),
             search: RwLock::new(None),
             room_search: RwLock::new(None),
@@ -982,6 +995,7 @@ impl ConversationsManager {
             delivery_stamps: RwLock::new(HashMap::new()),
             alias_labels: RwLock::new(None),
             withheld_records: RwLock::new(None),
+            unsent_sends: RwLock::new(HashMap::new()),
             link_preview_rpc: RwLock::new(None),
             local_detections: RwLock::new(None),
             index_observer: RwLock::new(None),
@@ -1310,6 +1324,24 @@ impl ConversationsManager {
                     }
                 }
             }
+            // The state of each queued own copy (`devices.md` § Offline
+            // compose; the unsent-changes surface, point 2): a copy whose
+            // intent the outbox parked is not sent, with its reason; every
+            // other `queued:` copy is still waiting to send.
+            let unsent = self.unsent_sends.read().unwrap();
+            for m in &mut d.messages {
+                m.queued_send =
+                    crate::offline_compose::queued_intent_hex(&m.message_id).map(|intent| {
+                        match unsent.get(intent) {
+                            Some(code) => crate::message::QueuedSendState::Unsent {
+                                reason_code: code.clone(),
+                                reason: fauna_protocol::offline_describe::reason_text(code),
+                            },
+                            None => crate::message::QueuedSendState::Queued,
+                        }
+                    });
+            }
+            drop(unsent);
             let revealed = self.revealed_remote.read().unwrap();
             if !revealed.is_empty() {
                 for m in &mut d.messages {
@@ -1352,8 +1384,13 @@ impl ConversationsManager {
             // Assigned on every message, never only raised: a slice persisted
             // from a projection may carry an answer a role change has outdated.
             let supported = d.capabilities.supports_message_delete;
+            // The local remove (`MessageSnapshot::can_remove`): every message
+            // of a thread that offers it, the user's own included
+            // (`bridged-adapter.md` § Removing bridged rows, rule 1).
+            let removable = d.capabilities.supports_local_remove;
             for m in &mut d.messages {
                 m.can_delete = supported && (m.is_own || deletes_any);
+                m.can_remove = removable;
             }
             d
         })
@@ -1416,6 +1453,7 @@ impl ConversationsManager {
         self.delivery_stamps.write().unwrap().clear();
         *self.alias_labels.write().unwrap() = None;
         *self.withheld_records.write().unwrap() = None;
+        self.unsent_sends.write().unwrap().clear();
         self.drafts.clear_all();
         *self.selected.write().unwrap() = None;
         *self.selected_message.write().unwrap() = None;
@@ -2940,6 +2978,19 @@ impl ConversationsManager {
         }
         self.threads
             .append_inbound_message(&thread_id, msg, facts, mail);
+        // The ingest is the first of the held un-watermarked set's three
+        // sources (`mail-spam.md` § Scoring placement → *The app's catch-up*):
+        // an `INBOX` copy now held, delivered without the watermark, enters
+        // with its facts. One this pass's scorer just scored leaves again when
+        // its flush lands ([`Self::note_spam_disposition`]).
+        if let Some(arrival) = mail.filter(|m| m.mailbox == MailFeed::Inbox)
+            && self.threads.inbox_message(arrival.uid).is_some()
+        {
+            self.mail_read
+                .lock()
+                .unwrap()
+                .observe_spam_facts(arrival.uid, arrival.spam);
+        }
         self.notify();
         Ok(())
     }
@@ -4334,6 +4385,49 @@ impl ConversationsManager {
 // snapshot-shaped result crosses the FFI, never a `ChannelId`
 // (`conversations.md` § Architectural rules #2). On wasm the `uniffi` feature is
 // off, so this is a plain `impl` driven by the wasm wrappers.
+/// The unsent-changes doors on a queued own copy, exported to every app
+/// (`account-offline-mutation.md` § The offline-mutation contract →
+/// *The unsent-changes surface*, point 2): each logs a failure and answers
+/// plainly, like [`ConversationsManager::refresh_withheld_messages`].
+#[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
+impl ConversationsManager {
+    /// Re-read which queued MLS sends the outbox parked, so the next
+    /// [`thread_detail`](Self::thread_detail) paints each queued own copy's
+    /// [`crate::message::QueuedSendState`]. Apps call it when a thread opens
+    /// and wherever the outbox may have drained (a reconnect). No outbox lent
+    /// is a no-op; a failed read keeps what the last read said.
+    pub async fn refresh_unsent_sends(&self) {
+        if let Err(why) = self.read_unsent_sends().await {
+            tracing::warn!("reading the unsent sends failed: {why}");
+        }
+    }
+
+    /// Retry the not-sent own copy `message_id` (`dm-message-retry-button`).
+    /// `false` = not a queued copy, its intent not parked, or the outbox
+    /// failed (logged).
+    pub async fn retry_queued_send(&self, message_id: MessageId) -> bool {
+        self.retry_queued_send_inner(message_id)
+            .await
+            .unwrap_or_else(|why| {
+                tracing::warn!("retrying a queued send failed: {why}");
+                false
+            })
+    }
+
+    /// Discard the not-sent own copy `message_id`
+    /// (`dm-message-discard-confirm-button`, behind its confirm). `false` =
+    /// not a queued copy, its intent not parked, or the outbox failed
+    /// (logged).
+    pub async fn discard_queued_send(&self, message_id: MessageId) -> bool {
+        self.discard_queued_send_inner(message_id)
+            .await
+            .unwrap_or_else(|why| {
+                tracing::warn!("discarding a queued send failed: {why}");
+                false
+            })
+    }
+}
+
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
 impl ConversationsManager {
     /// Resolve link-preview metadata (render-model.md § D4) for the bare `url` carried by a
@@ -5483,12 +5577,24 @@ impl ConversationsManager {
     /// snapshot-only.
     pub async fn remove_participant(&self, id: ThreadId, addr: TypedAddress) {
         self.clear_page_error();
-        if let Err(detail) = self.remove_participant_inner(id, addr).await {
-            self.set_page_error(LocalizedText::key_arg(
+        match self.remove_participant_inner(id, addr).await {
+            Ok(()) => {}
+            // The removal DID happen — only its re-key is owed — so the page
+            // says that in its own sentence rather than inside "Could not
+            // remove them" (`community-rooms.md` § Implementation status
+            // today → *A removal severs*, the retry paragraph).
+            Err(BackendError::RemovalUnsevered { member, .. }) => {
+                self.set_page_error(LocalizedText::key_arg(
+                    "conversations.unified.error_remove_participant_unsevered",
+                    "name",
+                    member,
+                ));
+            }
+            Err(e) => self.set_page_error(LocalizedText::key_arg(
                 "conversations.unified.error_remove_participant",
                 "message",
-                detail,
-            ));
+                e.user_detail(),
+            )),
         }
     }
 
@@ -5649,9 +5755,12 @@ impl ConversationsManager {
                 .await
             {
                 Ok(()) => outcome.evicted.push(summary.thread_id),
-                Err(detail) => outcome.failed.push(crate::eviction::EvictionFailure {
+                // A residue is reported as a failure: the person is off the
+                // floor, but the severance the eviction exists for is still
+                // owed, and an earned verdict must not claim it.
+                Err(e) => outcome.failed.push(crate::eviction::EvictionFailure {
                     thread: summary.thread_id,
-                    reason: detail,
+                    reason: e.user_detail(),
                 }),
             }
         }
@@ -6066,6 +6175,82 @@ impl ConversationsManager {
         // Rule 3: the tombstone rides the history slice — durable before done.
         self.persist_thread_history(&thread).await;
     }
+
+    /// Remove the nest's copy of `message` in `thread`
+    /// (`dm-message-remove-button` → `dm-message-remove-confirm-button`) — a
+    /// *remove*, never a *delete*: the far side keeps its copy
+    /// (`bridged-adapter.md` § Removing bridged rows, rules 1 and 5). Refused
+    /// unless the message's snapshot says `can_remove`. The message leaves
+    /// the manager when the nest answers, never optimistically — the nest is
+    /// the store; a refusal, the precondition's or the nest's, surfaces on
+    /// `error-message`.
+    pub async fn remove_message(&self, thread: ThreadId, message: MessageId) {
+        self.clear_page_error();
+        let Some(detail) = self.thread_detail(thread) else {
+            return;
+        };
+        if !detail
+            .messages
+            .iter()
+            .any(|m| m.message_id == message && m.can_remove)
+        {
+            self.set_page_error(LocalizedText::key_arg(
+                "conversations.unified.error_remove_message",
+                "message",
+                fauna_i18n::strings::error::send::NOT_SUPPORTED.to_string(),
+            ));
+            return;
+        }
+        let backend = self.backends.read().unwrap().get(&detail.rail).cloned();
+        let result = match backend {
+            Some(backend) => backend.remove_message(&detail, &message).await,
+            None => Err(BackendError::NotSupported),
+        };
+        match result {
+            Ok(()) => {
+                self.forget_message(&message);
+            }
+            Err(e) => self.set_page_error(LocalizedText::key_arg(
+                "conversations.unified.error_remove_message",
+                "message",
+                e.user_detail(),
+            )),
+        }
+    }
+
+    /// Remove the nest's copy of the whole of `thread` and hide it until a new
+    /// row reopens it (`room-remove-button` → `room-remove-confirm`;
+    /// `bridged-adapter.md` § Removing bridged rows, rules 4 and 5). Refused
+    /// unless the thread's capabilities say `supports_local_remove`. The
+    /// thread leaves the manager when the nest answers, never optimistically;
+    /// a refusal surfaces on `error-message`.
+    pub async fn remove_thread(&self, thread: ThreadId) {
+        self.clear_page_error();
+        let Some(detail) = self.thread_detail(thread.clone()) else {
+            return;
+        };
+        if !detail.capabilities.supports_local_remove {
+            self.set_page_error(LocalizedText::key_arg(
+                "conversations.unified.error_remove_thread",
+                "message",
+                fauna_i18n::strings::error::send::NOT_SUPPORTED.to_string(),
+            ));
+            return;
+        }
+        let backend = self.backends.read().unwrap().get(&detail.rail).cloned();
+        let result = match backend {
+            Some(backend) => backend.remove_thread(&detail).await,
+            None => Err(BackendError::NotSupported),
+        };
+        match result {
+            Ok(()) => self.forget_thread(&thread),
+            Err(e) => self.set_page_error(LocalizedText::key_arg(
+                "conversations.unified.error_remove_thread",
+                "message",
+                e.user_detail(),
+            )),
+        }
+    }
 }
 
 // Private helpers for the async client surface above.
@@ -6087,6 +6272,43 @@ impl ConversationsManager {
 // genuinely cross the boundary use a `uniffi::Error` enum (`FfiError`), never a
 // bare `String`.
 impl ConversationsManager {
+    /// Forget one held message — a bridged row removed from the nest, here
+    /// or on another device of the account (`bridged-adapter.md` § Removing
+    /// bridged rows, rule 5). The thread stays, even emptied: the room is
+    /// still listed. A message this manager does not hold is a no-op, with no
+    /// emit.
+    pub(crate) fn forget_message(&self, message: &MessageId) {
+        if self.threads.evict_message(message).is_none() {
+            return;
+        }
+        if self.selected_message.read().unwrap().as_ref() == Some(message) {
+            *self.selected_message.write().unwrap() = None;
+        }
+        self.notify();
+    }
+
+    /// Forget one thread whole — a bridged room removed from the nest, here
+    /// or on another device (`bridged-adapter.md` § Removing bridged rows,
+    /// rules 4 and 5). A selection on it is cleared, so no app paints a
+    /// detail the list no longer carries.
+    pub(crate) fn forget_thread(&self, thread: &ThreadId) {
+        if self.threads.participants_of(thread).is_none() {
+            return;
+        }
+        self.threads.discard(thread);
+        if self.selected.read().unwrap().as_ref() == Some(thread) {
+            *self.selected.write().unwrap() = None;
+            *self.selected_message.write().unwrap() = None;
+        }
+        self.notify();
+    }
+
+    /// Every held thread of `rail` with its participants — what the bridged
+    /// driver matches a vanished room against.
+    pub(crate) fn threads_on_rail(&self, rail: Rail) -> Vec<(ThreadId, Vec<TypedAddress>)> {
+        self.threads.threads_on_rail(rail)
+    }
+
     /// The fill half of [`Self::restore_drafts_at`]: `false` when nothing was
     /// filled — `epoch` has moved (the bytes are the outgoing account's), or the
     /// blob would not open. The epoch read lock is held across the check and
@@ -6233,15 +6455,20 @@ impl ConversationsManager {
     /// two reporting styles; a second copy of the optimistic-mutation-plus-
     /// rollback dance is exactly the drift priority #1 forbids.
     ///
-    /// Rust-only by construction: `Result<_, String>` is unrepresentable on the
-    /// UniFFI boundary (see this block's header), and the reporting shape it
-    /// exists for has no foreign caller — the exported [`Self::remove_participant`]
-    /// is what an app calls.
+    /// Rust-only by construction: the reporting shape it exists for has no
+    /// foreign caller — the exported [`Self::remove_participant`] is what an
+    /// app calls.
+    ///
+    /// **A community-room residue keeps the chip gone**
+    /// ([`BackendError::RemovalUnsevered`]): the unseat landed, so the member
+    /// IS off the floor, and putting their chip back would report a severance
+    /// as not having happened. Only the re-key is owed, and the next owner's
+    /// or admin's tend pass pays it.
     async fn remove_participant_inner(
         &self,
         id: ThreadId,
         addr: TypedAddress,
-    ) -> Result<(), String> {
+    ) -> Result<(), BackendError> {
         // Was this person listed at all? The removal is idempotent in the
         // store, so this is what separates "we dropped them" from "they were
         // never here" — and therefore what the rollback below may undo, exactly
@@ -6265,17 +6492,18 @@ impl ConversationsManager {
                 // Same optimistic-mutation-first shape as the add, so the same
                 // two halves: put the member back (they are still in the group
                 // — hiding them is the inverse of rendering membership
-                // truthfully), then surface why.
-                if was_listed {
+                // truthfully), then surface why. Except on the residue: they
+                // are NOT still here, so the chip stays gone.
+                let unseated = matches!(e, BackendError::RemovalUnsevered { .. });
+                if was_listed && !unseated {
                     self.threads.add_participant_to(&id, addr);
                 }
                 tracing::warn!("remove participant failed: {e:?}");
                 self.notify();
-                // Rule 3 still applies to the rollback: the store was mutated
-                // twice and its current truth (they are still here) is what has
-                // to be durable.
+                // Rule 3 still applies to the rollback: the store's current
+                // truth is what has to be durable.
                 self.persist_thread_history(&id).await;
-                return Err(e.user_detail());
+                return Err(e);
             }
         }
         // Rule 3: the membership edit rides the history slice — durable before
@@ -6613,6 +6841,81 @@ impl ConversationsManager {
         self.mail_read.lock().unwrap().requeue(uids);
     }
 
+    /// What a catch-up pass whose scorer is in `state` owes a score, from the
+    /// held un-watermarked set (`mail-spam.md` § Scoring placement → *The
+    /// app's catch-up*): newest first, at most the MDA's per-pass cap, every
+    /// copy for a trained scorer, the reported ones for a report-only one,
+    /// none without a scorer ([`crate::mail_read::MailReadSync::take_rescore`]).
+    /// The set keeps them until the flush watermarks them
+    /// ([`Self::note_spam_disposition`]), so a copy a pass could not score is
+    /// owed the next; one no longer in the view is forgotten here.
+    pub fn take_mail_rescore(
+        &self,
+        state: crate::backend::SpamScorerState,
+    ) -> Vec<crate::mail_read::RescoreCandidate> {
+        self.mail_read
+            .lock()
+            .unwrap()
+            .take_rescore(state, |uid| self.threads.inbox_message(uid).is_some())
+    }
+
+    /// The app's own spam disposition watermarked `scored_uids`: they leave
+    /// the held un-watermarked set. Called with what a flush sent — the native
+    /// driver with what `InboundMailSource::end_pass` returns, the web manager
+    /// where it takes the disposition.
+    pub fn note_spam_disposition(&self, scored_uids: &[u32]) {
+        self.mail_read
+            .lock()
+            .unwrap()
+            .note_scored(scored_uids.iter().copied());
+    }
+
+    /// The mailbox no longer holds the held copy at `uid` (a re-read found it
+    /// gone): it leaves the held un-watermarked set.
+    pub fn forget_unscored_mail(&self, uid: u32) {
+        self.mail_read.lock().unwrap().forget_unscored(uid);
+    }
+
+    /// The source cannot re-score held copies: the held un-watermarked set is
+    /// owed nothing this run.
+    pub fn drop_unscored_mail(&self) {
+        self.mail_read.lock().unwrap().drop_unscored();
+    }
+
+    /// Whether any held `INBOX` copy lacks the watermark — a catch-up pass
+    /// has anything to consider.
+    pub fn has_unscored_mail(&self) -> bool {
+        self.mail_read.lock().unwrap().has_unscored()
+    }
+
+    /// Take a held `INBOX` copy out of the view because the app's own scorer
+    /// just filed it to Junk on a re-score — the held twin of a fresh junk
+    /// verdict never entering the view (`mail-spam.md` § Re-file timing;
+    /// `report-sharing.md` § Applying the aggregate). A thread the copy leaves
+    /// empty goes too, and a selection on either is cleared. Whether anything
+    /// was held under `uid`.
+    pub fn withdraw_filed_inbox_copy(&self, uid: u32) -> bool {
+        self.mail_read.lock().unwrap().forget_unscored(uid);
+        let Some(message) = self.threads.inbox_message(uid) else {
+            return false;
+        };
+        let Some(evicted) = self.threads.evict_message(&message) else {
+            return false;
+        };
+        if self.selected_message.read().unwrap().as_ref() == Some(&message) {
+            *self.selected_message.write().unwrap() = None;
+        }
+        if evicted.emptied {
+            self.threads.discard(&evicted.thread_id);
+            if self.selected.read().unwrap().as_ref() == Some(&evicted.thread_id) {
+                *self.selected.write().unwrap() = None;
+                *self.selected_message.write().unwrap() = None;
+            }
+        }
+        self.notify();
+        true
+    }
+
     /// The launch drain's first `INBOX` page names the flag-change baseline;
     /// later offers are ignored ([`MailReadSync::offer_baseline`]).
     pub fn offer_mail_flag_baseline(&self, highest_modseq: u64) {
@@ -6641,9 +6944,11 @@ impl ConversationsManager {
     }
 
     /// Apply one delivered `flag_changes` page: each message that gained
-    /// `\Seen` leaves the unread set, each that lost it re-enters, and the
-    /// cursor moves past the page. Observers hear of it once, when anything
-    /// moved.
+    /// `\Seen` leaves the unread set, each that lost it re-enters, each held
+    /// copy delivered without the watermark is in the held un-watermarked set
+    /// with its veto and report score while one delivered with it leaves the
+    /// set, and the cursor moves past the page. Observers hear of it once, when
+    /// anything moved.
     pub fn apply_mail_flag_changes(&self, page: &crate::backend::MailFlagChangesPage) {
         let mut moved = false;
         for change in &page.changes {
@@ -6655,6 +6960,27 @@ impl ConversationsManager {
             moved |= self
                 .threads
                 .apply_inbox_seen(change.uid, change.has_seen_flag);
+        }
+        // The feed is one of the held un-watermarked set's three sources
+        // (`mail-spam.md` § Scoring placement → *The app's catch-up*): a held
+        // copy delivered without the watermark is in it with what this change
+        // says of its veto and report row — the nest's re-open on a rising
+        // aggregate included (`report-sharing.md` § Applying the aggregate →
+        // *The re-open is a metadata change, not a flag change*) — and one
+        // delivered with it leaves. Whether a pass scores it is the take's
+        // filter, never this site's. A copy this run does not hold is the
+        // fresh drain's.
+        let held: Vec<_> = page
+            .changes
+            .iter()
+            .filter(|c| self.threads.inbox_message(c.uid).is_some())
+            .map(|c| (c.uid, c.spam))
+            .collect();
+        {
+            let mut sync = self.mail_read.lock().unwrap();
+            for (uid, facts) in held {
+                sync.observe_spam_facts(uid, facts);
+            }
         }
         self.mail_read
             .lock()
@@ -7009,6 +7335,7 @@ fn archive_thread_detail(record: crate::backend::ArchiveThreadRecord) -> ThreadD
         .messages
         .iter()
         .map(|m| MessageSnapshot {
+            queued_send: None,
             message_id: MessageId(format!(
                 "{ARCHIVE_THREAD_ID_PREFIX}{}:{}",
                 record.external_id, m.external_id
@@ -7031,6 +7358,7 @@ fn archive_thread_detail(record: crate::backend::ArchiveThreadRecord) -> ThreadD
             // A record of the past: nothing to delete here (the folder is
             // where the user deletes it), nothing in flight, nothing scanned.
             can_delete: false,
+            can_remove: false,
             undelivered: false,
             warmup_hold: None,
             scan_result_lines: Vec::new(),
@@ -7981,121 +8309,38 @@ impl ConversationsManager {
             }
         };
 
+        // No nest, and a bound MLS group: the send becomes a plaintext intent
+        // in the outbox (`devices.md` § Offline compose).
+        if let Some(queued) = self
+            .queue_offline_send(
+                &id,
+                &detail,
+                backend.as_ref(),
+                &compose,
+                &attachments,
+                drafted,
+            )
+            .await
+        {
+            return queued;
+        }
+
         if drafted {
             self.set_send_state(&id, SendState::Sending);
         }
 
         match backend.send(&detail, &compose, &attachments).await {
-            Ok(outcome) => {
-                // The sender's own "Sent" copy must render like the peers'
-                // received copy: on a markdown-capable rail (FaunaMls and —
-                // since html-mail.md — SMTP) the body is markdown, so flag it
-                // `Markdown` and the bubble renders `**bold**` formatted
-                // instead of as raw source (`conversations.md` § Layout —
-                // `dm-message-text` rendered per `body_format`). Non-markdown
-                // rails (a bridge) stay PlainText.
-                let body_format = if detail.capabilities.supports_markdown {
-                    BodyFormat::Markdown
-                } else {
-                    BodyFormat::PlainText
-                };
-                // The sender's own copy renders the attachments it just sent —
-                // the resolved set the backend received, so echo and wire agree;
-                // the bubble loads the real file via `attachment_bytes`.
-                let attachments = Self::sent_echo_attachments(&attachments);
-                let sent_id = outcome.message_id.clone();
-                let msg = MessageSnapshot {
-                    message_id: outcome.message_id,
-                    sender: outcome.sender,
-                    sender_display: String::new(),
-                    body: compose.body_draft.clone(),
-                    // The complete render document the shells paint (body +
-                    // attachment blocks), produced once here from the same
-                    // body+format+attachments (render-model.md § D1/D2).
-                    document: crate::message::document_for_message(
-                        &compose.body_draft,
-                        body_format,
-                        &attachments,
-                    ),
-                    timestamp_ms: outcome.timestamp_ms,
-                    subject_line: None,
-                    badges: MessageBadges::default(),
-                    reply_to: compose.reply_to.clone(),
-                    reactions: vec![],
-                    deleted: false,
-                    is_own: true,
-                    // A message the local user just sent is never taken down.
-                    legal_takedown_ref: None,
-                    admin_block_reason: None,
-                    // Own content is never classified as received-spam (mirrors
-                    // `observe_local_detection`'s is_own skip).
-                    labels: vec![],
-                    // Carried from the backend's outcome. A `conv` scope is a
-                    // member scope, so an own message on it is browse content
-                    // under T1 exactly like a received one — and this echo is
-                    // the only copy that will ever carry the ref.
-                    plane_ref: outcome.plane_ref,
-                    can_delete: false,
-                    undelivered: false,
-                    warmup_hold: None,
-                    scan_result_lines: Vec::new(),
-                    delivered_to: None,
-                    withheld: None,
-                };
-                // The own copy reaches the content index NOW — the receive poll
-                // never re-presents a sender's own record on the device that
-                // sent it, so without this a sent message stayed unsearchable
-                // until the next launch's store walk (`content-index-ingest.md`
-                // § Ingest triggers, v1 → the own-send ruling). Offered exactly
-                // as that walk would (no subject, no record id), so its re-offer
-                // next launch is dropped by the builder's guard. Mail waits for
-                // its Sent copy instead, which carries the record id a mail doc
-                // is identified by (the `AlreadyOwn` arm of
-                // `ingest_inbound_identified`).
-                if detail.rail != Rail::Smtp {
-                    self.observe_for_index(index_kind_for_rail(detail.rail), &id, &msg, None, None);
-                }
-                self.threads.append_message(&id, msg);
-                // Where the attachments just sent rest (FaunaMls: the sealed
-                // blobs on the room's home nest). No receive loop will ever
-                // tell this device — a sender never walks its own record back
-                // (`SendOutcome::attachment_coordinates`) — so without this an
-                // own attachment the budget evicts renders declared, and the
-                // Rule-3 flush below writes the `history/<ch>` slice without
-                // them (`conversations.md` § Attachments → *Retention*).
-                for (blob_hash, coordinates) in outcome.attachment_coordinates {
-                    self.remember_attachment_coordinates(blob_hash, coordinates);
-                }
-                // Sent: clear the draft body/subject/reply, back to Idle.
-                if drafted {
-                    self.drafts.set(
-                        id.clone(),
-                        ComposeState {
-                            send_state: SendState::Idle,
-                            ..Default::default()
-                        },
-                    );
-                }
-                // Sender-side channel-keying: once a FaunaMls group has
-                // bootstrapped and bound its channel, re-key the thread from the
-                // participant key `send_new_thread` created to channel-keyed,
-                // matching the receiver (`materialize_conv_thread`). Two
-                // sender-initiated groups with identical membership then stay
-                // distinct instead of colliding on the participant key.
-                if detail.rail == Rail::FaunaMls
-                    && let Some(channel_hex) = backend.channel_binding_hex(&id)
-                {
-                    self.threads.rekey_to_channel(&id, channel_hex);
-                }
-                self.notify();
-                // Rule 3 (durable-before-done): the send action completes only
-                // once the just-appended own message — which a sender can never
-                // MLS-decrypt off the log — is durably persisted.
-                self.persist_thread_history(&id).await;
-                // A list send's progress and today's meter moved with it.
-                self.refresh_list_send(Some(id)).await;
-                Ok(sent_id)
-            }
+            Ok(outcome) => Ok(self
+                .record_sent(
+                    &id,
+                    &detail,
+                    backend.as_ref(),
+                    &compose,
+                    &attachments,
+                    outcome,
+                    drafted,
+                )
+                .await),
             Err(e) => {
                 // The slot renders only product statements (`user_detail`, the
                 // send-slot taxonomy — conversations.md § Errors & edge cases);
@@ -8110,5 +8355,339 @@ impl ConversationsManager {
                 Err(e)
             }
         }
+    }
+
+    /// The tail of a send the backend accepted — shared by the online send and
+    /// the MLS outbox drain: the own copy is appended, indexed and persisted,
+    /// and (when `drafted`) the draft cleared. Returns the sent message's id.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_sent(
+        &self,
+        id: &ThreadId,
+        detail: &ThreadDetail,
+        backend: &dyn RailBackend,
+        compose: &ComposeState,
+        attachments: &[crate::backend::ResolvedAttachment],
+        outcome: crate::backend::SendOutcome,
+        drafted: bool,
+    ) -> MessageId {
+        let id = id.clone();
+        // The sender's own "Sent" copy must render like the peers'
+        // received copy: on a markdown-capable rail (FaunaMls and —
+        // since html-mail.md — SMTP) the body is markdown, so flag it
+        // `Markdown` and the bubble renders `**bold**` formatted
+        // instead of as raw source (`conversations.md` § Layout —
+        // `dm-message-text` rendered per `body_format`). Non-markdown
+        // rails (a bridge) stay PlainText.
+        let body_format = if detail.capabilities.supports_markdown {
+            BodyFormat::Markdown
+        } else {
+            BodyFormat::PlainText
+        };
+        // The sender's own copy renders the attachments it just sent —
+        // the resolved set the backend received, so echo and wire agree;
+        // the bubble loads the real file via `attachment_bytes`.
+        let attachments = Self::sent_echo_attachments(attachments);
+        let sent_id = outcome.message_id.clone();
+        let msg = MessageSnapshot {
+            queued_send: None,
+            message_id: outcome.message_id,
+            sender: outcome.sender,
+            sender_display: String::new(),
+            body: compose.body_draft.clone(),
+            // The complete render document the shells paint (body +
+            // attachment blocks), produced once here from the same
+            // body+format+attachments (render-model.md § D1/D2).
+            document: crate::message::document_for_message(
+                &compose.body_draft,
+                body_format,
+                &attachments,
+            ),
+            timestamp_ms: outcome.timestamp_ms,
+            subject_line: None,
+            badges: MessageBadges::default(),
+            reply_to: compose.reply_to.clone(),
+            reactions: vec![],
+            deleted: false,
+            is_own: true,
+            // A message the local user just sent is never taken down.
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            // Own content is never classified as received-spam (mirrors
+            // `observe_local_detection`'s is_own skip).
+            labels: vec![],
+            // Carried from the backend's outcome. A `conv` scope is a
+            // member scope, so an own message on it is browse content
+            // under T1 exactly like a received one — and this echo is
+            // the only copy that will ever carry the ref.
+            plane_ref: outcome.plane_ref,
+            can_delete: false,
+            can_remove: false,
+            undelivered: false,
+            warmup_hold: None,
+            scan_result_lines: Vec::new(),
+            delivered_to: None,
+            withheld: None,
+        };
+        // The own copy reaches the content index NOW — the receive poll
+        // never re-presents a sender's own record on the device that
+        // sent it, so without this a sent message stayed unsearchable
+        // until the next launch's store walk (`content-index-ingest.md`
+        // § Ingest triggers, v1 → the own-send ruling). Offered exactly
+        // as that walk would (no subject, no record id), so its re-offer
+        // next launch is dropped by the builder's guard. Mail waits for
+        // its Sent copy instead, which carries the record id a mail doc
+        // is identified by (the `AlreadyOwn` arm of
+        // `ingest_inbound_identified`).
+        if detail.rail != Rail::Smtp {
+            self.observe_for_index(index_kind_for_rail(detail.rail), &id, &msg, None, None);
+        }
+        self.threads.append_message(&id, msg);
+        // Where the attachments just sent rest (FaunaMls: the sealed
+        // blobs on the room's home nest). No receive loop will ever
+        // tell this device — a sender never walks its own record back
+        // (`SendOutcome::attachment_coordinates`) — so without this an
+        // own attachment the budget evicts renders declared, and the
+        // Rule-3 flush below writes the `history/<ch>` slice without
+        // them (`conversations.md` § Attachments → *Retention*).
+        for (blob_hash, coordinates) in outcome.attachment_coordinates {
+            self.remember_attachment_coordinates(blob_hash, coordinates);
+        }
+        // Sent: clear the draft body/subject/reply, back to Idle.
+        if drafted {
+            self.drafts.set(
+                id.clone(),
+                ComposeState {
+                    send_state: SendState::Idle,
+                    ..Default::default()
+                },
+            );
+        }
+        // Sender-side channel-keying: once a FaunaMls group has
+        // bootstrapped and bound its channel, re-key the thread from the
+        // participant key `send_new_thread` created to channel-keyed,
+        // matching the receiver (`materialize_conv_thread`). Two
+        // sender-initiated groups with identical membership then stay
+        // distinct instead of colliding on the participant key.
+        if detail.rail == Rail::FaunaMls
+            && let Some(channel_hex) = backend.channel_binding_hex(&id)
+        {
+            self.threads.rekey_to_channel(&id, channel_hex);
+        }
+        self.notify();
+        // Rule 3 (durable-before-done): the send action completes only
+        // once the just-appended own message — which a sender can never
+        // MLS-decrypt off the log — is durably persisted.
+        self.persist_thread_history(&id).await;
+        // A list send's progress and today's meter moved with it.
+        self.refresh_list_send(Some(id)).await;
+        sent_id
+    }
+
+    /// Lend the device's offline outbox: from now on a send on a bound MLS
+    /// group made while its connection word is offline queues as a plaintext
+    /// intent (`devices.md` § Offline compose). The app that lends it hosts the
+    /// drain too ([`crate::session::ConversationsSession`]'s
+    /// `MlsIntentSender`).
+    pub fn set_offline_queue(
+        &self,
+        queue: Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>,
+    ) {
+        *self.offline_queue.write().unwrap() = queue;
+    }
+
+    /// Re-read which of this device's queued MLS sends the outbox parked, and
+    /// notify when that moved, so the next [`thread_detail`](Self::thread_detail)
+    /// paints each queued own copy `dm-message-queued` or `dm-message-unsent`
+    /// (`account-offline-mutation.md` § The offline-mutation contract →
+    /// *The unsent-changes surface*, point 2). Apps call it when a thread
+    /// opens and wherever the outbox may have drained (a reconnect); a retry or
+    /// discard here re-reads it itself. No outbox lent is a no-op; a failed
+    /// read keeps what the last read said.
+    async fn read_unsent_sends(&self) -> Result<(), String> {
+        use fauna_core::offline_intent::{MLS_INTENT_KIND, UnsentState};
+        let Some(queue) = self.offline_queue.read().unwrap().clone() else {
+            return Ok(());
+        };
+        let next: HashMap<String, String> = queue
+            .unsent_changes()
+            .await?
+            .into_iter()
+            .filter(|c| c.kind == MLS_INTENT_KIND)
+            .filter_map(|c| match c.state {
+                UnsentState::Unsent { reason_code } => Some((c.intent_id, reason_code)),
+                _ => None,
+            })
+            .collect();
+        let changed = {
+            let mut held = self.unsent_sends.write().unwrap();
+            let changed = *held != next;
+            *held = next;
+            changed
+        };
+        if changed {
+            self.notify();
+        }
+        Ok(())
+    }
+
+    /// Retry the not-sent own copy `message_id` (`dm-message-retry-button`):
+    /// its intent returns to waiting in the outbox, which starts the MLS drain,
+    /// and the copy reads queued again. `Ok(false)` = `message_id` is not a
+    /// queued copy, or its intent is not parked.
+    async fn retry_queued_send_inner(&self, message_id: MessageId) -> Result<bool, String> {
+        let Some(intent) = crate::offline_compose::queued_intent_id(&message_id) else {
+            return Ok(false);
+        };
+        let Some(queue) = self.offline_queue.read().unwrap().clone() else {
+            return Ok(false);
+        };
+        let retried = queue.retry_intent(intent).await?;
+        self.read_unsent_sends().await?;
+        Ok(retried)
+    }
+
+    /// Discard the not-sent own copy `message_id`
+    /// (`dm-message-discard-confirm-button`, behind its confirm) — the one
+    /// user-initiated deletion of a pending write: the outbox deletes its
+    /// parked intent (and lets the conversation's next queued send try), and
+    /// the copy leaves the thread. `Ok(false)` = `message_id` is not a queued
+    /// copy, or its intent is not parked (a waiting intent may be in flight
+    /// and is never deleted).
+    async fn discard_queued_send_inner(&self, message_id: MessageId) -> Result<bool, String> {
+        let Some(intent) = crate::offline_compose::queued_intent_id(&message_id) else {
+            return Ok(false);
+        };
+        let Some(queue) = self.offline_queue.read().unwrap().clone() else {
+            return Ok(false);
+        };
+        if !queue.discard_intent(intent).await? {
+            return Ok(false);
+        }
+        if let Some(evicted) = self.threads.evict_message(&message_id) {
+            self.persist_thread_history(&evicted.thread_id).await;
+        }
+        self.read_unsent_sends().await?;
+        self.notify();
+        Ok(true)
+    }
+
+    /// The offline outbox lent with [`Self::set_offline_queue`], if any — for
+    /// the host that lends it to check which queue a manager holds.
+    pub fn offline_queue(&self) -> Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>> {
+        self.offline_queue.read().unwrap().clone()
+    }
+
+    /// The composer arm: `None` when the send goes online as ever (no outbox
+    /// lent, the app online, or a thread whose send must stay online —
+    /// [`RailBackend::queueable_channel`]); else the queued send's result. A
+    /// queued send appends its own copy under [`queued_message_id`] — the drain
+    /// swaps in the nest-assigned id — clears the draft and persists, like a
+    /// sent one; an outbox that refuses fails the send as before.
+    ///
+    /// Queues only when the app already knows it has no nest, the composer's
+    /// rule (`fauna_protocol::offline_intent` module docs): a send that fails
+    /// in flight is never re-queued under a fresh key.
+    ///
+    /// [`queued_message_id`]: crate::offline_compose::queued_message_id
+    async fn queue_offline_send(
+        &self,
+        id: &ThreadId,
+        detail: &ThreadDetail,
+        backend: &dyn RailBackend,
+        compose: &ComposeState,
+        attachments: &[crate::backend::ResolvedAttachment],
+        drafted: bool,
+    ) -> Option<Result<MessageId, BackendError>> {
+        let queue = self.offline_queue.read().unwrap().clone()?;
+        if fauna_protocol::offline_class::is_online(&queue.connection_state()) {
+            return None;
+        }
+        let (channel_id, sender) = backend.queueable_channel(id)?;
+        let composed_at_ms = fauna_core::data::Timestamp::now_millis() as i64;
+        let intent = crate::offline_compose::MlsSendIntent {
+            channel_id: channel_id.clone(),
+            body: compose.body_draft.clone(),
+            reply_to: compose.reply_to.clone(),
+            attachments: compose.attachments.clone(),
+            composed_at_ms,
+        };
+        let queued = match intent.encode() {
+            Ok(bytes) => {
+                queue
+                    .enqueue_mls(crate::offline_compose::intent_scope(&channel_id), bytes)
+                    .await
+            }
+            Err(e) => Err(format!("intent does not encode: {e}")),
+        };
+        let intent_id = match queued {
+            Ok(intent_id) => intent_id,
+            Err(why) => {
+                let e = BackendError::Internal(format!("offline send could not be queued: {why}"));
+                tracing::warn!("{e}");
+                if drafted {
+                    self.set_send_state(id, SendState::failed(e.user_detail()));
+                }
+                return Some(Err(e));
+            }
+        };
+        let outcome = crate::backend::SendOutcome {
+            message_id: crate::offline_compose::queued_message_id(&intent_id),
+            timestamp_ms: composed_at_ms,
+            sender,
+            plane_ref: None,
+            attachment_coordinates: Vec::new(),
+        };
+        Some(Ok(self
+            .record_sent(id, detail, backend, compose, attachments, outcome, drafted)
+            .await))
+    }
+
+    /// The drain's half in the manager: send one queued intent on the thread
+    /// bound to its channel — sealed now, keyed by `intent_id` — and swap the
+    /// queued own copy for the sent one. The caller has caught the channel's
+    /// log up first ([`crate::session::ConversationsSession`]).
+    pub async fn send_queued_intent(
+        &self,
+        intent_id: [u8; 16],
+        intent: &crate::offline_compose::MlsSendIntent,
+        thread_id: ThreadId,
+    ) -> Result<MessageId, BackendError> {
+        let Some(detail) = self.thread_detail(thread_id.clone()) else {
+            return Err(BackendError::NotSupported);
+        };
+        let backend = self
+            .backends
+            .read()
+            .unwrap()
+            .get(&detail.rail)
+            .cloned()
+            .ok_or(BackendError::NotSupported)?;
+        let compose = ComposeState {
+            body_draft: intent.body.clone(),
+            reply_to: intent.reply_to.clone(),
+            attachments: intent.attachments.clone(),
+            ..Default::default()
+        };
+        let attachments = self.resolve_attachments(&compose)?;
+        let outcome = backend
+            .send_queued(&detail, &compose, &attachments, intent_id)
+            .await?;
+        // The queued copy gives way to the sent one (the nest's id, seq and
+        // plane ref); a copy already gone (evicted, or a replayed drain) is
+        // simply not there to remove.
+        self.threads
+            .evict_message(&crate::offline_compose::queued_message_id(&intent_id));
+        Ok(self
+            .record_sent(
+                &thread_id,
+                &detail,
+                backend.as_ref(),
+                &compose,
+                &attachments,
+                outcome,
+                false,
+            )
+            .await)
     }
 }

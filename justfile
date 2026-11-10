@@ -219,6 +219,15 @@ go_bindings := env_var_or_default("FAUNA_GO_BINDINGS", "regenerate")
 mail-ffi-slot profile="release":
     @case "{{profile}}" in dev) echo "debug/mail-bridge-ffi/labeler" ;; *) echo "{{profile}}/mail-bridge-ffi/labeler" ;; esac
 
+# The mail bridge's E2E cdylib slot (`mail-bridge-ffi-e2e` below): the
+# `labeler` flavor plus fauna-mail's harness seams (fauna-ffi's
+# `mail-bridge-e2e` feature). Its own directory for the reason the slot above
+# has one — the flavor is in the PATH — and so the e2e bridge's rpath can never
+# name the shipped flavor's copy, nor the shipped bridge's name this one. Always
+# `release`: a test flavor never needs `dist`.
+mail-ffi-e2e-slot:
+    @echo "release/mail-bridge-ffi/labeler-e2e"
+
 # The macOS SDK every Unix cgo link uses — a shell line each cgo recipe
 # interpolates beside its CGO_LDFLAGS export (`:` off macOS). Without it cgo's
 # `clang` takes the OS-default SDK, which can belong to a NEWER Command Line
@@ -1807,6 +1816,44 @@ nest-test-image:
     interpreter=$(head -n 1 "$(command -v pytest)")
     FAUNA_ALLOW_NEST_IMAGE_BUILD=1 "${interpreter#\#!}" -c "import sys; from pathlib import Path; sys.path[:0] = ['.', '..', '../..']; from tests.platform.docker.helpers import docker_build; print(docker_build(Path('../..').resolve()))"
 
+# The cold-cache witness of a Dockerfile change (image-pipeline.md § Witnessing an
+# image-plumbing change → *A witness build runs cold*): the image, or the named stages
+# (`just image-witness rust-wasm rust-native`), built with every cache mount
+# EMPTY — `FAUNA_CACHE_SALT` renames each mount id, and the ARG changing also
+# misses the stage's RUN layers — so a crate, module or tool the warm daemon
+# cache already holds cannot mask a fetch the change broke, as it did on
+# 2026-11-06. The warm build stays the iteration loop; this one is the witness
+# a commit message may cite. The salted mounts are pruned before and after, so
+# the next witness starts cold too. Builds locally, never dispatches; the
+# build's compile parallelism follows the slot's grant.
+image-witness *STAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    # A shebang body gets no positional arguments: the stages come in by
+    # interpolation, so the slot's re-exec carries them too.
+    stages=({{STAGES}})
+    salt=-witness-cold
+    prune() { docker buildx prune --builder default --force --filter "description~=witness-cold" > /dev/null || true; }
+    prune
+    trap prune EXIT
+    commit=$(git rev-parse HEAD)
+    version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    args=(--builder default --progress=plain --build-arg FAUNA_CACHE_SALT="$salt"
+          --build-arg FAUNA_BUILD_COMMIT="$commit" --build-arg FAUNA_VERSION="$version"
+          --build-arg BUILD_JOBS="${CARGO_BUILD_JOBS:-8}")
+    # `cacheonly`: the witness is the build's verdict, so nothing is loaded or tagged.
+    args+=(--output type=cacheonly)
+    if [ "${#stages[@]}" -eq 0 ]; then
+        docker buildx build "${args[@]}" .
+    else
+        for stage in "${stages[@]}"; do
+            echo "image-witness: stage $stage, cache mounts cold"
+            docker buildx build "${args[@]}" --target "$stage" .
+        done
+    fi
+    echo "image-witness: GREEN cold at ${commit:0:12} (${stages[*]:-the whole image})"
+
 # The nest-mode axis: run the ORDINARY journey suite against the real deployment
 # artifact instead of a locally-built binary (testing.md § Default app and nest
 # mode). Every tier_3 test that collects here is elevated to tier_4 for the run,
@@ -2564,7 +2611,7 @@ feature-test-compile-check:
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-core --tests --features format_text,local-clock,qr_render,sqlite-schema-meta
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-credential-store --tests --features live-keychain
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-devices-machine --tests --features rpc-glue,account-port
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-ffi-core --tests --features file-provider-host,test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-ffi-core --tests --features e2e-harness,file-provider-host,test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-folders-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-index --tests --features uniffi
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-iroh --tests --features quic
@@ -2871,6 +2918,11 @@ workspace-clippy-check:
 #   fauna-ffi-core/test-helpers — genuinely opt-in; nothing enables it. +2. The
 #                                core of the fauna-ffi split, where the tests
 #                                live (the thin `fauna-ffi` only forwards it).
+#   fauna-ffi-core/e2e-harness — already on through test-helpers, which forwards
+#                                it; named so the ratchet, which reads this
+#                                line and not the forwarding, counts the
+#                                harness exports' own unit tests
+#                                (`src/cabi/harness/`) as run here.
 #   fauna-mail/mail-export     — genuinely opt-in (client-only export twin of
 #                                imap-client, docs/goal/behavior/mail-export.md
 #                                § Export pipeline); nothing enables it.
@@ -2894,7 +2946,7 @@ workspace-clippy-check:
 # recomputes this whole split, so a NEW dark feature cannot land silently.
 workspace-test-check:
     {{slot_build}} cargo test --locked --workspace --lib --bins \
-        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi-core/test-helpers,fauna-mail/mail-export,fauna-mail/dmarc-report,fauna-mail/imap-client-tunnel \
+        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi-core/test-helpers,fauna-ffi-core/e2e-harness,fauna-mail/mail-export,fauna-mail/dmarc-report,fauna-mail/imap-client-tunnel \
         --exclude fauna-nest \
         --exclude fauna-linux \
         --exclude fauna-bridge-service \
@@ -3609,6 +3661,26 @@ android-store-driver:
 ios-export-compliance *ARGS:
     xcrun swift scripts/asc-export-compliance.swift {{ARGS}}
 
+# The iOS App Store build — and, with `upload`, the upload — as one command
+# (installers/ios.md § Upload mechanics, steps 1–3). A clean scratch clone of
+# the PUBLIC repository at tag `v<version>` in `target/ios-store-<version>/`
+# (never the private tree — release-integrity.md § Release signing), that
+# clone's `apple-ffi-store-safe`, the signed Release archive of `Fauna-iOS`
+# with the two excision flags, `-exportArchive` with the tracked export-only
+# options, every bundle verified and the `.ipa`'s sha256 printed. `upload`
+# then sends the archive through the exporter's upload destination with a
+# SCRATCH options copy and the App Store Connect key (read as
+# `ios-export-compliance` reads it), and PRINTS the `just store-review` lines
+# for the session to run from the console reading. Refuses a dirty or non-tag
+# clone and a tree whose MARKETING_VERSION is not `<version>`. Output and logs:
+# `target/ios-store-<version>.out/`. The cold FFI build takes ~30 min — run it
+# detached (scripts/detached-run.py). Pinned by test_ios_store_upload_pins.py.
+# Usage: just ios-store-upload 0.1.6
+#        just ios-store-upload 0.1.6 upload
+[macos]
+ios-store-upload version mode="export":
+    bash scripts/ios-store-upload.sh "{{version}}" "{{mode}}"
+
 # The iOS store driver: an XCUITest runner bundle of its own
 # (`apps/fauna-apple/StoreDriver/`, bundle id `social.fauna.storedriver`) that
 # obtains the app from TestFlight on a physical device and drives the install
@@ -3665,8 +3737,17 @@ android-venue-agents login="" address="":
 # `emulator down: <which leg>` — asked of the tunnelled adb server through the
 # harness's own adb prefix (`-L tcp:127.0.0.1:18509`, which never starts a local
 # server). Exit 0 when up, 1 otherwise. Cheap: one `adb devices`, 5 s at most.
-android-venue-probe:
-    @{{py}} tests/e2e-unified/helpers/android_venue.py --probe
+android-venue-probe *flags:
+    @{{py}} tests/e2e-unified/helpers/android_venue.py --probe {{flags}}
+
+# Print the script that installs the FOURTH venue agent: the Play-image AVD
+# fauna-e2e-play headless on port 5556 (the store-install witness), RunAtLoad +
+# KeepAlive. Its own recipe, never part of android-venue-agents: the owner runs
+# it on the emulator's machine only AFTER the one windowed Play sign-in boot
+# (an AVD runs in one instance).
+# `just android-venue-probe --play` then reads emulator-5556. Prints only.
+android-venue-play-agent:
+    @{{py}} tests/e2e-unified/helpers/android_venue.py --play-agent
 
 # Build Android release APK
 android-release: android-ffi i18n-generate providers-generate
@@ -4605,6 +4686,17 @@ apple-ffi-store-safe profile="release": i18n-generate providers-generate
 apple-ffi-kids profile="release": i18n-generate providers-generate
     @just _apple-ffi-flavor "kids-safe,kids-floor" "" "{{profile}}"
 
+# The `--app ios-kids` e2e's FFI — the kids flavor PLUS `test-helpers`, the
+# simulator slice set (`sim`, as `apple-ffi-test-sim`). conftest routes
+# `ios-kids` here and builds the SPM `FaunaiOS` app over it with the kids Swift
+# conditions under the kids bundle id (`feature-catalog.md` § Cell semantics:
+# the `ios-kids` column is the kids build product on ios's venue). A TEST
+# artifact only: the seams it exports are what the Debug TestAgent calls, so it
+# never feeds `apple-ffi-kids` or the archive `apple-kids-check` fences — that
+# recipe rebuilds the production kids flavor into the one staging slot itself.
+apple-ffi-kids-test-sim profile="release": i18n-generate providers-generate
+    @just _apple-ffi-flavor "kids-safe,kids-floor,test-helpers" sim "{{profile}}"
+
 # store-no-payments full FFI — the second store flavor's apple xcframework
 # (`dynamic-features.md` § The App-Store escape hatch → *The store flavors*):
 # `--no-default-features --features store-safe,p2p-share`, the complement plus
@@ -4757,7 +4849,20 @@ _apple-ffi-flavor features slices="" profile="release":
         # restores this entry after every macOS host build, and fresh mtimes made
         # the iOS `xcodebuild` recompile the bindings module and everything above
         # it each time for byte-identical files.
-        if [ -d "$HIT/FaunaFFI.xcframework" ] && (
+        # The entry must hold this shape's slice count (one slice directory per
+        # triple: 2slice=2, 3slice=3, 5slice=5). An entry with fewer is
+        # poisoned — measured 2026-11-09: a full-2slice key restored a
+        # framework holding macos-arm64 alone, a host-flavor build in the
+        # populating checkout having replaced the staged framework before the
+        # populate's copy, and every iOS e2e on the box failed its link until
+        # the entry aged out. Such an entry is dropped below and rebuilt.
+        # `|| true`: on a miss the entry does not exist, find fails, and under
+        # `set -euo pipefail` a bare substitution would end the recipe silently.
+        HIT_SLICES=$( { find "$HIT/FaunaFFI.xcframework" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l | tr -d ' ')
+        if [ -d "$HIT/FaunaFFI.xcframework" ] && [ "$HIT_SLICES" != "${SHAPE%slice}" ]; then
+            echo "apple-ffi: cache entry $CACHE_KEY holds $HIT_SLICES slice(s), $SHAPE wants ${SHAPE%slice} — dropping the poisoned entry"
+        fi
+        if [ -d "$HIT/FaunaFFI.xcframework" ] && [ "$HIT_SLICES" = "${SHAPE%slice}" ] && (
                 set -e
                 rm -rf apps/fauna-apple/FaunaFFI.xcframework
                 cp -pRc "$HIT/FaunaFFI.xcframework" apps/fauna-apple/FaunaFFI.xcframework
@@ -4900,6 +5005,13 @@ _apple-ffi-build-impl:
         FEATURE_ARGS=(--no-default-features --features "$FEATURES,file-provider-host")
     elif [ "$FEATURES" = "kids-safe,kids-floor" ]; then
         FEATURE_ARGS=(--no-default-features --features "kids-safe,kids-floor,file-provider-host")
+    # `kids-safe,kids-floor,<seams>` is the kids flavor PLUS the e2e seams — the
+    # `--app ios-kids` simulator build (`apple-ffi-kids-test-sim`). Spelled through
+    # `$FEATURES`, as the store-safe arm above is, so no production cargo line
+    # carries the seam feature's name; above the generic `elif`, which would build
+    # it WITH defaults — nothing excised.
+    elif [ "${FEATURES#kids-safe,kids-floor,}" != "$FEATURES" ]; then
+        FEATURE_ARGS=(--no-default-features --features "$FEATURES,file-provider-host")
     elif [ -n "$FEATURES" ]; then
         FEATURE_ARGS=(--features "$FEATURES,file-provider-host")
     else
@@ -5075,6 +5187,21 @@ _apple-ffi-build-impl:
     # Non-fatal: a cache I/O error must never fail the build. Stage under a
     # pid-unique dir then publish with an atomic rename; if another checkout won
     # the race for this key, discard ours.
+    #
+    # First the staged framework is counted against SLICE_TRIPLES: a host-flavor
+    # build in this checkout (`mac-debug`, `swift-test`) that replaced it since
+    # the bindgen would otherwise be published under this flavor's key, stamped
+    # and stashed, and every checkout restoring it fails its iOS link (the
+    # restore's check in `_apple-ffi-flavor` has the 2026-11-09 measurement).
+    # Nothing of it is kept: the framework and the bindgen stamp go, so the next
+    # run rebuilds, and this one fails saying why.
+    STAGED_SLICES=$( { find apps/fauna-apple/FaunaFFI.xcframework -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l | tr -d ' ')
+    if [ "$STAGED_SLICES" != "${#SLICE_TRIPLES[@]}" ]; then
+        rm -rf apps/fauna-apple/FaunaFFI.xcframework
+        rm -f "$BINDGEN_STAMP" apps/fauna-apple/.ffi-cache.stamp apps/fauna-apple/.ffi-flavor
+        echo "apple-ffi: the staged FaunaFFI.xcframework holds $STAGED_SLICES slice(s) where ${#SLICE_TRIPLES[@]} were built — another build replaced it mid-recipe (a host-flavor \`mac-debug\`/\`swift-test\` in this checkout?); discarded, re-run" >&2
+        exit 1
+    fi
     if [ -n "$CACHE_KEY" ]; then
         (
             set -e
@@ -5488,7 +5615,11 @@ _apple-ffi-bindgen features cargo_args bindgen_lib +slices:
     # `store-safe` (the App-Store escape hatch, 2026-08-15) is a third flavor and
     # it is every bit as shippable as production — an `[ -z "$FEATURES" ]` test
     # would have exempted the one artifact an App Store review actually receives.
-    if [ "$FEATURES" != "test-helpers" ]; then
+    # A TEST flavor is one carrying `test-helpers` as a MEMBER — `test-helpers`
+    # itself, or the kids e2e's `kids-safe,kids-floor,test-helpers`
+    # (`apple-ffi-kids-test-sim`); no shipping recipe passes that member (the
+    # production/store/kids recipes are pinned seam-free).
+    if [[ ",$FEATURES," != *",test-helpers,"* ]]; then
         LEAKED=$(grep -rlE '\bfunc [A-Za-z0-9_]*ForTest\(' apps/fauna-apple/generated/ || true)
         if [ -n "$LEAKED" ]; then
             echo "ERROR: the PRODUCTION apple FFI flavor generated e2e seam exports." >&2
@@ -5514,16 +5645,26 @@ _apple-ffi-bindgen features cargo_args bindgen_lib +slices:
     # flavor this run just staged. Do not force a pair check onto the single
     # staging slot (one tree on disk at a time, behind .ffi-flavor).
     #
-    # ⚠ Same three-flavor caveat as the suffix grep above: route on
-    # `= "test-helpers"`, not `-z`/`!= "test-helpers"` inverted — `store-safe`
-    # is shippable and must take the PRODUCTION arm, same as empty FEATURES.
-    if [ "$FEATURES" = "test-helpers" ]; then
-        FLAVOR_FLAG=--test-tree
+    # ⚠ Same three-flavor caveat as the suffix grep above: route on MEMBERSHIP
+    # of `test-helpers` (windows' `_windows-ffi-bindgen` shape), never `-z` —
+    # `store-safe` and the kids flavor are shippable and take the PRODUCTION
+    # arm, same as empty FEATURES. The full test flavor takes the test arm. The
+    # kids e2e's `kids-safe,kids-floor,test-helpers` takes NEITHER: it is a test
+    # artifact (the production asserts do not apply), and its tree lacks, by
+    # design, the seams of the planes the kids flavor excises (offline share,
+    # delegation…), so the test arm's floor-presence assert would fail on a
+    # correct build — that floor is held by the full test flavor's regeneration.
+    case ",$FEATURES," in
+        ,test-helpers,) FLAVOR_FLAG=--test-tree ;;
+        *,test-helpers,*) FLAVOR_FLAG= ;;
+        *) FLAVOR_FLAG=--production-tree ;;
+    esac
+    if [ -n "$FLAVOR_FLAG" ]; then
+        {{py}} scripts/check-ffi-seam-diff.py --lang swift \
+            "$FLAVOR_FLAG" apps/fauna-apple/generated/
     else
-        FLAVOR_FLAG=--production-tree
+        echo "flavor-diff seam witness: skipped for the partial test flavor '$FEATURES' (the full test flavor holds the floor)"
     fi
-    {{py}} scripts/check-ffi-seam-diff.py --lang swift \
-        "$FLAVOR_FLAG" apps/fauna-apple/generated/
     echo "XCFramework built at apps/fauna-apple/FaunaFFI.xcframework (flavor: ${FEATURES:-production})"
 
 # Run the FaunaKit Swift tests, then typecheck the iOS app target for the host.
@@ -6692,6 +6833,38 @@ _mail-bridge-ffi-bindgen lib:
     {{py}} scripts/qualify-go-binding-imports.py "$STAGING"
     echo "mail-bridge FFI bindings regenerated into staging: $STAGING"
 
+# The e2e flavor of the mail bridge's cdylib: `mail-bridge-ffi`'s `labeler`
+# build plus fauna-ffi's `mail-bridge-e2e` feature (fauna-mail's
+# `test-helpers`: the inbound verification's resolver and deadline seams,
+# FAUNA_MAIL_E2E_RESOLVER / FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS,
+# `libs/fauna-mail/src/auth.rs`), copied into its own private slot
+# (`mail-ffi-e2e-slot`). It adds no export, so the Go binding `mail-bridge-ffi`
+# regenerates (its dependency here) serves both flavors. Only
+# `mail-bridge-build-e2e` links it.
+mail-bridge-ffi-e2e: mail-bridge-ffi
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    case "$(uname -s)" in Darwin) LIBNAME=libfauna_ffi.dylib ;; *) LIBNAME=libfauna_ffi.so ;; esac
+    CARGO_LIB="$TARGET_DIR/release/$LIBNAME"
+    FFI_SLOT_FILE="$(mktemp)"
+    just mail-ffi-e2e-slot >"$FFI_SLOT_FILE"
+    FFI_DIR="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")"
+    rm -f "$FFI_SLOT_FILE"
+    LIB="$FFI_DIR/$LIBNAME"
+    mkdir -p "$FFI_DIR"
+    # The copy is inside the gated command, as in `mail-bridge-ffi`: the private
+    # slot is only ever written by a build this recipe just ran.
+    export CARGO_LIB LIB
+    {{py}} scripts/build-if-stale.py --label "mail-bridge-ffi-e2e-lib" \
+        --stamp "$TARGET_DIR/mail-bridge-ffi-e2e-lib.stamp" \
+        --target "$LIB" \
+        --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
+        --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
+        -- {{slot_build}} bash -c 'cargo build --locked -p fauna-ffi --profile release --no-default-features --features labeler,mail-bridge-e2e && cp "$CARGO_LIB" "$LIB.$$.tmp" && mv -f "$LIB.$$.tmp" "$LIB"'
+    {{py}} scripts/check_linked_paths.py --root "$TARGET_DIR" "$LIB"
+
 # Build the Go mail-bridge binary (depends on FFI bindings).
 # The generated UniFFI Go bindings #include namespace-local headers and
 # resolve symbols against libfauna_ffi.so at link + runtime; CGO_* and
@@ -6699,7 +6872,56 @@ _mail-bridge-ffi-bindgen lib:
 # `mail-bridge-ffi` (installers/macos.md § Size & build profile); under `dist` the Go binary also links `-trimpath -ldflags '-s -w'`
 # (windows parity — `_windows-go-cgo-build`'s identical GOLDFLAGS switch).
 mail-bridge-build profile="release": (mail-bridge-ffi profile)
-    @just _go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge" "{{profile}}" ""
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge" "{{profile}}" "" mail-ffi-slot
+    # Convention 15 witness on the artifact (the atproto bridge's shape): the
+    # mail bridge's harness seams (the Go ones under `-tags fauna_e2e_fixtures`,
+    # the Rust ones in the cdylib under fauna-ffi's `mail-bridge-e2e`, each
+    # keyed on the ENV-VAR NAME it reads, which a production twin never spells)
+    # must be absent from the production flavor — the binary AND the cdylib it
+    # loads. e2e-automation-surface-gating.md § Implementation status today →
+    # the Go bridges' leg.
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    case "$(uname -s)" in Darwin) LIBNAME=libfauna_ffi.dylib ;; *) LIBNAME=libfauna_ffi.so ;; esac
+    FFI_SLOT_FILE="$(mktemp)"
+    just mail-ffi-slot {{profile}} >"$FFI_SLOT_FILE"
+    FFI_LIB="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")/$LIBNAME"
+    rm -f "$FFI_SLOT_FILE"
+    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS FAUNA_MAIL_E2E_RESOLVER FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS; do
+        if grep -a -q -- "$lit" bins/fauna-bridges/fauna-mail-bridge "$FFI_LIB"; then
+            echo "ERROR: the production fauna-mail-bridge or its cdylib carries the e2e seam '$lit' (convention 15)" >&2
+            exit 1
+        fi
+    done
+
+# The e2e flavor of the mail bridge: the same binary plus the harness seams
+# (`fauna_e2e_fixtures`: FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS, the shorter
+# pre-auth connection deadline the outcome-26 witnesses boot with), written to
+# a DISTINCT path so the two flavors can never be confused. Every e2e test that
+# sets a FAUNA_MAIL_E2E_* seam requests the `mail_bridge_e2e_binary` fixture,
+# which builds this; no release path, no Dockerfile, and no other recipe sets
+# the tag. Always `release`: a test flavor never needs `dist`.
+mail-bridge-build-e2e: mail-bridge-ffi-e2e
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge-e2e" "release" "fauna_e2e_fixtures" mail-ffi-e2e-slot
+    # The gate must switch BOTH ways, or the production witness above proves
+    # nothing about the mechanism (a tag nobody honours also greps clean). The
+    # Go seams live in the binary, the Rust ones in the e2e cdylib it links
+    # (rpath `mail-ffi-e2e-slot`), so each literal must be in one of the two.
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    case "$(uname -s)" in Darwin) LIBNAME=libfauna_ffi.dylib ;; *) LIBNAME=libfauna_ffi.so ;; esac
+    FFI_SLOT_FILE="$(mktemp)"
+    just mail-ffi-e2e-slot >"$FFI_SLOT_FILE"
+    FFI_LIB="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")/$LIBNAME"
+    rm -f "$FFI_SLOT_FILE"
+    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS FAUNA_MAIL_E2E_RESOLVER FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS; do
+        if ! grep -a -q -- "$lit" bins/fauna-bridges/fauna-mail-bridge-e2e "$FFI_LIB"; then
+            echo "ERROR: the e2e fauna-mail-bridge and its cdylib are missing the seam '$lit' the e2e flavor should compile in" >&2
+            exit 1
+        fi
+    done
 
 # The e2e-unified test harness's cdylib slot (`tests/e2e-unified/fauna_ffi.py`)
 # — HARNESS-PRIVATE, for the same reason `mail-ffi-slot` above is: the shared
@@ -6803,14 +7025,21 @@ seal-helper-build: mail-bridge-ffi
 # so a release<->dist switch rebuilds instead of serving the other flavor (the
 # binary's rpath names the profile's FFI slot). Sources: the Go module (minus
 # the binaries built into it), the cgo bindings, and the FFI slot it links.
-_go-cgo-build cmd out_name profile go_tags:
+_go-cgo-build cmd out_name profile go_tags ffi_slot="mail-ffi-slot":
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
     INCLUDES=""
     for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$(pwd)/$d"; done
     FFI_SLOT_FILE="$(mktemp)"
-    just mail-ffi-slot {{profile}} >"$FFI_SLOT_FILE"
+    # `ffi_slot`: the slot recipe naming the cdylib this binary links and
+    # rpaths — `mail-ffi-slot` (profile-keyed), or `mail-bridge-build-e2e`'s
+    # `mail-ffi-e2e-slot` (release only, takes no profile).
+    case "{{ffi_slot}}" in
+        mail-ffi-slot) just mail-ffi-slot {{profile}} >"$FFI_SLOT_FILE" ;;
+        mail-ffi-e2e-slot) just mail-ffi-e2e-slot >"$FFI_SLOT_FILE" ;;
+        *) echo "_go-cgo-build: unknown ffi_slot '{{ffi_slot}}'" >&2; exit 2 ;;
+    esac
     FFI_SLOT="$TARGET_DIR/$(cat "$FFI_SLOT_FILE")"
     rm -f "$FFI_SLOT_FILE"
     export CGO_CFLAGS="$INCLUDES"
@@ -6900,7 +7129,7 @@ _mail-bridge-go-test-legs:
     # under `-tags fauna_e2e_fixtures`; `./...` above is the production flavor
     # (seams inert), this line is the e2e flavor (seams work). Convention 15's
     # two-way check, mirrored from `atproto-bridge-test`.
-    go -C bins/fauna-bridges test -tags fauna_e2e_fixtures ./internal/atprotoid/ ./cmd/fauna-atproto-bridge/
+    go -C bins/fauna-bridges test -tags fauna_e2e_fixtures ./internal/atprotoid/ ./internal/connlimit/ ./cmd/fauna-atproto-bridge/
     unset GOFLAGS
     # FAUNA-FORK: the vendored go-imap server is a separate module (replace
     # directive), so `./...` above stops at its boundary. Run its imapserver
@@ -6952,7 +7181,7 @@ mail-bridge-test-portable:
     {{slot_build_body}}
     go -C bins/fauna-bridges test -count=1 -run 'TheRustWrapper' ./internal/confinement/
     just _go-bridge-test-subset portable "" ./...
-    just _go-bridge-test-subset portable fauna_e2e_fixtures ./internal/atprotoid/ ./cmd/fauna-atproto-bridge/
+    just _go-bridge-test-subset portable fauna_e2e_fixtures ./internal/atprotoid/ ./internal/connlimit/ ./cmd/fauna-atproto-bridge/
     go -C bins/fauna-bridges/third_party/go-imap test ./imapserver/...
 
 # Test the cgo-linked Go bridge packages on Windows — the half
@@ -6994,7 +7223,7 @@ mail-bridge-test-win-cgo:
     # classifier) ignores a test-only flag in GOFLAGS; `go test` applies it.
     export GOFLAGS="${GOFLAGS:+$GOFLAGS }-count=1"
     just _go-bridge-test-subset cgo "" ./...
-    just _go-bridge-test-subset cgo fauna_e2e_fixtures ./internal/atprotoid/ ./cmd/fauna-atproto-bridge/
+    just _go-bridge-test-subset cgo fauna_e2e_fixtures ./internal/atprotoid/ ./internal/connlimit/ ./cmd/fauna-atproto-bridge/
 
 # The whole Go bridge suite on Windows, in one recipe: the toolchain preflight, then
 # the cgo-free half, then the cgo-linked half — cheapest first, so a break the
@@ -7231,6 +7460,12 @@ _ffi-store-safe-check-impl:
     {{slot_build}} cargo build --locked -p fauna-ffi --no-default-features --features store-safe
     built "$LIB"
     absent "store-safe" 'fauna\.payments\.' 'fauna\.tips\.' 'FfiPaymentsClient' "${ZAP_PATS[@]}" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}" "${P2P_FACE_PATS[@]}"
+    # The same-account peer leg stays (wormability rule 5's third column,
+    # `account-sync-plane.md` § Wormability walk): since 2026-11-09 the FFI's
+    # account runtime binds it (`fauna_iroh::peer_leg_factory`), so the store
+    # flavor iOS ships carries the `fauna.peer.sync.*` family while the share
+    # plane's surfaces above are gone.
+    present "store-safe" 'fauna\.peer\.sync\.'
 
     # --- column 2: the Damus flavor keeps payments, drops zaps ---------------
     # The subset edge, witnessed on the artifact rather than asserted from the
@@ -8570,11 +8805,15 @@ android-kids-check: i18n-generate providers-generate
         find "$dir" -name '*.apk' -print -quit
     }
     count() { grep -c -- "$1" "$2" || true; }
+    # A dex string sits behind a one-byte length that `strings` prints when it is
+    # printable (an id of 32-126 characters reads `$contact-actor-...`), so an id
+    # line may open with ONE extra character: `idpat` lets the anchor tolerate it.
+    idpat() { printf '^.\{0,1\}%s' "${1#^}"; }
 
     # Element-id patterns are anchored PREFIXES (`strings` prints one id per
     # line), so a new id on an excised page is covered the day it is added and
     # an unrelated id that merely contains the word is not.
-    ID_PATS=('^feed-' '^search-' '^atproto-' '^personalization-' '^nostr-' '^labeler-catalog' '^connected-app' '^mail-settings-' '^web-settings-' '^admin-mail-' '^admin-dns-' '^bridge-' '^profile-follow-button' '^profile-tiers-tab' '^link-preview-card' '^folder-paywall-tier-select')
+    ID_PATS=('^feed-' '^search-' '^atproto-' '^personalization-' '^nostr-' '^labeler-catalog' '^connected-app' '^mail-settings-' '^web-settings-' '^admin-mail-' '^admin-dns-' '^bridge-' '^profile-follow-button' '^profile-tiers-tab' '^link-preview-card' '^folder-paywall-tier-select' '^contact-actor-id-open-profile-button')
     # UniFFI export symbols, one per line in the `.so`'s dynamic string table.
     FACE_PATS=('^uniffi_fauna_feed_fn_' '^uniffi_fauna_client_search_fn_' '^uniffi_fauna_atproto_settings_machine_fn_' '^uniffi_fauna_labeler_catalog_machine_fn_' '^uniffi_fauna_client_alerts_fn_' '^uniffi_fauna_client_connected_apps_fn_' '^uniffi_fauna_ffi_fn_.*ffifeedmanager' '^uniffi_fauna_ffi_fn_.*ffisearchmanager' '^uniffi_fauna_ffi_fn_.*ffiwebclient' '^uniffi_fauna_ffi_fn_func_build_mail_settings_machine' '^uniffi_fauna_ffi_fn_func_build_dns_management_machine_with_credentials')
     # Wire kinds of the excised planes, in the dex or the library (criterion 2).
@@ -8592,10 +8831,10 @@ android-kids-check: i18n-generate providers-generate
     apk_strings "$KIDS_APK" "$WORK/kids-manifest" manifest > "$WORK/kids-manifest.txt"
     fail=0
     for pat in "${ID_PATS[@]}"; do
-        n="$(count "$pat" "$WORK/kids-dex.txt")"
+        n="$(count "$(idpat "$pat")" "$WORK/kids-dex.txt")"
         if [ "$n" != "0" ]; then
             echo "ERROR: the kids APK's dex still carries $n '$pat' element id(s):" >&2
-            grep -- "$pat" "$WORK/kids-dex.txt" | sort -u | head -5 | sed 's/^/    /' >&2
+            grep -- "$(idpat "$pat")" "$WORK/kids-dex.txt" | sort -u | head -5 | sed 's/^/    /' >&2
             fail=1
         fi
     done
@@ -8657,7 +8896,7 @@ android-kids-check: i18n-generate providers-generate
     apk_strings "$REL_APK" "$WORK/rel-all" all > "$WORK/rel-all.txt"
     apk_strings "$REL_APK" "$WORK/rel-manifest" manifest > "$WORK/rel-manifest.txt"
     for pat in "${ID_PATS[@]}"; do
-        if [ "$(count "$pat" "$WORK/rel-dex.txt")" = "0" ]; then
+        if [ "$(count "$(idpat "$pat")" "$WORK/rel-dex.txt")" = "0" ]; then
             echo "ERROR: the DEFAULT Android APK carries no '$pat' element id — the kids" >&2
             echo "  assertion above is therefore vacuous. Either the surface was removed" >&2
             echo "  from the default build (a product regression) or it was renamed and" >&2
@@ -8845,6 +9084,41 @@ _apple-store-safe-check-impl:
     just _apple-assert-no-fp-test-cli "$BIN" "default FaunaMacOS"
     just _apple-assert-no-e2e-env "$BIN" "default FaunaMacOS"
     echo "apple-store-safe-check: OK — payments + p2p-share UI and payments kinds present in default, absent in store-safe, p2p-share only in store-no-payments; File Provider test CLI and e2e env surface absent from all three"
+
+# The kids flavor's HOST TYPECHECK — the mac merge-gate check's gate 8
+# (`merge-gate-check-mac.md` § Merge-gate check (mac); `merge-gate-catalog.md`
+# owns its catalog entry). Shared FaunaKit and the iOS shell carry
+# `#if !FAUNA_KIDS` excisions (`dynamic-features.md` § Compile-time excision),
+# and until this gate nothing at landing compiled that flavor: shared Swift
+# drifted past the kids conditions for two weeks (2026-10-23 → 2026-11-07),
+# seen only when the ~45-minute device archive `apple-kids-check` was next
+# tried. This is the cheap catch, not the witness: it compiles the kids pairing
+# (the kids FFI + the kids Swift conditions) and greps nothing; the archive
+# recipe stays the deliberate artifact witness.
+#
+# The conditions are `apple-kids-check`'s own (the kids build is a store-safe
+# build one complement further, so it carries the two store-safe conditions
+# too), and the FFI is `apple-ffi-host-kids`, the 1-slice twin of the archive's.
+#
+# ⚠ RELEASE, for `apple-store-safe-check`'s stated reason: a DEBUG Swift build
+# compiles FaunaKit's `#if DEBUG` automation surface, whose `*ForTest` seams
+# exist only in the test-helpers FFI, which the kids flavor never carries — so
+# debug + kids is un-buildable by construction.
+#
+# ⚠ A HOST build: `swift build --target FaunaiOS` compiles FaunaKit and the SPM
+# iOS target for macOS, so `#if os(iOS)` code is not compiled here — the
+# archive is the only build of that half under the kids conditions.
+#
+# ⚠ It leaves the tree on the kids FFI flavor. The merge-gate check restores
+# gate 1's `apple-ffi-host-test debug` after it; a local run should too.
+[macos]
+apple-kids-typecheck: i18n-generate providers-generate
+    {{slot_build_swift}} just _apple-kids-typecheck-impl
+
+_apple-kids-typecheck-impl:
+    just apple-ffi-host-kids release
+    {{slot_build}} swift build --package-path apps/fauna-apple --target FaunaiOS -c release -Xswiftc -DFAUNA_KIDS -Xswiftc -DFAUNA_EXCISE_PAYMENTS -Xswiftc -DFAUNA_EXCISE_P2P_SHARE
+    @echo "apple-kids-typecheck: OK — FaunaKit + FaunaiOS compile release under FAUNA_KIDS over the kids host FFI"
 
 # Convention 15's ARTIFACT witness for apple's File Provider test CLI
 # (`FaunaKit/FileProvider/FileProviderTestCLI.swift`, `#if DEBUG` only —
@@ -9073,7 +9347,8 @@ apple-ios-store-safe-check: i18n-generate providers-generate
 # it before its archive.
 #
 # Deliberately NOT in the merge-gate check (two device xcframeworks and two
-# archives, ~45 min cold on the macOS VM).
+# archives, ~45 min cold on the macOS VM); its cheap host-compile half is,
+# as gate 8 (`apple-kids-typecheck`).
 [macos]
 apple-kids-check: i18n-generate providers-generate
     #!/usr/bin/env bash
@@ -9125,11 +9400,14 @@ apple-kids-check: i18n-generate providers-generate
     id_line() { printf '%s[a-z0-9-]*$' "$1"; }
 
     # Anchored prefixes, one id per `strings` line (see `android-kids-check`).
-    ID_PATS=('^feed-' '^search-' '^atproto-' '^personalization-' '^nostr-' '^labeler-catalog' '^connected-app' '^mail-settings-' '^web-settings-' '^admin-mail-' '^admin-dns-' '^bridge-' '^profile-follow-button' '^profile-tiers-tab' '^link-preview-card' '^folder-paywall-tier-select')
+    ID_PATS=('^feed-' '^search-' '^atproto-' '^personalization-' '^nostr-' '^labeler-catalog' '^connected-app' '^mail-settings-' '^web-settings-' '^admin-mail-' '^admin-dns-' '^bridge-' '^profile-follow-button' '^profile-tiers-tab' '^link-preview-card' '^folder-paywall-tier-select' '^contact-actor-id-open-profile-button')
     FACE_PATS=('^uniffi_fauna_feed_fn_' '^uniffi_fauna_client_search_fn_' '^uniffi_fauna_atproto_settings_machine_fn_' '^uniffi_fauna_labeler_catalog_machine_fn_' '^uniffi_fauna_client_alerts_fn_' '^uniffi_fauna_client_connected_apps_fn_' '^uniffi_fauna_ffi_fn_.*ffifeedmanager' '^uniffi_fauna_ffi_fn_.*ffisearchmanager' '^uniffi_fauna_ffi_fn_.*ffiwebclient' '^uniffi_fauna_ffi_fn_func_build_mail_settings_machine' '^uniffi_fauna_ffi_fn_func_build_dns_management_machine_with_credentials')
     # Wire kinds of the excised planes (criterion 2), unanchored.
     KIND_PATS=('fauna\.feed\.' 'fauna\.search\.' 'fauna\.web\.')
     KIDS_ID='social.fauna.faunakids'
+    # Swift-only kids ids beyond photo backup (ui-ids-generate.py's
+    # SWIFT_KIDS_ONLY_ID_PREFIXES): subscriptions — monetization, D-K5 *Excised*.
+    SWIFT_KIDS_ID_PATS=('^subscription-')
     # Photo backup (not *Kept*): Swift-only kids ids, its task id, its plist key.
     PHOTO_ID_PATS=('^photo-backup-')
     PHOTO_TASK='social.fauna.sync.upload'
@@ -9172,6 +9450,14 @@ apple-kids-check: i18n-generate providers-generate
         if [ "$n" != "0" ]; then
             echo "ERROR: the kids iOS archive still carries $n line(s) of '$pat' kind text:" >&2
             grep -o -- "${pat}[A-Za-z0-9_.]*" "$SCRATCH/kids.strings" | sort -u | head -5 | sed 's/^/    /' >&2
+            fail=1
+        fi
+    done
+    for pat in "${SWIFT_KIDS_ID_PATS[@]}"; do
+        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.strings")"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the kids iOS archive still carries $n '$pat' (subscriptions) element id(s):" >&2
+            grep -- "$(id_line "$pat")" "$SCRATCH/kids.strings" | sort -u | head -5 | sed 's/^/    /' >&2
             fail=1
         fi
     done
@@ -9259,6 +9545,13 @@ apple-kids-check: i18n-generate providers-generate
         echo "ERROR: the DEFAULT iOS archive carries the Fauna Kids identity." >&2
         exit 1
     fi
+    for pat in "${SWIFT_KIDS_ID_PATS[@]}"; do
+        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.strings")" = "0" ]; then
+            echo "ERROR: the DEFAULT iOS archive carries no '$pat' element id — the kids" >&2
+            echo "  subscriptions assertion above is vacuous (or the ids were renamed)." >&2
+            exit 1
+        fi
+    done
     for pat in "${PHOTO_ID_PATS[@]}"; do
         if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.strings")" = "0" ]; then
             echo "ERROR: the DEFAULT iOS archive carries no '$pat' element id — the kids" >&2
@@ -9272,7 +9565,7 @@ apple-kids-check: i18n-generate providers-generate
         echo "  the task id in its binary — the kids photo-backup assertions are vacuous." >&2
         exit 1
     fi
-    echo "apple-kids-check: OK — kids-excised element ids, exported UniFFI faces, feed/search/web kind text and photo backup (ids, task id, Info.plist key and permission) present in the default iOS archive, absent in the kids one; kids identity on the kids archive only; no WebKit/SafariServices in the kids archive"
+    echo "apple-kids-check: OK — kids-excised element ids (subscriptions included), exported UniFFI faces, feed/search/web kind text and photo backup (ids, task id, Info.plist key and permission) present in the default iOS archive, absent in the kids one; kids identity on the kids archive only; no WebKit/SafariServices in the kids archive"
 
 # The WASM/web column of the same witness (`dynamic-features.md` § The
 # feature-matrix test story). Third and last of the store-safe family:
@@ -9985,7 +10278,32 @@ mail-bridge-release: mail-bridge-ffi
 # Staged DLLs land beside the exe in target/; Track 2 wires them into the MSI Bridge
 # feature. Mechanism + toolchain prereqs: `_windows-go-cgo-build` below.
 windows-mail-bridge-build rust_target="aarch64-pc-windows-gnullvm" go_arch="arm64" profile="release":
-    @just _windows-go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge.exe" "{{rust_target}}" "{{go_arch}}" "{{profile}}" ""
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _windows-go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge.exe" "{{rust_target}}" "{{go_arch}}" "{{profile}}" ""
+    # Convention 15 witness on the artifact — the same check the Unix
+    # `mail-bridge-build` makes, since a windows-only build path is exactly where
+    # a seam rides into a shipped binary unnoticed.
+    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS; do
+        if grep -a -q -- "$lit" target/fauna-mail-bridge.exe; then
+            echo "ERROR: the production fauna-mail-bridge.exe carries the e2e seam '$lit' (convention 15)" >&2
+            exit 1
+        fi
+    done
+
+# The e2e flavor of the Windows mail bridge (`fauna_e2e_fixtures`), at its own
+# DISTINCT path — the twin of the Unix `mail-bridge-build-e2e`, which
+# `mail_bridge_e2e_binary` builds on Windows.
+windows-mail-bridge-build-e2e rust_target="aarch64-pc-windows-gnullvm" go_arch="arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _windows-go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge-e2e.exe" "{{rust_target}}" "{{go_arch}}" "release" "fauna_e2e_fixtures"
+    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS; do
+        if ! grep -a -q -- "$lit" target/fauna-mail-bridge-e2e.exe; then
+            echo "ERROR: the e2e fauna-mail-bridge.exe is missing the seam '$lit' the tag should compile in" >&2
+            exit 1
+        fi
+    done
 
 # Build the TEST-ONLY seal-helper for Windows (gnullvm cgo) — same module + same
 # fauna_ffi.dll as windows-mail-bridge-build, just a different cmd. NOT a production

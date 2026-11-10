@@ -1999,6 +1999,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_update_channel_rows()
+		})
+		if checksum != 5941 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_update_channel_rows: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_verify_dns()
 		})
 		if checksum != 54661 {
@@ -4830,6 +4839,12 @@ type OnboardingMachineInterface interface {
 	// running product version (`UpdateChannel::description_key_for`). Apps look
 	// the string up by this key rather than choosing per row themselves.
 	UpdateChannelDescriptionKeyForRow(channel fauna_provisioning.UpdateChannel) string
+	// Every update-channel radio, in `UpdateChannel::ALL` order, each with the
+	// id its `vps-config-update-channel-row[<id>]` is keyed by, its label's
+	// i18n key and its description's i18n key
+	// ([`Self::update_channel_description_key_for_row`]). Apps render this list
+	// and keep no channel→id or channel→label table of their own.
+	UpdateChannelRows() []UpdateChannelRow
 	VerifyDns() error
 	VerifyOobInviteCode(code string)
 	VerifyVps() error
@@ -8021,6 +8036,22 @@ func (_self *OnboardingMachine) UpdateChannelDescriptionKeyForRow(channel fauna_
 	}))
 }
 
+// Every update-channel radio, in `UpdateChannel::ALL` order, each with the
+// id its `vps-config-update-channel-row[<id>]` is keyed by, its label's
+// i18n key and its description's i18n key
+// ([`Self::update_channel_description_key_for_row`]). Apps render this list
+// and keep no channel→id or channel→label table of their own.
+func (_self *OnboardingMachine) UpdateChannelRows() []UpdateChannelRow {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterSequenceUpdateChannelRowINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_update_channel_rows(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
 func (_self *OnboardingMachine) VerifyDns() error {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -10081,6 +10112,64 @@ func (c FfiConverterSshDoorReadout) Write(writer io.Writer, value SshDoorReadout
 type FfiDestroyerSshDoorReadout struct{}
 
 func (_ FfiDestroyerSshDoorReadout) Destroy(value SshDoorReadout) {
+	value.Destroy()
+}
+
+// One update-channel radio on the VPS-config page — what an app needs to
+// render and key the row, with no per-app channel table
+// (`OnboardingMachine::update_channel_rows`).
+type UpdateChannelRow struct {
+	Channel fauna_provisioning.UpdateChannel
+	// The id `vps-config-update-channel-row[<id>]` is keyed by.
+	Id string
+	// The i18n key of the row's label.
+	LabelKey string
+	// The i18n key of the row's description (no-build / compat-line / plain).
+	DescriptionKey string
+}
+
+func (r *UpdateChannelRow) Destroy() {
+	fauna_provisioning.FfiDestroyerUpdateChannel{}.Destroy(r.Channel)
+	FfiDestroyerString{}.Destroy(r.Id)
+	FfiDestroyerString{}.Destroy(r.LabelKey)
+	FfiDestroyerString{}.Destroy(r.DescriptionKey)
+}
+
+type FfiConverterUpdateChannelRow struct{}
+
+var FfiConverterUpdateChannelRowINSTANCE = FfiConverterUpdateChannelRow{}
+
+func (c FfiConverterUpdateChannelRow) Lift(rb RustBufferI) UpdateChannelRow {
+	return LiftFromRustBuffer[UpdateChannelRow](c, rb)
+}
+
+func (c FfiConverterUpdateChannelRow) Read(reader io.Reader) UpdateChannelRow {
+	return UpdateChannelRow{
+		fauna_provisioning.FfiConverterUpdateChannelINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterUpdateChannelRow) Lower(value UpdateChannelRow) C.RustBuffer {
+	return LowerIntoRustBuffer[UpdateChannelRow](c, value)
+}
+
+func (c FfiConverterUpdateChannelRow) LowerExternal(value UpdateChannelRow) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[UpdateChannelRow](c, value))
+}
+
+func (c FfiConverterUpdateChannelRow) Write(writer io.Writer, value UpdateChannelRow) {
+	fauna_provisioning.FfiConverterUpdateChannelINSTANCE.Write(writer, value.Channel)
+	FfiConverterStringINSTANCE.Write(writer, value.Id)
+	FfiConverterStringINSTANCE.Write(writer, value.LabelKey)
+	FfiConverterStringINSTANCE.Write(writer, value.DescriptionKey)
+}
+
+type FfiDestroyerUpdateChannelRow struct{}
+
+func (_ FfiDestroyerUpdateChannelRow) Destroy(value UpdateChannelRow) {
 	value.Destroy()
 }
 
@@ -14516,6 +14605,53 @@ type FfiDestroyerSequenceRetireStepRow struct{}
 func (FfiDestroyerSequenceRetireStepRow) Destroy(sequence []RetireStepRow) {
 	for _, value := range sequence {
 		FfiDestroyerRetireStepRow{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceUpdateChannelRow struct{}
+
+var FfiConverterSequenceUpdateChannelRowINSTANCE = FfiConverterSequenceUpdateChannelRow{}
+
+func (c FfiConverterSequenceUpdateChannelRow) Lift(rb RustBufferI) []UpdateChannelRow {
+	return LiftFromRustBuffer[[]UpdateChannelRow](c, rb)
+}
+
+func (c FfiConverterSequenceUpdateChannelRow) Read(reader io.Reader) []UpdateChannelRow {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]UpdateChannelRow, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterUpdateChannelRowINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceUpdateChannelRow) Lower(value []UpdateChannelRow) C.RustBuffer {
+	return LowerIntoRustBuffer[[]UpdateChannelRow](c, value)
+}
+
+func (c FfiConverterSequenceUpdateChannelRow) LowerExternal(value []UpdateChannelRow) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]UpdateChannelRow](c, value))
+}
+
+func (c FfiConverterSequenceUpdateChannelRow) Write(writer io.Writer, value []UpdateChannelRow) {
+	if len(value) > math.MaxInt32 {
+		panic("[]UpdateChannelRow is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterUpdateChannelRowINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceUpdateChannelRow struct{}
+
+func (FfiDestroyerSequenceUpdateChannelRow) Destroy(sequence []UpdateChannelRow) {
+	for _, value := range sequence {
+		FfiDestroyerUpdateChannelRow{}.Destroy(value)
 	}
 }
 

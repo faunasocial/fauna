@@ -84,8 +84,8 @@ def test_responses_carry_cors_headers(fake_cloud) -> None:
 
 
 def test_hetzner_list_servers_is_empty_without_the_label_selector(fake_cloud) -> None:
-    """`?name=` is find_server_by_name's pre-flight — it must keep answering
-    empty, or provisioning would think every box already exists."""
+    """`?name=` is find_server_by_name's pre-flight — a SEEDED account box must
+    never answer it, or provisioning would think every box already exists."""
     urls = fake_cloud.url_map()
     fake_cloud.hetzner_cloud.seed_managed_server()
     resp = requests.get(
@@ -94,6 +94,49 @@ def test_hetzner_list_servers_is_empty_without_the_label_selector(fake_cloud) ->
     )
     assert resp.status_code == 200
     assert resp.json()["servers"] == []
+
+
+def test_hetzner_pre_flight_finds_the_box_an_earlier_order_bought(fake_cloud) -> None:
+    """An order is remembered: the pre-flight then finds that box by its name,
+    so a Retry, a start over or a relaunch resumes it instead of buying a
+    second one (`onboarding-provisioning.md` § 6, the one-box resume) — and the
+    order count is what a resume journey asserts."""
+    urls = fake_cloud.url_map()
+    auth = {"Authorization": "Bearer test-token"}
+    assert fake_cloud.hetzner_cloud.server_orders == []
+    before = requests.get(f"{urls['vps']}/servers?name=example-test", headers=auth)
+    assert before.json()["servers"] == []
+
+    created = requests.post(
+        f"{urls['vps']}/servers",
+        json={"name": "example-test", "server_type": "cx23", "image": "ubuntu-26.04"},
+        headers=auth,
+    )
+    assert created.status_code == 201
+    box = created.json()["server"]
+
+    found = requests.get(f"{urls['vps']}/servers?name=example-test", headers=auth)
+    assert [s["id"] for s in found.json()["servers"]] == [box["id"]]
+    assert found.json()["servers"][0]["public_net"]["ipv4"]["ip"] == (
+        box["public_net"]["ipv4"]["ip"]
+    )
+    other = requests.get(f"{urls['vps']}/servers?name=another-test", headers=auth)
+    assert other.json()["servers"] == []
+    assert [o["name"] for o in fake_cloud.hetzner_cloud.server_orders] == ["example-test"]
+    # The retire view's account is a different list: an order never lands in it.
+    assert fake_cloud.hetzner_cloud.managed_servers == []
+
+
+def test_hetzner_a_failed_order_buys_nothing(fake_cloud) -> None:
+    urls = fake_cloud.url_map()
+    fake_cloud.hetzner_cloud.create_server_always_fails()
+    resp = requests.post(
+        f"{urls['vps']}/servers",
+        json={"name": "example-test"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resp.status_code == 500
+    assert fake_cloud.hetzner_cloud.server_orders == []
 
 
 def test_hetzner_list_servers_honours_the_marker_selector(fake_cloud) -> None:
@@ -236,3 +279,26 @@ def test_hetzner_get_server_answers_a_seeded_box_with_its_ptr(fake_cloud) -> Non
     )
     assert resp.status_code == 200
     assert resp.json()["server"]["public_net"]["ipv4"]["dns_ptr"] == "mail.example.test"
+
+
+def test_namecheap_refuses_an_unallowlisted_source_with_http_200_and_echoes_it(fake_cloud) -> None:
+    nc = fake_cloud.namecheap
+    params = {"ApiUser": "u", "ApiKey": "k", "UserName": "u",
+              "ClientIp": "192.0.2.1", "Command": "namecheap.domains.getList"}
+    resp = requests.get(nc.base_url(), params=params)
+    # Namecheap's API-level refusal rides HTTP 200 (namecheap_api.rs::ApiError).
+    assert resp.status_code == 200
+    assert 'Status="ERROR"' in resp.text
+    assert f'<Error Number="1011150">Invalid request IP: {nc.observed_ip}</Error>' in resp.text
+    # The echoed address as ClientIp changes nothing: the gate is the source.
+    resp = requests.get(nc.base_url(), params={**params, "ClientIp": nc.observed_ip})
+    assert 'Status="ERROR"' in resp.text
+    assert [r["ClientIp"] for r in nc.requests] == ["192.0.2.1", nc.observed_ip]
+
+
+def test_namecheap_lists_domains_once_the_source_is_allowlisted(fake_cloud) -> None:
+    nc = fake_cloud.namecheap
+    nc.allowlisted.add(nc.observed_ip)
+    resp = requests.get(nc.base_url(), params={"Command": "namecheap.domains.getList"})
+    assert 'Status="OK"' in resp.text
+    assert '<Domain ID="0" Name="example.test" />' in resp.text

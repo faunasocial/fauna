@@ -80,7 +80,7 @@ def _ingested_post_id(nest, text: str) -> str:
 
 
 def _open_detail(app, post_id: str) -> None:
-    index = _until(lambda: app.feed.post_index_by_id(post_id) + 1, 30) - 1
+    index = app.feed.card_index_by_id(post_id, timeout=30)
     assert index >= 0, (
         f"the ingested Bluesky post {post_id} is on the wire but not in the "
         f"app's feed; error={app.error_text()!r}"

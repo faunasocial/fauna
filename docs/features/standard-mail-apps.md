@@ -4,6 +4,9 @@ title: Use a regular mail app
 section: mail, calendar and contacts
 goal: docs/goal/behavior/mail-credentials.md § MUA setup conventions
 guide: docs/guides/own-your-mail.md § Connecting a regular mail app
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -101,6 +104,8 @@ Stamped 2026-10-01 at 308c995169.
 | ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

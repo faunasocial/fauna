@@ -171,10 +171,9 @@ public static class ActorScope
             // account with the outgoing one's finding.
             CriticalAlertsHost.Instance.ClearAll();
             // …and the teardown-epoch bump above is what stops that account's
-            // re-sweep loop, so forget it in the same breath: the next sign-in
-            // starts a loop of its own rather than taking the same-identity
-            // one-shot arm.
-            Helpers.CriticalAlertsSweep.ForgetLoop();
+            // re-sweep loop AND what makes the shared post-auth split forget the
+            // identity (fauna_client_alert_sweep::LoopClaim), so the next sign-in
+            // starts a loop of its own — no per-shell record to clear here.
         }
         // Memoized against the outgoing secret AND the RPC client it was built
         // with — either alone is enough to make it wrong after a teardown.

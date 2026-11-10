@@ -183,6 +183,12 @@ public struct DmMessageBubble: View {
     /// the same shape as `mutedRevealed`, and likewise never persisted. A
     /// `block` has no reveal at all, so this can only ever un-collapse.
     @State private var contentRevealed = false
+    /// The received picture open in the shared `image-lightbox` (`conversations.md`
+    /// § User actions: activating a `dm-attachment-image` enlarges it; dismiss closes
+    /// it) — the feed card's own trigger shape (`PostCardBody`), one bubble's state.
+    @State private var lightboxItem: LightboxItem?
+    /// The body's painted lines, measured for `get_attr(dm-message-text, painted)`.
+    @State private var paintedLines = DocumentPaintedLines()
 
     /// The device's region content plane (`region-blocking.md`), injected at
     /// the app root beside `ContentPolicyStore`; `nil` in a preview.
@@ -352,7 +358,15 @@ public struct DmMessageBubble: View {
                 // AHEAD of the muted arm on purpose (the linux/web/android
                 // ordering): a guardian `block` must never be reachable through
                 // the muted-keyword reveal.
-                ContentPolicyBlockedNotice(reported: decision.reported, reason: decision.guardianReason)
+                ContentPolicyBlockedNotice(
+                    reported: decision.reported, reason: decision.guardianReason,
+                    showAgain: contentPolicy.showAgainFor(
+                        itemId: message.planeRef?.recordDigest, authorId: senderActorHex),
+                    onShowAgain: { ids in
+                        guard let policyStore else { return }
+                        Task { await policyStore.report.showAgain(ids, contentPolicy: policyStore) }
+                    }
+                )
                 timestampLabel
             } else if contentVerdict == "collapse" && !contentRevealed {
                 ContentPolicyCollapsedPlaceholder(reason: decision.guardianReason) { contentRevealed = true }
@@ -392,6 +406,7 @@ public struct DmMessageBubble: View {
                 onResolveLinkPreview(url)
             }
         }
+        .imageLightbox(item: $lightboxItem)
     }
 
     /// Tombstone for a deleted message (conversations.md § Reactions & message
@@ -518,7 +533,7 @@ public struct DmMessageBubble: View {
         // Body — the shared document walk (render-model.md § D1). One model for every
         // format: the manager already chose the markdown/plaintext/html producer when it
         // built `document`, so the bubble no longer branches on `body_format` or re-parses.
-        DocumentBodyView(document: message.document)
+        DocumentBodyView(document: message.document, painted: paintedLines)
             .font(.body)
             .accessibilityIdentifier(Ids.dmMessageText)
             // Complex body view — keep the id, register the painted *document*
@@ -526,7 +541,11 @@ public struct DmMessageBubble: View {
             // with linux/web/android/windows (render-model.md P1 read-uniformity).
             // Cached per messageId — see `cachedDocumentPlaintext` above — so a
             // large body's FFI render doesn't repeat on every automation touch.
-            .automationValue(Ids.dmMessageText, text: { cachedDocumentPlaintext(for: message) })
+            // `painted` is the body as laid out — boxes and nesting kept
+            // (`DocumentPaintedLines`, the `document-painted-read` surface).
+            .automationValue(Ids.dmMessageText,
+                             text: { cachedDocumentPlaintext(for: message) },
+                             attributes: { ["painted": paintedLines.text] })
 
         // The author's own blocked message keeps its body; the shared notice paints
         // right beside it (no new id).
@@ -969,20 +988,33 @@ public struct DmMessageBubble: View {
             let declared = "\(filename) (\(ValueFormat.byteSize(sizeBytes)))"
             VStack(alignment: .leading, spacing: 2) {
                 if isImage, let data = loadAttachment(blobHash), let img = FaunaImage.decode(data) {
+                    // A tap opens the shared lightbox on the bytes already decoded here; the
+                    // same action is what the in-process driver's click invokes (it performs
+                    // no real gestures). A placeholder opens the same lightbox as its declared text.
+                    let openLightbox = { lightboxItem = LightboxItem(source: .decoded(img)) }
                     Image(platformImage: img)
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 240, maxHeight: 240, alignment: .leading)
                         .help(declared)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: openLightbox)
                         .accessibilityIdentifier(Ids.dmAttachmentImage)
                         .accessibilityLabel(declared)
-                        .automationValue(Ids.dmAttachmentImage, text: { declared }, value: { "painted" })
+                        .accessibilityAddTraits(.isButton)
+                        .automationActivate(Ids.dmAttachmentImage, text: { declared }, value: { "painted" },
+                                            perform: openLightbox)
                 } else if isImage {
+                    let openPlaceholder = { lightboxItem = LightboxItem.placeholder(declared) }
                     Label(declared, systemImage: "photo")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: openPlaceholder)
                         .accessibilityIdentifier(Ids.dmAttachmentImage)
-                        .automationValue(Ids.dmAttachmentImage, text: { declared }, value: { "placeholder" })
+                        .accessibilityAddTraits(.isButton)
+                        .automationActivate(Ids.dmAttachmentImage, text: { declared }, value: { "placeholder" },
+                                            perform: openPlaceholder)
                 } else {
                     Label(declared, systemImage: "doc")
                         .font(.caption)

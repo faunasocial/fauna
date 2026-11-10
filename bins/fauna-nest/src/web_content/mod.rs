@@ -5,6 +5,7 @@ pub mod holder;
 pub mod paywall;
 #[cfg(feature = "payments")]
 pub mod paywall_doors;
+pub mod public_url;
 pub mod publish_routes;
 pub(crate) mod region;
 pub mod render;

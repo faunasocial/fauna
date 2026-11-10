@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
+using FaunaApp.Helpers;
 using uniffi.fauna_ffi;
 using uniffi.fauna_client_dns;
 using uniffi.fauna_client_mail_settings;
@@ -617,17 +618,15 @@ public sealed partial class AdminDnsPage : Page
 
         // Per-domain DMARC policy picker (admin-dns-domain-dmarc-policy-select;
         // dmarc-reporting.md § Multi-domain deployments) — a RAW-VALUE picker over the
-        // shared catalog: each item's AutomationProperties.Name + Tag is the RFC 7489 tag,
-        // what the FlaUI bridge's select/get_text match a ComboBoxItem by (the
-        // PersonalizationPage publish-kind precedent), and its Content the localized
-        // text. The parallel DmarcPolicies list is what the handler dispatches.
+        // shared catalog: each item paints the localized text and is keyed by the
+        // RFC 7489 tag (PickerOption). The parallel DmarcPolicies list is what the
+        // handler dispatches.
         var dmarcItems = new List<ComboBoxItem>();
         var dmarcPolicies = new List<DomainDmarcPolicy>();
         var dmarcSelected = -1;
         foreach (var opt in ctx.DmarcOptions)
         {
-            var dmarcItem = new ComboBoxItem { Content = S.Resolve(opt.@label), Tag = opt.@value };
-            AutomationProperties.SetName(dmarcItem, opt.@value);
+            var dmarcItem = PickerOption.Create(S.Resolve(opt.@label), opt.@value);
             if (opt.@policy == dmarcPolicy) dmarcSelected = dmarcItems.Count;
             dmarcItems.Add(dmarcItem);
             dmarcPolicies.Add(opt.@policy);

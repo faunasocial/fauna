@@ -668,9 +668,27 @@ pub fn build_manage_subscribers_self_delegation(
     signer: &ActorKeypair,
     created_at: Timestamp,
 ) -> Result<SignedDeviceAuth, SelfDelegationError> {
+    build_manage_subscribers_delegation(signer, signer.actor_id().0, created_at)
+}
+
+/// Build + sign a `DeviceAuthorization` granting exactly `[ManageSubscribers]`
+/// to `device_key`, signed by (and naming as `actor_id`) `signer`, never
+/// expiring.
+///
+/// [`build_manage_subscribers_self_delegation`] is the `device_key ==
+/// signer` case. The other case the wire carries is the **nest-key
+/// delegation** `fauna.subscriptions.delegate.upload` stores, whose
+/// `device_key` must be the nest's own signing key — one minter for both, so a
+/// harness that arranges a stored delegation signs it the way the self case
+/// is signed rather than re-deriving the envelope.
+pub fn build_manage_subscribers_delegation(
+    signer: &ActorKeypair,
+    device_key: [u8; 32],
+    created_at: Timestamp,
+) -> Result<SignedDeviceAuth, SelfDelegationError> {
     let auth = DeviceAuthorization {
         actor_id: signer.actor_id(),
-        device_key: signer.actor_id().0,
+        device_key,
         capabilities: vec![Capability::ManageSubscribers],
         created_at,
         expires_at: None,

@@ -12,13 +12,11 @@ Every nest serves the web app itself by default, so on any device with a browser
 you open your nest's address and you are in — nothing to install. The six native
 apps (Linux, Windows, macOS, iOS, Android and the terminal app) are built from
 source today, outside Google Play's invitation-only testing of the Android app
-and the pre-release downloads of the Windows, Linux and terminal apps; public
-releases arrive once a version passes acceptance, and from then on the nest and
-every app's release channel that exists ship together at one version.
+and the pre-release downloads of the Windows, Linux and terminal apps; public releases arrive once a version passes acceptance, and from then on the nest and every app's release channel that exists ship together at one version. The Windows installer can also set up your nest on the computer it installs on — its "Nest Service" choice, off by default — as a service that starts with the computer, runs with nobody signed in, and that your other devices reach over the network; the macOS package, once published, does the same.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 0bb8814071.
+Stamped 2026-11-07 at 5ea28bd6f2.
 
 1. [app] Getting the app the way your platform provides it — served by your nest in the browser, installed on a computer, installed from the store on a phone — ends with the app open and you signed in to your account — `docs/goal/architecture/installers/README.md` § The channel contract
    - `tests/e2e-unified/tests/test_static_serving.py::test_the_nest_served_app_drives_a_login_to_feed_journey`
@@ -35,19 +33,23 @@ Stamped 2026-09-19 at 0bb8814071.
 2. [nest] Your nest is a ready-made image you can run anywhere Docker runs — `docs/goal/architecture/installers/docker.md` § Goal
    - `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_image_structure`
    - `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_health`
+3. [nest] The installer that installs the app can also set up your nest on that computer, as a service that starts with the computer, runs with nobody signed in, and that your other devices reach over the network — `docs/goal/architecture/installers/README.md` § The channel contract
+   - (none)
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3ef7fefd docker |
-| linux | ✅ full | 0.1.5-dev+3ef7fefd docker |
+| web | ⚠ partial | 0.1.5-dev+3ef7fefd docker |
+| linux | ⚠ partial | 0.1.5-dev+3ef7fefd docker |
 | windows | ⚠ partial | 0.1.5-dev+dc4662a8.dirty standalone |
-| macos | ✅ full | 0.1.5-dev+3ef7fefd docker |
+| macos | ⚠ partial | 0.1.5-dev+3ef7fefd docker |
 | ios |  no run recorded | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+4f5374ff standalone |
+| tui | ⚠ partial | 0.1.5-dev+4f5374ff standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -64,4 +66,5 @@ Stamped 2026-09-19 at 0bb8814071.
 | 1 | app | `tests/e2e-unified/tests/artifact/test_windows_store_install.py::test_the_store_installed_app_signs_in_to_the_feed` | — |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_image_structure` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_health` | nest (linux): passed |
+| 3 | nest | (none) | — |
 <!-- features-render:end -->

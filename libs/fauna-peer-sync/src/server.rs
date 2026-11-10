@@ -79,37 +79,43 @@ pub type NowFn = Arc<dyn Fn() -> u64 + Send + Sync>;
 /// read live from a snapshot the evaluator refreshes; before its first
 /// successful refresh it knows nothing, and "nothing known" must refuse —
 /// an empty set would admit every withdrawn witness (the runtime's
-/// `fauna_sync_engine::peer_leg::WithdrawalSnapshot` owns that posture).
+/// `fauna_sync_engine::peer_leg::DerivedSet` owns that posture).
 pub type CustodyRevocationFn = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
 /// The serve side's **removed-device view**, as a predicate over
-/// `(account, device key)`: `true` = that account's fleet carries a `Removed`
-/// row for that device. The device twin of [`CustodyRevocationFn`], and
-/// keyed by account because the serve side is a registry — one node answers
-/// for its own account and for every account it holds custody of, and a
-/// global device-key predicate would conflate their fleets.
+/// `(account, device key)`: `true` = that account has withdrawn that device,
+/// or never verifiably enrolled it — refuse. The device twin of
+/// [`CustodyRevocationFn`], and keyed by account because the serve side is a
+/// registry — one node answers for its own account and for every account it
+/// holds custody of, and a global device-key predicate would conflate their
+/// fleets.
 ///
-/// A fleet replica answers it from the merged `fauna.state.device-set` rows
-/// of the served account (`fauna_core::generation::FleetView`'s exclusion
-/// set); the runtime refreshes the backing snapshot each pump pass, which IS
+/// **Its own account answers from membership.** A fleet replica holds the
+/// merged `fauna.state.device-set` rows of its own account, and answers
+/// `false` only for a verified member of that account's
+/// `fauna_core::generation::FleetView` — enrolled under the account root, no
+/// `Removed` row — the predicate its dial pass filters candidates by. So a
+/// valid, never-expiring account-root cert over a device this replica's
+/// merged state does not enroll is refused: one whose `Removed` row it never
+/// merged (removal evidence is retired once every linked replica held it, so
+/// a device enrolled later never sees it) as much as one removed in front of
+/// it. The runtime refreshes the backing snapshot each pump pass, which IS
 /// the honest bound here exactly as it is for custody revocation — and, as
-/// there, a view whose snapshot has never derived answers `true`.
+/// there, a view whose snapshot has never derived answers `true`. The cost
+/// is the dial filter's: a sibling whose device-set row has not merged here
+/// yet is refused until it has; both rows ride the fleet-only scope together.
 ///
-/// **It answers `false` on an absent row, and that is load-bearing twice.**
-/// (a) *Version skew:* a device enrolled before the plane-side device-set
-/// existed has no row at all, so refusing on "not present" would sever every
-/// such sibling; refusing on `Removed` **only** keeps the check additive.
-/// (b) *The custodied account:* a custodian evaluating an owner device's
-/// `DeviceAuthorization` for a custodied account cannot read that account's
-/// sealed `state-fleet` rows, so its only exclusion set there is the
-/// owner-signed list on the custody grants it holds
-/// ([`crate::admission::CustodiedExclusions`]). A device a held grant lists
-/// is refused; one minted before the removal lists nothing, and an account
-/// whose grants list nothing admits — failing closed
-/// would sever custody serving wholesale, exactly as `custody_revoked: None`
-/// would. The bound is stated in `account-sync-plane.md` § The admission
-/// seam → *Validity and severance*; the owner's own siblings, which hold the
-/// rows, sever at their next evaluation regardless.
+/// **A custodied account answers `false` on an absent listing.** A custodian
+/// evaluating an owner device's `DeviceAuthorization` for a custodied account
+/// cannot read that account's sealed `state-fleet` rows, so its only
+/// exclusion set there is the owner-signed list on the custody grants it
+/// holds ([`crate::admission::CustodiedExclusions`]). A device a held grant
+/// lists is refused; one minted before the removal lists nothing, and an
+/// account whose grants list nothing admits — failing closed would sever
+/// custody serving wholesale, exactly as `custody_revoked: None` would. The
+/// bound is stated in `account-sync-plane.md` § The admission seam →
+/// *Validity and severance*; the owner's own siblings, which hold the rows,
+/// sever at their next evaluation regardless.
 pub type DeviceRemovedFn = Arc<dyn Fn(&[u8; 32], &[u8; 32]) -> bool + Send + Sync>;
 
 /// The serve side's **file-body source**: one stored chunk body of a file-sync
@@ -448,7 +454,7 @@ impl PeerSyncServer {
             || not_admitted("the admission witness has expired — re-present it"),
         )?;
         let verdict = admitted.verdict;
-        // Device removal, per REQUEST — the same shape the served-account
+        // Device withdrawal, per REQUEST — the same shape the served-account
         // check below has: severance is per request, never per
         // connection. That is also why removal
         // cannot merely bound the *next* handshake — a fleet cert never
@@ -461,7 +467,7 @@ impl PeerSyncServer {
             && removed(&verdict.account, device_key)
         {
             return Err(not_admitted(
-                "the device is removed from this account's fleet",
+                "the device is not a verified member of this account's fleet",
             ));
         }
         // Custody revocation, per REQUEST — the custody twin of the check
@@ -576,17 +582,20 @@ impl PeerSyncServer {
         // The device evaluator's second store, the twin of the custody
         // evaluator's above: the `DeviceAuthorization` witness is
         // self-contained, root-signed and (in production) never expires —
-        // "removal is the control" — so whether the account has since removed
-        // the device is THIS side's own question, answered from its own
-        // merged `fauna.state.device-set` state. Refused BEFORE the verdict
-        // is stored, so a removed device never holds one.
+        // "removal is the control" — so whether the device is still a
+        // verified member of the account is THIS side's own question,
+        // answered from its own merged `fauna.state.device-set` state.
+        // Refused BEFORE the verdict is stored, so a removed device never
+        // holds one.
         if let (Some(device_key), Some(removed)) =
             (&evaluated.device_key, &self.config.device_removed)
             && removed(&claimed, device_key)
         {
             return Err(
                 RpcError::new(ERR_WITNESS_REFUSED, "error.peer_sync.witness_refused")
-                    .with_details_text("the device is removed from this account's fleet"),
+                    .with_details_text(
+                        "the device is not a verified member of this account's fleet",
+                    ),
             );
         }
         // The mutual half answers with the CLAIMED account's reply witness:
@@ -2158,13 +2167,13 @@ mod tests {
         assert!(slot.lock().unwrap().is_none(), "no verdict on refusal");
     }
 
-    /// **Refuse on the `Removed` row only.** A device the view does not
-    /// exclude still admits — which is what keeps the check additive across
-    /// version skew: a device enrolled before the plane-side device-set
-    /// existed has no row at all, and refusing "not present" would sever
-    /// every such sibling.
+    /// **The seam refuses exactly what the view answers `true` for.** A
+    /// device the view does not refuse admits, and its key is recorded for
+    /// the per-request re-check. What the view refuses is the runtime's to
+    /// derive (`DeviceRemovedFn`: the own account admits verified members
+    /// only).
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_device_with_no_removal_row_still_admits() {
+    async fn a_device_the_view_does_not_refuse_admits() {
         let owner = ActorKeypair::from_secret([9u8; 32]);
         let (_dir, server, _own) =
             admit_server_with(None, Some(removed_view(owner.actor_id().0, [0xEEu8; 32]))).await;

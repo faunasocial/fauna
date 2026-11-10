@@ -1054,6 +1054,16 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             }
         }
 
+        // The primary-domain rename driver, on EVERY nest — HTTP-01 on or off: it
+        // reads the installed listener cert whichever issuer wrote it (the loop
+        // below, or the admin's client over DNS-01), so a rename advances on the
+        // private axis too (`mail-primary-domain-rename.md` § *Issuer-independence
+        // — the rename driver*).
+        app_state.spawn_scoped(fauna_nest::rename_driver::rename_driver_task(
+            app_state.clone(),
+            acme_config.acme_dir.clone(),
+        ));
+
         // Spawn the ACME cert-lifecycle task now that AppState (and its DB) exists.
         // It derives the desired SAN set (apex + `mail.<domain>` for each active mail
         // domain) from nest state and re-issues whenever the on-disk cert stops
@@ -1468,11 +1478,13 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         // transition hook; this owns only the time-driven decay.
         fauna_nest::trend_sweeper::spawn_trend_sweeper(Arc::clone(&app_state));
 
-        // Membership-lapse reconcile: hourly (and at boot, on the first tick) flip
-        // every expired member back to their link's `lapse_tier` — the time-driven
-        // half of Pillar 4 Rail C step 3 the webhook-ingress reconcile can't see
-        // (monetization.md § Pillar 4). Renewals/refunds reconcile their buyer live.
-        fauna_nest::membership_lapse::spawn_membership_lapse_sweeper(Arc::clone(&app_state));
+        // Entitlement-lapse sweep: hourly (and at boot, on the first tick) flip
+        // every expired member back to their link's `lapse_tier` (the time-driven
+        // half of Pillar 4 Rail C step 3 the webhook-ingress reconcile can't see),
+        // then queue the leave's removal for every content-tier window past its
+        // grace (monetization.md § Pillar 3 → *Expiry & revocation*).
+        // Renewals/refunds reconcile their buyer live.
+        fauna_nest::entitlement_lapse::spawn_entitlement_lapse_sweeper(Arc::clone(&app_state));
 
         // ATProto unreferenced-upload sweep: hourly (and at boot, on the first
         // tick) retire `atproto_blobs` rows no record ever named, past the

@@ -304,6 +304,94 @@ where
             .collect())
     }
 
+    /// [`MediaNestApi::foreign_listing`]: page the set's change log through
+    /// this nest's relay, fold it to its heads, judge each head as a
+    /// cross-nest member and keep the admitted ones as items.
+    async fn do_foreign_listing(
+        &self,
+        channel: [u8; 32],
+        home_nest_url: &str,
+    ) -> Result<super::ForeignListing, MediaApiError> {
+        use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
+        // A bound on the pages one listing walks — far past any real set (the
+        // relay pages hundreds of rows), so a peer that never stops answering
+        // cannot spin the page.
+        const MAX_PAGES: usize = 1_000;
+        let mut changes = Vec::new();
+        let mut certs = Vec::new();
+        let (mut reachable, mut residency) = (None, None);
+        let mut since = 0;
+        for _ in 0..MAX_PAGES {
+            let reply: SyncChangesListReply = self
+                .nest
+                .request(
+                    "fauna.sync.changes.list",
+                    SyncChangesListRequest {
+                        nest_url: Some(home_nest_url.to_string()),
+                        channel_id: Some(hex::encode(channel)),
+                        since,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(foreign_read_err)?;
+            reachable = reply.reachable.or(reachable);
+            residency = reply.residency.or(residency);
+            certs.extend(reply.signer_certs);
+            // Paged by `since`: a page that adds no newer row ends the walk.
+            let Some(top) = reply.changes.iter().map(|c| c.seq).max() else {
+                break;
+            };
+            if top <= since {
+                break;
+            }
+            since = top;
+            changes.extend(reply.changes);
+        }
+        let heads = fauna_protocol::sync::head_rows(&changes);
+        let seat = self.seat();
+        let verdicts = fauna_client_sync::row_judge::judge_foreign_rows(
+            &self.nest,
+            &seat,
+            fauna_client_sync::row_judge::ForeignSet {
+                channel,
+                home_nest_url,
+            },
+            &heads,
+            &certs,
+        )
+        .await;
+        let items = heads
+            .iter()
+            .zip(&verdicts)
+            .map(|(head, verdict)| {
+                let mut item = fauna_client_media::media::MediaItem::from_change_row("", head);
+                // Ruling (8)(c), as `judge_media_listing` stamps it: the item is
+                // attributed to the verdict's writer and carries whether it was
+                // signed as this seat's current identity.
+                if let fauna_protocol::sync_row_verify::RowVerdict::Verified { writer, .. } =
+                    verdict
+                {
+                    item.author_actor_id = Some(fauna_protocol::ByteBuf::from(writer.to_vec()));
+                }
+                item.signed_as_current = verdict.signed_as(seat.own.as_ref());
+                item.signed_as = fauna_client_sync::row_judge::verified_signer(verdict);
+                item
+            })
+            .collect();
+        let (items, tally) = fauna_client_sync::row_judge::retain_admitted(
+            items,
+            &verdicts,
+            "the foreign browse scope",
+        );
+        Ok(super::ForeignListing {
+            items,
+            held: tally.held,
+            reachable,
+            residency,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn do_record_member(
         &self,
@@ -334,6 +422,44 @@ where
             path_sealed,
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn do_record_foreign(
+        &self,
+        channel: [u8; 32],
+        home_nest_url: &str,
+        folder: &str,
+        device_id: &str,
+        path: &str,
+        manifest_hash: Option<String>,
+        size_bytes: i64,
+        change_type: &str,
+        content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
+        path_sealed: Option<Vec<u8>>,
+    ) -> Result<(), MediaApiError> {
+        // The engine's cross-nest record (`SyncClient::changes_record_foreign`,
+        // the same signer this seam's own-nest records take); the home nest's
+        // writer gate refusing it is `fauna.federation.forbidden`, which keeps
+        // its detail on the page error.
+        self.sync
+            .changes_record_foreign(
+                home_nest_url,
+                channel,
+                folder,
+                device_id,
+                path,
+                manifest_hash,
+                size_bytes,
+                change_type,
+                content_key_version,
+                thumbnail_hash,
+                path_sealed,
+            )
+            .await
+            .map(|_| ())
+            .map_err(map_err)
     }
 
     async fn do_delete_member(
@@ -381,6 +507,43 @@ where
                 signed_as_current: v.signed_as_current,
                 signed_as: v.signed_as,
                 summary: FileVersionSummary::from(v),
+            })
+            .collect())
+    }
+
+    /// [`MediaNestApi::foreign_versions`]: the relayed history, each version
+    /// judged as a cross-nest member and the admitted ones kept.
+    async fn do_foreign_versions(
+        &self,
+        channel: [u8; 32],
+        home_nest_url: &str,
+        path: &str,
+    ) -> Result<Vec<ListedVersion>, MediaApiError> {
+        let judged = self
+            .sync
+            .versions_list_judged_foreign(
+                fauna_core::sync::path_hash(path),
+                fauna_client_sync::row_judge::ForeignSet {
+                    channel,
+                    home_nest_url,
+                },
+                &self.seat(),
+            )
+            .await
+            .map_err(foreign_read_err)?;
+        let (versions, _) =
+            fauna_client_sync::row_judge::retain_judged(judged, "the foreign version history");
+        Ok(versions
+            .into_iter()
+            .map(|v| ListedVersion {
+                signed_as_current: v.signed_as_current,
+                signed_as: v.signed_as,
+                // The home nest's row id names nothing on this side: the
+                // version's set is the scope, addressed by its channel.
+                summary: FileVersionSummary {
+                    folder_id: None,
+                    ..FileVersionSummary::from(v)
+                },
             })
             .collect())
     }
@@ -574,6 +737,132 @@ fauna_core::map_rpc_error! {
     }
 }
 
+/// Map a foreign scope's relayed read failure: the home nest's refusal of the
+/// membership itself ([`fauna_client_sync::is_access_revoked`] — the member
+/// was removed) is the one `NotFound`, the removal the page names; every other
+/// failure keeps its class but is never `NotFound`, so a dropped connection or
+/// an unrelated miss never renders as the removal (`ui/media.md` § Cross-nest
+/// shared sets, *Removal is loud*).
+fn foreign_read_err<E: RpcErrorClass + std::fmt::Display>(e: E) -> MediaApiError {
+    if fauna_client_sync::is_access_revoked(&e) {
+        return MediaApiError::NotFound {
+            detail: format!("the folder's home nest refused the read: {e}"),
+        };
+    }
+    match map_err(e) {
+        MediaApiError::NotFound { detail } => MediaApiError::Transient { detail },
+        other => other,
+    }
+}
+
+/// Mint a cross-nest WRITER's byte-plane write token for the set whose channel
+/// is `channel_id` (hex), homed at `home_nest_url`: `fauna.folders.write_token.get`
+/// on the member's OWN nest, which relays `fauna.federation.folder.write_token.mint`
+/// to the home nest behind its foreign-member + `access == 'writer'` gate
+/// (`ui/media.md` § Cross-nest shared sets, *Upload*). The one mint both write
+/// doors share — native and the browser's. A refusal of the grant
+/// ([`fauna_client_sync::is_access_revoked`]) is a `403` — the home nest will
+/// not authorize this write, never a retryable transport fault (the engine's
+/// `classify_mint_error` distinction, without its park: Media has no engine to
+/// park); every other failure keeps its transport framing.
+pub(crate) async fn mint_member_write_token<R>(
+    nest: &R,
+    home_nest_url: String,
+    channel_id: String,
+) -> Result<(String, u64), WriteMintError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + std::fmt::Display,
+{
+    use fauna_protocol::folders::{
+        KIND_FOLDERS_WRITE_TOKEN_GET, WriteTokenGetReply, WriteTokenGetRequest,
+    };
+    let reply: Result<WriteTokenGetReply, R::Error> = nest
+        .request(
+            KIND_FOLDERS_WRITE_TOKEN_GET,
+            WriteTokenGetRequest {
+                nest_url: home_nest_url,
+                channel_id,
+                extra: Default::default(),
+            },
+        )
+        .await;
+    match reply {
+        Ok(reply) => Ok((reply.token, reply.expires_at)),
+        Err(e) if fauna_client_sync::is_access_revoked(&e) => Err(WriteMintError::Refused(
+            format!("the folder's home nest refused the write: {e}"),
+        )),
+        Err(e) => Err(WriteMintError::Transport(format!("write_token.get: {e}"))),
+    }
+}
+
+/// Why [`mint_member_write_token`] failed, target-neutral — each write door
+/// maps it onto its own plane's error.
+#[derive(Debug)]
+pub(crate) enum WriteMintError {
+    /// The home nest refused the writer grant (the member was demoted or
+    /// removed) — never retried as a transport fault.
+    Refused(String),
+    /// The mint never reached a verdict.
+    Transport(String),
+}
+
+impl WriteMintError {
+    /// The page's error for a refused or failed mint (the browser door's; the
+    /// native door maps onto its content plane's `ApiError` instead).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn into_media(self) -> MediaApiError {
+        match self {
+            Self::Refused(detail) => MediaApiError::BadRequest { detail },
+            Self::Transport(detail) => MediaApiError::Transient { detail },
+        }
+    }
+}
+
+/// Mint a cross-nest member's byte-plane read token for the set whose channel
+/// is `channel_id`, homed at `home_nest_url`: `fauna.folders.read_token.get` on
+/// the member's OWN nest, which relays `fauna.federation.folder.read_token.mint`
+/// to the home nest behind its member gate (`relay-serving.md` § Relay serving
+/// → *A member on another nest*, step (5)). The one mint both member doors
+/// share — the native fetcher's and the browser's.
+///
+/// A refusal of the membership itself (the member was removed —
+/// [`fauna_client_sync::is_access_revoked`], the same classifier the sync
+/// engine parks a set on) carries
+/// [`fauna_core::file_download::MembershipRefused`] for the page to name;
+/// every other failure keeps its transport framing.
+async fn mint_member_read_token<R>(
+    nest: &R,
+    home_nest_url: &str,
+    channel_id: [u8; 32],
+) -> anyhow::Result<String>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + std::fmt::Display,
+{
+    use fauna_protocol::folders::{
+        KIND_FOLDERS_READ_TOKEN_GET, ReadTokenGetReply, ReadTokenGetRequest,
+    };
+    let reply: Result<ReadTokenGetReply, R::Error> = nest
+        .request(
+            KIND_FOLDERS_READ_TOKEN_GET,
+            ReadTokenGetRequest {
+                nest_url: home_nest_url.to_string(),
+                channel_id: hex::encode(channel_id),
+                extra: Default::default(),
+            },
+        )
+        .await;
+    match reply {
+        Ok(reply) => Ok(reply.token),
+        Err(e) if fauna_client_sync::is_access_revoked(&e) => Err(anyhow::Error::new(
+            fauna_core::file_download::MembershipRefused,
+        )
+        .context(format!("read_token.get refused: {e}"))),
+        Err(e) => Err(anyhow::anyhow!("read_token.get: {e}")),
+    }
+}
+
 // ── Native (`Arc<NestClient>`) ──────────────────────────────────────────────
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -588,6 +877,21 @@ mod native {
 
         async fn list_folders(&self) -> Result<Vec<MediaFolder>, MediaApiError> {
             self.do_list_folders().await
+        }
+        async fn foreign_listing(
+            &self,
+            channel: [u8; 32],
+            home_nest_url: &str,
+        ) -> Result<super::super::ForeignListing, MediaApiError> {
+            self.do_foreign_listing(channel, home_nest_url).await
+        }
+        async fn foreign_versions(
+            &self,
+            channel: [u8; 32],
+            home_nest_url: &str,
+            path: &str,
+        ) -> Result<Vec<ListedVersion>, MediaApiError> {
+            self.do_foreign_versions(channel, home_nest_url, path).await
         }
         async fn record_member(
             &self,
@@ -608,6 +912,35 @@ mod native {
                 path,
                 manifest_hash,
                 size_bytes,
+                content_key_version,
+                thumbnail_hash,
+                path_sealed,
+            )
+            .await
+        }
+        async fn record_foreign(
+            &self,
+            channel: [u8; 32],
+            home_nest_url: &str,
+            folder: &str,
+            device_id: &str,
+            path: &str,
+            manifest_hash: Option<String>,
+            size_bytes: i64,
+            change_type: &str,
+            content_key_version: Option<u64>,
+            thumbnail_hash: Option<String>,
+            path_sealed: Option<Vec<u8>>,
+        ) -> Result<(), MediaApiError> {
+            self.do_record_foreign(
+                channel,
+                home_nest_url,
+                folder,
+                device_id,
+                path,
+                manifest_hash,
+                size_bytes,
+                change_type,
                 content_key_version,
                 thumbnail_hash,
                 path_sealed,
@@ -743,6 +1076,10 @@ mod native {
         // The seat's own actor id, the declassification anchor for every
         // OWN folder the seam lists; unreadable ⇒ `None` ⇒ sealed.
         let own = fauna_core::identity::ActorId::from_hex(&nest.actor_id_hex()).ok();
+        let foreign = NativeForeignFetchers {
+            nest: Arc::clone(&nest),
+            homes: Arc::default(),
+        };
         let mut seam = WsRpcMediaNest::new(nest, own);
         if let Some(signing) = signing {
             seam = seam.with_record_signing(signing);
@@ -755,17 +1092,24 @@ mod native {
         let api: Arc<dyn MediaNestApi> = Arc::new(seam);
         let machine = MediaMachine::new(observer, api, Some(uploader), Some(download), folder_keys);
         // Cross-nest downloads (a foreign shared set, a followed public folder
-        // homed elsewhere): the bytes come straight off the home nest's public
+        // homed elsewhere): the bytes come straight off the home nest's byte
         // routes, integrity by content address, the TLS verified against the
-        // record-delivered home identity (`ForeignPublicChunkFetcher` doc).
-        machine.set_foreign_fetchers(Arc::new(NativeForeignFetchers));
+        // record-delivered home identity (`ForeignPublicChunkFetcher` doc); a
+        // shared set's member reads its folder under the read token this
+        // session's own nest mints for it.
+        machine.set_foreign_fetchers(Arc::new(foreign));
         machine
     }
 
     /// Native [`crate::folder_keys::ForeignBlobFetcherFactory`] — builds a
     /// [`fauna_client::ForeignPublicChunkFetcher`] per foreign home, pinned on
-    /// the identity the record delivered.
-    struct NativeForeignFetchers;
+    /// the identity the record delivered; the member door's carries a
+    /// [`MemberReadBearer`] over this session's own nest.
+    struct NativeForeignFetchers {
+        nest: Arc<NestClient>,
+        /// One graduation per home for the session's write doors.
+        homes: Arc<fauna_client::post_blob::PinnedHomes>,
+    }
 
     impl crate::folder_keys::ForeignBlobFetcherFactory for NativeForeignFetchers {
         fn fetcher_for(
@@ -777,6 +1121,53 @@ mod native {
                 base_url,
                 home_nest_actor_id,
             ))
+        }
+
+        fn member_fetcher_for(
+            &self,
+            home: &fauna_core::folder_keys::ForeignHome,
+            channel_id: [u8; 32],
+        ) -> Arc<dyn fauna_core::file_download::BlobFetcher> {
+            Arc::new(
+                fauna_client::ForeignPublicChunkFetcher::for_home(
+                    &home.nest_url,
+                    home.nest_actor_id.as_deref(),
+                )
+                .with_read_bearer(Arc::new(MemberReadBearer {
+                    nest: Arc::clone(&self.nest),
+                    home_nest_url: home.nest_url.clone(),
+                    channel_id,
+                })),
+            )
+        }
+
+        fn member_uploader_for(
+            &self,
+            home: &fauna_core::folder_keys::ForeignHome,
+            channel_id: [u8; 32],
+        ) -> Option<Arc<dyn crate::blob_uploader::MediaBlobUploader>> {
+            Some(Arc::new(crate::blob_uploader::NativeMemberUploader::new(
+                Arc::clone(&self.nest),
+                home,
+                channel_id,
+                Arc::clone(&self.homes),
+            )))
+        }
+    }
+
+    /// A cross-nest member's read token, minted afresh through its own nest
+    /// for every folder read of the one download its fetcher serves
+    /// ([`super::mint_member_read_token`]).
+    struct MemberReadBearer {
+        nest: Arc<NestClient>,
+        home_nest_url: String,
+        channel_id: [u8; 32],
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_client::ForeignReadBearer for MemberReadBearer {
+        async fn bearer(&self) -> anyhow::Result<String> {
+            super::mint_member_read_token(&self.nest, &self.home_nest_url, self.channel_id).await
         }
     }
 }
@@ -798,6 +1189,21 @@ mod wasm {
         async fn list_folders(&self) -> Result<Vec<MediaFolder>, MediaApiError> {
             self.do_list_folders().await
         }
+        async fn foreign_listing(
+            &self,
+            channel: [u8; 32],
+            home_nest_url: &str,
+        ) -> Result<super::super::ForeignListing, MediaApiError> {
+            self.do_foreign_listing(channel, home_nest_url).await
+        }
+        async fn foreign_versions(
+            &self,
+            channel: [u8; 32],
+            home_nest_url: &str,
+            path: &str,
+        ) -> Result<Vec<ListedVersion>, MediaApiError> {
+            self.do_foreign_versions(channel, home_nest_url, path).await
+        }
         async fn record_member(
             &self,
             folder: &str,
@@ -817,6 +1223,35 @@ mod wasm {
                 path,
                 manifest_hash,
                 size_bytes,
+                content_key_version,
+                thumbnail_hash,
+                path_sealed,
+            )
+            .await
+        }
+        async fn record_foreign(
+            &self,
+            channel: [u8; 32],
+            home_nest_url: &str,
+            folder: &str,
+            device_id: &str,
+            path: &str,
+            manifest_hash: Option<String>,
+            size_bytes: i64,
+            change_type: &str,
+            content_key_version: Option<u64>,
+            thumbnail_hash: Option<String>,
+            path_sealed: Option<Vec<u8>>,
+        ) -> Result<(), MediaApiError> {
+            self.do_record_foreign(
+                channel,
+                home_nest_url,
+                folder,
+                device_id,
+                path,
+                manifest_hash,
+                size_bytes,
+                change_type,
                 content_key_version,
                 thumbnail_hash,
                 path_sealed,
@@ -969,6 +1404,7 @@ mod wasm {
         // The seat's own actor id, the declassification anchor for every
         // OWN folder the seam lists; unreadable ⇒ `None` ⇒ sealed.
         let own = fauna_core::identity::ActorId::from_hex(nest.actor_id_hex()).ok();
+        let foreign = WasmForeignFetchers { nest: nest.clone() };
         let mut seam = WsRpcMediaNest::new(nest, own);
         if let Some(signing) = signing {
             seam = seam.with_record_signing(signing);
@@ -984,7 +1420,7 @@ mod wasm {
         // nest's public byte routes directly — the S6 route-scoped permissive
         // CORS on exactly those two GETs is what makes this fetch legal; the
         // resolver above is what routes a foreign set's `download_file` here.
-        machine.set_foreign_fetchers(Arc::new(WasmForeignFetchers));
+        machine.set_foreign_fetchers(Arc::new(foreign));
         machine
     }
 
@@ -1008,8 +1444,11 @@ mod wasm {
     /// base (same type as the home fetcher; the browser owns TLS, so the
     /// record-delivered home identity cannot be pinned here — a self-signed
     /// home is unreachable from a browser, WebPKI only, exactly as
-    /// `security.md` § Transport trust records for web).
-    struct WasmForeignFetchers;
+    /// `security.md` § Transport trust records for web). The member door's
+    /// fetcher carries a [`MemberReadBearer`] over the session's own nest.
+    struct WasmForeignFetchers {
+        nest: WsRpcClient,
+    }
 
     impl crate::folder_keys::ForeignBlobFetcherFactory for WasmForeignFetchers {
         fn fetcher_for(
@@ -1020,6 +1459,52 @@ mod wasm {
             Arc::new(fauna_core::file_download::WasmPublicChunkFetcher::new(
                 base_url.trim_end_matches('/'),
             ))
+        }
+
+        fn member_fetcher_for(
+            &self,
+            home: &fauna_core::folder_keys::ForeignHome,
+            channel_id: [u8; 32],
+        ) -> Arc<dyn fauna_core::file_download::BlobFetcher> {
+            Arc::new(
+                fauna_core::file_download::WasmPublicChunkFetcher::new(
+                    home.nest_url.trim_end_matches('/'),
+                )
+                .with_session_bearer(std::rc::Rc::new(MemberReadBearer {
+                    nest: self.nest.clone(),
+                    home_nest_url: home.nest_url.clone(),
+                    channel_id,
+                })),
+            )
+        }
+
+        fn member_uploader_for(
+            &self,
+            home: &fauna_core::folder_keys::ForeignHome,
+            channel_id: [u8; 32],
+        ) -> Option<Arc<dyn crate::blob_uploader::MediaBlobUploader>> {
+            Some(Arc::new(crate::blob_uploader::WasmMemberUploader::new(
+                self.nest.clone(),
+                &home.nest_url,
+                channel_id,
+            )))
+        }
+    }
+
+    /// A cross-nest member's read token for the home nest's chunk route,
+    /// minted through the session's own nest for every folder read
+    /// ([`super::mint_member_read_token`]) — never the session bearer, which
+    /// names nobody on another nest.
+    struct MemberReadBearer {
+        nest: WsRpcClient,
+        home_nest_url: String,
+        channel_id: [u8; 32],
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl fauna_core::file_download::SessionBearer for MemberReadBearer {
+        async fn bearer(&self) -> anyhow::Result<String> {
+            super::mint_member_read_token(&self.nest, &self.home_nest_url, self.channel_id).await
         }
     }
 }
@@ -1092,6 +1577,38 @@ mod tests {
         let mut e = RpcError::new(code.to_string(), "error.x".to_string());
         e.details = Some(Box::new(Value::String(detail.to_string())));
         e
+    }
+
+    /// The member door's mint (`relay-serving.md` § Relay serving → *A member
+    /// on another nest*, step (5)) asks the member's OWN nest, and only a
+    /// refusal of the membership itself is named a removal: a version gap or a
+    /// transport fault keeps its retryable framing, never `MembershipRefused`.
+    #[tokio::test]
+    async fn the_member_mint_names_only_a_membership_refusal() {
+        for (code, refused) in [
+            ("fauna.federation.forbidden", true),
+            ("fauna.federation.peer_nest_outdated", false),
+            ("fauna.protocol.internal", false),
+        ] {
+            let kinds = Arc::new(Mutex::new(Vec::new()));
+            let stub = StubRequester {
+                kinds: Arc::clone(&kinds),
+                err: Some(rejection(code, "refused")),
+            };
+            let err = mint_member_read_token(&stub, "https://home.example", [0xab; 32])
+                .await
+                .expect_err("the stub refuses every mint");
+            assert_eq!(
+                fauna_core::file_download::is_membership_refused(&err),
+                refused,
+                "{code}: {err:#}"
+            );
+            assert_eq!(
+                *kinds.lock().unwrap(),
+                vec![fauna_protocol::folders::KIND_FOLDERS_READ_TOKEN_GET],
+                "the mint asks the member's own nest"
+            );
+        }
     }
 
     /// A nest that answers `fauna.folders.list` with whatever rows the test
@@ -1778,6 +2295,54 @@ mod tests {
         );
     }
 
+    /// A cross-nest writer's record rides the own nest's relay: `nest_url` +
+    /// `channel_id` name the home nest and the set, and no own-nest row is
+    /// stamped (`ui/media.md` § Cross-nest shared sets, *Upload*;
+    /// `federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append).
+    #[tokio::test]
+    async fn a_foreign_record_carries_the_home_nest_and_the_channel() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let seam = WsRpcMediaNest::new(
+            RecordingRequester {
+                captured: Arc::clone(&captured),
+            },
+            None,
+        );
+        let _ = seam
+            .do_record_foreign(
+                [0xAB; 32],
+                "https://away.example",
+                "trip",
+                "dev-1",
+                "trip/new.jpg",
+                Some("abc123".into()),
+                42,
+                "create",
+                Some(3),
+                None,
+                Some(vec![5u8; 40]),
+            )
+            .await;
+        let calls = captured.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            vec!["fauna.sync.changes.record"]
+        );
+        let rec: SyncChangeRecordRequest =
+            fauna_protocol::decode_strict(&calls[0].1).expect("decode record");
+        assert_eq!(rec.nest_url.as_deref(), Some("https://away.example"));
+        assert_eq!(rec.channel_id, Some(hex::encode([0xAB; 32])));
+        assert_eq!(rec.folder_id, None);
+        assert_eq!(rec.change_type, "create");
+        assert_eq!(rec.manifest_hash.as_deref(), Some("abc123"));
+        assert_eq!(rec.content_key_version, Some(3));
+        assert_eq!(
+            rec.path_sealed.as_ref().map(|b| &b[..]),
+            Some(&[5u8; 40][..])
+        );
+    }
+
     /// Simulates the folder-less-upload gap: the **first**
     /// `fauna.sync.changes.record` is rejected `fauna.sync.device_unregistered`
     /// (the client never mapped a folder, so its sync device isn't registered);
@@ -1989,5 +2554,217 @@ mod tests {
             kinds.lock().unwrap().as_slice(),
             ["fauna.sync.changes.record"]
         );
+    }
+
+    // ── The foreign browse scope's seam (`foreign_listing`) ─────────────────
+
+    const FOREIGN_CHANNEL: [u8; 32] = [0xAB; 32];
+    const FOREIGN_HOME: &str = "https://away.example";
+    const FOREIGN_NONCE: [u8; 32] = [7; 32];
+
+    /// Custody holding the foreign set's nonce by its ref.
+    struct ForeignNonce;
+
+    #[async_trait::async_trait]
+    impl fauna_core::folder_keys::FolderKeyResolver for ForeignNonce {
+        async fn resolve(
+            &self,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn set_lineage_ref(
+            &self,
+            folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
+            Ok(
+                (*folder_ref == fauna_core::folder_keys::FolderRef::Foreign(FOREIGN_CHANNEL)).then(
+                    || fauna_core::folder_keys::SetNonceLineage {
+                        live: Some(FOREIGN_NONCE),
+                        ..Default::default()
+                    },
+                ),
+            )
+        }
+    }
+
+    fn foreign_row(
+        author: &fauna_core::identity::ActorKeypair,
+        seq: i64,
+        path: &str,
+    ) -> fauna_protocol::sync::SyncChange {
+        let mut row = fauna_protocol::sync::SyncChange {
+            seq,
+            path_hash: fauna_core::hex32::encode(&fauna_core::sync::path_hash(path)),
+            manifest_hash: Some(fauna_core::hex32::encode(&[seq as u8; 32])),
+            size_bytes: 10,
+            change_type: if seq == 1 { "create" } else { "modify" }.into(),
+            created_at: 1_000 + seq,
+            path: Some(path.into()),
+            device_id: Some(fauna_core::hex32::encode(&[4; 32])),
+            author_actor_id: Some(author.actor_id().to_hex()),
+            ..Default::default()
+        };
+        fauna_protocol::sync_writer_sig::ChangeSigner::direct(author)
+            .sign_row(&mut row, FOREIGN_NONCE)
+            .unwrap();
+        row
+    }
+
+    /// The member's own nest relaying a foreign set: `changes.list` paged by
+    /// `since`, and the home nest's roster.
+    struct RelayRequester {
+        pages: std::collections::BTreeMap<i64, Vec<fauna_protocol::sync::SyncChange>>,
+        roster: fauna_protocol::folders::ActorMembersListReply,
+        sent: Mutex<Vec<(&'static str, serde_json::Value)>>,
+    }
+
+    impl RpcRequester for RelayRequester {
+        type Error = ClassifiedError;
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, ClassifiedError>
+        where
+            Req: Serialize,
+            Reply: DeserializeOwned,
+        {
+            let json = serde_json::to_value(&payload).unwrap();
+            self.sent.lock().unwrap().push((kind, json.clone()));
+            let bytes = match kind {
+                "fauna.sync.changes.list" => {
+                    let since = json["since"].as_i64().unwrap();
+                    fauna_protocol::encode_canonical(&fauna_protocol::sync::SyncChangesListReply {
+                        changes: self.pages.get(&since).cloned().unwrap_or_default(),
+                        reachable: Some(false),
+                        residency: Some("metadata_only".into()),
+                        ..Default::default()
+                    })
+                }
+                fauna_protocol::folders::KIND_FOLDERS_MEMBERS_LIST_ACTORS_REMOTE => {
+                    fauna_protocol::encode_canonical(&self.roster)
+                }
+                other => {
+                    return Err(ClassifiedError::Transport(format!("no mock for {other}")));
+                }
+            }
+            .expect("encode");
+            Ok(fauna_protocol::decode_strict(&bytes).expect("decode"))
+        }
+    }
+
+    /// `ui/media.md` § Cross-nest shared sets → *The read model*: the seam
+    /// pages the set's log through the member's own nest by `since`, folds it
+    /// to its heads (the latest row per path), judges each head under the
+    /// scope's custody with the relayed roster — a stranger's head is absent —
+    /// and carries the home nest's stamps.
+    #[tokio::test]
+    async fn the_foreign_listing_pages_folds_and_judges_the_heads() {
+        use fauna_core::identity::ActorKeypair;
+        let (owner, me, stranger) = (
+            ActorKeypair::from_secret([1; 32]),
+            ActorKeypair::from_secret([2; 32]),
+            ActorKeypair::from_secret([4; 32]),
+        );
+        let relay = RelayRequester {
+            pages: [
+                (
+                    0,
+                    vec![
+                        foreign_row(&owner, 1, "a.jpg"),
+                        foreign_row(&stranger, 2, "b.jpg"),
+                    ],
+                ),
+                (2, vec![foreign_row(&owner, 3, "a.jpg")]),
+            ]
+            .into_iter()
+            .collect(),
+            roster: fauna_protocol::folders::ActorMembersListReply {
+                members: vec![
+                    fauna_protocol::folders::FolderActorMember {
+                        actor_id: owner.actor_id().to_hex(),
+                        role: "owner".into(),
+                        ..Default::default()
+                    },
+                    fauna_protocol::folders::FolderActorMember {
+                        actor_id: me.actor_id().to_hex(),
+                        role: "member".into(),
+                        access: Some("reader".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            sent: Mutex::new(Vec::new()),
+        };
+        let seam = WsRpcMediaNest::new(Arc::new(relay), Some(me.actor_id())).with_row_nonces(
+            fauna_client_sync::SetNonceSource::Resolver(Arc::new(ForeignNonce)),
+        );
+        let listing = seam
+            .do_foreign_listing(FOREIGN_CHANNEL, FOREIGN_HOME)
+            .await
+            .expect("listed");
+        assert_eq!(listing.items.len(), 1, "{:?}", listing.items);
+        let head = &listing.items[0];
+        assert_eq!(head.path, "a.jpg");
+        assert_eq!(
+            head.manifest_hash.as_ref().map(|b| b.to_vec()),
+            Some(vec![3u8; 32])
+        );
+        assert!(
+            !head.signed_as_current,
+            "the owner signed it, not this seat"
+        );
+        assert_eq!(head.signed_as, Some(owner.actor_id().0));
+        assert_eq!(listing.reachable, Some(false));
+        assert!(!listing.source_online());
+        let sent = seam.nest.sent.lock().unwrap().clone();
+        let lists: Vec<i64> = sent
+            .iter()
+            .filter(|(k, _)| *k == "fauna.sync.changes.list")
+            .map(|(_, p)| {
+                assert_eq!(p["nest_url"], FOREIGN_HOME);
+                assert_eq!(p["channel_id"], hex::encode(FOREIGN_CHANNEL));
+                p["since"].as_i64().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            lists,
+            vec![0, 2, 3],
+            "paged by since until a page adds nothing"
+        );
+    }
+
+    /// Only the home nest's refusal of the membership is the removal
+    /// (`NotFound`); any other failure — a version gap, an unrelated miss, a
+    /// transport fault — is never `NotFound`, so it never renders as one.
+    #[tokio::test]
+    async fn only_a_membership_refusal_reads_as_the_foreign_removal() {
+        for (code, removed) in [
+            ("fauna.federation.forbidden", true),
+            ("fauna.sync.not_found", true),
+            ("fauna.federation.peer_nest_outdated", false),
+            ("fauna.media.not_found", false),
+        ] {
+            let (seam, _) = seam(Some(rejection(code, "refused")));
+            let err = seam
+                .do_foreign_listing(FOREIGN_CHANNEL, FOREIGN_HOME)
+                .await
+                .expect_err("refused");
+            assert_eq!(
+                matches!(err, MediaApiError::NotFound { .. }),
+                removed,
+                "{code}: {err:?}"
+            );
+        }
     }
 }

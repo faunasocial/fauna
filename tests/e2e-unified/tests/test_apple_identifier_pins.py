@@ -889,6 +889,23 @@ def test_the_e2e_macos_bundle_id_matches_the_shipping_app():
     )
 
 
+def test_the_e2e_ios_kids_bundle_id_matches_the_kids_target():
+    # The `--app ios-kids` lane (feature-catalog.md § Cell semantics) installs and
+    # launches the kids simulator build under the driver's KIDS_BUNDLE_ID, and the
+    # conftest wrapper stamps that id into the plist: both must be the id the
+    # `Fauna-Kids-iOS` target declares, or the kids column proves an app nobody
+    # installs.
+    pbxproj = _read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj")
+    assert f"PRODUCT_BUNDLE_IDENTIFIER = {KIDS_BUNDLE_ID};" in pbxproj
+    driver = _read("tests/e2e-unified/drivers/ios.py")
+    assert f'KIDS_BUNDLE_ID = "{KIDS_BUNDLE_ID}"' in driver
+    assert "BUNDLE_ID = KIDS_BUNDLE_ID" in driver, (
+        "IosKidsInProcessDriver must target the kids id in every simctl call"
+    )
+    conftest = _read("tests/e2e-unified/conftest.py")
+    assert "from drivers.ios import KIDS_BUNDLE_ID" in conftest
+
+
 def test_the_e2e_ios_bundle_id_matches_the_shipping_app():
     # The drift this whole file exists to prevent, pinned directly: the e2e
     # synthetic bundle and the driver that targets it must carry the bundle id
@@ -905,7 +922,8 @@ def test_the_e2e_ios_bundle_id_matches_the_shipping_app():
     conftest = _read("tests/e2e-unified/conftest.py")
     bundle = _read("tests/e2e-unified/helpers/ios_app_bundle.py")
     assert "from drivers.ios import BUNDLE_ID as IOS_BUNDLE_ID" in conftest
-    assert "write_app_bundle(app_dir, exe, IOS_BUNDLE_ID)" in conftest
+    assert ("write_app_bundle(app_dir, exe, KIDS_BUNDLE_ID if kids else IOS_BUNDLE_ID, "
+            "kids=kids)") in conftest
     assert "from drivers.ios import BUNDLE_ID\n" in _read("tests/e2e-unified/helpers/prev_build.py")
     assert "<key>CFBundleIdentifier</key><string>{bundle_id}</string>" in bundle, (
         "the e2e iOS bundle must take its id from drivers.ios.BUNDLE_ID; a second "

@@ -7,7 +7,7 @@
   // (`third-party.md` § The runner contract → *The install-approval leg*).
   // Reference painter: `apps/fauna-tui/src/bridges.rs::plugin_elements`. The
   // parent mounts this only while the account is the nest's admin.
-  import { onMount } from 'svelte';
+  import { afterNavigate } from '$app/navigation';
   import { connectionStatus, identity } from '#lib/store';
   import { offlineAffordance } from '#lib/wasm';
   import { makeOfflineGate } from '#lib/offline-gate';
@@ -44,7 +44,15 @@
     }
   }
 
-  onMount(refresh);
+  // ⚠ A same-route `goto()` (the Bridges tab pressed while on Bridges) does not
+  // remount this component, so an `onMount` read would only ever run once per
+  // visit and a fault the runner counted since would never paint — every other
+  // app re-lists on its nav edge. `afterNavigate` runs at mount and on every
+  // later navigation event, the same-route one included (the fix
+  // `admin/bridges-pending/+page.svelte` and `WebSettingsSection.svelte` carry).
+  afterNavigate(() => {
+    void refresh();
+  });
 
   async function install() {
     const secret = $identity?.secretHex;

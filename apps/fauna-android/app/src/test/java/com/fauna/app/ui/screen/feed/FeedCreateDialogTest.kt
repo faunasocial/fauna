@@ -292,7 +292,9 @@ class FeedCreateDialogTest {
         )
         composeTestRule.onNodeWithTag("feed-create-feed-name").performTextInput("My Feed")
         composeTestRule.onNodeWithTag("feed-factor-select").performScrollTo().performClick()
-        composeTestRule.onNodeWithText("Rust news").performClick()
+        // The trained rows follow every built-in factor, so the option can sit
+        // below the popup's fold, where a bare click silently no-ops.
+        composeTestRule.onNodeWithText("Rust news").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("feed-add-factor-button").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("create-feed").performClick()
 

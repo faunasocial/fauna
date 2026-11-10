@@ -59,7 +59,7 @@ pub(super) fn load_more(app: &App) -> Option<Op> {
 }
 
 /// Whether the focus ring sits on the tab's last card while the window holds
-/// more — `App::handle_key`'s load-more edge for this page.
+/// more — `App::page_on_arrival`'s load-more edge for this page.
 pub fn at_last_post(app: &App) -> bool {
     app.page == Page::Profile
         && app.profile.tab == Tab::Posts
@@ -158,9 +158,11 @@ pub(super) fn route(app: &mut App, action: feed::Action) -> Option<Op> {
         reveal @ (F::RevealMuted(_) | F::RevealContent(_) | F::OpenLightbox(_)) => {
             feed::apply_local(app, reveal).map(|op| Op::Feed(Box::new(op)))
         }
+        // The pay link subscribes through the manager that holds the post —
+        // the window's, like the buy above.
         #[cfg(feature = "payments")]
-        link @ F::OpenPaymentLink(_) => {
-            feed::apply_local(app, link).map(|op| Op::Feed(Box::new(op)))
+        link @ F::OpenPaymentLink { .. } => {
+            feed::apply_on(app, window?, link).map(|op| Op::Feed(Box::new(op)))
         }
         // The overlays and every verb they fire, over the window: the
         // feed's own arms, resolving the post against the manager the row

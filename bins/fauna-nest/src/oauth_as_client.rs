@@ -534,12 +534,32 @@ pub async fn resolve_client(
         },
     };
 
-    cache.put(
-        client_id.to_string(),
-        CachedResolution::Resolved(Box::new(client.clone())),
-        now,
-    );
+    if !test_hook_skip_positive_cache() {
+        cache.put(
+            client_id.to_string(),
+            CachedResolution::Resolved(Box::new(client.clone())),
+            now,
+        );
+    }
     Ok(client)
+}
+
+/// Under `test-hooks` **only**, and only when
+/// `FAUNA_TEST_CLIENT_METADATA_NO_CACHE` is set: a FETCHED document is never
+/// cached positively, so a tier_3 journey can re-publish a client's document
+/// (a manifest that now declares another bridge id) and have the very next
+/// ceremony read it — with no wait on the positive TTL, which a test may not
+/// assert across (`e2e-conventions.md` point 14). Refusals stay cached and the
+/// synthesized loopback client is untouched; production builds no
+/// `test-hooks`, so the cache there is always on.
+#[cfg(feature = "test-hooks")]
+fn test_hook_skip_positive_cache() -> bool {
+    std::env::var_os("FAUNA_TEST_CLIENT_METADATA_NO_CACHE").is_some()
+}
+
+#[cfg(not(feature = "test-hooks"))]
+const fn test_hook_skip_positive_cache() -> bool {
+    false
 }
 
 /// The `jwks_uri` that still needs following, if any.

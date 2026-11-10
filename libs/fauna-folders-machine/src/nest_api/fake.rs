@@ -38,6 +38,11 @@ pub struct FakeFolderNestApi {
     /// Pre-set per-device-id place-set results, keyed by device_id hex.
     /// Any device not in the map succeeds.
     place_responses: Mutex<std::collections::HashMap<String, Result<(), FolderApiError>>>,
+    /// Whether the seam reports it can attest a born-public create.
+    can_attest: Mutex<bool>,
+    /// Make a successful create report its attestation failed, with this
+    /// detail ([`CreatedFolder::unattested`]).
+    unattested: Mutex<Option<String>>,
     calls: Mutex<Vec<FakeCall>>,
 }
 
@@ -75,6 +80,16 @@ impl FakeFolderNestApi {
         *self.create_response.lock().unwrap() = Some(r);
     }
 
+    /// Make the seam report it can (or cannot) attest a born-public create.
+    pub fn set_can_attest(&self, can: bool) {
+        *self.can_attest.lock().unwrap() = can;
+    }
+
+    /// Make every successful create report a failed attestation follow-up.
+    pub fn set_unattested(&self, detail: Option<String>) {
+        *self.unattested.lock().unwrap() = detail;
+    }
+
     /// Make the place-set for `device_id` return `r`.
     pub fn set_place_response(&self, device_id: &str, r: Result<(), FolderApiError>) {
         self.place_responses
@@ -102,7 +117,14 @@ impl super::FolderNestApi for FakeFolderNestApi {
             .unwrap_or_else(|| Ok(self.folder_rows.lock().unwrap().clone()))
     }
 
-    async fn create_folder(&self, req: CreateFolderRequest) -> Result<(), FolderApiError> {
+    fn can_attest_public(&self) -> bool {
+        *self.can_attest.lock().unwrap()
+    }
+
+    async fn create_folder(
+        &self,
+        req: CreateFolderRequest,
+    ) -> Result<CreatedFolder, FolderApiError> {
         let name = req.name.clone();
         self.calls
             .lock()
@@ -119,7 +141,9 @@ impl super::FolderNestApi for FakeFolderNestApi {
             let id = rows.iter().map(|r| r.id).max().unwrap_or(0) + 1;
             rows.push(FolderRow { id, name });
         }
-        result
+        result.map(|()| CreatedFolder {
+            unattested: self.unattested.lock().unwrap().clone(),
+        })
     }
 
     async fn set_place(&self, folder: &str, place: SetPlaceRequest) -> Result<(), FolderApiError> {

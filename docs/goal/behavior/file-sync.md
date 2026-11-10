@@ -397,6 +397,8 @@ re-drove a pull that reported itself unfinished on its next rescan tick
 (`PullPhase::Retry`), conditionally — still no standing nest poll. Re-pulling from an unmoved
 anchor is safe for exactly the reason the nudge-vs-reconnect overlap is, below.
 
+**The outbound half owes its retry driver too, and it is the converge pass (ruled 2026-11-07).** A local write whose upload or change record failed stays pending in the engine's rows (`LocallyModified`, or a not-recorded delete), and the one thing that re-drives it is `LocalWriteHost::converge` (drain, reconcile, `upload_pending`). Every engine root runs that pass at start, on every rescan tick, and on the reconnect edge after its pull — step 3's order: apply the nest's changes, then upload the queued local ones — so a write that failed while the socket was down reaches the nest as the socket returns, not up to a rescan interval later. A write that fails with the socket still up gets no earlier retry than the next tick, deliberately: with the plane connected, a failed nest call is a refusal or a fault on the nest's side, which an immediate retry would repeat rather than heal, and the failure logs name the whole error chain so its cause is read off the log rather than retried around. Revisit only if those logs show a transient, connected-socket failure class that the tick's latency genuinely hurts.
+
 Two consequences a future change must preserve:
 
 - **Any caller that hands the apply path a batch not drawn from the current
@@ -581,7 +583,9 @@ access model + UI: `../ui/folders.md` § Sharing; crypto: `../architecture/key-m
   rotation-commit custody ingest advances the current generation, never via a blind retry.
   That heal is what scopes the refusal: a **declassified** record on a `public`-audience
   folder has no generation to advance to and must not be re-sealed while public, so it is
-  exempt at the floor rather than refused (KMH § M2 owns the exemption and its bounds).
+  exempt at the floor rather than refused (KMH § M2 owns the exemption and its bounds);
+  and a **tombstone** carries no content stamp, so the floor judges it by its sealed
+  label's generation instead (KMH § M2 owns that arm too).
 - **Owner-pays metering + per-member caps.** The per-path size delta charges the **set
   owner's** `storage_bytes_used` regardless of who records (delete-reclaim already
   credits the owner — one payer keeps the arithmetic coherent, and it is the only shape
@@ -821,6 +825,25 @@ mid-life demotion now parks the set instead of retrying forever:
   bind-time mint verify (D3) — so a re-granted writer is one gesture away, and a
   still-revoked one is refused loudly at that gesture rather than parked again in
   silence.
+- **The files a demoted writer added stay on every seat — the owner's, every other
+  member's, and the demoted member's own pull side.** A demotion ends what the
+  member may record from then on, never what they recorded: their earlier rows
+  are admitted on every reader as a *former writer of record*'s, and the owner
+  removes those files, if wanted, by ordinary deletes. Owner:
+  `../architecture/writer-signed-change-records.md` ruling (12) (ruled and
+  built 2026-11-07 — its § Implementation status today names the build; the
+  witness is `tests/e2e-unified/tests/test_folder_writer_revocation.py`'s
+  `test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files`,
+  whose step 5 reads the owner's Media listing after the demotion).
+
+***Revocation on a capability host (ruled 2026-11-06; the shared-Rust half BUILT 2026-11-06, the android leg BUILT 2026-11-06 (its device witness on request), the apple leg — iOS and the macOS domain-only case — BUILT 2026-11-06 (its device witness on request) — what landed: [`on-demand-files-shared-sets.md`](on-demand-files-shared-sets.md) § Implementation status, the revocation-surface sentence).*** Since [`on-demand-files-shared-sets.md`](on-demand-files-shared-sets.md) § Shared sets on a capability host, decision 3, a capability host — the iOS and macOS File Provider domain, the android documents provider — is a WRITING seat for a writer member, so a member whose only presence is such a domain can be demoted mid-life, and the iron rule reaches it: a demotion there is never silent. The 2026-08-15 "N/A by construction" ruling for iOS and android below predates decision 3 and is retired for them (web alone stays N/A: it has no filesystem). The park takes the same shape as a bound location's, with four differences the host's control-inverted nature forces:
+
+- **The host learns the demotion itself, at its own row read — one shared-Rust decision for apple and android.** A capability host reads the set's row at every refresh and at every write's pre-seal edge (`fauna_sync_engine::binding_edge::edge_verdict`: access moved ⇒ rebuild). A rebuild whose basis read `writer` and whose fresh row reads `reader` IS the demotion — the basis being the resident engine's or, for a host process with none (an iOS extension is relaunched per request, so the demotion usually lands while no host runs), the access the set's last build persisted in the same state DB (`SyncDb::host_built_access`, written after each build and only once any mark that build owed is down, so a crash between the two marks at the next build): before it rebuilds read-only, the host persists a park mark on the set's own per-set state DB (`fauna_sync_engine::db`, the state the host and the app of one device already share — the app reads `set_unrecorded_rels` from it for the domain-removal gate). A nest refusal reaching the host first (a record or mint refused typed while the row read was stale — the `AccessGate` flip) writes the same mark. The mark is what makes the park durable across the extension being unloaded: nothing in a File Provider process survives a relaunch but its DB.
+- **A demoted domain parks as a READER'S host, not whole.** A bound location parks entirely (a directory the user can write behind the engine's back cannot stay bound as a reader — the engine leaves its loop); a domain is control-inverted, so the host rebuilds read-only and the set STAYS in Files / Finder: reads and pulls go on, the platform advertises no write, create, delete or rename, and a write the OS sends anyway is refused typed (`provider_face::ReadOnlyHost`; apple `CocoaError(.fileWriteNoPermission)`, android a read-only open refusal). "Sync stopped" therefore means the member's OWN changes: nothing of theirs leaves the device any more.
+- **Pending edits are kept and VISIBLE where the user looks — and they never drain until a re-grant.** Apple: the OS keeps the dirty content and keeps re-offering `modifyItem`, which the host refuses typed each time; android: the closed write's body stays in the host's kept root ("kept for the next sweep"), which a reader's sweep never ingests. On both, the owned tree serves a kept-root body before the cache (`provider_face::owned_tree::lookup_body`), so what the user saved is what Files / Finder / the picker shows, and `set_unrecorded_rels` lists it. Those bodies are the user's: the domain-removal gate ([`on-demand-files-apple.md`](on-demand-files-apple.md) § Multi-account × File Provider, consequence 2 — removal refused while un-recorded edits exist) stands on a parked domain, fail closed, so a hide toggle never discards them; the user copies an unsent file out through the platform's own file browser, or a re-grant uploads it.
+- **Recovery is the row reading `writer` again — no gesture, because a domain has none.** A bound location recovers only by a re-bind (the user's verified gesture; a park that could un-revoke itself would let a blip resurrect a parked engine). A domain's only gesture is the hide-only toggle, and the host re-reads the nest's own row at every edge, so the clear is keyed on a POSITIVE fact from the nest — the row reading `writer` — never on the absence of a refusal: at that edge the host clears the mark, rebuilds two-way, and the kept bodies drain (apple's OS queue re-offers them, android's sweep re-drives them), the write-token mint still the enforcement.
+
+**What the app shows, and how the park reaches it.** The member's row paints `folder-access-revoked-warning` — the one ID, every app, user-approved 2026-07-22 — heading the row's device-local section; on iOS and android, where a member's row carries no binding widget, it heads the row's `folder-on-demand-toggle`, the one device-local presence the row has. `fauna_folders_machine::binding_section` stays the ONE decision (owner or writer ⇒ bound; any parked presence ⇒ shown and warned, whatever the access now reads), its `parked` input on a capability-host app being the fold, in shared Rust, of (a) the host's persisted mark for any domain this device presents the set through, or (b) the row reading `reader` while that domain holds un-recorded rels — the state the mark names, caught even when the app refreshes before the host's next edge. **The app watches the park; it does not wait to be told** (as above): the fold runs on the app's folder-list refresh — the same refresh that turns the row's access to `reader`, since a demotion has no push — and on its presence reconcile; apple reads the host's DB through the app-group container, as the removal gate does, android in-process, and macOS unions the domain parks with the agent's bound-location parks, so a set shown in Finder without a bound location is covered too. **The wording:** the string reads "this location is no longer syncing", which a domain, still pulling, makes imprecise — the honest domain reading says the member's changes no longer sync and that N unsent changes are kept on this device. Two readings under one ID, chosen in shared Rust by presence kind as `folder-writer-published-warning` chooses its reading by reach, changes the element's "one i18n string" spec — a rule-A question put to the user; until it is answered the legs ship the existing string, true on its second half and, read as the member's own sync, on its first. **Witness:** ios and android arms of `test_folder_writer_revocation.py` whose member's second write goes through the domain (apple: the DEBUG `FileProviderTestCLI` `write` verb; android: `DocumentsContract` through the provider), asserting the warning on the member's row, the nest never recording the second file, the domain still serving the unsent body byte for byte, and the host's mark; plus a macOS arm whose member binds nothing and has the Finder toggle on.
 
 ***PROVEN end-to-end 2026-07-22 — the two-nest client-stack
 capstone.*** `bins/fauna-sync-agent/tests/cross_nest_agent_capstone.rs` (tier_3,
@@ -959,8 +982,11 @@ deleted so their next `changes.record` is refused (reader default) — is pinned
 **Still open (per-app UI fan-out is owned by `../ui/folders.md` § Sharing,
 don't restate its table here):** the SAME-NEST per-app writer-binding fan-out
 closed 2026-08-26 — every app with any location binding to gate (linux, macOS,
-tui, windows) renders it; android/web/iOS are N/A by construction, ruled
-2026-08-15 in the owner doc. Still open: the CROSS-NEST writer app leg on the
+tui, windows) renders it; web is N/A by construction (ruled 2026-08-15 in the
+owner doc; no filesystem), and iOS, android and a macOS set shown in Finder
+without a bound location — capability hosts, writing seats since decision 3 —
+owe the revoked-park surface ruled above (*Revocation on a capability host*,
+2026-11-06; unbuilt, rows), their 2026-08-15 N/A retired. Still open: the CROSS-NEST writer app leg on the
 six apps other than linux — linux's own leg (discovery, bind, revoked-park) is
 BUILT per the § status above, leaving only its Media resolver open, per
 `../ui/folders.md` § Sharing's own status line.

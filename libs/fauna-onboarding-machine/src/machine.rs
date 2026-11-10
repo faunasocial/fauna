@@ -264,6 +264,21 @@ struct AgeNonceMint {
     attestation_platforms: Vec<String>,
 }
 
+/// One update-channel radio on the VPS-config page — what an app needs to
+/// render and key the row, with no per-app channel table
+/// (`OnboardingMachine::update_channel_rows`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UpdateChannelRow {
+    pub channel: fauna_provisioning::cloud_init::UpdateChannel,
+    /// The id `vps-config-update-channel-row[<id>]` is keyed by.
+    pub id: String,
+    /// The i18n key of the row's label.
+    pub label_key: String,
+    /// The i18n key of the row's description (no-build / compat-line / plain).
+    pub description_key: String,
+}
+
 /// The SSH door key a run minted (`installers/vps.md` § The SSH door → *The
 /// key*). `private_key` is `Some` only where it waits for its one hand-over —
 /// on a desktop app it went to `~/.ssh` at mint and the machine kept nothing.
@@ -684,13 +699,13 @@ impl OnboardingMachine {
     }
 
     /// Start [`Self::probe_channel_availability`] in the background on entering
-    /// `vps_config` ([`crate::background::spawn_background`]: the machine's own
+    /// `vps_config` ([`fauna_sleep::spawn_background`]: the machine's own
     /// runtime, whatever the caller's).
     pub(crate) fn spawn_channel_probe(&self) {
         let Some(me) = self.self_ref.upgrade() else {
             return;
         };
-        crate::background::spawn_background(me.probe_channel_availability());
+        fauna_sleep::spawn_background(me.probe_channel_availability());
     }
 
     /// Read every update channel's head from the registry and rest the result
@@ -751,7 +766,7 @@ impl OnboardingMachine {
         let Some(me) = self.self_ref.upgrade() else {
             return;
         };
-        crate::background::spawn_background(me.refresh_vps_offers());
+        fauna_sleep::spawn_background(me.refresh_vps_offers());
     }
 
     /// Re-list the curated offers for `vps.selected_location_id` and rest them
@@ -2659,6 +2674,23 @@ impl OnboardingMachine {
         })
     }
 
+    /// Every update-channel radio, in `UpdateChannel::ALL` order, each with the
+    /// id its `vps-config-update-channel-row[<id>]` is keyed by, its label's
+    /// i18n key and its description's i18n key
+    /// ([`Self::update_channel_description_key_for_row`]). Apps render this list
+    /// and keep no channel→id or channel→label table of their own.
+    pub fn update_channel_rows(&self) -> Vec<UpdateChannelRow> {
+        fauna_provisioning::cloud_init::UpdateChannel::ALL
+            .into_iter()
+            .map(|channel| UpdateChannelRow {
+                channel,
+                id: channel.id().to_string(),
+                label_key: channel.label_key().to_string(),
+                description_key: self.update_channel_description_key_for_row(channel),
+            })
+            .collect()
+    }
+
     /// Fields visible on the vps_config form. Filters the selected VPS
     /// provider's fields by `FieldMeta::kinds` containing `Capability::Vps`.
     /// Mirrors `visible_dns_fields()` so per-app view code is a one-liner
@@ -4084,7 +4116,7 @@ impl OnboardingMachine {
     }
 
     /// Read the joining nest's rules in the background
-    /// ([`crate::background::spawn_background`]), replacing any earlier read's.
+    /// ([`fauna_sleep::spawn_background`]), replacing any earlier read's.
     pub(crate) fn spawn_joining_rules_read(&self) {
         self.clear_joining_rules();
         let Some(me) = self.self_ref.upgrade() else {
@@ -4092,7 +4124,7 @@ impl OnboardingMachine {
         };
         let generation = self.joining_rules.lock().unwrap().generation;
         let base_url = self.effective_nest_url();
-        crate::background::spawn_background(me.read_joining_rules(generation, base_url));
+        fauna_sleep::spawn_background(me.read_joining_rules(generation, base_url));
     }
 
     /// One read: the nest's self-description over the anonymous connection,
@@ -5200,18 +5232,26 @@ impl OnboardingMachine {
                 .resolve_not_found_recheck(&nest_url, &secret, &pending_request_id)
                 .await;
         }
+        // A nest the poll cannot reach (stopped, connection refused, trust
+        // trouble with no pin held) is no verdict on the request: it stays
+        // pending and the next tick asks again — the same rule as the not-found
+        // probe's unreachable arm. An `Error` here would strand the request,
+        // because this function proceeds only from `PendingReview`
+        // (`onboarding.md` § The pending-invite surface).
+        if matches!(
+            recheck,
+            Err(crate::nest_api::InviteRequestError::Transient { .. })
+        ) {
+            return self.restore_pending_review(&pending_request_id);
+        }
 
         let next_state = match recheck {
             Ok(resp) => state_from_resp(resp),
             Err(crate::nest_api::InviteRequestError::NotFound) => {
                 unreachable!("handled by the registered-probe branch above")
             }
-            Err(crate::nest_api::InviteRequestError::Transient { cause }) => {
-                InviteRequestState::Error {
-                    transient: true,
-                    context: ErrorContext::Rechecking,
-                    cause,
-                }
+            Err(crate::nest_api::InviteRequestError::Transient { .. }) => {
+                unreachable!("handled by the unreachable-nest branch above")
             }
             Err(crate::nest_api::InviteRequestError::Malformed { cause }) => {
                 InviteRequestState::Error {
@@ -8916,11 +8956,17 @@ impl OnboardingMachine {
         // No nest URL is not a refusal: this device's own store may hold the
         // box (the surviving device whose only nest is the dead box), and the
         // reader joins it with a cold read whenever a nest URL is given.
-        let nest_url = Some(snapshot.nest_url.as_str()).filter(|u| !u.is_empty());
+        // The read DIALS the nest, so it goes through the one dial face every
+        // other nest dial does (`resolved_nest_dial_url`): the identity of the
+        // URL stays the typed one, only the socket may move — the identity
+        // function in a production build.
+        let nest_url = Some(snapshot.nest_url.as_str())
+            .filter(|u| !u.is_empty())
+            .map(fauna_launch_machine::resolved_dial_url);
 
         let reader = self.recovery_config_reader.read().unwrap().clone();
         let input = reader
-            .resolve(nest_url, &owner_secret, &nest_actor_id_hex)
+            .resolve(nest_url.as_deref(), &owner_secret, &nest_actor_id_hex)
             .await
             .map_err(|e| OnboardingError::ProvisioningFailed {
                 step: "recovery-config".into(),
@@ -11799,6 +11845,21 @@ mod tests {
             fresh.update_channel_description_key_for_row(UpdateChannel::Dev),
             UpdateChannel::Dev.description_key()
         );
+        // The row list is the shared ALL order with each channel's own id,
+        // label key and the row getter's description key.
+        let rows = fresh.update_channel_rows();
+        assert_eq!(
+            rows.iter().map(|r| r.channel).collect::<Vec<_>>(),
+            UpdateChannel::ALL.to_vec()
+        );
+        for r in &rows {
+            assert_eq!(r.id, r.channel.id());
+            assert_eq!(r.label_key, r.channel.label_key());
+            assert_eq!(
+                r.description_key,
+                fresh.update_channel_description_key_for_row(r.channel)
+            );
+        }
         // An explicit choice is kept whatever the registry says.
         fresh.set_provision_update_channel(UpdateChannel::Stable);
         assert_eq!(fresh.provision_update_channel(), UpdateChannel::Stable);

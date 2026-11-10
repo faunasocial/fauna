@@ -14,7 +14,7 @@ in readable units. No limit is ever silent.
 
 ## Coverage contract
 
-Stamped 2026-09-22 at e9f79fdf25.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] Your quota shows with live values from the nest — `docs/goal/ui/status.md` § Layout & flow
    - `tests/e2e-unified/tests/test_settings.py::test_quota_section`
@@ -50,6 +50,16 @@ Stamped 2026-09-22 at e9f79fdf25.
    - `tests/e2e-unified/tests/test_feature_limits.py::test_the_editor_writes_disable_offline_and_are_never_queued`
 14. [nest] Once your storage is full, a new calendar event is refused and saves nothing, while making one smaller still works — `docs/goal/behavior/caldav-server.md` § Enforcement points
    - `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_an_event_past_the_storage_ceiling_is_refused_and_moves_nothing`
+15. [nest] An operation you are denied or have used up is refused by your nest with its feature, the tier that set the limit and, for a quota, the window, the limit and what you used — `docs/goal/architecture/dynamic-features.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_a_denied_operation_is_refused_naming_its_feature_and_tier`
+   - `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_a_used_up_quota_is_refused_naming_its_window_limit_and_use`
+16. [nest] With payments denied or used up, connecting a provider, pricing a tier, paywalling a post and minting or redeeming a claim are refused, undoing any of them never is, and a refused zap still lands as a tip — `docs/goal/architecture/dynamic-features.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_with_payments_denied_the_adds_are_refused_and_the_undos_never_are`
+   - `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_with_payments_used_up_a_zap_meeting_the_price_still_lands_as_a_tip`
+   - `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_with_payments_allowed_the_same_zap_is_a_purchase_not_a_tip`
+17. [nest] Once your storage is full a new contact card, or an emailed invitation, is refused too, while a lower limit on the number of messages never refuses an event or a card — `docs/goal/behavior/caldav-server.md` § QUOTA — shared with IMAP
+   - `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_a_full_account_refuses_a_new_card_and_leaves_an_emailed_invitation_unplaced`
+   - `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_a_lower_message_limit_never_refuses_an_event_or_a_card`
 
 ## Status
 
@@ -65,6 +75,8 @@ Stamped 2026-09-22 at e9f79fdf25.
 | ios | ⚠ partial | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+b6bf85de standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -88,4 +100,11 @@ Stamped 2026-09-22 at e9f79fdf25.
 | 13 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_you_set_your_own_limit_and_the_row_above_binds_without_renavigating` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_the_editor_writes_disable_offline_and_are_never_queued` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_an_event_past_the_storage_ceiling_is_refused_and_moves_nothing` | nest (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_a_denied_operation_is_refused_naming_its_feature_and_tier` | nest (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_a_used_up_quota_is_refused_naming_its_window_limit_and_use` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_with_payments_denied_the_adds_are_refused_and_the_undos_never_are` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_with_payments_used_up_a_zap_meeting_the_price_still_lands_as_a_tip` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_feature_gate_refusals.py::test_with_payments_allowed_the_same_zap_is_a_purchase_not_a_tip` | nest (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_a_full_account_refuses_a_new_card_and_leaves_an_emailed_invitation_unplaced` | nest (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_a_lower_message_limit_never_refuses_an_event_or_a_card` | nest (linux): passed |
 <!-- features-render:end -->

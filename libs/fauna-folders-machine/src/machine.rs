@@ -23,7 +23,8 @@ use crate::snapshots::{
     DevicePlacesSnapshot, EnrolledDeviceSummary, FolderWizardSnapshot, NameSnapshot, ReviewSnapshot,
 };
 use crate::state::{
-    DeviceOption, FolderWizardStep, RetentionPolicy, State, SubmitPhase, WizardDevice,
+    AUDIENCE_PUBLIC, DeviceOption, FolderWizardStep, RetentionPolicy, State, SubmitPhase,
+    WizardDevice, normalize_audience,
 };
 use fauna_protocol::folders::PlaceFlags;
 
@@ -36,6 +37,15 @@ const CREATE_ERROR_KEY: &str = "devices.wizard.create_error";
 /// from `CREATE_ERROR_KEY` because the create succeeded; the structured
 /// `ReviewSnapshot::{created, failed_members}` fields disambiguate further.
 const MEMBER_ERROR_KEY: &str = "devices.wizard.create_member_error";
+/// i18n key for a born-public create whose attesting follow-up update failed
+/// ("Folder created, but making it public did not finish: {message}…"). The
+/// folder EXISTS, public and unattested — every seat reads such a row as
+/// sealed (the verifier's fail-safe) and the owner row paints it
+/// `folder-audience-unattested` with the re-confirm door, which heals it
+/// (`ui/folders.md` § Audience and website serving → *Born public*, ruling 3).
+/// A partial failure like [`MEMBER_ERROR_KEY`]: `created` stays true and a
+/// retry never re-sends the create.
+const ATTEST_ERROR_KEY: &str = "devices.wizard.create_attest_error";
 
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct FolderWizardMachine {
@@ -59,8 +69,14 @@ impl FolderWizardMachine {
         available_devices: Vec<DeviceOption>,
         nest_api: Arc<dyn FolderNestApi>,
     ) -> Arc<Self> {
+        // Whether the seam can attest is fixed for its life (it holds the
+        // owner's identity key or it does not), so it is read once here.
+        let audience_offered = nest_api.can_attest_public();
         Arc::new(Self {
-            state: Mutex::new(State::new(to_wizard_devices(available_devices))),
+            state: Mutex::new(State::new(
+                to_wizard_devices(available_devices),
+                audience_offered,
+            )),
             observer,
             nest_api,
         })
@@ -103,6 +119,42 @@ impl FolderWizardMachine {
 
     pub fn set_name(&self, name: String) {
         self.mutate(|s| s.name = name);
+    }
+
+    /// The Name step's `wizard-audience-select` — `private` or `public`
+    /// (`ui/folders.md` § Audience and website serving → *Born public*).
+    /// Normalized as an unbound folder's value: anything but `public` is
+    /// `private` (fail-closed; `shared` is entered by sharing, never at
+    /// create). Ignored on a seam that cannot attest — the select is not
+    /// offered there, and a public create it cannot attest is refused. Any
+    /// change disarms a pending declassify confirm.
+    pub fn set_audience(&self, audience: String) {
+        self.mutate(|s| {
+            if s.audience_offered {
+                s.audience = normalize_audience(&audience, false);
+                s.declassify_armed = false;
+            }
+        });
+    }
+
+    /// Answer the declassify confirm `submit()` armed on a Public wizard:
+    /// create the folder public — the create, then the owner's attestation
+    /// over the id it mints, in the shared create site. No-op (returns the
+    /// current step) unless armed.
+    pub async fn confirm_public_create(&self) -> FolderWizardStep {
+        {
+            let mut s = self.state.lock().unwrap();
+            if !s.declassify_armed {
+                return s.step;
+            }
+            s.declassify_armed = false;
+        }
+        self.commit().await
+    }
+
+    /// Dismiss the declassify confirm: back to Review, nothing created.
+    pub fn cancel_public_create(&self) {
+        self.mutate(|s| s.declassify_armed = false);
     }
 
     /// Toggle whether device `index` (into the device list) is enrolled.
@@ -158,9 +210,17 @@ impl FolderWizardMachine {
         });
     }
 
-    /// Step back one. No-op on the first step / terminal.
+    /// Step back one. No-op on the first step / terminal. While the
+    /// declassify confirm is armed, Back is its cancel and stays on Review
+    /// (the same as [`Self::cancel_public_create`]) — so a dialog painted
+    /// without a cancel control of its own still has one, and no stale arm
+    /// is ever carried back to a later Review.
     pub fn back(&self) {
         self.mutate(|s| {
+            if s.declassify_armed {
+                s.declassify_armed = false;
+                return;
+            }
             s.step = match s.step {
                 FolderWizardStep::Devices => FolderWizardStep::Name,
                 FolderWizardStep::Review => FolderWizardStep::Devices,
@@ -179,9 +239,41 @@ impl FolderWizardMachine {
     ///
     /// No-op (returns the current step) unless invoked on `Review` with a valid
     /// name.
+    ///
+    /// **On a Public wizard not yet created, Create is not the commit**: it
+    /// arms the declassify confirm (`ReviewSnapshot::declassify_armed`) and
+    /// sends nothing; [`Self::confirm_public_create`] commits
+    /// (`ui/folders.md` § Audience and website serving → *Born public*,
+    /// ruling 2). A retry after a partial failure commits directly — the
+    /// folder already exists, and the owner consented when it was created.
     pub async fn submit(&self) -> FolderWizardStep {
+        {
+            let mut s = self.state.lock().unwrap();
+            if s.step != FolderWizardStep::Review || !s.name_valid() {
+                return s.step;
+            }
+            if s.is_public() && !s.created {
+                if !s.declassify_armed
+                    && !matches!(s.submit_phase, SubmitPhase::Submitting | SubmitPhase::Done)
+                {
+                    s.declassify_armed = true;
+                    drop(s);
+                    self.observer.on_changed();
+                }
+                return FolderWizardStep::Review;
+            }
+        }
+        self.commit().await
+    }
+}
+
+// ── Internal helpers (not FFI-exported: closures / Arc<dyn> have no ABI) ──
+impl FolderWizardMachine {
+    /// The commit `submit()` and `confirm_public_create()` share: create (with
+    /// the chosen audience), then enroll the pending members.
+    async fn commit(&self) -> FolderWizardStep {
         // Phase 1: validate + snapshot inputs under the lock.
-        let (name, retention, conflict_policy, already_created, selected) = {
+        let (name, retention, conflict_policy, audience, already_created, selected) = {
             let mut s = self.state.lock().unwrap();
             if s.step != FolderWizardStep::Review || !s.name_valid() {
                 return s.step;
@@ -198,6 +290,9 @@ impl FolderWizardMachine {
                 s.name.clone(),
                 s.retention,
                 s.default_conflict_policy.clone(),
+                // Only `public` rides the wire; a private create sends no
+                // audience and rests on the nest's default.
+                s.is_public().then(|| AUDIENCE_PUBLIC.to_string()),
                 s.created,
                 selected,
             )
@@ -205,6 +300,9 @@ impl FolderWizardMachine {
         self.observer.on_changed();
 
         // Phase 2: create (skip if a prior partial-failure submit already did).
+        // A born-public create whose attestation failed still LANDED: the
+        // members are enrolled as usual and the failure settles below.
+        let mut unattested: Option<String> = None;
         if !already_created {
             let req = CreateFolderRequest {
                 name: name.clone(),
@@ -213,12 +311,14 @@ impl FolderWizardMachine {
                 // (`ui/folders.md` § Photo backup).
                 retention_policy: retention,
                 conflict_policy,
+                audience,
             };
             match self.nest_api.create_folder(req).await {
-                Ok(()) => {
+                Ok(created) => {
                     let mut s = self.state.lock().unwrap();
                     s.created = true;
                     s.pending_member_ids = selected.iter().map(|(id, _)| id.clone()).collect();
+                    unattested = created.unattested;
                 }
                 Err(e) => {
                     // Producer-side log for the reactive `error-message` banner:
@@ -262,7 +362,20 @@ impl FolderWizardMachine {
         }
 
         // Phase 4: settle.
-        if still_pending.is_empty() {
+        if still_pending.is_empty()
+            && let Some(detail) = unattested
+        {
+            // The folder exists, public and unattested: a partial failure, as a
+            // member-add failure is (see `ATTEST_ERROR_KEY`).
+            let err = submit_error(ATTEST_ERROR_KEY, &detail);
+            tracing::warn!(target: "fauna_folders", "{}", err.log_line());
+            self.mutate(|s| {
+                s.pending_member_ids.clear();
+                s.submit_phase = SubmitPhase::Failed;
+                s.error = Some(err);
+            });
+            FolderWizardStep::Review
+        } else if still_pending.is_empty() {
             self.mutate(|s| {
                 s.pending_member_ids.clear();
                 s.submit_phase = SubmitPhase::Done;
@@ -284,10 +397,7 @@ impl FolderWizardMachine {
             FolderWizardStep::Review
         }
     }
-}
 
-// ── Internal helpers (not FFI-exported: closures / Arc<dyn> have no ABI) ──
-impl FolderWizardMachine {
     /// Stamp a retention policy onto the create — a PRESET's gesture, never a
     /// wizard step: a plain create stamps none (`ui/folders.md` § Photo
     /// backup). Crate-internal because the only caller is
@@ -334,6 +444,8 @@ pub(crate) fn build_name(s: &State) -> NameSnapshot {
     NameSnapshot {
         name: s.name.clone(),
         continue_enabled: s.name_valid(),
+        audience: s.audience.clone(),
+        audience_offered: s.audience_offered,
     }
 }
 
@@ -380,5 +492,7 @@ fn build_review(s: &State) -> ReviewSnapshot {
         created: s.created,
         failed_members,
         error: s.error.clone(),
+        audience: s.audience.clone(),
+        declassify_armed: s.declassify_armed,
     }
 }

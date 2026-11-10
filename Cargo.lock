@@ -3892,10 +3892,10 @@ dependencies = [
  "anyhow",
  "clap",
  "fauna-ipc",
+ "fauna-log",
  "fauna-mda-supervisor",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "windows-service",
 ]
 
@@ -4086,6 +4086,7 @@ dependencies = [
  "fauna-client-config",
  "fauna-client-conversations-oracle",
  "fauna-client-core",
+ "fauna-client-folders",
  "fauna-client-pair",
  "fauna-client-search",
  "fauna-client-sync",
@@ -5112,6 +5113,7 @@ dependencies = [
  "fauna-media",
  "fauna-mls",
  "fauna-peer-share",
+ "fauna-protocol",
  "fauna-uniffi-async",
  "futures-util",
  "getrandom 0.3.4",
@@ -5300,6 +5302,7 @@ dependencies = [
  "fauna-labeler",
  "fauna-media",
  "fauna-protocol",
+ "fauna-sleep",
  "fauna-text-model",
  "hex",
  "serde",
@@ -5390,6 +5393,7 @@ dependencies = [
  "fauna-client-status",
  "fauna-client-subscriptions",
  "fauna-client-sync",
+ "fauna-client-testkit",
  "fauna-client-web",
  "fauna-conversations",
  "fauna-core",
@@ -5715,6 +5719,7 @@ dependencies = [
  "fauna-client-status",
  "fauna-client-subscriptions",
  "fauna-client-sync",
+ "fauna-client-testkit",
  "fauna-client-web",
  "fauna-conversations",
  "fauna-core",
@@ -6577,6 +6582,7 @@ dependencies = [
 name = "fauna-sleep"
 version = "0.1.0"
 dependencies = [
+ "fauna-core",
  "gloo-timers 0.4.0",
  "tokio",
 ]

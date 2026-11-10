@@ -707,6 +707,182 @@ def test_no_one_else_on_the_nest_can_read_or_change_your_calendar(
     )
 
 
+# ── calendar-in-standard-apps 29 ─────────────────────────────────────────────
+
+
+def _propfind_href(app: CalDAVClient, url: str, prop: str, ns: str) -> str | None:
+    """PROPFIND Depth:0 one property at ``url`` (redirects followed, as a
+    calendar app's HTTP stack does) and return the ``href`` inside it."""
+    import xml.etree.ElementTree as ET
+
+    body = (
+        f'<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:p="{ns}">'
+        f"<d:prop><p:{prop}/></d:prop></d:propfind>"
+    )
+    resp = app.raw("PROPFIND", url, headers={"Depth": "0"}, data=body)
+    assert resp.status_code == 207, f"PROPFIND {prop} at {url}: {resp.status_code} {resp.text[:300]}"
+    el = ET.fromstring(resp.content).find(f".//{{{ns}}}{prop}/{{DAV:}}href")
+    return el.text.strip() if el is not None and el.text else None
+
+
+@pytest.mark.feature("calendar-in-standard-apps")
+def test_given_only_your_domain_a_calendar_app_finds_the_calendar_server(
+    mail_bridge_mda, nest_instance,
+):
+    """`caldav-server.md` § Network exposure (and § Network exposure — SRV
+    autodiscovery): from nothing but the bare domain, every hop of a calendar
+    app's automatic setup leads to the calendars —
+
+      1. the nest publishes `_caldavs._tcp.<domain> SRV 0 1 443 mail.<domain>.`
+         (RFC 6764 — the record a calendar app's automatic setup queries);
+      2. the bare domain's `https://<domain>/.well-known/caldav` answers `301`
+         to the mail host's own well-known (cross-host bootstrapping: the
+         unauthenticated apex cannot know the user);
+      3. the mail host's well-known, signed in, names the user's principal,
+         whose calendar home is the one that serves the calendars.
+
+    DNS itself is not resolved here (tier_3 has no resolver); hop 1 witnesses
+    the record the nest publishes, and hops 2–3 follow what it serves. This is
+    the routed box — the one the outcome's "mail host" names; a direct-listener
+    box withholds the SRV and names the request's own host instead, pinned by
+    the nest's `dns_handlers::dav_srv_rows_follow_the_dav_listener_shape` and
+    `well_known_dav` tests (a test nest cannot boot with the artifact's
+    listener hatch). The contacts twin is
+    `test_carddav_nest_outcomes.py::test_given_only_an_email_address_a_contacts_app_finds_the_address_book`.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    handle = mail_bridge_mda
+    domain = handle.domain
+    admin = nest_instance["admin"]
+    with WsRpcAdminClient(nest_instance["url"], actor_id=bytes(admin["signing_key"].verify_key),
+                          signing_key=bytes(admin["signing_key"])) as admin_ws:
+        domains = admin_ws.call("fauna.dns.list_records", {"domain": domain})["domains"]
+    records = [r for d in domains for r in d["records"]]
+    srv = [r for r in records if r["record_type"] == "SRV"
+           and r["name"].rstrip(".") == f"_caldavs._tcp.{domain}"]
+    assert srv, f"no _caldavs SRV record is published for {domain}: {records}"
+    assert srv[0]["expected"].split() == ["0", "1", "443", f"mail.{domain}."], srv[0]
+
+    status, location = _apex_dav(nest_instance, "caldav")
+    assert status == 301, f"the bare domain's well-known must 301; got {status} → {location}"
+    assert location == f"https://mail.{domain}/.well-known/caldav", (
+        f"the bare domain must send the app to the mail host's well-known; got {location}"
+    )
+
+    # Hop 3 at the mail host (loopback stands in for mail.<domain>).
+    app = _caldav(handle, handle.recipient_username, handle.recipient_password)
+    principal = _propfind_href(app, app._abs("/.well-known/caldav"),
+                               "current-user-principal", "DAV:")
+    assert principal, "the mail host's well-known named no principal for the signed-in user"
+    home = _propfind_href(app, app._abs(principal), "calendar-home-set",
+                          "urn:ietf:params:xml:ns:caldav")
+    assert home and app._abs(home).rstrip("/") == app.home.rstrip("/"), (
+        f"the discovered calendar home {home!r} is not the user's ({app.home})"
+    )
+    assert app.list_calendars(), "the discovered calendar home serves no calendar"
+
+
+# ── calendar-in-standard-apps 31 ─────────────────────────────────────────────
+
+
+@pytest.mark.feature("calendar-in-standard-apps")
+def test_a_calendar_app_cannot_send_invitations_in_someone_elses_name(
+    mail_bridge_mda, dav_user,
+):
+    """`caldav-server.md` § Scheduling & invitations — the auto-schedule
+    gateway fans out only for the signed-in organizer, and the nest admits the
+    MDA's enqueue only as the one organizer whose session it is inside. A user's
+    calendar app stores an event naming a colleague as its ORGANIZER and a third
+    user as attendee: no invitation goes out in the colleague's name. The same
+    user's genuine invitation, stored after it, reaches the attendee — so by the
+    time it lands, the forged one had its chance and must be nowhere.
+    """
+    handle = mail_bridge_mda
+    forger_user, forger_pw, _ = dav_user("cal-forger")
+    victim_user, _victim_pw, _ = dav_user("cal-named")
+    att_user, att_pw, _ = dav_user("cal-att")
+    forger = _caldav(handle, forger_user, forger_pw)
+    cal = forger.personal_calendar()
+
+    forged_uid = f"forged-invite-{secrets.token_hex(6)}"
+    forger.put_event(cal, forged_uid, build_invite_vevent(
+        forged_uid, "Sent in your name", "20361109T090000Z", "20361109T100000Z",
+        victim_user, [att_user],
+    ))
+    genuine_uid = f"genuine-invite-{secrets.token_hex(6)}"
+    forger.put_event(cal, genuine_uid, build_invite_vevent(
+        genuine_uid, "Sent in my own name", "20361110T090000Z", "20361110T100000Z",
+        forger_user, [att_user],
+    ))
+
+    attendee = _caldav(handle, att_user, att_pw)
+    _calendar_event_containing(attendee, genuine_uid)
+    assert attendee.get_event(attendee.personal_calendar(), forged_uid) is None, (
+        "an invitation naming someone else as organizer reached the attendee's calendar"
+    )
+    leaked = [m for m in _inbox_messages(handle, att_user, att_pw) if forged_uid in m]
+    assert not leaked, f"an invitation was mailed in someone else's name:\n{leaked[0][:600]}"
+
+
+# ── calendar-in-standard-apps 32 ─────────────────────────────────────────────
+
+
+@pytest.mark.feature("calendar-in-standard-apps")
+def test_copying_an_event_honours_the_calendar_apps_conditions(mail_bridge_mda, dav_user):
+    """`caldav-server.md` § Write surface (the MOVE/COPY rows) / § Atomicity
+    rule: a COPY between the user's own calendars lands the event in both; a
+    COPY the app sent with `Overwrite: F` onto a destination already holding the
+    event is refused `412` and leaves it as it was; a MOVE or COPY whose
+    destination lies outside the user's calendars — another user's calendar —
+    is refused `403` and nothing reaches it. (The MOVE half of the write
+    surface is `test_moving_an_event_moves_it_and_a_failed_move_leaves_it`.)
+    """
+    handle = mail_bridge_mda
+    user, pw, _ = dav_user("cal-copy")
+    other_user, other_pw, _ = dav_user("cal-copy-other")
+    app = _caldav(handle, user, pw)
+    home = app.personal_calendar()
+    work = app.mkcalendar(f"work-{secrets.token_hex(4)}", displayname="Work")
+    uid = f"copy-{secrets.token_hex(6)}"
+    app.put_event(home, uid, _event(uid, "Copied to Work"))
+    source = app.href_for_uid(home, uid)
+    name = source.rstrip("/").rsplit("/", 1)[1]
+
+    copied = app.raw("COPY", source, headers={"Destination": f"{work}{name}", "Overwrite": "F"})
+    assert copied.status_code == 201, (
+        f"COPY between the user's own calendars must create the copy; got "
+        f"{copied.status_code} {copied.text[:300]}"
+    )
+    assert "SUMMARY:Copied to Work" in (app.get_event(work, uid) or ""), "the copy is not in Work"
+    assert "SUMMARY:Copied to Work" in (app.get_event(home, uid) or ""), "COPY removed the source"
+
+    # Change the source, then COPY it over the existing copy with Overwrite: F.
+    app.put_event(home, uid, _event(uid, "Edited after the copy"),
+                  if_match=app.etag_for_uid(home, uid))
+    again = app.raw("COPY", source, headers={"Destination": f"{work}{name}", "Overwrite": "F"})
+    assert again.status_code == 412, (
+        f"COPY with Overwrite: F onto an existing event must be refused 412; got "
+        f"{again.status_code} {again.text[:300]}"
+    )
+    assert "SUMMARY:Copied to Work" in (app.get_event(work, uid) or ""), (
+        "a refused overwrite must leave the destination's event as it was"
+    )
+
+    theirs = _caldav(handle, other_user, other_pw)
+    their_cal = theirs.personal_calendar()
+    for method in ("COPY", "MOVE"):
+        resp = app.raw(method, source, headers={"Destination": f"{their_cal}{name}"})
+        assert resp.status_code == 403, (
+            f"a {method} into another user's calendar must be refused 403; got "
+            f"{resp.status_code} {resp.text[:300]}"
+        )
+    assert theirs.get_event(their_cal, uid) is None, "a refused COPY/MOVE reached another user"
+    assert "SUMMARY:Edited after the copy" in (app.get_event(home, uid) or ""), (
+        "a refused MOVE must leave the source event in place"
+    )
+
+
 # ── admin-calendar-contacts-files 4, 6 and 7 ─────────────────────────────────
 #
 # The admin's per-service switches, witnessed at the running MDA. Each test

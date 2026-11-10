@@ -12,8 +12,11 @@
 //!   client key speaks for which principal. The row is never the authority.
 //! * [`authorize`] — run by `bunker::handle_request` for every request whose
 //!   author is no invite-roster app. It re-resolves, **per request**, the
-//!   principal row and the owner's live `identity.op` grant to the
-//!   principal's attested key, so revoking either refuses the very next call.
+//!   principal row, the account's external-apps switch and the owner's live
+//!   `identity.op` grant to the principal's attested key, so revoking or
+//!   pausing refuses the very next call (the account's own authority —
+//!   suspension, lockout — is read before it at the signer's door, for every
+//!   author: `bunker::account_stands`).
 //!   Then the class-specific policy (the sign_event kind set) and the rate
 //!   ceiling. Every refusal answers the same `unauthorized` (the ceiling:
 //!   `rate-limited`) — never which check failed.
@@ -167,6 +170,17 @@ pub fn authorize(
         return Ok(Err(Unauthorized));
     };
 
+    // The external-apps switch, read now, as every other principal door
+    // reads it (`principal_handlers::resolve_principal`): OFF pauses every
+    // external app, this bound client included (`atproto-pds-full.md` § F1
+    // detail, the kill-switch bullet). Here, not per method, so `connect` is
+    // refused too. The account's authority (a missing, suspended or
+    // locked-out account) was already refused at the signer's door for every
+    // author alike (`bunker::account_stands`).
+    if !external_apps_on(conn, &owner)? {
+        return Ok(Err(Unauthorized));
+    }
+
     let class = match req.method.oracle_class() {
         Err(_) => return Ok(Err(Unauthorized)),
         Ok(None) => {
@@ -223,6 +237,22 @@ pub fn authorize(
         client_id,
         class: Some(class),
     }))
+}
+
+/// Is the account's external-apps switch ON (no settings row = ON, as
+/// `get_atproto_external_apps_enabled` reads it)? The account's authority —
+/// the `users` row, suspension, lockout — is not read here: the signer's door
+/// reads it once for every author, roster app or principal's client
+/// (`bunker::account_stands`), before this module is asked anything.
+fn external_apps_on(conn: &Connection, owner: &[u8]) -> Result<bool> {
+    let enabled: Option<i64> = conn
+        .query_row(
+            "SELECT external_apps_enabled FROM atproto_account_settings WHERE actor_id = ?1",
+            params![owner],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(enabled.is_none_or(|v| v != 0))
 }
 
 /// The per-operation detail recorded beside the class: the event kind for

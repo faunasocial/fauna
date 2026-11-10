@@ -88,6 +88,7 @@ from helpers.photo_backup import (
     await_photo_in_media,
     await_quiet,
     enable_photo_backup,
+    fixture_creates,
     granted,
     png_chunks,
     photo_library_set,
@@ -99,19 +100,6 @@ pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.ios,
 ]
-
-
-#: Above any copy of the one-pixel fixtures and below every stock photo the
-#: simulator's library ships (megabytes) — see the selection in the test.
-FIXTURE_CEILING_B = 64 * 1024
-
-
-def _creates_above(port: int, secret_key: str, folder: str, seq: int) -> list[dict]:
-    changes = sync_changes_list(
-        port, secret_key=secret_key, folder=folder,
-    ).get("changes", [])
-    return [c for c in changes
-            if c.get("seq", 0) > seq and c.get("change_type") == "create"]
 
 
 @pytest.mark.feature("photo-backup")
@@ -185,28 +173,25 @@ def test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone(
     # them. They are picked out by size instead — both fixtures are a single
     # pixel (under 200 B), the stock photos are megabytes, and any copy the
     # ingress could make of a one-pixel PNG, re-encoded or not, stays far under
-    # `FIXTURE_CEILING_B`. Which create is which does not matter: the assertion
-    # below is about the relationship BETWEEN them, and `await_photo_in_media`
-    # has already proved both arrived.
+    # `helpers.photo_backup.FIXTURE_CEILING_B`. Which create is which does not
+    # matter: the assertion below is about the relationship BETWEEN them, and
+    # `await_photo_in_media` has already proved both arrived.
     await_photo_in_media(app, plain_tag, what="enabling backup (the plain photo)")
     await_photo_in_media(app, rich_tag, what="enabling backup (the rich photo)")
     app.backups.navigate_folders()
     await_quiet(driver)
 
-    def fixture_creates() -> list[dict]:
-        return [c for c in _creates_above(port, secret_key, folder, 0)
-                if (c.get("size_bytes") or 0) < FIXTURE_CEILING_B]
-
     ours = wait_until(
-        lambda: (lambda cs: cs if len(cs) >= 2 else None)(fixture_creates()),
+        lambda: (lambda cs: cs if len(cs) >= 2 else None)(
+            fixture_creates(port, secret_key, folder)),
         budgets.RPC_ROUNDTRIP_S,
         diagnose=lambda: (
             "the nest recorded fewer than two fixture-sized creates in "
             f"{folder!r} even though both photos list in Media: "
-            f"{_creates_above(port, secret_key, folder, 0)!r}"
+            f"{sync_changes_list(port, secret_key=secret_key, folder=folder).get('changes')!r}"
         ),
     )
-    ours = sorted(ours, key=lambda c: c.get("seq", 0))[-2:]
+    ours = ours[-2:]
 
     # ── The outcome ──
     hashes = {c.get("manifest_hash") for c in ours}

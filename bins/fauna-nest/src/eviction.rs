@@ -84,6 +84,7 @@ pub async fn run_eviction_tick(state: &Arc<AppState>) -> anyhow::Result<Eviction
             // a now-suspended actor its Push stream
             // (`transport.md` § Revocation teardown).
             state.close_actor_sockets(&actor_id);
+            state.end_bridge_held_sessions(&actor_id).await;
         }
     }
     for actor_id_vec in &deleting {

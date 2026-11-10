@@ -573,6 +573,12 @@ pub struct RoomInvitation {
     /// acceptance is relayed to (`conversation-rooms.md` § Join rules and
     /// invites → *A cross-nest invitation*).
     pub room_node: Option<String>,
+    /// That home's identity, stamped beside [`Self::room_node`] by this
+    /// account's nest from the same verified handshake — what the accept
+    /// records with the home, so the room's attachment legs can pin a
+    /// self-signed home (`conversation-rooms.md` § The home nest →
+    /// *Attachment bytes*). `None` same-nest.
+    pub home_nest_actor_id: Option<String>,
 }
 
 impl RoomInvitation {

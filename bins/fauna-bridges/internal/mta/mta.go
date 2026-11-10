@@ -478,16 +478,16 @@ func Run(ctx context.Context, deps Deps) error {
 	wg.Add(listenerCount)
 	go func() {
 		defer wg.Done()
-		errCh <- runListenerWithBackend(listenerCtx, port25, inbound, tlsConfig, deps.Snapshot.PrimaryDomain, deps.Snapshot.Spam.MaxMessageBytes, deps.ShutdownGrace, inboundDrain, logger.With("listener", "inbound-25"))
+		errCh <- runListenerWithBackend(listenerCtx, port25, inbound, tlsConfig, deps.Snapshot.PrimaryDomain, deps.ShutdownGrace, inboundDrain, logger.With("listener", "inbound-25"))
 	}()
 	if tlsAvailable {
 		go func() {
 			defer wg.Done()
-			errCh <- runSubmissionListener(listenerCtx, port465, submission, submissionImplicitTLS, tlsConfig, deps.Snapshot.PrimaryDomain, deps.Snapshot.Spam.MaxMessageBytes, deps.ShutdownGrace, submissionDrain, logger.With("listener", "submission-465"))
+			errCh <- runSubmissionListener(listenerCtx, port465, submission, submissionImplicitTLS, tlsConfig, deps.Snapshot.PrimaryDomain, deps.ShutdownGrace, submissionDrain, logger.With("listener", "submission-465"))
 		}()
 		go func() {
 			defer wg.Done()
-			errCh <- runSubmissionListener(listenerCtx, port587, submission, submissionStartTLS, tlsConfig, deps.Snapshot.PrimaryDomain, deps.Snapshot.Spam.MaxMessageBytes, deps.ShutdownGrace, submissionDrain, logger.With("listener", "submission-587"))
+			errCh <- runSubmissionListener(listenerCtx, port587, submission, submissionStartTLS, tlsConfig, deps.Snapshot.PrimaryDomain, deps.ShutdownGrace, submissionDrain, logger.With("listener", "submission-587"))
 		}()
 	}
 

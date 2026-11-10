@@ -1283,3 +1283,89 @@ async fn an_engine_that_cannot_read_its_row_holds_its_first_pass() {
         "the pass after the row became readable converges, exclusion armed"
     );
 }
+
+// ── The reconnect edge uploads what waited while the socket was down ────────
+
+/// **The `Connected` arm converges the local half after its pull** —
+/// `file-sync.md` § 5, Offline Catch-Up step 3: on reconnect the device applies
+/// the nest's changes, *then* uploads what it queued while offline.
+///
+/// The seat starts with a file on disk that no pass has taken up: loop entry's
+/// converge is held, because the plane answers nothing and the folder row has
+/// never been read (`SyncEngine::row_read_for_first_pass`), and the file was
+/// written before the watcher started, so no event carries it either. That is
+/// the state a write which failed while the socket was down leaves behind —
+/// one only a converge re-drives. With the rescan tick an hour away, the only
+/// thing left to re-drive it is the reconnect edge.
+///
+/// The observable is the engine's row (the pass ran and scanned), read at the
+/// instant it first appears against the wire log: the arm's pull must already
+/// be on it (§ 5's order — apply, then upload). Removing the arm's converge
+/// leaves the file untaken; moving it above the pull fails the order check.
+#[tokio::test]
+async fn the_connected_arm_converges_what_waited_after_its_pull() {
+    let h = stand_up();
+    std::fs::write(h.watch_dir.path().join("offline.txt"), b"written offline").unwrap();
+    let double = Arc::clone(&h.double);
+    let probe = Arc::clone(&h.engine);
+    let test_state_tx = h.state_tx.clone();
+
+    let loop_fut = crate::always_resident::run_watch_loop(
+        Arc::clone(&h.engine),
+        h.watch_dir.path().to_path_buf(),
+        FOLDER.to_string(),
+        NO_TICK,
+        None,
+        None,
+    );
+    tokio::pin!(loop_fut);
+
+    // ── 1. Entry, against a plane that answers nothing: the pass is held ──
+    let entry = Arc::clone(&double);
+    race(
+        &mut loop_fut,
+        until("the entry pull to be issued", || {
+            entry.count("fauna.sync.changes.list") >= 1
+        }),
+    )
+    .await;
+    assert!(
+        probe.db().get_entry("offline.txt").unwrap().is_none(),
+        "loop entry must not have taken the file up, or the reconnect edge is \
+         not what this test measures"
+    );
+    let before_transition = double.log().len();
+
+    // ── 2. The socket comes back ──
+    double.serving.store(true, Ordering::SeqCst);
+    test_state_tx.send(ConnectionState::Disconnected).unwrap();
+    test_state_tx.send(ConnectionState::Connected).unwrap();
+
+    // ── 3. The arm converges the waiting file, after its pull ──
+    let taken = Arc::clone(&probe);
+    let seen = Arc::clone(&double);
+    let pulled_first = Arc::new(AtomicBool::new(false));
+    let pulled_first_w = Arc::clone(&pulled_first);
+    race(
+        &mut loop_fut,
+        until("the reconnect edge to converge the waiting file", || {
+            if taken.db().get_entry("offline.txt").unwrap().is_none() {
+                return false;
+            }
+            let pulled = seen.log()[before_transition..]
+                .iter()
+                .any(|k| k == "fauna.sync.changes.list");
+            pulled_first_w.store(pulled, Ordering::SeqCst);
+            true
+        }),
+    )
+    .await;
+    assert!(
+        pulled_first.load(Ordering::SeqCst),
+        "§ 5's order is apply, then upload: the reconnect pull must be on the \
+         wire before the pass takes the file up (log after the transition: {:?})",
+        &double.log()[before_transition..]
+    );
+
+    h.server_task.abort();
+}

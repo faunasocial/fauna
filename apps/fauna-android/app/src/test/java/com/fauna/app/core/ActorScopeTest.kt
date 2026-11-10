@@ -39,7 +39,7 @@ class ActorScopeTest {
      *
      * The closers include the custodian push loop's native teardown, which holds
      * a host built over the very nest client `clearAuth()` closes — and, on
-     * sign-out, holds open the very directory `AccountStores.eraseAllAccounts()`
+     * sign-out, holds open the very directory `AccountStores.finishSignOut()`
      * is about to delete. Reversing these two lines reinstates the
      * deleted-inode hazard `AccountStores.closeOpenStores` documents.
      */

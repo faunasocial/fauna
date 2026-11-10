@@ -74,6 +74,7 @@ use fauna_client_nostr::nostr::ZapSignerEntry;
 use fauna_i18n::strings::{common, nostr as t};
 use fauna_protocol::Value as WireValue;
 use fauna_protocol::bridges_ui::{BridgeFollow, BridgeStatus};
+use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 use fauna_sync_engine::account_runtime::AccountStoreHandle;
 use serde_json::{Value, json};
 
@@ -555,6 +556,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             st.follow_petname_input.clear();
             Some(Op::AddFollow {
                 nest,
+                queue: crate::bridges::offline_queue(&app.account_outbox),
                 id,
                 petname,
                 read_gen: claim_read_gen(st),
@@ -562,6 +564,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::RemoveFollow { id } => Some(Op::RemoveFollow {
             nest: st.nest.clone()?,
+            queue: crate::bridges::offline_queue(&app.account_outbox),
             id,
             read_gen: claim_read_gen(st),
         }),
@@ -670,14 +673,21 @@ pub enum Op {
         settings: WireValue,
         read_gen: u64,
     },
+    /// `fauna.bridges.add_follow`, then re-list. `queue` is the device's
+    /// outbox ([`App::account_outbox`]): with no nest the follow is queued
+    /// ([`Outcome::FollowQueued`]) and nothing is re-read.
     AddFollow {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         id: String,
         petname: Option<String>,
         read_gen: u64,
     },
+    /// `fauna.bridges.remove_follow`, then re-list — queued like
+    /// [`Op::AddFollow`] when there is no nest.
     RemoveFollow {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         id: String,
         read_gen: u64,
     },
@@ -757,6 +767,10 @@ pub enum Outcome {
         connect_string: String,
         bunker_apps: Vec<BunkerAppEntry>,
     },
+    /// A follow or unfollow was queued — no nest; it rests in the device's
+    /// outbox and drains when the nest is back. The follow list is left as it
+    /// was (the nest's list after the drain is the word).
+    FollowQueued,
     /// A transport or provider failure — lands on `error-message`.
     Failed(String),
 }
@@ -811,20 +825,34 @@ impl Op {
             }
             Op::AddFollow {
                 nest,
+                queue,
                 id,
                 petname,
                 read_gen,
             } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
-                match client.add_follow(BRIDGE_ID, id, petname, None).await {
-                    Ok(()) => refresh(nest, read_gen).await,
+                match client
+                    .add_follow_or_queue(queue.as_deref(), BRIDGE_ID, id, petname, None)
+                    .await
+                {
+                    Ok(Composed::Queued(_)) => Outcome::FollowQueued,
+                    Ok(Composed::Sent(())) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::RemoveFollow { nest, id, read_gen } => {
+            Op::RemoveFollow {
+                nest,
+                queue,
+                id,
+                read_gen,
+            } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
-                match client.remove_follow(BRIDGE_ID, id).await {
-                    Ok(()) => refresh(nest, read_gen).await,
+                match client
+                    .remove_follow_or_queue(queue.as_deref(), BRIDGE_ID, id)
+                    .await
+                {
+                    Ok(Composed::Queued(_)) => Outcome::FollowQueued,
+                    Ok(Composed::Sent(())) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1060,6 +1088,9 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         } => {
             st.bunker_connect_string = Some(connect_string);
             st.bunker_apps = bunker_apps;
+            app.errors.remove(&Page::Nostr);
+        }
+        Outcome::FollowQueued => {
             app.errors.remove(&Page::Nostr);
         }
         Outcome::Failed(e) => {
@@ -1517,6 +1548,75 @@ mod tests {
     use super::*;
     use crate::app::tests::authed_app;
     use fauna_protocol::bridges_ui::BridgeSetting;
+
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn run_nostr_follow_ops(word: &'static str) -> (Vec<Outcome>, Vec<(&'static str, String)>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let lent = || Some(queue.clone() as Arc<dyn OfflineIntentQueue>);
+        let nest = || {
+            NestClient::new(
+                "http://127.0.0.1:9".to_string(),
+                fauna_core::identity::ActorKeypair::from_secret([5u8; 32]),
+            )
+        };
+        let ops = vec![
+            Op::AddFollow {
+                nest: nest(),
+                queue: lent(),
+                id: "npub1alice".into(),
+                petname: Some("Alice".into()),
+                read_gen: 1,
+            },
+            Op::RemoveFollow {
+                nest: nest(),
+                queue: lent(),
+                id: "npub1alice".into(),
+                read_gen: 2,
+            },
+        ];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcomes = ops.into_iter().map(|op| rt.block_on(op.run())).collect();
+        let queued = queue.queued().into_iter().map(|q| (q.0, q.1)).collect();
+        (outcomes, queued)
+    }
+
+    /// With no nest, a Nostr follow then unfollow of one account rest in the
+    /// outbox under one scope (so they drain in order); the page clears its
+    /// error and paints no follow it has not read back.
+    #[test]
+    fn nostr_follows_with_no_nest_are_queued_in_one_scope() {
+        let (outcomes, queued) = run_nostr_follow_ops("unreachable");
+        assert!(outcomes.iter().all(|o| matches!(o, Outcome::FollowQueued)));
+        let scope = fauna_client_bridges::follow_scope(BRIDGE_ID, "npub1alice");
+        assert_eq!(
+            queued,
+            vec![
+                ("fauna.bridges.add_follow", scope.clone()),
+                ("fauna.bridges.remove_follow", scope),
+            ]
+        );
+
+        let mut app = authed_app();
+        app.errors.insert(Page::Nostr, "stale".into());
+        let before = app.nostr.follows.clone();
+        for outcome in outcomes {
+            apply_outcome(&mut app, outcome);
+        }
+        assert_eq!(app.nostr.follows, before, "nothing listed");
+        assert!(!app.errors.contains_key(&Page::Nostr));
+    }
+
+    /// Connected, both are sent as before and nothing is queued.
+    #[test]
+    fn nostr_follows_with_the_nest_connected_are_sent_not_queued() {
+        let (outcomes, queued) = run_nostr_follow_ops("connected");
+        assert!(outcomes.iter().all(|o| matches!(o, Outcome::Failed(_))));
+        assert!(queued.is_empty());
+    }
 
     fn setting(key: &str, value: WireValue) -> BridgeSetting {
         BridgeSetting {

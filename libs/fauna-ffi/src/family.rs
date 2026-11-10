@@ -2117,6 +2117,85 @@ impl From<FamilyApprovalEntry> for FfiFamilyApprovalEntry {
     }
 }
 
+impl From<FfiFamilyApprovalEntry> for FamilyApprovalEntry {
+    fn from(e: FfiFamilyApprovalEntry) -> Self {
+        FamilyApprovalEntry {
+            supervised_actor_id: e.supervised_actor_id.into(),
+            supervised_handle: e.supervised_handle,
+            kind: e.kind,
+            peer_actor_id: e.peer_actor_id.into(),
+            peer_address: e.peer_address,
+            message_id: e.message_id.into(),
+            summary: e.summary,
+            peer_handle: e.peer_handle,
+            bridge_id: e.bridge_id,
+            operation: e.operation,
+            target: e.target,
+            created_at: e.created_at,
+            ..Default::default()
+        }
+    }
+}
+
+/// The page's fold of a decision [`FfiFamilyClient::approvals_decide_or_queue`]
+/// answered QUEUED: the approvals list without the decided item, matched by its
+/// item key (`fauna_client_family::approvals_after_queued_decision`), never by
+/// display fields. Nothing is re-read while there is no nest.
+#[uniffi::export]
+pub fn approvals_after_queued_decision(
+    approvals: Vec<FfiFamilyApprovalEntry>,
+    decided: FfiFamilyApprovalEntry,
+) -> Vec<FfiFamilyApprovalEntry> {
+    fauna_client_family::approvals_after_queued_decision(
+        approvals.into_iter().map(Into::into).collect(),
+        &decided.into(),
+    )
+    .into_iter()
+    .map(Into::into)
+    .collect()
+}
+
+/// The device's outbox as the shared composer's queue
+/// (`crate::offline_outbox::DEVICE`): `None` until the app's first connection
+/// word wired it, when every gesture is sent as before.
+#[cfg(feature = "feed-manager")]
+pub(crate) fn device_queue() -> Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>> {
+    crate::offline_outbox::DEVICE
+        .wired()
+        .map(|outbox| outbox as Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>)
+}
+
+/// A build without the feed manager (the kids flavor, the mail bridge's
+/// `--no-default-features`) has no device outbox — the one wiring it is the
+/// feed manager's connection word — so the queue is the never-wired `None`
+/// and every gesture is sent as before.
+#[cfg(not(feature = "feed-manager"))]
+pub(crate) fn device_queue() -> Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>> {
+    None
+}
+
+/// A composer failure as an [`FfiError`]: the online send's own error keeps
+/// [`stringify`]'s mapping (an identity change, a guardian refusal); a queue
+/// refusal is a general error carrying its reason.
+pub(crate) fn compose_err(
+    e: fauna_protocol::offline_intent::ComposeError<fauna_client::NestClientError>,
+) -> FfiError {
+    match e {
+        fauna_protocol::offline_intent::ComposeError::Rpc(e) => stringify(e),
+        other => FfiError::General {
+            msg: other.to_string(),
+        },
+    }
+}
+
+/// `true` when the composer queued the gesture, `false` when it was sent.
+fn queued(composed: fauna_protocol::offline_intent::Composed<()>) -> bool {
+    matches!(
+        composed,
+        fauna_protocol::offline_intent::Composed::Queued(_)
+    )
+}
+
 // ── The client object ──────────────────────────────────────────────────
 
 /// Typed-call client for the `fauna.family.*` kinds over an authenticated
@@ -2133,6 +2212,55 @@ impl FfiFamilyClient {
 
     fn client(&self) -> FamilyClient<Arc<NestClient>> {
         FamilyClient::new(Arc::clone(&self.nest))
+    }
+
+    /// [`Self::approvals_decide_or_queue`] through an explicit queue — the
+    /// testable half (the export lends the device's outbox).
+    async fn decide_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        entry: FfiFamilyApprovalEntry,
+        approve: bool,
+    ) -> Result<bool, FfiError> {
+        let request = fauna_client_family::decide_request_for(&entry.into());
+        self.client()
+            .approvals_decide_or_queue(queue, request, approve)
+            .await
+            .map(queued)
+            .map_err(compose_err)
+    }
+
+    /// [`Self::allow_blocked_peer_or_queue`] through an explicit queue.
+    async fn allow_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        supervised_actor_id: Vec<u8>,
+        peer: FfiFamilyBlockedPeer,
+    ) -> Result<bool, FfiError> {
+        self.client()
+            .allow_blocked_dm_peer_or_queue(
+                queue,
+                supervised_actor_id,
+                peer.bridge_id,
+                peer.peer_id,
+            )
+            .await
+            .map(queued)
+            .map_err(compose_err)
+    }
+
+    /// [`Self::contact_add_or_queue`] through an explicit queue.
+    async fn contact_add_through(
+        &self,
+        queue: Option<&dyn fauna_core::offline_intent::OfflineIntentQueue>,
+        supervised_actor_id: Vec<u8>,
+        peer_actor_id: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        self.client()
+            .contact_add_or_queue(queue, supervised_actor_id, peer_actor_id)
+            .await
+            .map(queued)
+            .map_err(compose_err)
     }
 }
 
@@ -2307,6 +2435,50 @@ impl FfiFamilyClient {
             .contact_add(supervised_actor_id, peer_actor_id)
             .await
             .map_err(stringify)
+    }
+
+    // ── The `OfflineQueued` composer (`account-offline-mutation.md` § The
+    // offline-mutation contract): with no nest a gesture rests in the device's
+    // outbox (`crate::offline_outbox::DEVICE`, wired by the app's connection
+    // word) and drains when the nest is back. Each returns `true` when it
+    // QUEUED — re-read nothing; a queued decision's item leaves the local list
+    // through [`approvals_after_queued_decision`] — and `false` when it was
+    // sent, when the page re-reads as before.
+
+    /// [`Self::approvals_decide`] for one approvals-list entry, taken whole
+    /// (every item key verbatim — the app never picks which key a kind uses),
+    /// sent now or queued with no nest. `true` = queued.
+    pub async fn approvals_decide_or_queue(
+        &self,
+        entry: FfiFamilyApprovalEntry,
+        approve: bool,
+    ) -> Result<bool, FfiError> {
+        let queue = device_queue();
+        self.decide_through(queue.as_deref(), entry, approve).await
+    }
+
+    /// [`Self::allow_blocked_peer`] sent now or queued with no nest. `true` =
+    /// queued; a queued un-deny folds nothing.
+    pub async fn allow_blocked_peer_or_queue(
+        &self,
+        supervised_actor_id: Vec<u8>,
+        peer: FfiFamilyBlockedPeer,
+    ) -> Result<bool, FfiError> {
+        let queue = device_queue();
+        self.allow_through(queue.as_deref(), supervised_actor_id, peer)
+            .await
+    }
+
+    /// [`Self::contact_add`] sent now or queued with no nest. `true` = queued;
+    /// a queued pre-approval folds nothing.
+    pub async fn contact_add_or_queue(
+        &self,
+        supervised_actor_id: Vec<u8>,
+        peer_actor_id: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        let queue = device_queue();
+        self.contact_add_through(queue.as_deref(), supervised_actor_id, peer_actor_id)
+            .await
     }
 
     /// `fauna.family.contact.request` — the **supervised** caller's in-app
@@ -3147,6 +3319,81 @@ mod screen_time_face_tests {
         assert_eq!(
             due, 2,
             "one hour-long step credits only MAX_ACCRUAL_STEP_SECS (120s = 2 min)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod offline_composer_tests {
+    use super::*;
+    use fauna_client_testkit::RecordingQueue;
+
+    fn client() -> Arc<FfiFamilyClient> {
+        FfiFamilyClient::from_nest(NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        ))
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn held_mail(id: u8) -> FfiFamilyApprovalEntry {
+        FfiFamilyApprovalEntry::from(FamilyApprovalEntry {
+            supervised_actor_id: vec![3u8; 32].into(),
+            kind: "mail_hold".into(),
+            message_id: vec![id; 32].into(),
+            ..Default::default()
+        })
+    }
+
+    /// With no nest the door answers QUEUED and the decision rests in the
+    /// outbox; the queued item then leaves the list through the shared fold.
+    #[test]
+    fn a_decision_with_no_nest_is_queued_and_folds_out_of_the_list() {
+        let queue = RecordingQueue::new("disconnected");
+        let queued = block_on(client().decide_through(Some(&queue), held_mail(9), true));
+        assert!(queued.unwrap(), "no nest: queued");
+        let recorded = queue.queued();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "fauna.family.approvals.decide");
+        assert_eq!(
+            approvals_after_queued_decision(vec![held_mail(9), held_mail(8)], held_mail(9)),
+            vec![held_mail(8)]
+        );
+    }
+
+    /// Connected, the decision is sent (to this dummy nest it fails on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn a_decision_with_the_nest_connected_is_sent_not_queued() {
+        let queue = RecordingQueue::new("connected");
+        let out = block_on(client().decide_through(Some(&queue), held_mail(9), false));
+        assert!(out.is_err(), "the send was attempted");
+        assert!(queue.queued().is_empty());
+    }
+
+    #[test]
+    fn a_pre_approval_and_an_un_deny_with_no_nest_are_queued() {
+        let queue = RecordingQueue::new("unreachable");
+        let c = client();
+        assert!(
+            block_on(c.contact_add_through(Some(&queue), vec![3u8; 32], vec![4u8; 32])).unwrap()
+        );
+        let peer = FfiFamilyBlockedPeer {
+            bridge_id: "telegram".into(),
+            peer_id: "peer-1".into(),
+        };
+        assert!(block_on(c.allow_through(Some(&queue), vec![3u8; 32], peer)).unwrap());
+        let kinds: Vec<_> = queue.queued().into_iter().map(|q| q.0).collect();
+        assert_eq!(
+            kinds,
+            vec!["fauna.family.contact.add", "fauna.family.approvals.decide"]
         );
     }
 }

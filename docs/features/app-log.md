@@ -18,7 +18,7 @@ before a crash or a restart is not lost with the page.
 
 ## Coverage contract
 
-Stamped 2026-10-21 at 77c610862e.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] The page shows the app's activity, filters by severity, and copies or clears — `docs/goal/architecture/apps/observability.md` § 3. Surfaces
    - `tests/e2e-unified/tests/test_settings_logs.py::test_logs_page_renders`
@@ -36,19 +36,23 @@ Stamped 2026-10-21 at 77c610862e.
    - `tests/e2e-unified/tests/test_settings_logs.py::test_message_text_never_reaches_the_log`
 6. [app] The log is also kept in a file on your device, so what the app did before a crash or a restart is still there to hand over — `docs/goal/architecture/apps/observability.md` § 2. Persistence & privacy
    - `tests/e2e-unified/tests/test_settings_logs.py::test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file`
+7. [app] The log the app keeps on this device is held in a file of bounded size, so it never grows without limit — `docs/goal/architecture/apps/observability.md` § 1. Shared capture
+   - `tests/e2e-unified/tests/test_app_log_size_cap_tui.py::test_the_on_device_log_directory_stays_under_its_size_cap`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+36883152.dirty standalone |
+| web | ⚠ partial | 0.1.5-dev+36883152.dirty standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.5-dev+fbba25bc standalone |
 | macos | ✅ full | 0.1.5-dev+03b5332b standalone |
 | ios | ✅ full | 0.1.5-dev+03b5332b standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1c323650.dirty standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -61,6 +65,7 @@ Stamped 2026-10-21 at 77c610862e.
 | 3 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_copied_notice_reaches_the_ring_at_info` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_message_text_never_reaches_the_log` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file` — requires `on-device-log-reader` (test harness) (not built: web, windows, android) | web (linux): skipped, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file` — requires `on-device-log-reader` (test harness) (not built: web, windows) | web (linux): skipped, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | absent by design on web | — |
+| 7 | app | `tests/e2e-unified/tests/test_app_log_size_cap_tui.py::test_the_on_device_log_directory_stays_under_its_size_cap` — requires `on-device-log-reader` (test harness) (not built: web, windows) | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 <!-- features-render:end -->

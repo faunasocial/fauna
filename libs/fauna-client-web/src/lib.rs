@@ -465,38 +465,30 @@ pub fn site_link_view(
     handle: Option<&str>,
     domain: &str,
 ) -> SiteLinkView {
-    if let Some(active) = custom_domains.iter().find(|row| row.status == "active") {
-        return SiteLinkView {
-            origin: Some(format!("https://{}/", active.domain)),
-            disabled_reason: None,
-        };
-    }
-    if !subdomain_enabled {
-        return SiteLinkView {
-            origin: None,
-            disabled_reason: Some(SiteLinkDisabledReason::SubdomainDisabled),
-        };
-    }
-    // Subdomain hosting is on — reuse the toggle's own eligibility rules so the
-    // two surfaces can never disagree about whether a handle can serve.
-    let sub = subdomain_view(true, handle, domain);
-    match (sub.url, sub.disabled_reason) {
-        (Some(url), _) => SiteLinkView {
-            origin: Some(url),
+    // The rule itself is `fauna_core::web::site_origin`, which the nest calls
+    // too (the Nostr advertisement's `r` tag); this only picks the active row
+    // and projects the refusal.
+    let active = custom_domains
+        .iter()
+        .find(|row| row.status == "active")
+        .map(|row| row.domain.as_str());
+    match fauna_core::web::site_origin(active, subdomain_enabled, handle, domain) {
+        Ok(origin) => SiteLinkView {
+            origin: Some(origin),
             disabled_reason: None,
         },
-        (None, Some(SubdomainDisabledReason::NoServingDomain)) => SiteLinkView {
-            origin: None,
-            disabled_reason: Some(SiteLinkDisabledReason::NoServingDomain),
-        },
-        (None, Some(SubdomainDisabledReason::ReservedLabel)) => SiteLinkView {
-            origin: None,
-            disabled_reason: Some(SiteLinkDisabledReason::ReservedLabel),
-        },
-        (None, _) => SiteLinkView {
-            origin: None,
-            disabled_reason: Some(SiteLinkDisabledReason::NoHandle),
-        },
+        Err(refusal) => {
+            use fauna_core::web::SiteOriginRefusal as R;
+            SiteLinkView {
+                origin: None,
+                disabled_reason: Some(match refusal {
+                    R::SubdomainDisabled => SiteLinkDisabledReason::SubdomainDisabled,
+                    R::NoHandle => SiteLinkDisabledReason::NoHandle,
+                    R::ReservedLabel => SiteLinkDisabledReason::ReservedLabel,
+                    R::NoServingDomain => SiteLinkDisabledReason::NoServingDomain,
+                }),
+            }
+        }
     }
 }
 
@@ -616,7 +608,7 @@ pub async fn read_web_page<R: RpcRequester>(
 /// is the link a creator shares to sell: a visitor with no token gets the
 /// teaser (`web-content-hosting.md` § Paywalled serving, "no token → teaser").
 pub fn post_page_url(origin: &str, slug: &str) -> String {
-    format!("{}post/{}.html", ensure_trailing_slash(origin), slug)
+    fauna_core::web::post_page_url(origin, slug)
 }
 
 /// The full-access URL for a minted paywall link — the *Copy paywall link*

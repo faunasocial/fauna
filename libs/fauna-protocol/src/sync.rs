@@ -510,6 +510,15 @@ pub struct SyncChangesListReply {
     /// stated, never *full*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub residency: Option<String>,
+    /// **Cross-nest relay only** — the folder's content-reachability verdict
+    /// as the set's HOME nest computes it (`file-sync.md` § Content
+    /// reachability), beside `residency` and relayed verbatim, never
+    /// interpreted by the relaying nest (`federation-shared-folders.md`
+    /// § Relay serving across nests, the `reachable` stamp). `None` = not
+    /// stated: the reader falls back to `residency` (`ui/media.md`
+    /// § Cross-nest shared sets owns that reading). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
     /// **The completeness echo** (`account-sync-plane.md` § Feeds and cursors
     /// → *Compaction is a serve-order watermark*): *this page is complete
     /// through this `seq` — every live row at or below it that your request
@@ -562,6 +571,109 @@ pub struct SyncChangesListReply {
     pub signer_certs: Vec<fauna_core::encoding::EmbedAsBytes>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// The item class an ordinary file row carries on the wire
+/// (`ItemClass::ChunkManifest`); a row written before classes were stamped
+/// carries `None`, which reads as the same class.
+const FILE_ROW_CLASS: &str = "chunk-manifest";
+
+/// **The one head fold** over a folder's change log (`ui/media.md`
+/// § Cross-nest shared sets, *the read model*; § Followed public folders): the
+/// rows naming each path's current file, in stable `path_hash` order.
+///
+/// - The latest `seq` per `path_hash` wins.
+/// - A retention row (`is_retention`) never shadows a head — it re-points no
+///   path's current version.
+/// - Only file rows count: a state entry (`entry`) or a row of another item
+///   class is never a file head.
+/// - A head that is a delete names no file and is dropped.
+///
+/// Rows only — what a head *means* (a keyless follower skips a sealed-path
+/// head; a member keeps it and opens its label) is each caller's own step, so
+/// every scope folds alike and diverges only where its keys do.
+#[must_use]
+pub fn head_rows(changes: &[SyncChange]) -> Vec<&SyncChange> {
+    let mut heads: std::collections::HashMap<&str, &SyncChange> = std::collections::HashMap::new();
+    for c in changes {
+        if c.is_retention == Some(true) || c.entry.is_some() {
+            continue;
+        }
+        if matches!(c.item_class.as_deref(), Some(class) if class != FILE_ROW_CLASS) {
+            continue;
+        }
+        match heads.entry(c.path_hash.as_str()) {
+            std::collections::hash_map::Entry::Occupied(mut slot) if slot.get().seq < c.seq => {
+                slot.insert(c);
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(c);
+            }
+            _ => {}
+        }
+    }
+    let mut out: Vec<&SyncChange> = heads
+        .into_values()
+        .filter(|head| head.change_type != "delete")
+        .collect();
+    out.sort_by(|a, b| a.path_hash.cmp(&b.path_hash));
+    out
+}
+
+#[cfg(test)]
+mod head_rows_tests {
+    use super::*;
+
+    fn change(seq: i64, path_hash: &str, change_type: &str) -> SyncChange {
+        SyncChange {
+            seq,
+            path_hash: path_hash.into(),
+            change_type: change_type.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_latest_seq_per_path_wins_and_a_delete_head_drops() {
+        let rows = vec![
+            change(1, "a", "create"),
+            change(3, "a", "modify"),
+            change(2, "b", "create"),
+            change(4, "b", "delete"),
+            change(5, "c", "create"),
+        ];
+        let heads: Vec<(i64, &str)> = head_rows(&rows)
+            .into_iter()
+            .map(|h| (h.seq, h.path_hash.as_str()))
+            .collect();
+        assert_eq!(heads, vec![(3, "a"), (5, "c")]);
+    }
+
+    #[test]
+    fn retention_rows_state_entries_and_other_classes_never_shadow_a_head() {
+        let mut retention = change(9, "a", "modify");
+        retention.is_retention = Some(true);
+        let mut entry = change(10, "a", "modify");
+        entry.entry = Some(ByteBuf::from(vec![1]));
+        let mut other = change(11, "a", "modify");
+        other.item_class = Some("state-entry".into());
+        let mut file = change(2, "a", "create");
+        file.item_class = Some(FILE_ROW_CLASS.into());
+        let rows = vec![file, retention, entry, other];
+        let heads = head_rows(&rows);
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].seq, 2);
+    }
+
+    /// A sealed-path head (no plaintext `path`) is still a head: what it
+    /// means is the caller's step, never the fold's.
+    #[test]
+    fn a_sealed_path_head_is_still_a_head() {
+        let mut sealed = change(1, "a", "create");
+        sealed.path = None;
+        sealed.path_sealed = Some(ByteBuf::from(vec![7; 8]));
+        assert_eq!(head_rows(std::slice::from_ref(&sealed)).len(), 1);
+    }
 }
 
 // ── fauna.sync.changes.record (≡ POST /api/v1/sync/changes) ──────────────────

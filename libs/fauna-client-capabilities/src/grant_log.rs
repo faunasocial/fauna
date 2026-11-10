@@ -598,6 +598,21 @@ pub fn is_bounded_mail_grant(scope: &[GrantEventScope]) -> bool {
     })
 }
 
+/// Whether a folded grant's declared scope marks it as a **materialization
+/// grant** — any `materialize` tuple (`encryption-at-rest.md` § Capability
+/// tiering → *The materialization grant*, part (a); the blob is
+/// [`crate::mint_materialization_grant`], its event scope
+/// [`event_scope_of`]`(`[`crate::materialization_scope`]`(kind))`). The one
+/// predicate the view model's copy and every app read, so no shell re-derives
+/// the class check. Like [`is_bounded_mail_grant`] a hint, not an enforcer:
+/// the nest's mint door holds the shape.
+#[must_use]
+pub fn is_materialization_grant(scope: &[GrantEventScope]) -> bool {
+    scope
+        .iter()
+        .any(|s| s.class == ScopeTuple::CLASS_MATERIALIZE)
+}
+
 /// The minting client's identity-key seam for the grant-event log: the impl
 /// holds the raw Ed25519 `SigningKey` and signs a fully-populated
 /// (placeholder-`sig`) [`GrantEvent`] in place, so the key never crosses a

@@ -149,6 +149,45 @@ class FakeDns:
             except OSError:
                 pass
 
+    def add_txt(self, name: str, value: str) -> None:
+        """Join ``value`` to ``name``'s TXT RRset in the UPDATE overlay, as an
+        UPDATE add would — a record some other tool wrote into the zone, which
+        a later UPDATE from the app's fake provider must leave in place."""
+        with self._lock:
+            values = self._updates.setdefault(name.rstrip(".").lower(), [])
+            if value not in values:
+                values.append(value)
+
+    def served_txt(self, name: str) -> list[str]:
+        """Every TXT value this server answers for ``name``, asked the way a
+        resolver asks — one UDP query to its own port, the reply parsed — so an
+        in-process caller reads what the zone serves, not the fake's internals."""
+        qname = b"".join(
+            bytes([len(label)]) + label.encode("ascii")
+            for label in name.rstrip(".").split(".")
+        ) + b"\x00"
+        query = struct.pack(">HHHHHH", 0x5151, 0, 1, 0, 0, 0) + qname
+        query += struct.pack(">HH", _TYPE_TXT, _CLASS_IN)
+        host = "127.0.0.1" if self.host in ("0.0.0.0", "") else self.host
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(3)
+            s.sendto(query, (host, self.port))
+            reply = s.recv(65535)
+        _, _, qdcount, ancount, _, _ = struct.unpack(">HHHHHH", reply[:12])
+        offset = 12
+        for _ in range(qdcount):
+            _, offset = self._parse_name(reply, offset)
+            offset += 4
+        values = []
+        for _ in range(ancount):
+            _, offset = self._parse_name(reply, offset)
+            rtype, _, _, rdlength = struct.unpack(">HHIH", reply[offset : offset + 10])
+            rdata = reply[offset + 10 : offset + 10 + rdlength]
+            offset += 10 + rdlength
+            if rtype == _TYPE_TXT:
+                values.append(self._txt_value(rdata))
+        return values
+
     # ── internals ─────────────────────────────────────────────────────
 
     def _serve(self) -> None:

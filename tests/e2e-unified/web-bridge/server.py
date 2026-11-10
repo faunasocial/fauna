@@ -510,6 +510,32 @@ _SCROLL_TO_BOTTOM_FRACTION_JS = r"""
 """
 
 
+# `in-viewport` on `GET /element/attr` — the same "nearest scrollable
+# ancestor" as `_SCROLL_TO_BOTTOM_FRACTION_JS` above, read without scrolling.
+_IN_VIEWPORT_JS = r"""
+(el) => {
+  let box = null;
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    const oy = getComputedStyle(a).overflowY;
+    if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && a.scrollHeight > a.clientHeight) {
+      box = a;
+      break;
+    }
+  }
+  let top = 0, bottom = window.innerHeight;
+  if (box) {
+    const r = box.getBoundingClientRect();
+    top = r.top + box.clientTop;
+    bottom = top + box.clientHeight;
+  }
+  const e = el.getBoundingClientRect();
+  if (e.height <= 0 && e.width <= 0) return 'false';
+  const mid = (e.top + e.bottom) / 2;
+  return (mid >= top && mid <= bottom) ? 'true' : 'false';
+}
+"""
+
+
 _REGISTRY_SNAPSHOT_JS = r"""
 () => {
   function isVisible(el) {
@@ -1116,6 +1142,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     # painted the styling. `null` for an element with no text.
                     runs = loc.evaluate(_TEXT_RUNS_JS)
                     value = json.dumps(runs) if runs is not None else None
+                elif attr == "in-viewport":
+                    # The web twin of linux's and tui's `in-viewport`
+                    # (`drivers/base.py::in_viewport` owns the contract):
+                    # "true" when the WHOLE element's vertical centre lies
+                    # inside the visible band of its nearest vertically
+                    # scrolling ancestor (else the window). `null` for an
+                    # element that is not on the page, so the driver fails
+                    # loudly instead of reading it as out of view.
+                    value = loc.evaluate(_IN_VIEWPORT_JS) if loc.count() else None
                 else:
                     # `data-<attr>` WINS over a same-named real attribute.
                     #

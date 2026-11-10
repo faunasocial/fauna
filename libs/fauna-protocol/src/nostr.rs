@@ -1,6 +1,7 @@
 //! User-facing WS-RPC payload types for the nest's Nostr kinds: the NIP-46
 //! bunker control plane (`fauna.nostr.bunker.*`), the zap-signer roster
-//! (`fauna.nostr.zap_signers.*`) and the protocol-native content kinds
+//! (`fauna.nostr.zap_signers.*`), the sold-post advertisement
+//! (`fauna.nostr.advertise.*`) and the protocol-native content kinds
 //! (`nostr.<area>.<verb>`). Each family's section below owns its naming and
 //! semantics.
 //!
@@ -312,6 +313,73 @@ pub struct RemoveZapSignerRequest {
 pub struct RemoveZapSignerReply {
     /// `false` when the caller had not designated that signer.
     pub removed: bool,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── fauna.nostr.advertise.* — the Nostr advertisement of a sold post ─
+//
+// The zap purchase leg's ingress (`docs/goal/behavior/monetization.md` § The
+// Nostr advertisement of a sold post): a per-post, explicit, reversible author
+// act publishing a sold post's teaser onto Nostr as a kind-1 note carrying the
+// selling tier's asking price, so a zap of at least that price buys the post.
+// Both kinds are **User-class, caller = the author**.
+//
+// `set` is gated on the `zaps` member (surface `zaps.advertise`) and compiled
+// with it; `clear` is de-escalation — never gated and compiled always, so an
+// excised nest can still withdraw what a full build advertised
+// (`dynamic-features.md` § Charter members, ruling (i)).
+
+/// Request for `fauna.nostr.advertise.set` — advertise one of the caller's
+/// own sold posts on Nostr. Idempotent: advertising an advertised post keeps
+/// the original act's time.
+#[cfg(feature = "zaps")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvertiseSetRequest {
+    /// The sold post's content id (64 lowercase hex, the 32-byte digest).
+    pub post_id: String,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Reply for `fauna.nostr.advertise.set`.
+#[cfg(feature = "zaps")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvertiseSetReply {
+    /// Epoch-seconds the post was first advertised (the flag at rest).
+    pub advertised_at: u64,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.nostr.advertise.clear` — stop advertising a post: the
+/// flag clears, the published note is retracted (a kind 5 to the nest's relay
+/// and the publish relays), and a later zap on a cached copy is a tip.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvertiseClearRequest {
+    /// The post's content id (64 lowercase hex).
+    pub post_id: String,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Reply for `fauna.nostr.advertise.clear`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvertiseClearReply {
+    /// `false` when the post was not advertised (an idempotent no-op).
+    pub cleared: bool,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

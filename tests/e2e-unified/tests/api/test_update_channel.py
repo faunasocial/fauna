@@ -420,6 +420,7 @@ def test_a_nest_the_image_does_not_run_follows_no_channel_and_asks_the_registry_
 
 
 @pytest.mark.standalone_only
+@pytest.mark.feature("admin-nest")
 def test_an_unapplied_newer_head_is_said_overdue_once(overdue_nest, overdue_registry):
     """The Dev interval (a minute) plus a zero allowance passes with no updater
     to apply the head: the nest's own ring carries one ``update overdue``

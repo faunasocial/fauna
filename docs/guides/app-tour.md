@@ -362,6 +362,8 @@ A profile opens on its **Posts** tab: that person's posts, newest first, each on
 
 You can follow someone whose account lives on another nest, too. Look them up in [Contacts](#contacts) by their full address — `someone@their-server` — press **View profile** on the result, and press **Follow**. Your nest passes the follow on to theirs. A plain follow needs no approval from them: it goes through on its own the next time their app is running. From then on their posts arrive in your feed on your own nest — first their recent ones, then each new one as they post it, the ones they share only with their followers included. A post they delete leaves your feed too.
 
+You can undo a follow: open their profile and press **Following**. If you also pay for one of their tiers, the button first changes to **Unfollow and end your paid subscription?** — press it again to confirm, because unfollowing ends the paid subscription too. A post you bought from them stays yours. The button reads **Follow** again at once. A follow that has not gone through yet is simply taken back. Once it has, the unfollow goes through on its own the next time their app is running; if you open their profile again before then, it may still show **Following**.
+
 Your profile can also be shown to people on other nests. The edit form's **People on other nests can see your profile** switch is off until you turn it on. While it is off, someone on another nest who opens your profile sees the start of your Actor ID where your name would be; once it is on, they see your display name, which their nest fetches from yours, and your picture and banner. The same goes for your posts in their feed: while the switch is on, their app names each post of yours by your display name; while it is off, by the start of your Actor ID. A nickname they give you takes the place of either. Everyone on your own nest sees your profile either way. The switch is about Fauna only: the Fediverse, once you enable it, and Bluesky, when your nest hosts your Bluesky identity, publish your profile whatever it says (see [Who can see what](who-can-see-what.md#public-posts-and-your-profile)).
 
 **Reporting** tells your nest's admin about something you think they should see — an account from its profile, a post from its **⋯** menu, or a message someone sent you from that message's **⋯** menu. You pick a reason, can add a note, and can also block the person in the same step. A message, or a post only some people can open, is private, so your admin cannot read it unless you tick the box that attaches its text — the box says so. When the person you are reporting lives on another nest, your report is passed on to that nest's admin too, without your name. A report informs; it removes nothing by itself, and the person you report is never told who reported them. What it does change is your own view: what you reported shows **You reported this** in its place from then on. Your reports, and what became of each, are listed under **Your reports** on the **Moderation** page (in the web app, the **Content Moderation** section of Settings → **Privacy**), where you can withdraw one while it is still open.
@@ -871,9 +873,12 @@ do. The sub-pages:
   (the consumer side of [Profile](#profile)'s tiers). Paid for a
   subscription outside Fauna and got a claim code? Redeem it here — the
   subscription binds to your account and activates as soon as the creator's
-  app syncs. Unsubscribing works the same way: your leave is recorded at
-  once, needs no approval from the creator, and completes the next time
-  their app syncs — the row stays listed until then.
+  app syncs. Leaving an active subscription works the same way: your leave
+  is recorded at once, needs no approval from the creator, and goes through
+  on its own the next time their app is running — the row stays listed
+  until then, except that a subscription to someone on another nest leaves
+  the list at once. A subscription that has not gone through yet is simply
+  taken back when you unsubscribe, and its row goes at once.
 - **Nests** — link your *other* nests — the servers, or boxes, your account lives on — so one identity can live on several. A nest you have set up as a custodian (below), whether another of your own or a friend's, keeps a copy of your account that it cannot read — apart from what you have published to everyone, which is public by design — so if one of your nests is lost you can restore what it holds for you from it: **Restore from a custodian nest…** on this page takes the custodian's address, and works on a new device too, once you have signed in there (the steps are in [Your identity, devices & recovery](identity-and-devices.md#if-you-lose-every-device-and-your-nest)). Each nest's row shows
   what it is trusted to read, renewable and
   revocable per item, with a history view of every change. A folder you

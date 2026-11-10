@@ -4,6 +4,9 @@ title: Know where a post came from
 section: everyday
 goal: docs/goal/architecture/security.md § App display of unverified content
 guide: docs/guides/who-can-see-what.md § Public posts and your profile
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -39,13 +42,15 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| web | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.2-dev+f5c0a21a.dirty standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

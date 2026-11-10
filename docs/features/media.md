@@ -15,7 +15,7 @@ reloading. Each item says whether it is synced.
 
 ## Coverage contract
 
-Stamped 2026-11-01 at a6047fbd8b.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] The browser shows all your files across folders, narrows to one folder, and says when a folder is empty — `docs/goal/ui/media.md` § Default view: cross-set all-media
    - `tests/e2e-unified/tests/test_media.py::test_media_explorer_chrome`
@@ -56,29 +56,42 @@ Stamped 2026-11-01 at a6047fbd8b.
    - `tests/e2e-unified/tests/test_media.py::test_upload_into_a_metadata_only_folder_is_refused_with_its_reason`
 14. [app] The browse offers a sort direction, ascending by default, that reverses the order of whichever sort key is active — `docs/goal/ui/media.md` § Layout & flow
    - `tests/e2e-unified/tests/test_media.py::test_media_sort_direction_select_reverses_the_active_sort_key`
+15. [app] A restore made elsewhere — of a version, or of a file deleted on this device — reaches the disk of a folder this device keeps resident, and an upload from another surface into a path this device serves appears on its disk — `docs/goal/behavior/file-versions.md` § Restore
+   - `tests/e2e-unified/tests/test_media.py::test_media_restore_of_an_older_version_reaches_the_resident_disk`
+   - `tests/e2e-unified/tests/test_media.py::test_media_restore_of_a_file_deleted_on_this_device_brings_it_back_to_disk`
+   - `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves`
+16. [nest] Every version counts against your storage: shrinking a file frees nothing, pruning versions frees space and deleting the folder frees all of it — `docs/goal/behavior/file-versions.md` § Retention
+   - `tests/e2e-unified/tests/api/test_file_versions_metering_audience.py::test_every_version_counts_shrinking_frees_nothing_pruning_and_deleting_free`
+17. [app] Retention never prunes below two versions or the current one, and a scheduled prune waits seven days and can be cancelled — `docs/goal/behavior/file-versions.md` § Retention
+   - `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers`
+   - `tests/e2e-unified/tests/test_media_version_retention.py::test_a_scheduled_version_prune_waits_seven_days_and_cancelling_keeps_every_version`
+18. [nest] Only the folder's audience sees a file's versions: an admin outside it, or a non-member, gets nothing — `docs/goal/behavior/file-versions.md` § Wire surface
+   - `tests/e2e-unified/tests/api/test_file_versions_metering_audience.py::test_only_the_folders_audience_sees_a_files_versions`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| web | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | linux | ✅ full | 0.1.5-dev+1e755069 standalone |
 | windows | ⚠ partial | 0.1.5-dev+1e755069 standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_media.py::test_media_explorer_chrome` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_media.py::test_all_media_cross_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_media.py::test_media_empty_state_marks_a_loaded_page_not_a_loading_one` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_into_selected_set` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_into_selected_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_freshly_created_empty_folder` | tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_no_set_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves` | tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_item` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_file_from_disk` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_cancel_is_a_no_op` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -96,5 +109,12 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state` | web (linux): failed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_in_a_full_folder_is_reachable_with_no_seat_connected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_metadata_only_folder_is_refused_with_its_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_media.py::test_media_sort_direction_select_reverses_the_active_sort_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_media.py::test_media_sort_direction_select_reverses_the_active_sort_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_media.py::test_media_restore_of_an_older_version_reaches_the_resident_disk` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_media.py::test_media_restore_of_a_file_deleted_on_this_device_brings_it_back_to_disk` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_file_versions_metering_audience.py::test_every_version_counts_shrinking_frees_nothing_pruning_and_deleting_free` | nest (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_media_version_retention.py::test_a_scheduled_version_prune_waits_seven_days_and_cancelling_keeps_every_version` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | nest | `tests/e2e-unified/tests/api/test_file_versions_metering_audience.py::test_only_the_folders_audience_sees_a_files_versions` | nest (linux): passed |
 <!-- features-render:end -->

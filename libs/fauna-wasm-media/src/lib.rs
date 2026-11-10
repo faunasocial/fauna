@@ -531,7 +531,7 @@ impl MediaMachine {
     /// the all-media default.
     #[wasm_bindgen(js_name = setFilter)]
     pub fn set_filter(&self, folder: Option<String>) {
-        self.0.set_filter(folder)
+        self.0.clone().set_filter(folder)
     }
 
     /// Set the `media-view-toggle`: `true` = thumbnail grid, `false` = list.

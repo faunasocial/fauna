@@ -493,7 +493,9 @@ def _rule_7_declarations(pages: list, ledger: dict, tests: dict, registry: dict,
     (b) a `product` surface keyed by a ui.yaml id, declared unbuilt on an app whose
         `ui-actual-<app>.yaml` records that id present — the fence against declaring
         unbuilt what exists, naming both files;
-    (c) a `product` entry whose `built` is all seven apps — finished."""
+    (c) a `product` entry whose `built` holds all seven apps — finished (a kids column
+        it leaves out is a plane the kids build excises, kept off the column by the
+        page's absence)."""
     problems = []
     surface_marks = {node_id: facts.surfaces for node_id, facts in tests.items()
                      if facts.surfaces}
@@ -525,7 +527,7 @@ def _rule_7_declarations(pages: list, ledger: dict, tests: dict, registry: dict,
     for key, entry in sorted(registry.items()):
         if entry.kind != "product":
             continue
-        if entry.built == frozenset(fc.APPS):
+        if entry.built >= frozenset(fc.APP_COLUMNS):
             problems.append(
                 f"tests/e2e-unified/surfaces.toml [{key}]: built on all seven apps — "
                 "finished: delete the entry and its gates (e2e-conventions.md convention 7)")

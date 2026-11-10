@@ -168,6 +168,7 @@ public final class FeedVM {
     public func authorWindow(actorId: String) async -> FeedVM? {
         guard let manager, !isReconfiguring else { return nil }
         let window = FeedVM(authorWindow: manager.authorWindow(actorId: actorId), api: api)
+        window.setSpamMarked(spamMarkedIds)
         await window.manager?.refreshCurrentFeed()
         return window
     }
@@ -290,8 +291,11 @@ public final class FeedVM {
         observerBox = nil
         storeChangeWatch?.cancel()
         storeChangeWatch = nil
+        connectionWordFollow?.cancel()
+        connectionWordFollow = nil
         manager = nil
         cueTrackerOf = nil
+        spamMarkedIds = []
         roomPostSession = nil
         roomPostObservedManager = nil
         roomPostObserverBox = nil
@@ -366,6 +370,17 @@ public final class FeedVM {
             box.target = self
             self.manager = mgr
             self.observerBox = box
+            // The reader's spam marks may have loaded before this manager
+            // existed (`setSpamMarked`); a rebuilt manager starts with them.
+            mgr.setSpamMarked(ids: spamMarkedIds)
+            // The connection word the offline gate reads, now and on every
+            // change: the first word wires the device's offline outbox, before
+            // any author window copies the manager's queue
+            // (`account-offline-mutation.md` § The offline-mutation contract).
+            connectionWordFollow?.cancel()
+            connectionWordFollow = ConnectionWordFeed.shared.follow { [weak mgr] word in
+                mgr?.setConnectionState(connectionState: word)
+            }
             self.configuredSecret = secretHex
             storeChangeWatch?.cancel()
             storeChangeWatch = StoreChangeNotice.shared.watch { [weak self] in
@@ -627,6 +642,10 @@ public final class FeedVM {
     /// both apple targets take it from here and neither adds its own.
     @ObservationIgnored private var storeChangeWatch: StoreChangeWatch?
 
+    /// The installed manager's follow of the offline gate's connection word
+    /// (`ConnectionWordFeed`) — armed with the manager, dropped with it.
+    @ObservationIgnored private var connectionWordFollow: ConnectionWordFeed.Following?
+
     /// Re-pull the CURRENT selection so a mute, a trained topic or any other
     /// sealed-scorer change another device or instance stored re-ranks the
     /// open feed — through the same `refreshCurrentFeed` seam `rehydrate`
@@ -708,6 +727,84 @@ public final class FeedVM {
     /// `ComposeAttachButton`'s picker-open/cancel failures).
     public func setClientErrorMessage(_ message: String?) {
         clientErrorMessage = message
+    }
+
+    // ── The post's mark-as-spam verb (`report-sharing.md` § Report capture →
+    //    *The post's mark-as-spam verb*) ─────────────────────────────────────
+    //
+    // A shell over the shared surfaces: the `spam_marked` list on the sealed
+    // moderation record (`load_spam_marked`/`mark_spam`/`unmark_spam`), the
+    // manager's spam fold (`FeedManager::set_spam_marked`/`is_spam_marked`) and
+    // the `train_moderation_correction` façade. android's `FeedVM.markPostSpam`
+    // and tui's `Op::MarkPostSpam` are the twins.
+
+    /// The reader's spam marks, kept so a manager built (or an author window
+    /// minted) after the list loaded starts with them.
+    @ObservationIgnored private var spamMarkedIds: [String] = []
+
+    /// Hand the manager the spam marks (its next snapshot folds `spam`@1000
+    /// into each marked post's labels and notifies) and keep them for a
+    /// rebuild. Fed from ``ContentPolicyStore/spamMarked`` by the
+    /// `feedSpamMarkSync` modifier both platform feed pages mount.
+    public func setSpamMarked(_ ids: [String]) {
+        spamMarkedIds = ids
+        manager?.setSpamMarked(ids: ids)
+    }
+
+    /// The mark-as-spam verb's `state`: whether the reader marked `postId`.
+    public func isSpamMarked(_ postId: String) -> Bool {
+        _ = _observerTick
+        return manager?.isSpamMarked(postId: postId) ?? false
+    }
+
+    /// The plane write the verb runs — `mark_spam`/`unmark_spam`, returning
+    /// the stored list. A seam so the toggle's routing is unit-testable
+    /// without an account runtime.
+    @ObservationIgnored var spamPlaneWrite: (_ postId: String, _ isSpam: Bool) async throws -> [String] = { id, isSpam in
+        isSpam ? try await markSpam(id: id) : try await unmarkSpam(id: id)
+    }
+
+    /// The nest half — the shared `train_moderation_correction` façade (the
+    /// sealed model write when available, then `fauna.moderation.train`), or
+    /// `fauna.moderation.train` alone when no mail-settings machine could be
+    /// built (tui's and linux's fallback). A seam for the unit tests.
+    @ObservationIgnored var spamTrain: (_ api: APIClient?, _ postId: String, _ isSpam: Bool) async throws -> Void = { api, id, isSpam in
+        guard let api else { return }
+        if let machine = try? await api.mailSettingsMachine() {
+            _ = try await machine.trainModerationCorrection(contentId: id, isSpam: isSpam)
+        } else {
+            try await api.moderationClient().train(contentId: id, verdict: isSpam ? "spam" : "ham")
+        }
+    }
+
+    /// `feed-post-mark-as-spam-button` — the toggle. The plane write lands
+    /// first and its stored list goes to the manager and the shared store
+    /// (the post collapses for the marker at once); then the façade runs with
+    /// the verb's new state. A failure of either reaches the page's
+    /// `error-message` (wrapped in `feed.error_mark_spam`) and never undoes
+    /// the other.
+    public func markPostSpam(_ postId: String, contentPolicy: ContentPolicyStore?) async {
+        guard let manager else { return }
+        let isSpam = !manager.isSpamMarked(postId: postId)
+        let generation = managerGeneration
+        let issuedApi = api
+        var failure: String?
+        do {
+            let stored = try await spamPlaneWrite(postId, isSpam)
+            guard generation == managerGeneration else { return }
+            setSpamMarked(stored)
+            contentPolicy?.setSpamMarked(stored)
+        } catch {
+            failure = DisplayError.message(error)
+        }
+        do {
+            try await spamTrain(issuedApi, postId, isSpam)
+        } catch {
+            if failure == nil { failure = DisplayError.message(error) }
+        }
+        if let failure {
+            landClientErrorMessage(generation: generation, message: L.feed.errorMarkSpam(message: failure))
+        }
     }
 
     // ── Feed list / selection ───────────────────────────────────────────────
@@ -1395,16 +1492,18 @@ public final class FeedVM {
         return source
     }
 
-    /// What one post's `post-image` slot paints, from its document: the blob
-    /// image first (``postImage(_:home:)``), else a bridged post's `ProxiedImage`
-    /// (``proxiedPostImage(_:)``), else `nil` — the precedence tui's
-    /// `proxied_post_image` keeps (`render-model.md` § D6c). The one pick the
-    /// list card and both post details share. `home` is the post's
+    /// What one picture element of ``documentMediaElements(_:)`` paints — a blob
+    /// picture through ``postImage(_:home:)``, a bridged one through
+    /// ``proxiedPostImage(_:)`` — or `nil` for a video element. Asking for it
+    /// kicks that picture's byte load, so every picture a post carries loads, not
+    /// just the first (render-model.md § D6b). `home` is the post's
     /// `postBlobHome`, handed on unchanged.
-    public func documentPostImage(_ document: RenderDocument, home: FfiPostBlobHome?) -> PostImageSource? {
-        if let hash = documentMediaImageHash(document) { return postImage(hash, home: home) }
-        if let path = documentMediaProxiedImagePath(document) { return proxiedPostImage(path) }
-        return nil
+    public func postImage(for element: DocumentMediaElement, home: FfiPostBlobHome?) -> PostImageSource? {
+        switch element {
+        case .image(let hash, _): return postImage(hash, home: home)
+        case .proxiedImage(let path, _): return proxiedPostImage(path)
+        case .video, .proxiedVideo: return nil
+        }
     }
 
     /// Decoded bytes for bridged post pictures, keyed by their nest-relative

@@ -32,7 +32,7 @@ fn replica() -> Replica {
     let engine = ingest_engine(tree.kept_root().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
     Replica {
         _dir: dir,

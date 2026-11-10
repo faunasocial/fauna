@@ -421,7 +421,8 @@ public struct ConnectedAppsView: View {
             text: { itemText },
             attributes: {
                 // Every row reports whether it can act — `paused` (the
-                // account's external-apps switch is OFF), `connected`, or
+                // account's external-apps switch is OFF, or a step-down suspended the
+                // app), `connected`, or
                 // `not_connected` — beside the words.
                 var attrs = ["status": row.paused ? "paused" : (row.connected ? "connected" : "not_connected")]
                 if burned { attrs["revoked"] = "true" }
@@ -475,12 +476,14 @@ public struct ConnectedAppsView: View {
                 Text(secret ?? "")
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
-                    .accessibilityIdentifier(Ids.connectedAppsItemSecret)
-                    .automationValue(Ids.connectedAppsItemSecret, text: { vm.revealed[key] ?? "" })
                     // Rule 2 of `security.md` § On-screen secret exposure: a
                     // minted, revocable credential suppresses capture while — and
-                    // only while — it is actually revealed.
+                    // only while — it is actually revealed. Innermost, with the id
+                    // registered outside it: on macOS the value is hosted again in
+                    // the reveal window, and the id must register once.
                     .suppressScreenCapture(isActive: secret != nil)
+                    .accessibilityIdentifier(Ids.connectedAppsItemSecret)
+                    .automationValue(Ids.connectedAppsItemSecret, text: { vm.revealed[key] ?? "" })
                 Button(secret == nil ? L.settings.mail.revealSecret : L.settings.mail.hideSecret) {
                     Task { await vm.toggleReveal(key) }
                 }

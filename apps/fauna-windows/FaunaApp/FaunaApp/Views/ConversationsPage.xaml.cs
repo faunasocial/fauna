@@ -100,6 +100,11 @@ public sealed partial class ConversationsPage : Page
     private string? _seededThreadId;
     private bool _seededNewThread;
 
+    /// <summary>The thread <c>image-lightbox</c> was opened over; the lightbox belongs
+    /// to it, so a render that no longer shows that thread closes it
+    /// (<see cref="CloseImageLightboxIfThreadLeft"/>).</summary>
+    private string? _lightboxThreadId;
+
     // ── The messages list, identity-keyed by message id ──
     // Bubbles and subject dividers are REUSED across observer ticks and re-bound in place —
     // web (`{#each … (msg.message_id)}`) and android (`key = { it.messageId }`) key their
@@ -300,11 +305,15 @@ public sealed partial class ConversationsPage : Page
         }
         // The page shown again with a thread still selected (no list click follows):
         // re-read the withheld badges' queue rows, since a takedown or a block lands
-        // while no app is looking (takedown-and-block.md § Legal takedown → App render;
-        // linux reads it on the page's map).
+        // while no app is looking (takedown-and-block.md § Legal takedown → App render),
+        // and the received messages' scan verdicts, since the scan-result switch lives
+        // on mail-settings and the selection read never fires for a thread that stayed
+        // open (mail-content-scanning.md § Per-account opt-out for visible scan details).
+        // linux reads both on the page's map.
         else if (_vm.SelectedThreadId is { } shownThread)
         {
             _ = _vm.RefreshWithheldMessagesAsync(shownThread);
+            _ = _vm.RefreshMessageScanResultsAsync(shownThread);
         }
     }
 
@@ -316,6 +325,9 @@ public sealed partial class ConversationsPage : Page
         // Guarded: a sign-out's or switch's unload runs AFTER the actor change —
         // see UnlessManagerRetired.
         UnlessManagerRetired(FlushActiveComposeDraft, "unload draft flush");
+        // Leaving the page leaves the thread: the lightbox does not outlive it.
+        Lightbox.Hide();
+        _lightboxThreadId = null;
         // Persist the just-flushed draft set to the nest now (draft-persistence v2),
         // in case the debounce window hadn't elapsed — fire-and-forget, best-effort.
         _ = App.ConvDrafts?.SaveNowAsync();
@@ -478,6 +490,8 @@ public sealed partial class ConversationsPage : Page
             _seededThreadId = null;
             _seededNewThread = false;
         }
+
+        CloseImageLightboxIfThreadLeft(nt is null ? detail?.threadId : null);
 
         // Add-participant overlay — driven off snapshot.addParticipant,
         // mirroring RefreshNewThreadView's NewThreadPicker block.
@@ -936,7 +950,34 @@ public sealed partial class ConversationsPage : Page
         {
             if (msg.Withheld is { } withheld) MainPage.Current?.OpenModerationAppeal(withheld.ContentId);
         };
+        // dm-attachment-image → image-lightbox over the thread (conversations.md § User
+        // actions): the bitmap the bubble already decoded — no second read of the shared
+        // attachment store — or, for a picture whose bytes the device does not hold, its
+        // declared placeholder, never a dropped click.
+        bubble.ImageClicked += OpenImageLightbox;
         return bubble;
+    }
+
+    /// <summary>Open <c>image-lightbox</c> over the shown thread on a
+    /// <c>dm-attachment-image</c>'s picture, or as its placeholder when
+    /// <paramref name="image"/> is null. The bubbles are the shown thread's
+    /// (<see cref="_bubblesThreadId"/>), so that is the thread it opens over.</summary>
+    private void OpenImageLightbox(Microsoft.UI.Xaml.Media.Imaging.BitmapImage? image, string declared)
+    {
+        _lightboxThreadId = _bubblesThreadId;
+        if (image is not null) Lightbox.Show(image);
+        else Lightbox.ShowPlaceholder(declared);
+    }
+
+    /// <summary>The lightbox closes when its thread is left — another thread selected,
+    /// the new-thread composer opened, or no thread shown (<paramref name="shownThreadId"/>
+    /// null) — as tui clears its <c>conversations.lightbox</c> on leaving the thread
+    /// (conversations.md § User actions, the <c>dm-attachment-image</c> row).</summary>
+    private void CloseImageLightboxIfThreadLeft(string? shownThreadId)
+    {
+        if (!Lightbox.IsOpen || shownThreadId == _lightboxThreadId) return;
+        Lightbox.Hide();
+        _lightboxThreadId = null;
     }
 
     private void RefreshNewThreadView(ComposeState compose)
@@ -1555,11 +1596,11 @@ public sealed partial class ConversationsPage : Page
     private bool _roomSelectsFilled;
 
     /// <summary>
-    /// Fill the two token selects the <c>event-detail-reminder-select</c> way:
-    /// each item's Content is the localized sentence, its Name AND Tag the
-    /// driver-facing token — because <c>select</c> matches on Name and
-    /// <c>get_text</c> reads the selected item's Name back, which is what makes
-    /// the token round-trip (<c>ui.yaml</c> `room-join-rule-select`).
+    /// Fill the two token selects the way every keyed windows picker is filled:
+    /// each item paints the localized sentence and is keyed by the driver-facing
+    /// token (<see cref="PickerOption"/>) — <c>select</c> matches the key and
+    /// <c>get_text</c> reads the selected item's key back, which is what makes the
+    /// token round-trip (<c>ui.yaml</c> `room-join-rule-select`).
     ///
     /// <para>Filled ONCE, never rebuilt. Re-filling a ComboBox with the
     /// identical options is not a no-op under UIA — it destroys the automation
@@ -1589,12 +1630,8 @@ public sealed partial class ConversationsPage : Page
         _roomSelectsFilled = true;
     }
 
-    private static void AddRoomTokenItem(ComboBox box, string token, string label)
-    {
-        var item = new ComboBoxItem { Content = label, Tag = token };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, token);
-        box.Items.Add(item);
-    }
+    private static void AddRoomTokenItem(ComboBox box, string token, string label) =>
+        box.Items.Add(PickerOption.Create(label, token));
 
     /// <summary>Move a token select's selection without touching its items.</summary>
     private static void SelectRoomToken(ComboBox box, string token)
@@ -2397,11 +2434,17 @@ public sealed class ThreadRow
         // conversation_timestamp_display); this row only supplies the live `now`
         // and the machine's local UTC offset, via the app's one named door
         // (value-formatting.md § Absolute local timestamp display). No
-        // hand-rolled time logic here.
-        Timestamp = ValueFormat.ConversationTimestamp(
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            t.lastActivityMs,
-            DeviceOffset.UtcOffsetSeconds());
+        // hand-rolled time logic here. A thread with no activity time
+        // (`last_activity_ms` = 0) has no `conversation-item-timestamp` at all —
+        // Collapsed, as on the other six apps — never a 1970 date.
+        var hasActivity = t.lastActivityMs > 0;
+        Timestamp = hasActivity
+            ? ValueFormat.ConversationTimestamp(
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                t.lastActivityMs,
+                DeviceOffset.UtcOffsetSeconds())
+            : "";
+        TimestampVis = hasActivity ? Visibility.Visible : Visibility.Collapsed;
     }
 
     public string ThreadIdValue { get; }
@@ -2425,8 +2468,13 @@ public sealed class ThreadRow
     public Visibility UnreadVis { get; }
 
     /// <summary>The shared contextual last-activity timestamp shown in the row's
-    /// top-right (conversations.md § Layout list-row timestamp).</summary>
+    /// top-right (conversations.md § Layout list-row timestamp), the indexed
+    /// <c>conversation-item-timestamp</c>; empty while the thread has no activity time.</summary>
     public string Timestamp { get; }
+
+    /// <summary>Collapsed — <c>conversation-item-timestamp</c> absent — while the thread
+    /// has no activity time (<c>last_activity_ms</c> = 0, ui.yaml).</summary>
+    public Visibility TimestampVis { get; }
 
     /// <summary>The indexed <c>protocol-icon</c> glyph for a thread's source concept,
     /// resolved through the shared <c>SourceGlyph</c> token (render-model.md § Deltas

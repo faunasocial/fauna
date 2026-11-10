@@ -155,52 +155,48 @@ class FamilyVM @Inject constructor(
      * (family-safety.md § The bridge-DM gate → *The un-deny surface*): the
      * shared `allowBlockedPeer` over THAT row's own [FfiFamilyBlockedPeer]
      * ([UndenyDecide], rule (f)). Re-reads status so the row drops from
-     * nest-confirmed state.
+     * nest-confirmed state; with no nest it rests in the device's outbox
+     * (account-offline-mutation.md) and nothing is re-read.
      */
     fun allowBlockedPeer(decide: UndenyDecide) {
         viewModelScope.launch {
             errorMessage.value = null
             try {
-                api.familyAllowBlockedPeer(decide.supervisedActorId, decide.peer)
-                refresh()
+                val queued = api.familyAllowBlockedPeerOrQueue(decide.supervisedActorId, decide.peer)
+                if (!queued) refresh()
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"
             }
         }
     }
 
-    /** `family-approval-{approve,deny}-button` — decide one queued item. */
+    /** `family-approval-{approve,deny}-button` — decide one queued item. The
+     *  entry travels whole: shared Rust passes every item key through. With no
+     *  nest the decision rests in the device's outbox and the item leaves the
+     *  local list through the shared fold, nothing re-read
+     *  (account-offline-mutation.md § Implementation status today). */
     fun decideApproval(entry: FfiFamilyApprovalEntry, approve: Boolean) {
         viewModelScope.launch {
             errorMessage.value = null
             try {
-                api.familyApprovalsDecide(
-                    entry.supervisedActorId,
-                    entry.kind,
-                    entry.peerActorId,
-                    entry.messageId,
-                    // A `feed_source` item's key; empty for every other kind.
-                    entry.bridgeId,
-                    entry.operation,
-                    entry.target,
-                    // A `dm_hold` item's key, with bridgeId — an external DM
-                    // peer is not an actor on this nest.
-                    entry.peerAddress,
-                    approve,
-                )
-                _approvals.value = api.familyApprovalsList()
+                if (api.familyApprovalsDecideOrQueue(entry, approve)) {
+                    _approvals.value = api.familyApprovalsAfterQueuedDecision(_approvals.value, entry)
+                } else {
+                    _approvals.value = api.familyApprovalsList()
+                }
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"
             }
         }
     }
 
-    /** `family-contact-add-button` — pre-approve a contact on the ward's behalf. */
+    /** `family-contact-add-button` — pre-approve a contact on the ward's
+     *  behalf; with no nest it rests in the device's outbox, folding nothing. */
     fun addContact(supervisedActorId: ByteArray, peerActorId: ByteArray) {
         viewModelScope.launch {
             errorMessage.value = null
             try {
-                api.familyContactAdd(supervisedActorId, peerActorId)
+                api.familyContactAddOrQueue(supervisedActorId, peerActorId)
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"
             }

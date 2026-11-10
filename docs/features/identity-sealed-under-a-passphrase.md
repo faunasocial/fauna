@@ -88,6 +88,8 @@ Stamped 2026-10-17 at 2ad53d795c.
 | ios | — absent | |
 | android | — absent | |
 | tui | ✅ full | 0.1.5-dev+67f8b249 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

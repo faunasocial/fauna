@@ -500,6 +500,17 @@ pub struct RoomInviteInbox {
     /// beyond that relay (`federation.md` § residue).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub room_node: Option<String>,
+    /// The room's home nest's deployment `nest_actor_id` (hex 32-byte pubkey),
+    /// stamped beside [`Self::room_node`] by the invitee's own nest from the
+    /// identity it verified on the delivering channel — never the peer's word,
+    /// exactly as [`WelcomeInbox::home_nest_actor_id`] is for the Welcome
+    /// classes. A community room is joined by this knock and an accept, never
+    /// a Welcome, so this is where its member learns the identity its byte
+    /// plane (the room's attachment legs) graduates a pin against
+    /// (`docs/goal/architecture/transport-trust.md` § The post arm). `None`
+    /// for a room homed on the invitee's own nest. Wire-additive.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub home_nest_actor_id: Option<String>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -815,6 +826,7 @@ mod tests {
         let i = RoomInviteInbox {
             signed_invite: vec![0xa1, 0xb2, 0xc3],
             room_node: None,
+            home_nest_actor_id: None,
             extra: Default::default(),
         };
         let env = InboxEnvelope::room_invite(&i).unwrap();
@@ -834,6 +846,7 @@ mod tests {
         let env = InboxEnvelope::room_invite(&RoomInviteInbox {
             signed_invite: signed.clone(),
             room_node: Some("https://other.example".into()),
+            home_nest_actor_id: Some("ef".repeat(32)),
             extra: Default::default(),
         })
         .unwrap();
@@ -844,6 +857,7 @@ mod tests {
             .unwrap();
         assert_eq!(back.signed_invite, signed);
         assert_eq!(back.room_node.as_deref(), Some("https://other.example"));
+        assert_eq!(back.home_nest_actor_id, Some("ef".repeat(32)));
     }
 
     #[test]

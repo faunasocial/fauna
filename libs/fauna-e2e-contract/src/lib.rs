@@ -42,6 +42,57 @@ impl ConnectionReports {
     }
 }
 
+/// The log behind `fauna_e2e_agent::KNOCK_NOTICES_KEY` — one per app process,
+/// fed at the knock-toast firing site.
+///
+/// `seen` counts every knock push the firing arm received, before the
+/// muted-word gate (`behavior/notifications.md` § Muted words rule 6) decides;
+/// `fired` appends one entry per toast actually raised, after every
+/// suppression, ordered by firing and never trimmed. A positive read waits for
+/// its entries; a negative one ("this muted knock raised no toast") waits for
+/// `seen` to pass the value it read at plant time and then asserts `fired` did
+/// not grow — no clock anywhere (convention 14).
+#[derive(Debug, Default)]
+pub struct KnockNotices {
+    seen: u64,
+    fired: Vec<FiredKnockNotice>,
+}
+
+#[derive(Debug)]
+struct FiredKnockNotice {
+    key: Option<String>,
+    text: String,
+    replace_id: Option<u32>,
+}
+
+impl KnockNotices {
+    /// A knock push reached the firing arm (call before the muted gate).
+    pub fn observe(&mut self) {
+        self.seen += 1;
+    }
+
+    /// A knock toast was raised: the catalog `key` its text resolved from
+    /// (`None` for a verbatim text), the painted `text`, and the platform
+    /// notification id it replaces under (`None` where the arm has none).
+    pub fn record(&mut self, key: Option<&str>, text: &str, replace_id: Option<u32>) {
+        self.fired.push(FiredKnockNotice {
+            key: key.map(str::to_owned),
+            text: text.to_owned(),
+            replace_id,
+        });
+    }
+
+    /// The `fauna_e2e_agent::KNOCK_NOTICES_KEY` value.
+    pub fn json(&self) -> Value {
+        let fired: Vec<Value> = self
+            .fired
+            .iter()
+            .map(|n| json!({ "key": n.key, "text": n.text, "replace_id": n.replace_id }))
+            .collect();
+        json!({ "seen": self.seen, "fired": fired })
+    }
+}
+
 /// Parse a `fauna_e2e_agent::RECONNECT_BACKOFF` payload: `Ok(Some((initial, max)))` to pace,
 /// `Ok(None)` to restore, `Err` naming what is wrong. Shared so every app reads
 /// the same shape and refuses the same malformed ones.
@@ -161,6 +212,30 @@ mod tests {
         assert_eq!(
             custody_ceremony_ingest_json(5, 2, 1, 1, 1),
             json!({ "seen": 5, "moved": 2, "duplicate": 1, "refused": 1, "uncaptured": 1 })
+        );
+    }
+
+    /// A flood reads as N entries under one replace id, in firing order, and
+    /// a withheld knock moves `seen` without growing `fired`.
+    #[test]
+    fn knock_notices_log_every_fire_and_count_every_push() {
+        let mut log = KnockNotices::default();
+        assert_eq!(log.json(), json!({ "seen": 0, "fired": [] }));
+        log.observe();
+        log.record(
+            Some("notifications.row_knock"),
+            "a wants to connect: hi",
+            Some(7),
+        );
+        log.observe();
+        log.record(None, "verbatim", None);
+        log.observe();
+        assert_eq!(
+            log.json(),
+            json!({ "seen": 3, "fired": [
+                { "key": "notifications.row_knock", "text": "a wants to connect: hi", "replace_id": 7 },
+                { "key": null, "text": "verbatim", "replace_id": null },
+            ]})
         );
     }
 

@@ -71,13 +71,14 @@ use std::sync::Arc;
 use fauna_client::NestClient;
 use fauna_client_bridges::{
     BridgesClient, FollowRequestRow, InstalledPluginRow, PluginCard, PluginCardAction,
-    PluginsClient, SettingControl, follow_display, follow_request_row, installed_plugin_row,
-    is_unified_bridges_page_bridge, plugin_card, plugin_publisher_text, plugin_status_lines,
-    setting_control,
+    PluginsClient, SettingControl, bridge_card_title, follow_display, follow_request_row,
+    installed_plugin_row, is_unified_bridges_page_bridge, plugin_card, plugin_publisher_text,
+    plugin_status_lines, setting_control,
 };
 use fauna_i18n::strings::{bridges as t, common};
 use fauna_protocol::Value as WireValue;
 use fauna_protocol::bridges_ui::{BridgeFollow, BridgeSetting, BridgeStatus};
+use fauna_protocol::offline_intent::{ComposeError, Composed, OfflineIntentQueue};
 
 use crate::app::App;
 use crate::element::{Element, Field, Gesture, SelectTarget};
@@ -567,6 +568,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             st.follow_petname_input.remove(&bridge_id);
             Some(Op::AddFollow {
                 nest,
+                queue: offline_queue(&app.account_outbox),
                 bridge_id,
                 id,
                 petname,
@@ -574,6 +576,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::RemoveFollow { bridge_id, id } => Some(Op::RemoveFollow {
             nest: st.nest.clone()?,
+            queue: offline_queue(&app.account_outbox),
             bridge_id,
             id,
         }),
@@ -696,14 +699,22 @@ pub enum Op {
         bridge_id: String,
         settings: WireValue,
     },
+    /// `fauna.bridges.add_follow`, then re-read. `queue` is the device's
+    /// outbox ([`App::account_outbox`]): with no nest the follow is queued
+    /// instead of sent into a dead connection ([`Outcome::FollowQueued`]), and
+    /// nothing is re-read.
     AddFollow {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         bridge_id: String,
         id: String,
         petname: Option<String>,
     },
+    /// `fauna.bridges.remove_follow`, then re-read — queued like
+    /// [`Op::AddFollow`] when there is no nest.
     RemoveFollow {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         bridge_id: String,
         id: String,
     },
@@ -778,6 +789,11 @@ pub enum Outcome {
         /// them; `None` leaves the page's cards as they were.
         plugin_cards: Option<Vec<PluginCard>>,
     },
+    /// A follow or unfollow was queued — no nest; it rests in the device's
+    /// outbox and drains when the nest is back. The list is left as it was:
+    /// the page paints only what the nest persisted, and the nest's list after
+    /// the drain is the word.
+    FollowQueued,
     /// The install card is open — the admin answers it in Connected apps.
     PluginInstallOpened,
     /// The bind card is open — the user answers it in Connected apps.
@@ -854,32 +870,46 @@ impl Op {
             }
             Op::AddFollow {
                 nest,
+                queue,
                 bridge_id,
                 id,
                 petname,
             } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
                 match client
-                    .add_follow(bridge_id.clone(), id.clone(), petname, None)
+                    .add_follow_or_queue(
+                        queue.as_deref(),
+                        bridge_id.clone(),
+                        id.clone(),
+                        petname,
+                        None,
+                    )
                     .await
                 {
-                    Ok(()) => refresh(nest).await,
-                    Err(e) => guardian_gate_or_failed(
+                    Ok(Composed::Queued(_)) => Outcome::FollowQueued,
+                    Ok(Composed::Sent(())) => refresh(nest).await,
+                    Err(ComposeError::Rpc(e)) => guardian_gate_or_failed(
                         e,
                         bridge_id,
                         fauna_core::data::FeedSourceOperation::Follow,
                         id,
                     ),
+                    Err(e @ ComposeError::Queue(_)) => Outcome::Failed(e.to_string()),
                 }
             }
             Op::RemoveFollow {
                 nest,
+                queue,
                 bridge_id,
                 id,
             } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
-                match client.remove_follow(bridge_id, id).await {
-                    Ok(()) => refresh(nest).await,
+                match client
+                    .remove_follow_or_queue(queue.as_deref(), bridge_id, id)
+                    .await
+                {
+                    Ok(Composed::Queued(_)) => Outcome::FollowQueued,
+                    Ok(Composed::Sent(())) => refresh(nest).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1098,6 +1128,17 @@ async fn refresh_page(nest: Arc<NestClient>, admin: bool) -> Outcome {
     outcome
 }
 
+/// The device's outbox, lent to the gestures whose kind is `OfflineQueued`
+/// ([`App::account_outbox`]; `None` before the account store is ready, when a
+/// gesture sends as it always did).
+pub(crate) fn offline_queue(
+    outbox: &Option<Arc<fauna_sync_engine::offline_intent_queue::AccountOutbox>>,
+) -> Option<Arc<dyn OfflineIntentQueue>> {
+    outbox
+        .clone()
+        .map(|outbox| outbox as Arc<dyn OfflineIntentQueue>)
+}
+
 /// Fold an op's result back into the page. One function for both dispatch
 /// paths, so they cannot disagree about what an outcome means.
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
@@ -1118,6 +1159,9 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             if let Some(cards) = plugin_cards {
                 app.bridges.plugin_cards = cards;
             }
+            app.errors.remove(&Page::Bridges);
+        }
+        Outcome::FollowQueued => {
             app.errors.remove(&Page::Bridges);
         }
         Outcome::PluginInstallOpened => {
@@ -1337,7 +1381,10 @@ fn plugin_card_elements(
 ) {
     let resolve =
         |text: &fauna_core::localized::LocalizedText| text.resolve(fauna_i18n::strings::lookup);
-    out.push(Element::chrome(card.name.clone()).within(ids::BRIDGE_CARD, display_i));
+    out.push(
+        Element::label(ids::BRIDGE_CARD_NAME, card.name.clone())
+            .within(ids::BRIDGE_CARD, display_i),
+    );
     out.push(
         Element::chrome(format!(
             "{}\n{}",
@@ -1443,8 +1490,13 @@ fn bridge_card(
     bridge: &BridgeStatus,
     out: &mut Vec<Element>,
 ) {
-    // The bridge name — untagged chrome (ui.yaml scopes no per-card name id).
-    out.push(Element::chrome(bridge.name.clone()).within(ids::BRIDGE_CARD, display_i));
+    // The bridge name — `bridge-card-name`, headed by a consented bridge app's
+    // declared glyph through the shared `bridge_card_title` (`bridges.md`
+    // § Coverage contract, outcome 11).
+    out.push(
+        Element::label(ids::BRIDGE_CARD_NAME, bridge_card_title(bridge))
+            .within(ids::BRIDGE_CARD, display_i),
+    );
 
     if bridge.linked {
         // Identity ("Handle: @user@domain") — `bridge-identity`.
@@ -1875,6 +1927,66 @@ mod tests {
         )
     }
 
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn run_follow_ops(word: &'static str) -> (Vec<Outcome>, Vec<&'static str>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let lent = || Some(queue.clone() as Arc<dyn OfflineIntentQueue>);
+        let ops = vec![
+            Op::AddFollow {
+                nest: dummy_nest(),
+                queue: lent(),
+                bridge_id: "activitypub".into(),
+                id: "@alice@example.com".into(),
+                petname: None,
+            },
+            Op::RemoveFollow {
+                nest: dummy_nest(),
+                queue: lent(),
+                bridge_id: "activitypub".into(),
+                id: "@bob@example.com".into(),
+            },
+        ];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcomes = ops.into_iter().map(|op| rt.block_on(op.run())).collect();
+        let kinds = queue.queued().into_iter().map(|q| q.0).collect();
+        (outcomes, kinds)
+    }
+
+    /// With no nest, a follow and an unfollow rest in the outbox (not sent
+    /// into the dead connection); the page clears its error and leaves the
+    /// follow list as the nest last said it was.
+    #[test]
+    fn follows_with_no_nest_are_queued_and_list_nothing() {
+        let (outcomes, kinds) = run_follow_ops("disconnected");
+        assert!(outcomes.iter().all(|o| matches!(o, Outcome::FollowQueued)));
+        assert_eq!(
+            kinds,
+            vec!["fauna.bridges.add_follow", "fauna.bridges.remove_follow"]
+        );
+
+        let mut app = authed_app();
+        app.errors.insert(Page::Bridges, "stale".into());
+        let before = app.bridges.follows.clone();
+        for outcome in outcomes {
+            apply_outcome(&mut app, outcome);
+        }
+        assert_eq!(app.bridges.follows, before, "nothing listed");
+        assert!(!app.errors.contains_key(&Page::Bridges));
+    }
+
+    /// Connected, both are sent as before (to this dummy nest they fail on the
+    /// transport) and nothing is queued.
+    #[test]
+    fn follows_with_the_nest_connected_are_sent_not_queued() {
+        let (outcomes, kinds) = run_follow_ops("connected");
+        assert!(outcomes.iter().all(|o| matches!(o, Outcome::Failed(_))));
+        assert!(kinds.is_empty());
+    }
+
     fn setting(key: &str, type_: &str, value: WireValue) -> BridgeSetting {
         BridgeSetting {
             key: key.to_string(),
@@ -2135,6 +2247,33 @@ mod tests {
             error: None,
             extra: Default::default(),
         }
+    }
+
+    /// A consented bridge app's row paints its declared glyph before its name
+    /// as the card's `bridge-card-name`; a first-party provider's row (no
+    /// glyph) stays the bare name (`bridges.md` § Coverage contract, outcome 11).
+    #[test]
+    fn a_consented_bridge_apps_card_paints_its_declared_glyph() {
+        let mut app = bridges_app();
+        let mut matrix = linked_bridge("matrix", "Matrix", vec![]);
+        matrix.glyph = Some("globe".to_string());
+        app.bridges.bridges = vec![matrix, linked_bridge("activitypub", "ActivityPub", vec![])];
+        let out = elements(&app);
+        let titled = |i: usize, text: &str| {
+            out.iter().any(|e| {
+                e.id == ids::BRIDGE_CARD_NAME
+                    && e.text == text
+                    && e.path == vec![(ids::BRIDGE_CARD.to_string(), i)]
+            })
+        };
+        assert!(
+            titled(0, "🌐 Matrix"),
+            "the consented bridge's row carries its glyph"
+        );
+        assert!(
+            titled(1, "ActivityPub"),
+            "a first-party row stays the bare name"
+        );
     }
 
     /// A linked card carries its identity as `bridge-identity` and its follow

@@ -32,6 +32,27 @@ pub trait MlsQuery: FolderChannelOwners + Send + Sync {
     /// Whether the local MLS engine holds the group for the shared set with this raw
     /// hex `mls_group_id` — i.e. the client has joined it.
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool;
+
+    /// Whether the local MLS engine has marked this joined set's seat
+    /// **forked** — the owner changed identity and this copy could not follow
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*). Read into the member row so the recipient badge carries its
+    /// third reading. Default `false`: a host that cannot tell renders the
+    /// ordinary "Shared by ‹…›".
+    fn is_forked_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        let _ = mls_group_id_hex;
+        false
+    }
+}
+
+/// Whether a member row's seat reads forked ([`MlsQuery::is_forked_shared_set`]):
+/// `false` for an owner row, a row with no group id, or no wired query.
+pub fn seat_forked(query: Option<&dyn MlsQuery>, member: bool, mls_group_id: Option<&str>) -> bool {
+    match (member, query, mls_group_id) {
+        (true, Some(q), Some(gid)) => q.is_forked_shared_set(gid),
+        _ => false,
+    }
 }
 
 /// Whether a row passes the join-filter: an owner (or unspecified-role) row

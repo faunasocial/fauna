@@ -534,7 +534,8 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
         set_test_attr(&item, "oracle_ops", &oracle.ops_in_window.to_string());
     }
     // Every row reports whether it can act — `paused` (the account's
-    // external-apps switch is OFF), `connected`, or `not_connected` — as a
+    // external-apps switch is OFF, or a step-down suspended the app), `connected`,
+    // or `not_connected` — as a
     // value a reader can count, beside the words.
     set_test_attr(
         &item,

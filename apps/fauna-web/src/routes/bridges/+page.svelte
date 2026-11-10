@@ -17,6 +17,7 @@
   import { identity } from '#lib/store';
   import { isSafeNavUrl } from '#lib/safe-url';
   import { onMount } from 'svelte';
+  import { afterNavigate } from '$app/navigation';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import BridgeCard from '#lib/components/BridgeCard.svelte';
   import BridgePlugins from '#lib/components/BridgePlugins.svelte';
@@ -125,8 +126,12 @@
       void refreshWardAsks(secret);
       void checkIsAdmin(secret).then((admin) => (isAdmin = admin)).catch(() => {});
     }
-    refresh();
   });
+  // The network rows re-read on every visit — the first included, and one to
+  // this very route: a consent approved on Connected apps pushes nothing here,
+  // so a consented bridge app's row (with its glyph) appears only on a re-read,
+  // as the plugin cards below re-read theirs (`BridgePluginCards.svelte`).
+  afterNavigate(refresh);
 
   async function handleLink(bridge: BridgeInfo, mode: string, fields: Record<string, string>) {
     const secret = $identity?.secretHex;

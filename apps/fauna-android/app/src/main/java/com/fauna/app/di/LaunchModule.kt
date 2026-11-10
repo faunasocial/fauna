@@ -31,7 +31,7 @@ import javax.inject.Singleton
  *     -> FfiSecretStore (LogicalSecretStore: every logical key verbatim)
  *       -> FfiAccountRegistry (shared: index, per-actor slots)
  *         -> LaunchPersistence (shared RegistryLaunchPersistence over the
- *            ACTIVE account) -> LaunchMachine
+ *            ACTIVE account) -> a fresh LaunchMachine per launch drive
  *
  * The registry is the only store (`long-term-store.md` § Downgrade mirror +
  * abandoned-append recovery): launch routes on the registry's active account
@@ -119,14 +119,21 @@ object LaunchModule {
     fun provideLaunchPersistence(registry: FfiAccountRegistry): LaunchPersistence =
         registry.launchPersistence()
 
+    /**
+     * A fresh [LaunchMachine] per launch drive — never one process-wide machine.
+     * A launch is identified by the machine that computed its verdict
+     * ([com.fauna.app.core.LaunchCurrency]), which is only possible when two
+     * launches are two machines: the shape tui, linux and apple share.
+     */
     @Provides
     @Singleton
-    fun provideLaunchMachine(
+    fun provideLaunchMachineFactory(
         observer: LaunchObserverImpl,
         persistence: LaunchPersistence,
-    ): LaunchMachine {
-        val machine = LaunchMachine(observer, persistence)
-        observer.attach(machine)
-        return machine
-    }
+    ): LaunchMachineFactory = LaunchMachineFactory { observer.newMachine(persistence) }
+}
+
+/** Builds the fresh machine each launch drive runs on (see [LaunchModule]). */
+fun interface LaunchMachineFactory {
+    fun fresh(): LaunchMachine
 }

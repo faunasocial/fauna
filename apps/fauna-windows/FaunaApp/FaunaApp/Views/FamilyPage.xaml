@@ -210,6 +210,18 @@
                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyContentNotifyToggle}"
                                   Header="{loc:Localize Key=family/policy_content_notify_label}"
                                   Toggled="ContentNotifyToggle_Toggled" />
+                    <!-- The honest bound on content categories, stated on the editor
+                         surface (family-client-enforcement.md § Content policy →
+                         Where it binds): the apps do not detect adult content or ads
+                         yet, so a limit on them waits for a label. The one shared
+                         sentence every app paints — `family-policy-content-hint`,
+                         user-approved 2026-10-16; its text is a public text
+                         (family.policy_content_hint). -->
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyContentHint}"
+                               Text="{loc:Localize Key=family/policy_content_hint}"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Opacity="0.7"
+                               TextWrapping="Wrap" />
 
                     <!-- ── Screen time (family-safety.md § Screen time) ──
                          Typed HH:MM / whole minutes, never a picker — an EMPTY

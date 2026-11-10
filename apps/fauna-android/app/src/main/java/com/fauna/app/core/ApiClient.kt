@@ -2877,10 +2877,14 @@ class ApiClient @Inject constructor(
         return contactsRpc().knocksList()
     }
 
-    suspend fun acceptKnock(actorId: String, peerId: String) {
-        ensureAuthenticated()
-        contactsRpc().knocksAccept(peerId)
-    }
+    /**
+     * `fauna.knocks.accept` sent now or — with no nest — queued in the device's
+     * outbox (the shared `OfflineQueued` composer, `account-offline-mutation.md`
+     * § The offline-mutation contract). `true` = queued: drop the knock locally
+     * and add no roster row; the nest's read after the drain is the word.
+     */
+    suspend fun acceptKnockOrQueue(actorId: String, peerId: String): Boolean =
+        contactsRpc().knocksAcceptOrQueue(peerId)
 
     suspend fun blockKnock(actorId: String, peerId: String) {
         ensureAuthenticated()
@@ -3257,14 +3261,18 @@ class ApiClient @Inject constructor(
 
     suspend fun listEmailFilters(): List<FfiEmailFilter> = emailRpc().filtersList()
 
-    suspend fun createEmailFilter(
+    /** `fauna.email.filters.create` sent now, or queued in the device outbox
+     *  with no nest (the shared `OfflineQueued` composer,
+     *  account-offline-mutation.md § The offline-mutation contract). `true` =
+     *  queued: the rule has no server id until the drain, so nothing is listed. */
+    suspend fun createEmailFilterOrQueue(
         name: String,
         rules: List<FfiEmailFilterRule>,
         combination: String,
         action: FfiEmailFilterAction,
         priority: Int,
         continueOnMatch: Boolean,
-    ): Long = emailRpc().filtersCreate(name, rules, combination, action, priority, continueOnMatch)
+    ): Boolean = emailRpc().filtersCreateOrQueue(name, rules, combination, action, priority, continueOnMatch)
 
     suspend fun getEmailFilter(id: Long): FfiEmailFilter = emailRpc().filtersGet(id)
 
@@ -3458,14 +3466,17 @@ class ApiClient @Inject constructor(
     // — the request is built by the shared `report_request`, the rows arrive
     // already worded; the app only paints them.
 
-    /** `fauna.moderation.abuse_report.submit`, built from the sheet by shared Rust. */
-    suspend fun abuseReportSubmit(
+    /**
+     * `fauna.moderation.abuse_report.submit`, built from the sheet by shared Rust,
+     * sent now or — with no nest — queued in the device's outbox (the shared
+     * `OfflineQueued` composer, `account-offline-mutation.md` § The
+     * offline-mutation contract). `null` = queued: the sheet says
+     * `reportQueued`, still hides, and never tries a ticked block.
+     */
+    suspend fun abuseReportSubmitOrQueue(
         target: com.fauna.ffi.FfiReportTarget,
         form: com.fauna.ffi.FfiReportForm,
-    ): com.fauna.ffi.FfiReportSent {
-        ensureAuthenticated()
-        return moderationRpc().abuseReportSubmit(target, form)
-    }
+    ): com.fauna.ffi.FfiReportSent? = moderationRpc().abuseReportSubmitOrQueue(target, form)
 
     /** `fauna.moderation.abuse_report.mine` — the reporter's ledger, newest first, worded. */
     suspend fun abuseReportMine(): List<com.fauna.ffi.FfiReportLedgerRow> =
@@ -3498,6 +3509,21 @@ class ApiClient @Inject constructor(
 
     /** Hide a reported subject for the owner; returns the stored list. */
     suspend fun hideReported(id: String): List<String> = com.fauna.ffi.hideReported(id)
+
+    /** Show a hidden subject again (the reporter's show-again); returns the stored list. */
+    suspend fun unhideReported(id: String): List<String> = com.fauna.ffi.unhideReported(id)
+
+    // The post's mark-as-spam verb (`report-sharing.md` § Report capture → *The
+    // post's mark-as-spam verb*): the `spam_marked` list on the same record.
+
+    /** The post ids the owner marked as spam. */
+    suspend fun loadSpamMarked(): List<String> = com.fauna.ffi.loadSpamMarked()
+
+    /** Mark a post as spam for the owner; returns the stored list. */
+    suspend fun markSpam(id: String): List<String> = com.fauna.ffi.markSpam(id)
+
+    /** Un-mark a post; returns the stored list. */
+    suspend fun unmarkSpam(id: String): List<String> = com.fauna.ffi.unmarkSpam(id)
 
     /**
      * `fauna.moderation.train` — submit a spam/ham training correction for one
@@ -4064,6 +4090,32 @@ class ApiClient @Inject constructor(
     /** `fauna.family.contact.add` — pre-approve a contact on the ward's behalf. */
     suspend fun familyContactAdd(supervisedActorId: ByteArray, peerActorId: ByteArray) =
         familyClient().contactAdd(supervisedActorId, peerActorId)
+
+    // The family page's `OfflineQueued` gestures (account-offline-mutation.md
+    // § The offline-mutation contract): with no nest each rests in the
+    // device's outbox — the one the feed's connection word wires — and drains
+    // when the nest is back. Each answers `true` when it QUEUED (re-read
+    // nothing) and `false` when it was sent (re-read as before).
+
+    /** The approvals decide for one list entry, taken whole, sent or queued. */
+    suspend fun familyApprovalsDecideOrQueue(entry: com.fauna.ffi.FfiFamilyApprovalEntry, approve: Boolean): Boolean =
+        familyClient().approvalsDecideOrQueue(entry, approve)
+
+    /** The un-deny of one denied bridge-DM peer, sent or queued. */
+    suspend fun familyAllowBlockedPeerOrQueue(supervisedActorId: ByteArray, peer: com.fauna.ffi.FfiFamilyBlockedPeer): Boolean =
+        familyClient().allowBlockedPeerOrQueue(supervisedActorId, peer)
+
+    /** The contact pre-approval, sent or queued. */
+    suspend fun familyContactAddOrQueue(supervisedActorId: ByteArray, peerActorId: ByteArray): Boolean =
+        familyClient().contactAddOrQueue(supervisedActorId, peerActorId)
+
+    /** The page's fold of a QUEUED decision: the list without the decided
+     *  item, matched by its item key in shared Rust. */
+    fun familyApprovalsAfterQueuedDecision(
+        approvals: List<com.fauna.ffi.FfiFamilyApprovalEntry>,
+        decided: com.fauna.ffi.FfiFamilyApprovalEntry,
+    ): List<com.fauna.ffi.FfiFamilyApprovalEntry> =
+        com.fauna.ffi.approvalsAfterQueuedDecision(approvals, decided)
 
     /** `fauna.family.device.mark` — set/clear the guardian-enrolled-device
      *  marker on one of the ward's devices (family-safety.md § Full

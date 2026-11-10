@@ -4,6 +4,9 @@ title: Gated posts, sold posts and tips
 section: money
 goal: docs/goal/behavior/monetization.md § Per-post pay-to-unlock
 guide: docs/guides/who-can-see-what.md § Paid posts — what is public and what is not
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,7 +18,7 @@ gave them.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at f5dec3d933.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] A post gated to a tier unlocks for a subscriber — `docs/goal/behavior/monetization.md` § Pillars 2+3 — app UX
    - `tests/e2e-unified/tests/test_gated_post_compose.py::test_gate_to_tier_compose_and_subscriber_unlock`
@@ -42,8 +45,8 @@ Stamped 2026-10-01 at f5dec3d933.
    - `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_non_subscriber_sees_only_the_teaser_and_the_tier_badge`
 8. [app] You can sell a post so that even your existing subscribers have to buy it — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
    - `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_post_sold_to_everyone_leaves_existing_subscribers_out`
-9. [app] Buying a post that the author's subscribers read free also makes you a follower of the author — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
-   - `tests/e2e-unified/tests/test_paid_post_offers.py::test_buying_a_subscribers_free_post_makes_you_a_follower`
+9. [app] Buying a post makes you its reader and nothing more — not a follower of the author — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
+   - `tests/e2e-unified/tests/test_paid_post_offers.py::test_buying_a_subscribers_free_post_does_not_make_you_a_follower`
 10. [app] A post you sell never appears in your own list of tiers — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
    - `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_mints_an_unlock_tier_and_gates_the_post`
 11. [app] A post you sell is never offered on your profile as a tier to subscribe to — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
@@ -67,19 +70,27 @@ Stamped 2026-10-01 at f5dec3d933.
    - `tests/e2e-unified/tests/api/test_zap_trust_gate.py::test_a_zap_counts_only_from_the_signer_the_payee_named`
 20. [nest] A zap signer you named cannot credit a tip to a post that is not yours — `docs/goal/behavior/monetization.md` § Zap receipts — the trust model
    - `tests/e2e-unified/tests/api/test_zap_trust_gate.py::test_a_named_signer_cannot_credit_a_tip_to_another_users_post`
+21. [nest] Search on your nest finds a post behind a paywall only by the words of its teaser, never by the words behind the paywall — `docs/goal/architecture/nest/network-exposure.md` § Rulings
+   - `tests/e2e-unified/tests/api/test_paywalled_post_search_teaser_only.py::test_search_finds_a_paywalled_post_by_its_teaser_and_never_by_its_gated_body`
+22. [app] A subscriber who opens a tier-gated post sees its photo too, unsealed — `docs/goal/behavior/restricted-posts.md` § Encryption at rest — broadcast tiers
+   - `tests/e2e-unified/tests/test_gated_post_compose.py::test_a_restricted_post_s_picture_opens_for_an_entitled_reader`
+23. [app] A repost of a tier-gated post shows someone outside the tier only its teaser and the badge naming the tier — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
+   - `tests/e2e-unified/tests/test_gated_post_compose.py::test_a_repost_of_a_tier_gated_post_shows_an_outsider_the_teaser_and_the_tier_badge`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+d6b5dbea.dirty standalone |
-| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.5-dev+517219d5 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| web | ⚠ partial | 0.1.5-dev+d6b5dbea.dirty standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.5-dev+517219d5 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.6-dev+aa0b8e99 standalone |
 | android | 🚧 unbuilt | 0.1.6-dev+aa0b8e99 standalone |
 | tui | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -89,7 +100,7 @@ Stamped 2026-10-01 at f5dec3d933.
 | 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_mints_an_unlock_tier_and_gates_the_post` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_buyer_redeems_claim_and_unseals` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_teaser_price_and_self_serve_buy` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_existing_subscriber_reads_it_free` — requires `sell-post-seller-surfaces` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_existing_subscriber_reads_it_free` — requires `sell-post-seller-surfaces` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_tips.py::test_a_tipped_post_shows_its_total_and_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_tips.py::test_tips_with_no_readable_amount_show_the_count_and_no_total` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_tips.py::test_the_attribution_window_names_every_tipper_it_was_given` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -99,11 +110,11 @@ Stamped 2026-10-01 at f5dec3d933.
 | 6 | nest | `tests/e2e-unified/tests/api/test_web_paywall_folder.py::test_web_paywall_folder_expired_token_serves_teaser` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_web_paywall_folder.py::test_web_paywall_folder_rotation_renews_the_grant` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_non_subscriber_sees_only_the_teaser_and_the_tier_badge` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_post_sold_to_everyone_leaves_existing_subscribers_out` — requires `sell-post-seller-surfaces` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_buying_a_subscribers_free_post_makes_you_a_follower` — requires `sell-post-seller-surfaces` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_post_sold_to_everyone_leaves_existing_subscribers_out` — requires `sell-post-seller-surfaces` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_buying_a_subscribers_free_post_does_not_make_you_a_follower` — requires `sell-post-seller-surfaces` (not built: android, android-kids, ios-kids) | tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_sell_post.py::test_sell_post_mints_an_unlock_tier_and_gates_the_post` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 11 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_sold_post_is_never_offered_as_a_tier_or_an_audience` — requires `profile-offers-browse` (not built: android); `sell-post-seller-surfaces` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_sold_post_is_never_offered_as_a_tier_or_an_audience` — requires `profile-offers-browse` (not built: android); `sell-post-seller-surfaces` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_sold_post_is_never_offered_as_a_tier_or_an_audience` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids); `sell-post-seller-surfaces` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_sold_post_is_never_offered_as_a_tier_or_an_audience` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids); `sell-post-seller-surfaces` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_you_are_never_offered_your_own_sold_post` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_paid_post_offers.py::test_a_bought_post_is_not_offered_again_while_the_approval_is_on_its_way` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_bought_post_stays_unlocked_with_no_end_date` | nest (linux): passed |
@@ -113,4 +124,7 @@ Stamped 2026-10-01 at f5dec3d933.
 | 19 | nest | `tests/e2e-unified/tests/api/test_zap_trust_gate.py::test_with_no_signer_named_no_zap_counts` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_zap_trust_gate.py::test_a_zap_counts_only_from_the_signer_the_payee_named` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_zap_trust_gate.py::test_a_named_signer_cannot_credit_a_tip_to_another_users_post` | nest (linux): passed |
+| 21 | nest | `tests/e2e-unified/tests/api/test_paywalled_post_search_teaser_only.py::test_search_finds_a_paywalled_post_by_its_teaser_and_never_by_its_gated_body` | nest (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_gated_post_compose.py::test_a_restricted_post_s_picture_opens_for_an_entitled_reader` | tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_gated_post_compose.py::test_a_repost_of_a_tier_gated_post_shows_an_outsider_the_teaser_and_the_tier_badge` | tui (linux): passed |
 <!-- features-render:end -->

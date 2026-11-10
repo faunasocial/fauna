@@ -25,8 +25,10 @@ Three journeys:
 Then the sheet's own promises, one journey each: a received message reported
 from its menu, its text reaching the admins only when the excerpt box is ticked
 (two seats, ``room_seat_pair``), and the same box on a restricted post; block in
-the same step; no verb on your own post, message or profile; and an account
-report hiding everything that account wrote.
+the same step; no verb on your own post, message or profile; an account
+report hiding everything that account wrote — and the reporter's hide being
+theirs to undo (§ Corollary): the placeholder's show-again control brings a
+hidden post, or a hidden account's every post, back.
 
 Mutations are UI-only (convention 8) save the OTHER actor's post, which is that
 actor's own act through the nest API — the seed, not the journey. Waits are
@@ -74,6 +76,10 @@ pytestmark = [
 # The shared words every app renders (i18n `moderation.report.*`,
 # `notifications.row_abuse_report_*`, en.yaml).
 HIDDEN_PLACEHOLDER = "You reported this"
+# The show-again control's labels (`moderation.report.show_again_*`) — the
+# shared fold names the scope: the one item, or the whole account.
+SHOW_AGAIN_ITEM = "Show it again"
+SHOW_AGAIN_ACCOUNT = "Show this account again"
 DOORBELL = "A report is waiting in the reports queue"
 REVIEWED = "Your report was reviewed"
 ACK_LOCAL = "Report sent to the admins of {nest}."
@@ -303,7 +309,7 @@ def _wait_for_post_id(app, post_id, tag):
 
 def _report_post(app, post_id, reason):
     """Report the post ``post_id`` through its ⋯ verb; return the acknowledgement."""
-    idx = app.feed.post_index_by_id(post_id)
+    idx = app.feed.card_index_by_id(post_id)
     assert idx >= 0, f"the post {post_id} must be in the feed window to report it"
     app.report.open_from_post(app.feed, idx)
     app.report.choose_reason(reason)
@@ -811,3 +817,166 @@ def test_reporting_an_account_hides_everything_it_wrote(logged_in_app, nest_inst
     assert sum(HIDDEN_PLACEHOLDER in n for n in notices) >= len(texts), (
         f"each hidden post is replaced by the reporter's note, got {notices!r}"
     )
+
+    # The reporter's hide is theirs to undo (moderation.md § Corollary): each
+    # placeholder of the hidden account offers to show the ACCOUNT again, and
+    # one press on any of them brings back everything it wrote. The feed lists
+    # newest first, so the account's two seeds are the top two cards.
+    # An app that has not built the show-again button declares it here: the
+    # hide above is witnessed on it either way.
+    require_surface(app.driver, "content-policy-show-again-button")
+    card = "post-card[0]"
+    _poll(
+        lambda: app.driver.count("content-policy-show-again-button", scope=card) > 0,
+        _PAGE_BUDGET_S,
+        "the placeholder offers to show the account again",
+    )
+    assert app.report.show_again_label(scope=card) == SHOW_AGAIN_ACCOUNT, (
+        "the label names the scope — the whole account, since its id is what was hidden"
+    )
+    app.report.show_again(scope=card)
+    for text in texts:
+        assert app.feed.wait_for_post_text(text, _FEED_BUDGET_S), (
+            f"every post of the shown-again account paints again: {text!r}; "
+            f"error-message: {app.error_text() if app.has_error() else 'none'}"
+        )
+    assert not app.has_error(), f"the un-hide must land cleanly: {app.error_text()!r}"
+
+
+@pytest.mark.feature("report-abuse")
+def test_a_hidden_post_is_shown_again_from_its_placeholder(logged_in_app, nest_instance):
+    """Report a post → its placeholder offers to show it again, naming the
+    item → one press → the post paints again and the placeholder is gone
+    (moderation.md § Corollary — the reporter's hide is theirs to undo: a
+    persisted un-hide through the shared `unhide_reported`, never the
+    session-local reveal; the report itself stays filed)."""
+    app = logged_in_app
+    require_surface(app.driver, "content-policy-show-again-button")
+    _, actor = _other_actor(nest_instance)
+    token = uuid.uuid4().hex[:10]
+    text = f"show again target {token}"
+    _seed_post(app, actor, text)
+
+    idx = app.feed.post_index_by_text(text)
+    assert idx >= 0
+    app.report.open_from_post(app.feed, idx)
+    app.report.choose_reason("spam")
+    _poll(app.report.submit_enabled, _PAGE_BUDGET_S, "a reasoned report becomes sendable")
+    app.report.submit()
+    _assert_acknowledged_by_own_nest(app, nest_instance)
+    assert app.feed.wait_for_post_text_absent(text, _FEED_BUDGET_S), (
+        "a reported post must stop painting for the reporter; "
+        f"error-message: {app.error_text() if app.has_error() else 'none'}"
+    )
+
+    # The card keeps its place; the placeholder in it carries the control.
+    card = f"post-card[{idx}]"
+    _poll(
+        lambda: app.driver.count("content-policy-show-again-button", scope=card) > 0,
+        _PAGE_BUDGET_S,
+        "the placeholder offers to show the post again",
+    )
+    assert app.report.show_again_label(scope=card) == SHOW_AGAIN_ITEM, (
+        "the label names the scope — the one post, since its own id is what was hidden"
+    )
+    app.report.show_again(scope=card)
+    assert app.feed.wait_for_post_text(text, _FEED_BUDGET_S), (
+        "a shown-again post paints again for its reporter; "
+        f"error-message: {app.error_text() if app.has_error() else 'none'}"
+    )
+    assert app.driver.count("content-policy-show-again-button", scope=card) == 0, (
+        "nothing of the reporter's is hidden on that card any more"
+    )
+    assert not app.has_error(), f"the un-hide must land cleanly: {app.error_text()!r}"
+
+
+# One account-store change reaching an already-open seat of the same account:
+# the sibling's commit lands at the nest, the open seat's runtime hears the
+# store change and re-reads the hide list (`account-runtime.md` § Multi-instance
+# concurrency). A generous ceiling; the deadline poll pays only the real delay.
+_SIBLING_BUDGET_S = 90.0
+
+
+@pytest.mark.feature("report-abuse")
+def test_a_reported_account_is_hidden_and_shown_again_on_every_own_device(
+    logged_in_app, nest_instance, request,
+):
+    """Two seats of ONE account (`alice_second_device`: same key, a distinct
+    device id, a fresh empty state root). Report an account on seat A → its
+    posts are replaced by "You reported this" on seat B too; show the account
+    again on seat B → its posts paint again on seat A, which stayed open
+    (moderation.md § Corollary — the hide list is per-account state, the
+    `hidden/<id>` rows of content-moderation-and-ranking.md § The moderation
+    kind's rows, and an un-hide is the same rows' stamped tombstone, so it
+    reaches every device of the reporter).
+
+    Seat B launches after the report on purpose: a fresh device restores the
+    hide list at sign-in, so B proves the hide travelled with the account, and
+    A — never re-signed-in — proves the un-hide reaches a device already open."""
+    app = logged_in_app
+    require_surface(app.driver, "content-policy-show-again-button")
+    app.profile.require_state_protocol_actor_nav_supported()
+    other, actor = _other_actor(nest_instance)
+    token = uuid.uuid4().hex[:10]
+    texts = [f"two-seat account post one {token}", f"two-seat account post two {token}"]
+    for text in texts:
+        _seed_post(app, actor, text)
+
+    # Seat A reports the account.
+    app.profile.navigate_to_actor(other["actor_id_hex"])
+    app.report.open_from_profile()
+    app.report.choose_reason("spam")
+    _poll(app.report.submit_enabled, _PAGE_BUDGET_S, "a reasoned report becomes sendable")
+    app.report.submit()
+    _assert_acknowledged_by_own_nest(app, nest_instance)
+    app.feed.return_to_feed_page()
+    for text in texts:
+        assert app.feed.wait_for_post_text_absent(text, _FEED_BUDGET_S), (
+            f"the reported account's post stops painting on seat A: {text!r}; "
+            f"error-message: {app.error_text() if app.has_error() else 'none'}"
+        )
+
+    # Seat B — the same account's other device — shows the placeholder in
+    # place of each post: positive evidence the hide arrived, not merely a
+    # feed that has not loaded. Newest first, so the two seeds lead.
+    seat_b, _driver_b = request.getfixturevalue("alice_second_device")
+    seat_b.feed.navigate()
+    seat_b.feed.open_feed("General")
+    card = "post-card[0]"
+    _poll(
+        lambda: seat_b.driver.count("content-policy-show-again-button", scope=card) > 0,
+        _SIBLING_BUDGET_S,
+        "seat B paints the reporter's placeholder, with its show-again control, "
+        f"in place of the account's newest post (error-message: "
+        f"{seat_b.error_text() if seat_b.has_error() else 'none'})",
+    )
+    notices = [
+        seat_b.driver.get_text("content-policy-blocked-notice", index=i)
+        for i in range(seat_b.driver.count("content-policy-blocked-notice"))
+    ]
+    assert sum(HIDDEN_PLACEHOLDER in n for n in notices) >= len(texts), (
+        f"each of the account's posts is replaced by the reporter's note on seat B, got {notices!r}"
+    )
+    for text in texts:
+        assert not seat_b.feed.post_text_visible(text), (
+            f"a post of the account hidden on seat A must not paint on seat B: {text!r}"
+        )
+
+    # Seat B shows the account again.
+    assert seat_b.report.show_again_label(scope=card) == SHOW_AGAIN_ACCOUNT, (
+        "the label names the scope — the whole account, since its id is what was hidden"
+    )
+    seat_b.report.show_again(scope=card)
+    for text in texts:
+        assert seat_b.feed.wait_for_post_text(text, _FEED_BUDGET_S), (
+            f"the shown-again account's post paints again on seat B: {text!r}; "
+            f"error-message: {seat_b.error_text() if seat_b.has_error() else 'none'}"
+        )
+    assert not seat_b.has_error(), f"the un-hide must land cleanly: {seat_b.error_text()!r}"
+
+    # Seat A, open all along, paints the posts again with no gesture of its own.
+    for text in texts:
+        assert app.feed.wait_for_post_text(text, _SIBLING_BUDGET_S), (
+            f"showing the account again on seat B shows its post on seat A too: {text!r}; "
+            f"error-message: {app.error_text() if app.has_error() else 'none'}"
+        )

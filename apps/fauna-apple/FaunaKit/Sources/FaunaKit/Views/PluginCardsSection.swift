@@ -136,7 +136,9 @@ public struct PluginCardsSection: View {
         let badge = renderLocalizedText(card.badge)
         let publisher = renderLocalizedText(card.publisher)
         return VStack(alignment: .leading, spacing: 8) {
-            Text(card.name).font(.headline)
+            // `bridge-card-name` — the card's title, inside its `bridge-card[i]`
+            // scope like a bridge card's.
+            automationText(Ids.bridgeCardName, card.name).font(.headline)
             Text("\(badge)\n\(publisher)").font(.caption).foregroundStyle(.secondary)
             Button(
                 card.bound ? L.bridges.pluginDisconnect : L.bridges.pluginConnect,

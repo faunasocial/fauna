@@ -280,6 +280,7 @@ fn restored_slice() -> ChannelHistorySlice {
         email_address: format!("{n}@example.com"),
     };
     let msg = |seq: i64, body: &str, own: bool| MessageSnapshot {
+        queued_send: None,
         message_id: MessageId(format!("conv:{CHANNEL_HEX}:{seq}")),
         sender: if own { addr("me") } else { addr("peer") },
         sender_display: String::new(),
@@ -297,6 +298,7 @@ fn restored_slice() -> ChannelHistorySlice {
         labels: vec![],
         plane_ref: None,
         can_delete: false,
+        can_remove: false,
         undelivered: false,
         warmup_hold: None,
         scan_result_lines: Vec::new(),

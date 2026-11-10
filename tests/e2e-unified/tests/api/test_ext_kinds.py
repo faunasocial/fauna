@@ -30,7 +30,10 @@ pre-existing sealed scope at all; the grammar is the bound. A third holds the
 form rule's other two doors: PAR refuses the personalization arm to a
 confidential client, and the nest's ``fauna.capabilities.mint`` refuses the
 arm's twin to a remote principal's attested key while minting it to a device
-principal's — the gate reads the row's form, never the arm.
+principal's — the gate reads the row's form, never the arm. A fourth holds the
+conversations oracle's per-class form gate: PAR refuses ``conversation.read``
+and ``conversation.send`` to a confidential client — a server-hosted app —
+while admitting the same arm's ``post.author`` to it.
 
 The plane-row write and the ledger ``Mint`` of the owner's entry point are
 pinned in Rust (``fauna_client_capabilities::ext_consent``); this journey is
@@ -299,6 +302,58 @@ def test_a_remote_principal_cannot_ask_for_the_accounts_mail(
     )
     assert "can grant" in body.get("error_description", ""), (
         f"refused for the scope, after the client authenticated — not for its assertion: {body!r}"
+    )
+
+
+@pytest.mark.feature("connected-apps")
+def test_a_remote_principal_cannot_ask_to_read_or_send_conversations(
+    consent_nest, consent_bridge, metadata_server
+):
+    """The conversations oracle's classes are form-gated per class
+    (``conversations-oracle.md`` § The ruling): a conversation is served by a
+    Fauna app on the user's own device, so a confidential client — a
+    server-hosted app — that asks for ``conversation.read`` or
+    ``conversation.send`` is answered ``invalid_scope`` at the push, by the
+    form rule, though its document declares both and its assertion is valid.
+    The same arm's nest-performed class, ``post.author``, is admitted to the
+    same client: the gate reads the class, never the arm. The live twin of
+    ``oauth_par::tests::the_conversation_classes_are_refused_to_a_confidential_client``."""
+    nest = consent_nest
+    read = "fauna:identity:op:conversation.read"
+    send = "fauna:identity:op:conversation.send"
+    post = "fauna:identity:op:post.author"
+    path = "/remote-conversations-client.json"
+    assertion_key = ec.generate_private_key(ec.SECP256R1())
+
+    def remote(scope: str) -> OAuthClient:
+        return OAuthClient(
+            base=nest["url"],
+            htu_origin=f"https://{HANDLE_DOMAIN}",
+            redirect_uri=REDIRECT_URI,
+            scope=f"{read} {send} {post}",
+            request_scope=scope,
+            holder_x25519=_raw(x25519.X25519PrivateKey.generate().public_key()),
+            client_id_url=metadata_server.client_id(path),
+            assertion_key=assertion_key,
+            assertion_kid="k1",
+            issuer=_issuer(nest),
+        )
+
+    metadata_server.documents[path] = client_document(
+        remote(read).client_id, REDIRECT_URI, f"{read} {send} {post}",
+        jwk=remote(read).assertion_jwk(),
+    )
+    for scope in (read, send):
+        status, body = remote(scope).push_authorization_request_expecting_refusal()
+        assert status == 400 and body.get("error") == "invalid_scope", (
+            f"a server-hosted app is refused `{scope}` at the push: {status} {body!r}"
+        )
+        assert "user's own device" in body.get("error_description", ""), (
+            f"refused by the form rule, after the client authenticated: {body!r}"
+        )
+
+    assert remote(post).push_authorization_request(), (
+        "the same client is admitted the arm's nest-performed class — the gate is per class"
     )
 
 

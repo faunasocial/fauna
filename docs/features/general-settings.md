@@ -55,6 +55,8 @@ Stamped 2026-09-22 at e9f79fdf25.
 | ios | — absent | |
 | android | — absent | |
 | tui | — absent | |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

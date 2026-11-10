@@ -62,6 +62,7 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/bridgeshutdown"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/config"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/confinement"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/httpdrain"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/keypair"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logging"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/logplane"
@@ -868,8 +869,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		metricsBindAddr = hatch.MetricsBindAddr
 	}
 	metricsSrv := &http.Server{
-		Addr:              metricsBindAddr,
-		Handler:           metricsMux(),
+		Addr: metricsBindAddr,
+		// Drained like every bridge listener (internal/httpdrain), so the
+		// listener sweep needs no exception list.
+		Handler:           httpdrain.Handler(metricsMux()),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {

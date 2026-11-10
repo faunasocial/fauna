@@ -133,9 +133,12 @@ async fn create_and_materialize(
         &state.post_segments,
         &hex::encode(actor),
         nostr_kp,
+        store::MaterializeClasses::PublicAndAdvertised,
+        "",
     )
     .await
-    .expect("materialize ok");
+    .expect("materialize ok")
+    .count;
     assert_eq!(n, 1, "the fresh post materialized");
     let conn = state.db.conn().await;
     let ids = nostr_db::list_event_ids_by_fauna_id(&conn, &post_id).expect("map read");

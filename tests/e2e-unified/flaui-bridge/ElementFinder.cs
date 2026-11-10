@@ -256,6 +256,14 @@ static class ElementFinder
         catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return ""; }
     }
 
+    /// <summary>Read an element's AutomationId with <see cref="SafeName"/>'s
+    /// tolerance.</summary>
+    private static string SafeAutomationId(AutomationElement el)
+    {
+        try { return el.AutomationId ?? ""; }
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return ""; }
+    }
+
     /// <summary>
     /// Get text from an element, with InfoBar child TextBlock fallback.
     /// </summary>
@@ -284,6 +292,20 @@ static class ElementFinder
             var selected = el.Patterns.Selection.Pattern.Selection.ValueOrDefault;
             if (selected is { Length: > 0 })
             {
+                // A picker option keyed apart from its label (FaunaApp's
+                // Helpers/PickerOption.cs: the label painted as Content and Name, the
+                // stable key as the item's AutomationId) reads back as its KEY, as a
+                // web <select> answers its <option value> — the cross-app "a selector
+                // reports its current value" contract (e2e-conventions.md convention
+                // 11, What counts as "offered"). An option with no key reads back by
+                // its Name, the label it paints. ComboBox only: a ListView's selected
+                // row can carry a ui.yaml AutomationId, which is never its text.
+                if (el.Properties.ControlType.ValueOrDefault == FlaUI.Core.Definitions.ControlType.ComboBox)
+                {
+                    var key = SafeAutomationId(selected[0]);
+                    if (!string.IsNullOrEmpty(key))
+                        return key;
+                }
                 var selName = SafeName(selected[0]);
                 if (!string.IsNullOrEmpty(selName))
                     return selName;

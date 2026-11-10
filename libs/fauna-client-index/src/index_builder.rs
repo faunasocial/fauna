@@ -432,7 +432,7 @@ impl IndexBuilder {
     pub fn mail(msek: &[u8; 32], publisher: Arc<dyn SegmentRail>) -> Self {
         Self::with_manifest(
             Self::mail_key(msek),
-            [ContentKind::Mail],
+            MAIL_CLASS_KINDS_BUILT.iter().copied(),
             IndexManifest::empty(KindClass::MailCal, TOKENIZER_PIPELINE_VERSION),
             publisher,
         )
@@ -721,6 +721,27 @@ impl IndexBuilder {
         self.stage_snapshot(
             ContentKind::Contact,
             contacts.iter().map(contact_doc_for).collect(),
+        )
+    }
+
+    /// Stage the whole calendar corpus — every event in every one of the
+    /// actor's calendars — as the `Calendar` kind's snapshot.
+    ///
+    /// The mail/calendar-class twin of [`Self::stage_contact_corpus`], with the
+    /// identical contracts: an **empty** corpus is a real event (the user's last
+    /// event is gone), the corpus is **per kind across every calendar** (staging
+    /// one calendar's events would retire the segments holding the others'), and
+    /// `false` — withheld by the lease, or `Calendar` not in this builder's set
+    /// — means the walk's corpus marker must not advance
+    /// (`content-index-ingest.md` § Ingest triggers, v1 → *The
+    /// third-ingest-class template*).
+    pub fn stage_calendar_corpus(&self, events: &[IndexableEvent]) -> bool {
+        if !self.kinds.contains(&ContentKind::Calendar) {
+            return false;
+        }
+        self.stage_snapshot(
+            ContentKind::Calendar,
+            events.iter().map(event_doc_for).collect(),
         )
     }
 
@@ -1793,8 +1814,14 @@ fn is_snapshot_kind(kind: ContentKind) -> bool {
         // ctag-prechecked reconcile walk (`content-index.md` § Ingest triggers,
         // v1 — the contacts ruling).
         ContentKind::Contact => true,
+        // A VEVENT is edited in place under a stable identity (its `uid_hash`,
+        // the CalDAV dedup key) and deleted outright — the contacts shape, so
+        // the same whole-corpus rewrite by the ctag-prechecked reconcile walk
+        // (`content-index-ingest.md` § Ingest triggers, v1 → *The
+        // third-ingest-class template*, the key-class orthogonality note).
+        ContentKind::Calendar => true,
         // Immutable once ingested.
-        ContentKind::Mail | ContentKind::Calendar | ContentKind::Conversation => false,
+        ContentKind::Mail | ContentKind::Conversation => false,
         // Append-shaped by the refined test above: both are vanish-only, and a
         // deletion heals at resolve time rather than by rewriting the corpus.
         //
@@ -1922,29 +1949,54 @@ pub struct IndexableContact {
 /// Using the card's own `internal_date` would rank a freshly imported address
 /// book by how old its contacts are.
 fn contact_doc_for(contact: &IndexableContact) -> IndexedDoc {
-    let mut fields = Vec::with_capacity(2);
-    if let Some(name) = contact.display_name.as_deref().filter(|s| !s.is_empty()) {
-        fields.push(IndexedField {
-            kind: FieldKind::Title,
-            text: name.to_string(),
-        });
-    }
-    if !contact.text.is_empty() {
-        fields.push(IndexedField {
-            kind: FieldKind::Body,
-            text: contact.text.clone(),
-        });
-    }
-    IndexedDoc {
-        kind: ContentKind::Contact,
-        content_id: ContentId(contact.uid_hash.as_bytes().to_vec()),
-        timestamp_ns: observed_now_ns(),
-        // A card is the user's own address-book entry — no sender to attribute,
-        // exactly as for a draft.
-        sender_actor_id: None,
-        secondary_id: None,
-        fields,
-    }
+    // A card is the user's own address-book entry — no sender to attribute,
+    // exactly as for a draft.
+    IndexedDoc::titled(
+        ContentKind::Contact,
+        contact.uid_hash.as_bytes().to_vec(),
+        contact.display_name.as_deref(),
+        &contact.text,
+        observed_now_ns(),
+    )
+}
+
+/// The mail/calendar-class kinds a mail builder stages — the class's rollout
+/// list, the twin of the launcher's master-class one. A hard-coded constant, no
+/// human chooses it. Calendar joined with its reconcile walk and its query-time
+/// resolver (`content-index-ingest.md` § Ingest triggers, v1 → *The
+/// third-ingest-class template*); a kind is listed once both ends exist.
+pub const MAIL_CLASS_KINDS_BUILT: &[ContentKind] = &[ContentKind::Mail, ContentKind::Calendar];
+
+/// One calendar event (a VEVENT), as the index needs it.
+///
+/// The producer is the launcher's calendar reconcile walk — the corpus is
+/// nest-resident and written by CalDAV MUAs and inbound scheduling as well as
+/// the apps, so there is no client-side chokepoint to hook — which is why this
+/// type lives beside the builder, like [`IndexableContact`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexableEvent {
+    /// The event's `uid_hash`, **hex-lowercase** — the index's `content_id`.
+    /// Stable across in-place edits and across a calendar move of the same
+    /// UID, and the CalDAV wire's own dedup key.
+    pub uid_hash: String,
+    /// The event's `SUMMARY` → the index's `Title`.
+    pub summary: Option<String>,
+    /// The rest of the event's searchable text (description, location) → the
+    /// index's `Body`.
+    pub text: String,
+}
+
+/// Shape one event into its indexed doc. Timestamp: the observation, for the
+/// reason [`contact_doc_for`] gives — the corpus is republished whole.
+fn event_doc_for(event: &IndexableEvent) -> IndexedDoc {
+    // The user's own calendar entry — no sender to attribute.
+    IndexedDoc::titled(
+        ContentKind::Calendar,
+        event.uid_hash.as_bytes().to_vec(),
+        event.summary.as_deref(),
+        &event.text,
+        observed_now_ns(),
+    )
 }
 
 /// One of the user's own posts, as either posts door stages it — a
@@ -4117,6 +4169,122 @@ mod tests {
             0,
             "a snapshot kind never populates the guard — an entry there would \
              pin its first version forever"
+        );
+    }
+
+    // ── The calendar arm (third ingest class, mail/calendar key) ─────────────
+
+    fn event(uid_hash: &str, summary: &str, text: &str) -> IndexableEvent {
+        IndexableEvent {
+            uid_hash: uid_hash.to_string(),
+            summary: Some(summary.to_string()),
+            text: text.to_string(),
+        }
+    }
+
+    /// Calendar hits, read the way the mail reader reads them: the
+    /// mail/calendar manifest, opened under the MSEK-derived key.
+    fn calendar_hits(rec: &Recorder, term: &str) -> Vec<ContentId> {
+        let key =
+            IndexSegmentKey::from_bytes(*fauna_mls::wrapped_blob::derive_index_segment_key(&MSEK));
+        let manifest = IndexManifest::from_sealed_bytes_mailcal(
+            &rec.bytes_at(&mailcal_manifest_path()).expect("a manifest"),
+            &key,
+        )
+        .expect("open manifest");
+        let Some(km) = manifest.kind(ContentKind::Calendar) else {
+            return Vec::new();
+        };
+        let plaintexts: Vec<Vec<u8>> = km
+            .live_segments
+            .iter()
+            .map(|id| {
+                let sealed = rec
+                    .bytes_at(&segment_path(ContentKind::Calendar, *id))
+                    .expect("a live calendar segment was published");
+                fauna_index::open_segment_bytes_mailcal(&sealed, &key).expect("unseal")
+            })
+            .collect();
+        let index = Index::open_multi_segment(&plaintexts).expect("open");
+        let mut ids: Vec<ContentId> = index
+            .query(term, &[ContentKind::Calendar], None, 1000)
+            .expect("query")
+            .into_iter()
+            .map(|h| h.content_id)
+            .collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids.dedup();
+        ids
+    }
+
+    /// The mail builder stages calendar events into the **mail/calendar**
+    /// class — sealed under the MSEK-derived key, beside the mail kind in
+    /// `manifest-mailcal.idx` — and an event's summary and description are
+    /// both findable.
+    #[tokio::test]
+    async fn the_mail_builder_stages_a_calendar_corpus_under_the_mail_calendar_key() {
+        let rec = Arc::new(Recorder::default());
+        let builder = IndexBuilder::mail(&MSEK, rec.clone());
+
+        assert!(builder.stage_calendar_corpus(&[event("aa", "Harbour picnic", "bring the kites")]));
+        builder.flush().await.expect("flush");
+
+        assert!(
+            rec.paths()
+                .contains(&"__index/calendar/seg-00000001.idx".to_string()),
+            "the calendar segment rides the mail/calendar class's own path"
+        );
+        assert_eq!(
+            calendar_hits(&rec, "picnic"),
+            vec![ContentId(b"aa".to_vec())]
+        );
+        assert_eq!(calendar_hits(&rec, "kites").len(), 1);
+    }
+
+    /// Events are edited in place under a stable uid, so calendar is a
+    /// snapshot kind: re-staging the corpus retires the old text.
+    #[tokio::test]
+    async fn an_edited_event_stops_matching_its_old_text() {
+        let rec = Arc::new(Recorder::default());
+        let builder = IndexBuilder::mail(&MSEK, rec.clone());
+
+        builder.stage_calendar_corpus(&[event("aa", "Harbour picnic", "")]);
+        builder.flush().await.expect("first flush");
+        builder.stage_calendar_corpus(&[event("aa", "Mountain picnic", "")]);
+        builder.flush().await.expect("second flush");
+
+        assert_eq!(calendar_hits(&rec, "mountain").len(), 1);
+        assert!(
+            calendar_hits(&rec, "harbour").is_empty(),
+            "the event's old summary must stop matching"
+        );
+
+        builder.stage_calendar_corpus(&[]);
+        builder.flush().await.expect("third flush");
+        assert!(
+            calendar_hits(&rec, "mountain").is_empty(),
+            "an empty corpus (the last event deleted) retires the kind"
+        );
+    }
+
+    /// The snapshot rewrite is per KIND: staging the calendar corpus never
+    /// retires the mail segments the same manifest lists.
+    #[tokio::test]
+    async fn staging_the_calendar_corpus_leaves_mail_untouched() {
+        let rec = Arc::new(Recorder::default());
+        let builder = IndexBuilder::mail(&MSEK, rec.clone());
+
+        observe(&builder, "<a@x>", "Lunch plans", "meet at the harbour");
+        builder.flush().await.expect("mail flush");
+        builder.stage_calendar_corpus(&[event("aa", "Harbour picnic", "")]);
+        builder.flush().await.expect("calendar flush");
+        builder.stage_calendar_corpus(&[]);
+        builder.flush().await.expect("empty calendar flush");
+
+        assert_eq!(
+            query_via_manifest(&rec, "harbour").len(),
+            1,
+            "the mail kind's segment stays live"
         );
     }
 

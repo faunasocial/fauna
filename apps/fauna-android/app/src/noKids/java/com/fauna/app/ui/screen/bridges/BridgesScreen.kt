@@ -48,6 +48,7 @@ import com.fauna.ffi.FfiBridgeStatus
 import com.fauna.ffi.FfiCborValue
 import com.fauna.ffi.FfiLinkBlock
 import com.fauna.ffi.FfiSettingControl
+import com.fauna.ffi.bridgeCardTitle
 import com.fauna.ffi.bridgeLinkBlock
 import com.fauna.ffi.bridgeModeApplies
 import com.fauna.ffi.followDisplay
@@ -183,7 +184,11 @@ internal fun PluginCard(
     val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BRIDGE_CARD)) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(card.name, style = MaterialTheme.typography.titleMedium)
+            Text(
+                card.name,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.testTag(Ids.BRIDGE_CARD_NAME),
+            )
             Text(
                 "${resolveLocalized(context, card.badge).orEmpty()}\n${resolveLocalized(context, card.publisher).orEmpty()}",
                 style = MaterialTheme.typography.bodySmall,
@@ -369,7 +374,13 @@ internal fun BridgeCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BRIDGE_CARD)) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(bridge.name, style = MaterialTheme.typography.titleMedium)
+            // The title through the shared composition: a consented bridge app's
+            // declared glyph heads it (bridges.md § Coverage contract, outcome 11).
+            Text(
+                bridgeCardTitle(bridge.name, bridge.glyph),
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.testTag(Ids.BRIDGE_CARD_NAME),
+            )
 
             if (!bridge.available) {
                 Spacer(Modifier.height(8.dp))

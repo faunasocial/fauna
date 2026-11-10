@@ -107,6 +107,32 @@ public class MemberReviewViewModelTests
         Assert.All(vm.Reviews, r => Assert.False(string.IsNullOrEmpty(r.DisplayText)));
     }
 
+    /// <summary>
+    /// The ephemeral kit-side pass's read — apple's
+    /// <c>MemberReviewVM.refresh</c> twin. That surface sits on the Recovery Kit
+    /// section, which has business of its own while the successor's store may
+    /// still be sealed, so a failed read keeps what is painted and raises NO
+    /// banner: the error slot there is the section's, and a roster read that
+    /// failed mid-aftermath is not the user's problem to read about.
+    /// </summary>
+    [Fact]
+    public async Task RefreshQuietAsync_AFailedReadKeepsTheRowsAndRaisesNoBanner()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMemberReviews = new[] { MockNestRpcClient.MakeMemberReview() },
+        };
+        var vm = new MemberReviewViewModel(rpc);
+        await vm.RefreshQuietAsync(null);
+        Assert.Single(vm.Reviews);
+
+        rpc.NextError = "store sealed";
+        await vm.RefreshQuietAsync(null);
+
+        Assert.Single(vm.Reviews);
+        Assert.Null(vm.ErrorMessage);
+    }
+
     [Fact]
     public async Task LoadAsync_ANoManagerPersonStillGetsAClosableRow()
     {

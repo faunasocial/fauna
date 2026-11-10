@@ -182,7 +182,7 @@ def test_deleting_your_post_leaves_replies_and_quotes_standing_and_says_it_is_go
         "their reply should be in the window before the delete"
     )
 
-    feed.delete_post(index=feed.post_index_by_id(target_id))
+    feed.delete_post(index=feed.card_index_by_id(target_id))
 
     assert feed.post_state_by_id(target_id) is None, (
         "my deleted post must leave the feed"

@@ -9,9 +9,19 @@ import SwiftUI
 public struct LightboxItem: Identifiable {
     public let id = UUID()
     public let source: PostImageSource
+    /// The declared `{filename} ({size})` text of a picture whose bytes the device does
+    /// not hold: the lightbox opens as that placeholder rather than dropping the tap
+    /// (`ui/conversations.md` § User actions, `dm-attachment-image[i]`). Nil for a picture.
+    public let placeholder: String?
 
-    public init(source: PostImageSource) {
+    public init(source: PostImageSource, placeholder: String? = nil) {
         self.source = source
+        self.placeholder = placeholder
+    }
+
+    /// A lightbox for a picture without bytes, painting `declared` where the picture would be.
+    public static func placeholder(_ declared: String) -> LightboxItem {
+        LightboxItem(source: .unavailable, placeholder: declared)
     }
 }
 
@@ -21,14 +31,16 @@ public struct LightboxItem: Identifiable {
 /// (`CrossPlatformUI.swift`), so this compiles and behaves uniformly on both.
 public struct ImageLightbox: View {
     let source: PostImageSource
+    let placeholder: String?
     let onDismiss: () -> Void
 
     @State private var scale: CGFloat = 1.0
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
 
-    public init(source: PostImageSource, onDismiss: @escaping () -> Void) {
+    public init(source: PostImageSource, placeholder: String? = nil, onDismiss: @escaping () -> Void) {
         self.source = source
+        self.placeholder = placeholder
         self.onDismiss = onDismiss
     }
 
@@ -43,16 +55,51 @@ public struct ImageLightbox: View {
                 }
 
             content
+
+            // Escape dismisses (ui.yaml declares no dismiss element inside the lightbox):
+            // a cancel-action shortcut fires without the lightbox holding focus.
+            Button("", action: onDismiss)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
         }
         .statusBarHidden()
         .accessibilityIdentifier(Ids.imageLightbox)
-        // Presence-only anchor for `is_visible("image-lightbox")`.
-        .automationValue(Ids.imageLightbox, text: { "" })
+        // Presence anchor for `is_visible("image-lightbox")`, and the driver's Escape
+        // door — the same dismiss the shortcut above runs for a real key.
+        .automationValue(Ids.imageLightbox, text: { "" }, pressKey: { key in
+            guard key == "Escape" else { return "image-lightbox takes only Escape" }
+            onDismiss()
+            return nil
+        })
     }
 
     /// The image itself, always arriving already fetched through the post-blob
     /// plane and opened by the shared manager (`ui/media.md` § Encryption at rest).
     @ViewBuilder private var content: some View {
+        if let placeholder {
+            placeholderView(placeholder)
+        } else {
+            imageContent
+        }
+    }
+
+    /// The declared filename and size painted in the picture's place; a tap dismisses.
+    private func placeholderView(_ declared: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "photo")
+                .font(.system(size: 48))
+            Text(declared)
+                .font(.callout)
+        }
+        .foregroundStyle(.white.opacity(0.8))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onDismiss)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private var imageContent: some View {
         switch source {
         case .decoded(let image):
             zoomable(Image(platformImage: image))
@@ -111,5 +158,16 @@ public struct ImageLightbox: View {
         Image(systemName: "photo")
             .font(.system(size: 48))
             .foregroundStyle(.white.opacity(0.6))
+    }
+}
+
+public extension View {
+    /// Presents ``ImageLightbox`` full-screen while `item` is set and clears it on
+    /// dismiss. One home for the cover every image-bearing card shares (the feed
+    /// card and the DM bubble both attach it), so the trigger shape never forks.
+    func imageLightbox(item: Binding<LightboxItem?>) -> some View {
+        fullScreenCover(item: item) { shown in
+            ImageLightbox(source: shown.source, placeholder: shown.placeholder, onDismiss: { item.wrappedValue = nil })
+        }
     }
 }

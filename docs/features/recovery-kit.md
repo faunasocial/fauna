@@ -16,7 +16,7 @@ secret key's link or QR, pasted where the kit belongs, is refused.
 
 ## Coverage contract
 
-Stamped 2026-11-01 at a6047fbd8b.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] Creating a kit shows the phrase once and the status changes; leaving the page does not show it again — `docs/goal/ui/settings.md` § Recovery kit
    - `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_creating_a_recovery_kit_flips_the_status_and_shows_the_secret_once`
@@ -53,6 +53,10 @@ Stamped 2026-11-01 at a6047fbd8b.
    - `tests/e2e-unified/tests/test_custody_recovery_copy_journey.py::test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone`
 16. [app] While older identity generations still hold items you cannot read, the recovery-kit section says how many and since when, and advises signing in first on any device not used since; letting them go needs the confirm word typed, and a wrong word is refused and lets nothing go — `docs/goal/ui/settings.md` § Recovery kit
    - `tests/e2e-unified/tests/test_recovery_kit_let_go.py::test_a_dead_generation_is_named_and_let_go_only_on_the_confirm_word`
+17. [nest] A recovery key can be replaced at once only with the old key's co-signature — the seed alone only through a 30-day window the current key can veto — and anyone can read an identity's succession chain without an account — `docs/goal/behavior/identity-succession.md` § The RecoveryKey
+   - `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_a_replacement_the_old_key_co_signs_becomes_the_head_at_once`
+   - `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_the_seed_alone_cannot_replace_a_registered_key_at_once`
+   - `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_anyone_reads_an_identitys_chain_without_an_account`
 
 ## Status
 
@@ -66,6 +70,8 @@ Stamped 2026-11-01 at a6047fbd8b.
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+52eff9ec standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -88,4 +94,7 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 14 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_kit_replaced_after_a_succession_still_restores_the_predecessor_corpus` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 15 | app | `tests/e2e-unified/tests/test_custody_recovery_copy_journey.py::test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_recovery_kit_let_go.py::test_a_dead_generation_is_named_and_let_go_only_on_the_confirm_word` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_a_replacement_the_old_key_co_signs_becomes_the_head_at_once` | nest (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_the_seed_alone_cannot_replace_a_registered_key_at_once` | nest (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_recovery_key_cosign_and_public_chain.py::test_anyone_reads_an_identitys_chain_without_an_account` | nest (linux): passed |
 <!-- features-render:end -->

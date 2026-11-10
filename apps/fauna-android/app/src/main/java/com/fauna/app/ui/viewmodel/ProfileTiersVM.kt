@@ -139,9 +139,10 @@ class ProfileTiersVM @Inject constructor(
     /** §4 — the registered provider kinds the form's kind select enumerates. */
     fun knownProviderKinds(): List<String> = api.paymentsKnownKinds()
 
-    /** §4 add — upsert one provider config (nest-side validation; typed errors). */
-    fun setProvider(kind: String, webhookSecret: String, tier: String) =
-        mutate { api.paymentsProvidersSet(kind, webhookSecret, tier) }
+    /** §4 add — upsert one provider config (nest-side validation; typed errors). The product
+     *  is sent as shown, so an emptied field clears the saved mapping. */
+    fun setProvider(kind: String, webhookSecret: String, tier: String, product: String) =
+        mutate { api.paymentsProvidersSet(kind, webhookSecret, tier, product) }
 
     /** §4 remove. */
     fun removeProvider(kind: String) = mutate { api.paymentsProvidersRemove(kind) }

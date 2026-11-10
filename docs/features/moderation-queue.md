@@ -16,7 +16,7 @@ you withdraw one while it is still open.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e5a7e5d758.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] The queue is reachable and honest when empty — `docs/goal/behavior/moderation.md` § Layout & flow
    - `tests/e2e-unified/tests/test_moderation.py::test_navigate_to_moderation`
@@ -43,7 +43,7 @@ Stamped 2026-10-01 at e5a7e5d758.
    - `tests/e2e-unified/tests/api/test_local_detections_stay_on_device.py::test_the_nest_has_no_way_to_learn_what_your_device_flags`
 11. [nest] Only the author of a conversation message your nest vouched for as theirs can appeal its removal or block, which writes an entry on their queue; anyone else is refused — `docs/goal/behavior/moderation.md` § Legal takedown
    - `tests/e2e-unified/tests/api/test_moderation_appeal.py::test_a_conversation_appeal_is_the_attested_authors`
-12. [app] When an administrator removes a message you sent in a conversation under a legal obligation, or blocks it after a report, your queue gains an entry naming the ground, you can appeal it from there, and the entry stays if the decision is reversed — `docs/goal/behavior/moderation.md` § Legal takedown
+12. [app] When an administrator removes a message you sent in a conversation under a legal obligation, or blocks it after a report, your queue gains an entry naming the ground, you can appeal it from there, and the entry stays if the decision is reversed; your own copy of the message keeps its words with a badge naming the ground, from which you can appeal too — `docs/goal/behavior/moderation.md` § Legal takedown
    - `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_takedown_from_the_queue`
    - `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue`
 13. [app] When another nest's administrator removes your content under a legal obligation — a post of yours that nest shows to its own people, or a message you sent in a community room it is the home of — your queue on your own nest gains the entry, naming the nest that decided; you can appeal it from there, the appeal is recorded on that nest for its administrators to review, and the entry stays if the decision is reversed — `docs/goal/behavior/moderation.md` § Legal takedown
@@ -55,32 +55,34 @@ Stamped 2026-10-01 at e5a7e5d758.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| web | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | linux | ✅ full | 0.1.5-dev+1e755069 standalone |
 | windows | ⚠ partial | 0.1.2-dev+068e152c.dirty standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_moderation.py::test_navigate_to_moderation` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_moderation.py::test_moderation_correction_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_moderation_local_detection.py::test_local_spam_detection_surfaces_in_moderation_queue` — requires `moderation-queue-second-real-engine` (test harness) (not built: web, windows, android) | linux (linux): passed, windows (windows): error, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_moderation_local_detection.py::test_web_local_spam_detection_surfaces_in_moderation_queue` — requires `single-engine-local-detection` (test harness) (not built: linux, windows, macos, ios, android, tui) | web (linux): passed, linux (linux): skipped, windows (windows): error, tui (linux): error |
-| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_train_correction_writes_sealed_model_at_rest` — requires `moderation-queue-second-real-engine` (test harness) (not built: web, windows, android) | linux (linux): passed, windows (windows): error, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_moderation_local_detection.py::test_local_spam_detection_surfaces_in_moderation_queue` — requires `moderation-queue-second-real-engine` (test harness) (not built: web, windows, android, android-kids) | linux (linux): passed, windows (windows): error, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_moderation_local_detection.py::test_web_local_spam_detection_surfaces_in_moderation_queue` — requires `single-engine-local-detection` (test harness) (not built: linux, windows, macos, ios, android, tui, android-kids, ios-kids) | web (linux): passed, linux (linux): skipped, windows (windows): error, tui (linux): error |
+| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_train_correction_writes_sealed_model_at_rest` — requires `moderation-queue-second-real-engine` (test harness) (not built: web, windows, android, android-kids) | linux (linux): passed, windows (windows): error, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_moderation_appeal.py::test_the_author_appeals_a_takedown_through_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_content_moderation.py::test_spam_filtering_pipeline` | nest (linux): passed, nest (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_moderation_appeal.py::test_a_queue_row_shows_its_category_confidence_and_action` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_admin_legal_takedown.py::test_the_admin_takes_down_and_restores_a_post_through_the_app` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_moderation_appeal.py::test_a_post_appeal_is_the_authors_bounded_and_once_per_decision` | nest (linux): passed, nest (macos): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_moderation_appeal.py::test_an_appeal_needs_a_real_enforcement_record` | nest (linux): passed, nest (macos): passed |
-| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_local_detections_stay_on_device.py::test_the_nest_has_no_way_to_learn_what_your_device_flags` | nest (linux): passed, nest (macos): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_moderation_appeal.py::test_a_conversation_appeal_is_the_attested_authors` | nest (linux): passed, nest (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_takedown_from_the_queue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_moderation_appeal_cross_nest.py::test_the_author_on_another_nest_appeals_a_takedown_of_their_projected_post` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_moderation_appeal_cross_nest.py::test_the_author_on_another_nest_appeals_a_takedown_of_their_room_message` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

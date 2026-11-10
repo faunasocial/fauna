@@ -923,9 +923,10 @@ impl ConversationsSession {
         thread_id: crate::thread::ThreadId,
         room_id: [u8; 32],
         room_node: Option<String>,
+        home_nest_actor_id: Option<String>,
     ) -> Result<ChannelId, BackendError> {
         self.fauna_mls
-            .accept_room_invite(thread_id, room_id, room_node)
+            .accept_room_invite(thread_id, room_id, room_node, home_nest_actor_id)
             .await
     }
 
@@ -1505,71 +1506,8 @@ impl ConversationsSession {
         let mut total = 0u32;
         let mut first_err: Option<BackendError> = None;
         for channel in self.fauna_mls.bound_channels() {
-            // Read + copy the cursor (no `conv_cursors` lock held across the
-            // await), poll, then write the advanced cursor back. First encounter
-            // seeds from the injected `ChannelCursor` (`resume_seq` — the restored
-            // `history/<ch>` watermark on a device-synced client, else `0`), so a
-            // restored device resumes from where this identity last folded rather
-            // than re-walking pre-restore history.
-            let mut cur = *self
-                .conv_cursors
-                .lock()
-                .unwrap()
-                .entry(channel)
-                .or_insert_with(|| {
-                    self.fauna_mls
-                        .channel_cursor()
-                        .map(|c| c.resume_seq(&channel))
-                        .unwrap_or(0)
-                });
-            // Serialize this channel's inbound drain against a concurrent gated
-            // commit ([`FaunaMlsBackend::channel_lock`]): a gated send stages a
-            // pending the engine cannot `process_commit` over. Held across the
-            // `.await`; the gate's own catch-up poll runs inside the gated section
-            // and never re-takes it.
-            let channel_lock = self.fauna_mls.channel_lock(&channel);
-            let guard = channel_lock.lock().await;
-            // Past the one-shot key-in stop, which exists for the receive
-            // loop's catch-up window: this sweep has none to reopen, so a stop
-            // here would only defer the newly readable room by a tick
-            // (`poll_inbound_conv_past_key_in`).
-            let polled = poll_inbound_conv_past_key_in(
-                &self.fauna_mls,
-                &self.manager,
-                &channel,
-                &mut cur,
-                0,
-            )
-            .await;
-            // An ownership offer the walk parked for this identity completes
-            // here — after the walk, under the same lock, never inside it
-            // (`FaunaMlsBackend::complete_ownership_offer_locked`).
-            self.fauna_mls
-                .complete_ownership_offer_locked(&channel)
-                .await;
-            match polled {
-                Ok(outcome) => {
-                    if outcome.awaiting_key {
-                        tracing::debug!(
-                            channel = %channel,
-                            "community room not keyed in yet — the walk waits before its \
-                             first sealed record"
-                        );
-                    } else if outcome.stalled {
-                        tracing::error!(
-                            channel = %channel,
-                            "inbound poll stalled before an unincorporated commit — channel is \
-                             behind the group's epoch until a resync heals it"
-                        );
-                    }
-                    total += outcome.ingested as u32;
-                    self.conv_cursors.lock().unwrap().insert(channel, cur);
-                    // Report the folded seq back so the next `history/<ch>` save
-                    // snapshots the right watermark (a no-op with no cursor seam).
-                    if let Some(c) = self.fauna_mls.channel_cursor() {
-                        c.advance(&channel, cur);
-                    }
-                }
+            match self.catch_up_channel(&channel).await {
+                Ok(outcome) => total += outcome.ingested as u32,
                 Err(e) => {
                     if first_err.is_none() {
                         first_err = Some(e);
@@ -1579,7 +1517,6 @@ impl ConversationsSession {
             // Name any member the walk seated that this device has never met,
             // AFTER releasing the channel lock — `poll_bound`'s step, for its
             // reasons, so the two drain paths stay behaviourally identical.
-            drop(guard);
             self.fauna_mls
                 .tend_community_room(&self.manager, &channel)
                 .await;
@@ -2737,6 +2674,16 @@ impl ConversationsSession {
                                         .await;
                                 }
                             }
+                            // The actor's spam model changed — a lesson here, on
+                            // another device or through a mail client. The whole
+                            // mail sweep, not the read-state legs alone: its drain
+                            // rebuilds the pass's scorer, so the catch-up its sync
+                            // ends in takes the held un-watermarked set through the
+                            // model that now exists (`mail-spam.md` § Scoring
+                            // placement → *The app's catch-up*).
+                            Some(ConvPushEvent::MailSpamModelChanged) => {
+                                mail_sweep!();
+                            }
                             // The socket came back. Pushes are transient, so whatever
                             // the nest tried to deliver while we were down was never
                             // broadcast to us — only a pull recovers it. Sweep every
@@ -2780,6 +2727,18 @@ impl ConversationsSession {
                                 if let Some(launcher) = index_launcher.as_ref() {
                                     launcher
                                         .corpus_changed(crate::backend::NestCorpus::Files)
+                                        .await;
+                                }
+                            }
+                            // An event moved in one of this actor's calendars.
+                            // The address book's routing and reasoning exactly:
+                            // the ctag-suppressed calendar walk is the
+                            // reconcile, so a spurious event costs one
+                            // `list_calendars` and no publish.
+                            Some(ConvPushEvent::CalendarChanged) => {
+                                if let Some(launcher) = index_launcher.as_ref() {
+                                    launcher
+                                        .corpus_changed(crate::backend::NestCorpus::Calendar)
                                         .await;
                                 }
                             }
@@ -3381,6 +3340,197 @@ mod weak_room_post_keys_tests {
         assert!(keys.room_post_seal_key([7; 32]).await.is_err());
         assert!(keys.room_post_rooms().await.is_empty());
         assert_eq!(keys.room_home_nest_url([7; 32]).await, None);
+    }
+}
+
+impl ConversationsSession {
+    /// Walk one bound channel's log up to its tip, under the channel lock —
+    /// [`Self::poll_conversations`]' per-channel step, and the MLS outbox
+    /// drain's catch-up before it seals a queued intent (`devices.md`
+    /// § Offline compose → *Drain*: a stalled walk blocks the drain exactly as
+    /// it blocks a gated send). The advanced cursor is written back on success.
+    async fn catch_up_channel(
+        &self,
+        channel: &ChannelId,
+    ) -> Result<crate::backends::fauna_mls::ConvPollOutcome, BackendError> {
+        let channel = *channel;
+        // Read + copy the cursor (no `conv_cursors` lock held across the
+        // await), walk, then write the advanced cursor back. First encounter
+        // seeds from `resume_cursor`, so a restored device resumes from where
+        // this identity last folded rather than re-walking pre-restore history.
+        let mut cur = *self
+            .conv_cursors
+            .lock()
+            .unwrap()
+            .entry(channel)
+            .or_insert_with(|| resume_cursor(&self.fauna_mls, &channel));
+        let polled =
+            catch_up_bound_channel(&self.fauna_mls, &self.manager, &channel, &mut cur).await;
+        if polled.is_ok() {
+            self.conv_cursors.lock().unwrap().insert(channel, cur);
+        }
+        polled
+    }
+}
+
+/// Where a bound channel's walk starts on first encounter: the injected
+/// `ChannelCursor`'s `resume_seq` (the restored `history/<ch>` watermark on a
+/// device-synced client), else `0`.
+pub fn resume_cursor(fauna_mls: &FaunaMlsBackend, channel: &ChannelId) -> i64 {
+    fauna_mls
+        .channel_cursor()
+        .map(|c| c.resume_seq(channel))
+        .unwrap_or(0)
+}
+
+/// Walk one bound channel's log from `cur` up to its tip, under the channel
+/// lock, advancing `cur` — the catch-up step every host that keeps its own
+/// cursor map runs (the native session's `catch_up_channel`, web's MLS outbox
+/// sender in `fauna-wasm`). The caller reads its cursor before and writes it
+/// back after an `Ok`; on `Ok` the folded seq is also reported to the injected
+/// `ChannelCursor`, so the next `history/<ch>` save snapshots it.
+pub async fn catch_up_bound_channel(
+    fauna_mls: &FaunaMlsBackend,
+    manager: &ConversationsManager,
+    channel: &ChannelId,
+    cur: &mut i64,
+) -> Result<crate::backends::fauna_mls::ConvPollOutcome, BackendError> {
+    let channel = *channel;
+    // Serialize this channel's inbound drain against a concurrent gated
+    // commit ([`FaunaMlsBackend::channel_lock`]): a gated send stages a
+    // pending the engine cannot `process_commit` over. Held across the
+    // `.await`; the gate's own catch-up poll runs inside the gated section
+    // and never re-takes it.
+    let channel_lock = fauna_mls.channel_lock(&channel);
+    let guard = channel_lock.lock().await;
+    // Past the one-shot key-in stop, which exists for the receive loop's
+    // catch-up window: this sweep has none to reopen, so a stop here would
+    // only defer the newly readable room by a tick
+    // (`poll_inbound_conv_past_key_in`).
+    let polled = poll_inbound_conv_past_key_in(fauna_mls, manager, &channel, cur, 0).await;
+    // An ownership offer the walk parked for this identity completes here
+    // — after the walk, under the same lock, never inside it
+    // (`FaunaMlsBackend::complete_ownership_offer_locked`).
+    fauna_mls.complete_ownership_offer_locked(&channel).await;
+    if let Ok(outcome) = &polled {
+        if outcome.awaiting_key {
+            tracing::debug!(
+                channel = %channel,
+                "community room not keyed in yet — the walk waits before its \
+                 first sealed record"
+            );
+        } else if outcome.stalled {
+            tracing::error!(
+                channel = %channel,
+                "inbound poll stalled before an unincorporated commit — channel is \
+                 behind the group's epoch until a resync heals it"
+            );
+        }
+        // Report the folded seq back so the next `history/<ch>` save
+        // snapshots the right watermark (a no-op with no cursor seam).
+        if let Some(c) = fauna_mls.channel_cursor() {
+            c.advance(&channel, *cur);
+        }
+    }
+    drop(guard);
+    polled
+}
+
+/// The MLS outbox drain's sealing send for one queued intent (`devices.md`
+/// § Offline compose → *Drain*), shared by every host of the account's
+/// conversations engine — the native [`ConversationsSession`] and web's sender
+/// in `fauna-wasm` — which differ only in where they keep their channel
+/// cursors (`catch_up`, a wrapper over [`catch_up_bound_channel`]). Per intent:
+/// catch the channel's log up (a stalled walk is a retry, as it blocks a gated
+/// send), then seal at the then-current epoch and append under the intent id
+/// ([`ConversationsManager::send_queued_intent`]). The outbox owns the order
+/// and the parking (`AccountStoreHandle::drain_mls_outbox`).
+pub async fn send_queued_mls_intent<F, Fut>(
+    fauna_mls: &FaunaMlsBackend,
+    manager: &ConversationsManager,
+    intent_id: [u8; 16],
+    payload: &[u8],
+    catch_up: F,
+) -> fauna_core::offline_intent::MlsIntentOutcome
+where
+    F: FnOnce(ChannelId) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<crate::backends::fauna_mls::ConvPollOutcome, BackendError>,
+        >,
+{
+    use fauna_core::offline_intent::{MlsIntentOutcome, park_code};
+    let intent = match crate::offline_compose::MlsSendIntent::decode(payload) {
+        Ok(intent) => intent,
+        Err(e) => {
+            return MlsIntentOutcome::Park {
+                code: park_code::UNDECODABLE,
+                why: format!("intent does not decode: {e}"),
+            };
+        }
+    };
+    let Ok(channel) = ChannelId::from_hex(&intent.channel_id) else {
+        return MlsIntentOutcome::Park {
+            code: park_code::MLS_NO_CHANNEL,
+            why: "intent names no channel".to_string(),
+        };
+    };
+    // The group is the engine's durable state: gone means this device is no
+    // longer a member (removed, or the conversation deleted) — permanent.
+    if !fauna_mls.engine().has_group(&channel) {
+        return MlsIntentOutcome::Park {
+            code: park_code::MLS_NOT_A_MEMBER,
+            why: "no longer a member of this conversation".to_string(),
+        };
+    }
+    // The binding is RAM state the session restores; not yet there is a
+    // retry, never a park.
+    let Some(thread_id) = fauna_mls.thread_for_channel(&channel) else {
+        return MlsIntentOutcome::Retry("the conversation is not restored yet".to_string());
+    };
+    match catch_up(channel).await {
+        Ok(outcome) if outcome.stalled => {
+            return MlsIntentOutcome::Retry("the channel log is stalled".to_string());
+        }
+        Ok(_) => {}
+        Err(e) => return MlsIntentOutcome::Retry(format!("catch up: {e}")),
+    }
+    match manager
+        .send_queued_intent(intent_id, &intent, thread_id)
+        .await
+    {
+        Ok(_) => MlsIntentOutcome::Sent,
+        Err(
+            e @ (BackendError::Transport(_)
+            | BackendError::NeedsUpdate { .. }
+            | BackendError::AuthRequired),
+        ) => MlsIntentOutcome::Retry(e.to_string()),
+        Err(e) => MlsIntentOutcome::Park {
+            code: park_code::MLS_SEND_FAILED,
+            why: e.to_string(),
+        },
+    }
+}
+
+/// The native host's sealing send: this session hosts the account's
+/// conversations engine, so it is the one place a queued plaintext intent
+/// becomes an MLS message here ([`send_queued_mls_intent`] over its own
+/// cursors).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl fauna_core::offline_intent::MlsIntentSender for ConversationsSession {
+    async fn send_mls_intent(
+        &self,
+        intent_id: [u8; 16],
+        payload: &[u8],
+    ) -> fauna_core::offline_intent::MlsIntentOutcome {
+        send_queued_mls_intent(
+            &self.fauna_mls,
+            &self.manager,
+            intent_id,
+            payload,
+            |channel| async move { self.catch_up_channel(&channel).await },
+        )
+        .await
     }
 }
 

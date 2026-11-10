@@ -145,6 +145,17 @@ pub struct ThreadCapabilities {
     #[cfg_attr(feature = "uniffi", uniffi(default = true))]
     #[serde(default = "default_true")]
     pub can_send: bool,
+    /// Remove this device's account's copy of a message or of the whole
+    /// conversation from its nest — a *remove*, never a *delete*: the far
+    /// side sees nothing (`bridged-adapter.md` § Removing bridged rows, rule
+    /// 1). Paints `dm-message-remove-button` (through
+    /// [`crate::message::MessageSnapshot::can_remove`]) and lights
+    /// `room-remove-button`. Derived from the rail, never declared — like
+    /// `encryption` — so a bridge's manifest cannot claim it: `true` on
+    /// [`Rail::Bridged`], `false` on every other rail today.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub supports_local_remove: bool,
 }
 
 /// Is this `(rail, flavor)` a **bound FaunaMls group** — the one pairing whose
@@ -223,6 +234,8 @@ pub fn declared_bridge_capabilities(
         // The room's class decides it, as `encryption`: never a bridge's word.
         can_search_room: base.can_search_room,
         can_send: base.can_send,
+        // The rail decides it, as `encryption`: never a bridge's word.
+        supports_local_remove: base.supports_local_remove,
     }
 }
 
@@ -259,6 +272,7 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
             can_leave_room: false,
             can_search_room: false,
             can_send: true,
+            supports_local_remove: false,
         },
         (FaunaMls, MlsGroup) => ThreadCapabilities {
             supports_membership_change: true,
@@ -330,6 +344,7 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
             can_leave_room: false,
             can_search_room: false,
             can_send: true,
+            supports_local_remove: false,
         },
         // Every bridge, before its declared vector is overlaid: the most
         // restrictive answer — every affordance withheld, no membership, role
@@ -361,6 +376,9 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
             can_leave_room: false,
             can_search_room: false,
             can_send: true,
+            // The nest's copy of a bridged row is the user's to remove
+            // (`bridged-adapter.md` § Removing bridged rows, rule 1).
+            supports_local_remove: true,
         },
         // An imported archive thread is a read-only record of another
         // platform's past (`behavior/archive-import.md` § What each category
@@ -369,6 +387,9 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
         // bar the way it already does for a disconnected bridge.
         (Archive, _) => ThreadCapabilities {
             can_send: false,
+            // An imported archive rests in the account's own files, not as
+            // bridged rows: no local remove on this rail.
+            supports_local_remove: false,
             ..derive_capabilities(Bridged, OneToOne)
         },
     }
@@ -448,6 +469,33 @@ mod tests {
             assert!(!caps.can_leave_room);
             assert_eq!(caps.delivery_mode, DeliveryMode::Async);
         }
+    }
+
+    /// The local remove is derived from the rail and never declared
+    /// (`bridged-adapter.md` § Removing bridged rows, rule 1): every bridged
+    /// flavor offers it, no other rail does, and a bridge that names it in
+    /// its vector is not listened to.
+    #[test]
+    fn only_the_bridged_rail_derives_the_local_remove_and_no_bridge_declares_it() {
+        let flavors = [
+            ThreadFlavor::OneToOne,
+            ThreadFlavor::MlsGroup,
+            ThreadFlavor::SubjectKeyed,
+        ];
+        for rail in [Rail::FaunaMls, Rail::Smtp, Rail::Bridged, Rail::Archive] {
+            for flavor in flavors.clone() {
+                assert_eq!(
+                    derive_capabilities(rail, flavor.clone()).supports_local_remove,
+                    rail == Rail::Bridged,
+                    "{rail:?} {flavor:?}"
+                );
+            }
+        }
+        let withheld = declared_bridge_capabilities(|_| Some(false), None);
+        assert!(
+            withheld.supports_local_remove,
+            "a bridge cannot withhold it"
+        );
     }
 
     #[test]

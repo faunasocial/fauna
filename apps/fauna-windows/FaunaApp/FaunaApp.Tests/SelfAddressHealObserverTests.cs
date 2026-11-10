@@ -111,4 +111,53 @@ public class SelfAddressHealObserverTests
         observer.AttachSession(session);
         Assert.Equal(new[] { "alice@example.com" }, session.SetSelfAddressCalls);
     }
+
+    // ── IdentityMoved: the profile SELF header's repaint hook ───────────
+    // (mail-primary-domain-rename.md § Display-handle interaction — the header follows
+    // the primary the launch machine's latest verify reply names.)
+
+    [Fact]
+    public void IdentityMovedFiresWhenTheDomainMoves()
+    {
+        var machine = new FakeMachine { SnapshotToReturn = SnapshotWithIdentity("alice", "old.test") };
+        var moved = 0;
+        var observer = new SelfAddressHealObserver { Machine = machine, IdentityMoved = () => moved++ };
+
+        observer.OnChanged();
+        machine.SnapshotToReturn = SnapshotWithIdentity("alice", "new.test");
+        observer.OnChanged();
+
+        Assert.Equal(2, moved);   // resolved, then renamed
+    }
+
+    [Fact]
+    public void IdentityMovedSkipsATickThatMovedNoIdentity()
+    {
+        // A token refresh ticks the observer too; the header has nothing to repaint.
+        var machine = new FakeMachine { SnapshotToReturn = SnapshotWithIdentity("alice", "example.com") };
+        var moved = 0;
+        var observer = new SelfAddressHealObserver { Machine = machine, IdentityMoved = () => moved++ };
+
+        observer.OnChanged();
+        observer.OnChanged();
+
+        Assert.Equal(1, moved);
+    }
+
+    [Fact]
+    public void IdentityMovedNeedsNoConversationsSession()
+    {
+        // The profile header is not the conversations session's: a resolve before
+        // StartMainAppAsync builds the session still repaints it.
+        var machine = new FakeMachine();   // unresolved
+        var moved = 0;
+        var observer = new SelfAddressHealObserver { Machine = machine, IdentityMoved = () => moved++ };
+
+        observer.OnChanged();
+        Assert.Equal(0, moved);
+
+        machine.SnapshotToReturn = SnapshotWithIdentity("alice", "example.com");
+        observer.OnChanged();
+        Assert.Equal(1, moved);
+    }
 }

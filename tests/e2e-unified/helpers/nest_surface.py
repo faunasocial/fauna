@@ -495,6 +495,11 @@ FIXTURE_START_OPTIONS = {
     "dedicated_caldav_admin_port_nest": frozenset(),
     "dedicated_no_mail_nest": frozenset(),
     "delete_account_nest": frozenset(),
+    "repoint_nest": frozenset(),
+    "succession_ap_nest": frozenset({"claim_domain"}),
+    # The succession bridge-plane witness's Bluesky nest: the
+    # `bluesky_feed_nest` shape (a domain for the OAuth client, the far-end seam).
+    "succession_bluesky_nest": frozenset({"claim_domain", "extra_env"}),
     # The bluesky-OAuth pair: one option, one difference between them, and that
     # difference IS what they assert (the OAuth client_id derives from the
     # claimed identity domain, so the domained one offers the bridge and the
@@ -622,6 +627,9 @@ FIXTURE_START_OPTIONS = {
     "no_scanner_nest": frozenset(),
     "overdue_nest": frozenset({"extra_env"}),
     "plugin_nest": frozenset({"extra_env"}),
+    # Its bridge-glyph twin (bridges outcome 11): the same publisher env, a
+    # bridge block in the manifest.
+    "bridge_nest": frozenset({"extra_env"}),
     # The release-check pair (`tests/api/test_release_check.py`): one points the
     # nest's check at the per-test feed stub through `extra_env`, the other
     # names no origin, as the session nest does.
@@ -667,10 +675,13 @@ FIXTURE_START_OPTIONS = {
     # (`test_succession_linked_nests.py`, `test_nest_rules_web_notice.py`).
     "linked_nests": frozenset(),
     "rules_nest": frozenset({"claim_domain"}),
+    # The standalone twin of the docker outside-darkness witness
+    # (`test_standalone_nest_reaches_no_outside_ca.py`).
+    "outside_dark_nest": frozenset({"claim_domain", "serve_tls"}),
     # The updater witness's registry-redirect seams ride `extra_env`; renamed off
     # `head_nest`, which the skew modules' option-less nests already wear.
     "updater_head_nest": frozenset({"extra_env"}),
-    "two_nest_custody_rig": frozenset({"handle_domain_seed", "serve_tls"}),
+    "two_nest_custody_rig": frozenset({"cors_origins", "handle_domain_seed", "serve_tls"}),
     "unclaimed_nest": frozenset({"handle_domain_seed", "serve_tls", "unclaimed"}),
     # `extra_env` from its `consent_nest_env` fixture, which a module overrides
     # with a `test-hooks` seam (`test_bridged_conversation_kinds.py`). Read as a
@@ -786,9 +797,12 @@ FIXTURE_START_OPTIONS = {
     #   already in this table, and the claimed-and-registerable cell is EMPTY.
     "caldav_cross_nest_peer": frozenset({"handle_domain_seed", "serve_tls"}),
     "cross_nest_foreign": frozenset({"handle_domain_seed", "serve_tls"}),
-    "cross_nest_foreign_ephemeral": frozenset({"handle_domain_seed",
+    # The ephemeral one also seeds the web seat's origin (community-room
+    # foreign attachment, web's arm).
+    "cross_nest_foreign_ephemeral": frozenset({"cors_origins", "handle_domain_seed",
                                                "serve_tls"}),
     "report_origin_nest": frozenset({"handle_domain_seed", "serve_tls"}),
+    "cross_nest_member_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     "smoke_handled_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     # Its Store-build twin (`tests/artifact/test_windows_store_install.py`): the
     # same loopback-authority TLS nest a Release build signs in to with no seed.
@@ -829,6 +843,21 @@ FIXTURE_START_OPTIONS = {
     "trust_grant_nest": frozenset(),
     "unclaimed_dns_nest": frozenset({"unclaimed"}),
     "unclaimed_tls_nest": frozenset({"serve_tls", "unclaimed"}),
+    "bluesky_nest": frozenset({"claim_domain", "extra_env"}),
+    "door_succession_nest": frozenset({"claim_domain"}),
+    "export_nest": frozenset(),
+    "faulting_nest": frozenset({"claim_domain", "extra_env"}),
+    "ingress_nest": frozenset({"claim_domain", "extra_env"}),
+    "one_trend_nest": frozenset(),
+    "refusing_nest": frozenset({"extra_env"}),
+    "render_atomicity_site_nest": frozenset({"claim_domain"}),
+    "repaint_nest": frozenset(),
+    "reserved_nest": frozenset({"claim_domain"}),
+    "situs_nest": frozenset({"claim_domain"}),
+    "takedown_nest": frozenset({"claim_domain", "extra_env"}),
+    "age_nest": frozenset({"claim_domain"}),
+    "handle_doors_nest": frozenset({"claim_domain"}),
+    "stoppable_nest_b": frozenset(),
 }
 
 _UNSUPPORTED_OPTION_REASON = (
@@ -1081,6 +1110,8 @@ DEDICATED_NEST_BINARIES = {
     "domained_bluesky_nest": "bluesky_nest_binary",
     "domainless_bluesky_nest": "bluesky_nest_binary",
     "bridges_nest": "bridges_nest_binary",
+    "succession_ap_nest": "bridges_nest_binary",
+    "succession_bluesky_nest": "bluesky_nest_binary",
 }
 
 _FEATURE_SET_BINARY_REASON = (
@@ -1184,6 +1215,7 @@ OWN_IMAGE_FIXTURES = frozenset({
     "forged_nest",
     "forwarder_ndr_nest",
     "ip_bridge_stack",
+    "ip_bridge_domain_stack",
     "lateral_nest",
     "lenient_nest",
     "linked",
@@ -1204,6 +1236,7 @@ OWN_IMAGE_FIXTURES = frozenset({
     "relay_seats",
     "rename_stack",
     "rename_mail_stack",
+    "rename_stack_new_mail_host_unpublished",
     "round_trip_nest",
     "router_nest",
     "scanners",
@@ -1276,6 +1309,9 @@ BRIDGE_SPAWN_FIXTURES = frozenset({
     "autoenable_mda",      # module-local: tests/test_mail_auto_enable_first_setup.py
     "lan_mda",             # module-local: tests/test_mail_policy_effects.py
     "principal_mda",       # module-local: tests/api/test_folder_read_principal.py
+    "preauth_bridges",     # module-local: tests/test_mail_abuse_refused.py
+    "silent_resolver_mta", # module-local: tests/test_mail_abuse_refused.py
+    "reject_peer_mta",     # module-local: tests/test_mail_dmarc_reports.py
 })
 
 #: Class (5)'s THIRD door: the fixtures that BUILD a self-enrolling bridge.
@@ -1311,6 +1347,7 @@ BRIDGE_BINARY_FIXTURES = frozenset({
     "mail_bridge_binary",
     "atproto_bridge_binary",
     "atproto_bridge_e2e_binary",
+    "mail_bridge_e2e_binary",
 })
 
 #: The two evidence clauses, and the one tail they share. Kept apart because
@@ -1538,6 +1575,7 @@ GLOBAL_ADMIN_FIXTURES = frozenset({
     "caldav_cross_nest_peer",
     "cross_nest_foreign",
     "cross_nest_foreign_ephemeral",
+    "cross_nest_member_nest",
     "dav_toggle_venue",
     "dedicated_caldav_mailbox_less_nest",
     "dedicated_caldav_only_nest",

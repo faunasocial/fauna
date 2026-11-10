@@ -126,6 +126,10 @@ class FakeCloud:
         # picks it (`ovh.base_url()`): the one provider whose rows are unmarked.
         self.ovh = OvhHandlers(httpserver, "/ovh")
         self.cloudflare = CloudflareHandlers(httpserver, "/cloudflare")
+        # Namecheap, reached through the `dns` override at `namecheap.base_url()`
+        # when a test picks it: refuses every call from an address it has not
+        # allowlisted, the way the live endpoint does.
+        self.namecheap = NamecheapHandlers(httpserver, "/namecheap")
         self.hetzner_dns = HetznerDnsHandlers(httpserver, "/hetzner-dns")
         self.nest = NestHandlers(httpserver, "/nest")
         # The bundled-provider reference server (fake_bundled.py) — reached by
@@ -166,6 +170,27 @@ class FakeCloud:
             return f"{base}/hetzner-dns"
         return f"{base}/cloudflare"
 
+    def _posted_bodies(self, path_pattern: str) -> list[dict]:
+        """The JSON bodies of every POST this fake has served whose path fully
+        matches `path_pattern`, in arrival order — read off pytest-httpserver's
+        own request log, so a test asserts what the run actually sent rather
+        than that a canned reply came back."""
+        pattern = re.compile(path_pattern)
+        bodies = []
+        for request, _response in self._h.log:
+            if request.method == "POST" and pattern.fullmatch(request.path):
+                bodies.append(json.loads(request.get_data() or b"{}"))
+        return bodies
+
+    def server_creates(self) -> list[dict]:
+        """Every Hetzner `POST /servers` body the run sent (its `user_data` is
+        the box's cloud-init)."""
+        return self._posted_bodies(r"/hetzner-cloud/servers")
+
+    def dns_record_creates(self) -> list[dict]:
+        """Every Cloudflare `POST /zones/{id}/dns_records` body the run sent."""
+        return self._posted_bodies(r"/cloudflare/zones/[^/]+/dns_records")
+
     def install_default_routes(self) -> None:
         """Install canned-success defaults for every endpoint the
         orchestrator hits. Tests override per-route via the per-backend
@@ -178,6 +203,7 @@ class FakeCloud:
         self.hetzner_cloud.install_defaults()
         self.ovh.install_defaults()
         self.cloudflare.install_defaults()
+        self.namecheap.install_defaults()
         self.hetzner_dns.install_defaults()
         self.nest.install_defaults()
         self.bundled.install_defaults()
@@ -232,6 +258,17 @@ class HetznerCloudHandlers:
         # canned reply came back.
         self.managed_servers: list[dict] = []
         self.deleted_server_ids: list[str] = []
+        # Every box a `POST /servers` actually ordered, in order — the
+        # provisioning orchestrator's one purchase. Kept as state for two
+        # reasons: a resume journey asserts the provider saw exactly ONE order
+        # (`onboarding-provisioning.md` § 6, the one-box resume), and the
+        # Server step's name-only pre-flight (`?name=`) must find a box an
+        # earlier run of the same test ordered, the way the real account would
+        # — a fake that forgot it would make every Retry buy a second box and
+        # hide exactly the bug the resume exists to prevent. Kept apart from
+        # `managed_servers` (the retire view's seeded account) so a seeded box
+        # never answers the pre-flight and no retire test sees an order.
+        self.server_orders: list[dict] = []
         # The Hetzner Cloud API serves DNS on the SAME base as servers
         # (`api.hetzner.cloud/v1`), and the retire machine points one base URL
         # at both — so the zone/RRset routes are mounted here too, on their own
@@ -263,16 +300,9 @@ class HetznerCloudHandlers:
             },
             headers=_CORS,
         )
-        # POST /servers
-        self._h.expect_request(f"{p}/servers", method="POST").respond_with_json(
-            {
-                "server": {
-                    "id": 12345,
-                    "public_net": {"ipv4": {"ip": "203.0.113.5", "dns_ptr": None}},
-                }
-            },
-            status=201,
-            headers=_CORS,
+        # POST /servers — recorded in `server_orders`, answered with the canned box.
+        self._h.expect_request(f"{p}/servers", method="POST").respond_with_handler(
+            self._create_server
         )
         # GET /server_types — names MUST be in Hetzner's curated_offers
         # (providers_generated.rs: ["cx23","cx33","cx43","ccx13","ccx23"]);
@@ -325,7 +355,8 @@ class HetznerCloudHandlers:
         # GET /servers — two callers share this (uri, method), and
         # pytest-httpserver matches the FIRST registered handler, so one
         # handler branches on the query:
-        #   ?name=...           find_server_by_name  → empty (nothing exists)
+        #   ?name=...           find_server_by_name  → the box this test's
+        #                       runs ordered under that name, else empty
         #   ?label_selector=... list_managed_servers → self.managed_servers
         # The retire view drives the second (nest-retirement.md § Where logic
         # lives); the filter is honoured rather than ignored, because the
@@ -349,6 +380,26 @@ class HetznerCloudHandlers:
         ).respond_with_handler(self._get_server)
         self.dns.install_defaults()
 
+    # The one box every order answers with — the address the existing journeys
+    # (and the slot's `reach_ipv4`) already read as "the box".
+    _ORDERED_SERVER_ID = 12345
+    _ORDERED_SERVER_IPV4 = "203.0.113.5"
+
+    def _create_server(self, request):
+        body = json.loads(request.get_data() or b"{}")
+        server = {
+            "id": self._ORDERED_SERVER_ID,
+            "name": body.get("name"),
+            "public_net": {"ipv4": {"ip": self._ORDERED_SERVER_IPV4, "dns_ptr": None}},
+        }
+        self.server_orders.append({"name": body.get("name"), "server": server})
+        return _Resp(
+            json.dumps({"server": server}),
+            status=201,
+            content_type="application/json",
+            headers=list(_CORS.items()),
+        )
+
     def _get_server(self, request):
         sid = request.path.rsplit("/", 1)[-1]
         seeded = next(
@@ -370,9 +421,12 @@ class HetznerCloudHandlers:
     def _list_servers(self, request):
         selector = request.args.get("label_selector")
         if selector is None:
-            # find_server_by_name's pre-flight: nothing exists yet.
+            # find_server_by_name's pre-flight: a box an earlier run of this
+            # test ordered under the name, else nothing.
+            name = request.args.get("name")
+            found = [o["server"] for o in self.server_orders if o["name"] == name][:1]
             return _Resp(
-                json.dumps({"servers": [], "meta": {"pagination": {"next_page": None}}}),
+                json.dumps({"servers": found, "meta": {"pagination": {"next_page": None}}}),
                 status=200,
                 content_type="application/json",
                 headers=list(_CORS.items()),
@@ -710,20 +764,30 @@ class CloudflareHandlers:
         self._h = httpserver
         self._prefix = prefix
 
-    def install_defaults(self) -> None:
-        p = self._prefix
+    def _serve_zone(self, name: str) -> None:
         # GET /zones?per_page=50  — return a single matching zone
-        self._h.expect_request(f"{p}/zones", method="GET").respond_with_json(
+        self._h.expect_request(f"{self._prefix}/zones", method="GET").respond_with_json(
             {
                 "success": True,
                 "errors": [],
                 "messages": [],
                 "result": [
-                    {"id": "zone-abc", "name": "example.test", "status": "active"}
+                    {"id": "zone-abc", "name": name, "status": "active"}
                 ],
             },
             headers=_CORS,
         )
+
+    def serve_zone(self, name: str) -> None:
+        """Answer `GET /zones` with the one zone `name` instead of the default
+        `example.test` — for a run whose domain is fixed by something other
+        than the test's handle (a recovered box's own domain)."""
+        _drop_handlers_for(self._h, f"{self._prefix}/zones", "GET")
+        self._serve_zone(name)
+
+    def install_defaults(self) -> None:
+        p = self._prefix
+        self._serve_zone("example.test")
         # POST /zones/{id}/dns_records
         self._h.expect_request(
             re.compile(rf"^{re.escape(p)}/zones/[^/]+/dns_records$"),
@@ -749,6 +813,68 @@ class CloudflareHandlers:
                 "result": [],  # empty so create_record_idempotent always creates
             },
             headers=_CORS,
+        )
+
+
+class NamecheapHandlers:
+    """Stub for Namecheap's one XML endpoint
+    (``libs/fauna-provisioning/src/namecheap_api.rs``): every command is a
+    ``GET <base>?ApiUser=…&ClientIp=…&Command=…`` on a single path.
+
+    Namecheap gates on the request's SOURCE address, not the ``ClientIp`` it
+    carries, and answers a refusal with **HTTP 200** and an
+    ``<ApiResponse Status="ERROR">`` body, error 1011150, echoing the address
+    it saw (``Invalid request IP: <addr>``). The fake does the same with
+    ``observed_ip`` standing in for the source address: while that address is
+    not in ``allowlisted`` every call is refused, so the adapter's one
+    self-heal retry (the echoed address as ``ClientIp``) is refused too and the
+    wizard's error must name the address. Allowlisting it lets
+    ``namecheap.domains.getList`` answer ``domains``."""
+
+    # RFC 5737 TEST-NET-3: never a real caller's address.
+    DEFAULT_OBSERVED_IP = "203.0.113.7"
+
+    def __init__(self, httpserver: HTTPServer, prefix: str) -> None:
+        self._h = httpserver
+        self._prefix = prefix
+        self.observed_ip = self.DEFAULT_OBSERVED_IP
+        self.allowlisted: set[str] = set()
+        self.domains: list[str] = ["example.test"]
+        # The query parameters of every call, in order.
+        self.requests: list[dict[str, str]] = []
+
+    def base_url(self) -> str:
+        return self._h.url_for("").rstrip("/") + self._prefix + "/xml.response"
+
+    def install_defaults(self) -> None:
+        self._h.expect_request(
+            f"{self._prefix}/xml.response", method="GET"
+        ).respond_with_handler(self._call)
+
+    def _xml(self, body: str) -> _Resp:
+        return _Resp(body, status=200, content_type="text/xml", headers=_CORS)
+
+    def _call(self, request) -> _Resp:
+        params = dict(request.args)
+        self.requests.append(params)
+        if self.observed_ip not in self.allowlisted:
+            return self._xml(
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                '<ApiResponse Status="ERROR" xmlns="http://api.namecheap.com/xml.response">'
+                f'<Errors><Error Number="1011150">Invalid request IP: {self.observed_ip}'
+                "</Error></Errors></ApiResponse>"
+            )
+        if params.get("Command") == "namecheap.domains.getList":
+            rows = "".join(f'<Domain ID="{i}" Name="{d}" />' for i, d in enumerate(self.domains))
+            return self._xml(
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                '<ApiResponse Status="OK" xmlns="http://api.namecheap.com/xml.response">'
+                f'<CommandResponse Type="namecheap.domains.getList"><DomainGetListResult>{rows}'
+                "</DomainGetListResult></CommandResponse></ApiResponse>"
+            )
+        return self._xml(
+            '<ApiResponse Status="ERROR"><Errors><Error Number="2011166">'
+            f'Command {params.get("Command")} is not served by the fake</Error></Errors></ApiResponse>'
         )
 
 

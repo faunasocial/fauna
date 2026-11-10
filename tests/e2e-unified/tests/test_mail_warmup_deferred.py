@@ -140,7 +140,7 @@ def test_a_sent_mail_the_warm_up_holds_says_when_it_will_be_delivered(
     alias_admin_to_address(nest, domain)
     app.mail_settings.navigate()
     app.mail_settings.enable_mail_plain(_MUA_PASSWORD)
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "mail must report enabled after the toggle; "
         f"status={app.mail_settings.status_text()!r}, "
         f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"

@@ -52,6 +52,16 @@
 //! post's public preview on purpose, the render serves it behind its paywall,
 //! and an archive import is served ON Fauna.
 //!
+//! **Two classes, one owner (2026-11-07).** [`PUBLIC_POST_SERVABLE`] is the
+//! public class every off-box consumer shares. [`ADVERTISED_TEASER_SERVABLE`]
+//! is the second: a *sold* post's teaser its author advertised on Nostr
+//! (`monetization.md` § The Nostr advertisement of a sold post). Both are built
+//! by the one composition below, differing only in the gated arm, and **a
+//! consumer of the teaser class must carry the price in what it publishes, or
+//! it may not adopt that predicate** — so the Nostr materializer selects the
+//! union, while ActivityPub and ATProto (whose events carry no price) stay on
+//! the public class alone.
+//!
 //! [`moderation.md`]: ../../../../docs/goal/behavior/moderation.md
 
 /// SQL fragment: true iff no **moderation flag** withholds the joined post —
@@ -110,7 +120,42 @@ pub const MODERATION_SERVABLE: &str = "cm.legal_takedown_ref IS NULL \
 /// (`c.follow_delivered = 1`) is the author's, resting at their home, and one
 /// local reader's to read (`federated-follow.md` § Decision 4): it never
 /// leaves this nest to a third party.
-pub static PUBLIC_POST_SERVABLE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+pub static PUBLIC_POST_SERVABLE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| off_box_servable("cm.gated_tier IS NULL"));
+
+/// SQL fragment: true iff the joined row is a **sold post's teaser the author
+/// advertised on Nostr** — the second class of anonymous off-box servability
+/// (`monetization.md` § The Nostr advertisement of a sold post →
+/// *Servability — one owner, two classes*).
+///
+/// Composed from exactly the fragments [`PUBLIC_POST_SERVABLE`] is — the
+/// `post/%` schema, the `content_meta`-exists arm, the federated-follow arm,
+/// [`MODERATION_SERVABLE`] and the archive-platform arm — with the gated arm
+/// **inverted** (`cm.gated_tier IS NOT NULL`) and the author's per-post flag
+/// added (`cm.nostr_advertised_at IS NOT NULL`), so the moderation, archive
+/// and follow rules cannot drift between the two classes.
+///
+/// ⚠ **A consumer of this class must carry the price in what it publishes, or
+/// it may not adopt this predicate.** A sold post's body is its teaser, and the
+/// teaser published without its price is the context-free republication the
+/// create-time half below exists to prevent. Today the one consumer is the
+/// Nostr materializer, whose advertised note carries `["price", value, unit]`
+/// (`fauna_bridge_nostr::translate::fauna_advertisement_to_nostr`);
+/// ActivityPub and ATProto carry no price and so stay on
+/// [`PUBLIC_POST_SERVABLE`] alone. The predicate does not check that a tier
+/// still sells the post at a price — that is the consumer's decode-time check
+/// (it needs the tier row to build the tag anyway), and the flag is cleared
+/// whenever the price is.
+///
+/// Same caller contract as [`PUBLIC_POST_SERVABLE`].
+pub static ADVERTISED_TEASER_SERVABLE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        off_box_servable("cm.gated_tier IS NOT NULL AND cm.nostr_advertised_at IS NOT NULL")
+    });
+
+/// The one composition both off-box classes share; `gate_arm` is the only
+/// thing that differs between them.
+fn off_box_servable(gate_arm: &str) -> String {
     let archive = fauna_core::source::ARCHIVE_PLATFORMS
         .iter()
         .map(|t| format!("'{t}'"))
@@ -119,13 +164,13 @@ pub static PUBLIC_POST_SERVABLE: std::sync::LazyLock<String> = std::sync::LazyLo
     format!(
         "c.schema LIKE 'post/%'
              AND cm.content_id IS NOT NULL
-             AND cm.gated_tier IS NULL
+             AND {gate_arm}
              AND c.follow_delivered = 0
              AND {MODERATION_SERVABLE}
              AND COALESCE(c.source, '{native}') NOT IN ({archive})",
         native = fauna_core::source::NATIVE,
     )
-});
+}
 
 /// The **create-time half** of [`PUBLIC_POST_SERVABLE`], for the two *push*
 /// legs that publish a post the instant it lands — the ActivityPub
@@ -161,7 +206,73 @@ pub fn publishable_off_box_at_create(post: &fauna_core::data::Post) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PUBLIC_POST_SERVABLE, publishable_off_box_at_create};
+    use super::{ADVERTISED_TEASER_SERVABLE, PUBLIC_POST_SERVABLE, publishable_off_box_at_create};
+
+    /// The teaser class is the public class with exactly the gated arm
+    /// inverted and the advertisement flag added — every other arm (schema,
+    /// `content_meta`-exists, follow, moderation, archive) is shared text, so
+    /// the two classes cannot drift. Graded by a real query, not by string
+    /// shape alone: a gated, advertised, unflagged post is in the teaser class
+    /// and not the public one; a takedown removes it from both.
+    #[test]
+    fn the_teaser_class_inverts_only_the_gated_arm_and_adds_the_flag() {
+        let public = PUBLIC_POST_SERVABLE.as_str();
+        let teaser = ADVERTISED_TEASER_SERVABLE.as_str();
+        assert_eq!(
+            teaser.replace(
+                "cm.gated_tier IS NOT NULL AND cm.nostr_advertised_at IS NOT NULL",
+                "cm.gated_tier IS NULL"
+            ),
+            public,
+            "every arm but the gated one is shared"
+        );
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::apply_unified_schema(&conn).unwrap();
+        let count = |pred: &str| -> i64 {
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM content c \
+                       LEFT JOIN content_meta cm ON cm.content_id = c.id WHERE {pred}"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        conn.execute(
+            "INSERT INTO content (id, author, schema, payload, created_at) \
+             VALUES (x'01', x'02', 'post/v1', x'', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO content_meta (content_id, gated_tier) VALUES (x'01', 'unlock')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            (count(public), count(teaser)),
+            (0, 0),
+            "gated, not advertised"
+        );
+        conn.execute(
+            "UPDATE content_meta SET nostr_advertised_at = 1 WHERE content_id = x'01'",
+            [],
+        )
+        .unwrap();
+        assert_eq!((count(public), count(teaser)), (0, 1), "advertised");
+        conn.execute(
+            "UPDATE content_meta SET legal_takedown_ref = 'ref' WHERE content_id = x'01'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            (count(public), count(teaser)),
+            (0, 0),
+            "a takedown binds both"
+        );
+    }
 
     fn post(gated: bool, platform: Option<&str>) -> fauna_core::data::Post {
         fauna_core::data::Post {

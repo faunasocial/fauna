@@ -142,6 +142,7 @@ def test_the_install_puts_the_sync_agent_where_the_app_looks_for_it(installed_pr
     assert agent.stat().st_mode & stat.S_IXUSR, f"{agent} is not executable"
 
 
+@pytest.mark.feature("fauna-for-ai-assistants")
 def test_the_install_puts_the_cli_app_beside_the_terminal_app_and_it_runs(installed_product):
     """The archive's third member, installed and launchable at its installed path.
 

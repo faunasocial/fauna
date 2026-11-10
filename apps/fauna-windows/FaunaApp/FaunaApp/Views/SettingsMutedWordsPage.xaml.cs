@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using S = FaunaApp.Core.Services.Strings;
 using FaunaApp.UiIds;
 
@@ -137,9 +138,9 @@ public sealed partial class SettingsMutedWordsPage : Page
 
     /// <summary>The row's <c>muted-word-level-select</c> (settings.md § Muted
     /// words — the level picker): its options are the shared catalog's
-    /// (<c>muted_keyword_levels</c>), each item NAMED by its level's token
-    /// (<c>hide</c> | <c>show-less</c>) — the value a driver selects and reads
-    /// back — while painting this app's label. A soft row differs from a hidden
+    /// (<c>muted_keyword_levels</c>), each item KEYED by its level's token
+    /// (<c>hide</c> | <c>show-less</c>, <see cref="PickerOption"/>) — the value a
+    /// driver selects and reads back — while painting this app's label. A soft row differs from a hidden
     /// one by this value alone. Pre-selected BEFORE the handler attaches, so
     /// painting a row's stored level never fires a save (the FoldersPage
     /// conflict-policy render-echo guard).</summary>
@@ -154,8 +155,7 @@ public sealed partial class SettingsMutedWordsPage : Page
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(select, Ids.MutedWordLevelSelect);
         foreach (var option in MutedWordsViewModel.LevelOptions())
         {
-            var item = new ComboBoxItem { Content = LevelLabel(option.Level), Tag = option.Token };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.Token);
+            var item = PickerOption.Create(LevelLabel(option.Level), option.Token);
             select.Items.Add(item);
             if (option.Token == entry.Level) select.SelectedItem = item;
         }

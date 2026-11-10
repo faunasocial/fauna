@@ -38,6 +38,7 @@ pub use anonymous::AnonymousWsRpcClient;
 pub use blob_http::{
     BLOB_UPLOAD_PATH, BlobHttpError, CHUNKS_UPLOAD_PATH, MANIFESTS_UPLOAD_PATH,
     post_multipart_blob, post_multipart_blob_with_bearer, post_octets_keyed,
+    post_octets_keyed_with_bearer,
 };
 #[cfg(feature = "test-helpers")]
 pub use client::connection_reports_json;

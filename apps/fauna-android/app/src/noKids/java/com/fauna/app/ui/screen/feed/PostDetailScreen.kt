@@ -416,11 +416,10 @@ private fun MainPostContent(
         }
 
         // Media — paint the folded feed `Image`/`Video` block from the post `document`
-        // (render-model.md § D6/D6b), the same `FeedPostImage`/`FeedPostVideo` painters
+        // (render-model.md § D6/D6b), the same `FeedPostMedia` painter — every block, in body order —
         // (fire-once `resolve_media` fold + blob-bytes fetch) the list card uses.
         if (post.hasMedia) {
-            FeedPostImage(document = post.document, postId = post.postId, mediaHash = post.mediaHash, vm = vm)
-            FeedPostVideo(document = post.document, postId = post.postId, vm = vm)
+            FeedPostMedia(document = post.document, postId = post.postId, mediaHash = post.mediaHash, vm = vm)
             PostImageC2paBadge(document = post.document, checkC2pa = { vm.checkBlobC2pa(post.postId, it) })
             Spacer(Modifier.height(8.dp))
         }

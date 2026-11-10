@@ -749,21 +749,21 @@ where
         let custody = &mut self.custody;
         // The two withdrawal snapshots both peer-leg admission halves read
         // (`account-sync-plane.md` § The admission seam → *Validity and
-        // severance*): revoked custody grants and removed fleet devices. Right
+        // severance*): revoked custody grants and verified fleet members. Right
         // after the fleet walk, so a sibling's removal row merged THIS pass is
         // already severing by the dial below — and before the ensure step, so a
         // pass that binds reads sets derived this pass. That ordering is not
         // what keeps a first bind honest when a refresh FAILS, though: a failed
         // refresh leaves its snapshot as it was, which before any success is
         // underived, and every view over an underived snapshot refuses its arm
-        // (`peer_leg::WithdrawalSnapshot`). After a success, a failure keeps the
+        // (`peer_leg::DerivedSet`). After a success, a failure keeps the
         // last derived set in force until a later pass succeeds — the stated
         // bound, surfaced here as the step error.
         if let Err(e) = custody.refresh_revoked(store, &peer.revoked).await {
             push_step_error(report, format!("custody-revocation snapshot: {e:#}"), &e);
         }
-        if let Err(e) = crate::peer_leg::refresh_removed_devices(peer, store, trust).await {
-            push_step_error(report, format!("removed-device snapshot: {e:#}"), &e);
+        if let Err(e) = crate::peer_leg::refresh_fleet_members(peer, store, trust).await {
+            push_step_error(report, format!("fleet-member snapshot: {e:#}"), &e);
         }
         // The peer-leg ensure step (W5.7 — holder-only by placement: pump passes
         // are the holder's). Before the device-endpoints step so a first bind's
@@ -805,8 +805,9 @@ where
         // Whether the nest path carries bytes this pass (`p2p.md` § The relay,
         // ruling 4): this pass's fleet walk is a nest walk that ran before the
         // legs, so its outcome is the pass's own nest reachability — passed to
-        // the byte gate, never re-derived there.
-        let nest = if report.fleet_walk.is_some() {
+        // the byte gate, never re-derived there. The reading is the shared one
+        // web's pass arm gates on too.
+        let nest = if fauna_account_plane::custodian_restore::own_nest_answered(report) {
             fauna_transport::NestPath::Reachable
         } else {
             fauna_transport::NestPath::Unavailable
@@ -851,14 +852,8 @@ where
         )
         .await
         {
-            Ok(Some(arm)) if arm.dialed + arm.withheld > 0 => {
-                let pass = report.peer_dial.get_or_insert_with(Default::default);
-                pass.nest_custodians += arm.dialed;
-                pass.nest_custodians_admitted += arm.admitted;
-                pass.nest_custodians_withheld += arm.withheld;
-                pass.applied += arm.applied;
-            }
-            Ok(_) => {}
+            Ok(Some(arm)) => fauna_account_plane::custodian_restore::count_nest_arm(report, arm),
+            Ok(None) => {}
             Err(e) => push_step_error(report, format!("custodian nest restore: {e:#}"), &e),
         }
         // The custody serve refresh (W8.5 P1): the served-custodies registry,
@@ -1496,8 +1491,10 @@ mod tests {
     use super::*;
     use crate::scope_set::OWN_ACTOR_KINDS;
     use fauna_account_plane::account_driver::NotReadyReason;
+    use fauna_account_plane::outbox::DrainReport;
     use fauna_account_store::db::actor_state_dir;
     use fauna_account_store::locks::EngineLockOutcome;
+    use fauna_core::offline_intent::{MlsIntentOutcome, MlsIntentSender, park_code};
     use std::path::PathBuf;
 
     /// The `prior` half of the R14 writer-door trust must reach the writer door
@@ -1650,6 +1647,11 @@ mod tests {
         grant_keys: Vec<String>,
         /// Which key the grant on [`Self::grant_on`] carries.
         granted_key: Option<String>,
+        /// The principal (hex device key) each row's registered grant names —
+        /// what `fauna.sync.devices.list` answers in a row's `principal`, as
+        /// the nest does. Set by a grant register, cleared by its revoke and
+        /// by the row's deletion.
+        row_principals: std::collections::BTreeMap<String, String>,
         /// Device keys retired over `fauna.sync.device_grant.revoke`, in
         /// arrival order — the sign-out leg's witness. The fake models the
         /// ruled revoke (`sync-agent-credentials.md` § Credential model → the
@@ -1699,6 +1701,11 @@ mod tests {
         /// stalled call has arrived, so a test can land its next act INSIDE
         /// the pass rather than guess when the pass has reached it.
         stall_next_list: Arc<AtomicBool>,
+        /// One-shot, keyed on the requested scope: as
+        /// [`Self::stall_next_list`], for the next `fauna.sync.changes.list`
+        /// of this scope only — every other scope's walk answers. Released by
+        /// [`Self::release_list`].
+        stall_list_scope: Arc<Mutex<Option<String>>>,
         list_stalled: Arc<tokio::sync::Notify>,
         /// Ends the stall: the held `changes.list` answers (an empty page)
         /// once notified. Never notified = a pass that never ends.
@@ -1844,14 +1851,6 @@ mod tests {
                 rpc: None,
             }
         }
-        /// A server refusal — the request reached the nest and was rejected.
-        fn rejection(msg: impl Into<String>) -> Self {
-            Self {
-                msg: msg.into(),
-                rejection: true,
-                rpc: None,
-            }
-        }
         /// A **typed** server refusal, carrying the code a real nest answers.
         fn coded(code: &str, msg: impl Into<String>) -> Self {
             let msg = msg.into();
@@ -1966,6 +1965,7 @@ mod tests {
             // carried — model both, or a "deleted" machine would still have
             // a registered row for the probe to find.
             s.rows.remove(device_id);
+            s.row_principals.remove(device_id);
             if s.grant_on.as_deref() == Some(device_id) {
                 s.grant_on = None;
                 if let Some(key) = s.granted_key.take() {
@@ -2182,6 +2182,22 @@ mod tests {
                         self.list_stalled.notify_one();
                         self.release_list.notified().await;
                     }
+                    let stall_here = {
+                        let mut want = self.stall_list_scope.lock().unwrap();
+                        let scope = decode_strict::<SyncChangesListRequest>(&req_bytes)
+                            .ok()
+                            .and_then(|r| r.scope);
+                        if want.is_some() && *want == scope {
+                            *want = None;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if stall_here {
+                        self.list_stalled.notify_one();
+                        self.release_list.notified().await;
+                    }
                     if self.walks_unreachable.load(Ordering::SeqCst) {
                         return Err(TestErr::transient("the feed is unreachable"));
                     }
@@ -2265,7 +2281,7 @@ mod tests {
                                 registered_at: 0,
                                 last_seen_at: 0,
                                 online: false,
-                                principal: None,
+                                principal: s.row_principals.get(row).cloned(),
                                 folders: Vec::new(),
                                 guardian_marked: false,
                                 p2p_participation: None,
@@ -2359,6 +2375,7 @@ mod tests {
                         ));
                     }
                     s.grant_registers.push(req.device_id.clone());
+                    s.row_principals.insert(req.device_id.clone(), key.clone());
                     s.grant_keys.push(key.clone());
                     s.grant_on = Some(req.device_id);
                     s.granted_key = Some(key);
@@ -2461,6 +2478,7 @@ mod tests {
                     // observe: the grant columns clear, the key is
                     // tombstoned, and the named row stays.
                     let cleared = s.grant_on.is_some();
+                    s.row_principals.retain(|_, k| *k != req.device_key);
                     s.grant_on = None;
                     s.granted_key = None;
                     s.revoked_device_ids.insert(req.device_key.clone());
@@ -2518,12 +2536,19 @@ mod tests {
                 return Err(TestErr::transient("injected keyed transport fault"));
             }
             if self.reject_next_keyed.swap(false, Ordering::SeqCst) {
-                return Err(TestErr::rejection("injected keyed rejection"));
+                return Err(TestErr::coded(
+                    INJECTED_REFUSAL_CODE,
+                    "injected keyed rejection",
+                ));
             }
             let reply_bytes = wire_encode(&0u8).expect("encode keyed reply");
             Ok(decode_strict(&reply_bytes).expect("decode keyed reply"))
         }
     }
+
+    /// The nest error code the injected keyed rejection carries — what the
+    /// outbox park stores as the intent's `failure_reason`.
+    const INJECTED_REFUSAL_CODE: &str = "fauna.test.injected_refusal";
 
     /// An explicit named `sync_devices` row, for the tests that pin the
     /// target independently of the fixture's own [`named_row`].
@@ -3590,6 +3615,46 @@ mod tests {
         let all = domains(&["first.example", "second.example", "third.example"]);
         assert_eq!(a.dns().await.expect("a reads").managed_domains, all);
         assert_eq!(b.dns().await.expect("b reads").managed_domains, all);
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
+    /// **The unkeyed hold never holds a removal** (`account-client-lifecycle.md`
+    /// § The client-side lifecycle → *The first listing*, clause (5), which
+    /// names the removal from the held device as the hold's remedy;
+    /// `fleet-scope-reclamation.md` clause (4)). The held device's full fleet
+    /// listing left the sibling's tip-sealed rows unopened, yet the sibling
+    /// verifies off its gen-0 `Enrolled` row, so the removal resolves to it
+    /// and settles — the remedy proven rather than believed.
+    #[tokio::test]
+    async fn a_device_under_the_unkeyed_hold_removes_the_sibling_whose_rows_it_cannot_open() {
+        let fx = fixture();
+        let (a, b) = a_second_device_that_has_listed_the_fleet_scope(&fx, true).await;
+        assert_eq!(
+            refused_for(&b.dns().await),
+            Some(NotReadyReason::HeldForNest),
+            "b is under the unkeyed hold"
+        );
+        let a_id = fleet_id_of(&a).await;
+        let b_id = fleet_id_of(&b).await;
+        let a_row = named_row("a");
+
+        let targets = b
+            .resolve_fleet_removal(&a_row, Some(a_id))
+            .await
+            .expect("the held device resolves its sibling's row");
+        assert_eq!(targets, vec![a_id]);
+        let removal = PendingFleetRemoval {
+            row: a_row.clone(),
+            targets,
+        };
+        b.stage_fleet_removal(removal.clone()).await.expect("stage");
+        fx.fake.revoke_device(&a_row);
+        b.settle_fleet_removal(removal, NestDeletion::Gone)
+            .await
+            .expect("settle");
+        let rows = b.states_of_kind(KIND_DEVICE_SET).await.expect("read");
+        assert_eq!(removed_by_at(&rows, &a_id), Some(b_id), "a reads Removed");
         a.shutdown().await;
         b.shutdown().await;
     }
@@ -6595,7 +6660,11 @@ mod tests {
     async fn a_device_cap_refusal_ends_the_pass_so_a_removal_is_served_at_once() {
         let fx = fixture();
         fx.fake.at_device_cap.store(true, Ordering::SeqCst);
-        fx.fake.stall_next_list.store(true, Ordering::SeqCst);
+        // The delegable walk only: the cap-refused pass's one fleet listing
+        // over the app session answers (`account-client-lifecycle.md` § The
+        // client-side lifecycle → *A cap-refused pass lists the fleet scope
+        // over the app session*).
+        *fx.fake.stall_list_scope.lock().unwrap() = Some(ACCOUNT_STATE_SCOPE.to_string());
         let mut params = fx.params("a");
         params.enrollment_target_device_id = NAMED_ROW.to_string();
         let handle = AccountStoreRuntime::start(params).await.expect("runtime");
@@ -6607,9 +6676,21 @@ mod tests {
             .expect("pass");
         assert_eq!(report.enrollment, Some(EnrollmentPass::DeviceLimitExceeded));
         assert_eq!(
-            fx.fake.state.lock().unwrap().list_calls,
+            fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE),
             0,
-            "no walk runs on a data path that cannot authenticate"
+            "no data-path walk — no delegable or content walk — on a cap-refused pass"
+        );
+        // One listing (the report's one walk); the fake counts its pages.
+        assert!(
+            report.cap_refused_fleet_listing.is_some()
+                && fx.fake.list_calls_for(ACCOUNT_STATE_FLEET_SCOPE) > 0,
+            "the one fleet listing over the app session ran: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            fx.fake.list_calls(),
+            fx.fake.list_calls_for(ACCOUNT_STATE_FLEET_SCOPE),
+            "and nothing else was listed"
         );
         let targets =
             tokio::time::timeout(budget, handle.resolve_fleet_removal("the-only-slot", None))
@@ -6627,10 +6708,103 @@ mod tests {
         let report = handle.reconcile_now().await.expect("pass");
         assert_eq!(report.enrollment, Some(EnrollmentPass::Registered));
         assert!(
-            fx.fake.state.lock().unwrap().list_calls > 0,
+            fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE) > 0,
             "the walks resume"
         );
         handle.shutdown().await;
+    }
+
+    /// **A machine refused at its device cap removes a dead device's
+    /// principal-carrying roster row** (`account-client-lifecycle.md` § The
+    /// client-side lifecycle → *A cap-refused pass lists the fleet scope over
+    /// the app session*; `fleet-scope-reclamation.md` clause (4) → *A removal
+    /// from a cap-refused device*). Replays 2026-11-09: a device enrolls and
+    /// dies without a sign-out, so its row carries its principal and holds
+    /// the account's one slot; a fresh machine is refused at the cap. Its
+    /// pass lists the fleet scope once over the app session — and nothing
+    /// else — so the dead device verifies off its gen-0 `Enrolled` row and
+    /// the removal resolves to it, settles, and publishes once a slot frees.
+    /// Red before the listing: every principal-carrying row is `NotAMember`.
+    #[tokio::test]
+    async fn a_cap_refused_machine_removes_a_dead_devices_principal_carrying_row() {
+        let fx = fixture();
+        let b = AccountStoreRuntime::start(fx.params("b"))
+            .await
+            .expect("start b");
+        b.reconcile_now().await.expect("b enrolls");
+        b.reconcile_now().await.expect("b states its row");
+        let b_id = fleet_id_of(&b).await;
+        // The dead instance: no sign-out, so the row keeps its grant.
+        b.shutdown().await;
+        let b_row = named_row("b");
+        assert_eq!(
+            fx.fake.state.lock().unwrap().row_principals.get(&b_row),
+            Some(&fauna_core::hex32::encode(&b_id)),
+            "the dead device's roster row carries its principal"
+        );
+
+        fx.fake.at_device_cap.store(true, Ordering::SeqCst);
+        let c = AccountStoreRuntime::start(fx.params("c"))
+            .await
+            .expect("start c");
+        let c_id = fleet_id_of(&c).await;
+        let fleet_lists = fx.fake.list_calls_for(ACCOUNT_STATE_FLEET_SCOPE);
+        let lists = fx.fake.list_calls();
+        let delegable_lists = fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE);
+        let report = c.reconcile_now().await.expect("pass");
+        assert_eq!(report.enrollment, Some(EnrollmentPass::DeviceLimitExceeded));
+        let fleet_pages = fx.fake.list_calls_for(ACCOUNT_STATE_FLEET_SCOPE) - fleet_lists;
+        assert!(
+            fleet_pages > 0,
+            "the fleet scope is listed over the app session"
+        );
+        assert_eq!(
+            fx.fake.list_calls(),
+            lists + fleet_pages,
+            "and no other scope is listed"
+        );
+        assert_eq!(
+            fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE),
+            delegable_lists,
+            "the delegable scope is not listed on a cap-refused pass"
+        );
+        assert!(
+            report.cap_refused_fleet_listing.is_some(),
+            "the listing is reported: {:?}",
+            report.errors
+        );
+        assert_eq!(c.enrolled_device_row().await.expect("read"), None);
+
+        let targets = c
+            .resolve_fleet_removal(&b_row, Some(b_id))
+            .await
+            .expect("the dead device verifies off its Enrolled row");
+        assert_eq!(targets, vec![b_id]);
+        let removal = PendingFleetRemoval {
+            row: b_row.clone(),
+            targets,
+        };
+        let fleet_puts = fx.fake.put_calls_for(ACCOUNT_STATE_FLEET_SCOPE);
+        c.stage_fleet_removal(removal.clone()).await.expect("stage");
+        fx.fake.revoke_device(&b_row);
+        c.settle_fleet_removal(removal, NestDeletion::Gone)
+            .await
+            .expect("settle");
+        let rows = c.states_of_kind(KIND_DEVICE_SET).await.expect("read");
+        assert_eq!(removed_by_at(&rows, &b_id), Some(c_id), "b reads Removed");
+
+        // The slot is free: the next pass registers, and the Removed row ships.
+        // (Over this fixture the data path and the app session are one fake
+        // nest, so the row may ship as soon as it is journaled; on a real
+        // capped machine the data path is down and it waits for this pass.)
+        fx.fake.at_device_cap.store(false, Ordering::SeqCst);
+        let report = c.reconcile_now().await.expect("pass");
+        assert_eq!(report.enrollment, Some(EnrollmentPass::Registered));
+        assert!(
+            fx.fake.put_calls_for(ACCOUNT_STATE_FLEET_SCOPE) > fleet_puts,
+            "the journaled Removed row reached the nest by the first full pass: {report:?}"
+        );
+        c.shutdown().await;
     }
 
     #[tokio::test]
@@ -7162,6 +7336,203 @@ mod tests {
         );
         a.shutdown().await;
         b.shutdown().await;
+    }
+
+    // ── The membership record (`account-runtime-roles.md` § Multi-instance
+    // concurrency → *The membership record*) — the seed-leg holder writes its
+    // engine's answer into the shared store; a runtime wired to the record
+    // (the seedless agent) reads it as its membership answer.
+
+    /// The membership record as device `device`'s store holds it.
+    async fn membership_record_of(
+        fx: &Fixture,
+        device: &str,
+    ) -> Option<crate::membership_record::MembershipRecord> {
+        crate::membership_record::read(&store_of(fx, device).await)
+            .await
+            .expect("read the record")
+    }
+
+    /// The seedless agent on device `device`, wired to the record.
+    async fn agent_on_the_record(fx: &Fixture, device: &str) -> AccountStoreHandle {
+        AccountStoreRuntime::start(AccountRuntimeParams {
+            principal: RuntimePrincipal::Seedless,
+            memberships: Some(MembershipSource::Record),
+            ..fx.params(device)
+        })
+        .await
+        .expect("the agent")
+    }
+
+    /// The machine as a desktop runs it: a sign-in that enrolls it, then the
+    /// agent pumping on the record and the app beside it, a non-holder that
+    /// holds the seed-leg role and answers from `app_in`.
+    async fn desktop(
+        fx: &Fixture,
+        app_in: &Memberships,
+    ) -> (AccountStoreHandle, AccountStoreHandle) {
+        let sign_in = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("first enrollment");
+        sign_in.reconcile_now().await.expect("pass");
+        sign_in.shutdown().await;
+        let agent = agent_on_the_record(fx, "a").await;
+        agent.reconcile_now().await.expect("the agent's pass");
+        assert!(agent.is_engine_holder(), "the agent pumps");
+        let app = device_in(fx, "a", app_in).await;
+        let report = app.reconcile_now().await.expect("the app's seed pass");
+        assert!(report.skipped_non_holder && !app.is_engine_holder());
+        (agent, app)
+    }
+
+    /// **The writer, holding both roles** (part (2)): every pass writes the
+    /// engine's answer with a fresh stamp, a `None` answer clears it, and a
+    /// clean teardown clears it.
+    #[tokio::test]
+    async fn the_seed_leg_holders_pass_writes_the_record_and_a_none_answer_clears_it() {
+        let fx = fixture();
+        let ch = [0x41; 32];
+        let app_in = Memberships::knows(&[ch]);
+        let app = device_in(&fx, "a", &app_in).await;
+        app.reconcile_now().await.expect("pass");
+        let first = membership_record_of(&fx, "a")
+            .await
+            .expect("the pass wrote the record");
+        assert_eq!(first.channels, [ch].into());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        app.reconcile_now().await.expect("pass");
+        let second = membership_record_of(&fx, "a").await.expect("still written");
+        assert!(
+            second.stamp_ms > first.stamp_ms,
+            "the stamp is the heartbeat"
+        );
+
+        app_in.cannot_tell();
+        app.reconcile_now().await.expect("pass");
+        assert_eq!(
+            membership_record_of(&fx, "a").await,
+            None,
+            "a None answer clears"
+        );
+
+        app_in.set(&[]);
+        app.reconcile_now().await.expect("pass");
+        assert_eq!(
+            membership_record_of(&fx, "a").await.map(|r| r.channels),
+            Some(Default::default()),
+            "an empty set is written: it is an answer"
+        );
+        app.shutdown().await;
+        assert_eq!(
+            membership_record_of(&fx, "a").await,
+            None,
+            "a clean teardown clears"
+        );
+    }
+
+    /// **The seed pass writes, and a changed set asks the engine holder for
+    /// its pass** (part (5)); an unchanged one asks nothing.
+    #[tokio::test]
+    async fn a_seed_pass_writes_the_record_and_a_changed_set_owes_a_holder_pass() {
+        let fx = fixture();
+        let ch = [0x42; 32];
+        let app_in = Memberships::knows(&[ch]);
+        let (agent, app) = desktop(&fx, &app_in).await;
+        assert_eq!(
+            membership_record_of(&fx, "a").await.map(|r| r.channels),
+            Some([ch].into()),
+            "the seed pass wrote the app's answer"
+        );
+        let owed = app.subscribe_holder_pass_owed();
+        let before = *owed.borrow();
+        app.reconcile_now().await.expect("seed pass");
+        assert_eq!(*owed.borrow(), before, "an unchanged set asks nothing");
+        app_in.set(&[]);
+        app.reconcile_now().await.expect("seed pass");
+        assert_eq!(
+            *owed.borrow(),
+            before + 1,
+            "a changed set owes a holder pass"
+        );
+        app.shutdown().await;
+        agent.shutdown().await;
+    }
+
+    /// **The reader** (parts (3) and (4)): the agent walks the channel the
+    /// app's record names, and concludes the departure when the record drops
+    /// it — this machine's read-marker row leaves the nest. Red before the
+    /// record: the agent had no answer, walked no channel and concluded
+    /// nothing.
+    #[tokio::test]
+    async fn the_agent_walks_the_recorded_channels_and_concludes_a_departure_from_the_record() {
+        let fx = fixture();
+        let ch = 0x43;
+        stage_channel(&fx, ch);
+        let app_in = Memberships::knows(&[[ch; 32]]);
+        let (agent, app) = desktop(&fx, &app_in).await;
+        let report = agent.reconcile_now().await.expect("the agent's pass");
+        assert!(
+            walked(&report).contains(&conv_scope([ch; 32])),
+            "the agent walks the channel the record names: {:?}",
+            walked(&report)
+        );
+        assert!(app.raise_read_marker(&channel(ch), 3).await.expect("raise"));
+        rounds(&[&agent, &app, &agent], 1).await;
+        let w = enrolled_writer_hex(&agent).await;
+        assert_eq!(census(&fx), [(w, 1)].into(), "the machine's marker row");
+
+        app_in.set(&[]); // the leave, folded in the app
+        app.reconcile_now().await.expect("the app's seed pass");
+        let report = agent.reconcile_now().await.expect("the agent's pass");
+        let dropped = &report.departures.as_ref().expect("departure pass").dropped;
+        assert_eq!(
+            dropped.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(),
+            vec![conv_scope([ch; 32])],
+            "{report:?}"
+        );
+        assert_eq!(
+            census(&fx),
+            Default::default(),
+            "the machine's row left the nest"
+        );
+        app.shutdown().await;
+        agent.shutdown().await;
+    }
+
+    /// **A stale record concludes nothing** (part (3), the lease): the agent
+    /// keeps the last derived walk set and drops nothing.
+    #[tokio::test]
+    async fn a_stale_record_concludes_nothing_and_keeps_the_last_walk_set() {
+        let fx = fixture();
+        let ch = [0x44; 32];
+        let app_in = Memberships::knows(&[ch]);
+        let (agent, app) = desktop(&fx, &app_in).await;
+        let report = agent.reconcile_now().await.expect("the agent's pass");
+        assert!(walked(&report).contains(&conv_scope(ch)));
+        // The app crashed long ago, its last snapshot naming no channel.
+        let lease = crate::membership_record::lease_for(Duration::from_secs(3600));
+        let old = fauna_core::data::Timestamp::now_millis_or_zero()
+            - u64::try_from(lease.as_millis()).unwrap()
+            - 1_000;
+        crate::membership_record::write(&store_of(&fx, "a").await, &[], old)
+            .await
+            .expect("write");
+        let report = agent.reconcile_now().await.expect("the agent's pass");
+        assert!(
+            report
+                .departures
+                .as_ref()
+                .is_some_and(|d| d.dropped.is_empty() && d.skipped.is_some()),
+            "{:?}",
+            report.departures
+        );
+        assert!(
+            walked(&report).contains(&conv_scope(ch)),
+            "the last derived set is kept: {:?}",
+            walked(&report)
+        );
+        app.shutdown().await;
+        agent.shutdown().await;
     }
 
     /// A device with no membership answer hands over a removed device's
@@ -10535,7 +10906,7 @@ mod tests {
         }
         fn source(&self) -> MembershipSource {
             let cell = Arc::clone(&self.0);
-            Arc::new(move || cell.lock().unwrap().clone())
+            MembershipSource::Engine(Arc::new(move || cell.lock().unwrap().clone()))
         }
     }
 
@@ -11486,6 +11857,89 @@ mod tests {
         handle.shutdown().await;
     }
 
+    /// **The first composer end to end** (`account-offline-mutation.md`
+    /// § The offline-mutation contract): a feed like composed while the app
+    /// reports no nest goes through the shared `send_or_queue` into the
+    /// `AccountOutbox`, survives a runtime restart, and the restarted runtime's
+    /// next full pass drains it once — the envelope carrying the id the
+    /// composer was handed, the bytes being the request the online tap sends.
+    #[tokio::test]
+    async fn a_like_composed_offline_survives_a_restart_and_drains_with_its_key() {
+        use crate::offline_intent_queue::AccountOutbox;
+        use fauna_protocol::offline_intent::{Composed, send_or_queue};
+        use fauna_protocol::posts::{PostInteractReply, PostInteractRequest};
+
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        // The launch pass would drain an intent appended while it runs; let
+        // it end first, so the intent below provably crosses the restart.
+        eventually(|| handle.pump_cycles().1 > 0, "a's launch pass ended").await;
+        let outbox = AccountOutbox::new(handle.clone(), "disconnected");
+        let request = PostInteractRequest {
+            post_id: "cc".repeat(32),
+            action: "like".into(),
+            body: None,
+            media: None,
+            extra: Default::default(),
+        };
+        let composed = send_or_queue::<_, _, PostInteractReply>(
+            &fx.fake,
+            Some(outbox.as_ref()),
+            "fauna.posts.interact",
+            "posts.interact:cc",
+            request,
+        )
+        .await
+        .expect("queued");
+        let Composed::Queued(id) = composed else {
+            panic!("no nest: the like must queue, got {composed:?}");
+        };
+        assert!(
+            fx.fake.keyed_requests().is_empty(),
+            "nothing reaches the nest while the app has none"
+        );
+        drop(outbox);
+        handle.shutdown().await;
+        assert!(
+            fx.fake.keyed_requests().is_empty(),
+            "the first life sent nothing (no pass ran after the compose)"
+        );
+
+        // At rest between the two lives, the intent is the store's alone.
+        let store_dir = StoreRoot::at(fx.base.join("a"))
+            .store_dir(&fx.actor_hex)
+            .expect("store dir");
+        let at_rest = SqliteBackend::open(&store_dir)
+            .expect("reopen the backend")
+            .outbox_undrained()
+            .await
+            .expect("list the outbox");
+        assert_eq!(
+            at_rest.iter().map(|i| i.intent_id).collect::<Vec<_>>(),
+            vec![id],
+            "the queued like is durable across the close"
+        );
+        drop(at_rest);
+
+        // The app opens again: its launch pass (or the explicit one) drains it,
+        // exactly once, carrying the id the composer was handed.
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("restart");
+        handle.reconcile_now().await.expect("pass");
+        assert_eq!(
+            fx.fake.keyed_requests(),
+            vec![("fauna.posts.interact".to_string(), id)],
+            "the drain carried the id the composer was handed"
+        );
+        let report = handle.reconcile_now().await.expect("second pass");
+        assert_eq!(report.outbox.expect("outbox step").drained, 0, "no replay");
+        assert_eq!(fx.fake.keyed_requests().len(), 1, "no replay after ack");
+        handle.shutdown().await;
+    }
+
     /// The phase-0 boundary at the door: an `OnlineOnly` kind must not queue
     /// (and an unregistered kind cannot).
     #[tokio::test]
@@ -11546,6 +12000,119 @@ mod tests {
         assert_eq!(outbox.drained, 0);
         assert_eq!(outbox.held_behind_park, 1);
         assert_eq!(fx.fake.keyed_requests().len(), 1, "no new attempts");
+
+        // The park stores the nest's own error code as the reason.
+        let rows = handle.outbox_rows().await.expect("rows");
+        assert_eq!(
+            rows[0].failure_reason.as_deref(),
+            Some(INJECTED_REFUSAL_CODE)
+        );
+        assert_eq!(rows[1].failure_reason, None, "the held intent");
+        handle.shutdown().await;
+    }
+
+    /// The unsent-changes read model over the real runtime
+    /// (`account-offline-mutation.md` § The offline-mutation contract →
+    /// *The unsent-changes surface*, point 4): `AccountOutbox` lists a parked
+    /// head as not sent with the nest's code and its scope's remainder as held,
+    /// described in user words; the user's retry re-arms the head and its wake
+    /// alone (no explicit pass) drains the whole scope in order; the user's
+    /// discard deletes a parked head and its wake lets the next intent go.
+    #[tokio::test]
+    async fn the_unsent_changes_list_retry_and_discard_rearm_a_parked_scope() {
+        use crate::offline_intent_queue::AccountOutbox;
+        use fauna_core::offline_intent::{OfflineIntentQueue as _, UnsentState};
+
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        eventually(|| handle.pump_cycles().1 > 0, "a's launch pass ended").await;
+        let outbox = AccountOutbox::new(handle.clone(), "connected");
+        let payload = wire_encode(&7u8).expect("payload").to_vec();
+        // Park the head of each scope, one scope per pass (a rejection does not
+        // stop a pass, so a scope enqueued before it would drain): "retried"
+        // first, then "discarded" — whose pass skips the parked "retried".
+        let mut ids = Vec::new();
+        for scope in ["retried", "discarded"] {
+            for _ in 0..2 {
+                ids.push(
+                    handle
+                        .enqueue_intent(QUEUED_KIND, scope, payload.clone(), IntentDrainer::Rpc)
+                        .await
+                        .expect("enqueue"),
+                );
+            }
+            fx.fake.reject_next_keyed.store(true, Ordering::SeqCst);
+            handle.reconcile_now().await.expect("pass parking the head");
+        }
+        let id = |i: usize| hex::encode(ids[i]);
+        assert_eq!(fx.fake.keyed_requests().len(), 2, "one attempt per head");
+
+        let listed = outbox.unsent_changes().await.expect("list");
+        let parked = UnsentState::Unsent {
+            reason_code: INJECTED_REFUSAL_CODE.to_string(),
+        };
+        assert_eq!(
+            listed
+                .iter()
+                .map(|c| (c.intent_id.clone(), c.scope.as_str(), c.state.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (id(2), "discarded", parked.clone()),
+                (id(3), "discarded", UnsentState::Held),
+                (id(0), "retried", parked.clone()),
+                (id(1), "retried", UnsentState::Held),
+            ],
+            "scope order then compose order, the drain's own hold"
+        );
+        assert_eq!(
+            listed[0].description.label,
+            fauna_core::localized::LocalizedText::key_arg(
+                "settings.unsent_changes.kind_other",
+                "kind",
+                QUEUED_KIND
+            ),
+            "a kind with no composer describes as its kind string"
+        );
+        assert_eq!(listed[0].kind, QUEUED_KIND);
+
+        // Neither door acts on a held (pending) intent.
+        assert!(!outbox.retry_intent(ids[1]).await.expect("retry held"));
+        assert!(!outbox.discard_intent(ids[3]).await.expect("discard held"));
+
+        // Retry: the wake's own pass sends the head, then the remainder.
+        assert!(outbox.retry_intent(ids[0]).await.expect("retry"));
+        eventually(
+            || fx.fake.keyed_requests().len() == 4,
+            "the retry's wake drained the retried scope",
+        )
+        .await;
+        assert_eq!(
+            fx.fake.keyed_requests()[2..]
+                .iter()
+                .map(|(_, k)| *k)
+                .collect::<Vec<_>>(),
+            vec![ids[0], ids[1]],
+            "the retried head first, then its scope's remainder"
+        );
+
+        // Discard: the head is gone and the wake lets the next intent go.
+        assert!(outbox.discard_intent(ids[2]).await.expect("discard"));
+        eventually(
+            || fx.fake.keyed_requests().len() == 5,
+            "the discard's wake drained the discarded scope's next intent",
+        )
+        .await;
+        assert_eq!(fx.fake.keyed_requests()[4].1, ids[3]);
+        assert!(
+            !outbox.discard_intent(ids[2]).await.expect("double discard"),
+            "a double discard is a no-op"
+        );
+        // A pass whose outbox step drains nothing proves the list is empty
+        // because every intent was acked, not because none was read.
+        handle.reconcile_now().await.expect("settling pass");
+        assert!(outbox.unsent_changes().await.expect("list").is_empty());
         handle.shutdown().await;
     }
 
@@ -11607,6 +12174,448 @@ mod tests {
         assert_eq!(outbox.held_for_mls, 1);
         assert_eq!(outbox.drained, 0);
         assert!(fx.fake.keyed_requests().is_empty(), "nothing sent");
+        handle.shutdown().await;
+    }
+
+    /// The conversations engine's stand-in for the MLS drain: records each
+    /// (intent id, payload) it was handed and answers from a script, `Sent`
+    /// once the script runs out.
+    #[derive(Default)]
+    struct ScriptedMlsSender {
+        seen: std::sync::Mutex<Vec<([u8; 16], Vec<u8>)>>,
+        script: std::sync::Mutex<std::collections::VecDeque<MlsIntentOutcome>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MlsIntentSender for ScriptedMlsSender {
+        async fn send_mls_intent(&self, intent_id: [u8; 16], payload: &[u8]) -> MlsIntentOutcome {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((intent_id, payload.to_vec()));
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(MlsIntentOutcome::Sent)
+        }
+    }
+
+    /// The MLS drain hands each channel's intents to the conversations
+    /// engine in compose order, under the intent id the composer was given,
+    /// and deletes each one it sent; the generic pump never touched them.
+    /// A retryable failure keeps the intent, stops the pass, and the next
+    /// drain re-presents the same id.
+    #[tokio::test]
+    async fn mls_intents_drain_through_the_engine_in_compose_order_under_their_ids() {
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        let mut ids = Vec::new();
+        for body in [1u8, 2, 3] {
+            let payload = wire_encode(&body).expect("payload").to_vec();
+            ids.push(
+                handle
+                    .enqueue_intent(
+                        "fauna.conversations.channel.send",
+                        "conv:aa",
+                        payload,
+                        IntentDrainer::Mls,
+                    )
+                    .await
+                    .expect("enqueue"),
+            );
+        }
+        let sender = ScriptedMlsSender::default();
+        sender.script.lock().unwrap().extend([
+            MlsIntentOutcome::Sent,
+            MlsIntentOutcome::Retry("no nest".into()),
+        ]);
+
+        let first = handle.drain_mls_outbox(&sender).await;
+        assert_eq!((first.drained, first.retried), (1, 1), "{first:?}");
+        let second = handle.drain_mls_outbox(&sender).await;
+        assert_eq!(second.drained, 2, "{second:?}");
+        let third = handle.drain_mls_outbox(&sender).await;
+        assert_eq!(third, DrainReport::default(), "nothing left to drain");
+
+        let seen: Vec<[u8; 16]> = sender.seen.lock().unwrap().iter().map(|s| s.0).collect();
+        assert_eq!(seen, vec![ids[0], ids[1], ids[1], ids[2]]);
+        let bodies: Vec<u8> = sender
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| fauna_protocol::decode_strict::<u8>(&s.1).unwrap())
+            .collect();
+        assert_eq!(bodies, vec![1, 2, 2, 3], "payload handed over verbatim");
+        assert!(
+            fx.fake.keyed_requests().is_empty(),
+            "the generic pump never sends an MLS intent"
+        );
+        handle.shutdown().await;
+    }
+
+    /// The shared drain loop every app runs on an online edge
+    /// (`AccountOutbox::drain_until_settled`) retries a retryable intent
+    /// on its backoff until it is sent, and sends nothing while the
+    /// connection word reads offline.
+    #[tokio::test(start_paused = true)]
+    async fn the_shared_mls_drain_loop_retries_until_sent_and_rests_offline() {
+        use crate::offline_intent_queue::AccountOutbox;
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        let payload = wire_encode(&9u8).expect("payload").to_vec();
+        let id = handle
+            .enqueue_intent(
+                "fauna.conversations.channel.send",
+                "conv:aa",
+                payload,
+                IntentDrainer::Mls,
+            )
+            .await
+            .expect("enqueue");
+        let sender = ScriptedMlsSender::default();
+        sender.script.lock().unwrap().extend([
+            MlsIntentOutcome::Retry("channel not restored".into()),
+            MlsIntentOutcome::Retry("stalled walk".into()),
+        ]);
+
+        let offline = AccountOutbox::new(handle.clone(), "disconnected");
+        let rested = offline.drain_until_settled(Some(&sender)).await;
+        assert_eq!(rested, DrainReport::default(), "{rested:?}");
+        assert!(
+            sender.seen.lock().unwrap().is_empty(),
+            "nothing sent offline"
+        );
+
+        let online = AccountOutbox::new(handle.clone(), "connected");
+        let last = online.drain_until_settled(Some(&sender)).await;
+        assert_eq!((last.drained, last.retried), (1, 0), "{last:?}");
+        let seen: Vec<[u8; 16]> = sender.seen.lock().unwrap().iter().map(|s| s.0).collect();
+        assert_eq!(seen, vec![id, id, id], "two retries, then sent once");
+        handle.shutdown().await;
+    }
+
+    /// A permanent failure (removed from the group, channel deleted) parks
+    /// the intent and its channel's remainder — still durable, never sent
+    /// out of order — while another channel's queue drains on.
+    #[tokio::test]
+    async fn mls_permanent_failure_parks_the_channel_remainder() {
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        for (scope, body) in [("conv:aa", 1u8), ("conv:aa", 2), ("conv:bb", 3)] {
+            let payload = wire_encode(&body).expect("payload").to_vec();
+            handle
+                .enqueue_intent(
+                    "fauna.conversations.channel.send",
+                    scope,
+                    payload,
+                    IntentDrainer::Mls,
+                )
+                .await
+                .expect("enqueue");
+        }
+        let sender = ScriptedMlsSender::default();
+        sender.script.lock().unwrap().push_back(not_a_member());
+
+        let report = handle.drain_mls_outbox(&sender).await;
+        assert_eq!(report.newly_parked, 1, "{report:?}");
+        assert_eq!(
+            report.held_behind_park, 1,
+            "aa's second waits behind the park"
+        );
+        assert_eq!(report.drained, 1, "bb drains on");
+
+        let again = handle.drain_mls_outbox(&sender).await;
+        assert_eq!(again.drained, 0);
+        assert_eq!(again.held_behind_park, 1, "still parked, still durable");
+        assert_eq!(sender.seen.lock().unwrap().len(), 2, "no new attempts");
+
+        let parked = handle.outbox_rows().await.expect("rows");
+        assert_eq!(
+            parked[0].failure_reason.as_deref(),
+            Some(park_code::MLS_NOT_A_MEMBER),
+            "the park stores the outcome's stable code"
+        );
+        handle.shutdown().await;
+    }
+
+    /// The scripted permanent failure: removed from the group.
+    fn not_a_member() -> MlsIntentOutcome {
+        MlsIntentOutcome::Park {
+            code: park_code::MLS_NOT_A_MEMBER,
+            why: "removed from the group".into(),
+        }
+    }
+
+    /// One channel of three MLS intents whose head the first drain parks —
+    /// the scope held behind it. Returns the intent ids in compose order.
+    async fn a_parked_channel_of_three(
+        handle: &AccountStoreHandle,
+        sender: &ScriptedMlsSender,
+    ) -> Vec<[u8; 16]> {
+        let mut ids = Vec::new();
+        for body in [1u8, 2, 3] {
+            let payload = wire_encode(&body).expect("payload").to_vec();
+            ids.push(
+                handle
+                    .enqueue_intent(
+                        "fauna.conversations.channel.send",
+                        "conv:aa",
+                        payload,
+                        IntentDrainer::Mls,
+                    )
+                    .await
+                    .expect("enqueue"),
+            );
+        }
+        sender.script.lock().unwrap().push_back(not_a_member());
+        let parked = handle.drain_mls_outbox(sender).await;
+        assert_eq!(
+            (parked.newly_parked, parked.held_behind_park),
+            (1, 2),
+            "{parked:?}"
+        );
+        ids
+    }
+
+    /// The user's retry re-arms the parked head, and the hold — recomputed
+    /// each pass from the scope's parked rows — is gone on the next pass:
+    /// the head goes first, the remainder behind it in compose order.
+    #[tokio::test]
+    async fn retry_releases_the_scope_hold_on_the_next_pass() {
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        let sender = ScriptedMlsSender::default();
+        let ids = a_parked_channel_of_three(&handle, &sender).await;
+
+        assert!(handle.outbox_retry(ids[0]).await.expect("retry"));
+        assert!(
+            !handle.outbox_retry(ids[0]).await.expect("retry"),
+            "a pending intent is not retried twice"
+        );
+        let next = handle.drain_mls_outbox(&sender).await;
+        assert_eq!((next.drained, next.held_behind_park), (3, 0), "{next:?}");
+        let seen: Vec<[u8; 16]> = sender.seen.lock().unwrap().iter().map(|s| s.0).collect();
+        assert_eq!(seen, vec![ids[0], ids[0], ids[1], ids[2]]);
+        assert!(handle.outbox_rows().await.expect("rows").is_empty());
+        handle.shutdown().await;
+    }
+
+    /// The user's discard deletes the parked head only, and the next pass
+    /// lets the scope's next intent try — the remainder drains in order, the
+    /// discarded write never sent again.
+    #[tokio::test]
+    async fn discard_releases_the_scope_hold_on_the_next_pass() {
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        let sender = ScriptedMlsSender::default();
+        let ids = a_parked_channel_of_three(&handle, &sender).await;
+
+        assert!(
+            !handle.outbox_discard(ids[1]).await.expect("discard"),
+            "a held (pending) intent is never discarded"
+        );
+        assert!(handle.outbox_discard(ids[0]).await.expect("discard"));
+        let next = handle.drain_mls_outbox(&sender).await;
+        assert_eq!((next.drained, next.held_behind_park), (2, 0), "{next:?}");
+        let seen: Vec<[u8; 16]> = sender.seen.lock().unwrap().iter().map(|s| s.0).collect();
+        assert_eq!(seen, vec![ids[0], ids[1], ids[2]]);
+        assert!(handle.outbox_rows().await.expect("rows").is_empty());
+        handle.shutdown().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // The identity drain (`account-offline-mutation.md` § The offline-mutation
+    // contract → *Identity-bound intents compose at drain*).
+    // -----------------------------------------------------------------------
+
+    /// The app's composer stand-in: records each (intent id, kind, inputs) it
+    /// was handed and answers from a script, `Sent` once the script runs out.
+    /// One intent handed to the composer: `(intent id, kind, inputs)`.
+    type SeenIntent = ([u8; 16], String, Vec<u8>);
+
+    #[derive(Default)]
+    struct ScriptedIdentitySender {
+        seen: std::sync::Mutex<Vec<SeenIntent>>,
+        script: std::sync::Mutex<
+            std::collections::VecDeque<fauna_core::offline_intent::IdentityIntentOutcome>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_core::offline_intent::IdentityIntentSender for ScriptedIdentitySender {
+        async fn send_identity_intent(
+            &self,
+            intent_id: [u8; 16],
+            kind: &str,
+            payload: &[u8],
+        ) -> fauna_core::offline_intent::IdentityIntentOutcome {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((intent_id, kind.to_string(), payload.to_vec()));
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(fauna_core::offline_intent::IdentityIntentOutcome::Sent)
+        }
+    }
+
+    async fn enqueue_knock_intent(handle: &AccountStoreHandle, scope: &str, body: u8) -> [u8; 16] {
+        let payload = wire_encode(&body).expect("payload").to_vec();
+        handle
+            .enqueue_intent("fauna.inbox.send", scope, payload, IntentDrainer::Identity)
+            .await
+            .expect("enqueue")
+    }
+
+    /// An `Identity` intent is never sent by the generic drain — its payload
+    /// is inputs, not a signed request, and only the app composes one.
+    #[tokio::test]
+    async fn an_identity_intent_is_held_not_sent() {
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        enqueue_knock_intent(&handle, "inbox.send:aa", 1).await;
+
+        let report = handle.reconcile_now().await.expect("pass");
+        let outbox = report.outbox.expect("outbox step");
+        assert_eq!(outbox.held_for_identity, 1);
+        assert_eq!(outbox.held_for_mls, 0);
+        assert_eq!(outbox.drained, 0);
+        assert!(fx.fake.keyed_requests().is_empty(), "nothing sent");
+        handle.shutdown().await;
+    }
+
+    /// The identity drain hands each scope's intents to the composer in
+    /// compose order, kind and inputs verbatim under the intent id; a
+    /// rejection parks the intent and its scope's remainder under the nest's
+    /// own code while another scope drains on; a retry stops the pass.
+    #[tokio::test]
+    async fn identity_intents_drain_through_the_composer_fifo_and_park_the_remainder() {
+        use fauna_core::offline_intent::IdentityIntentOutcome;
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        let a1 = enqueue_knock_intent(&handle, "inbox.send:aa", 1).await;
+        let _a2 = enqueue_knock_intent(&handle, "inbox.send:aa", 2).await;
+        let b1 = enqueue_knock_intent(&handle, "inbox.send:bb", 3).await;
+        let sender = ScriptedIdentitySender::default();
+        sender
+            .script
+            .lock()
+            .unwrap()
+            .push_back(IdentityIntentOutcome::Park {
+                code: "fauna.inbox.recipient_refused".into(),
+                why: "refused".into(),
+            });
+
+        let report = handle.drain_identity_outbox(&sender).await;
+        assert_eq!(
+            (report.newly_parked, report.held_behind_park, report.drained),
+            (1, 1, 1),
+            "{report:?}"
+        );
+        let seen = sender.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().map(|s| s.0).collect::<Vec<_>>(),
+            vec![a1, b1],
+            "aa's second waits behind the park"
+        );
+        assert!(seen.iter().all(|s| s.1 == "fauna.inbox.send"));
+        assert_eq!(fauna_protocol::decode_strict::<u8>(&seen[0].2).unwrap(), 1);
+        let rows = handle.outbox_rows().await.expect("rows");
+        assert_eq!(
+            rows[0].failure_reason.as_deref(),
+            Some("fauna.inbox.recipient_refused"),
+            "the park stores the nest's own code"
+        );
+
+        // A retry counts an attempt and stops the pass; the next re-presents
+        // the same id.
+        assert!(handle.outbox_discard(a1).await.expect("discard"));
+        sender
+            .script
+            .lock()
+            .unwrap()
+            .push_back(IdentityIntentOutcome::Retry("no nest".into()));
+        let stopped = handle.drain_identity_outbox(&sender).await;
+        assert_eq!((stopped.retried, stopped.drained), (1, 0), "{stopped:?}");
+        let next = handle.drain_identity_outbox(&sender).await;
+        assert_eq!(next.drained, 1, "{next:?}");
+        assert!(handle.outbox_rows().await.expect("rows").is_empty());
+        assert!(
+            fx.fake.keyed_requests().is_empty(),
+            "the generic pump never sends an identity intent"
+        );
+        handle.shutdown().await;
+    }
+
+    /// The shared app loop (`AccountOutbox::drain_until_settled`) drains the
+    /// MLS leg and the seated identity composer in one pass, and the identity
+    /// leg with no conversations engine handed in; unseated, the identity
+    /// intents wait.
+    #[tokio::test]
+    async fn the_shared_app_loop_drains_both_drainers_in_one_pass() {
+        use crate::offline_intent_queue::AccountOutbox;
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("start");
+        let payload = wire_encode(&9u8).expect("payload").to_vec();
+        handle
+            .enqueue_intent(
+                "fauna.conversations.channel.send",
+                "conv:aa",
+                payload,
+                IntentDrainer::Mls,
+            )
+            .await
+            .expect("enqueue");
+        enqueue_knock_intent(&handle, "inbox.send:bb", 1).await;
+
+        let outbox = AccountOutbox::new(handle.clone(), "connected");
+        let mls = ScriptedMlsSender::default();
+        let unseated = outbox.drain_until_settled(Some(&mls)).await;
+        assert_eq!(unseated.drained, 1, "the MLS leg alone: {unseated:?}");
+        assert_eq!(handle.outbox_rows().await.expect("rows").len(), 1);
+
+        let identity = Arc::new(ScriptedIdentitySender::default());
+        outbox.set_identity_sender(Some(identity.clone()));
+        let payload = wire_encode(&10u8).expect("payload").to_vec();
+        handle
+            .enqueue_intent(
+                "fauna.conversations.channel.send",
+                "conv:aa",
+                payload,
+                IntentDrainer::Mls,
+            )
+            .await
+            .expect("enqueue");
+        let both = outbox.drain_until_settled(Some(&mls)).await;
+        assert_eq!(both.drained, 2, "one of each in one pass: {both:?}");
+        assert_eq!(identity.seen.lock().unwrap().len(), 1);
+        assert_eq!(mls.seen.lock().unwrap().len(), 2);
+
+        enqueue_knock_intent(&handle, "inbox.send:cc", 2).await;
+        let identity_alone = outbox.drain_until_settled(None).await;
+        assert_eq!(identity_alone.drained, 1, "{identity_alone:?}");
+        assert_eq!(identity.seen.lock().unwrap().len(), 2);
+        assert!(handle.outbox_rows().await.expect("rows").is_empty());
         handle.shutdown().await;
     }
 

@@ -107,6 +107,7 @@ pub use fauna_account_plane::delegable_reclaim;
 pub use fauna_account_plane::departure;
 #[cfg(feature = "account-runtime")]
 pub use fauna_account_plane::device_endpoints_writer;
+pub use fauna_account_plane::membership_record;
 pub mod engine;
 pub mod engine_host;
 #[cfg(feature = "engine-lifecycle")]
@@ -167,6 +168,11 @@ pub use fauna_account_plane::observation_intake;
 /// `p2p-share` and the group doors ride the runtime.
 #[cfg(all(feature = "p2p-share", feature = "account-runtime"))]
 pub mod offline_share;
+/// The `OfflineIntentQueue` — the account runtime's outbox door plus the app's
+/// connection word, the queue the shared `OfflineQueued` composer reads; one
+/// type for every app, owned by the driver crate since web builds it too.
+#[cfg(feature = "account-runtime")]
+pub use fauna_account_plane::account_driver::offline_outbox as offline_intent_queue;
 pub use fauna_account_plane::outbox;
 pub mod own_novel_in_flight;
 #[cfg(feature = "account-runtime")]

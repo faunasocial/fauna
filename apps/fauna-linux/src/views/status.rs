@@ -11,8 +11,11 @@ pub struct StatusHandles {
     pub handle_row: adw::ActionRow,
     pub node_url_row: adw::ActionRow,
     pub connection_row: adw::ActionRow,
+    /// The identity cell's tier (`settings-tier-label`), beside the handle
+    /// row — painted from the registry's server-data cache by
+    /// [`paint_identity_cell`], never from the quota reply.
+    pub tier_row: adw::ActionRow,
     // Quota rows.
-    pub quota_tier_row: adw::ActionRow,
     pub quota_inbox_row: adw::ActionRow,
     pub quota_storage_row: adw::ActionRow,
     pub quota_devices_row: adw::ActionRow,
@@ -134,11 +137,23 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
         actor_id_row.add_suffix(&actor_copy);
     }
 
+    // The identity cell (`settings.md` § Layout & flow item 1): handle and
+    // tier beside the actor id, painted from the registry's server-data cache
+    // by `paint_identity_cell`, hidden (absent) while it holds no handle. Each
+    // row carries its id itself — the driver reads the row's subtitle (the
+    // value), as for `account-actor-id`; the title is the `common.*` label.
     let handle_row = adw::ActionRow::builder()
         .title(common::HANDLE)
-        .subtitle(status::identity::NOT_CONFIGURED)
+        .visible(false)
         .build();
+    crate::testid::set_test_id(&handle_row, ids::SETTINGS_HANDLE_LABEL);
     identity_group.add(&handle_row);
+    let tier_row = adw::ActionRow::builder()
+        .title(common::TIER)
+        .visible(false)
+        .build();
+    crate::testid::set_test_id(&tier_row, ids::SETTINGS_TIER_LABEL);
+    identity_group.add(&tier_row);
 
     let node_url_row = adw::ActionRow::builder()
         .title(common::NODE_URL)
@@ -273,12 +288,6 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
     quota_section_marker.set_visible(false);
     crate::testid::set_test_id(&quota_section_marker, ids::QUOTA_SECTION);
     quota_group.set_header_suffix(Some(&quota_section_marker));
-
-    let quota_tier_row = adw::ActionRow::builder()
-        .title(common::TIER)
-        .subtitle("—")
-        .build();
-    quota_group.add(&quota_tier_row);
 
     let quota_inbox_row = adw::ActionRow::builder()
         .title(status::quota::INBOX_USAGE)
@@ -454,7 +463,7 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
         handle_row,
         node_url_row,
         connection_row,
-        quota_tier_row,
+        tier_row,
         quota_inbox_row,
         quota_storage_row,
         quota_devices_row,
@@ -488,6 +497,45 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
     (wrapper, handles)
 }
 
+/// The identity cell's two values from the cached `(handle, domain, tier)`:
+/// `settings-handle-label` is the shared display twin `display_handle` (the
+/// registry's `handle@domain` — the profile SELF header's text), and
+/// `settings-tier-label` the bare cached tier. Both `None` while the cache
+/// holds no handle — the cell is then absent, not empty.
+pub fn identity_cell(
+    cached_handle: Option<&str>,
+    cached_domain: Option<&str>,
+    cached_tier: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    if cached_handle.map(str::trim).unwrap_or("").is_empty() {
+        return (None, None);
+    }
+    let handle = fauna_client_accounts::display_handle(
+        cached_handle.unwrap_or_default(),
+        cached_handle,
+        cached_domain,
+    );
+    let tier = handle.as_ref().and_then(|_| {
+        cached_tier
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    });
+    (handle, tier)
+}
+
+/// Paint the identity cell (`settings.md` § Layout & flow item 1) from the
+/// registry's server-data cache (`client::load_account_cache`) — the one
+/// paint source, seeded at the authenticated launch and re-read on every
+/// `IdentityRefreshed` (the verify reply, the cache's one writer). A row with
+/// no value is hidden: absent, not empty.
+pub fn paint_identity_cell(handle_row: &adw::ActionRow, tier_row: &adw::ActionRow) {
+    let (h, d, t) = crate::client::load_account_cache();
+    let (handle, tier) = identity_cell(h.as_deref(), d.as_deref(), t.as_deref());
+    paint_row(handle_row, handle.as_deref());
+    paint_row(tier_row, tier.as_deref());
+}
+
 /// Update quota rows from a `fauna.quota.get` reply (serialised as JSON for the
 /// linux UI's internal `DataMessage::QuotaLoaded`; the nest↔client wire itself
 /// is DAG-CBOR). Shape: `{ tier, inbox:{used_bytes,max_bytes},
@@ -495,10 +543,9 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
 /// `QuotaGetReply` in fauna-protocol. The earlier `inbox_usage`/`storage_usage`
 /// keys never existed on this reply, so those rows silently stayed at "—".
 pub fn update_quota(handles: &StatusHandles, quota: &serde_json::Value) {
-    if let Some(tier) = quota.get("tier").and_then(|v| v.as_str()) {
-        handles.quota_tier_row.set_subtitle(tier);
-    }
-
+    // The reply's `tier` is not painted: the identity cell's tier comes from
+    // the registry's cache (`paint_identity_cell`; `settings.md` § Layout &
+    // flow item 1 — the quota reply is a second read of the same fact).
     let inbox = format_usage_bytes(quota.get("inbox"));
     handles.quota_inbox_row.set_subtitle(&inbox);
     handles.quota_inbox_marker.set_text(&inbox);

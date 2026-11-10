@@ -199,6 +199,10 @@ pub struct DiagnosticInput {
     /// existing `MtaStsFetcher`): `Ok(())` = fetched + valid; `Err(reason)` =
     /// not-fetchable / parse error. The *record-present* row is checked via DNS.
     pub mta_sts_policy_fetch: Result<(), String>,
+    /// The DNSSEC resolver-path probe, re-run for this diagnostics pass
+    /// (`fauna_mail::outbound::dnssec_path::DnssecPath::reprobe`): `true` =
+    /// the root zone's apex SOA proved `Secure`, so outbound DANE is active.
+    pub dnssec_resolver_path_capable: bool,
 }
 
 /// Resolve the deployment's outbound IP from its advertised mail host
@@ -465,6 +469,22 @@ pub async fn run_diagnostics(
         }
     }
 
+    // ── DNSSEC resolver path (`mail-deliverability.md` § Symptom diagnostics
+    // → *Checks*; `smtp-server.md` § MX resolution item 1) ──
+    if input.dnssec_resolver_path_capable {
+        out.push(pass(
+            "DNSSEC resolver path",
+            "the root zone's SOA proves Secure through the box's resolver: outbound DANE active",
+        ));
+    } else {
+        // A provider-side setting like reverse DNS, never a Fauna knob.
+        out.push(warn(
+            "DNSSEC resolver path",
+            "outbound DANE unavailable: the box's resolver does not carry DNSSEC \
+             (the fix is the box's OS or provider resolver)",
+        ));
+    }
+
     // ── Outbound TLS posture probe to gmail ──
     match prober.probe(GMAIL_PROBE_MX_HOST, GMAIL_PROBE_MX_PORT).await {
         StarttlsProbeOutcome::Ok => out.push(pass(
@@ -726,8 +746,10 @@ mod tests {
                 public_dns_value: format!("v=DKIM1; k=ed25519; p={p}"),
             }],
             mta_sts_policy_fetch: Ok(()),
+            dnssec_resolver_path_capable: true,
         };
         let checks = run_diagnostics(&r, &FakeProber(true), &input).await;
+        assert_eq!(status_of(&checks, "DNSSEC resolver path"), "pass");
         assert_eq!(status_of(&checks, "SPF record present"), "pass");
         assert_eq!(status_of(&checks, "SPF record valid"), "pass");
         assert_eq!(status_of(&checks, "DKIM record present (sel1)"), "pass");
@@ -767,6 +789,7 @@ mod tests {
                 public_dns_value: "v=DKIM1; k=ed25519; p=ZZZ=".into(),
             }],
             mta_sts_policy_fetch: Err("404 fetching the policy file".into()),
+            dnssec_resolver_path_capable: false,
         };
         let checks = run_diagnostics(&r, &FakeProber(false), &input).await;
         assert_eq!(status_of(&checks, "SPF record present"), "fail"); // no mx
@@ -778,6 +801,7 @@ mod tests {
         assert_eq!(status_of(&checks, "TLSRPT record present"), "fail");
         assert_eq!(status_of(&checks, "Reverse-DNS matches HELO"), "fail"); // PTR mismatch
         assert_eq!(status_of(&checks, "Outbound TLS to gmail.com"), "warn"); // probe failed
+        assert_eq!(status_of(&checks, "DNSSEC resolver path"), "warn"); // stripping resolver
     }
 
     #[tokio::test]
@@ -789,6 +813,7 @@ mod tests {
             outbound_ip: None,
             dkim_selectors: vec![],
             mta_sts_policy_fetch: Ok(()),
+            dnssec_resolver_path_capable: true,
         };
         let checks = run_diagnostics(&r, &FakeProber(true), &input).await;
         assert_eq!(status_of(&checks, "Reverse-DNS for outbound IP"), "fail");

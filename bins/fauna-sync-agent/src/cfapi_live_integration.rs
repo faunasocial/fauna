@@ -1600,21 +1600,35 @@ async fn an_edit_plus_unpin_uploads_the_edit_but_does_not_free_it_until_recorded
              refuse — freeing it would destroy the edit"
         );
 
-        // Give the reaction arm ample time to (not) free the bytes, then assert
-        // they are still local and the row is still Synced — the edit is protected.
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        assert!(
-            !bytes_are_freed(&placeholder),
-            "the un-recorded edit must NOT be freed — its bytes are the only copy of \
-             the user's edit until the record lands (freeing is the exact data loss \
-             the recorded-head gate prevents)"
-        );
-        assert_eq!(
-            h.db_state("notes.txt"),
-            Some(SyncState::Synced),
-            "the protected file stays Synced with its edit on disk, never flipped to \
-             Placeholder behind the stale head"
-        );
+        // Give the reaction arm ample time to (not) free the bytes, watching the
+        // whole window rather than one instant after it (convention 14,
+        // `e2e-latency-independent-assertions.md`): at EVERY sample the bytes are
+        // still local and the row is never Placeholder behind the stale head. The
+        // row need not read Synced throughout: its record never lands here, so a
+        // later upload trigger re-drives the proof-less Synced row
+        // (`fauna_sync_engine::engine`, "synced row without a recorded-head proof —
+        // re-driving upload + record") through LocallyModified and Uploading and
+        // back — the record's designed retry, observed on Windows under a forced
+        // second trigger and, once on a loaded box, as an `Uploading` read here.
+        let window = std::time::Instant::now();
+        while window.elapsed() < Duration::from_secs(3) {
+            assert!(
+                !bytes_are_freed(&placeholder),
+                "the un-recorded edit must NOT be freed — its bytes are the only copy of \
+                 the user's edit until the record lands (freeing is the exact data loss \
+                 the recorded-head gate prevents)"
+            );
+            let state = h.db_state("notes.txt");
+            assert!(
+                matches!(
+                    state,
+                    Some(SyncState::Synced | SyncState::LocallyModified | SyncState::Uploading)
+                ),
+                "the protected file keeps its edit on disk, never flipped to Placeholder \
+                 behind the stale head (Synced, or re-driving its upload): {state:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         cancel.cancel();
     };

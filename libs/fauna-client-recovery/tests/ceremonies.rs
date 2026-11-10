@@ -8,6 +8,7 @@
 mod support;
 
 use fauna_client_core::linked_nests::{LinkedConnection, LinkedNestTarget};
+use fauna_client_recovery::alerts::CriticalAlerts;
 use fauna_client_recovery::kit::EscrowOutcome;
 use fauna_client_recovery::{
     LinkedNestDial, LinkedNestOutcome, request_seed_alone_replacement_everywhere, veto_with_status,
@@ -1062,9 +1063,10 @@ async fn one_veto_gesture_clears_the_window_at_the_bound_and_every_linked_nest()
         .unwrap();
     dial.opened.lock().unwrap().clear();
 
-    let (cancelled, status) = veto_with_status(&bound, actor, &kit_uri, &dial)
-        .await
-        .unwrap();
+    let (cancelled, status) =
+        veto_with_status(&bound, actor, &kit_uri, &dial, &CriticalAlerts::new(), 0)
+            .await
+            .unwrap();
 
     assert!(cancelled);
     assert_eq!(status, RecoveryKitStatus::Registered);
@@ -1086,12 +1088,120 @@ async fn the_veto_gesture_contests_a_window_held_at_a_linked_nest_alone() {
         .unwrap();
     assert!(bound.transport().pending(&actor).is_none());
 
-    let (cancelled, _) = veto_with_status(&bound, actor, &kit_uri, &dial)
-        .await
-        .unwrap();
+    let (cancelled, _) =
+        veto_with_status(&bound, actor, &kit_uri, &dial, &CriticalAlerts::new(), 0)
+            .await
+            .unwrap();
 
     assert!(cancelled, "the linked nest's window was there to cancel");
     assert!(dial.nest(LINKED_URL).pending(&actor).is_none());
+}
+
+/// Settings offers the veto when only a linked nest holds a window: the
+/// status read on the bound nest carries the leg's linked reading — the
+/// bound nest itself pends nothing — so `recovery-pending-veto-button`
+/// renders and its countdown is that window's.
+#[tokio::test]
+async fn settings_offers_the_veto_when_only_a_linked_nest_holds_a_window() {
+    use fauna_client_recovery::alerts::{LinkedReading, record_linked_readings};
+    let (identity, bound, dial, _) = bound_and_linked_by_pairing().await;
+    let actor = identity.actor_id();
+    let thief_side = RecoveryClient::new(Arc::clone(&dial.nests[LINKED_URL].1));
+    request_seed_alone_replacement(&thief_side, &identity)
+        .await
+        .unwrap();
+    assert_eq!(
+        kit_status(&bound, &actor).await.unwrap(),
+        RecoveryKitStatus::Registered,
+        "before the leg reads the linked nest, the bound nest's answer is all there is"
+    );
+
+    // The leg's half: the linked nest's window, recorded for the sweep and
+    // for Settings alike.
+    let window =
+        fauna_client_recovery::chain_reconcile::fetch_replacement_status(dial.nest(LINKED_URL))
+            .await
+            .unwrap()
+            .expect("the linked nest holds the window");
+    record_linked_readings(
+        &actor,
+        &[(LINKED_ID, LinkedReading::Read(Some(window.clone().into())))],
+    );
+
+    let status = kit_status(&bound, &actor).await.unwrap();
+    assert_eq!(
+        status,
+        RecoveryKitStatus::ReplacementPending(window.into()),
+        "the linked nest's window pends on the device bound to the other nest"
+    );
+    assert!(
+        status.allows_veto(),
+        "the one gesture that contests it is offered"
+    );
+    record_linked_readings(&actor, &[]);
+}
+
+/// One veto settles the device's own picture in the same gesture: the nests
+/// it reached lose their reading and the banner clears with the windows,
+/// while a nest it could not reach keeps its window loud — on the banner and
+/// in the status, which still offers the veto.
+#[tokio::test]
+async fn one_veto_settles_the_readings_and_the_banner_in_the_same_gesture() {
+    use fauna_client_recovery::alerts::{
+        LinkedReading, alert_key, linked_source, record_linked_readings, sync_linked_readings,
+    };
+    let (identity, bound, dial, kit_uri) = bound_and_linked_by_pairing().await;
+    let actor = identity.actor_id();
+    let alerts = CriticalAlerts::new();
+    let thief_side = RecoveryClient::new(Arc::clone(&dial.nests[LINKED_URL].1));
+    request_seed_alone_replacement(&thief_side, &identity)
+        .await
+        .unwrap();
+    let window: fauna_client_recovery::PendingReplacement =
+        fauna_client_recovery::chain_reconcile::fetch_replacement_status(dial.nest(LINKED_URL))
+            .await
+            .unwrap()
+            .expect("the linked nest holds the window")
+            .into();
+    // The leg read the linked nest and, once, the unreachable nest (its
+    // pairing row names `GONE_URL`, which the dial cannot open) — the sweep
+    // posted both.
+    let gone = [0x60; 32];
+    record_linked_readings(
+        &actor,
+        &[
+            (LINKED_ID, LinkedReading::Read(Some(window.clone()))),
+            (gone, LinkedReading::Read(Some(window.clone()))),
+        ],
+    );
+    sync_linked_readings(&alerts, &actor, 0);
+    assert_eq!(alerts.active().len(), 1, "the banner is up");
+
+    let (cancelled, status) = veto_with_status(&bound, actor, &kit_uri, &dial, &alerts, 0)
+        .await
+        .unwrap();
+
+    assert!(cancelled, "the linked nest's window was cancelled");
+    assert!(dial.nest(LINKED_URL).pending(&actor).is_none());
+    assert_eq!(
+        alerts.sources(&alert_key(&actor)),
+        vec![linked_source(&gone)],
+        "the reached nest's reading is settled at once; the unreachable nest's stands"
+    );
+    assert_eq!(
+        status,
+        RecoveryKitStatus::ReplacementPending(window),
+        "the unreachable nest's window keeps the status pending and the veto offered"
+    );
+
+    // The leg later reads the gone nest clear: nothing pends anywhere.
+    record_linked_readings(&actor, &[(gone, LinkedReading::Read(None))]);
+    sync_linked_readings(&alerts, &actor, 0);
+    assert!(alerts.active().is_empty());
+    assert_eq!(
+        kit_status(&bound, &actor).await.unwrap(),
+        RecoveryKitStatus::Registered
+    );
 }
 
 #[tokio::test]
@@ -1161,7 +1271,10 @@ async fn a_reseal_with_a_kit_naming_another_account_is_refused() {
     let err = reseal_escrow_with_held_kit(&client, &identity, &foreign, &[])
         .await
         .unwrap_err();
-    assert!(matches!(err, RecoveryError::Malformed(_)), "got {err:?}");
+    assert!(
+        matches!(err, RecoveryError::KitForAnotherAccount),
+        "got {err:?}"
+    );
     assert!(
         client
             .transport()
@@ -1417,8 +1530,13 @@ async fn a_kit_naming_another_account_is_refused_before_a_successor_is_minted() 
     .unwrap_err();
 
     assert!(
-        matches!(err, RecoveryError::PriorKitMismatch),
+        matches!(err, RecoveryError::KitForAnotherAccount),
         "got {err:?}"
+    );
+    assert_ne!(
+        err.to_string(),
+        RecoveryError::PriorKitMismatch.to_string(),
+        "another account's kit must not read as the stale-kit sentence"
     );
     assert!(
         resolve_successor(&client, identity.actor_id(), None)

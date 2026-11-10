@@ -1965,6 +1965,37 @@ impl CacheDb {
         Ok(Some(entries))
     }
 
+    /// Whether the room **owes a severance mint** — the roster read's
+    /// `severance_owed` answer: `Some(true)` while the tip's wrap set names an
+    /// entry whose member row is unseated (`removed_at` set), `None` for a room
+    /// that has never been keyed (`community-rooms.md` § Implementation status
+    /// today → *A removal severs*, the retry paragraph).
+    ///
+    /// Keyed on the entry, never the principal: a removed principal who is
+    /// re-admitted is seated on a FRESH entry with `removed_at` cleared, so its
+    /// old entry names no row any more and the debt is gone with the seat it
+    /// was owed against — the member is back, there is nothing to sever.
+    pub async fn room_severance_owed(&self, room_id: &[u8; 32]) -> Result<Option<bool>> {
+        let Some(tip) = self.room_generation_tip(room_id).await? else {
+            return Ok(None);
+        };
+        let room_id = *room_id;
+        let conn = self.conn.lock().await;
+        let owed: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM room_generation_wraps w
+                     JOIN room_members m
+                       ON m.room_id = w.room_id AND m.entry_id = w.entry_id
+                     WHERE w.room_id = ?1 AND w.generation_id = ?2
+                       AND m.removed_at IS NOT NULL)",
+                rusqlite::params![room_id.as_slice(), tip.generation_id.as_slice()],
+                |row| row.get(0),
+            )
+            .context("room_severance_owed")?;
+        Ok(Some(owed))
+    }
+
     /// One wrap, by `(generation, entry)` — how the home nest opens its own,
     /// and how a member reads back exactly its own and nothing else.
     pub async fn get_room_generation_wrap(

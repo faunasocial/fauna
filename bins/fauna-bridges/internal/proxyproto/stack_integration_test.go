@@ -134,7 +134,8 @@ func TestStackPeelsHeaderBelowTLSAndConnlimit(t *testing.T) {
 //     lengthens the header the per-IP cap's early peel consumes, so a mis-sized
 //     Discard would corrupt the ClientHello and fail the handshake here.
 //  2. An unauthenticated header from a co-resident forger on the same loopback
-//     is refused — RemoteAddr() stays the genuine loopback peer — and the
+//     is refused — RemoteAddr() is the non-loopback UntrustedProxiedSource, never
+//     the loopback peer, so it is metered under the admin's per-IP cap — and the
 //     connection still handshakes, so the forger cannot even tell it was caught.
 func TestStackAuthedHeaderVerifiesAndPreservesTLS(t *testing.T) {
 	secret := []byte("a-32-byte-ish-router-auth-secret")
@@ -215,12 +216,14 @@ func TestStackAuthedHeaderVerifiesAndPreservesTLS(t *testing.T) {
 			if r.addr == external.String() {
 				t.Fatalf("server RemoteAddr = %v — an unauthenticated header spoofed the source through the full stack", r.addr)
 			}
-			host, _, err := net.SplitHostPort(r.addr)
-			if err != nil {
-				t.Fatalf("split: %v", err)
+			if r.addr != UntrustedProxiedSource.String() {
+				t.Fatalf("server RemoteAddr = %v, want the untrusted-proxied sentinel %v (a refused header forfeits loopback trust)",
+					r.addr, UntrustedProxiedSource)
 			}
-			if !net.ParseIP(host).IsLoopback() {
-				t.Fatalf("server RemoteAddr host = %q, want the genuine loopback peer", host)
+			// The per-IP cap meters the refused connection under the admin's
+			// cap, not the loopback ceiling a headerless same-box dial earns.
+			if got := limiter.CeilingFor(UntrustedProxiedSource.(*net.TCPAddr).IP); got != 256 {
+				t.Fatalf("per-IP ceiling for a refused header = %d, want the admin's cap 256 (not the loopback ceiling)", got)
 			}
 		})
 	}

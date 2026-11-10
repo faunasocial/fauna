@@ -183,6 +183,16 @@ def _build_via_just_windows_ffi_test(root: Path) -> Path:
 # ordinary run keeps the build-at-import the stale-dll fixes rely on.
 _NO_BUILD_ENV = "FAUNA_E2E_FFI_NO_BUILD"
 
+# A plan-only preflight (`just e2e-preflight --plan`, conftest's
+# `PLAN_ONLY_ENV`) runs no test and must compile nothing and take no slot
+# (e2e-warm-pass.md § The preflight). Its collection still imports this module,
+# so it skips the import-time build exactly as `_NO_BUILD_ENV` does; the plan
+# header reads the cdylib job's warmth through its own probe
+# (`_ensure_fauna_ffi_built` under the probe marker). Measured 2026-11-08: the
+# import-time build of a plan run took a real `build` grant and compiled the
+# release cdylib for over an hour.
+_PLAN_ONLY_ENV = "FAUNA_E2E_PLAN_ONLY"
+
 # A process the test itself starts where no build tool is reachable — a
 # docker box a `tests/platform/docker/` witness runs this module in, the
 # host's interpreter borrowed through its loader — loads the library the
@@ -199,6 +209,11 @@ def _find_cdylib() -> Path:
             f"the fauna_ffi cdylib build is skipped ({_NO_BUILD_ENV}=1, a "
             f"collect-only caller) — unset it and run `just e2e-ffi` (linux/mac) "
             f"or `just windows-ffi-test dev` (windows) to build the library"
+        )
+    if os.environ.get(_PLAN_ONLY_ENV) == "1":
+        raise RuntimeError(
+            f"the fauna_ffi cdylib build is skipped ({_PLAN_ONLY_ENV}=1, a "
+            f"plan-only preflight, which compiles nothing)"
         )
     root = _find_repo_root()
     if sys.platform.startswith("linux"):
@@ -426,6 +441,22 @@ if _HAS_ROOM_JOIN_FIXTURES:
     _lib.fauna_room_mint_reception_pubkey.argtypes = [ctypes.POINTER(_FfiBuffer)]
     _lib.fauna_room_mint_reception_pubkey.restype = ctypes.c_int32
 
+# A member's sent message — deferred on its own, so a library built before it
+# landed still serves the founder's and the joiner's halves.
+_HAS_ROOM_MESSAGE_FIXTURE = hasattr(_lib, "fauna_room_build_message_envelope")
+if _HAS_ROOM_MESSAGE_FIXTURE:
+    _lib.fauna_room_build_message_envelope.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret, secret_len
+        ctypes.POINTER(ctypes.c_uint8),                    # room (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # generation (32)
+        ctypes.POINTER(ctypes.c_uint8),                    # gen_key (32)
+        ctypes.c_char_p,                                   # text
+        ctypes.c_int64,                                    # sent_at_ms
+        ctypes.POINTER(ctypes.c_uint8),                    # claimed_author (32) or NULL
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_room_build_message_envelope.restype = ctypes.c_int32
+
 _lib.fauna_capability_build_post_grant.argtypes = [
     ctypes.POINTER(ctypes.c_uint8),                    # owner (32)
     ctypes.POINTER(ctypes.c_uint8),                    # grant_id (16)
@@ -547,6 +578,18 @@ if hasattr(_lib, "fauna_ext_kind_seal_row"):
         ctypes.POINTER(_FfiBuffer),                        # out
     ]
     _lib.fauna_ext_kind_seal_row.restype = ctypes.c_int32
+if hasattr(_lib, "fauna_ext_kind_open_row"):
+    _lib.fauna_ext_kind_open_row.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # grant_blob, len
+        ctypes.POINTER(ctypes.c_uint8),                    # holder_secret (32)
+        ctypes.c_char_p,                                   # kind
+        ctypes.POINTER(ctypes.c_uint8),                    # writer_id (32)
+        ctypes.c_uint64,                                   # writer_seq
+        ctypes.POINTER(ctypes.c_uint8),                    # item_key (32)
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # envelope, len
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_ext_kind_open_row.restype = ctypes.c_int32
 # The `fauna:personalization:rw` twin (`authorization-server.md` § Scope
 # grammar → *The fifth arm*): the owner's grant and `state` row, the
 # principal's open.
@@ -647,6 +690,17 @@ if _HAS_DEVICE_GRANT_BUILD:
         ctypes.POINTER(_FfiBuffer),                        # out
     ]
     _lib.fauna_device_grant_build.restype = ctypes.c_int32
+
+# Same deferred binding as above, for the same reason.
+_HAS_MANAGE_SUBSCRIBERS_DELEGATION_BUILD = hasattr(
+    _lib, "fauna_manage_subscribers_delegation_build")
+if _HAS_MANAGE_SUBSCRIBERS_DELEGATION_BUILD:
+    _lib.fauna_manage_subscribers_delegation_build.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret (32-byte Ed25519 seed), len
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # device_key (32-byte public key), len
+        ctypes.POINTER(_FfiBuffer),                        # out
+    ]
+    _lib.fauna_manage_subscribers_delegation_build.restype = ctypes.c_int32
 
 # Same deferred binding as above, for the same reason.
 _HAS_KEYBLOB_OPEN = hasattr(_lib, "fauna_keyblob_open")
@@ -844,6 +898,36 @@ def build_device_grant(secret: bytes, device_key: bytes) -> dict:
     out = _FfiBuffer()
     rc = _lib.fauna_device_grant_build(sec_arr, 32, key_arr, 32, ctypes.byref(out))
     return cbor2.loads(_take_buffer(rc, out, "fauna_device_grant_build"))
+
+
+def build_manage_subscribers_delegation(secret: bytes, device_key: bytes) -> dict:
+    """Sign the ``ManageSubscribers`` ``DeviceAuthorization`` the author whose
+    seed is ``secret`` grants ``device_key`` — given the nest's own public key,
+    the delegation ``fauna.subscriptions.delegate.upload`` stores — and return
+    it in the ``{envelope, bytes}`` embed-as-bytes shape that kind's
+    ``authorization`` field carries.
+
+    The bytes come from the one minter
+    (``fauna_core::subscription::crypto::build_manage_subscribers_delegation``)
+    via ``fauna_manage_subscribers_delegation_build``; a fixture never
+    re-derives a signed envelope.
+    """
+    if not _HAS_MANAGE_SUBSCRIBERS_DELEGATION_BUILD:
+        raise RuntimeError(
+            "libfauna_ffi is stale: it has no `fauna_manage_subscribers_delegation_build`. "
+            "Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    if len(device_key) != 32:
+        raise ValueError("device_key must be the raw 32-byte public key")
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    key_arr = (ctypes.c_uint8 * 32)(*device_key)
+    out = _FfiBuffer()
+    rc = _lib.fauna_manage_subscribers_delegation_build(
+        sec_arr, 32, key_arr, 32, ctypes.byref(out))
+    return cbor2.loads(
+        _take_buffer(rc, out, "fauna_manage_subscribers_delegation_build"))
 
 
 def open_device_label(secret: bytes, device_id: bytes,
@@ -1509,6 +1593,42 @@ def mint_room_reception_pubkey() -> bytes:
     return _take_buffer(rc, out, "fauna_room_mint_reception_pubkey")
 
 
+def build_room_message_envelope(
+    secret: bytes,
+    room: bytes,
+    generation: bytes,
+    gen_key: bytes,
+    text: str,
+    sent_at_ms: int,
+    *,
+    claimed_author: bytes | None = None,
+) -> bytes:
+    """One community-room text message as a member's engine sends it: the
+    signer signs the ``(room, generation, author, sent_at_ms, body)`` core and
+    it is sealed under the generation key into the ``RoomSealed`` envelope —
+    the ``envelope`` bytes of ``fauna.conversations.channel.send``.
+    ``claimed_author`` relabels the signed core to another author (a message
+    sealed in another member's name, the attribution rule's negative). Wraps
+    ``fauna_mls::room_message``."""
+    if not _HAS_ROOM_MESSAGE_FIXTURE:
+        raise RuntimeError(
+            "libfauna_ffi is stale: it has no `fauna_room_build_message_envelope`. "
+            "Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32 or len(room) != 32 or len(generation) != 32 or len(gen_key) != 32:
+        raise ValueError("secret, room, generation and gen_key must be 32 bytes")
+    if claimed_author is not None and len(claimed_author) != 32:
+        raise ValueError("claimed_author must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_room_build_message_envelope(
+        _u8(secret), 32, _u8(room), _u8(generation), _u8(gen_key),
+        text.encode("utf-8"), sent_at_ms,
+        _u8(claimed_author) if claimed_author is not None else None,
+        ctypes.byref(out),
+    )
+    return _take_buffer(rc, out, "fauna_room_build_message_envelope")
+
+
 def build_post_grant(
     owner: bytes,
     grant_id: bytes,
@@ -1834,6 +1954,43 @@ def ext_kind_seal_row(
     )
     sealed = cbor2.loads(_take_buffer(rc, out, "fauna_ext_kind_seal_row"))
     return bytes(sealed["item_key"]), bytes(sealed["envelope"])
+
+
+def ext_kind_open_row(
+    grant_blob: bytes,
+    holder_secret: bytes,
+    kind: str,
+    writer_id: bytes,
+    writer_seq: int,
+    item_key: bytes,
+    envelope: bytes,
+) -> tuple[str, bytes]:
+    """Open one ``ext:<kind>`` row as the principal: the kind's pair out of
+    ``grant_blob`` with the holder's X25519 secret, the envelope at its
+    coordinates (``writer_id``, ``writer_seq``). Returns ``(key, value)``;
+    raises when the grant's pair does not open the row."""
+    if not hasattr(_lib, "fauna_ext_kind_open_row"):
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_ext_kind_open_row` — it is stale. "
+            "Run `just e2e-ffi` to rebuild it."
+        )
+    if len(holder_secret) != 32 or len(writer_id) != 32 or len(item_key) != 32:
+        raise ValueError("holder_secret/writer_id/item_key must be 32 bytes")
+    out = _FfiBuffer()
+    rc = _lib.fauna_ext_kind_open_row(
+        _u8(grant_blob),
+        len(grant_blob),
+        _u8(holder_secret),
+        kind.encode("utf-8"),
+        _u8(writer_id),
+        writer_seq,
+        _u8(item_key),
+        _u8(envelope),
+        len(envelope),
+        ctypes.byref(out),
+    )
+    opened = cbor2.loads(_take_buffer(rc, out, "fauna_ext_kind_open_row"))
+    return bytes(opened["key"]).decode("utf-8"), bytes(opened["value"])
 
 
 def build_personalization_grant(
@@ -2165,6 +2322,23 @@ def harness_create_link(
     return record, url
 
 
+def harness_mint_unregistered_link(
+    nest_url: str, secret: bytes, manifest_hash: bytes, filename: str, lifetime_secs: int
+) -> str:
+    """Mint an ordinary public **share link that is never registered**, as the
+    actor whose seed is ``secret`` — the token signed, the URL built, nothing
+    sent (a client that crashed short of ``fauna.share.create``, or a seed
+    holder keeping a link to itself). Only a witness of the nest's serve-side
+    succession gate needs this; every other test makes links through
+    :func:`harness_create_link`. Returns the URL."""
+    return _harness_call(
+        "fauna_harness_mint_unregistered_link",
+        nest_url,
+        secret,
+        [bytes(manifest_hash), filename, lifetime_secs],
+    )
+
+
 def harness_report_conflict(nest_url: str, secret: bytes, request: dict) -> dict:
     """Send ``fauna.sync.conflicts.report`` as the actor whose seed is
     ``secret``, a pre-resolved report's winner head row **signed** by the shared
@@ -2436,6 +2610,10 @@ _SEAT_EXPORTS = (
     "fauna_harness_topic_set_engagement",
     "fauna_harness_topic_train_engagement",
     "fauna_harness_topic_publish_model",
+    "fauna_harness_device_removal",
+    "fauna_harness_device_removal_linked",
+    "fauna_harness_follow",
+    "fauna_harness_author_pass",
 )
 for _name in _SEAT_EXPORTS:
     if hasattr(_lib, _name):
@@ -2537,12 +2715,13 @@ def harness_serve_set(nest_url: str, owner_secret: bytes, set_name: str, enable:
     ``FoldersAuthor::serve_enable`` — a genesis content key and the serve-on
     stamp in custody, then the nest's ``webdav_enabled`` flag — or
     ``serve_disable`` — the flag off, every principal's folder read twin over
-    the set revoked, the key rotated, the serve-off stamped. The MSEK-sealed
-    ``WebdavKeysBlob`` a face re-provisions afterwards is not (an app-less seat
-    holds no MSEK), so a MUA's Basic mount does not see the flip; a principal's
-    bearer read lends its own keys and does. Like ``harness_create_set``, the
-    call hosts the account store for its length (one fleet enrollment). Raises
-    the nest's refusal as ``RpcCallError``."""
+    the set revoked, the key rotated, the serve-off stamped — then the
+    MSEK-sealed ``WebdavKeysBlob`` re-provision a face runs, when the owner's
+    mail custody holds an MSEK (``harness_enable_mail`` first), so a MUA's
+    Basic mount sees the flip; without one it is skipped and only a
+    principal's bearer read (which lends its own keys) sees the set. Like
+    ``harness_create_set``, the call hosts the account store for its length
+    (one fleet enrollment). Raises the nest's refusal as ``RpcCallError``."""
     _seat_call("fauna_harness_serve_set", nest_url, owner_secret, [set_name, enable])
 
 
@@ -2637,21 +2816,211 @@ def harness_answer_consent(
 
 
 
-def harness_enable_mail(nest_url: str, owner_secret: bytes) -> None:
+def harness_enable_mail(nest_url: str, owner_secret: bytes) -> str:
     """Enable mail for the account whose seed is ``owner_secret``, app-less: the
     shared ``MailSettingsMachine`` the apps' Mail settings page builds, sent
     ``EnableMail`` with one generated plain credential over the owner's mail
     custody, then published — the MSEK sealed in ``fauna.state.mail`` and the
     recipient seal key on file, as an app's first enable leaves them, with no
     app seat left running (whose capability sweep would judge the grants a
-    test mints afterwards). Like ``harness_create_set``, the call hosts the
-    account store for its length (one fleet enrollment). Raises on a refusal."""
-    _seat_call("fauna_harness_enable_mail", nest_url, owner_secret, [])
+    test mints afterwards). Returns the generated plain credential, which an
+    IMAP or DAV client authenticates as the owner with. Like
+    ``harness_create_set``, the call hosts the account store for its length
+    (one fleet enrollment). Raises on a refusal."""
+    return _seat_call("fauna_harness_enable_mail", nest_url, owner_secret, [])
+
+
+def harness_device_removal(
+    nest_url: str,
+    owner_secret: bytes,
+    *,
+    sole: list[str],
+    shared: list[str],
+    words: list[str],
+) -> dict:
+    """Remove a lost device of the account whose seed is ``owner_secret``, app-less,
+    through the shared runtime every app hosts: two seats on rows of their own
+    (``stays``, a member of every channel named, and ``lost``) settle; ``lost``
+    raises each ``sole`` channel's read marker to 1 and writes the sync-prefs
+    record reading ``words``; ``stays`` raises each ``shared`` channel to 1 and
+    ``lost`` raises them to 2. ``lost`` then closes still enrolled, ``stays``
+    removes it by its fleet id (the Devices page's member door), runs its passes
+    and writes one tip-sealed record; ``stays`` signs out and a ``fresh`` seat
+    reads the account back, then signs out. Channels are 32-byte hex ids.
+
+    Returns the report: ``stays`` / ``lost`` / ``fresh`` (fleet ids, hex),
+    ``stays_counts_lost``, ``minted_before`` / ``minted_after`` (generation-mint
+    keys either side of the post-removal write), ``fresh_markers`` (channel →
+    through) and ``fresh_words``. What the nest kept is the caller's to read
+    from outside. Leaves three device rows on the account (one still enrolled,
+    removed)."""
+    return _seat_call(
+        "fauna_harness_device_removal",
+        nest_url,
+        owner_secret,
+        {"sole": sole, "shared": shared, "words": words},
+    )
+
+
+def harness_device_removal_linked(
+    nest_url: str,
+    owner_secret: bytes,
+    *,
+    other_url: str,
+    case: str,
+    leaving_at: str,
+) -> dict:
+    """A device of the account whose seed is ``owner_secret`` leaves, app-less,
+    across two nests linked at each other: A (``nest_url``) and B
+    (``other_url``), each holding the account and a pairing to the other — the
+    caller makes both. Three seats run the shared runtime every app hosts, each
+    with its secondary leg on: ``near`` bound to A, ``leaving`` bound to A or B
+    (``leaving_at``: ``"a"`` | ``"b"``), ``far`` bound to B. Once every seat
+    counts all three, ``case`` ``"sign_out"`` signs ``leaving`` out, and
+    ``"remove"`` closes it still enrolled and has ``near`` remove it by its
+    fleet id (the Devices page's member door); ``near`` then runs alone, then
+    ``near`` and ``far`` in turn, then every seat until neither nest lists a live
+    fleet-scope row under the departed device. Every seat signs out at the end.
+
+    Returns the report: ``near`` / ``leaving`` / ``far`` (fleet ids, hex),
+    ``near_counts_leaving``, ``far_reads`` (whether ``far`` counted the departed
+    device a member after each of its passes), ``far_counts_leaving`` (at the
+    end), ``rows_at_a`` / ``rows_at_b`` (live fleet-scope rows each nest lists
+    under it, at the end). The nests' grants are the caller's to read."""
+    return _seat_call(
+        "fauna_harness_device_removal_linked",
+        nest_url,
+        owner_secret,
+        {"other_url": other_url, "case": case, "leaving_at": leaving_at},
+    )
+
+
+def harness_successor_pass(
+    nest_url: str, successor_secret: bytes, predecessor_secret: bytes
+) -> dict:
+    """The successor's device after a succession, app-less: the account
+    registry a ceremony leaves (the predecessor's seed and the successor's,
+    linked by ``record_succession``) handed to the production runtime as every
+    app hands it (``AttestedPredecessors::from_registry``,
+    ``SeedHolder::from_registry``), its store-ready ledger pass run as theirs is
+    (``run_ledger_aftermath``: the grant log's chain re-pointed, so the
+    predecessor's grant events are the account's, then the re-mint), then a
+    fixed number of the driver's passes — so each ``ext:<kind>`` plane the account's verified manifests admit is
+    walked under the predecessor's delegable schedule, a predecessor row that
+    opens is carried as this device's own, and the predecessor's row is retired
+    behind the carry. The seat signs out at the end.
+
+    Returns the report: ``attested`` (predecessor ids, hex), ``inherited`` /
+    ``retired`` (summed over the passes after the seat's prologue, which may
+    already have carried — diagnostics, not the witness), ``rows`` /
+    ``unopened`` / ``unmergeable`` (the same walks' counters), ``aftermath``
+    (the ledger pass's leg events), ``ext_scopes`` and ``errors``. What the nest rests is the caller's to read from outside."""
+    if len(predecessor_secret) != 32:
+        raise ValueError("predecessor_secret must be 32 bytes")
+    return _seat_call(
+        "fauna_harness_successor_pass", nest_url, successor_secret, [predecessor_secret]
+    )
+
+
+def harness_follow(
+    nest_url: str,
+    subscriber_secret: bytes,
+    author_id: bytes,
+    tier: str,
+    home_nest_url: str | None,
+    *,
+    leave: bool = False,
+) -> dict:
+    """The subscriber's follow (or, ``leave=True``, leave) of ``author_id``
+    across nests, app-less, as the account whose seed is
+    ``subscriber_secret`` on ``nest_url``: the shared
+    ``SubscriptionsClient::subscribe_across_nests`` / ``unsubscribe_across_nests``
+    every app's follow and leave buttons call — the signed ``FollowIntent``
+    minted from the seed, naming the connected nest, carried to
+    ``home_nest_url`` (``None`` is the plain local follow). Returns the nest's
+    subscribe or unsubscribe reply; raises ``RpcCallError`` on a refusal."""
+    return _seat_call(
+        "fauna_harness_follow",
+        nest_url,
+        subscriber_secret,
+        [leave, author_id, tier, home_nest_url],
+    )
+
+
+def harness_author_reconcile(nest_url: str, author_secret: bytes) -> dict:
+    """One author-pump tick, app-less, as the author whose seed is
+    ``author_secret``: the shared ``SubscriptionsAuthor::reconcile_once`` every
+    native app's reconcile loop runs — staged removals healed, every queued
+    follow of an ``auto_approve`` tier approved (its ``KeyBlob`` minted into the
+    account's period-key custody) and every queued leave committed. Returns
+    ``{"resumed", "approved", "resume_error", "drain_error"}``. Hosts the
+    account store for its length (one fleet enrollment)."""
+    return _seat_call("fauna_harness_author_pass", nest_url, author_secret, ["reconcile"])
+
+
+def harness_author_remove_subscriber(
+    nest_url: str, author_secret: bytes, tier: str, subscriber_id_hex: str
+) -> dict:
+    """The author removes one subscriber from ``tier``, app-less: the shared
+    ``SubscriptionsAuthor::remove_subscriber`` the roster's remove door calls
+    (the removal rotation, then the nest's removal). Returns
+    ``{"removed": True}``; raises on a refusal. Hosts the account store for its
+    length (one fleet enrollment)."""
+    return _seat_call(
+        "fauna_harness_author_pass",
+        nest_url,
+        author_secret,
+        ["remove", tier, subscriber_id_hex],
+    )
+
+
+def harness_author_create_tier(
+    nest_url: str,
+    author_secret: bytes,
+    tier: str,
+    rank: int,
+    *,
+    auto_approve: bool = False,
+    unlocks_post: str | None = None,
+) -> dict:
+    """The author creates an offered tier, app-less: the shared
+    ``SubscriptionsAuthor::create_tier`` an app's tier editor calls — the
+    period key minted into the account's custody, so the author's pump can
+    later approve and remove subscribers of it. ``unlocks_post`` (a hex post
+    id) makes it the per-post tier that sells that post. Returns
+    ``{"created": bool}``; raises on a refusal. Hosts the account store for
+    its length."""
+    return _seat_call(
+        "fauna_harness_author_pass",
+        nest_url,
+        author_secret,
+        ["create", tier, rank, auto_approve, unlocks_post],
+    )
+
+
+def harness_redeem(
+    nest_url: str,
+    buyer_secret: bytes,
+    code: str,
+    author_id: bytes,
+    author_home_url: str | None,
+) -> dict:
+    """The buyer redeems a claim code, app-less, as the account whose seed is
+    ``buyer_secret`` on ``nest_url``: the shared
+    ``PaymentsClient::claims_redeem_across_nests`` every app's claim-redeem
+    button calls — the local redeem when ``author_home_url`` is ``None``, else
+    the buyer's own signed ``ClaimRedeemIntent`` naming the connected nest,
+    which relays it to the code's home. Returns the ``ClaimRedeemReply``;
+    raises ``RpcCallError`` on a refusal."""
+    return _seat_call(
+        "fauna_harness_redeem", nest_url, buyer_secret, [code, author_id, author_home_url]
+    )
 
 
 def harness_mint_trust(nest_url: str, owner_secret: bytes, use_case: str) -> None:
     """Mint the content trust the Nests page's picker offers for ``use_case``
-    (``"mail"`` or ``"calendar"``), app-less, as the account whose seed is
+    (``"mail"``, ``"calendar"`` or ``"materialize_mail"`` — the latter held by
+    the nest's own materializer), app-less, as the account whose seed is
     ``owner_secret``: the shared ``LinkedNestsMachine`` every native app's Nests
     page builds, hydrated so its home row carries the derived mint options, then
     sent ``Mint`` with that option's scope and first holder candidate — record
@@ -2660,6 +3029,121 @@ def harness_mint_trust(nest_url: str, owner_secret: bytes, use_case: str) -> Non
     option's role. Like ``harness_create_set``, the call hosts the account store
     for its length (one fleet enrollment). Raises on a refusal."""
     _seat_call("fauna_harness_mint_trust", nest_url, owner_secret, [use_case])
+
+
+# The backup legs (`cabi/harness/backup.rs`): an owner's nest-to-nest backup
+# driven app-less through the very shared sequences the backups page runs, so a
+# `[nest]` outcome whose promise shared client code keeps is witnessed through
+# this library, never a Python re-implementation of a leg
+# (`feature-catalog.md` § The two surfaces). Each call hosts the account store
+# for its length, like ``harness_create_set`` (one fleet enrollment, the same
+# device id every call — the id the legs record under).
+_BACKUP_EXPORTS = (
+    "fauna_harness_backup_enroll",
+    "fauna_harness_backup_audit_pass",
+    "fauna_harness_backup_recover",
+    "fauna_harness_backup_pull_back",
+)
+for _name in _BACKUP_EXPORTS:
+    if hasattr(_lib, _name):
+        _fn = getattr(_lib, _name)
+        _fn.argtypes = [
+            ctypes.c_char_p,                                   # owner's nest base URL
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # owner secret (32-byte seed), len
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # dag-cbor request, len
+            ctypes.POINTER(_FfiBuffer),                        # out: {"ok": reply}
+        ]
+        _fn.restype = ctypes.c_int32
+
+
+def harness_backup_enroll(
+    nest_url: str, owner_secret: bytes, destination_url: str, name: str = ""
+) -> str:
+    """Add the nest at ``destination_url`` as a backup destination of the
+    owner whose seed is ``owner_secret`` on the owner's nest at ``nest_url`` —
+    the shared ``enroll_backup_destination`` over the destination's connected
+    resolve, the sequence the backups page's *Add destination* runs (the
+    source granted the owner's ``NestBackupKey``, the writer grant registered
+    at the destination, the destination registered with the source, the row
+    recorded and published). The owner must already be a user of the
+    destination nest. Returns ``(destination_id, rows)``: the new row's id, and
+    the owner's whole destination list after the enroll as opaque bytes — what
+    the owner's device store holds, which a test hands
+    ``harness_backup_pull_back`` after losing the box (an app's surviving store
+    carries it there; an app-less seat has none). Raises ``RuntimeError``
+    carrying the enroll's text on a refusal."""
+    destination_id, rows = _seat_call(
+        "fauna_harness_backup_enroll", nest_url, owner_secret, [destination_url, name])
+    return destination_id, bytes(rows)
+
+
+def harness_backup_audit_pass(
+    nest_url: str, owner_secret: bytes, state_path: str, clock_offset_secs: int = 0
+) -> list[dict]:
+    """Run one client backup audit pass for the owner over their pinned
+    destination list — the shared ``run_audit_pass`` with the native seams the
+    apps build, its ``now`` the wall clock plus ``clock_offset_secs`` — into
+    the audit store at ``state_path`` (the test's own file; hand the same path
+    to ``harness_backup_recover`` / ``harness_backup_pull_back``). Returns one
+    dict per destination: ``destination_id``, ``last_passed_at`` (seconds or
+    None), ``alert_reasons`` (each the reason's dag-cbor form) and
+    ``recover_offered``."""
+    rows = _seat_call(
+        "fauna_harness_backup_audit_pass", nest_url, owner_secret,
+        [state_path, clock_offset_secs])
+    return [
+        {
+            "destination_id": d,
+            "last_passed_at": passed,
+            "alert_reasons": reasons,
+            "recover_offered": offered,
+        }
+        for d, passed, reasons, offered in rows
+    ]
+
+
+def harness_backup_recover(
+    nest_url: str, owner_secret: bytes, destination_id: str, state_path: str
+) -> dict:
+    """The lived-in recovery from the nest destination ``destination_id`` into
+    the owner's own regressed nest — the shared ``recover_from_destination``,
+    reading the sets to recover off the audit store at ``state_path`` (a pass
+    must have accepted the regression there first). Returns ``{"whole":
+    bool, "lines": [str]}`` — the outcome's own verdict and its result lines.
+    A run the shared driver never reached, or stopped, raises
+    ``RuntimeError``."""
+    whole, lines = _seat_call(
+        "fauna_harness_backup_recover", nest_url, owner_secret,
+        [destination_id, state_path])
+    return {"whole": whole, "lines": lines}
+
+
+def harness_backup_pull_back(
+    nest_url: str, owner_secret: bytes, destination_id: str, state_path: str,
+    carried_rows: bytes | None = None,
+) -> dict:
+    """The after-loss re-seed from the surviving nest destination
+    ``destination_id`` into the rebuilt nest at ``nest_url`` — the shared
+    preflight, then ``pull_back_from_destination`` carrying it as accepted, the
+    composition every app's confirmed re-seed gesture runs (delivery, each
+    set's ``fauna.backup.custody.materialize``, the re-enrollment). The audit
+    store at ``state_path`` supplies this device's pins and may be empty.
+    ``carried_rows`` is the list ``harness_backup_enroll`` returned: a box
+    rebuilt from nothing holds no destination list, so the rows it lacks are
+    written into it first, as an app's surviving store re-publishes them. A
+    torn restore (``/api/v1/test/backup/materialize_tear``) is retried by
+    calling again. Returns ``{"whole", "lines", "reenroll_error", "sets"}`` —
+    ``sets`` maps each delivered set name to its outcome's text
+    (``Materialized …``, ``AlreadyLive``, ``Refused …``)."""
+    whole, lines, reenroll_error, sets = _seat_call(
+        "fauna_harness_backup_pull_back", nest_url, owner_secret,
+        [destination_id, state_path, carried_rows])
+    return {
+        "whole": whole,
+        "lines": lines,
+        "reenroll_error": reenroll_error,
+        "sets": dict(sets),
+    }
 
 if hasattr(_lib, "fauna_folder_read_keys_header"):
     _lib.fauna_folder_read_keys_header.argtypes = [
@@ -2868,6 +3352,169 @@ def harness_conv_forge_delete(
         raise _build_rpc_call_error(reply["err"])
     channel, target_seq, delete_seq = reply["ok"]
     return {"channel": channel, "target_seq": target_seq, "delete_seq": delete_seq}
+
+
+# ── Client-kept scheduling: an organizer's event, the sealed rail, the apply ──
+# An inbound iTIP message is applied by the recipient's CLIENT (the shared
+# `fauna_client_caldav` apply decides who may create, change or answer an
+# event — `inbound-scheduling-authority.md` § Who may mutate an existing event
+# over the inbound rail), so its `[nest]` outcomes are witnessed through these
+# exports: every iMIP is built by the shared builders and every apply is the
+# shared one, never re-derived here. Same call shape as `_HARNESS_EXPORTS`.
+
+_SCHEDULING_EXPORTS = (
+    "fauna_harness_caldav_put_event",
+    "fauna_harness_caldav_events",
+    "fauna_harness_scheduling_invite",
+    "fauna_harness_scheduling_rsvp",
+)
+_HAS_SCHEDULING = all(hasattr(_lib, name) for name in _SCHEDULING_EXPORTS)
+if _HAS_SCHEDULING:
+    for _name in _SCHEDULING_EXPORTS:
+        _fn = getattr(_lib, _name)
+        _fn.argtypes = [
+            ctypes.c_char_p,                                   # nest base URL
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret (32-byte Ed25519 seed), len
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # dag-cbor request, len
+            ctypes.POINTER(_FfiBuffer),                        # out: {"ok": reply} | {"err": RpcError}
+        ]
+        _fn.restype = ctypes.c_int32
+
+
+def _scheduling_call(fn_name: str, nest_url: str, secret: bytes, request: list):
+    if not _HAS_SCHEDULING:
+        raise RuntimeError(
+            f"libfauna_ffi has no `{fn_name}` — it is stale, or not the "
+            "`e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    return _harness_call(fn_name, nest_url, secret, request)
+
+
+def _scheduling_outcome(reply: list) -> dict:
+    method, outcome, reason, author = reply
+    return {"method": method, "outcome": outcome, "reason": reason, "author": author}
+
+
+def harness_caldav_put_event(
+    nest_url: str,
+    secret: bytes,
+    msek: bytes,
+    *,
+    uid: str,
+    summary: str,
+    organizer: str,
+    attendees: list[str],
+    dtstart: str = "20361102T100000Z",
+    dtend: str = "20361102T110000Z",
+    timestamp: int = 1_700_000_000,
+) -> dict:
+    """Store an event as the **organizer's** client does: its ``Personal``
+    calendar provisioned, the event sealed under ``msek`` (the actor's
+    client-held calendar key, any 32 bytes) and put through the shared
+    ``CalDavClient::seal_and_put_event``, every attendee ``NEEDS-ACTION``.
+    Returns the nest's ``PutEventCiphertextReply``."""
+    return _scheduling_call(
+        "fauna_harness_caldav_put_event", nest_url, secret,
+        [bytes(msek), uid, summary, dtstart, dtend, organizer, list(attendees), int(timestamp)],
+    )
+
+
+def harness_caldav_events(nest_url: str, secret: bytes, msek: bytes) -> list[dict]:
+    """The actor's ``Personal`` calendar as its client reads it (the shared
+    ``query_events_decoded`` under ``msek``): one ``{"uid", "etag", "summary",
+    "attendees": {email: partstat}, "ics"}`` per stored event — ``ics`` the
+    whole decoded body, so a test can tell an untouched event from a rewritten
+    one. Empty when the calendar does not exist yet."""
+    rows = _scheduling_call("fauna_harness_caldav_events", nest_url, secret, [bytes(msek)])
+    return [
+        {
+            "uid": uid,
+            "etag": etag,
+            "summary": summary,
+            "attendees": {email.lower(): partstat for email, partstat in roster},
+            "ics": ics,
+        }
+        for uid, etag, summary, roster, ics in rows
+    ]
+
+
+def harness_scheduling_invite(
+    nest_url: str,
+    sender_secret: bytes,
+    recipient_secret: bytes,
+    recipient_msek: bytes,
+    *,
+    method: str,
+    uid: str,
+    summary: str,
+    organizer: str,
+    attendees: list[str],
+    directory: dict[str, str],
+    dtstart: str = "20361102T100000Z",
+    dtend: str = "20361102T110000Z",
+    timestamp: int = 1_700_000_000,
+) -> dict:
+    """Send one organizer-shaped iMIP (``method`` ``REQUEST`` or ``CANCEL``)
+    from the actor ``sender_secret`` names to the recipient over the **sealed
+    scheduling rail**, and apply it on the **recipient's** client.
+
+    The message is the shared ``build_event_imip``'s for an event whose
+    ``ORGANIZER`` is ``organizer`` — the sender's own address, or someone
+    else's when the sender is replaying the organizer's message. It crosses
+    the real nest (one-off MLS group, Welcome, ``channel.send``), comes back
+    off the recipient's drain with the author the nest attests, and the shared
+    ``apply_inbound_scheduling_from_message`` decides. ``directory`` maps each
+    address to its actor hex (the stand-in for anon discovery, which needs
+    DNS). Returns ``{"method", "outcome", "reason", "author"}``: ``outcome``
+    ``created`` / ``updated`` / ``cancelled`` / ``refused`` / …, ``reason``
+    the refusal's wire reason, ``author`` the attested sender."""
+    return _scheduling_outcome(_scheduling_call(
+        "fauna_harness_scheduling_invite", nest_url, sender_secret,
+        [
+            bytes(recipient_secret), bytes(recipient_msek), method, uid, summary,
+            dtstart, dtend, organizer, list(attendees),
+            [[addr, actor] for addr, actor in directory.items()], int(timestamp),
+        ],
+    ))
+
+
+def harness_scheduling_rsvp(
+    nest_url: str,
+    sender_secret: bytes,
+    sender_msek: bytes,
+    organizer_secret: bytes,
+    organizer_msek: bytes,
+    *,
+    uid: str,
+    as_address: str,
+    response: str = "going",
+    rail: str = "sealed",
+    door_sender: str | None = None,
+    directory: dict[str, str],
+    timestamp: int = 1_700_000_100,
+) -> dict:
+    """An attendee's RSVP as its client sends it, applied on the
+    **organizer's** client. The sender's client reads its own copy of event
+    ``uid``, folds ``response`` (``going`` / ``interested`` / ``declined``)
+    into it for ``as_address`` (the shared ``apply_rsvp``) and builds the
+    ``REPLY`` (``imip_reply_for_rsvp``) — ``as_address`` is the sender's own
+    rostered address for a genuine answer, another attendee's for a forgery.
+
+    ``rail="sealed"``: carried over the sealed scheduling rail and applied by
+    the shared ``apply_inbound_scheduling_from_message`` under the author the
+    nest attests. ``rail="mail"``: the copy the organizer's mail door files,
+    stamped ``X-Fauna-Authenticated-Sender: <door_sender>`` by the door's own
+    stamp builder (``door_sender=None`` files it unstamped), applied by the
+    shared ``apply_inbound_reply_from_mail``. Returns as
+    :func:`harness_scheduling_invite`."""
+    return _scheduling_outcome(_scheduling_call(
+        "fauna_harness_scheduling_rsvp", nest_url, sender_secret,
+        [
+            bytes(sender_msek), bytes(organizer_secret), bytes(organizer_msek), uid,
+            as_address, response, rail, door_sender,
+            [[addr, actor] for addr, actor in directory.items()], int(timestamp),
+        ],
+    ))
 
 
 _HAS_MAIL_IMPORT = hasattr(_lib, "fauna_harness_mail_import")

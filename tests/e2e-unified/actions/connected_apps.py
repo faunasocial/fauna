@@ -468,8 +468,18 @@ class ConnectedAppsActions:
         return self.external_apps_state() == expected
 
     def set_external_apps_enabled(self, enabled: bool) -> None:
-        """Drive the switch to `enabled`, idempotently."""
+        """Drive the switch to `enabled`, idempotently.
+
+        The state is read only once THIS visit's read has returned: before it
+        the toggle paints the flag's own default, ON (`docs/goal/ui/
+        connected-apps.md` § State & data shape), so an early read on an app
+        that drops its snapshot per visit (web) sees "on" whatever the account
+        holds and an ON request would skip its click, leaving the switch OFF."""
         self.driver.wait_for(self.EXTERNAL_APPS_TOGGLE_ID, timeout=10.0)
+        assert self.wait_loaded(), (
+            "the connected-apps visit's read must return before the switch is read; "
+            f"error: {self.current_error_text()!r}"
+        )
         want = "on" if enabled else "off"
         if self.external_apps_state() != want:
             self.driver.click(self.EXTERNAL_APPS_TOGGLE_ID)

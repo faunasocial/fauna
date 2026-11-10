@@ -9,6 +9,7 @@ using FaunaApp.Core;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using FaunaApp.Services;
 using FaunaApp.Sync;
 using uniffi.fauna_client_capabilities;
@@ -1147,7 +1148,11 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // for its "Shared · N" badge — one id, different meaning by context.
         var badge = new TextBlock
         {
-            Text = S.Get("devices/shared_by").Replace("{who}", fs.ownerDisplay),
+            // A seat the folder rail marked forked reads the badge's third text
+            // (owner changed; only their re-share heals it) — shared Rust's
+            // FolderSummary.seatForked.
+            Text = S.Get(fs.seatForked ? "devices/shared_by_owner_changed" : "devices/shared_by")
+                .Replace("{who}", fs.ownerDisplay),
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap,
@@ -1682,9 +1687,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
     // Per-set conflict policy (folder-conflict-policy-select) — file-sync.md §
     // Conflicts, policy. A value/label ComboBox split (the e2e select contract):
-    // each item displays the friendly label but carries the WIRE VALUE ("auto" /
-    // "latest_wins_always") as its UIA Name, so driver.select(id, value) matches
-    // by Name and get_text reads the stable value back. The resolving device
+    // each item displays the friendly label and is keyed by the WIRE VALUE
+    // ("auto" / "latest_wins_always", PickerOption), so driver.select(id, value)
+    // matches it and get_text reads the stable value back. The resolving device
     // reads the policy off the authoritative nest row. Options come from the
     // shared catalog (folders.md § Where logic lives), not a local list.
 
@@ -1705,8 +1710,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         int i = 0;
         foreach (var opt in uniffi.fauna_ffi.FaunaFfiMethods.ConflictPolicyOptions())
         {
-            var item = new ComboBoxItem { Content = S.Resolve(opt.label), Tag = opt.value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
+            var item = PickerOption.Create(S.Resolve(opt.label), opt.value);
             combo.Items.Add(item);
             if (opt.value == current) selectedIndex = i;
             i++;
@@ -1732,8 +1736,8 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
     // Content residency (folder-nest-residency-select) — file-sync.md §
     // Content residency. Same value/label ComboBox split as the conflict
-    // select above: each item displays the friendly label but carries the WIRE
-    // VALUE ("full" / "metadata_only") as its UIA Name. Applies ON CHANGE, its
+    // select above: each item displays the friendly label and is keyed by the
+    // WIRE VALUE ("full" / "metadata_only"). Applies ON CHANGE, its
     // own fauna.folders.update field, deliberately OUTSIDE the batched
     // nest-place save (so an older writer's policy edit can never silently
     // clear it) — every mode, not gated on Sync like the conflict select.
@@ -1767,8 +1771,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         int i = 0;
         foreach (var opt in uniffi.fauna_ffi.FaunaFfiMethods.ResidencyOptions())
         {
-            var item = new ComboBoxItem { Content = S.Resolve(opt.label), Tag = opt.value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
+            var item = PickerOption.Create(S.Resolve(opt.label), opt.value);
             combo.Items.Add(item);
             if (opt.value == current) selectedIndex = i;
             i++;
@@ -1842,9 +1845,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // (audience_hint, website_serve_hint). windows derives none of it.
     //
     // The select is the same value/label ComboBox split as the conflict-policy
-    // and residency pickers above: each item displays the localized label but
-    // carries the WIRE VALUE as its UIA Name, so driver.select(id, value)
-    // matches by Name and get_text reads the stable value back.
+    // and residency pickers above: each item displays the localized label and is
+    // keyed by the WIRE VALUE, so driver.select(id, value) matches it and
+    // get_text reads the stable value back.
 
     private const string AudiencePublic = "public";
 
@@ -1883,8 +1886,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         int i = 0;
         foreach (var opt in uniffi.fauna_ffi.FaunaFfiMethods.AudienceOptions(bound, current))
         {
-            var item = new ComboBoxItem { Content = S.Resolve(opt.label), Tag = opt.value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
+            var item = PickerOption.Create(S.Resolve(opt.label), opt.value);
             // `selectable: false` is exactly one case — `shared` on a bound
             // folder that is not currently public. It is RENDERED because a
             // bound folder must be able to say what it is, but it is not a
@@ -1892,7 +1894,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             // nowhere else. It is also the folder's CURRENT value there, so the
             // no-op guard in the handler already refuses it; leaving the item
             // enabled keeps the ComboBox drivable by the cross-app select
-            // contract, which addresses items by Name.
+            // contract, which addresses items by key.
             combo.Items.Add(item);
             if (opt.value == current) selectedIndex = i;
             i++;
@@ -2318,15 +2320,14 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         });
 
         // Same value/label split as `folder-conflict-policy-select`: each item paints the
-        // localized label and carries the WIRE VALUE ("default" / "on" / "off") as its
-        // UIA Name, so the cross-app `select(id, value)` contract matches by Name and
-        // `get_text` reads the stable value back. Options come from the shared catalog.
+        // localized label and is keyed by the WIRE VALUE ("default" / "on" / "off"), so
+        // the cross-app `select(id, value)` contract matches it and `get_text` reads the
+        // stable value back. Options come from the shared catalog.
         var snapshots = new ComboBox { MinWidth = 220 };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(snapshots, Ids.FolderNestSnapshotsSelect);
         foreach (var opt in uniffi.fauna_ffi.FaunaFfiMethods.NestSnapshotsOptions())
         {
-            var item = new ComboBoxItem { Content = S.Resolve(opt.label), Tag = opt.value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
+            var item = PickerOption.Create(S.Resolve(opt.label), opt.value);
             snapshots.Items.Add(item);
         }
         section.Children.Add(LabeledRow(S.Get("devices/nest_snapshots"), snapshots));
@@ -2462,20 +2463,24 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         if (refusal is not null) return;
         var current = stored ?? "auto";
 
+        // A page reload reads the preference again after an await, possibly right
+        // after the user's own pick: PickerOption.Reconcile only moves the selection
+        // while the catalog is unchanged.
         _suppressDefaultPolicyEvents = true;
-        DefaultConflictPolicyCombo.Items.Clear();
-        int selectedIndex = 0;
-        int i = 0;
-        foreach (var opt in uniffi.fauna_ffi.FaunaFfiMethods.ConflictPolicyOptions())
+        try
         {
-            var item = new ComboBoxItem { Content = S.Resolve(opt.label), Tag = opt.value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
-            DefaultConflictPolicyCombo.Items.Add(item);
-            if (opt.value == current) selectedIndex = i;
-            i++;
+            PickerOption.Reconcile(
+                DefaultConflictPolicyCombo,
+                uniffi.fauna_ffi.FaunaFfiMethods.ConflictPolicyOptions()
+                    .Select(opt => (S.Resolve(opt.label), opt.value))
+                    .ToList(),
+                current,
+                firstIfAbsent: true);
         }
-        DefaultConflictPolicyCombo.SelectedIndex = selectedIndex;
-        _suppressDefaultPolicyEvents = false;
+        finally
+        {
+            _suppressDefaultPolicyEvents = false;
+        }
     }
 
     private async void DefaultConflictPolicy_Changed(object sender, SelectionChangedEventArgs e)
@@ -2627,9 +2632,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // via the shared FoldersAuthor::paywall_set, over FaunaFfiMethods.FoldersPaywallSet.
     //
     // Same value/label ComboBox split as the conflict select: each item
-    // DISPLAYS its label but carries the WIRE VALUE as its UIA Name — each own-tier's
-    // name, plus an empty-string sentinel for the "Not paywalled (public)" placeholder —
-    // so driver.select(id, tier) matches by Name and get_text reads the value back.
+    // DISPLAYS its label and is keyed by the WIRE VALUE — each own-tier's name, plus an
+    // empty-string sentinel for the "Not paywalled (public)" placeholder — so
+    // driver.select(id, tier) matches it and get_text reads the value back.
     //
     // v1 is SET-ONLY (ratified 2026-07-13): the placeholder is offered only while the set
     // is still public; once paywalled it is gone (no clear affordance — no client offers
@@ -2662,12 +2667,10 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         for (int i = 0; i < values.Count; i++)
         {
             var value = values[i];
-            var item = new ComboBoxItem
-            {
-                Content = value.Length == 0 ? S.Get("devices/paywall_tier_none") : value,
-                Tag = value,
-            };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, value);
+            // A tier paints its own name; the empty placeholder paints "none" and,
+            // keyless, reads back by that label.
+            var item = PickerOption.Create(
+                value.Length == 0 ? S.Get("devices/paywall_tier_none") : value, value);
             combo.Items.Add(item);
             if (current is not null && value == current) selectedIndex = i;
         }
@@ -3206,9 +3209,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     /// The attach select + button pair, painted while ≥1 enrolled destination
     /// remains unattached. Same value/label ComboBox split as
     /// <see cref="BuildConflictPolicyRow"/>: each item DISPLAYS the
-    /// destination's label but carries the wire value (its
-    /// <c>destinationId</c>) as its UIA Name, so <c>driver.select(id, value)</c>
-    /// matches by Name and the pre-selected first entry always leaves a valid
+    /// destination's label and is keyed by the wire value (its
+    /// <c>destinationId</c>), so <c>driver.select(id, value)</c>
+    /// matches it and the pre-selected first entry always leaves a valid
     /// pick staged for <c>folder-destination-attach-button</c> — always
     /// enabled rather than bound to a selection state
     /// (reference_windows_disabled_button_no_invoke).
@@ -3223,9 +3226,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(combo, Ids.FolderDestinationAttachSelect);
         foreach (var place in attachable)
         {
-            var item = new ComboBoxItem { Content = place.label, Tag = place.destinationId };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, place.destinationId);
-            combo.Items.Add(item);
+            combo.Items.Add(PickerOption.Create(place.label, place.destinationId));
         }
         combo.SelectedIndex = 0;
         row.Children.Add(combo);
@@ -3301,7 +3302,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         // The recipient's access grant (multi-writer Phase 1, folders.md § Sharing) —
         // Reader | Writer, default Reader, from the shared member_access_options()
-        // catalog (same wire-value-via-Name pattern as the member roster's
+        // catalog (same wire-value key as the member roster's
         // folder-member-role-select above). Present only while the share flow is
         // open. A fresh Writer grant always starts uncapped (the owner caps it
         // afterwards on the member row), so the shared folder-writer-uncapped-warning
@@ -3310,8 +3311,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(shareRoleSelect, Ids.FolderShareRoleSelect);
         foreach (var option in uniffi.fauna_ffi.FaunaFfiMethods.MemberAccessOptions())
         {
-            var item = new ComboBoxItem { Content = S.Resolve(option.@label), Tag = option.@value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.@value);
+            var item = PickerOption.Create(S.Resolve(option.@label), option.@value);
             shareRoleSelect.Items.Add(item);
             if (option.@value == "reader") shareRoleSelect.SelectedItem = item;
         }
@@ -3439,7 +3439,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     /// never a per-page re-derivation) — then, for a handle (a bare localpart
     /// included), resolve it through the shared find-user lookup
     /// <see cref="ContactsViewModel.LookUpRecipientAsync"/>'s Handle branch runs
-    /// (<see cref="ContactsViewModel.FindRecipientActorIdAsync"/>), reusing the picker's own resolve-state
+    /// (<see cref="ContactsViewModel.FindRecipientAsync"/>), reusing the picker's own resolve-state
     /// strings ("not-found" / "error") rather than inventing new ones. On a
     /// resolved actor: share the set, hide the
     /// share row, and refresh the page (folders.md § Sharing — Where logic lives).
@@ -3464,9 +3464,14 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         var c = ContactsViewModel.ClassifyRecipientInput(typedInput);
         string actorIdHex;
+        // The member's nest when it is a PEER nest: the cross-nest share fetches their
+        // KeyPackage from it and relays the Welcome there (folders.md § Sharing a folder,
+        // the Cross-nest members bullet). Null keeps the share same-nest.
+        string? memberNestUrl = null;
         switch (c.Kind)
         {
             case ContactsViewModel.RecipientKind.ActorId:
+                // A typed actor id is classified offline and taken as a home-nest member.
                 actorIdHex = c.ActorId;
                 picker.UpdateResolveState(ResolveState.Resolved);
                 break;
@@ -3477,9 +3482,11 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
                     // The shared find-user lookup the contacts find runs (FFI
                     // libs/fauna-ffi/src/resolve.rs): a bare localpart's empty domain
                     // probes the home nest alone, a qualified handle may resolve on a
-                    // peer. The share itself stays same-nest (memberNestUrl null below),
-                    // as on every app today.
-                    actorIdHex = await ContactsViewModel.FindRecipientActorIdAsync(rpc.HomeUrl, c);
+                    // peer, whose nest URL the share then carries — tui's
+                    // resolve_share_recipient.
+                    var found = await ContactsViewModel.FindRecipientAsync(rpc.HomeUrl, c);
+                    actorIdHex = found.ActorId;
+                    memberNestUrl = found.NestUrl;
                     picker.UpdateResolveState(ResolveState.Resolved);
                 }
                 catch
@@ -3497,7 +3504,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         try
         {
             var memberId = Convert.FromHexString(actorIdHex);
-            await rpc.FoldersShareAsync(session, fs.name, memberId, memberNestUrl: null, access: access);
+            await rpc.FoldersShareAsync(session, fs.name, memberId, memberNestUrl: memberNestUrl, access: access);
             picker.Visibility = Visibility.Collapsed;
             confirm.Visibility = Visibility.Collapsed;
             // The refresh re-renders the list, and `RenderFolders` re-opens the row
@@ -3633,17 +3640,15 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(published, Ids.FolderWriterPublishedWarning);
 
         // Populate BEFORE wiring SelectionChanged (below) — the programmatic
-        // SelectedItem set below would otherwise fire the handler and dispatch a
-        // spurious commit at row-build time.
-        roleSelect.Items.Clear();
-        foreach (var option in uniffi.fauna_ffi.FaunaFfiMethods.MemberAccessOptions())
-        {
-            var item = new ComboBoxItem { Content = S.Resolve(option.@label), Tag = option.@value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.@value);
-            roleSelect.Items.Add(item);
-            if (option.@value == (access ?? "reader")) roleSelect.SelectedItem = item;
-        }
-        if (roleSelect.SelectedItem is null && roleSelect.Items.Count > 0) roleSelect.SelectedIndex = 0;
+        // selection would otherwise fire the handler and dispatch a spurious commit
+        // at row-build time.
+        PickerOption.Reconcile(
+            roleSelect,
+            uniffi.fauna_ffi.FaunaFfiMethods.MemberAccessOptions()
+                .Select(option => (S.Resolve(option.@label), option.@value))
+                .ToList(),
+            access ?? "reader",
+            firstIfAbsent: true);
 
         string CurrentAccess() => roleSelect.SelectedItem is ComboBoxItem { Tag: string t } ? t : "reader";
         void UpdateWarning() => warning.Visibility =

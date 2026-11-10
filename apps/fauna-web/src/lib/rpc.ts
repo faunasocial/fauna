@@ -155,6 +155,9 @@ export interface BridgeStatus {
   // Gates the card's Follow requests section (bridges.md § Follow requests).
   supports_follow_requests: boolean;
   link_modes: BridgeLinkMode[] | null;
+  // A consented bridge app's declared SourceGlyph id; absent on a first-party
+  // row. Painted only through `bridgeCardTitle` (shared Rust owns the emoji map).
+  glyph?: string | null;
   // Present (a provider `status(...)` error string) only on failure; the
   // typed wire always carries the slot, unlike the HTTP twin's omit-on-none.
   error: string | null;
@@ -1193,7 +1196,10 @@ export function emailFiltersList(secretHex: string): Promise<EmailFilter[]> {
   return call(secretHex, (c) => c.emailFiltersList());
 }
 
-export function emailFiltersCreate(
+/** `fauna.email.filters.create`, sent now or — with no nest — queued in this
+ *  tab's outbox (the shared `OfflineQueued` composer). Resolves `true` when it
+ *  QUEUED: the rule has no server id until the drain, so list nothing. */
+export function emailFiltersCreateOrQueue(
   secretHex: string,
   name: string,
   rules: unknown[],
@@ -1201,8 +1207,11 @@ export function emailFiltersCreate(
   action: string | Record<string, unknown>,
   priority: number,
   continueOnMatch: boolean,
-): Promise<number> {
-  return call(secretHex, (c) => c.emailFiltersCreate(name, rules, combination, action, priority, continueOnMatch));
+): Promise<boolean> {
+  return callOrQueue(
+    secretHex,
+    (c) => c.emailFiltersCreateOrQueue(name, rules, combination, action, priority, continueOnMatch) as Promise<boolean>,
+  );
 }
 
 export function emailFiltersGet(secretHex: string, id: number): Promise<EmailFilter> {
@@ -1441,8 +1450,11 @@ export function knocksList(secretHex: string): Promise<KnockItem[]> {
   return call(secretHex, (c) => c.knocksList());
 }
 
-export function knocksAccept(secretHex: string, peerId: string): Promise<void> {
-  return call(secretHex, (c) => c.knocksAccept(peerId));
+/** `fauna.knocks.accept`, sent now or — with no nest — queued in this tab's
+ *  outbox (the shared `OfflineQueued` composer). Resolves `true` when it
+ *  QUEUED: drop the knock locally and add no roster row. */
+export function knocksAcceptOrQueue(secretHex: string, peerId: string): Promise<boolean> {
+  return callOrQueue(secretHex, (c) => c.knocksAcceptOrQueue(peerId) as Promise<boolean>);
 }
 
 export function knocksBlock(secretHex: string, peerId: string): Promise<void> {
@@ -2583,9 +2595,12 @@ export function moderationAppeal(
 
 /** `fauna.moderation.abuse_report.submit`, built from the sheet by the shared
  *  `report_request` (a sheet the view would not let send rejects before
- *  anything leaves). `block_author` is recorded only — the caller chains
- *  `knocksBlock` and `hideReported` itself. */
-export function moderationAbuseReportSubmit(
+ *  anything leaves), sent now or — with no nest — queued in this tab's outbox
+ *  (the shared `OfflineQueued` composer). Resolves `null` when it QUEUED: say
+ *  `reportQueued`, still hide, never try a ticked block. `block_author` is
+ *  recorded only — the caller chains `knocksBlock` and `hideReported` itself
+ *  (`report-submit.ts`). */
+export function moderationAbuseReportSubmitOrQueue(
   secretHex: string,
   target: ReportTarget,
   form: ReportForm,
@@ -2593,8 +2608,8 @@ export function moderationAbuseReportSubmit(
   report_id: string;
   routed_to: string[];
   acknowledgement: import('#lib/i18n/localized').LocalizedText;
-}> {
-  return call(secretHex, (c) => c.moderationAbuseReportSubmit(target, form) as Promise<never>);
+} | null> {
+  return callOrQueue(secretHex, (c) => c.moderationAbuseReportSubmitOrQueue(target, form) as Promise<never>);
 }
 
 /** `fauna.moderation.abuse_report.mine` — the ledger, newest first, worded. */
@@ -2649,6 +2664,30 @@ export function loadHiddenContent(secretHex: string): Promise<string[]> {
 /** Hide a reported subject for the owner; resolves to the stored list. */
 export function hideReported(secretHex: string, id: string): Promise<string[]> {
   return call(secretHex, (c) => c.hideReported(id) as Promise<string[]>);
+}
+
+/** Show a hidden subject again (the reporter's show-again, `moderation.md`
+ *  § Corollary); resolves to the stored list. */
+export function unhideReported(secretHex: string, id: string): Promise<string[]> {
+  return call(secretHex, (c) => c.unhideReported(id) as Promise<string[]>);
+}
+
+// The post's mark-as-spam verb (`report-sharing.md` § Report capture → *The
+// post's mark-as-spam verb*): the `spam_marked` list on the same sealed record.
+
+/** The post ids the owner marked as spam. */
+export function loadSpamMarked(secretHex: string): Promise<string[]> {
+  return call(secretHex, (c) => c.loadSpamMarked() as Promise<string[]>);
+}
+
+/** Mark a post as spam for the owner; resolves to the stored list. */
+export function markSpam(secretHex: string, id: string): Promise<string[]> {
+  return call(secretHex, (c) => c.markSpam(id) as Promise<string[]>);
+}
+
+/** Un-mark a post; resolves to the stored list. */
+export function unmarkSpam(secretHex: string, id: string): Promise<string[]> {
+  return call(secretHex, (c) => c.unmarkSpam(id) as Promise<string[]>);
 }
 
 // Tiers (definitions — shared with admin-settings; the tier pickers' options).
@@ -3434,6 +3473,18 @@ export interface InboxMessage {
    *  (`release_at`, epoch seconds) and how many held messages are ahead of it.
    *  Additive — absent on INBOX and on every message nothing holds. */
   warmup_hold?: WarmupHold;
+  /** The copy's live scoring-bus rows (content-scoring.md § The
+   *  scoring-metadata bus); the on-device scorer reads its `report:spam`
+   *  entry (report-sharing.md § Applying the aggregate). Additive — absent
+   *  on an unscored copy. Handed to `ingestSealedInbound` whole. */
+  scores?: ScoreEntry[];
+}
+/** One scoring-bus row (`fauna_core::scoring::ScoreEntry`). */
+export interface ScoreEntry {
+  factor: string;
+  score: number;
+  tier: number;
+  scorer_version: number;
 }
 /** The warm-up's hold on one sent message (`InboxMessage.warmup_hold`). */
 export interface WarmupHold {
@@ -5346,6 +5397,7 @@ export type SubscriptionSubscribeOutcome =
 export interface SubscriptionStatus {
   tier: string | null; // the active tier, or null when not subscribed
   auto_approve: boolean;
+  follow_pending: boolean; // a follow asked and waiting on the author's client
 }
 
 /** Browse another creator's offered tiers (`offers.list`); same shape as a SELF tier. */
@@ -5755,6 +5807,58 @@ export function familyContactAdd(
   return call(
     secretHex,
     (c) => c.familyContactAdd(supervisedActorId, peerActorId) as Promise<void>,
+  );
+}
+
+/** `call` for the family page's `OfflineQueued` gestures
+ *  (`account-offline-mutation.md` § The offline-mutation contract): with no
+ *  nest the shared composer puts the gesture in this tab's outbox, so the
+ *  call must not wait out a connect that is not coming — it waits for the
+ *  socket only while the connection word reads `connected`. */
+async function callOrQueue<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): Promise<T> {
+  const c = await getClient(secretHex);
+  if (get(connectionStatus) === 'connected') await ensureConnected(c);
+  return fn(c);
+}
+
+/** The approvals decide for one `familyApprovalsList` entry, passed back whole
+ *  (shared Rust passes every item key through), sent now or — with no nest —
+ *  queued in this tab's outbox. Resolves `true` when it QUEUED: re-read
+ *  nothing, and drop the item with `approvalsAfterQueuedDecision`. */
+export function familyApprovalsDecideOrQueue(
+  secretHex: string,
+  entry: FamilyApprovalEntry,
+  approve: boolean,
+): Promise<boolean> {
+  return callOrQueue(
+    secretHex,
+    (c) => c.familyApprovalsDecideOrQueue(entry, approve) as Promise<boolean>,
+  );
+}
+
+/** The un-deny of one denied bridge-DM peer, sent or queued; `true` = queued
+ *  (a queued un-deny folds nothing). */
+export function familyAllowBlockedDmPeerOrQueue(
+  secretHex: string,
+  supervisedActorId: Uint8Array,
+  peer: BlockedPeer,
+): Promise<boolean> {
+  return callOrQueue(
+    secretHex,
+    (c) =>
+      c.familyAllowBlockedDmPeerOrQueue(supervisedActorId, peer.bridge_id, peer.peer_id) as Promise<boolean>,
+  );
+}
+
+/** The contact pre-approval, sent or queued; `true` = queued (folds nothing). */
+export function familyContactAddOrQueue(
+  secretHex: string,
+  supervisedActorId: Uint8Array,
+  peerActorId: Uint8Array,
+): Promise<boolean> {
+  return callOrQueue(
+    secretHex,
+    (c) => c.familyContactAddOrQueue(supervisedActorId, peerActorId) as Promise<boolean>,
   );
 }
 

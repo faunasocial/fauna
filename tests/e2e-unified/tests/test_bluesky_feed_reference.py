@@ -96,13 +96,7 @@ def _signed_in_on_the_ingested_post(request, app, nest, far, text, rkey) -> tupl
         spa_url_fixture="bluesky_feed_spa_url", verify_live_actor=True,
     )
     app.feed.navigate()
-    deadline = time.monotonic() + 30
-    index = -1
-    while time.monotonic() < deadline:
-        index = app.feed.post_index_by_id(post_id)
-        if index >= 0:
-            break
-        time.sleep(0.3)  # sleep-ok: pacing between poll iterations
+    index = app.feed.card_index_by_id(post_id, timeout=30)
     assert index >= 0, (
         f"the ingested Bluesky post {post_id} is on the wire but not in the "
         f"app's feed; error={app.error_text()!r}"

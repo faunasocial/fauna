@@ -124,8 +124,8 @@ def _find_simulator_udid() -> str | None:
     return None
 
 
-def _ios_derived_data_dir() -> Path:
-    """Per-working-tree iOS derived-data path.
+def _ios_derived_data_dir(kids: bool = False) -> Path:
+    """Per-working-tree iOS derived-data path (`kids`: the Fauna Kids build's own).
 
     The iOS app build (`xcodebuild` below) and the `just apple-ffi-test-sim`
     static lib are both per-working-tree. A single shared `/tmp/fauna-e2e-build`
@@ -137,7 +137,29 @@ def _ios_derived_data_dir() -> Path:
     per-instance isolation linux/macOS already have.
     """
     h = hashlib.sha1(str(_repo_root).encode()).hexdigest()[:10]
-    return Path(f"/tmp/fauna-e2e-build-{_repo_root.name}-{h}")
+    # The kids build compiles the same package under other Swift conditions over
+    # another FFI flavor: one tree for both would recompile every Swift module at
+    # each switch, and its stamp would vouch for the other build's executable.
+    return Path(f"/tmp/fauna-e2e-build-{_repo_root.name}-{h}{'-kids' if kids else ''}")
+
+
+def _kids_run() -> bool:
+    """Whether this run drives a kids column (`--app android-kids` / `ios-kids`)."""
+    return any(a in KIDS_PARENT for a in get_available_apps())
+
+
+def _kids_session_guardian(nest) -> str:
+    """A fresh adult account on ``nest`` to stand as the kids run's session ward's
+    guardian; returns its actor id hex. Its own identity, never the shared one."""
+    return _make_user(nest)["actor_id_hex"]
+
+
+def _ios_kids_run() -> bool:
+    """Whether this run's iOS artifact is the Fauna Kids build (`--app ios-kids`,
+    feature-catalog.md § Cell semantics). A run drives one or the other: both
+    stage the one `FaunaFFI.xcframework` slot, and `_get_ios_setup` boots one
+    simulator for one app (`_resolve_app_tokens` refuses the pair)."""
+    return "ios-kids" in get_available_apps()
 
 
 # The iOS simulator the suite runs on — the one place it is named. The runtime is
@@ -624,7 +646,12 @@ def _build_ios_app() -> str | None:
     package_dir = _repo_root / "apps" / "fauna-apple"
     if not package_dir.exists():
         return None
-    derived = _ios_derived_data_dir()
+    # `--app ios-kids`: the same SPM app compiled under the kids conditions over
+    # the kids test FFI (`apple-ffi-kids-test-sim`), in a tree of its own, wrapped
+    # under the kids bundle id — the column's build product on ios's venue.
+    kids = _ios_kids_run()
+    ffi_recipe = "apple-ffi-kids-test-sim" if kids else "apple-ffi-test-sim"
+    derived = _ios_derived_data_dir(kids)
 
     # The clobber check, BEFORE spending an xcodebuild on a link that cannot
     # resolve. `_prebuild_binaries` restores the full framework after the macOS
@@ -639,8 +666,8 @@ def _build_ios_app() -> str | None:
             "Cause: `just apple-ffi-host-test` (a dep of `just mac-debug` and "
             "`just swift-test`) deletes a full xcframework and reassembles it "
             "host-only.\n"
-            "Fix: run `just apple-ffi-test-sim` LAST, after any macOS build:\n"
-            f"    just apple-ffi-test-sim    # from {_repo_root}"
+            f"Fix: run `just {ffi_recipe}` LAST, after any macOS build:\n"
+            f"    just {ffi_recipe}    # from {_repo_root}"
         )
 
     # xcodebuild for SPM puts bare binary in Products — create .app bundle
@@ -648,8 +675,9 @@ def _build_ios_app() -> str | None:
     exe = products / "FaunaiOS"
     stamp = derived / ".fauna-ios-app.stamp"
     if _apple_app_build_is_fresh(package_dir, exe, stamp):
-        print("[prebuild] ios app: up-to-date (stamp read, no xcodebuild, no slot)", flush=True)
-        return _bundle_ios_app(derived, exe)
+        print(f"[prebuild] {'ios-kids' if kids else 'ios'} app: up-to-date "
+              "(stamp read, no xcodebuild, no slot)", flush=True)
+        return _bundle_ios_app(derived, exe, kids)
 
     from common.nest import DISK_GB_XCODE, _build_slot_cmd, _load_build_if_stale
 
@@ -661,6 +689,7 @@ def _build_ios_app() -> str | None:
             "xcodebuild", "build",
             "-workspace", str(_ios_package_workspace(package_dir)),
             *SIMULATOR_BUILD_ARGS,
+            *((KIDS_SWIFT_FLAGS,) if kids else ()),
             "-derivedDataPath", str(derived)],
         # stdout (xcodebuild's build log) is captured for the failure tail;
         # stderr streams, so a slot wait's `[build-slot]` lines — who holds the
@@ -677,8 +706,9 @@ def _build_ios_app() -> str | None:
             f"{tail or '    <no output captured>'}\n"
             f"--- end build output ---\n"
             f"Reproduce with:\n"
-            f"    just apple-ffi-test-sim && xcodebuild build -scheme FaunaiOS "
-            f"-destination 'generic/platform=iOS Simulator' ARCHS=arm64 ONLY_ACTIVE_ARCH=NO\n"
+            f"    just {ffi_recipe} && xcodebuild build -scheme FaunaiOS "
+            f"-destination 'generic/platform=iOS Simulator' ARCHS=arm64 ONLY_ACTIVE_ARCH=NO"
+            f"{(' ' + repr(KIDS_SWIFT_FLAGS)) if kids else ''}\n"
             f"(run it from {package_dir})."
         )
 
@@ -689,16 +719,19 @@ def _build_ios_app() -> str | None:
             f"xcodebuild succeeded but the built executable is missing at {exe}"
         )
     bis.commit_stamp(stamp, instant, fingerprint + "\n")
-    return _bundle_ios_app(derived, exe)
+    return _bundle_ios_app(derived, exe, kids)
 
 
-def _bundle_ios_app(derived: Path, exe: Path) -> str:
+def _bundle_ios_app(derived: Path, exe: Path, kids: bool = False) -> str:
     """Wrap the bare SPM executable in the `.app` bundle `simctl install` takes;
-    returns the bundle path. Cheap, and run on every call — warm or built."""
+    returns the bundle path. Cheap, and run on every call — warm or built. The id
+    is the driver's (`KIDS_BUNDLE_ID` for the kids build), so the two cannot
+    disagree."""
     from drivers.ios import BUNDLE_ID as IOS_BUNDLE_ID
+    from drivers.ios import KIDS_BUNDLE_ID
 
     app_dir = derived / "FaunaiOS.app"
-    write_app_bundle(app_dir, exe, IOS_BUNDLE_ID)
+    write_app_bundle(app_dir, exe, KIDS_BUNDLE_ID if kids else IOS_BUNDLE_ID, kids=kids)
     return str(app_dir)
 
 
@@ -884,6 +917,14 @@ def _resolve_app_tokens(raw: str) -> list[str]:
             "--app web: web is built only on Linux, never on this machine "
             "(build-system.md § The Deno build sandbox) — run the web leg on the Linux dev machine"
         )
+    if "ios" in out and "ios-kids" in out:
+        # Two FFI flavors through one staging slot, two apps on one setup's
+        # simulator: refused before any build rather than half-served.
+        raise pytest.UsageError(
+            "--app ios,ios-kids: one run drives one iOS build — the two stage the one "
+            "FaunaFFI.xcframework slot (`apple-ffi-test-sim` / `apple-ffi-kids-test-sim`); "
+            "run the ios and ios-kids legs as two runs"
+        )
     return out
 
 
@@ -947,6 +988,7 @@ def get_available_apps() -> list[str]:
 
 from helpers import helper_bins as _helper_bins  # noqa: E402
 from helpers.ios_app_bundle import (  # noqa: E402
+    KIDS_SWIFT_FLAGS,
     SIMULATOR_BUILD_ARGS,
     write_app_bundle,
     write_package_workspace,
@@ -1503,7 +1545,7 @@ def _start_mail_venue(request, nest_mode, tmp_path_factory, label, **options):
 def _make_nest(nest_binary, tmp_path_factory, label="nest", unclaimed=False,
                claim_domain=None, handle_domain_seed=None, serve_tls=False,
                dial_host=None, extra_env=None, cors_origins=None,
-               static_dir=None):
+               static_dir=None, port=None):
     """Start a nest instance. Returns (nest_dict, cleanup_fn).
 
     ``unclaimed=True`` leaves the nest never-claimed (admin is None) so a
@@ -1567,6 +1609,14 @@ def _make_nest(nest_binary, tmp_path_factory, label="nest", unclaimed=False,
     its bundled build — so only a test whose BROWSER loads a nest-served page
     needs it; pass the ``static_dir`` fixture.
 
+    ``port`` starts the nest on THAT port instead of a free one — the port of a
+    nest the caller has already stopped (``common.nest.stop_nest``), so a
+    different deployment answers the URL a client enrolled: the backup
+    destination whose proven identity changed under the same URL
+    (``backup-destinations.md`` § Create / edit / remove protocol → *Every later
+    connection to the destination is held to that id*). The port stays the
+    stopped nest's: this nest's cleanup releases no lease for it.
+
     ``extra_env`` sets bucket-2 IPC env on this nest only — artifact-set wiring
     the deployment writes, never a human-edited knob (``common.nest.start_nest``
     carries the same parameter and the same rule). The box-recovery case is
@@ -1588,7 +1638,10 @@ def _make_nest(nest_binary, tmp_path_factory, label="nest", unclaimed=False,
     # `find_free_port()` in every run but an android venue run, where the port
     # is leased from the range the venue's tunnel carries — the only ports the
     # device can reach (`helpers/android_venue.nest_port`).
-    port, release_port = android_venue.nest_port(find_free_port)
+    if port is None:
+        port, release_port = android_venue.nest_port(find_free_port)
+    else:
+        release_port = lambda: None  # the stopped nest that owned it releases it
     try:
         nest = start_nest(nest_binary, tmp_dir, port=port, unclaimed=unclaimed,
                           claim_domain=claim_domain,
@@ -1961,6 +2014,7 @@ class _StandaloneProvider:
     supported_options = frozenset({
         "unclaimed", "claim_domain", "handle_domain_seed",
         "serve_tls", "dial_host", "extra_env", "cors_origins", "static_dir",
+        "port",
     })
 
     def start(self, nest_binary, tmp_path_factory, label="nest", **kwargs):
@@ -3501,8 +3555,9 @@ def _register_nest_providers():
 _register_nest_providers()
 
 
-def _make_user(nest):
-    """Register a user on a nest and create a default feed. Returns user dict."""
+def _make_user(nest, guardian_actor: str | None = None):
+    """Register a user on a nest and create a default feed. Returns user dict.
+    ``guardian_actor`` (hex) admits it supervised under that guardian."""
     # Register over WS-RPC (fauna.admin.users.create) — the HTTP /admin/api/users
     # twin was ripped, so the admin SIGNING KEY (not the bearer
     # token) is what registers a user now (common.auth.register_user).
@@ -3515,6 +3570,7 @@ def _make_user(nest):
             nest["port"],
             base_url=nest["url"],
             admin_signing_key=nest["admin"]["signing_key"],
+            guardian_actor=guardian_actor,
         )
     # Best-effort default "General" feed over the WS-RPC feed surface (the
     # REST twin was deleted in the WS-RPC migration). Swallow failures so a
@@ -3686,8 +3742,14 @@ def share_viewer_nest(request, nest_mode, tmp_path_factory, served_spa_dir):
 _IS_WINDOWS = platform.system() == "Windows"
 
 
-def _apply_bridge_ffi_env(env: dict) -> None:
+def _apply_bridge_ffi_env(env: dict, binary: str | None = None) -> None:
     """Point a spawned mail-bridge / seal-helper at its libfauna_ffi.
+
+    `binary` is the program being spawned: the e2e flavor of the mail bridge
+    (`fauna-mail-bridge-e2e`) loads the e2e cdylib (`mail-ffi-e2e-slot`, the
+    one carrying fauna-mail's harness seams), every other program the shipped
+    one — `LD_LIBRARY_PATH` outranks the binary's RUNPATH, so naming the wrong
+    slot here would load the other flavor whatever the link said.
 
     Unix: the FFI lib is the flavor-private slot `just mail-bridge-ffi` owns
     (justfile's `mail-ffi-slot`, always the `release` profile here — the e2e
@@ -3700,15 +3762,18 @@ def _apply_bridge_ffi_env(env: dict) -> None:
     """
     if _IS_WINDOWS:
         return
-    cargo_release = _mail_bridge_ffi_dir()
+    e2e_flavor = binary is not None and os.path.basename(binary).startswith("fauna-mail-bridge-e2e")
+    cargo_release = _mail_bridge_ffi_dir("mail-ffi-e2e-slot" if e2e_flavor else "mail-ffi-slot")
     existing_ld = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = (
         f"{cargo_release}:{existing_ld}" if existing_ld else cargo_release
     )
 
 
-def _mail_bridge_ffi_dir() -> str:
-    """Resolve the flavor-private directory holding the bridge's libfauna_ffi.
+def _mail_bridge_ffi_dir(slot_recipe: str = "mail-ffi-slot") -> str:
+    """Resolve the flavor-private directory holding the bridge's libfauna_ffi
+    (`slot_recipe`: the justfile recipe naming it — `mail-ffi-slot`, or
+    `mail-ffi-e2e-slot` for the e2e bridge's seam-carrying cdylib).
 
     NOT `<cargo target>/release`, which this returned until 2026-08-29: that slot
     is written by every host build of fauna-ffi in the workspace (mac's
@@ -3733,7 +3798,7 @@ def _mail_bridge_ffi_dir() -> str:
         meta = json.loads(result.stdout)
         target_dir = meta["target_directory"]
     slot = subprocess.run(
-        ["just", "mail-ffi-slot"],
+        ["just", slot_recipe],
         cwd=_repo_root, capture_output=True, text=True, check=True,
     ).stdout.strip()
     return os.path.join(target_dir, *slot.split("/"))
@@ -3762,6 +3827,33 @@ def _ensure_mail_bridge_built() -> str:
         return str(_repo_root / "bins" / "fauna-bridges" / "fauna-mail-bridge")
 
     return _memoized_build("mail-bridge-binary", build)
+
+
+def _ensure_mail_bridge_e2e_built() -> str:
+    """The e2e FLAVOR of fauna-mail-bridge (`-tags fauna_e2e_fixtures`);
+    returns its binary path.
+
+    A distinct memo key and path from `_ensure_mail_bridge_built`: this binary
+    carries the mail bridge's harness seams (the shorter pre-auth deadline,
+    `FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS`), which convention 15 compiles out of
+    the shipped flavor — so it can never collapse onto `mail-bridge-binary`.
+    """
+
+    def build():
+        _ensure_generated_files_fresh()
+        if _IS_WINDOWS:
+            subprocess.run(
+                ["just", "windows-mail-bridge-build-e2e"],
+                cwd=_repo_root, check=True,
+            )
+            return str(_repo_root / "target" / "fauna-mail-bridge-e2e.exe")
+        subprocess.run(
+            ["just", "mail-bridge-build-e2e"],
+            cwd=_repo_root, check=True,
+        )
+        return str(_repo_root / "bins" / "fauna-bridges" / "fauna-mail-bridge-e2e")
+
+    return _memoized_build("mail-bridge-e2e-binary", build)
 
 
 def _ensure_atproto_bridge_built() -> str:
@@ -3878,6 +3970,21 @@ def mail_bridge_binary(_generated_files_fresh):
     collection time, outside every per-test timeout budget.
     """
     return _ensure_mail_bridge_built()
+
+
+@pytest.fixture(scope="session")
+def mail_bridge_e2e_binary(_generated_files_fresh):
+    """Build the e2e FLAVOR of fauna-mail-bridge once per session, at
+    COLLECTION time (`just mail-bridge-build-e2e` →
+    `bins/fauna-bridges/fauna-mail-bridge-e2e`; win:
+    `just windows-mail-bridge-build-e2e` → `target/fauna-mail-bridge-e2e.exe`).
+
+    **Any test that sets a `FAUNA_MAIL_E2E_*` seam requests THIS fixture** —
+    the shipped flavor (`mail_bridge_binary`) ignores them by construction
+    (convention 15). Spawn it through `_spawn_mta_bridge` / `_spawn_mda_bridge`
+    with the seam in `extra_env`.
+    """
+    return _ensure_mail_bridge_e2e_built()
 
 
 @pytest.fixture(scope="session")
@@ -4149,28 +4256,21 @@ _LOCAL_NEST_FIXTURE_USERS = (
 )
 
 # The same bound-inversion `_LOCAL_NEST_FIXTURE_USERS` corrects for
-# `nest_binary`, but for `mail_bridge_binary`/`seal_helper_binary`: every one
-# of these fixtures reaches `_start_mail_venue` -> the standalone provider's
+# `nest_binary`, but for `mail_bridge_binary`/`seal_helper_binary`: every mail
+# venue reaches `_start_mail_venue` -> the standalone provider's
 # `start_mail_venue`, which fetches both via `request.getfixturevalue(...)`
 # rather than a declared parameter (mode-polymorphic — docker's own provider
 # needs neither, so a declared param would over-build there). A dynamic
-# `getfixturevalue` call is invisible to pytest's static `item.fixturenames`,
-# so `_prebuild_binaries`'s closure scan never sees these two names for a run
-# whose only mail-venue fixture is one of these — the first such test
-# pays the cold build inside its own 900 s budget instead. Measured
-# 2026-09-09: `test_addressbook.py::test_address_book_lists_and_details_mda_sealed_card[web]`
-# died as a bare `Timeout (>900.0s)` on `subprocess.run(["just",
-# "mail-bridge-build"], ...)`, reading exactly like a product bug — the same
-# failure shape `_prebuild_binaries`'s own docstring already documents for
-# `test_addressbook.py --app tui` on 2026-07-29, which this fixture set closes
-# for good. `dedicated_caldav_admin_port_nest` is NOT here: it declares
-# `mail_bridge_binary`/`seal_helper_binary` as real parameters, so the static
-# closure already covers it.
-_MAIL_VENUE_FIXTURE_USERS = frozenset({
-    "dedicated_mail_nest", "dedicated_mail_nest_handle_domain",
-    "dedicated_caldav_mailbox_less_nest", "dedicated_caldav_only_nest",
-    "dav_toggle_venue",
-})
+# `getfixturevalue` call is invisible to pytest's static `item.fixturenames`, so
+# the first venue test would pay the cold build inside its own 900 s budget
+# (measured 2026-09-09 on `test_addressbook.py`, and again 2026-11-07 on
+# `test_mail_dmarc_reports.py`'s module-own `dmarc_venue`, which the hand-kept
+# fixture-NAME set this replaced never listed). So every venue fixture — in this
+# file or a test module — declares the builds on itself,
+# `@_resolves_lazily(*_MAIL_VENUE_BINARIES)` under `@pytest.fixture`, and
+# `_prebuild_jobs` reads the declarations off each item's closure
+# (`helpers/fixture_closure.py::lazily_resolved`). A pin in
+# `test_e2e_binary_prebuild.py` holds every `_start_mail_venue` caller to it.
 
 
 # A directly-parametrized argname sits in `fixturenames` beside real fixture
@@ -4182,6 +4282,9 @@ _MAIL_VENUE_FIXTURE_USERS = frozenset({
 from helpers.e2e_session import e2e_login_device_id
 from helpers.fixture_closure import is_real_fixture as _is_real_fixture
 from helpers.fixture_closure import real_fixture_closure as _real_fixture_closure
+from helpers.fixture_closure import lazily_resolved as _lazily_resolved
+from helpers.fixture_closure import resolves_lazily as _resolves_lazily
+from helpers.fixture_closure import MAIL_VENUE_BINARIES as _MAIL_VENUE_BINARIES
 from helpers import prebuild_donor as _prebuild_donor  # noqa: E402
 
 
@@ -4933,8 +5036,13 @@ def _spawn_mta_bridge(
     operator_hatch_extra="",
     pre_approve=True,
     wait_for_serving=True,
+    extra_env=None,
 ):
     """Spawn one MTA-role `fauna-mail-bridge` process against `nest_instance`.
+
+    `extra_env` (a dict) is laid over the bridge's environment — the way a test
+    sets a `FAUNA_MAIL_E2E_*` harness seam on a bridge spawned from
+    `mail_bridge_e2e_binary` (the shipped flavor compiles them out).
 
     Owns *only* the work that two bridges can never share: a fresh
     service-user keypair + its admin enrollment (so the bridge's nest WS
@@ -5069,7 +5177,8 @@ def _spawn_mta_bridge(
 
     # ── 5. Spawn the bridge.
     bridge_env = os.environ.copy()
-    _apply_bridge_ffi_env(bridge_env)
+    _apply_bridge_ffi_env(bridge_env, mail_bridge_binary)
+    bridge_env.update(extra_env or {})
     # Role-specific filename: the `dedicated_mail_nest` fixture passes the SAME
     # `tmp` to both `_spawn_mta_bridge` and `_spawn_mda_bridge`, so a shared
     # `mail-bridge.log` had the two processes truncate each other's log on
@@ -5864,8 +5973,12 @@ def _spawn_mda_bridge(
     pin_caldav_hatch=True,
     operator_hatch_extra="",
     imap_bind_host="127.0.0.1",
+    extra_env=None,
 ):
     """Spawn one MDA-role `fauna-mail-bridge` process against `nest_instance`.
+
+    `extra_env` is laid over the bridge's environment, as on
+    `_spawn_mta_bridge` (a harness seam on the e2e flavor).
 
     `operator_hatch_extra` (default `""`) is appended verbatim to the operator-
     hatch TOML — the MDA counterpart of `_spawn_mta_bridge`'s param. The re-score
@@ -6083,7 +6196,8 @@ def _spawn_mda_bridge(
 
     # ── 6. Spawn the bridge.
     bridge_env = os.environ.copy()
-    _apply_bridge_ffi_env(bridge_env)
+    _apply_bridge_ffi_env(bridge_env, mail_bridge_binary)
+    bridge_env.update(extra_env or {})
     # Role-specific filename — see the MTA spawn's note: a shared
     # `mail-bridge.log` was truncated by whichever of the co-located MTA/MDA
     # processes opened it second, hiding the MDA's CalDAV logs.
@@ -7594,6 +7708,7 @@ def _restartable_mta_venue(
 
 
 @pytest.fixture(scope="function")
+@_resolves_lazily(*_MAIL_VENUE_BINARIES)
 def dav_toggle_venue(request, nest_mode, tmp_path_factory, seal_helper_binary):
     """Factory: a dedicated nest + one DAV user + one MDA, with the deployment's
     mail / CalDAV / CardDAV / WebDAV toggles set as asked BEFORE the MDA boots.
@@ -8838,6 +8953,7 @@ def _dedicated_mail_nest_impl(
 
 
 @pytest.fixture(scope="function")
+@_resolves_lazily(*_MAIL_VENUE_BINARIES)
 def dedicated_mail_nest(request, nest_mode, tmp_path_factory):
     """The canonical claimed-nest + MTA + MDA tier_3 fixture (mail + CalDAV).
 
@@ -8861,6 +8977,7 @@ def dedicated_mail_nest(request, nest_mode, tmp_path_factory):
 
 
 @pytest.fixture(scope="function")
+@_resolves_lazily(*_MAIL_VENUE_BINARIES)
 def dedicated_mail_nest_handle_domain(request, nest_mode, tmp_path_factory):
     """``dedicated_mail_nest`` under a distinct label, kept because the tui
     outbound-From replyability test wants its own nest.
@@ -8892,6 +9009,7 @@ def dedicated_mail_nest_handle_domain(request, nest_mode, tmp_path_factory):
 
 
 @pytest.fixture(scope="function")
+@_resolves_lazily(*_MAIL_VENUE_BINARIES)
 def dedicated_caldav_mailbox_less_nest(request, nest_mode, tmp_path_factory):
     """A claimed mail+CalDAV nest whose handle domain IS the mail domain
     (``fauna.test``) and which opens self-service registration — so a test can
@@ -8921,6 +9039,7 @@ def dedicated_caldav_mailbox_less_nest(request, nest_mode, tmp_path_factory):
 
 
 @pytest.fixture(scope="function")
+@_resolves_lazily(*_MAIL_VENUE_BINARIES)
 def dedicated_caldav_only_nest(request, nest_mode, tmp_path_factory):
     """A **CalDAV-only** tier_3 nest: the deployment CalDAV toggle is enabled
     before the MDA boots, and email is **never** enabled (``mail_enabled`` stays
@@ -9632,17 +9751,63 @@ def report_origin_nest(request, nest_mode, tmp_path_factory):
         cleanup()
 
 
-def _start_handled_tls_nest(request, nest_mode, tmp_path_factory, label):
+@pytest.fixture(scope="session")
+def cross_nest_member_nest(request, nest_mode, tmp_path_factory):
+    """A second *handled*, TLS-serving nest — the MEMBER's home in a cross-nest
+    shared-folder journey, with ``cross_nest_foreign`` as the set's home
+    (the owner's nest).
+
+    Same shape as ``cross_nest_foreign`` and ``report_origin_nest``, because both
+    ends of a cross-nest share must be handled under a domain the other can dial:
+    the owner's picker resolves ``member@<domain>`` through the foreign-domain
+    rule and the anonymous lookup on the peer, and ``handled_nest``'s handle
+    domain (``MAIL_PRIMARY_DOMAIN``) names no nest the owner's nest can reach. The
+    member's custody records the set's ``home_nest_url`` as
+    ``https://<the owner nest's handle domain>``, which is why the owner side is
+    handled too.
+
+    One fixture for every journey that needs the member's nest — never a second
+    copy of this start. :func:`cross_nest_folder_seats` seats a real app on each.
+    """
+    nest, cleanup = _start_handled_tls_nest(
+        request, nest_mode, tmp_path_factory, "nest-member-home")
+    try:
+        yield nest
+    finally:
+        cleanup()
+
+
+def _start_handled_tls_nest(request, nest_mode, tmp_path_factory, label,
+                            cors_origins=None):
     """Start a dedicated nest whose handle domain is its own loopback authority,
     serving TLS, with self-service registration open — the shape
     ``cross_nest_foreign`` documents. Returns ``(nest, cleanup)``; the nest
-    carries the bare ``host:port`` under ``authority``."""
+    carries the bare ``host:port`` under ``authority``.
+
+    ``cors_origins`` is ``_start_dedicated_nest``'s, for a nest a browser dials
+    raw — and every nest of this shape IS one on a web run: it is the foreign
+    HOME of a cross-nest room, shared folder or report, and a web member's
+    attachment upload goes from the browser straight to
+    ``https://<home>/api/v1/blob`` under a write token its own nest relayed
+    (``fauna_rpc_wasm::post_multipart_blob_with_bearer``), a preflighted
+    cross-origin POST the home's allow-list must admit (the blob GET rides the
+    open ``public_bytes`` router and needs nothing). So ``None`` means
+    ``browser_origins_to_allow(request)`` — the web seat's SPA-proxy origin,
+    empty on a run without web — the same substitution production makes for
+    its hosted origin (that helper's docstring). Until 2026-11-08 the home
+    seeded nothing, and the web arm of outcome 33's witness
+    (``test_conversation_room_community_cross_nest_attachments.py``) could not
+    have uploaded; the read half was already witnessed by the room-post
+    journey's web arm."""
     from common.auth import open_registration
     from common.nest import OWN_DIAL_AUTHORITY
 
+    if cors_origins is None:
+        cors_origins = browser_origins_to_allow(request)
     nest, cleanup = _start_dedicated_nest(
         request, nest_mode, tmp_path_factory, label,
         handle_domain_seed=OWN_DIAL_AUTHORITY, serve_tls=True,
+        cors_origins=cors_origins,
     )
     try:
         open_registration(nest)
@@ -9726,6 +9891,10 @@ def cross_nest_foreign_ephemeral(request, nest_mode, tmp_path_factory):
     nest, cleanup = _start_dedicated_nest(
         request, nest_mode, tmp_path_factory, "nest-foreign-ephemeral",
         handle_domain_seed=OWN_DIAL_AUTHORITY, serve_tls=True,
+        # A browser dials this nest RAW when it is a room's home (the member's
+        # cross-origin upload under a write token, `_start_handled_tls_nest`'s
+        # paragraph), so it seeds the web seat's origin as that helper does.
+        cors_origins=browser_origins_to_allow(request),
     )
     open_registration(nest)
     nest["authority"] = nest["handle_domain_seed"]
@@ -9999,7 +10168,7 @@ def _launch_second_real_faunamls_app(
     # the ticker mute, plus the push-suppression knob when this caller wants
     # the drain-alone shape.
     config = _build_app_config(app_name, nest_instance, request)
-    if app_name == "ios":
+    if KIDS_PARENT.get(app_name, app_name) == "ios":
         # bob is a SECOND, concurrently-live iOS app in this session — he
         # cannot share alice's `_get_ios_setup` device (launch()'s
         # own uninstall+install would tear alice's app down mid-test).
@@ -10280,6 +10449,18 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
     ``account-replica-posture.md`` § *Corollary — the cold device*, its web
     clause) starts it from a reset, and a journey that needs the app under test
     to run the ceremony declares the absence on ``alice_app`` exactly as before.
+    A journey whose web leg is instead a SECOND device of alice's fleet — signed
+    in on her home nest and enrolled beside the tui seat that mints the custody
+    — calls ``sign_in_alice_app()`` before the mint: it signs the web app in as
+    alice through its own SPA proxy to A (the session ``spa_url`` proxies the
+    shared nest) and waits for its account runtime; a no-op on every other app,
+    where ``alice_app`` is the fleet seat and already signed in. Nest B allows
+    the SPA's origin (``browser_origins_to_allow``), because a web device dials
+    a custodian nest raw — its segment fetch is cross-origin.
+    ``retire_fleet_seat()`` tears the separate fleet seat down and leaves A up
+    — for a journey whose observable is what the app under test alone does
+    once the custody is minted (the tui seat is an enrolled device of alice's
+    too, and would otherwise answer for it); a no-op where the two are one app.
     ``lose_fleet()`` is every device lost and the home nest with them: it stops
     A and tears a separate fleet seat down (on the other apps the journey's own
     ``driver.reset()`` is that loss).
@@ -10289,7 +10470,8 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
 
     Yields a dict: ``home``, ``custodian`` (the two nest dicts, each with
     ``authority``), ``alice`` (her actor dict, ``handle`` bare), ``alice_app``,
-    ``fleet_app``, ``lose_fleet``, ``bob``, ``bob_app``.
+    ``fleet_app``, ``lose_fleet``, ``sign_in_alice_app``, ``retire_fleet_seat``,
+    ``bob``, ``bob_app``.
     """
     import secrets
 
@@ -10311,7 +10493,8 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
     home["stop"] = stop_home
     try:
         custodian, custodian_cleanup = _start_handled_tls_nest(
-            request, nest_mode, tmp_path_factory, "custody-custodian")
+            request, nest_mode, tmp_path_factory, "custody-custodian",
+            cors_origins=browser_origins_to_allow(request))
         try:
             hold = f"{custodian['url']}/api/v1/test/custody_hosting/hold"
             resp = requests.post(hold, json={"held": True}, timeout=30, verify=False)
@@ -10347,6 +10530,8 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
                         "alice_app": alice_app,
                         "fleet_app": alice_app,
                         "lose_fleet": stop_home,
+                        "sign_in_alice_app": lambda: None,
+                        "retire_fleet_seat": lambda: None,
                         "bob": bob,
                         "bob_app": bob_app,
                     }
@@ -10362,7 +10547,9 @@ def _custody_rig_on_a_fleet_seat(
     """``two_nest_custody_rig``'s mixed seat (its docstring owns the why):
     alice's fleet on ``driver`` — a fresh tui seat, launched by the fixture so
     the prebuild hoist's pin reads its literal — signed in on A, bob on tui on
-    B, and the app under test left signed out for its own cold-device leg.
+    B, and the app under test left signed out for its own cold-device leg —
+    or, through ``sign_in_alice_app()``, signed in on A as a second fleet
+    device.
 
     The fleet seat is this rig's own launch, never the session-cached app, so
     it takes the real engine directly (tui wires its real session at every
@@ -10386,6 +10573,25 @@ def _custody_rig_on_a_fleet_seat(
         stop_home()
         teardown_fleet_seat()
 
+    def sign_in_alice_app() -> None:
+        """The web app under test as a second device of alice's fleet: signed
+        in on A through a proxy of its own (A is stopped and restarted in
+        place, so the proxy's target survives), its account runtime assembled
+        — which mints its enrollment grant — and on the real engine before the
+        journey goes on."""
+        from helpers.waiting import await_account_runtime_assembled
+
+        url, server = _serve_spa_proxy(request.getfixturevalue("static_dir"), home["url"])
+        request.addfinalizer(server.shutdown)
+        _login_app_as(app, request, home, alice, verify_live_actor=True, spa_url=url)
+        await_account_runtime_assembled(app.driver)
+        # The real engine, as the native arm's alice runs it; the mock comes
+        # back at teardown (the generator's own `finally`).
+        engine = _activate_real_faunamls(
+            app, context="the `two_nest_custody_rig` fixture (alice's web device)")
+        next(engine)
+        request.addfinalizer(lambda: next(engine, None))
+
     try:
         fleet_app = ActionLayer(driver)
         _login_app_as(fleet_app, request, home, alice, verify_live_actor=True)
@@ -10402,6 +10608,8 @@ def _custody_rig_on_a_fleet_seat(
                 "alice_app": app,
                 "fleet_app": fleet_app,
                 "lose_fleet": lose_fleet,
+                "sign_in_alice_app": sign_in_alice_app,
+                "retire_fleet_seat": teardown_fleet_seat,
                 "bob": bob,
                 "bob_app": bob_app,
             }
@@ -10518,7 +10726,7 @@ def succession_member_app(request, succeedable_app, nest_instance):
         node_url = request.getfixturevalue("spa_url")
     else:
         config = _build_app_config(app_name, nest_instance, request)
-        if app_name == "ios":
+        if KIDS_PARENT.get(app_name, app_name) == "ios":
             second_udid = _get_ios_second_seat_udid()
             if second_udid is None:
                 pytest.skip("could not allocate a second iOS simulator for bob's seat")
@@ -10566,23 +10774,16 @@ def succession_member_app(request, succeedable_app, nest_instance):
         driver.teardown()
 
 
-def _alice_extra_seat(app_name, request, test_user, nest_instance, *, screenshot_tag):
-    """Launch one MORE seat of alice — the same identity as ``logged_in_app``, a
-    distinct device id, a fresh empty state root — on ``app_name`` and yield
-    ``(seat_app, driver)``. The body of ``alice_second_device`` (whose docstring
-    owns the per-app isolation mechanics), shared with ``alice_builder_seats``,
-    whose extra seats run on a DIFFERENT app than the one under test."""
-    # alice's own secret + actor id (the `logged_in_app` login uses the same
-    # `test_user["signing_key"].encode().hex()`); the extra seat logs in with them
-    # so it derives the SAME BackupKey that unseals alice's replica.
-    secret_hex = test_user["signing_key"].encode().hex()
-
-    # Reuse the standard launch config (fresh state root + the shared
-    # FAUNA_CONV_POLL_SECS=2 fast-drain cadence). A brand-new driver launch ⇒ a
-    # brand-new empty state dir ⇒ device B truly has nothing until it restores.
+def _second_seat_config(app_name, nest_instance, request):
+    """The launch config for one MORE seat of the app under test beside a
+    live one — the standard config (fresh state root) plus each app's
+    per-launch isolation: macOS's short-path home, iOS's second simulator,
+    windows' own data dir. The one home of those mechanics, shared by
+    ``_alice_extra_seat`` (a seat signed in with a seed) and any journey that
+    launches a seat holding nothing (a new device)."""
     config = _build_app_config(app_name, nest_instance, request)
     if app_name == "macos":
-        # Isolate the Application Support store (the MLS store) — see docstring.
+        # Isolate the Application Support store (the MLS store) — `alice_second_device`'s docstring owns why.
         # `dir="/tmp"`, NOT the default `$TMPDIR`: macOS hands pytest a
         # `/var/folders/<..>/T/` tempdir whose length alone pushes the HOME-derived
         # `Library/Application Support/Fauna/sync-agent.sock` past the 104-byte
@@ -10592,7 +10793,7 @@ def _alice_extra_seat(app_name, request, test_user, nest_instance, *, screenshot
         # already carries). The agent would otherwise die at bind and the app would
         # report only "agent unreachable".
         config["home"] = tempfile.mkdtemp(prefix="fauna-e2e-alice-device-b-", dir="/tmp")
-    elif app_name == "ios":
+    elif KIDS_PARENT.get(app_name, app_name) == "ios":
         # A second concurrently-live iOS app cannot share device A's simulator
         # (`launch()`'s own uninstall+install would tear A's app down), so the
         # extra seat takes the second-seat simulator, as bob's seat does.
@@ -10608,10 +10809,32 @@ def _alice_extra_seat(app_name, request, test_user, nest_instance, *, screenshot
         # default since e2e rule 10 landed for windows); device B gets a fresh one
         # THIS fixture owns, so it provably boots with an empty `mls.db` and MUST
         # restore the replica on login — not a same-device restart against a
-        # surviving store (see docstring). Explicit, not inherited: the two-device
+        # surviving store (`alice_second_device`'s docstring). Explicit, not inherited: the two-device
         # claim must not rest on a driver default a future change could alter.
         config["data_dir"] = tempfile.mkdtemp(prefix="fauna-e2e-alice-device-b-")
 
+    return config
+
+
+def _alice_extra_seat(app_name, request, test_user, nest_instance, *, screenshot_tag,
+                      landing_view="feed"):
+    """Launch one MORE seat of alice — the same identity as ``logged_in_app``, a
+    distinct device id, a fresh empty state root — on ``app_name`` and yield
+    ``(seat_app, driver)``. The body of ``alice_second_device`` (whose docstring
+    owns the per-app isolation mechanics), shared with ``alice_builder_seats``,
+    whose extra seats run on a DIFFERENT app than the one under test.
+    ``landing_view`` is the page the seat signs in on — the feed by default; a
+    journey that must arm a test lever before the feed first mounts (the
+    cue-hydration hold) lands it elsewhere, as ``_alice_web_twin_seat`` does."""
+    # alice's own secret + actor id (the `logged_in_app` login uses the same
+    # `test_user["signing_key"].encode().hex()`); the extra seat logs in with them
+    # so it derives the SAME BackupKey that unseals alice's replica.
+    secret_hex = test_user["signing_key"].encode().hex()
+
+    # Reuse the standard launch config (fresh state root + the shared
+    # FAUNA_CONV_POLL_SECS=2 fast-drain cadence). A brand-new driver launch ⇒ a
+    # brand-new empty state dir ⇒ device B truly has nothing until it restores.
+    config = _second_seat_config(app_name, nest_instance, request)
     driver = create_driver(app_name)
     driver.launch(config)
     try:
@@ -10630,7 +10853,7 @@ def _alice_extra_seat(app_name, request, test_user, nest_instance, *, screenshot
                 # keyed by the shared BackupKey — the device id never gates it.
                 "device_id": "fedcba9876543210" * 4,
             },
-            "nav": {"stack": [{"view": "feed"}]},
+            "nav": {"stack": [{"view": landing_view}]},
         })
         device_b = ActionLayer(driver)
         if app_name in ("linux", "tui"):
@@ -10934,7 +11157,8 @@ def alice_builder_seats(request, nest_instance):
             gen.close()
 
 
-def _alice_web_twin_seat(driver, request, test_user, *, screenshot_tag, node_url=None):
+def _alice_web_twin_seat(driver, request, test_user, *, screenshot_tag, node_url=None,
+                         landing_view="feed"):
     """One MORE **web** seat of ``test_user`` beside the page ``driver`` drives —
     a twin page in its own ``BrowserContext`` (``WebBridgeDriver.open_twin_page``),
     the web analogue of ``_alice_extra_seat``'s fresh-state-root native launch.
@@ -10943,7 +11167,9 @@ def _alice_web_twin_seat(driver, request, test_user, *, screenshot_tag, node_url
     need a second device of a dedicated actor. ``node_url`` is the SPA proxy the
     seat's session points at — the session ``spa_url`` by default; a seat of an
     actor on a dedicated nest passes that nest's own proxy, as ``_login_app_as``
-    does."""
+    does. ``landing_view`` is the page the seat signs in on — the feed by
+    default; a journey that must arm a test lever before the feed first mounts
+    (the cue-hydration hold) lands it elsewhere."""
     secret_hex = test_user["signing_key"].encode().hex()
     twin_driver = driver.open_twin_page()
     try:
@@ -10963,7 +11189,7 @@ def _alice_web_twin_seat(driver, request, test_user, *, screenshot_tag, node_url
                 # same identity, different device (mirrors alice_second_device).
                 "device_id": "fedcba9876543210" * 4,
             },
-            "nav": {"stack": [{"view": "feed"}]},
+            "nav": {"stack": [{"view": landing_view}]},
         })
         device_b = ActionLayer(twin_driver)
         device_b.conversations.enable_real_faunamls()
@@ -11121,7 +11347,7 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
         node_url = nest["url"]
     else:
         config = _build_app_config(app_name, nest, request)
-        if app_name == "ios":
+        if KIDS_PARENT.get(app_name, app_name) == "ios":
             # carol is a SECOND, concurrently-live iOS app in this session — she
             # cannot share the organizer's `_get_ios_setup` device (
             # launch()'s own uninstall+install would tear the organizer's app
@@ -11208,7 +11434,7 @@ def _launch_fresh_share_driver(
     from drivers.inprocess_agent import InProcessAgentDriver, RenderNotReady
 
     config = _build_app_config(app_name, nest, request)
-    if second_seat and app_name == "ios":
+    if second_seat and KIDS_PARENT.get(app_name, app_name) == "ios":
         second_udid = _get_ios_second_seat_udid()
         if second_udid is None:
             pytest.skip("could not allocate a second iOS simulator for the recipient seat")
@@ -11625,6 +11851,61 @@ def folder_share_recipient_app(request, handled_nest):
         yield recipient_app, handled_nest, recipient
 
 
+@dataclass
+class CrossNestFolderSeats:
+    """The two real app seats of a cross-nest shared-folder journey — what
+    :func:`cross_nest_folder_seats` hands the test."""
+
+    owner_app: ActionLayer
+    owner: dict
+    owner_nest: dict
+    member_app: ActionLayer
+    member: dict
+    member_nest: dict
+
+
+@pytest.fixture(params=[pytest.param("tui", marks=pytest.mark.tui)])
+def cross_nest_folder_seats(request, cross_nest_foreign, cross_nest_member_nest):
+    """An OWNER app signed in on ``cross_nest_foreign`` (the set's home nest) and a
+    MEMBER app signed in on ``cross_nest_member_nest`` — both real seats with live
+    conversations sessions, each a handled actor under its own nest's loopback
+    authority, so the owner's picker can share to ``member@<member nest>`` and the
+    member's custody records a dialable home nest
+    (``federation-shared-folders.md`` § Cross-nest shared folders + channel append).
+
+    A composition of the two seat builders every folder-share fixture uses,
+    :func:`_folder_share_owner_seat` and :func:`_folder_share_recipient_seat`,
+    never a seat builder of its own. ``request.param`` names the app for both
+    seats; the owner binds a folder, so a new param is an app whose agent serves
+    a bound folder (tui, linux, macOS, windows). Consumers carry the
+    ``real_conversations`` marker, as every folder-share journey does.
+
+    Yields a :class:`CrossNestFolderSeats`.
+    """
+    import secrets
+
+    from helpers.admin_wire import admit_adult
+
+    owner_nest, member_nest = cross_nest_foreign, cross_nest_member_nest
+    owner = admit_adult(
+        owner_nest, "xnowner" + secrets.token_hex(3),
+        domain=owner_nest["authority"], token=True,
+    )
+    for owner_app, owner in _folder_share_owner_seat(
+        request.param, owner_nest, request, owner=owner
+    ):
+        for member_app, member in _folder_share_recipient_seat(
+            request.param, member_nest, request,
+            handle_prefix="xnmember",
+            screenshot="teardown-cross-nest-folder-member",
+            domain=member_nest["authority"],
+        ):
+            yield CrossNestFolderSeats(
+                owner_app=owner_app, owner=owner, owner_nest=owner_nest,
+                member_app=member_app, member=member, member_nest=member_nest,
+            )
+
+
 def _folder_share_recipient_seat(
     app_name: str,
     handled_nest: dict,
@@ -11688,6 +11969,17 @@ def _folder_share_recipient_seat(
         handled_nest, handle_prefix + secrets.token_hex(3),
         domain=domain, token=True,
     )
+    if KIDS_PARENT.get(app_name, app_name) == "ios" and request.node.get_closest_marker("ios_file_provider_app"):
+        # The File Provider host on this seat's device signs as an enrolled
+        # machine of its own (the app's principal lives in the e2e launch's
+        # in-memory keychain, which no extension reads). Enrolled BEFORE the
+        # seat's first sign-in, as the eviction witness does, so every
+        # generation and custody row the seat writes is wrapped to it too.
+        import fauna_ffi
+
+        recipient["fp_principal"] = fauna_ffi.harness_machine_principal(
+            handled_nest["url"], recipient["signing_key"].encode()
+        )
     driver = _launch_fresh_share_driver(app_name, handled_nest, request, second_seat=True)
     try:
         secret_hex = recipient["signing_key"].encode().hex()
@@ -12401,7 +12693,15 @@ def test_user(nest_instance):
             max_feeds=1000,
             base_url=nest_instance["url"],
         )
-    user = _make_user(nest_instance)
+    # A kids column's run (`--app ios-kids` / `android-kids`): the kids build
+    # refuses an unsupervised account with one gate surface replacing the shell
+    # (`account-age-band.md`, the kids-app bullet, item (3)), so the session user
+    # every kept-plane witness signs in as is a WARD, direct-admitted under a
+    # guardian of its own (`_kids_session_guardian`).
+    guardian = _kids_session_guardian(nest_instance) if _kids_run() else None
+    user = _make_user(nest_instance, guardian_actor=guardian)
+    if guardian is not None:
+        user["guardian_actor_hex"] = guardian
     if live:
         from helpers.live_box_door import reaching_the_live_box
 
@@ -13064,6 +13364,74 @@ def _prewarm_ios_seat(ordinal: int) -> None:
     _get_ios_seat_udid(ordinal, in_test=False)
 
 
+#: The device type the File Provider suites' `fp_device` runs on — a device
+#: `simctl create`d fresh for each test (its domain registration, enablement
+#: and replica are the test's own state, so no two tests share one).
+IOS_FP_DEVICE_TYPE = "iPhone 17 Pro"
+#: How many of those devices the warm pass boots ahead (`_ios_fp_seats_needed`):
+#: one per `fp_device` item, at most this many live at once before the first
+#: test takes one — the room journeys' figure (`_IOS_ROOM_SEATS`). A test past
+#: the cap makes its own and boots it with the in-test bound.
+_IOS_FP_SEATS_MAX = 3
+#: Ordinal → the device the warm pass booted for it (None: the create failed).
+_ios_fp_seat_udids: dict[int, str | None] = {}
+#: The pre-booted devices a test has already taken (each is the test's to delete).
+_ios_fp_seats_taken: set[str] = set()
+
+
+def _ios_fp_seats_needed(session) -> int:
+    """How many `fp_device` devices the warm pass boots before the lane: one per
+    item whose real fixture closure names `fp_device`, capped at
+    `_IOS_FP_SEATS_MAX`. Pure over the items."""
+    count = sum(1 for item in session.items if "fp_device" in _real_fixture_closure(item))
+    return min(count, _IOS_FP_SEATS_MAX)
+
+
+def create_ios_fp_device() -> str | None:
+    """A fresh `IOS_FP_DEVICE_TYPE` device on the default runtime, registered with
+    the run's lane notes (`register_simulator`) and deleted at exit if its test
+    has not deleted it first; not booted. None when `simctl create` fails."""
+    name = f"fauna-fp-evict-{os.getpid()}-{len(_E2E_SIMULATORS) + 1}"
+    res = subprocess.run(
+        ["xcrun", "simctl", "create", name, IOS_FP_DEVICE_TYPE],
+        capture_output=True, text=True, timeout=120,
+    )
+    if res.returncode != 0 or not res.stdout.strip():
+        print(f"[fp-seat] simctl create {IOS_FP_DEVICE_TYPE!r} failed "
+              f"(rc={res.returncode}): {res.stderr.strip()}", flush=True)
+        return None
+    udid = res.stdout.strip()
+    atexit.register(_delete_simulator, udid)
+    register_simulator(udid)
+    return udid
+
+
+def _prewarm_ios_fp_seat(ordinal: int) -> None:
+    """The warm pass's job for the `ordinal`-th `fp_device` device: created and
+    booted under the boot's grant before the lane, with no bound on the wait
+    (`_boot_simulator_held`, `in_test=False`). Nothing when the File Provider
+    app is not there (off macOS, no Xcode, no simulator slice — the fixture
+    skips) or the ordinal is already made: the in-hold replay is a dict read."""
+    if ordinal in _ios_fp_seat_udids or not _ensure_ios_fp_app_built():
+        return
+    udid = create_ios_fp_device()
+    if udid:
+        _boot_simulator_held(udid)
+    _ios_fp_seat_udids[ordinal] = udid
+
+
+def take_ios_fp_seat() -> str | None:
+    """A device the warm pass booted for `fp_device` and no test has taken yet,
+    now the caller's (it deletes it); None when none is left — the caller then
+    creates its own and boots it with the in-test bound."""
+    for ordinal in sorted(_ios_fp_seat_udids):
+        udid = _ios_fp_seat_udids[ordinal]
+        if udid and udid not in _ios_fp_seats_taken:
+            _ios_fp_seats_taken.add(udid)
+            return udid
+    return None
+
+
 def _ensure_app_built(app_name: str) -> None:
     """Build the client's app via its just recipe (which freshens i18n + providers).
 
@@ -13105,8 +13473,12 @@ def _restore_full_apple_ffi() -> None:
     swapping the framework back cannot unbuild it, and the restore is a
     cross-checkout cache hit on a warm tree.
     """
-    # The same recipe `app[ios]` took — another shape would rebuild here.
-    _build_via_just("apple-ffi-test-sim", "restoring the full FaunaFFI.xcframework")
+    # The same recipe `app[ios]` (or `app[ios-kids]`) took — another shape would
+    # rebuild here.
+    _build_via_just(
+        "apple-ffi-kids-test-sim" if _ios_kids_run() else "apple-ffi-test-sim",
+        "restoring the full FaunaFFI.xcframework",
+    )
 
 
 def _ensure_macos_pkg_built() -> None:
@@ -13163,6 +13535,10 @@ def _build_app_via_just(app_name: str) -> None:
         # (testing.md § convention 15). The `-sim` slice set: the app is built
         # for the iOS Simulator, so the device slice would link nowhere.
         "ios": "apple-ffi-test-sim",
+        # The kids column's (feature-catalog.md § Cell semantics): the kids
+        # flavor plus the seams, the same `sim` slices. `_build_ios_app` then
+        # compiles the app under the kids conditions over it.
+        "ios-kids": "apple-ffi-kids-test-sim",
         "android": "android-debug",
         "tui": "tui-debug",
     }
@@ -14868,6 +15244,30 @@ def _apply_isolated_sync_agent_env(env: dict, request) -> None:
     env["FAUNA_E2E_CREDENTIAL_DIR"] = str(Path(data_dir) / "credentials")
 
 
+def _ios_seat_app_path(ios_setup: dict, request) -> str:
+    """The app an iOS seat installs: the SPM `FaunaiOS` bundle, or — for a test
+    carrying ``ios_file_provider_app`` — the Debug simulator `Fauna-iOS` app
+    (`_ensure_ios_fp_app_built`), which embeds the File Provider extension the
+    SPM bundle lacks. Both link `FaunaiOSLib` and build Debug, so the seat's
+    automation surface is the same; the second also answers the DEBUG
+    `FileProviderTestCLI` verbs a test drives through `simctl launch`, against
+    a domain registered on THAT seat's device (a capability-host witness,
+    `file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+    host*). Same bundle id: the next plain seat's launch uninstalls it."""
+    node = getattr(request, "node", None)
+    if node is None or node.get_closest_marker("ios_file_provider_app") is None:
+        return ios_setup["app_path"]
+    # The iOS seat itself built and booted, so a missing File Provider app is a
+    # build break, never an absent platform: raised, not skipped.
+    app = _ensure_ios_fp_app_built()
+    if not app:
+        raise RuntimeError(
+            "ios_file_provider_app: no Debug simulator Fauna-iOS app — the "
+            "xcframework lacks its simulator slice; run 'just apple-ffi-test-sim'"
+        )
+    return app
+
+
 def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
     """Build launch config for a client. Shared by driver cache and persistent_app.
 
@@ -14886,7 +15286,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
     # is `_generated_files_fresh`'s job, not this recipe's).
     if not (app_name == "windows" and _installed_windows_app_override(request)):
         _ensure_app_built(app_name)
-    if app_name == "ios":
+    if KIDS_PARENT.get(app_name, app_name) == "ios":
         ios_setup = _get_ios_setup()
         if ios_setup is None:
             skip_environment(
@@ -14913,7 +15313,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
         _apply_apple_opener_env(env, request)
         return {
             "url": nest_instance["url"],
-            "app_path": ios_setup["app_path"],
+            "app_path": _ios_seat_app_path(ios_setup, request),
             "udid": ios_setup["udid"],
             "device_name": IOS_SIM_DEVICE_NAME,
             "platform_version": IOS_SIM_RUNTIME_VERSION,
@@ -17030,8 +17430,7 @@ def _bind_live_location(app, watch_dir, folder, folder_id):
     return sync
 
 
-@pytest.fixture
-def bound_location_media_app(request, app, nest_instance, tmp_path):
+def _bound_location_media(request, app, nest_instance, tmp_path):
     """``app`` logged in as a DEDICATED fresh actor with a REAL local folder bound to
     a REAL ``sync``-mode folder, and the client's in-process ``SyncEngine`` running
     live against it.
@@ -17127,7 +17526,7 @@ def bound_location_media_app(request, app, nest_instance, tmp_path):
             f"the agent's own log is `<its --data-dir>/logs/fauna.log.<date>`, folded into "
             f"the windows driver's `app_stderr_text()`)."
         )
-        return app, tracked_file, folder
+        return app, tracked_file, folder, secret_key
 
     if app.driver.is_windows():
         from helpers.windows_sync_agent import serving_agent
@@ -17149,6 +17548,32 @@ def bound_location_media_app(request, app, nest_instance, tmp_path):
         return
 
     yield _arrange()
+
+
+def _drive_bound_location_media(request, app, nest_instance, tmp_path, keep_key):
+    """Run ``_bound_location_media`` as a fixture body, yielding its tuple with or
+    without the actor's secret key, and finishing its teardown after the test."""
+    gen = _bound_location_media(request, app, nest_instance, tmp_path)
+    arranged = next(gen)
+    try:
+        yield arranged if keep_key else arranged[:3]
+    finally:
+        for _ in gen:
+            pass
+
+
+@pytest.fixture
+def bound_location_media_app(request, app, nest_instance, tmp_path):
+    """See ``_bound_location_media``: ``(app, tracked_file, folder)``."""
+    yield from _drive_bound_location_media(request, app, nest_instance, tmp_path, False)
+
+
+@pytest.fixture
+def bound_location_media_app_and_key(request, app, nest_instance, tmp_path):
+    """``bound_location_media_app`` plus the dedicated actor's secret key (hex) —
+    ``(app, tracked_file, folder, secret_key)`` — for a journey whose causal barrier
+    is the nest's own projection (convention 8's verification carve-out)."""
+    yield from _drive_bound_location_media(request, app, nest_instance, tmp_path, True)
 
 
 @pytest.fixture
@@ -17310,12 +17735,15 @@ def ios_setup():
     """
     from helpers.app_surface import skip_environment
 
-    _ensure_app_built("ios")
+    # The run's iOS build — the kids one under `--app ios-kids` (`_ios_kids_run`).
+    ios_app = "ios-kids" if _ios_kids_run() else "ios"
+    _ensure_app_built(ios_app)
     setup = _get_ios_setup()
     if setup is None:
+        recipe = "apple-ffi-kids-test-sim" if ios_app == "ios-kids" else "apple-ffi-test-sim"
         skip_environment(
-            "ios: the iOS simulator/app is not on this box — "
-            "run 'just apple-ffi-test-sim' first"
+            f"{ios_app}: the iOS simulator/app is not on this box — "
+            f"run 'just {recipe}' first"
         )
     return setup
 
@@ -17425,6 +17853,16 @@ def pytest_addoption(parser):
                           "selects its subject through the `installed_product` marker "
                           "(_installed_linux_app_override). Opt-in, never the inner loop: see "
                           "`just e2e-linux-artifact-test`.")
+    parser.addoption("--store-layout-arch", action="store", default=None,
+                     choices=("x64", "arm64"),
+                     help="Which architecture's staged store-no-payments layout the "
+                          "development-mode nodes of tests/artifact/test_windows_store_install.py "
+                          "register (`build/installer/store-stage/<arch>/`, staged by `just "
+                          "windows-store-package <arch> store-no-payments …`). Default: this "
+                          "box's own. `x64` on an Arm box runs the journey under emulation — the "
+                          "x64 leg of the Store witness (packaging-witnesses.md § Implementation "
+                          "status today, the bullet on how the Windows Store install is driven). "
+                          "Read by the harness alone; the app reads nothing of it.")
     parser.addoption("--real-session", action="store_true", default=False,
                      help="Opt in to tests/real_session/ — the real-ambient-session category: "
                           "tests that deliberately run against and MUTATE the box's real desktop "
@@ -18309,6 +18747,15 @@ def _write_last_green(session, exitstatus=None):
         print("\nlast-green directory: NOT written — a prewarm-only run")
         return
     try:
+        # The tree once more: one that moved under the run marks its records
+        # dirty (delayed-testing.md § The last-green directory, `flaky`).
+        if last_green._run and not last_green._run.get("dirty"):
+            from helpers import feature_ledger
+            if last_green.settle_dirt(
+                    commit=feature_ledger.head_commit(),
+                    dirty=feature_ledger.is_dirty(feature_ledger.tree_dirt())):
+                print("\nlast-green directory: the tree moved while this run ran — "
+                      "its records are marked dirty")
         path = last_green.write()
     except OSError as exc:
         print(f"\nlast-green directory: NOT written ({exc})")
@@ -18741,7 +19188,7 @@ _WARM_KEPT_MEMO_KEYS = frozenset({"ios-setup"})
 #: accumulates in `_PREBUILD_SETUP_S`; `_timed_prebuild` reads the hold's
 #: delta, so the warm pass's share is never charged to the hold.
 _SESSION_SETUP_BUILDERS = frozenset({
-    "_get_ios_setup", "_prewarm_ios_seat", "_recheck_ios_simulators",
+    "_get_ios_setup", "_prewarm_ios_seat", "_prewarm_ios_fp_seat", "_recheck_ios_simulators",
 })
 
 #: Wall seconds spent in `_SESSION_SETUP_BUILDERS` jobs by this process, summed
@@ -19815,6 +20262,7 @@ _PREBUILD_BY_FIXTURE = (
     # The shared `ap_binary` fixture's AP build.
     ("ap_binary", "_ensure_ap_nest_built", ()),
     ("mail_bridge_binary", "_ensure_mail_bridge_built", ()),
+    ("mail_bridge_e2e_binary", "_ensure_mail_bridge_e2e_built", ()),
     ("atproto_bridge_binary", "_ensure_atproto_bridge_built", ()),
     ("atproto_bridge_e2e_binary", "_ensure_atproto_bridge_e2e_built", ()),
     ("seal_helper_binary", "_ensure_seal_helper_built", ()),
@@ -20049,6 +20497,8 @@ _IOS_SECOND_SEAT_FIXTURES = frozenset({
     # the helper's reach — a spare held boot at most, and the stranger is
     # never an iOS item).
     "folder_share_owner_app", "folder_share_recipient_app", "folder_share_stranger_app",
+    # The cross-nest pair composes the same two seat builders (tui-only today).
+    "cross_nest_folder_seats",
     # tests/test_subscriptions.py's own second-seat fixture.
     "subs_author_app",
     # The real-binary skew grid's receiver (helpers/skew_client.py::launch_build).
@@ -20200,6 +20650,12 @@ def _prebuild_jobs(session) -> list:
     # posture is on.
     if "macos" in apps and _macos_spawns_a_real_sync_agent(session.items):
         requested.add("macos_sync_agent_binary")
+    # An `ios_file_provider_app` seat installs the File Provider app at launch
+    # (`_ios_seat_app_path`), the same invisible reach: warm its build here.
+    if "ios" in _as_marks(apps) and any(
+        item.get_closest_marker("ios_file_provider_app") for item in session.items
+    ):
+        requested.add("fauna_ios_fp_app")
 
     # A mode whose nest is not a local binary never executes one, so building it
     # is a cold cargo compile — and a machine-wide `build`-slot wait — spent on
@@ -20227,9 +20683,10 @@ def _prebuild_jobs(session) -> list:
         for fixture, build in _ns.DEDICATED_NEST_BINARIES.items():
             if fixture in requested:
                 requested.add(build)
-        if requested.intersection(_MAIL_VENUE_FIXTURE_USERS):
-            requested.add("mail_bridge_binary")
-            requested.add("seal_helper_binary")
+        # Builds a fixture declares it resolves lazily (`@_resolves_lazily`,
+        # the mail venues) — the same correction, read off the fixtures.
+        for item in session.items:
+            requested.update(_lazily_resolved(item))
     else:
         requested -= _LOCAL_NEST_BUILD_FIXTURES
     # Any run touching a nest, in any mode, may seed through the `fauna_ffi`
@@ -20285,18 +20742,38 @@ def _prebuild_jobs(session) -> list:
     # FaunaFFI.xcframework the iOS build needs and reassembles it host-only, and
     # `sorted(apps)` puts `ios` before `macos` every time. See
     # `_restore_full_apple_ffi` / `_xcframework_slices`.
-    if {"ios", "macos"} <= apps:
+    if {"ios", "macos"} <= _as_marks(apps):
         jobs.append(("full FaunaFFI.xcframework restore", "_restore_full_apple_ffi", ()))
     # The iOS app's `xcodebuild`, after the restore and before the simulator:
     # a stamp-gated build like the app recipes above, so the warm pass compiles
     # it holding no lane and the hold re-checks it for free.
-    if "ios" in apps:
+    if "ios" in _as_marks(apps):
         jobs.append(("ios app (xcodebuild)", "_ensure_ios_app_built", ()))
     # The File Provider suites' apps, there for the same reason: after the
     # restore, so no FFI flavor swap can stale their stamps in the hold. Keyed
     # on the fixture, which the deposit-adoption suites adopt by import.
     if "fauna_ios_fp_app" in requested:
+        # The app links the xcframework's simulator slice, which only an iOS
+        # run's own app build (`app[ios]`, or the restore) writes. A run whose
+        # app set has no iOS — a selection of `tests/platform/ios/` and tier_1
+        # modules reads app set `none` — built none, so the File Provider
+        # suites skipped on the fixture's guidance and a green of that set ran
+        # none of them (convention 7: a skip is not coverage). So the slice's recipe is a job here, after
+        # every app build (a macOS app build strips the slice) and before the
+        # app that links it; a freshness-gated recipe, a stamp read when warm.
+        if "ios" not in _as_marks(apps):
+            jobs.append(("ios simulator ffi slice (file-provider app)",
+                         "_ensure_app_built", ("ios",)))
         jobs.append(("ios file-provider app (xcodebuild)", "_ensure_ios_fp_app_built", ()))
+        # The suites' own devices (`fp_device`, one fresh device per test),
+        # booted here under the boot's grant with no bound on the wait, before
+        # the lane — a device first booted inside a test waited at most 120 s
+        # and missed the room about one boot in three.
+        for ordinal in range(_ios_fp_seats_needed(session)):
+            jobs.append((f"ios file-provider seat {ordinal} (create + finish booting)",
+                         "_prewarm_ios_fp_seat", (ordinal,)))
+        if "ios" not in _as_marks(apps) and _ios_fp_seats_needed(session):
+            jobs.append(("ios simulators (still booted?)", "_recheck_ios_simulators", ()))
     if "fauna_fp_host_app" in requested:
         jobs.append(("macos file-provider app (xcodebuild)", "_ensure_fp_host_app_built", ()))
     # iOS's simulator is the same bound inversion as a binary build, and a worse
@@ -20310,7 +20787,7 @@ def _prebuild_jobs(session) -> list:
     # the device's boot rather than the behaviour under test, which is exactly
     # what this hook exists to prevent. Memoized, so the fixtures that call it at
     # setup (`_build_app_config`, `ios_setup`) become cache hits.
-    if "ios" in apps:
+    if "ios" in _as_marks(apps):
         jobs.append(("ios simulator (create + finish booting)", "_get_ios_setup", ()))
         # Every further seat the items foreseeably need, booted here under its
         # grant too (`_ios_seats_needed`): a seat first booted inside a test
@@ -20801,7 +21278,33 @@ def handled_logged_in_app(request, app, handled_nest):
 # Additionally, honesty/destructive tests are pushed to the end because
 # they can crash fragile bridges (XCUITest, AT-SPI, FlaUI).
 
-_KNOWN_APPS = {"web", "ios", "macos", "android", "windows", "linux", "tui"}
+def _column_parent() -> dict:
+    """`scripts/features_catalog.py::COLUMN_PARENT` — the kids channels and the app
+    each is a build of (feature-catalog.md § Cell semantics), read from its one home
+    so the app axis and the catalog cannot disagree about which columns exist."""
+    scripts = str(Path(__file__).resolve().parents[2] / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import features_catalog
+
+    return dict(features_catalog.COLUMN_PARENT)
+
+
+#: The kids app-axis values (`--app android-kids` / `--app ios-kids`) → the parent
+#: app whose driver launches the kids identity on its venue. A kids value is never a
+#: MARK (`_APP_MARKERS` stays the seven): it selects the parent's marked tests and the
+#: unmarked ones, deselects nothing else, and its records land in its own ledger file
+#: (`helpers/feature_ledger`, attributed by the app name the driver door notes).
+KIDS_PARENT = _column_parent()
+
+
+def _as_marks(apps) -> set:
+    """The app MARKS a set of app-axis values answers to — each kids value read as its
+    parent (`KIDS_PARENT`), so a marker check compares like with like."""
+    return {KIDS_PARENT.get(a, a) for a in apps}
+
+
+_KNOWN_APPS = {"web", "ios", "macos", "android", "windows", "linux", "tui", *KIDS_PARENT}
 
 # Subdirectories that are client-independent — always deselected under --client.
 _CLIENT_INDEPENDENT_DIRS = {"api", "platform", "scenarios", "web"}
@@ -21398,8 +21901,8 @@ def pytest_collection_modifyitems(config, items):
             # marker is authoritative over the parametrization (an iOS-only test
             # parametrized [linux] is still deselected). Registered client markers
             # live in pytest.ini.
-            marker_platforms = {m.name for m in item.iter_markers()} & _KNOWN_APPS
-            if marker_platforms and not (marker_platforms & selected):
+            marker_platforms = {m.name for m in item.iter_markers()} & _APP_MARKERS
+            if marker_platforms and not (marker_platforms & _as_marks(selected)):
                 deselected.append(item)
                 continue
             # A test restricted to a client set this run did not select —
@@ -21460,7 +21963,7 @@ def pytest_collection_modifyitems(config, items):
                     set(first_seat_mark.args) if first_seat_mark else marker_platforms
                 )
                 if (real_second_apps and first_seat_allowed
-                        and not first_seat_apps <= first_seat_allowed):
+                        and not _as_marks(first_seat_apps) <= first_seat_allowed):
                     deselected.append(item)
                     continue
             params =_parametrized_clients(item)
@@ -21476,7 +21979,7 @@ def pytest_collection_modifyitems(config, items):
                 # on a `web` driver that has not lifted the feature yet. With no
                 # client markers the parametrization alone governs (supports all).
                 if (params & selected) and (
-                    not marker_platforms or (params & marker_platforms)
+                    not marker_platforms or (_as_marks(params) & marker_platforms)
                 ):
                     kept.append(item)
                 else:

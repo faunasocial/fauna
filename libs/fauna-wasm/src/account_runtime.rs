@@ -221,7 +221,9 @@ pub(crate) async fn start(
         .map_err(|e| JsValue::from_str(&format!("account runtime: device id: {e}")))?;
     let memberships: MembershipSource = {
         let fauna_mls = Arc::clone(&fauna_mls);
-        Arc::new(move || Some(fauna_mls.conv_channels().into_iter().map(|c| c.0).collect()))
+        MembershipSource::Engine(Arc::new(move || {
+            Some(fauna_mls.conv_channels().into_iter().map(|c| c.0).collect())
+        }))
     };
     let ledger_client = client.clone();
     let custody_client = client.clone();
@@ -294,6 +296,10 @@ pub(crate) async fn start(
         ));
     }
     tracing::info!("account runtime: started for this tab");
+    // The MLS sends queued while the runtime was not up (or by an earlier
+    // run of this tab) drain now that its outbox door answers (`devices.md`
+    // § Offline compose → *Drain*; `crate::offline_outbox`).
+    crate::offline_outbox::spawn_mls_drain();
     // The deployment-seed custody leg — one of its two edges;
     // `selfHealDeploymentSeedCustody` (the post-auth hook) is the other
     // (`crate::deployment_seed_custody`): runs now iff the hook already fired
@@ -583,16 +589,20 @@ impl fauna_client_core::succession_delivery::OwedNestReach for WebOwedReach {
 /// home nest → *Every nest the identity is linked to*, **The road**) — the
 /// native `fauna_client_account_runtime::native_owed_nest_deliverer`'s twin:
 /// the shared delivery body over [`WebOwedReach`], for whichever keeping nest
-/// the pass hands it.
+/// the pass hands it, with one park ledger per deliverer (an address that
+/// answered as another nest is dialed once per runtime).
 fn owed_nest_deliverer(
     seeds: fauna_account_plane::owed_delivery::PredecessorSeeds,
 ) -> fauna_account_plane::account_driver::OwedNestDeliverer<fauna_rpc_wasm::WsRpcClient> {
     let reach = std::rc::Rc::new(WebOwedReach { seeds });
+    let parked =
+        std::rc::Rc::new(fauna_client_core::succession_delivery::ParkedOwedNests::default());
     #[allow(clippy::arc_with_non_send_sync)] // wasm is single-threaded; the seam is `Arc` natively
     Arc::new(move |keeper: fauna_rpc_wasm::WsRpcClient| {
         let reach = std::rc::Rc::clone(&reach);
+        let parked = std::rc::Rc::clone(&parked);
         Box::pin(async move {
-            fauna_client_core::succession_delivery::deliver_owed_nests(&keeper, &*reach)
+            fauna_client_core::succession_delivery::deliver_owed_nests(&keeper, &*reach, &parked)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -1004,6 +1014,46 @@ pub fn account_device_set_state_json(device_id_hex: String) -> js_sys::Promise {
         Ok(JsValue::from_str(
             &serde_json::to_string(&view).unwrap_or_else(|_| r#"{"found":false}"#.into()),
         ))
+    })
+}
+
+/// e2e-only: the `folder_set_custody` command's body — which content-key
+/// generations this browser's folder custody holds for one shared set, as the
+/// JSON every hosting app answers: `{"found", "channel_id_hex",
+/// "generations": [{"version", "key_fp"}]}`, most-recent first, or
+/// `{"found": false, "error"}` when the custody is unreadable (no runtime
+/// included) — the succession journeys' cross-seat comparison
+/// (`succession-aftermath.md` § Re-key scope). The SAME body the native
+/// dispatchers run (`fauna_client_folders::custody::read_held_generations`,
+/// through `fauna_client_account_runtime::folder_set_custody_json`) over this
+/// tab's `PlaneFolderKeys`, never a twin. A refused selector rejects the
+/// promise (convention 11: a loud refusal, never "nothing held"). Gated like
+/// [`account_device_set_state_json`].
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = accountFolderSetCustodyJsonForTest, unchecked_return_type = "Promise<string>")]
+pub fn account_folder_set_custody_json(
+    set_name: Option<String>,
+    channel_id_hex: Option<String>,
+) -> js_sys::Promise {
+    use fauna_client_folders::custody::{SetCustodyReading, read_held_generations};
+    wasm_bindgen_futures::future_to_promise(async move {
+        let keys = fauna_account_seams::folder_keys::PlaneFolderKeys::new(handle);
+        let reading = read_held_generations(&keys, set_name.as_deref(), channel_id_hex.as_deref())
+            .await
+            .map_err(|why| JsValue::from_str(&format!("folder_set_custody {why}")))?;
+        let value = match reading {
+            SetCustodyReading::Held(held) => serde_json::json!({
+                "found": held.found,
+                "channel_id_hex": held.channel_id_hex,
+                "generations": held
+                    .generations
+                    .iter()
+                    .map(|g| serde_json::json!({ "version": g.version, "key_fp": g.key_fp }))
+                    .collect::<Vec<_>>(),
+            }),
+            SetCustodyReading::Unreadable(e) => serde_json::json!({ "found": false, "error": e }),
+        };
+        Ok(JsValue::from_str(&value.to_string()))
     })
 }
 

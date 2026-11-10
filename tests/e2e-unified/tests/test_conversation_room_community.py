@@ -25,7 +25,9 @@ founder's device keys the member in with no gesture of its own; a message
 crosses both ways, sealed; the home nest's search index finds it, answered
 to a member; and withdrawing the nest's read — one toggle and Save in the
 founder's room settings — empties that index, which is the members'
-standing choice working rather than an error.
+standing choice working rather than an error; and the founder's tap on the
+member's chip removes them through the room's own door — off the floor, the
+room's generation rotated past them.
 
 **Latency-independent by construction** (convention 14): every wait is a
 deadline poll over projected state (the room's ``awaiting_key`` and
@@ -43,6 +45,7 @@ from helpers.room_seats import (  # noqa: F401 — room_app/room_seat_pair are p
     MEMBERSHIP_BUDGET_S,
     MESSAGE_BUDGET_S,
     WELCOME_BUDGET_S,
+    index_of,
     room_app,
     room_seat_pair,
     seat_element,
@@ -69,6 +72,13 @@ pytestmark = [
     # toggle are all built in `apps/fauna-android/`; its device run is the
     # venue row's, the mark is the coverage contract.
     pytest.mark.android,
+    # web: the composer's home-nest toggle, the pending-invite withdraw, the
+    # nest-read toggle and the room's search strip are all painted in
+    # `apps/fauna-web/src/routes/conversations/+page.svelte`; founding and
+    # accepting need the tab's account runtime up (`community-rooms.md`,
+    # the founding entry of § Implementation status today), which the seat's
+    # sign-in brings.
+    pytest.mark.web,
 ]
 
 SEARCH_BUDGET_S = MESSAGE_BUDGET_S
@@ -349,6 +359,61 @@ def test_a_community_room_is_founded_joined_searched_and_its_read_withdrawn(
         f"seating, and the nest keeps its floor seat: {after.room!r}"
     )
 
+    # ── removing the member: the chip is the room.remove door ────────────
+    # A community seat is keyed by generation wraps, not an MLS add, so the
+    # chip's removal is the unseat THEN the rotation (`community-rooms.md`
+    # § Implementation status today → *A removal severs, because the client
+    # rotates*) — never the end-to-end class's Remove commit, which finds no
+    # leaf here. The rotation is read off the nest as the tip moving.
+    tip_before = _tip_generation(port, founder.actor, room_id)
+    assert tip_before is not None, "the founder holds the room's tip before the removal"
+    removing = wait_for(
+        "the member listed on the founder's thread",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None and member.actor_hex in t.participant_actor_ids,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: seat_story(founder),
+    )
+    conv.open_thread_by_id(removing.thread_id)
+    conv.remove_member(index_of(removing, member.actor_hex))
+    wait_for(
+        "the member leaving the room's floor",
+        lambda: _floor_principals(port, founder.actor, room_id),
+        lambda seats: seats is not None and member.actor_hex not in seats,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"error={founder.app.error_text()!r}\n{seat_story(founder)}\n"
+        f"{seat_log(founder, 'remove', 'room')}",
+    )
+    wait_for(
+        "the removal rotating the room's generation",
+        lambda: _tip_generation(port, founder.actor, room_id),
+        lambda tip: tip is not None and tip != tip_before,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"error={founder.app.error_text()!r}\n"
+        f"{seat_log(founder, 'remove', 'rotate', 'mint')}",
+    )
+    assert not founder.app.has_error(), (
+        f"the removal and its rotation both landed: {founder.app.error_text()!r}"
+    )
+
+
+def _floor_principals(port: int, reader: dict, room: str) -> list[str] | None:
+    """The live floor's principal hexes as ``reader`` reads them, or ``None``
+    on a refusal (worth polling through)."""
+    try:
+        return [m["principal"] for m in conv_api.room_list_roster(port, reader, room)["members"]]
+    except Exception:
+        return None
+
+
+def _tip_generation(port: int, reader: dict, room: str) -> str | None:
+    """The id of the room's tip generation wrapped to ``reader``, or ``None``."""
+    try:
+        gens = conv_api.room_generations(port, reader, room)
+    except Exception:
+        return None
+    return next((g["generation_id"] for g in gens if g.get("is_tip")), None)
+
 
 SEARCH_KIND = "fauna.conversations.room.search"
 FETCH_KIND = "fauna.conversations.channel.fetch"
@@ -480,3 +545,119 @@ def test_a_failed_room_search_shows_its_error_and_a_hit_not_yet_here_selects_onc
         f"{seat_element(member, 'dm-message-timestamp')}\n{seat_story(member)}",
     )
     assert not member.app.has_error(), member.app.error_text()
+
+
+PUBLISH_GENERATION_KIND = "fauna.conversations.room.publish_generation"
+
+
+def _severance_owed(port: int, reader: dict, room: str) -> bool | None:
+    """The floor's ``severance_owed`` answer as ``reader`` reads it — ``None``
+    on a refusal (worth polling through) and on a reply without the field."""
+    try:
+        return conv_api.room_list_roster(port, reader, room).get("severance_owed")
+    except Exception:
+        return None
+
+
+@pytest.mark.feature("group-conversations")
+@pytest.mark.requires_surface("community-room-rekey-retry")
+def test_a_removal_whose_rekey_fails_says_so_and_the_next_pass_completes_it(
+    room_seat_pair, nest_instance
+):
+    """Outcome 37's retry arm (``docs/features/group-conversations.md``): a
+    re-key that fails says so, and the next owner's or admin's app to look
+    completes it without being asked (``community-rooms.md`` § Implementation
+    status today → *A removal severs*, the retry paragraph).
+
+    The home nest refuses the founder's mint (the test hook's refusal — the
+    reply a failing door gives the app), so the chip's removal lands its
+    unseat and not its rotation: the member's chip stays gone (they ARE off
+    the floor) and ``error-message`` carries the residue's own sentence, never
+    "Could not remove them". The floor answers ``severance_owed``. With the
+    refusal lifted, the founder's own tend pass — no gesture — mints past the
+    unseated entry: the tip moves and the floor answers ``severance_owed =
+    false``, which the nest computes as "the tip no longer wraps to the
+    removed entry", i.e. the removed member reads nothing new.
+
+    Every mutation is a gesture (convention 8); every wait is a deadline poll
+    on the nest's own floor and tip or on painted state (convention 14)."""
+    from helpers.room_seats import found_community_room
+    from helpers.rpc_hold import refuse_rpc, release_rpc_hold, wait_for_refused_rpc
+    from i18n.strings import S
+
+    founder, member = room_seat_pair
+    port = nest_instance["port"]
+    room_id, _founder_thread, _member_thread = found_community_room(
+        founder, member, f"hello {secrets.token_hex(4)}"
+    )
+    conv = founder.app.conversations
+    tip_before = _tip_generation(port, founder.actor, room_id)
+    assert tip_before is not None, "the founder holds the room's tip before the removal"
+    assert _severance_owed(port, founder.actor, room_id) is False, (
+        "a keyed room with nobody unseated owes nothing"
+    )
+    removing = wait_for(
+        "the member listed on the founder's thread",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None and member.actor_hex in t.participant_actor_ids,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: seat_story(founder),
+    )
+
+    # ── the unseat lands, the re-key is refused ──────────────────────────
+    marker = "⁣"
+    residue_tail = S.conversations.unified.error_remove_participant_unsevered(
+        name=marker
+    ).split(marker, 1)[1]
+    refuse_rpc(port, PUBLISH_GENERATION_KIND)
+    try:
+        conv.open_thread_by_id(removing.thread_id)
+        conv.remove_member(index_of(removing, member.actor_hex))
+        wait_for_refused_rpc(port, PUBLISH_GENERATION_KIND)
+        wait_for(
+            "the member leaving the room's floor",
+            lambda: _floor_principals(port, founder.actor, room_id),
+            lambda seats: seats is not None and member.actor_hex not in seats,
+            MEMBERSHIP_BUDGET_S,
+            diagnose=lambda: f"error={founder.app.error_text()!r}\n{seat_story(founder)}",
+        )
+        shown = wait_for(
+            "the residue's own sentence on the founder's error-message",
+            founder.app.error_text,
+            lambda text: residue_tail in (text or ""),
+            MEMBERSHIP_BUDGET_S,
+            diagnose=lambda: f"{seat_story(founder)}\n{seat_log(founder, 'remove', 'rotate')}",
+        )
+        assert "Could not remove" not in shown, (
+            f"the removal happened — it must not read as a failed one: {shown!r}"
+        )
+        after = thread_by_channel(founder.app, room_id)
+        assert after is not None and member.actor_hex not in after.participant_actor_ids, (
+            "the chip stays gone — the member IS off the floor: "
+            f"{after.participant_actor_ids if after else None!r}"
+        )
+        assert _tip_generation(port, founder.actor, room_id) == tip_before, (
+            "precondition: the refused mint left the tip where it was"
+        )
+        assert _severance_owed(port, founder.actor, room_id) is True, (
+            "the floor names the debt while the tip still wraps to the removed entry"
+        )
+    finally:
+        release_rpc_hold(port, PUBLISH_GENERATION_KIND)
+
+    # ── the founder's next tend pass completes it, with no gesture ───────
+    wait_for(
+        "the founder's tend pass re-keying the room past the removed member",
+        lambda: _severance_owed(port, founder.actor, room_id),
+        lambda owed: owed is False,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"tip={_tip_generation(port, founder.actor, room_id)!r}\n"
+        f"{seat_story(founder)}\n{seat_log(founder, 'severance', 'tend', 'rotate', 'mint')}",
+    )
+    tip_after = _tip_generation(port, founder.actor, room_id)
+    assert tip_after is not None and tip_after != tip_before, (
+        f"the pass minted a fresh generation: {tip_before!r} → {tip_after!r}"
+    )
+    assert member.actor_hex not in (_floor_principals(port, founder.actor, room_id) or []), (
+        "and the removal stood throughout — nothing re-seated the member"
+    )

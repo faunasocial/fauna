@@ -222,6 +222,9 @@ pub struct MailArrival {
     pub uid: u32,
     pub has_seen_flag: bool,
     pub warmup_hold: Option<crate::backend::MailWarmupHold>,
+    /// What the record's feed flags and scores said for the spam catch-up
+    /// ([`crate::backend::InboundMailRecord::spam`]).
+    pub spam: crate::backend::MailSpamFacts,
 }
 
 /// What an inbound message parsed to beyond what its [`MessageSnapshot`]
@@ -391,6 +394,17 @@ impl ThreadStore {
         out.into_iter().map(|(_, row)| row).collect()
     }
 
+    /// Every thread of `rail` with its participants. Clones no messages.
+    pub fn threads_on_rail(&self, rail: Rail) -> Vec<(ThreadId, Vec<TypedAddress>)> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .threads
+            .values()
+            .filter(|d| d.rail == rail)
+            .map(|d| (d.thread_id.clone(), d.participants.clone()))
+            .collect()
+    }
+
     /// The user has thread `id` open (or said so): nothing in it is unread any
     /// more. Whether that changed anything — so a caller on the notify path can
     /// tell a read from a no-op.
@@ -504,6 +518,11 @@ impl ThreadStore {
             .collect();
         uids.sort_unstable();
         uids
+    }
+
+    /// The message this run holds under `INBOX` UID `uid`, if any.
+    pub fn inbox_message(&self, uid: u32) -> Option<MessageId> {
+        self.inner.read().unwrap().by_inbox_uid.get(&uid).cloned()
     }
 
     /// Apply one delivered `\Seen` state to the held `INBOX` message at `uid`
@@ -1288,6 +1307,13 @@ impl ThreadStore {
         let thread_id = inner.by_message.remove(msg_id)?;
         inner.inbound_parse.remove(msg_id);
         inner.forget_inbox_uid(msg_id);
+        // A message that left is no longer unread news either.
+        if let Some(ids) = inner.unread.get_mut(&thread_id) {
+            ids.remove(msg_id);
+            if ids.is_empty() {
+                inner.unread.remove(&thread_id);
+            }
+        }
         let detail = inner.threads.get_mut(&thread_id)?;
         detail.messages.retain(|m| &m.message_id != msg_id);
         if detail.selected_message_id.as_ref() == Some(msg_id) {
@@ -1594,6 +1620,7 @@ mod tests {
 
     fn msg(id: &str, body: &str) -> MessageSnapshot {
         MessageSnapshot {
+            queued_send: None,
             message_id: MessageId(id.to_string()),
             sender: email("alice@example.com"),
             sender_display: String::new(),
@@ -1611,6 +1638,7 @@ mod tests {
             labels: vec![],
             plane_ref: None,
             can_delete: false,
+            can_remove: false,
             undelivered: false,
             warmup_hold: None,
             scan_result_lines: Vec::new(),

@@ -1639,8 +1639,10 @@ class DeviceSeatDriver:
     :attr:`path`, binds no folder and hosts no agent, so :meth:`peer_files` is
     always ``None`` — "I cannot look", never an empty reading — and
     :attr:`carries_peer_leg` is False. A journey reads that attribute to leave
-    out the assertions that belong to the same-account peer leg (the outcomes
-    a phone is excused from), never the app name.
+    out the assertions that read the agent's plane (an admitted sibling, the
+    file bodies a sibling served), never the app name. A phone's app still
+    runs the account plane's peer leg in-process (``fauna-ffi``'s account
+    runtime); a journey witnesses that leg on the phone's own screen.
 
     The device is still a full member of the account: the app hosts the account
     runtime in-process, whose pump folds a sibling's pending request on this

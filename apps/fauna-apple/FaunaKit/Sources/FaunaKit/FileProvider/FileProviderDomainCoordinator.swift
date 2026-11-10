@@ -498,6 +498,13 @@ import Foundation
                 }
             }
             await refreshOSEnableNotices(actorHex: actorHex, boundSets: boundSets) { sets }
+            // The presence reconcile re-reads every presented set's park
+            // (`file-sync.md` § Multi-writer shared sets → *Revocation on a
+            // capability host*), with the page's last `reader` readings.
+            await refreshParks(
+                actorHex: actorHex, boundSets: boundSets,
+                readerFolderIds: await FileProviderParks.shared.readerFolderIds
+            ) { sets }
         }
 
         /// Bound-folder pickup: remove one set's FP domain (by its bare

@@ -65,6 +65,7 @@ from helpers.folder_content import (
     bind_location_under_set as _bind_location_under_set,
 )
 from helpers.macos_firewall import seat_firewall_note
+from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -704,6 +705,343 @@ def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
             start_nest_in_place(nest)
 
     _await_member_page_clean_after_restart(member_app)
+
+
+# ── The transfer rows' own readings (share-a-folder outcomes 27–29) ──────────
+#
+# `p2p-shared-set.md` § The transfer row of a pull that failed, § Wormability
+# walk (rule 8, the per-operation cap) and § A departed member's cached
+# endpoint: what a `share-transfer-item` row SAYS, as against whether a file
+# arrived (the journeys above). Every reading is the shared
+# `share_glue::transfer_state_label`, compared against `S.folders`, never a
+# literal.
+
+
+def _transfer_rows(driver) -> list[dict[str, str]]:
+    """Every `share-transfer-item` row on the page, each read scoped to itself:
+    its name (`folder — who`), its progress and its state."""
+    rows = []
+    for k in range(driver.count("share-transfer-item")):
+        scope = f"share-transfer-item[{k}]"
+        row = {}
+        for key, element_id in (
+            ("name", "share-transfer-name"),
+            ("progress", "share-transfer-progress"),
+            ("state", "share-transfer-state"),
+        ):
+            try:
+                row[key] = driver.get_text(element_id, scope=scope) or ""
+            except LookupError:
+                # The row repainted between the count and this read (each pass
+                # replaces the cell wholesale): a poll tick, never a fail.
+                row[key] = ""
+        rows.append(row)
+    return rows
+
+
+def _rows_for(driver, set_name: str) -> list[dict[str, str]]:
+    return [r for r in _transfer_rows(driver) if set_name in r["name"]]
+
+
+def _p2p_share_limits_row(settings) -> int:
+    """The Feature limits row index of `p2p-share`, found by its name rather
+    than by its place in the registry."""
+    for index in range(8):
+        try:
+            if settings.feature_limit_row(index)["name"] == S.features.name_p2p_share:
+                return index
+        except LookupError:
+            break
+    raise AssertionError(
+        "the Feature limits section lists no p2p-share row, so no per-file cap "
+        "can be set on it from the app"
+    )
+
+
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    _share_plane_seat_pairs(),
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# Documented-long (point 9): the step 1–3 ground above plus one failed dial.
+@pytest.mark.timeout(1800)
+@pytest.mark.feature("share-a-folder")
+def test_a_pull_from_a_device_that_went_away_keeps_its_row_and_says_why(
+    request, folder_share_owner_app, folder_share_recipient_app, tmp_path
+):
+    """share-a-folder outcome 27: the folder's sync status shows each transfer
+    with its progress, and a pull that failed KEEPS its row, reading *Could not
+    reach their device* or *Connection lost; retrying* (`p2p-shared-set.md`
+    § The transfer row of a pull that failed).
+
+    The barrier leaves the member with a row for the owner's device whose
+    progress moved something. The owner then quits the app — the device going
+    away is a state, not a race (convention 14): every later pass of the
+    member's pump dials an address nothing answers at, and the ruling says that
+    pass still yields the row. Which of the two failure readings appears
+    depends on how far the cut pull got, so either is the outcome.
+    """
+    owner_app, member_app, _nest, _owner_folder, _member_folder, set_name = (
+        _share_and_reach_peer_barrier(
+            request, folder_share_owner_app, folder_share_recipient_app, tmp_path
+        )
+    )
+    md = member_app.driver
+    member_app.backups.navigate_folders()
+
+    before = wait_until(
+        lambda: _rows_for(md, set_name) or None,
+        _PEER_BARRIER_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"[member] no transfer row names the folder {set_name!r} after the "
+            f"barrier; rows={_transfer_rows(md)!r}; {_transfer_surface_readout(md)}"
+        ),
+    )
+    names = {r["name"] for r in before}
+    assert all(r["progress"] for r in before), (
+        f"[member] every transfer row carries its progress reading: {before!r}"
+    )
+
+    # The owner's device goes away. The fixture's own driver stops the app (the
+    # user quitting it); its teardown afterwards finds the app already gone.
+    owner_app.driver.quit_app()
+
+    failure_readings = {
+        S.folders.share_transfer_state_unreachable,
+        S.folders.share_transfer_state_interrupted,
+    }
+
+    def _failed_row():
+        for row in _transfer_rows(md):
+            if row["name"] in names and row["state"] in failure_readings:
+                return row
+        return None
+
+    row = wait_until(
+        _failed_row,
+        _PEER_TRANSFER_S,
+        interval=1.0,
+        diagnose=lambda: (
+            "[member] with the owner's app quit, no row for the owner's device "
+            f"read {sorted(failure_readings)!r}: the rows were {_transfer_rows(md)!r} "
+            f"(before the quit: {before!r}). A row that VANISHED is the failure "
+            "the ruling removed (a failed pull yielding no outcome); a row still "
+            "reading Receiving/Up to date means the member never dialed again. "
+            f"{_transfer_surface_readout(md)}; error={member_app.error_text()!r}\n"
+            + _agent_diagnosis(member_app, "member")
+        ),
+    )
+    assert row["progress"], (
+        f"[member] the failed pull's row keeps its progress reading (this pass's "
+        f"counts): {row!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    _share_plane_seat_pairs(),
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# Documented-long (point 9): the step 1–3 ground above, a limit authored in
+# Settings, one capped peer pull and one nest-mediated hydration.
+@pytest.mark.timeout(1800)
+@pytest.mark.feature("share-a-folder")
+def test_a_file_over_the_per_file_cap_arrives_through_the_nest_and_its_row_says_limited(
+    request, folder_share_owner_app, folder_share_recipient_app, tmp_path
+):
+    """share-a-folder outcome 28: a file over the direct-transfer size cap
+    arrives through the nest instead, and its transfer row says it was limited
+    (`p2p-shared-set.md` § Wormability walk, rule 8: the per-operation cap is
+    put to each FILE, a capped file is a permanent spool miss, "the file
+    reaches this device by the nest path, and the surface reads 'limited by'
+    the cap's tier").
+
+    1. the member sets their OWN per-file cap on Peer transfers to 1 KB, in
+       Settings' Feature limits editor (convention 8 — the self tier, the
+       limit's source the row will name);
+    2. the nest holds every `fauna.sync.changes.list`, so the member's agent
+       cannot fetch the new row and the peer pull is the first to meet it —
+       without the hold the two paths race, and a row the nest path delivered
+       first is never planned peer-side, so it is never capped;
+    3. the owner adds a 16 KB file;
+    4. the member's row reads "Limited by Your own setting" while the file is
+       still absent from the member's folder (kept off the peer leg);
+    5. the hold lifts and the file arrives through the nest.
+
+    The limited reading belongs to the pass that capped the file (the cursor
+    then moves past its row), so step 4 polls fast enough to read one whole
+    pump pass; a loaded box makes a pass longer, never shorter.
+    """
+    from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, rpc_hold_status
+
+    owner_app, member_app, nest, owner_folder, member_folder, set_name = (
+        _share_and_reach_peer_barrier(
+            request, folder_share_owner_app, folder_share_recipient_app, tmp_path
+        )
+    )
+    md = member_app.driver
+    settings = member_app.settings
+    editor = member_app.feature_policy_editor
+
+    # ── 1. the member's own per-file cap, through the app ──
+    settings._navigate_subpage("status")
+    settings.wait_for_feature_limits()
+    p2p_row = _p2p_share_limits_row(settings)
+    settings.open_own_feature_limit_editor(p2p_row)
+    editor.wait_open()
+    cap_cells = [
+        i for i in range(editor.cell_count())
+        if editor.cell(i)["label"] == S.features.editor_per_operation_bytes
+    ]
+    assert len(cap_cells) == 1, (
+        "the self-limits editor for Peer transfers carries exactly one "
+        f"per-file cap cell; cells={[editor.cell(i) for i in range(editor.cell_count())]!r}"
+    )
+    editor.set_cell(cap_cells[0], "1 KB")
+    editor.save()
+    assert editor.wait_for_status(S.features.editor_saved) == S.features.editor_saved, (
+        f"[member] the cap never saved: status={editor.status()!r} "
+        f"error={member_app.error_text()!r}"
+    )
+    editor.close_if_open()
+    member_app.backups.navigate_folders()
+
+    kind = "fauna.sync.changes.list"
+    big = f"over-cap-{secrets.token_hex(3)}.bin"
+    payload = ("over the cap — " + secrets.token_hex(8) + "\n") * 512  # ~16 KB
+    expected_state = S.folders.share_transfer_state_limited(source=S.features.tier_self)
+    try:
+        # ── 2–3. hold the nest path, then the owner adds the big file ──
+        arm_rpc_hold(nest["port"], kind)
+        _atomic_write(owner_folder / big, payload)
+
+        # ── 4. the member's row says limited; the file is not here yet ──
+        def _limited_row():
+            for row in _rows_for(md, set_name):
+                if row["state"] == expected_state:
+                    return row
+            return None
+
+        wait_until(
+            _limited_row,
+            _PEER_TRANSFER_S,
+            interval=0.25,
+            diagnose=lambda: (
+                f"[member] no transfer row for {set_name!r} read {expected_state!r} "
+                f"after the owner added a {len(payload)}-byte file over the 1 KB "
+                f"cap; rows={_transfer_rows(md)!r}; member has the file: "
+                f"{_read_or_none(member_folder / big) is not None}. A file that "
+                "ARRIVED with no limited reading crossed the peer leg uncapped "
+                "(the pass read a policy without the cap, or the cap is not put "
+                "to each file); no arrival and no reading means no pass planned "
+                f"it (a relayed path defers bodies before the gate). nest hold: "
+                f"{rpc_hold_status(nest['port'], kind)!r}; "
+                f"error={member_app.error_text()!r}\n"
+                + _agent_diagnosis(member_app, "member")
+            ),
+        )
+        assert _read_or_none(member_folder / big) is None, (
+            "[member] the over-cap file is already here while the nest path is "
+            "held — it crossed the peer leg the cap should have kept it off"
+        )
+    finally:
+        release_rpc_hold(nest["port"], kind)
+
+    # ── 5. the file arrives through the nest ──
+    wait_until(
+        lambda: _read_or_none(member_folder / big) == payload,
+        _NEST_HYDRATION_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"[member] {big} never arrived through the nest after the hold "
+            "lifted — a capped file must still reach the device by the nest "
+            f"path; error={member_app.error_text()!r}\n"
+            + _agent_diagnosis(member_app, "member")
+            + "\n"
+            + _agent_diagnosis(owner_app, "owner")
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    _share_plane_seat_pairs(),
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# Documented-long (point 9): the step 1–3 ground above plus one removal.
+@pytest.mark.timeout(1800)
+@pytest.mark.feature("share-a-folder")
+def test_a_removed_member_drops_off_the_owners_transfer_list(
+    request, folder_share_owner_app, folder_share_recipient_app, tmp_path
+):
+    """share-a-folder outcome 29: a member who left or was removed drops off
+    the transfer list, and their devices are no longer contacted
+    (`p2p-shared-set.md` § A departed member's cached endpoint, ruling 1: the
+    set's roster decides what is dialed, at the dial-target read, so "the
+    transfer surface drops the row at the first pass after the roster change,
+    by construction").
+
+    The member is a writer whose seat advertises, so the owner's own pump
+    pulls from them and the owner's list carries a row for this folder and
+    the member's device. The owner removes the member through the folder's
+    own controls (convention 8 — the Remove commit lives in the owner's
+    engine); from the next pass the owner dials nobody for this folder, so
+    no row for it remains. The removed member's app stays running: a row that
+    lingered "Could not reach their device" would be the pre-ruling defect.
+    """
+    owner_app, member_app, _nest, _owner_folder, _member_folder, set_name = (
+        _share_and_reach_peer_barrier(
+            request, folder_share_owner_app, folder_share_recipient_app, tmp_path
+        )
+    )
+    od = owner_app.driver
+    ob = owner_app.backups
+    ob.navigate_folders()
+
+    wait_until(
+        lambda: _rows_for(od, set_name) or None,
+        _PEER_BARRIER_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"[owner] the owner's list never carried a row for {set_name!r} — "
+            "the owner never dialed the member's device, so the removal below "
+            "could not be read off the list. The member's seat advertises once "
+            "bound as a writer; check the owner's sink. "
+            f"rows={_transfer_rows(od)!r}; {_transfer_surface_readout(od)}\n"
+            + share_ingest_reading(od, "owner")
+            + "\n"
+            + _agent_diagnosis(owner_app, "owner")
+        ),
+    )
+
+    owner_row = ob.find_and_expand_folder(set_name)
+    ob.remove_shared_member(0, row=owner_row)
+    wait_until(
+        lambda: ob.shared_member_count() == 0,
+        60,
+        interval=0.5,
+        diagnose=lambda: (
+            f"[owner] the removal never landed; error={owner_app.error_text()!r}"
+        ),
+    )
+
+    ob.navigate_folders()
+    wait_until(
+        lambda: not _rows_for(od, set_name),
+        _PEER_TRANSFER_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"[owner] the removed member's row for {set_name!r} is still on the "
+            f"owner's transfer list: {_rows_for(od, set_name)!r}. The roster no "
+            "longer lists them, so the dial-target read must skip their cached "
+            f"endpoint; error={owner_app.error_text()!r}\n"
+            + _agent_diagnosis(owner_app, "owner")
+        ),
+    )
 
 
 #: Apps whose seat carries the share probe (`offline_share_probe_set`, one

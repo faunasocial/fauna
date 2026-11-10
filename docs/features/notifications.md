@@ -14,7 +14,7 @@ read.
 
 ## Coverage contract
 
-Stamped 2026-09-24 at 89bb22083d.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] The list loads and mark-all-read clears the unread count — `docs/goal/behavior/notifications.md` § User actions
    - `tests/e2e-unified/tests/test_notifications.py::test_navigate_to_notifications`
@@ -63,19 +63,27 @@ Stamped 2026-09-24 at 89bb22083d.
 12. [app] You can dismiss one notification or clear the whole list, a security notice staying for its first fourteen days; a contact request you turn away takes its notification with it — `docs/goal/behavior/notifications.md` § Retention (ratified 2026-09-24)
    - `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismiss_deletes_one_row_and_clear_all_deletes_the_rest`
    - `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismissing_a_knock_takes_its_doorbell_row_with_it`
+13. [app] A notification about someone in your contacts names them by their name or handle, never by an identifier — `docs/goal/behavior/value-formatting.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_contacts_accept_opens_conversation.py::test_accepting_a_contact_request_lets_you_start_the_conversation`
+14. [app] A security notice is never hidden by a muted word — `docs/goal/behavior/notifications.md` § Muted words (ratified 2026-10-09)
+   - `tests/e2e-unified/tests/test_notifications_muted.py::test_a_muted_word_collapses_the_notification_rows_that_carry_it`
+15. [app] A knock from a stranger shows one notice in your language, and a flood of them replaces that notice rather than piling up — `docs/goal/behavior/notifications.md` § Localized body (ratified 2026-09-20)
+   - `tests/e2e-unified/tests/test_notifications_knock_toast.py::test_a_flood_of_knocks_raises_one_localized_notice`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+88622a93 standalone |
-| linux | ✅ full | 0.1.5-dev+5a9a5fa8 standalone |
+| web | ⚠ partial | 0.1.5-dev+88622a93 standalone |
+| linux | ⚠ partial | 0.1.5-dev+5a9a5fa8 standalone |
 | windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -114,4 +122,7 @@ Stamped 2026-09-24 at 89bb22083d.
 | 11 | app | `tests/e2e-unified/tests/test_notifications_localized_body.py::test_a_row_paints_its_localized_body_and_an_unknown_key_paints_the_summary` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismiss_deletes_one_row_and_clear_all_deletes_the_rest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismissing_a_knock_takes_its_doorbell_row_with_it` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_contacts_accept_opens_conversation.py::test_accepting_a_contact_request_lets_you_start_the_conversation` | tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_notifications_muted.py::test_a_muted_word_collapses_the_notification_rows_that_carry_it` | web (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_notifications_knock_toast.py::test_a_flood_of_knocks_raises_one_localized_notice` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

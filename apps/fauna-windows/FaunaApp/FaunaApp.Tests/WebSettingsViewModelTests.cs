@@ -32,7 +32,11 @@ internal sealed class FakeWebClient : FfiWebClientFakeBase
     public readonly List<byte[]> PublishUnsetRequests = new();
     public readonly List<string> PaywallMintRequests = new();
 
-    public override Task<bool> GetSubdomainEnabled() => Task.FromResult(SubdomainState);
+    /// <summary>Set to model a nest that refuses the subdomain read — a failed page load.</summary>
+    public Exception? GetSubdomainFailure;
+
+    public override Task<bool> GetSubdomainEnabled() =>
+        GetSubdomainFailure is { } failure ? Task.FromException<bool>(failure) : Task.FromResult(SubdomainState);
 
     public override Task<bool> SetSubdomainEnabled(bool @enabled)
     {
@@ -124,6 +128,32 @@ public class WebSettingsViewModelTests
         // The live URL comes from the shared fauna_core::web::subdomain_url projection
         // (real native FfiMethods call) — never re-derived in C#.
         Assert.Contains("alice.example.test", vm.SubdomainUrlText);
+    }
+
+    [Fact]
+    public async Task Subdomain_toggle_is_live_only_once_the_page_has_hydrated()
+    {
+        // ui/README.md rule 1: a frame drawn before the nest is read claims nothing.
+        // A flip made before the nest-confirmed view is in would be dropped without a
+        // word; painted disabled, the automation layer refuses it loudly (tui's
+        // `.enabled(view.is_some())`, apple's `.disabled(!webPublish.isHydrated)`).
+        var web = new FakeWebClient { SubdomainState = false };
+        var vm = new WebSettingsViewModel(web, "alice");
+        Assert.False(vm.SubdomainToggleEnabled); // the pre-hydrate frame
+
+        await vm.LoadAsync();
+        Assert.True(vm.SubdomainToggleEnabled);
+    }
+
+    [Fact]
+    public async Task Subdomain_toggle_stays_disabled_after_a_failed_load()
+    {
+        var web = new FakeWebClient { GetSubdomainFailure = new InvalidOperationException("nest refused the read") };
+        var vm = new WebSettingsViewModel(web, "alice");
+
+        await vm.LoadAsync();
+        Assert.NotNull(vm.Error); // the failure is said…
+        Assert.False(vm.SubdomainToggleEnabled); // …and no unread toggle goes live
     }
 
     // ── Published-posts management section (web-content-hosting.md

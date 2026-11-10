@@ -771,19 +771,20 @@ pub fn recover_signed_actor(
 /// The reader's whole check of one served row (ruling (3)), after class
 /// routing: signed, the statement rebuilt under the reader's `set_nonce`
 /// verifies with a `SyncWrite` chain as the actor [`recover_signed_actor`]
-/// finds, and that **signed** actor is a writer (`is_writer` — the set's owner,
-/// or a `writer`-access member per the reader's roster read; fail-closed when
-/// no roster was ever read). A reader that must also place a retired identity
-/// under its successor resolves the signed actor itself
-/// (`sync_row_verify::RowReader`).
+/// finds, and that **signed** actor is a writer of record (`is_writer_of_record`
+/// — the set's owner, or a current or former `writer` per the reader's roster
+/// read, `writer-signed-change-records.md` ruling (12)(d): an ADMISSION
+/// question, never the standing one; fail-closed when no roster was ever
+/// read). A reader that must also place a retired identity under its successor
+/// resolves the signed actor itself (`sync_row_verify::RowReader`).
 pub fn verify_row(
     row: &SyncChange,
     set_nonce: [u8; SET_NONCE_LEN],
     certs: &SignerCertCache,
-    is_writer: impl FnOnce(&[u8; 32]) -> bool,
+    is_writer_of_record: impl FnOnce(&[u8; 32]) -> bool,
 ) -> Result<AuthoringOrigin, ChangeVerifyError> {
     let signed = recover_signed_actor(row, set_nonce, certs)?;
-    if !is_writer(&signed.signed_as) {
+    if !is_writer_of_record(&signed.signed_as) {
         return Err(ChangeVerifyError::NotAWriter);
     }
     Ok(signed.origin)

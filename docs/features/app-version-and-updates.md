@@ -45,14 +45,16 @@ Stamped 2026-09-26 at dc54d3d61e.
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+67f8b249 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_settings_shows_the_version_you_are_running` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_asking_for_a_newer_version_says_so_and_where_to_get_it` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed, tui (macos): passed |
-| 2 | app | absent by design on web, ios, android | — |
+| 2 | app | absent by design on web, ios, android, android-kids, ios-kids | — |
 | 3 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_signing_in_looks_once_and_only_tells_you` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed, tui (macos): passed |
-| 3 | app | absent by design on web, ios, android | — |
+| 3 | app | absent by design on web, ios, android, android-kids, ios-kids | — |
 | 4 | app | `tests/e2e-unified/tests/test_app_version_and_updates.py::test_a_newer_version_is_only_announced_never_fetched_or_installed` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed, tui (macos): passed |
-| 4 | app | absent by design on web, ios, android | — |
+| 4 | app | absent by design on web, ios, android, android-kids, ios-kids | — |
 <!-- features-render:end -->

@@ -24,9 +24,13 @@
 //!   contract*; the family was reserved at W2). A folder scope is a SHARED
 //!   plane: the wide own-account verdict forms never admit it (see
 //!   [`AdmittedScopes::admits`]) — its admission doors are the explicit
-//!   `Named` list (the M2-membership witness's product) only. T17's
-//!   materialization-grant scope will take its own family tag too — neither
-//!   ever lands under `content`.
+//!   `Named` list (the M2-membership witness's product) only, and it never
+//!   lands under `content`. The materialization grant (T17, designed
+//!   2026-11-08) mints NO family tag here: what a nest may keep readable is
+//!   grant-plane data — a keyless `materialize` tuple beside the kind's read
+//!   tuple (`encryption-at-rest.md` § Capability tiering → *The
+//!   materialization grant*) — and this grammar names only what a replica
+//!   syncs.
 //! - `group:<scope-id-hex>` — a **storage group** scope under the T20
 //!   recipient-set scheme, one per group, named by the content-derived scope
 //!   id its birth record commits to (`fauna_core::group_scope`), as exactly

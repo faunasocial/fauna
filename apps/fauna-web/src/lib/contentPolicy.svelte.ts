@@ -16,14 +16,22 @@
 import {
   contentRenderVerdict,
   contentRenderForItem,
+  reportedShowAgain,
   probabilityToPerMille,
   type ContentLabelEntry,
   type ContentPolicyValue,
   type ContentRenderVerdict,
   type ContentRender,
   type RegionItem,
+  type ShowAgain,
 } from '#lib/wasm';
-import { familyStatus, spamGetPreferences, loadHiddenContent } from '#lib/rpc';
+import {
+  familyStatus,
+  spamGetPreferences,
+  loadHiddenContent,
+  loadSpamMarked,
+  unhideReported,
+} from '#lib/rpc';
 import { regionRender } from '#lib/region.svelte';
 import { registerActorScopedReset } from '#lib/actorScope';
 import { openRuleEditorForGuardian } from '#lib/wasm';
@@ -52,6 +60,23 @@ let hiddenContent = $state<string[]>([]);
  *  the load, resolved to). */
 export function setHiddenContent(ids: string[]): void {
   hiddenContent = ids;
+}
+
+// The post ids the viewer marked as spam (`fauna.state.moderation`'s
+// `spam_marked`, `report-sharing.md` § Report capture → *The post's
+// mark-as-spam verb*). The render reads it through the shared `FeedManager`'s
+// fold (`setSpamMarked`, which `#lib/feed-post-host` hands it), never here.
+let spamMarked = $state<string[]>([]);
+
+/** Cache the viewer's spam marks (the stored list a mark, or the load,
+ *  resolved to). */
+export function setSpamMarked(ids: string[]): void {
+  spamMarked = ids;
+}
+
+/** The viewer's spam marks — a reactive read. */
+export function spamMarkedIds(): string[] {
+  return spamMarked;
 }
 
 /** Move the guardian half — the floor + the Guardian Notify knob — to what a
@@ -109,6 +134,11 @@ export async function hydrateContentPolicy(secretHex: string): Promise<void> {
   void loadHiddenContent(secretHex)
     .then(setHiddenContent)
     .catch(() => {});
+  // Its sibling on the same record, the post spam marks — the same not-awaited,
+  // best-effort read.
+  void loadSpamMarked(secretHex)
+    .then(setSpamMarked)
+    .catch(() => {});
 }
 
 /** The content-policy render verdict for a piece of content, keyed on its
@@ -145,6 +175,30 @@ export function contentRender(labels: ContentLabelEntry[] | undefined, item: Reg
   }
   const composed = regionRender(labels ?? [], wardContentPolicy, ownSpamPermille, ownPhishingPermille, item);
   return composed ?? { verdict: contentVerdict(labels), placeholder: null };
+}
+
+/** The show-again control for an item `contentRender` painted as the viewer's
+ *  own report (`moderation.md` § Corollary — the reporter's hide is theirs to
+ *  undo): the hidden ids one press removes and the label naming the scope,
+ *  decided by the shared `show_again_for_item` over the same keys the render
+ *  matched — or `null` when nothing of the viewer's matched. A reactive read. */
+export function showAgainFor(item: RegionItem): ShowAgain | null {
+  const reportId = item.reportIdHex ?? item.contentIdHex;
+  if (hiddenContent.length === 0 || !reportId) return null;
+  return reportedShowAgain(hiddenContent, reportId, item.reportAuthorHex ?? item.authorHex ?? null);
+}
+
+/** The show-again press: one `unhideReported` per matched id, the stored list
+ *  the last returns put into the render state, so the item paints again here
+ *  and — through the record's tombstones — on the user's other devices. The
+ *  report itself is never withdrawn. A failure rejects; the surface paints it
+ *  on its page's `error-message`. */
+export async function showAgain(secretHex: string, ids: string[]): Promise<void> {
+  let stored: string[] | null = null;
+  for (const id of ids) {
+    stored = await unhideReported(secretHex, id);
+  }
+  if (stored !== null) setHiddenContent(stored);
 }
 
 /** The guardian's own reason, verbatim, when a rule of the guardian's document

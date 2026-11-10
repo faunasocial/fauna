@@ -21,6 +21,7 @@ AUTH_HANDSHAKE_V2 = b"fauna.auth.handshake.v2\0"
 AUTH_VERIFY_V2 = b"fauna.auth.verify.v2\0"
 DEVICE_HANDSHAKE_V2 = b"fauna.device-auth.handshake.v2\0"
 DEVICE_BIND_V1 = b"fauna.device-auth.bind.v1\0"
+CUSTODY_HANDSHAKE_V2 = b"fauna.custody.handshake.v2\0"
 # The nest's own channel-binding context (deployment key) — what a login signer
 # verifies BEFORE signing, to learn the identity it binds (``login.md``
 # § Binding the nest; ``nest_identity.read_nest_identity``).
@@ -84,6 +85,19 @@ def device_bind_signed_message(
     return domain_separated(
         DEVICE_BIND_V1,
         actor_id + device_key + struct.pack(">Q", timestamp_ms) + nest_id + nonce,
+    )
+
+
+def custody_handshake_signed_message(
+    owner_actor_id: bytes, custodian_key: bytes, timestamp_ms: int, nest_id: bytes, nonce: bytes
+) -> bytes:
+    """``fauna.auth.custody_handshake`` — a custodian's mint (twin of
+    ``auth::custody_handshake_signed_message``): ``owner_actor_id ‖
+    custodian_key ‖ timestamp_be ‖ nest_id ‖ nonce``, signed by the CUSTODIAN
+    key."""
+    return domain_separated(
+        CUSTODY_HANDSHAKE_V2,
+        owner_actor_id + custodian_key + struct.pack(">Q", timestamp_ms) + nest_id + nonce,
     )
 
 

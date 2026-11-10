@@ -327,6 +327,62 @@ pub async fn nest_custodian_arm<B: StoreBackend, D: CustodianDial>(
     Ok(report)
 }
 
+/// Whether this pass's own-nest walk answered — the one reading both hosts
+/// gate the pass-time arm on (ruling 6: never a standing dial). The fleet walk
+/// is a nest walk that runs before the legs, so its outcome is the pass's own
+/// nest reachability; the native host turns the same reading into its
+/// `fauna_transport::NestPath` for the relay byte gate.
+pub fn own_nest_answered(report: &crate::account_driver::PumpReport) -> bool {
+    report.fleet_walk.is_some()
+}
+
+/// Count one run of the arm into the pass's `peer_dial` slot, as both hosts
+/// report it: an arm that dialed or withheld anything creates the slot on a
+/// pass whose peer leg reported nothing (unbound, or none at all on web); an
+/// idle arm leaves the report as it was.
+pub fn count_nest_arm(report: &mut crate::account_driver::PumpReport, arm: NestArmReport) {
+    if arm.dialed + arm.withheld == 0 {
+        return;
+    }
+    let pass = report.peer_dial.get_or_insert_with(Default::default);
+    pass.nest_custodians += arm.dialed;
+    pass.nest_custodians_admitted += arm.admitted;
+    pass.nest_custodians_withheld += arm.withheld;
+    pass.applied += arm.applied;
+}
+
+/// The pass-time arm as a host that keeps no standing revocation snapshot
+/// runs it (web's [`crate::account_driver::HostLegs::run`]): nothing while
+/// `own_nest_answered` (never a standing dial), nothing for an unenrolled
+/// device (`id` is `None` — the fleet handshake cannot do without the
+/// enrollment witness, and a pass, unlike the gesture, has nobody to tell);
+/// otherwise the revocation view derived from the store now by
+/// [`custody_revoked_grant_ids`] — the same fold the native snapshot installs
+/// — and [`nest_custodian_arm`]. `Err` is a store or ledger read failure,
+/// never a silent empty view.
+pub async fn pass_arm_with_derived_view<B: StoreBackend, D: CustodianDial>(
+    store: &AccountStore<B>,
+    dial: &D,
+    id: Option<FleetDialIdentity<'_>>,
+    own_nest_answered: bool,
+    content_scopes: &[ContentScope],
+) -> Result<Option<NestArmReport>> {
+    if own_nest_answered {
+        return Ok(None);
+    }
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let revoked = custody_revoked_grant_ids(store, fauna_core::identity::ActorId(id.owner))
+        .await
+        .context("custodian nest restore: the custody-revocation view")?;
+    nest_custodian_arm(store, dial, id, content_scopes, &|grant_id| {
+        revoked.contains(grant_id)
+    })
+    .await
+    .map(Some)
+}
+
 /// The restore gesture at a typed address — the cold device's entry and the
 /// warm explicit one (`account-replica-posture.md` § *Corollary — the cold
 /// device*, bounds (a)–(e); the surface is `ui/nests.md` § Trust facet —
@@ -971,5 +1027,100 @@ mod tests {
         .await
         .unwrap();
         assert!(revoked.is_empty());
+    }
+
+    /// The owner the fixture's grant log folds as, presenting `authorization`.
+    fn owner_id<'a>(
+        f: &'a Fixture,
+        authorization: &'a fauna_core::encoding::EmbedAsBytes,
+    ) -> FleetDialIdentity<'a> {
+        FleetDialIdentity {
+            owner: crate::generation_fixture_test_support::root().actor_id().0,
+            ..id(f, authorization)
+        }
+    }
+
+    /// The pass-time arm (ruling 6: never a standing dial): a pass whose own
+    /// nest answered dials no custodian, whatever the registry holds.
+    #[tokio::test]
+    async fn custodian_restore_pass_arm_stays_quiet_while_the_own_nest_answers() {
+        let f = fixture().await;
+        record_nest_custodian(&f, 0xB1, "https://live.example/").await;
+        let auth = no_authorization();
+        let dial = Refusing::default();
+        let arm = pass_arm_with_derived_view(&f.store, &dial, Some(owner_id(&f, &auth)), true, &[])
+            .await
+            .unwrap();
+        assert_eq!(arm, None);
+        assert_eq!(dial.connects.get(), 0, "nothing was dialed");
+    }
+
+    /// A pass whose own-nest walk did not answer dials every live custodian
+    /// nest on record, the revocation view derived from the store's grant log
+    /// at the pass (an empty log withdraws nothing) and the URL policy still
+    /// withholding a refused address.
+    #[tokio::test]
+    async fn custodian_restore_pass_arm_dials_when_the_own_nest_did_not_answer() {
+        let f = fixture().await;
+        record_nest_custodian(&f, 0xB2, "https://live.example/").await;
+        record_nest_custodian(&f, 0xB3, "http://10.0.0.1:1/").await;
+        let auth = no_authorization();
+        let dial = Refusing::default();
+        let arm =
+            pass_arm_with_derived_view(&f.store, &dial, Some(owner_id(&f, &auth)), false, &[])
+                .await
+                .unwrap();
+        assert_eq!(
+            arm,
+            Some(NestArmReport {
+                dialed: 1,
+                admitted: 0,
+                withheld: 1,
+                applied: 0
+            })
+        );
+        assert_eq!(dial.connects.get(), 1);
+    }
+
+    /// An unenrolled device has no witness to present: the pass arm is a
+    /// quiet no-op, never an error (the gesture names the absence instead).
+    #[tokio::test]
+    async fn custodian_restore_pass_arm_skips_an_unenrolled_device() {
+        let f = fixture().await;
+        record_nest_custodian(&f, 0xB4, "https://live.example/").await;
+        let dial = Refusing::default();
+        let arm = pass_arm_with_derived_view(&f.store, &dial, None, false, &[])
+            .await
+            .unwrap();
+        assert_eq!(arm, None);
+        assert_eq!(dial.connects.get(), 0);
+    }
+
+    /// The pass counts an arm that dialed or withheld into its `peer_dial`
+    /// slot, creating it on a pass whose peer leg reported nothing.
+    #[test]
+    fn custodian_restore_pass_arm_counts_into_the_peer_dial_slot() {
+        let mut report = crate::account_driver::PumpReport::default();
+        count_nest_arm(&mut report, NestArmReport::default());
+        assert!(report.peer_dial.is_none(), "an idle arm reports nothing");
+        count_nest_arm(
+            &mut report,
+            NestArmReport {
+                dialed: 2,
+                admitted: 1,
+                withheld: 1,
+                applied: 7,
+            },
+        );
+        let pass = report.peer_dial.expect("the arm's slot");
+        assert_eq!(
+            (
+                pass.nest_custodians,
+                pass.nest_custodians_admitted,
+                pass.nest_custodians_withheld,
+                pass.applied
+            ),
+            (2, 1, 1, 7)
+        );
     }
 }

@@ -19,6 +19,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from helpers import budgets
+from helpers.waiting import wait_until
+
 from .http_bridge import HttpBridgeDriver
 from .port_util import (drain_pipes, popen_group_kwargs, reap_descendants_of,
                         terminate_tree, track_process, untrack_process)
@@ -169,6 +172,22 @@ class WebBridgeDriver(HttpBridgeDriver):
         return False quickly. Tree-membership is the honest, hang-free signal
         here, exactly as ``WindowsDriver.is_nav_tab_revealed`` documents."""
         return self.count(element_id, scope=scope) >= 1
+
+    def in_viewport(self, element_id: str, *, index: int = 0,
+                    scope: str | None = None) -> bool:
+        """The bridge's ``in-viewport`` attribute (``web-bridge/server.py``,
+        ``_IN_VIEWPORT_JS``): true when the element's vertical centre lies
+        inside its nearest vertically scrolling ancestor's visible band. The
+        DOM keeps every rendered row attached, so ``is_visible`` reads a row
+        scrolled far out of view as visible; this asks the geometry."""
+        value = self.get_attr(element_id, "in-viewport", index, scope=scope)
+        if value is None:
+            raise AssertionError(
+                f"web answered no in-viewport for {element_id!r}[{index}] — the "
+                "element is missing; "
+                f"{self.diagnose(element_id, scope=scope)}"
+            )
+        return value == "true"
 
     # The web bridge serves POST /element/scroll-into-view (Playwright
     # scroll_into_view_if_needed), so `scroll_to` works on web too.
@@ -784,11 +803,13 @@ class WebBridgeDriver(HttpBridgeDriver):
             f"(still on the old document at {path!r})"
         )
 
-    def hard_reload(self) -> None:
+    def hard_reload(self, *, replay_login: bool = True) -> None:
         """Force-quit + relaunch the web app: a fresh SPA boot over the same
         origin's localStorage. Reopens the page if a prior `kill_uncleanly()` closed
         it, else a full page reload. After it, the agent is re-injected and the SPA
-        has rehydrated — its stored identity included (`_await_identity_restored`)."""
+        has rehydrated — its stored identity included (`_await_identity_restored`).
+        ``replay_login`` is the native contract's switch; web never replays a
+        login (its identity lives in localStorage), so it changes nothing here."""
         self._fresh_boot()
 
     #: An active account in the registry (the agent's `session.secret_hex` reads
@@ -1264,8 +1285,27 @@ class WebBridgeDriver(HttpBridgeDriver):
             state = {**state, "session": {**session, "actor_id": actor_id_hex(session["secret_hex"])}}
         patch_json = json_mod.dumps(state)
         self._execute_js(f"window.__faunaTestAgent.applyPatch({patch_json})")
-        # Wait for SvelteKit goto() and store updates to settle
-        time.sleep(0.5)
+        # Hold until every navigation the patch started has landed: the agent
+        # counts each on `window.__faunaNavPending` (a `goto` clears its count
+        # when it settles; a hard load starts a fresh document with none), and
+        # the document has finished loading. The probe carries across a hard
+        # load (convention 14 — a state wait, not a fixed sleep).
+        settled = {"last": None}
+
+        def _navigation_landed():
+            settled["last"] = self._probe_js(
+                "({pending: window.__faunaNavPending || 0,"
+                " ready: document.readyState, path: location.pathname})"
+            )
+            last = settled["last"] or {}
+            return last.get("pending") == 0 and last.get("ready") == "complete"
+
+        wait_until(
+            _navigation_landed,
+            max(timeout, budgets.UI_SETTLE_S),
+            interval=0.1,
+            diagnose=lambda: f"set_state: the patch's navigation never landed: {settled['last']!r}",
+        )
         # Re-ensure agent in case navigation caused a full page reload
         self._ensure_agent()
         self._sync_state_to_cache()

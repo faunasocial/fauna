@@ -347,6 +347,12 @@ class ProfileActions:
     def subscribe_offer(self, index: int = 0) -> None:
         self.driver.click("subscription-offer-subscribe-button", index=index)
 
+    def open_offer_payment_link(self, index: int = 0) -> None:
+        """Tap offer row ``index``'s external checkout link
+        (``subscription-offer-payment-link``): the subscribe to that tier goes
+        first, then the checkout opens (``monetization.md`` § Pillar 3, Q13)."""
+        self.driver.click("subscription-offer-payment-link", index=index)
+
     def wait_for_offer(self, name: str, timeout: float = 15.0) -> bool:
         """Poll until an offer row renders ``name`` (the offers read is async —
         ``offers_list`` + ``status_get`` over the tokio runtime)."""

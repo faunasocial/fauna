@@ -1237,7 +1237,7 @@ class OfflineGateTest {
             ),
             providerKinds = listOf("fake"),
             claims = emptyList<ClaimItem>(),
-            onSetProvider = { _, _, _ -> },
+            onSetProvider = { _, _, _, _ -> },
             onRemoveProvider = {},
             onMintClaim = {},
             hexFull = { HexUtil.bytesToHex(it) },

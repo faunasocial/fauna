@@ -894,6 +894,58 @@ impl CacheDb {
         Ok(rows)
     }
 
+    /// Bulk form of [`Self::get_content_scores`]: every live bus row of each
+    /// of `content_ids`, grouped by id — ONE query per page of a mail listing,
+    /// not one per message (`report-sharing.md` § Applying the aggregate: the
+    /// two mail replies carry each copy's rows). An id with no rows is absent
+    /// from the map. Chunked under SQLite's bound-parameter ceiling.
+    pub async fn get_content_scores_many(
+        &self,
+        content_ids: &[[u8; 32]],
+    ) -> Result<std::collections::HashMap<[u8; 32], Vec<fauna_core::scoring::ScoreEntry>>> {
+        const CHUNK: usize = 500;
+        let mut out: std::collections::HashMap<[u8; 32], Vec<fauna_core::scoring::ScoreEntry>> =
+            std::collections::HashMap::new();
+        if content_ids.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn.lock().await;
+        for chunk in content_ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT content_id, factor, score, tier, scorer_version
+                 FROM content_scores WHERE content_id IN ({placeholders})
+                 ORDER BY content_id, factor"
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .context("prepare bulk content_scores read")?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt
+                .query_map(params.as_slice(), |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        fauna_core::scoring::ScoreEntry {
+                            factor: r.get(1)?,
+                            score: r.get(2)?,
+                            tier: r.get::<_, i64>(3)?.clamp(0, u8::MAX as i64) as u8,
+                            scorer_version: r.get::<_, i64>(4)?.clamp(0, u32::MAX as i64) as u32,
+                        },
+                    ))
+                })
+                .context("bulk read content_scores")?;
+            for row in rows {
+                let (id, entry) = row.context("decode bulk content_scores row")?;
+                let Ok(key) = <[u8; 32]>::try_from(id.as_slice()) else {
+                    continue;
+                };
+                out.entry(key).or_default().push(entry);
+            }
+        }
+        Ok(out)
+    }
+
     /// The stored owner (`actor_id`) of a scored content item, from any of its
     /// existing `content_scores` rows (all factors of one `content_id` share a
     /// single owner). `None` when the content has no owner-attributed score row.
@@ -1725,6 +1777,46 @@ mod tests {
 
         // Unknown item → empty, not an error.
         assert!(db.get_content_scores(&[9u8; 32]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_content_scores_many_groups_rows_by_item() {
+        use fauna_core::scoring::{ScoreEntry, TIER_COMMUNITY, TIER_USER, factor};
+        let db = CacheDb::open_in_memory().unwrap();
+        let (a, b, none) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let row = |f: &str, s: i64, t: u8| ScoreEntry {
+            factor: f.into(),
+            score: s,
+            tier: t,
+            scorer_version: 1,
+        };
+        db.insert_content_scores(
+            &a,
+            "mail",
+            None,
+            1,
+            &[
+                row(factor::SPAM, 900, TIER_USER),
+                row("report:spam", 200, TIER_COMMUNITY),
+            ],
+        )
+        .await
+        .unwrap();
+        db.insert_content_scores(
+            &b,
+            "mail",
+            None,
+            1,
+            &[row("report:spam", 300, TIER_COMMUNITY)],
+        )
+        .await
+        .unwrap();
+        let got = db.get_content_scores_many(&[a, b, none]).await.unwrap();
+        assert_eq!(got.get(&a), Some(&db.get_content_scores(&a).await.unwrap()));
+        assert_eq!(got[&b].len(), 1);
+        assert_eq!(got[&b][0].score, 300);
+        assert!(!got.contains_key(&none), "an unscored id is absent");
+        assert!(db.get_content_scores_many(&[]).await.unwrap().is_empty());
     }
 
     /// Three distinct pairs around a mail pair — the calendar and card halves

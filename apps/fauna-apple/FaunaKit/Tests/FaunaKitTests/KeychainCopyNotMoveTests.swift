@@ -12,7 +12,9 @@ import Security
 /// *mechanism*: that opt-in KEEPS the device-bound working copy (so no device's only copy is ever
 /// the shared circle row), that opt-out removes only the synchronizable backup copy, that `load`
 /// reads this device's own device-bound copy over a clobbered circle copy, and that a restored
-/// device re-lands a device-bound copy. They drive the exact production code path (`inMemory` is
+/// device — which holds no preference row, since no restore brings a device-bound row — re-lands
+/// a device-bound copy and leaves the circle copy it did not choose to delete. They drive the
+/// exact production code path (`inMemory` is
 /// forced off) against a `FakeKeychainBackend` that models the keychain primary key
 /// `(service, account, synchronizable)` with `SynchronizableAny`-matched deletes — everything a
 /// move-semantics regression or a missing device-bound copy would break, without a real keychain.
@@ -85,7 +87,9 @@ struct KeychainCopyNotMoveTests {
 
     /// A keychain holding only the circle copies is the restore model: the identity loads, the
     /// device rows read as absent, so the device mints its own and enrolls as what it is. The
-    /// stray is never promoted to a working copy on its way out.
+    /// stray is never promoted to a working copy on its way out, while the identity rows'
+    /// circle copies stay — no preference row, no choice, nothing deleted (ruled
+    /// 2026-11-08).
     @Test func aRestoredDeviceFindsTheIdentityAndNotTheOtherDevice() {
         let fake = FakeKeychainBackend()
         let keychain = KeychainStore(testBackend: fake)
@@ -109,7 +113,10 @@ struct KeychainCopyNotMoveTests {
             #expect(fake.rows(account: row, sync: false).isEmpty, "\(row)")
             #expect(fake.rows(account: row, sync: true).isEmpty, "\(row)")
         }
-        #expect(fake.data(account: Self.secretRow, sync: false) == Data("ID".utf8))
+        for row in [Self.secretRow, Self.nestUrlRow, "fauna/index"] {
+            #expect(fake.data(account: row, sync: false) == Data("ID".utf8), "\(row)")
+            #expect(fake.rows(account: row, sync: true).count == 1, "\(row) circle copy kept")
+        }
     }
 
     /// The preference row is one more device-scoped row: a circle copy of it neither counts as
@@ -363,24 +370,94 @@ struct KeychainCopyNotMoveTests {
         #expect(keychain.load(rawKey: Self.secretRow) == "RESTORED")
     }
 
-    // MARK: - Restored device re-lands a device-bound copy on reconcile
+    // MARK: - Restored device re-lands a device-bound copy on reconcile, and chooses nothing
 
-    /// A restored device holds only the synced copy and the backup preference ON. The launch
-    /// reconcile lands a device-bound working copy so the device no longer depends on the shared
-    /// circle row as its sole copy — closing the same lockout window from the restore direction.
+    /// A restored device holds only the synced copy: the preference row is device-bound, so no
+    /// restore brings it, and this device has made no choice. The launch reconcile lands a
+    /// device-bound working copy so the device no longer depends on the shared circle row as
+    /// its sole copy — closing the same lockout window from the restore direction — and leaves
+    /// the circle copy where it found it: a missing preference is not an opt-out, and only a
+    /// person's own toggle deletes a circle copy (ruled 2026-11-08).
+    /// The launch writes no preference either; the toggle reads OFF until the person chooses.
+    /// (Red-verified against the old opt-out arm, which read a missing row as OFF: the
+    /// `sync: true` count dropped to 0 here.)
     @Test func restoredDeviceGainsDeviceBoundCopyOnReconcile() {
         let fake = FakeKeychainBackend()
         let keychain = KeychainStore(testBackend: fake)
-        keychain.setICloudBackup(enabled: true)  // pref ON, no credentials yet
         fake.seedSyncOnlyRow(service: keychain.service, account: Self.secretRow, data: Data("RESTORED".utf8))
         #expect(fake.rows(account: Self.secretRow, sync: false).isEmpty)
+        #expect(fake.rows(account: "icloud_backup_enabled", sync: false).isEmpty)
 
         keychain.reconcileCredentialAccessibility()
 
         #expect(fake.rows(account: Self.secretRow, sync: false).count == 1)
         #expect(fake.rows(account: Self.secretRow, sync: true).count == 1)
         #expect(fake.data(account: Self.secretRow, sync: false) == Data("RESTORED".utf8))
+        #expect(fake.data(account: Self.secretRow, sync: true) == Data("RESTORED".utf8))
         #expect(keychain.load(rawKey: Self.secretRow) == "RESTORED")
+        #expect(fake.rows(account: "icloud_backup_enabled", sync: false).isEmpty)
+        #expect(!keychain.iCloudBackupEnabled())
+    }
+
+    /// The person's own toggle is the one act that deletes a circle copy: a preference row
+    /// reading 0 — this device opted out, then met a sibling's circle copy of the identity —
+    /// still has the reconcile land the working copy and take the circle copy. This pins the
+    /// line between a missing row and a row reading 0: folding them back into one OFF goes red
+    /// in the restore test above, folding them into one "no choice" goes red here.
+    @Test func anExplicitOptOutStillDeletesTheCircleCopyAtReconcile() {
+        let fake = FakeKeychainBackend()
+        let keychain = KeychainStore(testBackend: fake)
+        keychain.setICloudBackup(enabled: false)  // the row reads 0; nothing to rewrite yet
+        #expect(fake.data(account: "icloud_backup_enabled", sync: false) == Data("0".utf8))
+        fake.seedSyncOnlyRow(service: keychain.service, account: Self.secretRow, data: Data("THEIRS".utf8))
+
+        keychain.reconcileCredentialAccessibility()
+
+        #expect(fake.rows(account: Self.secretRow, sync: true).isEmpty)
+        #expect(fake.rows(account: Self.secretRow, sync: false).count == 1)
+        #expect(keychain.load(rawKey: Self.secretRow) == "THEIRS")
+    }
+
+    /// After the restore the choice is the person's, on this device as on any other: the
+    /// toggle on refreshes the kept circle copy from the working value and lands; the toggle
+    /// off takes the circle copy and nothing more.
+    @Test func aRestoredDeviceLeavesTheChoiceToThePerson() {
+        let fake = FakeKeychainBackend()
+        let keychain = KeychainStore(testBackend: fake)
+        fake.seedSyncOnlyRow(service: keychain.service, account: Self.secretRow, data: Data("RESTORED".utf8))
+        keychain.reconcileCredentialAccessibility()
+
+        #expect(keychain.setICloudBackup(enabled: true))
+        #expect(keychain.iCloudBackupEnabled())
+        #expect(fake.rows(account: Self.secretRow, sync: false).count == 1)
+        #expect(fake.rows(account: Self.secretRow, sync: true).count == 1)
+
+        keychain.setICloudBackup(enabled: false)
+        #expect(fake.rows(account: Self.secretRow, sync: true).isEmpty)
+        #expect(fake.data(account: Self.secretRow, sync: false) == Data("RESTORED".utf8))
+        #expect(keychain.load(rawKey: Self.secretRow) == "RESTORED")
+    }
+
+    /// A `save` on a device that has made no choice holds the same line as the reconcile: it
+    /// re-lands the working copy with the new value and leaves the circle copy as it found it
+    /// — another device's backup, never this device's to delete. A device-scoped row's stray
+    /// circle copy is still swept, as at every save. (Red-verified against the old save, which
+    /// deleted both copies first: the circle copy of the nest URL was gone.)
+    @Test func saveWithNoPreferenceLeavesTheCircleCopyAlone() {
+        let fake = FakeKeychainBackend()
+        let keychain = KeychainStore(testBackend: fake)
+        fake.seedSyncOnlyRow(
+            service: keychain.service, account: Self.nestUrlRow, data: Data("https://old.example".utf8))
+        fake.seedSyncOnlyRow(service: keychain.service, account: Self.deviceIdRow, data: Data("THEIRS".utf8))
+
+        try? keychain.save(rawKey: Self.nestUrlRow, value: "https://new.example")
+        try? keychain.save(rawKey: Self.deviceIdRow, value: "MINE")
+
+        #expect(fake.data(account: Self.nestUrlRow, sync: false) == Data("https://new.example".utf8))
+        #expect(fake.data(account: Self.nestUrlRow, sync: true) == Data("https://old.example".utf8))
+        #expect(keychain.load(rawKey: Self.nestUrlRow) == "https://new.example")
+        #expect(fake.rows(account: Self.deviceIdRow, sync: true).isEmpty)
+        #expect(fake.data(account: Self.deviceIdRow, sync: false) == Data("MINE".utf8))
     }
 
     // MARK: - deleteAll sweeps both copies

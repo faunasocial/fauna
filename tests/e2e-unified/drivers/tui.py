@@ -61,7 +61,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from .base import detached_agent_log_text, rolling_log_text, stitch_agent_log
+from .base import detached_agent_log_text, rolling_log_sizes, rolling_log_text, stitch_agent_log
 from .http_bridge import HttpBridgeDriver
 from .local_launch import (
     local_launch_timeout_report,
@@ -70,11 +70,17 @@ from .local_launch import (
 )
 from .port_util import (
     find_free_port,
+    group_alive,
+    kill_group,
     reap_descendants_of,
     terminate_tree,
+    track_group,
     track_process,
     untrack_process,
 )
+
+# The `comm` an own-group agent's leader carries (linux truncates to 15 bytes).
+_AGENT_COMM_PREFIX = "fauna-sync-agen"
 from .pty_backend import spawn_pty
 
 # A real-ish window: the sidebar (24 cols) plus a page pane.
@@ -134,13 +140,16 @@ def _account_store_root(env: dict, sys_platform: str | None = None) -> str:
     """The unified account-store root a launch with `env` resolves — the seat's
     own spelling of `fauna_account_store::root::production_base()`: windows
     `%LOCALAPPDATA%\\Fauna\\sync`, darwin `<HOME>/Library/Application Support/
-    Fauna/sync` (the relocated HOME `build_launch_env` sets), linux
+    Fauna/sync` (the relocated install home `build_launch_env` sets: in a
+    debug or e2e build shared Rust follows `CFFIXED_USER_HOME` before `HOME`,
+    `fauna_core::platform_ids::macos_install_home`), linux
     `<XDG_CONFIG_HOME>/fauna/sync`."""
     platform = sys_platform or sys.platform
     if platform == "win32":
         return os.path.join(env["LOCALAPPDATA"], "Fauna", "sync")
     if platform == "darwin":
-        return os.path.join(env["HOME"], "Library", "Application Support", "Fauna", "sync")
+        home = env.get("CFFIXED_USER_HOME") or env["HOME"]
+        return os.path.join(home, "Library", "Application Support", "Fauna", "sync")
     return os.path.join(env["XDG_CONFIG_HOME"], "fauna", "sync")
 
 
@@ -211,6 +220,16 @@ def build_launch_env(
     # when it is deleted. Read back through the driver's `custody_hold_file`.
     env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
 
+    # Opt-in (`config["sync_agent_own_group"]`, POSIX only): the direct-spawned
+    # agent leads a process group of its own and records its pgid here
+    # (`agent_spawner::AGENT_OWN_GROUP_ENV`), so it survives the pty hangup a tui
+    # quit sends the app's group — the production shape, where the agent is a
+    # user unit that keeps syncing app-dead (local-folder-sync outcome 23). The
+    # driver tracks the recorded group and kills it at teardown and in
+    # `kill_uncleanly` (convention 10): see `TuiDriver.agent_pgid`.
+    if config.get("sync_agent_own_group") and os.name != "nt":
+        env["FAUNA_E2E_SYNC_AGENT_PGID_FILE"] = os.path.join(tmp, "sync-agent.pgid")
+
     # ── macOS: relocate HOME, or the agent socket is the machine-global one ───
     #
     # `fauna_ipc::unix_transport::default_socket_path` branches on the platform:
@@ -234,17 +253,25 @@ def build_launch_env(
     # change to the only working seat. Gate: `test_tui_driver_env.py`.
     if _relocates_home(sys_platform):
         home = config.get("home") or os.path.join(tmp, "home")
+        # `config["device_home"]`: a second install on the SAME device (the door
+        # journey's second seat of one account, `test_cli_conversations_door.py`)
+        # — `HOME`, which the agent socket and the door derive from, is that
+        # device home, while `CFFIXED_USER_HOME` stays this launch's own `home`,
+        # which the account store follows in a debug/e2e build
+        # (`fauna_core::platform_ids::macos_install_home`) — linux's shared
+        # `XDG_RUNTIME_DIR` over a private `XDG_CONFIG_HOME`, darwin's way.
+        device_home = config.get("device_home") or home
         # The bindability check is gated on the real-agent marker, exactly as
         # `drivers/macos.py`'s twin is: relocating HOME is unconditional (even an
         # agent-less launch polls `GetServiceStatus` and must not reach the real
         # socket), but the many launches that never spawn an agent are
         # legitimately free to sit at a long path — pytest's own `tmp_path` is
         # ~90 bytes before the suffix.
-        sock = os.path.join(home, _AGENT_SOCKET_RELPATH)
+        sock = os.path.join(device_home, _AGENT_SOCKET_RELPATH)
         wants_agent = config.get("environment", {}).get("FAUNA_E2E_REAL_SYNC_AGENT")
         if wants_agent and len(sock.encode()) >= _SUN_PATH_MAX:
             raise RuntimeError(
-                f"launch HOME {home!r} derives a {len(sock.encode())}-byte "
+                f"launch HOME {device_home!r} derives a {len(sock.encode())}-byte "
                 f"sync-agent socket path, over macOS's sun_path limit of "
                 f"{_SUN_PATH_MAX - 1} usable bytes:\n  {sock}\nThe agent would "
                 f"spawn and die at bind ('path must be shorter than SUN_LEN'), "
@@ -252,7 +279,7 @@ def build_launch_env(
                 f"shorter config['home'] (under {launch_tmp_root('darwin')})."
             )
         os.makedirs(home, exist_ok=True)
-        env["HOME"] = home
+        env["HOME"] = device_home
         env["CFFIXED_USER_HOME"] = home
 
     xdg_base = config.get("xdg_base") or tmp
@@ -515,12 +542,58 @@ class TuiDriver(HttpBridgeDriver):
         direct-child-spawned agent binds (`LaunchdAgentSpawner`'s e2e arm;
         `macos_socket_path`) — `None` on windows, or before launch."""
         if sys.platform == "darwin":
-            home = getattr(self, "_resolved_home", None)
+            home = getattr(self, "_resolved_device_home", None)
             return os.path.join(home, _AGENT_SOCKET_RELPATH) if home else None
         if os.name == "nt":
             return None
         runtime = getattr(self, "_xdg_runtime", None)
         return os.path.join(runtime, "fauna", "sync-agent.sock") if runtime else None
+
+    @property
+    def agent_pgid(self) -> int | None:
+        """The process group of the sync agent THIS launch spawned into a group
+        of its own — `None` unless the launch opted in with
+        ``config["sync_agent_own_group"]`` (POSIX) or before the agent has
+        spawned. Every pgid read here is tracked (`port_util.track_group`): the
+        driver kills it at teardown and in `kill_uncleanly`, atexit does if
+        neither ran, and the run's reaper does if the run itself is SIGKILLed —
+        an agent that outlives the app on purpose still never outlives the run
+        (convention 10)."""
+        path = getattr(self, "_agent_pgid_file", None)
+        if not path:
+            return None
+        try:
+            pgid = int(Path(path).read_text().strip())
+        except (OSError, ValueError):
+            return None
+        if pgid not in self._agent_pgids:
+            self._agent_pgids.append(pgid)
+            track_group(pgid, _AGENT_COMM_PREFIX)
+        return pgid
+
+    def agent_group_alive(self) -> bool:
+        """True while the own-group agent's process group (`agent_pgid`) still
+        has a member — the liveness half of "the agent survived the quit" and
+        the absence half of "teardown left no agent behind"."""
+        pgid = self.agent_pgid
+        return pgid is not None and group_alive(pgid)
+
+    def _kill_agent_groups(self, *, graceful: bool) -> None:
+        """Kill every own-group agent group this launch recorded. ``graceful``
+        (teardown): SIGTERM — the agent's own shutdown handler — then SIGKILL
+        once a bounded poll gives up; otherwise (an unclean kill) SIGKILL at
+        once, power-loss semantics. No-op for a launch that did not opt in."""
+        stop = getattr(self, "_agent_watch_stop", None)
+        if stop is not None:
+            stop.set()
+        self.agent_pgid  # pick up a pgid the watcher had not read yet
+        for pgid in list(getattr(self, "_agent_pgids", [])):
+            if graceful and kill_group(pgid, signal.SIGTERM):
+                deadline = time.monotonic() + 5.0
+                while group_alive(pgid) and time.monotonic() < deadline:
+                    time.sleep(0.05)  # sleep-ok: bounded TERM grace, as terminate_tree
+            kill_group(pgid, signal.SIGKILL)
+        self._agent_pgids = []
 
     # The tui agent serves POST /element/scroll-into-view as a REAL scroll: its
     # viewport follows the focus ring, so the agent lands the ring on the target
@@ -688,6 +761,12 @@ class TuiDriver(HttpBridgeDriver):
         cfg = getattr(self, "_xdg_config", None)
         return rolling_log_text(os.path.join(cfg, "fauna-tui")) if cfg else ""
 
+    def on_device_log_sizes(self) -> dict[str, int]:
+        """Each on-device `fauna.log.*` file's size by name — the sizes half of
+        `on_device_log_text()`, read from the same directory."""
+        cfg = getattr(self, "_xdg_config", None)
+        return rolling_log_sizes(os.path.join(cfg, "fauna-tui")) if cfg else {}
+
     def inherited_agent_log_text(self) -> str:
         """On POSIX the agent is an inherited-fd child (its lines are already in
         `app_stderr_text()`); its own rolling log under `<config_home>/fauna/sync`
@@ -716,7 +795,13 @@ class TuiDriver(HttpBridgeDriver):
         self._resolved_xdg_base = config.get("xdg_base") or tmp
         self._resolved_credential_dir = env["FAUNA_E2E_CREDENTIAL_DIR"]
         self._resolved_keyring_app = env["FAUNA_KEYRING_APP"]
-        self._resolved_home = env["HOME"] if _relocates_home(sys_platform) else None
+        # darwin: the install home (`CFFIXED_USER_HOME`, what the install-scoped
+        # state hangs off) and the device home (`HOME`, what the agent socket
+        # and the door derive from) — one dir unless `config["device_home"]`
+        # split them.
+        relocated = _relocates_home(sys_platform)
+        self._resolved_home = env["CFFIXED_USER_HOME"] if relocated else None
+        self._resolved_device_home = env["HOME"] if relocated else None
 
     def launch(self, config: dict) -> None:
         self._launch_config = config
@@ -767,6 +852,21 @@ class TuiDriver(HttpBridgeDriver):
         # as drivers/linux.py's download_dir().
         self._download_dir = env.get("FAUNA_E2E_DOWNLOAD_DIR")
         self._custody_hold_file = env.get("FAUNA_E2E_CUSTODY_HOLD_FILE")
+        # The opted-in own-group agent's pgid file (None otherwise) — see
+        # `agent_pgid`. Watched from the launch on, so the group is this run's
+        # (reaper-registered) the moment the agent records it, not only once a
+        # test happens to ask.
+        self._agent_pgid_file = env.get("FAUNA_E2E_SYNC_AGENT_PGID_FILE")
+        self._agent_pgids: list[int] = []
+        self._agent_watch_stop = threading.Event()
+        if self._agent_pgid_file:
+            stop = self._agent_watch_stop
+
+            def watch_agent_pgid():
+                while not stop.wait(0.25):
+                    self.agent_pgid
+
+            threading.Thread(target=watch_agent_pgid, daemon=True).start()
 
         self._remember_launch_store(config, env, tmp)
 
@@ -942,6 +1042,9 @@ class TuiDriver(HttpBridgeDriver):
                 backend.kill()
         else:
             backend.kill()
+        # An opted-in agent leads a group of its own, out of the group-kill's
+        # reach: SIGKILL it too — power loss takes the whole box's processes.
+        self._kill_agent_groups(graceful=False)
         try:
             backend.wait(timeout=10)
         except Exception:
@@ -980,6 +1083,14 @@ class TuiDriver(HttpBridgeDriver):
         if backend is not None:
             terminate_tree(backend)
             untrack_process(backend)
+        # An opted-in agent (`agent_pgid`) is in no group `terminate_tree`
+        # reaches — and after a tui quit it is the only thing left running.
+        # Killed BEFORE the pty master closes: an agent still holding the pty
+        # slave makes macOS block that close() in the kernel for good — a
+        # pytest sat 24 h in `close` holding mac's only `e2e_tui` lane
+        # (2026-11-08, the orphaned agent of the sync-agent-survives-quit set).
+        self._kill_agent_groups(graceful=True)
+        if backend is not None:
             backend.close()
             self._pty = None
         stderr = getattr(self, "_app_stderr", None)

@@ -277,11 +277,12 @@ fun AccountSettingsContent(
     // § Short id), injected FFI-free so the Robolectric harness stays off the
     // native path — the idiom every other Content composable uses.
     shortId: (String) -> String = { com.fauna.ffi.shortId(it) },
-    // Shared `fauna_protocol::pending_actions::describe_pending_action`
+    // Shared `fauna_protocol::pending_actions::describe_pending_action_with_folder`
     // (settings.md § Pending actions) — what a scheduled action will do, as
-    // one sentence; injected FFI-free for the same Robolectric reason.
-    describePendingAction: (String, String?) -> String =
-        { actionType, target -> com.fauna.ffi.describePendingAction(actionType, target) },
+    // one sentence, an automatic prune naming its folder off the session's
+    // roster ([com.fauna.app.core.FolderRoster]); injected FFI-free for the
+    // same Robolectric reason.
+    describePendingAction: (String, String?) -> String = ::describeWithFolder,
     // Shared `fauna_core::format::format_unix_local` (value-formatting.md
     // § Absolute local timestamp display) — the pending-action row's
     // execute-after text; injected FFI-free for the same reason.
@@ -546,12 +547,24 @@ fun ChangeHandleCard(
  * only to be *described*, never stored as state — [AccountSettingsVM]'s
  * `changeHandle`/`deleteAccount` never do this.
  */
+/**
+ * The pending-action row's sentence: the shared describer, handed the name the
+ * session's folder roster gives the action's target (an automatic prune's
+ * folder id; any other target simply names no folder) — never a resolver of
+ * this app's own (`settings.md` § Pending actions).
+ */
+private fun describeWithFolder(actionType: String, target: String?): String =
+    com.fauna.ffi.describePendingActionWithFolder(
+        actionType,
+        target,
+        target?.let { com.fauna.app.core.FolderRoster.folderName(it) },
+    )
+
 @Composable
 fun PendingActionsCard(
     pendingActions: List<com.fauna.ffi.FfiPendingActionSummary>?,
     onCancelPendingAction: (Long) -> Unit,
-    describePendingAction: (String, String?) -> String =
-        { actionType, target -> com.fauna.ffi.describePendingAction(actionType, target) },
+    describePendingAction: (String, String?) -> String = ::describeWithFolder,
     absoluteLocal: (Long) -> String = { com.fauna.app.ui.util.ValueFormat.absoluteLocal(it) },
 ) {
     val title = when {

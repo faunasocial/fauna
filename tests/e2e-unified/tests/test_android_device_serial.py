@@ -410,6 +410,8 @@ def test_adb_is_found_off_path_under_the_sdk(tmp_path, monkeypatch):
     assert android_device.adb_argv(None)[0] == str(adb)
     monkeypatch.delenv("ANDROID_HOME")
     monkeypatch.setenv("HOME", str(tmp_path))
+    # `os.path.expanduser("~")` reads USERPROFILE, not HOME, on Windows.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     (tmp_path / "android-sdk").symlink_to(sdk)
     assert android_device.adb_argv(None)[0] == str(tmp_path / "android-sdk" / "platform-tools" / "adb")
     (tmp_path / "android-sdk").unlink()

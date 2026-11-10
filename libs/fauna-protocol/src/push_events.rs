@@ -361,6 +361,28 @@ pub struct NestInfoChangedPayload {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// `fauna.sync.devices.changed` — the actor's device roster took a committed
+/// write: a row renamed (`fauna.sync.devices.rename`), removed
+/// (`fauna.sync.devices.delete`) or its peer participation set
+/// (`fauna.sync.devices.p2p_participation.set`). Own-device fanout to every
+/// connected socket of the actor, so a Devices page already open on another of
+/// the user's devices re-reads the roster (`devices.md` § Listing Devices →
+/// *An open roster follows a sibling's write*). Hint-less, like
+/// [`KIND_NEST_INFO_CHANGED`]: the roster is the nest's, so the device re-reads
+/// `fauna.sync.devices.list` and the push is only the nudge. Lossy like every
+/// push: a missed one is recovered by the reconnect and `ResyncRequired`
+/// sweeps, and by the page's own re-read on every visit.
+pub const KIND_SYNC_DEVICES_CHANGED: &str = "fauna.sync.devices.changed";
+
+/// The payload of [`KIND_SYNC_DEVICES_CHANGED`] — nothing but the
+/// forward-compat catch-all.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DevicesChangedPayload {
+    /// Forward-compat: preserved unknown CBOR-map keys (per § 2.3 rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// `fauna.sync.changed` — a new sync record landed in a shared/synced file
 /// set. The download-half twin of the mail/calendar arrival pushes: the nest's
 /// record path (`fauna.sync.changes.record`, and the federation relay into a
@@ -637,6 +659,12 @@ pub enum PushEvent {
     /// periodic triggers are the backstop. Per
     /// `docs/goal/architecture/content-scoring.md` § Timing.
     BridgeRescoreReady(crate::bridge_routing::BridgeRescoreReadyPush),
+    /// `fauna.bridges.account_revoked` — a user account stopped standing
+    /// (locked, suspended, evicted, deleted). Routed to every approved MDA
+    /// bridge, which ends the IMAP sessions AUTH'd as that account at once —
+    /// an IDLE one with a `BYE` — instead of at their next command. Per
+    /// `docs/goal/architecture/transport-connection.md` § Revocation teardown.
+    BridgeAccountRevoked(crate::bridge_routing::BridgeAccountRevokedPush),
     /// `fauna.bridges.spam_baseline_publish` — an admin `publish_spam_baseline`
     /// opened a pending run over client-sealed contributor copies. Routed to
     /// the MDA-role / content-processor bridge, which pulls the grant-gated
@@ -672,6 +700,9 @@ pub enum PushEvent {
     /// `fauna.bridges.push.import_complete` — an import session finalized;
     /// the payload carries the end-of-import summary counters.
     BridgeImportComplete(crate::bridge_routing::BridgeImportCompletePush),
+    /// `fauna.bridges.push.import_session_changed` — an import session was
+    /// cancelled or discarded; a bare nudge for an open Import page.
+    BridgeImportSessionChanged(crate::bridge_routing::BridgeImportSessionChangedPush),
     /// `fauna.bridges.push.export_progress` — mailbox-export counters moved.
     /// Routed to the exporter's own connected clients after each accepted
     /// `upload_export_chunk`. Per `docs/goal/behavior/mail-export.md`
@@ -684,6 +715,9 @@ pub enum PushEvent {
     /// its blob carries a terminator frame, so the download is openable
     /// (§ Blob shape on disk). Carries the actor-authenticated download path.
     BridgeExportComplete(crate::bridge_routing::BridgeExportCompletePush),
+    /// `fauna.bridges.push.export_session_changed` — an export session was
+    /// cancelled or discarded; a bare nudge for an open Export page.
+    BridgeExportSessionChanged(crate::bridge_routing::BridgeExportSessionChangedPush),
     /// `fauna.bridges.push.conversation_changed` — a bridged room took a
     /// deposit, a shape or membership change, or a receipt
     /// (`apps/bridges.md` § Bridge-kind catalogue → Phase G). The nudge to the
@@ -698,6 +732,10 @@ pub enum PushEvent {
     /// `fauna.nest.info_changed` — the self-description changed; every
     /// connected member re-reads it. See [`NestInfoChangedPayload`].
     NestInfoChanged(NestInfoChangedPayload),
+    /// `fauna.sync.devices.changed` — the actor's device roster took a
+    /// committed write; every connected device re-reads it. See
+    /// [`DevicesChangedPayload`].
+    DevicesChanged(DevicesChangedPayload),
     Unknown(Unknown),
 }
 
@@ -961,18 +999,24 @@ impl StaleSurfaces {
             }
             "fauna.bridges.push.export_progress"
             | "fauna.bridges.push.export_error"
-            | "fauna.bridges.push.export_complete" => Self {
+            | "fauna.bridges.push.export_complete"
+            | "fauna.bridges.push.export_session_changed" => Self {
                 mail_export: true,
                 ..Self::NONE
             },
             "fauna.bridges.push.import_progress"
             | "fauna.bridges.push.import_error"
-            | "fauna.bridges.push.import_complete" => Self {
+            | "fauna.bridges.push.import_complete"
+            | "fauna.bridges.push.import_session_changed" => Self {
                 mail_import: true,
                 ..Self::NONE
             },
             KIND_NEST_INFO_CHANGED => Self {
                 nest_info: true,
+                ..Self::NONE
+            },
+            KIND_SYNC_DEVICES_CHANGED => Self {
+                devices: true,
                 ..Self::NONE
             },
             "fauna.protocol.resync_required" => Self {
@@ -1137,6 +1181,13 @@ impl PushEvent {
                 nest_info: true,
                 ..StaleSurfaces::NONE
             },
+            // A rename, removal or participation write landed on the actor's
+            // device roster (`devices.md` § Listing Devices → *An open roster
+            // follows a sibling's write*): the Devices & Folders lists re-read.
+            PushEvent::DevicesChanged(_) => StaleSurfaces {
+                devices: true,
+                ..StaleSurfaces::NONE
+            },
 
             // ── Kinds whose consumer is not a snapshot surface ──
             //
@@ -1169,6 +1220,7 @@ impl PushEvent {
             | PushEvent::BridgeAtprotoServiceAuthRequested(_)
             | PushEvent::BridgeOutboundReady(_)
             | PushEvent::BridgeRescoreReady(_)
+            | PushEvent::BridgeAccountRevoked(_)
             | PushEvent::BridgeSpamBaselinePublish(_) => StaleSurfaces::NONE,
             // A session of the actor's own export moved — on this device or
             // another — so the open export page re-reads its listing
@@ -1177,7 +1229,8 @@ impl PushEvent {
             // the payload's counts or reason into its view.
             PushEvent::BridgeExportProgress(_)
             | PushEvent::BridgeExportError(_)
-            | PushEvent::BridgeExportComplete(_) => StaleSurfaces {
+            | PushEvent::BridgeExportComplete(_)
+            | PushEvent::BridgeExportSessionChanged(_) => StaleSurfaces {
                 mail_export: true,
                 ..StaleSurfaces::NONE
             },
@@ -1185,7 +1238,8 @@ impl PushEvent {
             // record the wizard shows until the user moves on).
             PushEvent::BridgeImportProgress(_)
             | PushEvent::BridgeImportError(_)
-            | PushEvent::BridgeImportComplete(_) => StaleSurfaces {
+            | PushEvent::BridgeImportComplete(_)
+            | PushEvent::BridgeImportSessionChanged(_) => StaleSurfaces {
                 mail_import: true,
                 ..StaleSurfaces::NONE
             },
@@ -1464,6 +1518,16 @@ impl PushEvent {
                     payload,
                 })
             }),
+            "fauna.bridges.account_revoked" => fauna_cbor::decode_strict::<
+                crate::bridge_routing::BridgeAccountRevokedPush,
+            >(&payload_bytes)
+            .map(PushEvent::BridgeAccountRevoked)
+            .unwrap_or_else(|_| {
+                PushEvent::Unknown(Unknown {
+                    kind: kind.to_string(),
+                    payload,
+                })
+            }),
             "fauna.bridges.spam_baseline_publish" => fauna_cbor::decode_strict::<
                 crate::bridge_routing::BridgeSpamBaselinePublishPush,
             >(&payload_bytes)
@@ -1534,6 +1598,16 @@ impl PushEvent {
                     payload,
                 })
             }),
+            "fauna.bridges.push.import_session_changed" => fauna_cbor::decode_strict::<
+                crate::bridge_routing::BridgeImportSessionChangedPush,
+            >(&payload_bytes)
+            .map(PushEvent::BridgeImportSessionChanged)
+            .unwrap_or_else(|_| {
+                PushEvent::Unknown(Unknown {
+                    kind: kind.to_string(),
+                    payload,
+                })
+            }),
             "fauna.bridges.push.export_progress" => fauna_cbor::decode_strict::<
                 crate::bridge_routing::BridgeExportProgressPush,
             >(&payload_bytes)
@@ -1558,6 +1632,16 @@ impl PushEvent {
                 crate::bridge_routing::BridgeExportCompletePush,
             >(&payload_bytes)
             .map(PushEvent::BridgeExportComplete)
+            .unwrap_or_else(|_| {
+                PushEvent::Unknown(Unknown {
+                    kind: kind.to_string(),
+                    payload,
+                })
+            }),
+            "fauna.bridges.push.export_session_changed" => fauna_cbor::decode_strict::<
+                crate::bridge_routing::BridgeExportSessionChangedPush,
+            >(&payload_bytes)
+            .map(PushEvent::BridgeExportSessionChanged)
             .unwrap_or_else(|_| {
                 PushEvent::Unknown(Unknown {
                     kind: kind.to_string(),
@@ -1604,6 +1688,16 @@ impl PushEvent {
                         })
                     })
             }
+            KIND_SYNC_DEVICES_CHANGED => {
+                fauna_cbor::decode_strict::<DevicesChangedPayload>(&payload_bytes)
+                    .map(PushEvent::DevicesChanged)
+                    .unwrap_or_else(|_| {
+                        PushEvent::Unknown(Unknown {
+                            kind: kind.to_string(),
+                            payload,
+                        })
+                    })
+            }
             _ => PushEvent::Unknown(Unknown {
                 kind: kind.to_string(),
                 payload,
@@ -1643,6 +1737,7 @@ impl PushEvent {
             }
             PushEvent::BridgeOutboundReady(_) => "fauna.bridges.outbound_ready",
             PushEvent::BridgeRescoreReady(_) => "fauna.bridges.rescore_ready",
+            PushEvent::BridgeAccountRevoked(_) => "fauna.bridges.account_revoked",
             PushEvent::BridgeSpamBaselinePublish(_) => "fauna.bridges.spam_baseline_publish",
             PushEvent::BridgeSpamModelUpdated(_) => "fauna.bridges.push.spam_model_updated",
             PushEvent::BridgeSpamModelReset(_) => "fauna.bridges.push.spam_model_reset",
@@ -1650,15 +1745,18 @@ impl PushEvent {
             PushEvent::BridgeImportProgress(_) => "fauna.bridges.push.import_progress",
             PushEvent::BridgeImportError(_) => "fauna.bridges.push.import_error",
             PushEvent::BridgeImportComplete(_) => "fauna.bridges.push.import_complete",
+            PushEvent::BridgeImportSessionChanged(_) => "fauna.bridges.push.import_session_changed",
             PushEvent::BridgeExportProgress(_) => "fauna.bridges.push.export_progress",
             PushEvent::BridgeExportError(_) => "fauna.bridges.push.export_error",
             PushEvent::BridgeExportComplete(_) => "fauna.bridges.push.export_complete",
+            PushEvent::BridgeExportSessionChanged(_) => "fauna.bridges.push.export_session_changed",
             PushEvent::BridgeConversationChanged(_) => {
                 crate::bridged_conversations::PUSH_CONVERSATION_CHANGED
             }
             PushEvent::PushNotification(_) => "fauna.push.notification",
             PushEvent::SyncChunkWanted(_) => KIND_SYNC_CHUNK_WANTED,
             PushEvent::NestInfoChanged(_) => KIND_NEST_INFO_CHANGED,
+            PushEvent::DevicesChanged(_) => KIND_SYNC_DEVICES_CHANGED,
             PushEvent::Unknown(u) => &u.kind,
         }
     }
@@ -2174,6 +2272,31 @@ mod tests {
     }
 
     #[test]
+    fn bridge_account_revoked_round_trips_and_classifies() {
+        use crate::bridge_routing::BridgeAccountRevokedPush;
+        use crate::codec::{decode_strict as decode, encode_canonical};
+        let push = BridgeAccountRevokedPush {
+            actor_id: vec![7u8; 32],
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&push).unwrap();
+        let decoded: BridgeAccountRevokedPush = decode(&bytes).unwrap();
+        assert_eq!(decoded, push);
+
+        let cbor: Value = decode(&bytes).unwrap();
+        let event = PushEvent::from_push("fauna.bridges.account_revoked", cbor);
+        match &event {
+            PushEvent::BridgeAccountRevoked(p) => assert_eq!(p.actor_id, vec![7u8; 32]),
+            other => panic!("expected BridgeAccountRevoked, got {other:?}"),
+        }
+        assert_eq!(event.kind(), "fauna.bridges.account_revoked");
+        assert_eq!(
+            event.kind(),
+            crate::bridge_routing::PUSH_KIND_BRIDGE_ACCOUNT_REVOKED
+        );
+    }
+
+    #[test]
     fn bridge_spam_baseline_publish_round_trips_and_classifies() {
         use crate::bridge_routing::BridgeSpamBaselinePublishPush;
         use crate::codec::{decode_strict as decode, encode_canonical};
@@ -2456,6 +2579,10 @@ mod tests {
         PushEvent::NestInfoChanged(NestInfoChangedPayload::default())
     }
 
+    fn devices_changed() -> PushEvent {
+        PushEvent::DevicesChanged(DevicesChangedPayload::default())
+    }
+
     fn spam_model_reset() -> PushEvent {
         PushEvent::BridgeSpamModelReset(crate::bridge_routing::BridgeSpamModelResetPush {
             actor_id: vec![6u8; 32],
@@ -2463,9 +2590,10 @@ mod tests {
     }
 
     /// The three export events — what a mail-export page re-reads on.
-    fn export_events() -> [PushEvent; 3] {
+    fn export_events() -> [PushEvent; 4] {
         use crate::bridge_routing::{
             BridgeExportCompletePush, BridgeExportErrorPush, BridgeExportProgressPush,
+            BridgeExportSessionChangedPush,
         };
         [
             PushEvent::BridgeExportProgress(BridgeExportProgressPush {
@@ -2486,13 +2614,18 @@ mod tests {
                 blob_bytes: 1,
                 extra: BTreeMap::new(),
             }),
+            PushEvent::BridgeExportSessionChanged(BridgeExportSessionChangedPush {
+                session_id: "s".into(),
+                extra: BTreeMap::new(),
+            }),
         ]
     }
 
     /// The import twin's three events.
-    fn import_events() -> [PushEvent; 3] {
+    fn import_events() -> [PushEvent; 4] {
         use crate::bridge_routing::{
             BridgeImportCompletePush, BridgeImportErrorPush, BridgeImportProgressPush,
+            BridgeImportSessionChangedPush,
         };
         [
             PushEvent::BridgeImportProgress(BridgeImportProgressPush {
@@ -2510,6 +2643,10 @@ mod tests {
                 imported_count: 1,
                 skipped_count: 0,
                 errored_count: 0,
+            }),
+            PushEvent::BridgeImportSessionChanged(BridgeImportSessionChangedPush {
+                session_id: "s".into(),
+                extra: BTreeMap::new(),
             }),
         ]
     }
@@ -2547,6 +2684,23 @@ mod tests {
                 );
                 assert!(reconnect.covers(&want), "{:?}", event.kind());
             }
+        }
+    }
+
+    /// The cancel/discard nudge of each wizard classifies into its typed
+    /// variant from the wire kind and payload, and `kind()` names it back —
+    /// so an app's push pump reaches the stale map above, never `Unknown`.
+    #[test]
+    fn the_session_changed_nudges_classify_via_from_push() {
+        for event in [export_events()[3].clone(), import_events()[3].clone()] {
+            let bytes = match &event {
+                PushEvent::BridgeExportSessionChanged(p) => encode_canonical(p).unwrap(),
+                PushEvent::BridgeImportSessionChanged(p) => encode_canonical(p).unwrap(),
+                other => panic!("not a session-changed nudge: {other:?}"),
+            };
+            let value: Value = decode(&bytes).unwrap();
+            let decoded = PushEvent::from_push(event.kind(), value);
+            assert_eq!(decoded, event, "{:?}", event.kind());
         }
     }
 
@@ -2654,6 +2808,7 @@ mod tests {
             spam_model_updated(),
             spam_model_reset(),
             nest_info_changed(),
+            devices_changed(),
         ] {
             assert!(
                 sweep.covers(&event.invalidates()),
@@ -2702,6 +2857,7 @@ mod tests {
             spam_model_updated(),
             spam_model_reset(),
             nest_info_changed(),
+            devices_changed(),
         ] {
             assert!(
                 reconnect.covers(&event.invalidates()),
@@ -2738,6 +2894,7 @@ mod tests {
             spam_model_updated(),
             spam_model_reset(),
             nest_info_changed(),
+            devices_changed(),
         ] {
             assert!(
                 !event.invalidates().family,
@@ -2753,17 +2910,31 @@ mod tests {
     }
 
     /// The Devices & Folders reads — the page lists and every open folder row's
-    /// per-set reads — are stale after a reconnect and after a `ResyncRequired`,
-    /// and never from a single kind: `fauna.sync.changed` stales one set's row,
-    /// which the call site matches by payload. Before this flag a row read that
-    /// failed while the nest was down kept "the connection to the nest was lost"
-    /// on `error-message` after the nest came back, because nothing re-read it
-    /// (`folders.md` § Errors & edge cases; `transport.md` § Push events).
+    /// per-set reads — are stale after a reconnect, after a `ResyncRequired`
+    /// and after the roster's own push, and from no other kind:
+    /// `fauna.sync.changed` stales one set's row, which the call site matches by
+    /// payload. Before this flag a row read that failed while the nest was down
+    /// kept "the connection to the nest was lost" on `error-message` after the
+    /// nest came back, because nothing re-read it (`folders.md` § Errors & edge
+    /// cases; `transport.md` § Push events); before the roster push, a device
+    /// renamed from a sibling kept its old name on an open Devices page until
+    /// the user left and came back (`devices.md` § Listing Devices).
     #[test]
-    fn a_reconnect_and_a_resync_stale_the_devices_pages_and_no_single_kind_does() {
+    fn a_reconnect_a_resync_and_the_roster_push_stale_the_devices_pages_and_no_other_kind_does() {
         assert!(StaleSurfaces::on_reconnect().devices);
         assert!(resync_required().invalidates().devices);
         assert!(StaleSurfaces::for_kind("fauna.protocol.resync_required").devices);
+        assert_eq!(
+            devices_changed().invalidates(),
+            StaleSurfaces {
+                devices: true,
+                ..StaleSurfaces::NONE
+            }
+        );
+        assert_eq!(
+            StaleSurfaces::for_kind(KIND_SYNC_DEVICES_CHANGED),
+            devices_changed().invalidates()
+        );
         const { assert!(!StaleSurfaces::NONE.devices) };
         for event in [
             knock(),
@@ -2817,6 +2988,7 @@ mod tests {
             mail_flags_changed(),
             spam_model_updated(),
             spam_model_reset(),
+            devices_changed(),
         ] {
             assert!(!event.invalidates().nest_info, "{:?}", event.kind());
         }
@@ -2827,6 +2999,15 @@ mod tests {
     fn the_nest_info_changed_push_round_trips() {
         let event = nest_info_changed();
         assert_eq!(event.kind(), "fauna.nest.info_changed");
+        let payload: Value = decode(&encode_canonical(&event).unwrap()).unwrap();
+        assert_eq!(PushEvent::from_push(event.kind(), payload), event);
+    }
+
+    /// The roster push travels as a bare map and decodes back to its own variant.
+    #[test]
+    fn the_devices_changed_push_round_trips() {
+        let event = devices_changed();
+        assert_eq!(event.kind(), "fauna.sync.devices.changed");
         let payload: Value = decode(&encode_canonical(&event).unwrap()).unwrap();
         assert_eq!(PushEvent::from_push(event.kind(), payload), event);
     }
@@ -2893,6 +3074,7 @@ mod tests {
             spam_model_updated(),
             spam_model_reset(),
             nest_info_changed(),
+            devices_changed(),
         ] {
             assert!(
                 !event.invalidates().admin_gate,
@@ -2945,6 +3127,7 @@ mod tests {
             mail_received(),
             mail_flags_changed(),
             nest_info_changed(),
+            devices_changed(),
         ] {
             assert_eq!(
                 StaleSurfaces::for_kind(event.kind()),

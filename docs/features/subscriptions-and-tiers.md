@@ -4,6 +4,9 @@ title: Subscribe to creators; offer tiers of your own
 section: money
 goal: docs/goal/behavior/monetization.md § Pillar 1 — Fauna-app subscriptions (built)
 guide: docs/guides/who-can-see-what.md § Paid posts — what is public and what is not
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -16,17 +19,17 @@ listed in Settings, where you also unsubscribe.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at dfa27a899f.
+Stamped 2026-11-09 at a24f65b1161d.
 
-1. [app] A subscription is granted and the subscriber reads the tier's posts, with the author doing nothing — `docs/goal/behavior/monetization.md` § Pillar 1 — Fauna-app subscriptions (built)
+1. [app] A subscription is granted and the subscriber reads the tier's posts, with the author doing nothing — `docs/goal/behavior/subscriptions.md` § Pillar 1 — Fauna-app subscriptions (built)
    - `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob`
    - `tests/e2e-unified/tests/test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode`
    - `tests/e2e-unified/tests/test_subscriptions.py::test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_action`
    - `tests/e2e-unified/tests/test_subscriptions.py::test_ui_subscribe_publishes_pq_hybrid_encapsulation_key`
-2. [app] Someone else's offers show on their profile and you subscribe from there — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+2. [app] Someone else's offers show on their profile and you subscribe from there — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_profile.py::test_other_profile_offers_render_and_subscribe`
    - `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section`
-3. [app] Your subscriptions are listed in Settings and you unsubscribe there — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+3. [app] Your subscriptions are listed in Settings and you unsubscribe there — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_settings_lists_active_subscription_and_unsubscribes`
 4. [app] Connect a payment provider, see the address to register with it, and remove it; a paid subscriber redeems a code — `docs/goal/behavior/monetization.md` § Pillars 2+3 — app UX
    - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove`
@@ -40,19 +43,19 @@ Stamped 2026-10-01 at dfa27a899f.
    - `tests/e2e-unified/tests/api/test_payments_webhook.py::test_claims_mint_and_list_cover_the_manual_no_api_path`
    - `tests/e2e-unified/tests/api/test_payments_webhook.py::test_refund_before_approval_strips_the_payment_marker`
    - `tests/e2e-unified/tests/api/test_payments_webhook.py::test_bad_signature_and_unknown_provider_are_non_2xx`
-6. [app] You create a tier from your own profile, giving it a name, a rank and a price — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+6. [app] You create a tier from your own profile, giving it a name, a rank and a price — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob`
-7. [app] You change a tier you already offer: its rank, description, price, payment link and whether it grants by itself — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+7. [app] You change a tier you already offer: its rank, description, price, payment link and whether it grants by itself — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscription_tier_management.py::test_editing_a_tier_changes_what_it_offers`
-8. [app] You delete a tier you no longer offer — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+8. [app] You delete a tier you no longer offer — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscription_tier_management.py::test_deleting_a_tier_removes_it`
-9. [app] A request to subscribe to a tier you approve by hand waits for you, and approving it lets the subscriber in — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+9. [app] A request to subscribe to a tier you approve by hand waits for you, and approving it lets the subscriber in — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob`
-10. [app] You can turn a request to subscribe down — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+10. [app] You can turn a request to subscribe down — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscription_tier_management.py::test_turning_a_subscribe_request_down`
-11. [app] You see who subscribes to each of your tiers — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+11. [app] You see who subscribes to each of your tiers — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob`
-12. [app] You remove a subscriber from a tier, and what you post to that tier afterwards no longer opens for them — `docs/goal/behavior/monetization.md` § Pillar 1 — UX
+12. [app] You remove a subscriber from a tier, and what you post to that tier afterwards no longer opens for them — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
    - `tests/e2e-unified/tests/test_subscription_tier_management.py::test_removing_a_subscriber_cuts_them_off_from_later_posts`
 13. [app] Subscribing to a higher tier also opens the posts of every lower tier, the author's follower posts included — `docs/goal/behavior/monetization.md` § The unifying model — tier as entitlement
    - `tests/e2e-unified/tests/test_subscription_tier_management.py::test_a_higher_tier_opens_every_lower_tiers_posts`
@@ -68,34 +71,69 @@ Stamped 2026-10-01 at dfa27a899f.
    - `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void`
 19. [app] You follow someone whose account lives on another nest from their profile, and their posts, the followers-only ones included, arrive in your feed on your own nest; a post they delete leaves it — `docs/goal/behavior/federated-follow.md` § Decision 2
    - `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed`
+20. [app] A payment provider's row shows whether it is configured, verified by a real delivery from the provider, or in error — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove`
+21. [app] A request to subscribe that a payment backs shows a paid badge — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_a_payment_backed_request_shows_the_paid_badge`
+22. [app] The app shows the return address to give your payment provider, beside the webhook address — `docs/goal/behavior/monetization.md` § Pillars 2+3 — app UX
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display`
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview`
+23. [nest] A refund voids that purchase's membership code even after it was redeemed, a renewal keeps the open code, and a checkout that never paid grants nothing — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_refund_voids_the_purchases_code_after_redemption_a_renewal_keeps_it_and_an_unpaid_checkout_grants_nothing`
+24. [app] Re-opening the Tiers tab re-reads your subscriptions, so a request granted meanwhile stops reading pending — `docs/goal/behavior/subscriptions.md` § Pillar 1 — UX
+   - `tests/e2e-unified/tests/test_subscriptions.py::test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_action`
+   - `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section`
+25. [nest] Unfollowing someone on another nest stops their posts reaching you, and an author's refusal or removal of a follower on another nest reaches that follower's nest — `docs/goal/behavior/federated-follow.md` § Decision 5
+   - `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_an_authors_removal_of_a_follower_on_another_nest_reaches_the_followers_nest`
+   - `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_an_unfollow_of_a_follow_still_pending_at_the_home_withdraws_it`
+26. [nest] A followed author's identity succession keeps the follow and their posts, and your own succession moves you on the author's follower list — `docs/goal/behavior/federated-follow.md` § Decision 5
+   - `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_a_followed_authors_succession_keeps_the_follow_and_a_followers_moves_them_on_the_roster`
+27. [nest] A post delivered by two homes lists once to each home's followers, and a tombstone from its real home removes it for both — `docs/goal/behavior/federated-follow.md` § Decision 3
+   - `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_a_post_delivered_by_two_homes_lists_once_per_home_and_the_real_homes_tombstone_removes_it`
+28. [app] You narrow a payment provider to the one payment link your tier is sold through: the form keeps it, and a payment through any other link on the account grants nothing while one through that link does — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_product_mapping_covers_only_its_own_payments`
+29. [app] You unfollow someone from their profile by pressing Following; when you also pay for one of their tiers the button asks once more first, because the unfollow ends the paid subscription too — `docs/goal/behavior/subscriptions.md` § The free followers tier — follow and unfollow
+   - `tests/e2e-unified/tests/test_profile.py::test_profile_follow_toggle_unfollows_and_confirms_a_paid_leave`
+30. [app] You pay for a tier through its payment link in the app: your subscription request goes first, and a Stripe payment is matched to that request with no claim code to enter — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/test_subscription_payments.py::test_the_payment_link_subscribes_first_and_binds_the_checkout`
+31. [nest] A claim code minted by a creator on another nest is redeemed from your own nest: the redeem reaches the creator's nest, binds the payment to you there, and the post you bought arrives on your nest whatever its age, while a code that is not that creator's is refused as unknown — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_code_minted_on_another_nest_is_redeemed_from_the_buyers_own_nest`
+32. [nest] A payment that arrives for a subscription request from another nest before the request itself is held: the author does not see it in their requests and cannot approve it until the request from the buyer's nest has named its home, and then the two meet as one request — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_payment_ahead_of_the_request_from_another_nest_is_held_until_the_request_names_its_home`
+33. [nest] A subscriber on another nest who paid for a ranked tier also receives the posts of every per-post tier that rank includes, as a subscriber on the author's own nest would — `docs/goal/behavior/monetization.md` § Per-post pay-to-unlock
+   - `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_buyer_on_another_nest_of_a_ranked_tier_is_served_the_per_post_tiers_it_includes`
+34. [nest] When a paid subscription's window is refunded, disputed, voided by the author or lapses without renewal, the subscription ends on the author's nest and a subscriber on another nest learns it was removed and stops receiving the posts, while a renewal inside the grace keeps it in place — `docs/goal/behavior/monetization.md` § Pillar 3
+   - `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_paid_windows_end_reaches_the_buyers_nest_and_a_renewal_inside_the_grace_keeps_it`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
-| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
-| windows | ✅ full | 0.1.5-dev+517219d5 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+1e755069 standalone |
-| android | 🚧 unbuilt | 0.1.5-dev+1e755069 standalone |
+| web | 🚧 unbuilt | 0.1.5-dev+1e755069 standalone |
+| linux | 🚧 unbuilt | 0.1.5-dev+1e755069 standalone |
+| windows | 🚧 unbuilt | 0.1.5-dev+517219d5 standalone |
+| macos | 🚧 unbuilt | 0.1.5-dev+3f9f2b95 standalone |
+| ios | 🚧 unbuilt | 0.1.5-dev+1e755069 standalone |
+| android | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_action` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_ui_subscribe_publishes_pq_hybrid_encapsulation_key` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_offers_render_and_subscribe` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_action` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_ui_subscribe_publishes_pq_hybrid_encapsulation_key` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_offers_render_and_subscribe` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_settings_lists_active_subscription_and_unsubscribes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_claim_redeem_via_ui` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_mint_and_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_claim_redeem_via_ui` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_mint_and_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_signed_webhook_with_reference_enqueues_the_grant` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_unbound_payment_mints_claim_and_redeem_binds_the_actor` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_claims_mint_and_list_cover_the_manual_no_api_path` | nest (linux): passed |
@@ -113,6 +151,24 @@ Stamped 2026-10-01 at dfa27a899f.
 | 15 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_refund_on_a_granted_subscription_ends_access` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_providers_list_shows_config_without_secret` | nest (linux): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_reserved_room_tier_name.py::test_a_creator_cannot_name_a_tier_room` | nest (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void` — requires `subscription-claim-void-button` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void` — requires `subscription-claim-void-button` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 19 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 21 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_a_payment_backed_request_shows_the_paid_badge` — requires `author-drain-hold` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 23 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_refund_voids_the_purchases_code_after_redemption_a_renewal_keeps_it_and_an_unpaid_checkout_grants_nothing` | nest (linux): passed |
+| 24 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_action` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 24 | app | `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section` — requires `profile-offers-browse` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 25 | nest | `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_an_authors_removal_of_a_follower_on_another_nest_reaches_the_followers_nest` | nest (linux): passed |
+| 25 | nest | `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_an_unfollow_of_a_follow_still_pending_at_the_home_withdraws_it` | nest (linux): passed |
+| 26 | nest | `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_a_followed_authors_succession_keeps_the_follow_and_a_followers_moves_them_on_the_roster` | nest (linux): passed, nest (macos): passed |
+| 27 | nest | `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_a_post_delivered_by_two_homes_lists_once_per_home_and_the_real_homes_tombstone_removes_it` | nest (linux): passed, nest (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_product_mapping_covers_only_its_own_payments` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 29 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_follow_toggle_unfollows_and_confirms_a_paid_leave` — requires `profile-follow-unfollow` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, android (linux): error, tui (linux): passed |
+| 30 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_the_payment_link_subscribes_first_and_binds_the_checkout` — requires `payment-link-subscribes-first` (not built: web, linux, windows, macos, ios, android, android-kids, ios-kids); `profile-offers-browse` (not built: android, android-kids, ios-kids) | tui (linux): passed |
+| 31 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_code_minted_on_another_nest_is_redeemed_from_the_buyers_own_nest` | nest (linux): passed |
+| 32 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_payment_ahead_of_the_request_from_another_nest_is_held_until_the_request_names_its_home` | nest (linux): passed |
+| 33 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_buyer_on_another_nest_of_a_ranked_tier_is_served_the_per_post_tiers_it_includes` | nest (linux): passed |
+| 34 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_paid_windows_end_reaches_the_buyers_nest_and_a_renewal_inside_the_grace_keeps_it` | nest (linux): passed |
 <!-- features-render:end -->

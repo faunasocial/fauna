@@ -501,13 +501,15 @@ func deriveBridgeMlkemEk(ed25519Seed []byte) ([]byte, error) {
 // `test_capability_labeler_drain` harness drives it so the drain test has a real
 // signed labeler without the client UI (E2E rule 8 carve-out (b) — arranging the
 // world, not the mutation under test).
-func publishLabeler(signingSeed, wasmBytes []byte, version uint64, needsText, needsHashtags, needsMediaMetadata, needsAuthor bool, labelAbi uint16, maxMemoryBytes, maxCpuMicroseconds, updatedAt uint64) ([]byte, error) {
-	// The fifth declared input, attachment bytes, is a community-room
-	// facet no mail-drain fixture asks for (the mail holder hands an empty
-	// facet); the tier_3 drain publishes flagless modules.
+//
+// The fifth declared input, attachment bytes, is the community-room facet: the
+// mail drain publishes flagless modules (its holder hands an empty facet),
+// while the tier_3 room-labeler journeys declare it to prove a room's labeler
+// reads attachment-only messages and room-post media.
+func publishLabeler(signingSeed, wasmBytes []byte, version uint64, needsText, needsHashtags, needsMediaMetadata, needsAuthor, needsAttachmentBytes bool, labelAbi uint16, maxMemoryBytes, maxCpuMicroseconds, updatedAt uint64) ([]byte, error) {
 	return fauna_ffi.BuildSignedLabelerMetadata(
 		signingSeed, wasmBytes, version,
-		needsText, needsHashtags, needsMediaMetadata, needsAuthor, false,
+		needsText, needsHashtags, needsMediaMetadata, needsAuthor, needsAttachmentBytes,
 		labelAbi,
 		maxMemoryBytes, maxCpuMicroseconds, updatedAt,
 	)

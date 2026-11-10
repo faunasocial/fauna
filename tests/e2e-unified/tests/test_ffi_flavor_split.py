@@ -184,8 +184,11 @@ def test_the_harness_seed_exports_ship_in_no_app_flavor():
     )
 
     text = _JUSTFILE.read_text(encoding="utf-8")
+    # `-p fauna-ffi ` only: `fauna-ffi-core` has an `e2e-harness` feature of its
+    # own (the backup legs' tests, `feature-test-compile-check`), a different
+    # crate whose cargo line ships nothing.
     naming = [line.strip() for line in text.splitlines()
-              if "e2e-harness" in line and "cargo" in line]
+              if "e2e-harness" in line and "cargo" in line and "-p fauna-ffi " in line]
     e2e_ffi = _recipe_body("e2e-ffi")
     check = _recipe_body("e2e-ffi-flavor-check")
     assert naming and all(line in e2e_ffi or line in check for line in naming), (
@@ -328,25 +331,29 @@ def test_apple_bindgen_routes_the_store_safe_flavor_to_the_production_arm():
     empty FEATURES — only `test-helpers` may take `--test-tree`. This is the
     same three-flavor caveat the pre-existing `*ForTest` suffix grep already
     carries a few lines above; the flavor-diff call must not regress it."""
+    # Since the kids e2e flavor (`kids-safe,kids-floor,test-helpers`) the
+    # guard is windows' membership shape: a flavor NAMING `test-helpers` takes
+    # --test-tree, every other one (store-safe, kids, empty) --production-tree.
+    # The partial test flavor (the kids e2e's) skips the witness — a test
+    # artifact, missing the excised planes' seams by design.
     body = _recipe_body("_apple-ffi-bindgen")
     m = re.search(
-        r'if \[ "\$FEATURES" (=|!=) "test-helpers" \]; then\s*\n\s*FLAVOR_FLAG=(--\S+)',
+        r'case ",\$FEATURES," in\s*\n'
+        r"\s*,test-helpers,\)\s*FLAVOR_FLAG=(--\S+)\s*;;\s*\n"
+        r"\s*\*,test-helpers,\*\)\s*FLAVOR_FLAG=\s*;;\s*\n"
+        r"\s*\*\)\s*FLAVOR_FLAG=(--\S+)\s*;;",
         body,
     )
     assert m, (
         "_apple-ffi-bindgen's flavor-diff call has no recognizable "
-        '`if [ "$FEATURES" =/!= "test-helpers" ]; then FLAVOR_FLAG=--…` '
-        "routing guard"
+        '`case ",$FEATURES," in ,test-helpers,) FLAVOR_FLAG=--… ;; '
+        "*,test-helpers,*) FLAVOR_FLAG= ;; *) FLAVOR_FLAG=--… ;;` routing guard"
     )
-    op, flag = m.group(1), m.group(2)
-    # `= "test-helpers"` must route to --test-tree (and everything else,
-    # including store-safe, falls to --production-tree); `!= "test-helpers"`
-    # inverted would route store-safe to --test-tree instead.
-    assert (op, flag) == ("=", "--test-tree"), (
-        f'flavor-diff routing reads `[ "$FEATURES" {op} "test-helpers" ]` -> '
-        f"{flag} — store-safe (neither empty nor test-helpers) would take "
-        "the wrong tree flag unless the guard is exactly "
-        '`= "test-helpers"` -> --test-tree (else --production-tree)'
+    test_flag, default_flag = m.group(1), m.group(2)
+    assert (test_flag, default_flag) == ("--test-tree", "--production-tree"), (
+        f"flavor-diff routing sends the full test flavor to {test_flag} and every "
+        f"shipping flavor to {default_flag} — store-safe and the kids flavor take "
+        "the catch-all arm, which must be --production-tree"
     )
 
 
@@ -381,7 +388,7 @@ def test_windows_bindgen_routes_the_store_safe_flavor_to_the_production_arm():
     `--production-tree`, exactly like empty FEATURES — only `test-helpers` may
     take `--test-tree`. The recipe routes with a `case ",$FEATURES," in
     *,test-helpers,*)` membership test rather than apple's `[ = ]` string
-    test; pin the membership arm to --test-tree and the catch-all arm to
+    test (apple's own guard now takes the same shape); pin the membership arm to --test-tree and the catch-all arm to
     --production-tree, so an inverted or emptiness-based rewrite reds here
     (the apple pin above is the same assertion for its own guard shape)."""
     body = _recipe_body("_windows-ffi-bindgen")
@@ -1414,10 +1421,12 @@ def test_production_apple_bindgen_asserts_zero_seams_in_its_own_output():
         "_apple-ffi-bindgen lost its seam assertion — a newly added ungated seam "
         "would ship silently in the next mac-release"
     )
-    assert 'if [ "$FEATURES" != "test-helpers" ]' in body, (
+    # A test flavor is one naming `test-helpers` as a member (the kids e2e's
+    # `kids-safe,kids-floor,test-helpers` is one); everything else is checked.
+    assert 'if [[ ",$FEATURES," != *",test-helpers,"* ]]' in body, (
         "_apple-ffi-bindgen's seam assertion no longer guards every SHIPPING "
-        "flavor — it must fire on anything that is not the test flavor, so "
-        "`store-safe` (the App-Store build) is covered too"
+        "flavor — it must fire on anything that is not a test flavor, so "
+        "`store-safe` (the App-Store build) and `kids-safe,kids-floor` are covered too"
     )
 
 
@@ -1466,6 +1475,7 @@ _E2E_TAGS = f"{_SEIZE_TAG},{_FIXTURES_TAG}"
 _BRIDGES = _REPO / "bins" / "fauna-bridges"
 _BRIDGE_CMD = _BRIDGES / "cmd" / "fauna-atproto-bridge"
 _ATPROTOID = _BRIDGES / "internal" / "atprotoid"
+_CONNLIMIT = _BRIDGES / "internal" / "connlimit"
 #: Every literal the production recipes grep their own binary for, and the e2e
 #: recipes grep for the presence of. The seize flag name plus the three env-var
 #: names; a fourth seam adds its variable here AND to the recipes' `for lit in`
@@ -1488,8 +1498,23 @@ _FIXTURE_SEAM_PAIRS = (
         _BRIDGE_CMD / "fixtures_seam_absent.go",
         ("proxyFixtureWrap", "proofFetcherFromEnv", "permissionSetFixtureWrap", "crawlRelays"),
     ),
+    # The mail bridge's first harness seam (2026-11-07): the shorter pre-auth
+    # connection deadline the outcome-26 witnesses boot the e2e flavor with.
+    (_CONNLIMIT / "preauth_seam.go", _CONNLIMIT / "preauth_seam_absent.go", ("preAuthDeadline",)),
 )
-_ATPROTO_SEAM_LITERAL = re.compile(r'"FAUNA_ATPROTO_[A-Z_]+"')
+#: A harness seam's variable, in either bridge: the atproto bridge's
+#: `FAUNA_ATPROTO_*` and the mail bridge's `FAUNA_MAIL_E2E_*`.
+_BRIDGE_HARNESS_SEAM_LITERAL = re.compile(r'"FAUNA_(?:ATPROTO_|MAIL_E2E_)[A-Z_]+"')
+#: The mail bridge's seam literals: what `mail-bridge-build` (and its windows
+#: twin) grep their own artifact for, and the e2e recipes grep the presence of.
+_MAIL_BRIDGE_SEAM_LITERALS = ("FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS",)
+#: The mail stack's RUST seam literals (fauna-mail's inbound-verification
+#: resolver and deadline, `libs/fauna-mail/src/auth.rs`, under `test-helpers`):
+#: they live in the bridge's cdylib, so the Unix recipes grep the binary AND
+#: the cdylib it links — the shipped `mail-ffi-slot` copy for absence, the
+#: `mail-ffi-e2e-slot` copy for presence.
+_MAIL_FFI_SEAM_FILE = _REPO / "libs" / "fauna-mail" / "src" / "auth.rs"
+_MAIL_FFI_SEAM_LITERALS = ("FAUNA_MAIL_E2E_RESOLVER", "FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS")
 
 
 def _strip_shell_comments(body: str) -> str:
@@ -1542,10 +1567,10 @@ def test_each_redirect_seam_carries_the_fixtures_tag_and_its_absent_twin(real_pa
             f"{fn} must exist in both flavors — the twin keeps the production "
             "build compiling with the seam absent"
         )
-    assert _ATPROTO_SEAM_LITERAL.search(real), (
+    assert _BRIDGE_HARNESS_SEAM_LITERAL.search(real), (
         f"{real_path.name} is the flavor that READS the variable; it must name it"
     )
-    assert not _ATPROTO_SEAM_LITERAL.search(twin), (
+    assert not _BRIDGE_HARNESS_SEAM_LITERAL.search(twin), (
         f"{twin_path.name} spells a FAUNA_ATPROTO_* literal — the production twin "
         "must carry none, or the artifact witness finds the name in a binary that "
         "never reads it and the gate becomes unverifiable"
@@ -1563,7 +1588,7 @@ def test_no_ungated_fauna_atproto_literal_in_the_bridges():
         if path.name.endswith("_test.go"):
             continue
         code = path.read_text(encoding="utf-8")
-        if not _ATPROTO_SEAM_LITERAL.search(code):
+        if not _BRIDGE_HARNESS_SEAM_LITERAL.search(code):
             continue
         if not code.startswith(f"//go:build {_FIXTURES_TAG}\n"):
             offenders.append(str(path.relative_to(_REPO)))
@@ -1615,7 +1640,9 @@ def test_only_the_e2e_recipe_sets_the_bridge_tags():
         )
 
 
-def _assert_two_way_artifact_witness(prod: str, e2e: str, prod_name: str, e2e_name: str) -> None:
+def _assert_two_way_artifact_witness(
+    prod: str, e2e: str, prod_name: str, e2e_name: str, literals=None,
+) -> None:
     """Text analysis proves what the recipes SAY; this pins the recipes that
     prove what the binary IS: the production recipe greps its own artifact for
     every seam literal and fails on presence, the e2e recipe fails on absence."""
@@ -1628,7 +1655,7 @@ def _assert_two_way_artifact_witness(prod: str, e2e: str, prod_name: str, e2e_na
         "verified in the positive direction is indistinguishable from a tag "
         "nothing honours, and the production witness would pass vacuously"
     )
-    for literal in _BRIDGE_SEAM_LITERALS:
+    for literal in _BRIDGE_SEAM_LITERALS if literals is None else literals:
         assert literal in _strip_shell_comments(prod), (
             f"{prod_name} does not grep its artifact for {literal!r}"
         )
@@ -1643,6 +1670,109 @@ def test_the_production_bridge_recipe_witnesses_its_own_artifact():
         _recipe_body("atproto-bridge-build-e2e"),
         "atproto-bridge-build",
         "atproto-bridge-build-e2e",
+    )
+
+
+# ── the mail bridge's harness seams (2026-11-07) ─────────────────────────────
+#
+# The mail bridge ships in every nest image and the windows MSI, so its seams
+# get the atproto bridge's discipline whole: the fixtures tag only on the e2e
+# recipes, two output paths, and the two-way grep on every artifact.
+
+_MAIL_BRIDGE_RECIPES = (
+    # (production recipe, e2e recipe, e2e output name)
+    ("mail-bridge-build", "mail-bridge-build-e2e", '"fauna-mail-bridge-e2e"'),
+    ("windows-mail-bridge-build", "windows-mail-bridge-build-e2e", '"fauna-mail-bridge-e2e.exe"'),
+)
+#: The literals each pair witnesses both ways. The windows pair carries the Go
+#: seams only: its e2e exe and the shipped one stage beside ONE
+#: `target/fauna_ffi.dll`, so no e2e cdylib flavor exists there
+#: yet.
+_MAIL_BRIDGE_PAIR_LITERALS = {
+    "mail-bridge-build": _MAIL_BRIDGE_SEAM_LITERALS + _MAIL_FFI_SEAM_LITERALS,
+    "windows-mail-bridge-build": _MAIL_BRIDGE_SEAM_LITERALS,
+}
+
+
+@pytest.mark.parametrize("prod_name, e2e_name, e2e_out", _MAIL_BRIDGE_RECIPES, ids=lambda v: v if not v.startswith('"') else "")
+def test_only_the_e2e_mail_bridge_recipes_set_the_fixtures_tag(prod_name, e2e_name, e2e_out):
+    prod = _strip_shell_comments(_recipe_body(prod_name))
+    e2e = _strip_shell_comments(_recipe_body(e2e_name))
+    assert _FIXTURES_TAG not in prod, (
+        f"{prod_name} must not pass {_FIXTURES_TAG} — it builds the shipped mail bridge"
+    )
+    assert f'"release" "{_FIXTURES_TAG}"' in e2e, (
+        f"{e2e_name} must pass `{_FIXTURES_TAG}` as the Go/cgo helper's tag argument"
+    )
+    assert e2e_out in e2e, (
+        f"{e2e_name} must write its own path ({e2e_out}) — sharing the production "
+        "slot is how a warm tree serves a test binary to a release step"
+    )
+
+
+@pytest.mark.parametrize("prod_name, e2e_name, e2e_out", _MAIL_BRIDGE_RECIPES, ids=lambda v: v if not v.startswith('"') else "")
+def test_the_production_mail_bridge_recipes_witness_their_own_artifact(prod_name, e2e_name, e2e_out):
+    _assert_two_way_artifact_witness(
+        _recipe_body(prod_name), _recipe_body(e2e_name), prod_name, e2e_name,
+        literals=_MAIL_BRIDGE_PAIR_LITERALS[prod_name],
+    )
+
+
+def test_the_unix_mail_bridge_recipes_grep_the_cdylib_they_link():
+    """The Rust seams are in the cdylib, not the Go binary: a grep of the binary
+    alone passes whatever the cdylib carries. The shipped recipe greps the
+    `mail-ffi-slot` copy and links it; the e2e recipe greps and links the
+    `mail-ffi-e2e-slot` copy, which only `mail-bridge-ffi-e2e` builds."""
+    prod = _strip_shell_comments(_recipe_body("mail-bridge-build"))
+    e2e = _strip_shell_comments(_recipe_body("mail-bridge-build-e2e"))
+    assert '"$FFI_LIB"' in prod and "just mail-ffi-slot" in prod and "mail-ffi-e2e-slot" not in prod, (
+        "mail-bridge-build must grep the shipped `mail-ffi-slot` cdylib ($FFI_LIB) and never name the e2e slot"
+    )
+    assert '"$FFI_LIB"' in e2e and "just mail-ffi-e2e-slot" in e2e, (
+        "mail-bridge-build-e2e must grep the `mail-ffi-e2e-slot` cdylib it links"
+    )
+    assert '"fauna_e2e_fixtures" mail-ffi-e2e-slot' in e2e, (
+        "mail-bridge-build-e2e must link the e2e cdylib (`_go-cgo-build … mail-ffi-e2e-slot`)"
+    )
+    header = re.search(r"^mail-bridge-build-e2e:(.*)$", (_REPO / "justfile").read_text(encoding="utf-8"), re.M)
+    assert header and "mail-bridge-ffi-e2e" in header.group(1), (
+        "mail-bridge-build-e2e must depend on `mail-bridge-ffi-e2e`, the recipe that fills its cdylib slot"
+    )
+
+
+def test_only_the_e2e_cdylib_recipe_turns_on_the_mail_seam_feature():
+    """fauna-ffi's `mail-bridge-e2e` feature (fauna-mail's `test-helpers`) is
+    built by `mail-bridge-ffi-e2e` alone — the one cargo line in the justfile
+    that names it — never by the shipped `mail-bridge-ffi`."""
+    justfile = (_REPO / "justfile").read_text(encoding="utf-8")
+    assert "labeler,mail-bridge-e2e" in _strip_shell_comments(_recipe_body("mail-bridge-ffi-e2e"))
+    assert "mail-bridge-e2e" not in _strip_shell_comments(_recipe_body("mail-bridge-ffi")), (
+        "mail-bridge-ffi turns on fauna-ffi's `mail-bridge-e2e` — the mail seams would ship"
+    )
+    hits = re.findall(r"--features [^ ']*mail-bridge-e2e", justfile)
+    assert len(hits) == 1, (
+        f"fauna-ffi's `mail-bridge-e2e` feature is named by {len(hits)} cargo lines in the "
+        "justfile; only `mail-bridge-ffi-e2e` may build it"
+    )
+
+
+def test_mail_bridge_seam_literals_match_the_seam_files():
+    """Every FAUNA_MAIL_E2E_* variable a tagged seam reads is in the witness
+    list, so a second mail seam cannot join without its artifact grep."""
+    read = set()
+    for real, _, _ in _FIXTURE_SEAM_PAIRS:
+        read |= set(re.findall(r'"(FAUNA_MAIL_E2E_[A-Z_]+)"', real.read_text(encoding="utf-8")))
+    assert read == set(_MAIL_BRIDGE_SEAM_LITERALS), (
+        f"seam files read {sorted(read)} but the recipes witness "
+        f"{sorted(_MAIL_BRIDGE_SEAM_LITERALS)} — add the new variable to "
+        "_MAIL_BRIDGE_SEAM_LITERALS and to every mail-bridge recipe's `for lit in` line"
+    )
+    # The Rust leg: fauna-mail's verification seams, read in the cdylib.
+    rust_read = set(re.findall(r'"(FAUNA_MAIL_E2E_[A-Z_]+)"', _MAIL_FFI_SEAM_FILE.read_text(encoding="utf-8")))
+    assert rust_read == set(_MAIL_FFI_SEAM_LITERALS), (
+        f"{_MAIL_FFI_SEAM_FILE.relative_to(_REPO)} reads {sorted(rust_read)} but the recipes "
+        f"witness {sorted(_MAIL_FFI_SEAM_LITERALS)} — add the new variable to "
+        "_MAIL_FFI_SEAM_LITERALS and to the Unix mail-bridge recipes' `for lit in` lines"
     )
 
 
@@ -1712,6 +1842,7 @@ def test_the_windows_go_cgo_recipes_share_one_feature_set():
         "_windows-go-cgo-build": "_windows-go-cgo-env",
         "mail-bridge-test-win-cgo": "_windows-go-cgo-env",
         "windows-mail-bridge-build": "_windows-go-cgo-build",
+        "windows-mail-bridge-build-e2e": "_windows-go-cgo-build",
         "windows-seal-helper-build": "_windows-go-cgo-build",
         "windows-atproto-bridge-build": "_windows-go-cgo-build",
         "windows-atproto-bridge-build-e2e": "_windows-go-cgo-build",

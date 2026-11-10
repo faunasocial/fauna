@@ -157,8 +157,13 @@ class PrivacySettingsVM @Inject constructor(
                 val rule = encodeEmailFilterRuleInputs(form.rule)
                 val actionTyped = encodeEmailFilterActionInputs(form.action)
                 val priority = parseEmailFilterPriority(form.priority)
-                api.createEmailFilter(form.name, listOf(rule), "all", actionTyped, priority, form.continueOnMatch)
-                loadFilters()
+                // With no nest the create rests in the device outbox: the sheet
+                // closes like a create, but nothing is re-read or listed — the
+                // rule has no server id until the drain (tui's rule).
+                val queued = api.createEmailFilterOrQueue(
+                    form.name, listOf(rule), "all", actionTyped, priority, form.continueOnMatch,
+                )
+                if (!queued) loadFilters()
             } catch (e: Exception) {
                 emailFilterError.value = e.message
             }

@@ -35,6 +35,7 @@
                 <ToggleSwitch x:Name="SubdomainToggle"
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.WebSettingsSubdomainToggle}"
                               Header="{loc:Localize Key=web_settings/subdomain_toggle_label}"
+                              IsEnabled="False"
                               Toggled="SubdomainToggle_Toggled" />
                 <TextBlock Opacity="0.6" TextWrapping="Wrap"
                            Text="{loc:Localize Key=web_settings/subdomain_toggle_subtitle}" />

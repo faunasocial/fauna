@@ -49,6 +49,11 @@ use fauna_feed::{CueObservation, CueRow, CueTracker, LeaveModel};
 
 use super::host::LinuxFeedManager;
 
+/// The CSS class `build_post_card_body` puts on a card body that shows the post
+/// itself: the observer measures only rows whose child carries it, so a
+/// placeholder card (muted, blocked, collapsed) is never an exposure.
+pub const CUE_SUBJECT_CLASS: &str = "cue-subject";
+
 /// The shared tracker plus this wire-up's monotonic epoch. `Instant` has no
 /// absolute reading, so the probe converts to the tracker's `mono_now_ms` by
 /// measuring from a zero captured when the observer was wired — a per-session
@@ -251,6 +256,17 @@ fn sample(
         let Some(post_id) = row_post_id(&row) else {
             continue;
         };
+        // A muted, blocked or collapsed placeholder hides what the post says,
+        // so lingering on it is no exposure to the post (`engagement-cues.md`
+        // § Cue vocabulary & derivation): left out, like tui's `card_rows`. The
+        // tracker reads an omitted row as held while the post stays in the
+        // loaded window, and a placeholder never starts an exposure at all.
+        if !row
+            .child()
+            .is_some_and(|c| c.has_css_class(CUE_SUBJECT_CLASS))
+        {
+            continue;
+        }
         // No bounds at all this sample: omit the row entirely — the tracker
         // reads that the same way it reads a non-positive height (held, not
         // gone, as long as the post is still in the loaded window).

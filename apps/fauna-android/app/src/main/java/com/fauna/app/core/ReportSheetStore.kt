@@ -3,7 +3,9 @@ package com.fauna.app.core
 import com.fauna.ffi.FfiReportForm
 import com.fauna.ffi.FfiReportSubject
 import com.fauna.ffi.FfiReportTarget
+import com.fauna.ffi.reportBlockNotSent
 import com.fauna.ffi.reportFailed
+import com.fauna.ffi.reportQueued
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,7 +26,7 @@ import uniffi.fauna_core.LocalizedText
  * Every decision is shared Rust's: the reason list, the submit gate, the
  * include-text rule and the words come from `reportSheetView(target, form)`
  * (folded by the host per keystroke), and the request is built from the sheet by
- * the shared `report_request` inside `abuseReportSubmit`. This type only
+ * the shared `report_request` inside `abuseReportSubmitOrQueue`. This type only
  * sequences the follow-ups, exactly as the references do: submit →
  * `knocks_block(author)` when ticked → the reporter-side hide (`hideReported`) →
  * the stored list into the render inputs ([onHiddenContent]). A failed send
@@ -39,6 +41,10 @@ class ReportSheetStore(
     private val api: ApiClient,
     /** The stored hide list after `hideReported` — the whole truth, replaces the cache. */
     private val onHiddenContent: (List<String>) -> Unit,
+    /** The shared `report_queued` line — injected so the sequencing tests stay FFI-free. */
+    private val queuedWords: () -> LocalizedText = { reportQueued() },
+    /** The shared `report_block_not_sent` line, likewise. */
+    private val blockNotSentWords: () -> LocalizedText = { reportBlockNotSent() },
 ) {
     /**
      * One immutable snapshot. FFI-free by construction (the per-keystroke
@@ -56,6 +62,10 @@ class ReportSheetStore(
         val error: LocalizedText? = null,
         /** A failed block/hide AFTER a landed send — beside [status], not instead of it. */
         val followupError: String? = null,
+        /** A queued report's ticked block that was not sent (shared `report_block_not_sent`). */
+        val followupNotice: LocalizedText? = null,
+        /** A failed show-again (the un-hide), painted on `error-message`. */
+        val showAgainError: String? = null,
     )
 
     private val _state = MutableStateFlow(State())
@@ -90,20 +100,28 @@ class ReportSheetStore(
         if (current.sending) return
         _state.update { it.copy(sending = true) }
         val draft = current.form
+        // `null` = queued with no nest (`account-offline-mutation.md`): the sheet
+        // closes on the queued line, the hide still lands (it is local), and a
+        // ticked block is not tried — it needs the nest, and the notice says so.
         val reply = try {
-            api.abuseReportSubmit(sent, draft)
+            api.abuseReportSubmitOrQueue(sent, draft)
         } catch (e: Exception) {
             // The sheet stays open for a retry.
             _state.update { it.copy(sending = false, error = reportFailed(e.message ?: e.toString())) }
             return
         }
         var followup: String? = null
+        var notice: LocalizedText? = null
         val author = sent.author
         if (draft.blockAuthor && author != null) {
-            try {
-                api.blockKnock("", author)
-            } catch (e: Exception) {
-                followup = "block: ${e.message ?: e}"
+            if (reply == null) {
+                notice = blockNotSentWords()
+            } else {
+                try {
+                    api.blockKnock("", author)
+                } catch (e: Exception) {
+                    followup = "block: ${e.message ?: e}"
+                }
             }
         }
         subjectId(sent.subject)?.let { id ->
@@ -117,10 +135,32 @@ class ReportSheetStore(
             it.copy(
                 target = null,
                 sending = false,
-                status = reply.acknowledgement,
+                status = reply?.acknowledgement ?: queuedWords(),
                 error = null,
                 followupError = followup,
+                followupNotice = notice,
             )
+        }
+    }
+
+    /**
+     * The reporter's show-again (`content-policy-show-again-button`,
+     * `moderation.md` § Corollary — the reporter's hide is theirs to undo): one
+     * `unhideReported` per id the shared fold matched, the stored list the last
+     * returns into the render inputs ([onHiddenContent]) so the item paints
+     * again — here and, through the record's tombstones, on the user's other
+     * devices. The report itself is never withdrawn; a failure lands on
+     * `error-message` ([State.showAgainError]).
+     */
+    suspend fun showAgain(ids: List<String>) {
+        if (ids.isEmpty()) return
+        _state.update { it.copy(showAgainError = null) }
+        try {
+            var stored: List<String>? = null
+            for (id in ids) stored = api.unhideReported(id)
+            stored?.let(onHiddenContent)
+        } catch (e: Exception) {
+            _state.update { it.copy(showAgainError = "show again: ${e.message ?: e}") }
         }
     }
 

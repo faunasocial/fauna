@@ -45,9 +45,12 @@ mod transport;
 
 #[cfg(feature = "quic")]
 pub use transport::{
-    DEFAULT_ALPN, IrohConn, IrohTransport, IrohTransportBuilder, ceremony_transport,
+    DEFAULT_ALPN, IrohConn, IrohTransport, IrohTransportBuilder, peer_leg_factory,
     peer_leg_transport, peer_leg_transport_trusting,
 };
+
+#[cfg(feature = "ceremony")]
+pub use transport::ceremony_transport;
 
 /// Re-exported because it is [`IrohTransportBuilder::relay_url`]'s own
 /// parameter type: consumers (the peer-leg factories in tui and the sync

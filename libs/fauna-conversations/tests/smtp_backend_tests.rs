@@ -559,6 +559,7 @@ fn inbound_record(uid: u32, id: &[u8], from: &str, subject: &str, body: &str) ->
         rfc5322: raw.into_bytes(),
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     }
@@ -713,8 +714,9 @@ impl InboundMailSource for LifecycleInbound {
     async fn begin_pass(&self) {
         self.began.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
-    async fn end_pass(&self) {
+    async fn end_pass(&self) -> Vec<u32> {
         self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Vec::new()
     }
 }
 
@@ -790,8 +792,9 @@ impl InboundMailSource for ErroringInbound {
     async fn fetch(&self, _after_uid: u32, _limit: u32) -> Result<InboundMailPage, String> {
         Err("boom".into())
     }
-    async fn end_pass(&self) {
+    async fn end_pass(&self) -> Vec<u32> {
         self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Vec::new()
     }
 }
 
@@ -949,6 +952,7 @@ async fn poll_skips_unaddressable_message_without_stalling() {
                 rfc5322: b"To: me@host.test\r\nSubject: orphan\r\n\r\nno sender\r\n".to_vec(),
                 mailbox: MailFeed::Inbox,
                 suppress_from_view: false,
+                spam: Default::default(),
                 has_seen_flag: false,
                 warmup_hold: None,
             },
@@ -1091,6 +1095,7 @@ fn ingest_inbound_record_derives_is_own_true_for_a_sent_mailbox_self_authored_me
             .to_vec(),
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1132,6 +1137,7 @@ fn ingest_inbound_record_upgrades_a_self_addressed_message_to_own_on_the_later_s
         rfc5322: raw.clone(),
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1150,6 +1156,7 @@ fn ingest_inbound_record_upgrades_a_self_addressed_message_to_own_on_the_later_s
         rfc5322: raw,
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1194,6 +1201,7 @@ fn ingest_inbound_record_dedup_duplicate_from_inbox_never_grants_ownership() {
             .to_vec(),
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1210,6 +1218,7 @@ fn ingest_inbound_record_dedup_duplicate_from_inbox_never_grants_ownership() {
             .to_vec(),
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1252,6 +1261,7 @@ fn ingest_inbound_record_message_id_collision_with_different_content_shows_the_s
             .to_vec(),
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1272,6 +1282,7 @@ fn ingest_inbound_record_message_id_collision_with_different_content_shows_the_s
             .to_vec(),
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1356,6 +1367,7 @@ fn ingest_inbound_record_upgrades_self_send_despite_bridge_added_received_header
         rfc5322: with_received, // the bridge's stamped delivery copy
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1371,6 +1383,7 @@ fn ingest_inbound_record_upgrades_self_send_despite_bridge_added_received_header
         rfc5322: core.to_vec(), // no Received: header — this account's own submission
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1427,6 +1440,7 @@ fn ingest_inbound_record_upgrades_a_self_send_carrying_an_attachment() {
             rfc5322,
             mailbox,
             suppress_from_view: false,
+            spam: Default::default(),
             has_seen_flag: false,
             warmup_hold: None,
         };
@@ -1512,6 +1526,7 @@ fn own_compare_record(
         rfc5322: raw.as_bytes().to_vec(),
         mailbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     }
@@ -1884,6 +1899,7 @@ fn ingest_inbound_record_skips_a_record_with_no_from() {
         rfc5322: b"To: me@host.test\r\nSubject: orphan\r\n\r\nno sender\r\n".to_vec(),
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -1921,6 +1937,7 @@ fn record_with_msgid(
         rfc5322: raw.into_bytes(),
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     }
@@ -2012,6 +2029,7 @@ async fn real_send_then_server_sent_copy_shows_one_bubble() {
         rfc5322: submitted_raw,
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -2063,6 +2081,7 @@ async fn a_sent_copy_the_warm_up_holds_marks_the_echoed_message_until_a_read_lif
         rfc5322: sink.calls.lock().unwrap()[0].1.clone(),
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold,
     };
@@ -2153,6 +2172,7 @@ async fn a_sent_mail_reaches_the_index_through_its_sent_copy_in_the_same_session
         rfc5322: submitted_raw,
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -2269,6 +2289,7 @@ async fn attachment_round_trips_outbound_to_inbound() {
         rfc5322: submitted_raw,
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     };
@@ -2354,6 +2375,7 @@ fn record_with_attachments(
         internal_date_ms: 1_700_000_000_000,
         rfc5322,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     }

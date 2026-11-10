@@ -8,6 +8,7 @@ using FaunaApp.Core.Logs;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using FaunaApp.Search;
 using Windows.System;
 using uniffi.fauna_ffi;
@@ -50,23 +51,18 @@ public sealed partial class SearchResultsPage : Page
     /// <c>search_type_filter_label</c> face (the same one linux/web/android/
     /// apple/tui call), which is expressed over the same badge map a row's
     /// own <c>search-result-item</c> uses — so the picker can never read
-    /// differently from its own results again. Each item's automation Name is
-    /// its wire token, not its label — the windows picker convention
-    /// (<c>FeedPage</c>'s <c>feed-rule-type-select</c>): an e2e selects the
-    /// stable token every app paints while the user reads the localized label.
+    /// differently from its own results again. Each item paints the localized
+    /// label and is keyed by its wire token (<see cref="PickerOption"/>): an e2e
+    /// selects the stable token while the user reads the label.
     /// </summary>
     private void PopulateTypeFilter()
-    {
-        TypeFilterCombo.Items.Clear();
-        foreach (var token in FaunaFfiMethods.SearchTypeFilterOptions())
-        {
-            var label = S.Resolve(FaunaFfiMethods.SearchTypeFilterLabel(token));
-            var item = new ComboBoxItem { Tag = token, Content = label };
-            AutomationProperties.SetName(item, token);
-            TypeFilterCombo.Items.Add(item);
-        }
-        if (TypeFilterCombo.Items.Count > 0) TypeFilterCombo.SelectedIndex = 0;
-    }
+        => PickerOption.Reconcile(
+            TypeFilterCombo,
+            FaunaFfiMethods.SearchTypeFilterOptions()
+                .Select(token => (S.Resolve(FaunaFfiMethods.SearchTypeFilterLabel(token)), token))
+                .ToList(),
+            selectedKey: null,
+            firstIfAbsent: true);
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
@@ -232,6 +228,13 @@ public sealed partial class SearchResultsPage : Page
                 {
                     DeepLinkFile = (file.folderId, file.pathHash),
                 });
+                break;
+
+            // The Events page; opening the hit's event_detail by its uidHash
+            // (the Events rows' id) is tui's shape and lifts here with the
+            // events trickle-down.
+            case SearchNav.Event:
+                Frame.Navigate(typeof(EventsPage), _clients!);
                 break;
         }
     }

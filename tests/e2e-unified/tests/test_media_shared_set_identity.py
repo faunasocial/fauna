@@ -57,6 +57,51 @@ def _scoped_names(app, value: str) -> list[str]:
     return app.media.item_names()
 
 
+def _share_with_member(owner_app, member_app, nest, owner, member, set_name, *, writer):
+    """The preamble every test here walks: the OWNER creates ``set_name`` and
+    shares it with the MEMBER (raised to writer when ``writer``), and the
+    member accepts the knock. Returns the owner's set row id — the identity
+    the member's Media page addresses the shared set by."""
+    from tests.api import conv_api
+
+    wait_until(
+        lambda: conv_api.keypackage_count(nest["port"], member, member["actor_id_hex"]) > 0,
+        30.0,
+        diagnose=lambda: "the member never published a KeyPackage the owner could admit",
+    )
+    ob = owner_app.backups
+    ob.navigate_folders()
+    ob.create_folder_via_wizard(set_name)
+    owner_row = ob.find_and_expand_folder(set_name)
+    ob.open_share_dialog()
+    ob.share_recipient(handle=member["handle"], actor_id_hex=member["actor_id_hex"])
+    wait_until(
+        lambda: ob.shared_member_count() == 1,
+        20.0,
+        diagnose=lambda: f"the share never landed; error={owner_app.error_text()!r}",
+    )
+    if writer:
+        ob.set_member_access("writer", 0, row=owner_row)
+        wait_until(
+            lambda: ob.member_access(0, row=owner_row) == "writer",
+            15.0,
+            diagnose=lambda: f"the writer grant never persisted; error={owner_app.error_text()!r}",
+        )
+    shared_id = conv_api.folder_row_id(nest["port"], owner, set_name)
+    assert shared_id is not None, "the owner's set must have a row on the nest"
+
+    mb = member_app.backups
+    mb.navigate_folders()
+    assert mb.wait_for_pending_shares(1) == 1, (
+        f"[member] the share should wait as one pending knock; error={member_app.error_text()!r}"
+    )
+    mb.accept_pending_share(0)
+    assert mb.wait_for_pending_shares(0) == 0, (
+        f"[member] accepting should consume the knock; error={member_app.error_text()!r}"
+    )
+    return shared_id
+
+
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
     [
@@ -89,44 +134,14 @@ def test_a_same_named_shared_set_is_its_own_option_and_upload_target(
     owner_app, nest, owner = folder_share_owner_app
     member_app, _nest, member = folder_share_recipient_app
 
-    wait_until(
-        lambda: conv_api.keypackage_count(nest["port"], member, member["actor_id_hex"]) > 0,
-        30.0,
-        diagnose=lambda: "the member never published a KeyPackage the owner could admit",
-    )
-
     # ── 1. Owner shares a writer set; member accepts and makes a namesake ──
     set_name = f"photos-{secrets.token_hex(3)}"
-    ob = owner_app.backups
-    ob.navigate_folders()
-    ob.create_folder_via_wizard(set_name)
-    owner_row = ob.find_and_expand_folder(set_name)
-    ob.open_share_dialog()
-    ob.share_recipient(handle=member["handle"], actor_id_hex=member["actor_id_hex"])
-    wait_until(
-        lambda: ob.shared_member_count() == 1,
-        20.0,
-        diagnose=lambda: f"the share never landed; error={owner_app.error_text()!r}",
+    shared_id = _share_with_member(
+        owner_app, member_app, nest, owner, member, set_name, writer=True
     )
-    ob.set_member_access("writer", 0, row=owner_row)
-    wait_until(
-        lambda: ob.member_access(0, row=owner_row) == "writer",
-        15.0,
-        diagnose=lambda: f"the writer grant never persisted; error={owner_app.error_text()!r}",
-    )
-    shared_id = conv_api.folder_row_id(nest["port"], owner, set_name)
-    assert shared_id is not None, "the owner's set must have a row on the nest"
     shared_value = member_app.media.shared_set_value(shared_id)
-
+    ob = owner_app.backups
     mb = member_app.backups
-    mb.navigate_folders()
-    assert mb.wait_for_pending_shares(1) == 1, (
-        f"[member] the share should wait as one pending knock; error={member_app.error_text()!r}"
-    )
-    mb.accept_pending_share(0)
-    assert mb.wait_for_pending_shares(0) == 0, (
-        f"[member] accepting should consume the knock; error={member_app.error_text()!r}"
-    )
 
     def _member_view() -> str:
         """Ground truth for a red: the member's Folders rows as painted, and
@@ -340,12 +355,6 @@ def test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set(
     owner_app, nest, owner = folder_share_owner_app
     member_app, _nest, member = folder_share_recipient_app
 
-    wait_until(
-        lambda: conv_api.keypackage_count(nest["port"], member, member["actor_id_hex"]) > 0,
-        30.0,
-        diagnose=lambda: "the member never published a KeyPackage the owner could admit",
-    )
-
     # ── 1. The member's own folder first ───────────────────────────────────
     set_name = f"photos-{secrets.token_hex(3)}"
     mb = member_app.backups
@@ -353,26 +362,7 @@ def test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set(
     mb.create_folder_via_wizard(set_name)
 
     # ── 2. The owner shares a same-named set; the member accepts ───────────
-    ob = owner_app.backups
-    ob.navigate_folders()
-    ob.create_folder_via_wizard(set_name)
-    ob.find_and_expand_folder(set_name)
-    ob.open_share_dialog()
-    ob.share_recipient(handle=member["handle"], actor_id_hex=member["actor_id_hex"])
-    wait_until(
-        lambda: ob.shared_member_count() == 1,
-        20.0,
-        diagnose=lambda: f"the share never landed; error={owner_app.error_text()!r}",
-    )
-
-    mb.navigate_folders()
-    assert mb.wait_for_pending_shares(1) == 1, (
-        f"[member] the share should wait as one pending knock; error={member_app.error_text()!r}"
-    )
-    mb.accept_pending_share(0)
-    assert mb.wait_for_pending_shares(0) == 0, (
-        f"[member] accepting should consume the knock; error={member_app.error_text()!r}"
-    )
+    _share_with_member(owner_app, member_app, nest, owner, member, set_name, writer=False)
 
     # ── 3. Both rows on Folders, both options on Media ─────────────────────
     def _folder_rows_named() -> int:
@@ -420,4 +410,237 @@ def test_a_namesake_made_before_the_accept_does_not_hide_the_shared_set(
     labels = mm.folder_filter_labels() or []
     assert labels.count(set_name) == 1 and labels.count(shared_label) == 1, (
         f"a same-named pair is exactly two options, never merged: {labels!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    # tui leads (outcome 26 of `docs/features/share-a-folder.md`); the other
+    # apps add their pair as they are witnessed.
+    [("tui", "tui")],
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# Two apps + a real MLS share/accept + the join, then two detail surfaces and a
+# delete on each side. A ceiling, not an expectation.
+@pytest.mark.timeout(900)
+@pytest.mark.feature("share-a-folder")
+def test_delete_versions_and_restore_act_on_the_chosen_row_never_the_namesake(
+    folder_share_owner_app, folder_share_recipient_app, tmp_path
+):
+    """Outcome 26: beside an own folder of the same name, the version list,
+    a restore and a delete on the SHARED folder's file act on that row alone
+    (`set-addressing.md` § The row form; the doors resolve the row the opened
+    item names, never its name). Both sets hold a file of the same path, so a
+    door that resolved by name would read, re-point or tombstone the wrong one
+    — each step reads both rows back on the member's Media page, and the
+    owner's own list, as its observable."""
+    from tests.api import conv_api
+
+    owner_app, nest, owner = folder_share_owner_app
+    member_app, _nest, member = folder_share_recipient_app
+
+    # ── 1. A writer share, accepted; then the member's namesake ────────────
+    set_name = f"photos-{secrets.token_hex(3)}"
+    shared_id = _share_with_member(
+        owner_app, member_app, nest, owner, member, set_name, writer=True
+    )
+    mm = member_app.media
+    om = owner_app.media
+    shared_value = mm.shared_set_value(shared_id)
+    mb = member_app.backups
+    mb.navigate_folders()
+    mb.create_folder_via_wizard(set_name, await_row=False)
+
+    def _member_view() -> str:
+        try:
+            mb.navigate_folders()
+            titles = mb.folder_titles()
+        except Exception as exc:  # diagnosis only — never mask the real failure
+            titles = f"<unreadable: {exc}>"
+        rows = conv_api.folder_rows(nest["port"], member)
+        return f"member folders painted={titles!r}; member folders.list={rows!r}"
+
+    # The Folders list shows both rows, never one merged.
+    def _folder_rows_named() -> int:
+        mb.navigate_folders()
+        return sum(1 for t in mb.folder_titles() if set_name in t)
+
+    wait_until(
+        lambda: _folder_rows_named() == 2,
+        150.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[member] the Folders page should list the own and the shared "
+            f"{set_name!r}; error={member_app.error_text()!r}; " + _member_view()
+        ),
+    )
+
+    # ── 2. One path, three records: two in the shared set, one in the own ──
+    # The owner records v1 then v2 of `same.txt` into its set; the member
+    # records its own `same.txt` into the namesake. Distinct sizes make every
+    # row's head readable off `media-item-size` / `file-version-size`.
+    same = "same.txt"
+    owned = tmp_path / "owner" / same
+    owned.parent.mkdir()
+    owned.write_bytes(b"v" * 1200)
+    om.navigate()
+    om.ensure_loaded()
+    om.set_filter(set_name)
+    om.upload_file(str(owned))
+    wait_until(
+        lambda: same in _scoped_names(owner_app, set_name),
+        30.0,
+        interval=1.0,
+        diagnose=lambda: (
+            f"[owner] {set_name!r} should list {same!r}; lists {om.item_names()!r}; "
+            f"error={owner_app.error_text()!r}"
+        ),
+    )
+    idx = om.index_of(same)
+    size_v1 = om.item_size(idx)
+    owned.write_bytes(b"w" * 48_000)
+    om.upload_file(str(owned))
+    size_v2 = om.wait_for_item_size_change(idx, size_v1, timeout=30.0)
+    assert size_v2 != size_v1, (
+        f"[owner] v2 of {same!r} should change the head size ({size_v1!r}); "
+        f"error={owner_app.error_text()!r}"
+    )
+
+    mine = tmp_path / "member" / same
+    mine.parent.mkdir()
+    mine.write_bytes(b"m" * 9_000)
+    mm.navigate()
+    mm.ensure_loaded()
+    mm.set_filter(set_name)
+    mm.upload_file(str(mine))
+    wait_until(
+        lambda: same in _scoped_names(member_app, set_name),
+        60.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[member] the own {set_name!r} should list {same!r}; lists "
+            f"{mm.item_names()!r}; error={member_app.error_text()!r}"
+        ),
+    )
+    size_mine = mm.item_size(mm.index_of(same))
+    assert size_mine not in (size_v1, size_v2), (
+        f"the fixture sizes must tell the rows apart: own {size_mine!r}, "
+        f"shared {size_v1!r}/{size_v2!r}"
+    )
+
+    # The shared row lists the owner's file at its v2 head once the member's
+    # client holds the set's key (the join's custody ingest; generous on
+    # purpose, convention 14).
+    def _shared_head() -> str | None:
+        if same not in _scoped_names(member_app, shared_value):
+            return None
+        return mm.item_size(mm.index_of(same))
+
+    wait_until(
+        lambda: _shared_head() == size_v2,
+        150.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[member] the shared set should list {same!r} at {size_v2!r}; lists "
+            f"{mm.item_names()!r} (head {_shared_head()!r}); "
+            f"error={member_app.error_text()!r}; " + _member_view()
+        ),
+    )
+
+    def _own_detail() -> tuple[int, str]:
+        """The own namesake's `same.txt` detail: (version count, v0's size)."""
+        assert same in _scoped_names(member_app, set_name), (
+            f"[member] the own {set_name!r} lost {same!r}; lists {mm.item_names()!r}"
+        )
+        mm.open_item_detail(mm.index_of(same))
+        try:
+            count = mm.wait_for_version_count(1)
+            return count, mm.version_size(0) if count else ""
+        finally:
+            mm.close_detail()
+
+    # ── 3. The version list names the chosen row ───────────────────────────
+    _scoped_names(member_app, shared_value)
+    mm.open_item_detail(mm.index_of(same))
+    versions = mm.wait_for_version_count(2, timeout=30.0)
+    assert versions == 2, (
+        f"[member] the shared {same!r} has two records — a list read by name "
+        f"would show the own namesake's one; got {versions}; "
+        f"error={member_app.error_text()!r}"
+    )
+    assert (mm.version_size(0), mm.version_size(1)) == (size_v1, size_v2), (
+        f"[member] the shared versions should be the owner's {size_v1!r} → "
+        f"{size_v2!r}; got {mm.version_size(0)!r} → {mm.version_size(1)!r}"
+    )
+
+    # ── 4. A restore re-points the chosen row, never the namesake ──────────
+    mm.restore_version(0)
+    versions = mm.wait_for_version_count(3, timeout=30.0)
+    assert versions == 3, (
+        f"[member] restoring v1 should append a version (2 → 3), got {versions}; "
+        f"error={member_app.error_text()!r}"
+    )
+    assert mm.version_size(2) == size_v1, (
+        f"[member] the restored head should carry v1's {size_v1!r}, got "
+        f"{mm.version_size(2)!r}"
+    )
+    mm.close_detail()
+    # The owner reads the re-point in its own set: the restore went to the
+    # owner's row.
+    wait_until(
+        lambda: same in _scoped_names(owner_app, set_name)
+        and om.item_size(om.index_of(same)) == size_v1,
+        60.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[owner] the member's restore should re-point the owner's {same!r} "
+            f"to {size_v1!r}; owner lists {om.item_names()!r}; "
+            f"error={owner_app.error_text()!r}"
+        ),
+    )
+    assert _own_detail() == (1, size_mine), (
+        f"[member] the own namesake's {same!r} must keep its one record at "
+        f"{size_mine!r} after a restore in the shared set"
+    )
+
+    # ── 5. A delete tombstones the chosen row, never the namesake ──────────
+    assert same in _scoped_names(member_app, shared_value), (
+        "precondition: the shared set still lists the file"
+    )
+    mm.open_item_detail(mm.index_of(same))
+    mm.delete_open_item()
+    # Each poll re-filters, and a re-filter refreshes the page and clears its
+    # banner — so the banner is read BEFORE each re-filter and any error kept,
+    # or a refused delete would time out reading `error=''` (convention 6).
+    delete_errors: list[str] = []
+
+    def _shared_delete_landed() -> bool:
+        seen = member_app.error_text()
+        if seen and seen not in delete_errors:
+            delete_errors.append(seen)
+        return same not in _scoped_names(member_app, shared_value)
+
+    wait_until(
+        _shared_delete_landed,
+        60.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[member] deleting the shared {same!r} should drop it from the "
+            f"shared set; lists {mm.item_names()!r}; errors seen after the "
+            f"delete={delete_errors!r}; error now={member_app.error_text()!r}"
+        ),
+    )
+    wait_until(
+        lambda: same not in _scoped_names(owner_app, set_name),
+        60.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[owner] the member's delete in the shared set should tombstone the "
+            f"owner's {same!r}; owner lists {om.item_names()!r}"
+        ),
+    )
+    assert _own_detail() == (1, size_mine), (
+        f"[member] the own namesake's {same!r} must survive a delete in the "
+        f"shared set, at its one record of {size_mine!r}"
     )

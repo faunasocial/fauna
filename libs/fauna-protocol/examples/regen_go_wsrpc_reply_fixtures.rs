@@ -375,15 +375,23 @@ fn main() {
 
     emit!(
         "reply-list-mailboxes.cbor",
+        // One entry per standard mailbox, attrs from the one Rust owner: the
+        // Go side pins `wsrpc.JunkMailbox` to the entry carrying `\\Junk`
+        // (`TestJunkMailboxPinnedToRustFixture`).
         ListMailboxesReply {
-            mailboxes: vec![MailboxEntry {
-                name: "INBOX".into(),
-                uid_validity: 101,
-                uid_next: 7,
-                highestmodseq: 5000,
-                exists: 3,
-                unseen: 2,
-            }],
+            mailboxes: fauna_protocol::email::STANDARD_MAILBOXES
+                .iter()
+                .zip(0u32..)
+                .map(|(name, i)| MailboxEntry {
+                    name: (*name).into(),
+                    uid_validity: 101 + i,
+                    uid_next: 7 + i,
+                    highestmodseq: 5000 + i64::from(i),
+                    exists: 3 + i,
+                    unseen: 2 + i,
+                    attrs: fauna_protocol::email::special_use_attrs(name),
+                })
+                .collect(),
         }
     );
 
@@ -416,6 +424,12 @@ fn main() {
                 internal_date: 1_700_000_001,
                 ciphertext_size: 1024,
                 seq_num: 6,
+                scores: vec![fauna_core::scoring::ScoreEntry {
+                    factor: "report:spam".into(),
+                    score: 200,
+                    tier: 3,
+                    scorer_version: 1,
+                }],
             }],
             expunged_uids: vec![3, 5],
             highestmodseq: 5002,
@@ -434,6 +448,7 @@ fn main() {
                 internal_date: 1_700_000_002,
                 ciphertext_size: 2048,
                 seq_num: 9,
+                scores: vec![],
             }],
             mailbox_total: 9,
         }

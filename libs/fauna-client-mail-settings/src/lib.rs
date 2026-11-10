@@ -131,7 +131,10 @@ pub use import::{
     import_mailbox_progress_text, import_selected_totals, import_source_kind_label,
     import_tls_mode_label, microsoft_sign_in_actions, resume_actions, scope_next_actions,
 };
-pub use inbox_scorer::{InboxCopyVerdict, InboxSpamScorer, judge_inbox_copy};
+pub use inbox_scorer::{
+    INBOX_SPAM_RESCORE_PER_PASS_CAP, InboxCopyVerdict, InboxSpamScorer, SpamScorerState,
+    judge_held_inbox_copy, judge_inbox_copy, report_spam_pm,
+};
 pub use lists::{
     ImportResult, ListDraft, ListMembers, ListView, ListsStatus, MailListMembersAction,
     MailListMembersMachine, MailListMembersNest, MailListMembersSnapshot, MailListsAction,

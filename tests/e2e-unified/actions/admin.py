@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from drivers.http_bridge import SelectOptionNotOffered
 from helpers.indexed_rows import row_texts
 from helpers.settings_tab_click import click_settings_tab
+from helpers import budgets
 
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
@@ -32,16 +33,17 @@ class AdminActions:
         the response lands — see attach_stat_markers in the linux app.)
         """
         self.driver.navigate_to("admin")
-        self.driver.wait_for("admin-dashboard-heading", timeout=15.0)
-        deadline = time.monotonic() + 15.0
+        self.driver.wait_for("admin-dashboard-heading", timeout=budgets.UI_SETTLE_S)
+        deadline = time.monotonic() + budgets.RPC_ROUNDTRIP_S
         while time.monotonic() < deadline:
             if self.dashboard_card_value("Users") and self.dashboard_card_value("Version"):
                 return
             time.sleep(0.3)
         raise AssertionError(
             "admin dashboard stat cards (Users/Version) did not populate "
-            "within 15.0s: Users=%r, Version=%r; %s"
+            "within %ss: Users=%r, Version=%r; %s"
             % (
+                budgets.RPC_ROUNDTRIP_S,
                 self.dashboard_card_value("Users"),
                 self.dashboard_card_value("Version"),
                 self.driver.diagnose("admin-stat-card-value"),
@@ -1095,9 +1097,18 @@ class AdminActions:
         """The owner-nest URL row `index` makes this nest dial, verbatim."""
         return self.driver.get_text("admin-custody-hosting-url", index=index)
 
+    def hosting_row_budget(self, index: int = 0) -> str:
+        """Row `index`'s retained-bytes allowance, as rendered (the default
+        word for a row with no allowance of its own)."""
+        return self.driver.get_text("admin-custody-hosting-budget", index=index)
+
     def hosting_row_held(self, index: int = 0) -> str:
         """Row `index`'s pump-metered held bytes, as rendered."""
         return self.driver.get_text("admin-custody-hosting-held", index=index)
+
+    def hosting_row_stopped(self, index: int = 0) -> str:
+        """Row `index`'s stop mark, as rendered (paused or active)."""
+        return self.driver.get_text("admin-custody-hosting-stopped", index=index)
 
     def hosting_row_receipt(self, index: int = 0) -> str:
         """Row `index`'s three-state receipt-freshness word."""

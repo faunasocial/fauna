@@ -299,6 +299,14 @@ fn attr(scope: &[find::ScopeStep], id: &str, name: &str, index: usize) -> Value 
                 Value::Null
             }
         }
+        // `painted`: a document element's body AS PAINTED, one line per painted
+        // line (`tests/e2e-unified/helpers/painted_lines.py`; render-model.md
+        // § D7) — the read that keeps a task item's `☑`/`☐` box and a nested
+        // item's indent, both of which the one-line `get_text` drops. Read off
+        // the labels the body actually laid out, never the document it was
+        // built from (`painted_lines`). `Value::Null` for an element holding no
+        // label at all.
+        "painted" => painted_lines(&w).map_or(Value::Null, |lines| json!(lines.join("\n"))),
         // `text-runs`: the text field's STYLING as its buffer holds it — the
         // observable for "formatting shows as you type" (`conversations.md`
         // § Compose-field inline markdown styling), which neither `get_text`
@@ -533,6 +541,70 @@ fn video_in(w: &gtk::Widget) -> Option<gtk::Video> {
         child = c.next_sibling();
     }
     None
+}
+
+/// Pixels of laid-out left offset that read as one leading space — the same
+/// rule as web's `WEB_INDENT_PX` (`tests/e2e-unified/helpers/painted_lines.py`).
+const PAINTED_INDENT_PX: f32 = 8.0;
+
+/// `element`'s body as painted: one entry per line of every visible descendant
+/// label, in document order, its text as shown, led by one space per
+/// [`PAINTED_INDENT_PX`] of the label's laid-out left offset against the
+/// element's own and by a `│ ` bar for a label that paints a left border (a
+/// block quote, `style.css` `.md-blockquote`). Geometry and computed style,
+/// never class names: a stylesheet that flattened the nesting or dropped the
+/// quote's border reads flat, exactly as the user would see it — web's rule.
+///
+/// A label holding no text (a line run not yet scrolled to,
+/// `views/line_runs.rs`) paints nothing and is skipped. A non-breaking space
+/// (the list prefixes' separator) reads as the space it shows as. `None` when
+/// the element holds no label at all.
+fn painted_lines(element: &gtk::Widget) -> Option<Vec<String>> {
+    fn collect(w: &gtk::Widget, out: &mut Vec<gtk::Label>) {
+        if !w.is_visible() {
+            return;
+        }
+        if let Some(label) = w.downcast_ref::<gtk::Label>() {
+            out.push(label.clone());
+            return;
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            collect(&c, out);
+            child = c.next_sibling();
+        }
+    }
+    let mut labels = Vec::new();
+    collect(element, &mut labels);
+    if labels.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for label in labels {
+        let text = label.text().replace('\u{a0}', " ");
+        if text.trim().is_empty() {
+            continue;
+        }
+        let offset = label
+            .compute_bounds(element)
+            .map_or(0.0, |b| b.x().max(0.0));
+        let pad = " ".repeat((offset / PAINTED_INDENT_PX).round() as usize);
+        // GTK 4 has no undeprecated read of a widget's computed border; this
+        // is the one place the paint's quote bar can be observed.
+        #[allow(deprecated)]
+        let bar = if label.style_context().border().left() > 0 {
+            "\u{2502} "
+        } else {
+            ""
+        };
+        for line in text.split('\n') {
+            let line = line.trim_end();
+            if !line.is_empty() {
+                lines.push(format!("{pad}{bar}{line}"));
+            }
+        }
+    }
+    Some(lines)
 }
 
 fn in_viewport(w: &gtk::Widget) -> Value {
@@ -1163,6 +1235,103 @@ mod tests {
                  silently reads row 0 again"
             );
 
+            window.destroy();
+        });
+    }
+
+    /// A document element's `painted` read is the body as laid out: a ticked
+    /// task paints `☑`, an unticked one `☐`, a nested item starts further right
+    /// than its parent (the indent read off geometry, so a renderer flattening
+    /// the list fails), a quote paints behind its `│` bar (off the computed
+    /// border), an ordered list numbers `1.`/`2.` — render-model.md § D7, the
+    /// read `tests/e2e-unified/helpers/painted_lines.py` takes.
+    #[test]
+    fn a_document_elements_painted_read_keeps_boxes_nesting_numbers_and_the_quote_bar() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::load_css();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let doc = fauna_core::render::markdown_to_document(
+                "- [x] packed the tent\n- [ ] bought the stove\n- groceries\n  - oats\n    - rolled\n\n\
+                 > quoted words\n\n1. first\n2. second",
+            );
+            let body = crate::views::document::render_to_widget(
+                &doc,
+                rt.handle(),
+                &crate::media_loads::MediaScope::conversations(),
+            );
+            crate::testid::set_test_id(&body, fauna_ui_ids::DM_MESSAGE_TEXT);
+            let window = gtk::Window::new();
+            window.set_default_size(500, 400);
+            window.set_child(Some(&body));
+            window.present();
+
+            const MAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+            let ctx = gtk::glib::MainContext::default();
+            let deadline = std::time::Instant::now() + MAP_BUDGET;
+            while !(body.is_mapped() && body.width() > 0) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the document never laid out within {MAP_BUDGET:?}"
+                );
+                if !ctx.iteration(false) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+
+            let reply = perform(&ElementReq {
+                kind: ElementKind::Attr,
+                id: fauna_ui_ids::DM_MESSAGE_TEXT.to_string(),
+                arg: "painted".to_string(),
+                index: 0,
+                scope: Vec::new(),
+            });
+            let painted = reply["value"].as_str().expect("a painted read").to_string();
+            let lines: Vec<&str> = painted.split('\n').collect();
+            let line_with = |words: &str| {
+                let hits: Vec<&str> = lines
+                    .iter()
+                    .copied()
+                    .filter(|l| l.contains(words))
+                    .collect();
+                assert_eq!(hits.len(), 1, "one painted line with {words:?}: {lines:?}");
+                hits[0]
+            };
+            let lead = |l: &str| l.len() - l.trim_start().len();
+
+            assert_eq!(
+                line_with("packed the tent").trim_start(),
+                "☑ packed the tent"
+            );
+            assert_eq!(
+                line_with("bought the stove").trim_start(),
+                "☐ bought the stove"
+            );
+            let (parent, child, grandchild) = (
+                line_with("groceries"),
+                line_with("oats"),
+                line_with("rolled"),
+            );
+            assert!(
+                lead(parent) > 0,
+                "a list item indents under the body: {lines:?}"
+            );
+            assert!(
+                lead(child) > lead(parent),
+                "a nested item indents: {lines:?}"
+            );
+            assert!(
+                lead(grandchild) > lead(child),
+                "every level indents: {lines:?}"
+            );
+            assert_eq!(line_with("quoted words"), "│ quoted words");
+            let first = lines.iter().position(|l| l.trim() == "1. first");
+            assert!(
+                first.is_some_and(|i| lines.get(i + 1).map(|l| l.trim()) == Some("2. second")),
+                "an ordered list numbers its items on consecutive lines: {lines:?}"
+            );
             window.destroy();
         });
     }

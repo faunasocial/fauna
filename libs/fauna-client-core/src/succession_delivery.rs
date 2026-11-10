@@ -41,6 +41,9 @@
 //! **Why this crate:** as for [`crate::recovery_chain`] — the ceremonies' home
 //! sits above both callers.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
+
 use fauna_core::encoding::canonical_decode;
 use fauna_core::recovery::SignedIdentitySuccession;
 use fauna_protocol::recovery::{
@@ -253,8 +256,14 @@ pub enum OwedReason {
     NoStatement,
     /// The owed nest could not be reached.
     Unreachable(String),
-    /// The address answered as another identity: nothing was sent.
+    /// The address answered as another identity: nothing was sent, and the
+    /// entry is parked for the life of this runtime ([`ParkedOwedNests`]).
     IdentityMismatch { presented: [u8; 32] },
+    /// The address answered as another identity on an earlier pass of this
+    /// runtime (`presented`), and is not dialed again until a relaunch —
+    /// client-side only, never on the wire (`succession-linked-nests.md`
+    /// § The road → *What the dial does with an entry it cannot land*).
+    Parked { presented: [u8; 32] },
     /// The owed nest holds an account for the successor already — one
     /// registered there by hand before the statement landed
     /// (`fauna.recovery.successor_exists`; stated bound 4): owed until that
@@ -500,9 +509,53 @@ where
     Replay::Carried(records.len())
 }
 
+/// The entries whose address answered as another nest in this runtime — the
+/// park (`succession-linked-nests.md` § The road → *What the dial does with an
+/// entry it cannot land*; stated bound 5). A nest's identity does not change,
+/// so a second dial of such an address learns nothing: the first
+/// [`OwedReason::IdentityMismatch`] parks the entry, and every later pass
+/// answers [`OwedReason::Parked`] without dialing. Only a mismatch parks — an
+/// unreachable or refusing address is dialed again next pass (bounds 1, 3 and
+/// 4 need it) — and nothing is settled.
+///
+/// One ledger per host assembly, held by the deliverer so it outlives a pass
+/// and is shared by the bound nest's step and every linked nest's; a relaunch
+/// starts empty, so a parked address is dialed once more.
+#[derive(Debug, Default)]
+pub struct ParkedOwedNests(Mutex<HashMap<ParkKey, [u8; 32]>>);
+
+/// An owed entry as the park knows it: the retired identity, the nest id and
+/// the address, as the keeping nest served them.
+type ParkKey = (Vec<u8>, Vec<u8>, Option<String>);
+
+impl ParkedOwedNests {
+    fn key(owed: &OwedNest) -> ParkKey {
+        (
+            owed.old_actor_id.to_vec(),
+            owed.nest_id.to_vec(),
+            owed.nest_url.clone(),
+        )
+    }
+
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<ParkKey, [u8; 32]>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The identity that answered at `owed`'s address on an earlier pass,
+    /// when the entry is parked.
+    fn parked(&self, owed: &OwedNest) -> Option<[u8; 32]> {
+        self.entries().get(&Self::key(owed)).copied()
+    }
+
+    fn park(&self, owed: &OwedNest, presented: [u8; 32]) {
+        self.entries().insert(Self::key(owed), presented);
+    }
+}
+
 /// Every owed entry `keeper` serves, delivered in served order
-/// ([`deliver_owed_nest`]). An unreadable list is an error; an entry that
-/// could not land is an [`OwedReason`] beside it.
+/// ([`deliver_owed_nest`]) — except an entry `parked` holds, which is
+/// answered [`OwedReason::Parked`] and not dialed. An unreadable list is an
+/// error; an entry that could not land is an [`OwedReason`] beside it.
 ///
 /// # Errors
 ///
@@ -510,6 +563,7 @@ where
 pub async fn deliver_owed_nests<K, H>(
     keeper: &K,
     reach: &H,
+    parked: &ParkedOwedNests,
 ) -> Result<Vec<(OwedNest, Delivery)>, K::Error>
 where
     K: RpcRequester,
@@ -518,7 +572,14 @@ where
 {
     let mut out = Vec::new();
     for owed in fetch_owed_nests(keeper).await? {
+        if let Some(presented) = parked.parked(&owed) {
+            out.push((owed, Delivery::Owed(OwedReason::Parked { presented })));
+            continue;
+        }
         let delivery = deliver_owed_nest(keeper, reach, &owed).await;
+        if let Delivery::Owed(OwedReason::IdentityMismatch { presented }) = delivery {
+            parked.park(&owed, presented);
+        }
         out.push((owed, delivery));
     }
     Ok(out)

@@ -158,15 +158,27 @@ def _branch_calls(func, callee: str) -> set[str]:
     tree = ast.parse(inspect.getsource(func))
     calls: set[str] = set()
 
+    def is_app_name(node) -> bool:
+        """`app_name` itself, or `KIDS_PARENT.get(app_name, …)` — a kids column's
+        parent, which takes its parent's branch (the ios branch reads it so)."""
+        if isinstance(node, ast.Name):
+            return node.id == "app_name"
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "KIDS_PARENT"
+            and bool(node.args)
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "app_name"
+        )
+
     def app_names(test) -> set[str]:
         """The string literals an `app_name == "..."` test in `test` names."""
         out = set()
         for node in ast.walk(test):
-            if (
-                isinstance(node, ast.Compare)
-                and isinstance(node.left, ast.Name)
-                and node.left.id == "app_name"
-            ):
+            if isinstance(node, ast.Compare) and is_app_name(node.left):
                 for c in node.comparators:
                     if isinstance(c, ast.Constant) and isinstance(c.value, str):
                         out.add(c.value)

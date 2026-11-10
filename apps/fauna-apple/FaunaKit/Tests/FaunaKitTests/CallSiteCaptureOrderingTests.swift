@@ -237,6 +237,36 @@ private let anObservation = CueObservation(
     }
 }
 
+/// A feed that re-mounts (a feed switch rebuilds the scroll view) while the
+/// first mount's hydrate is still in flight must WAIT for that hydrate, never
+/// read the generation as done and start sampling un-hydrated: the capture
+/// samples only once the feed has hydrated, on every mount alike (web's
+/// `hydrateCuesOnce` form; `engagement-cues.md` § At rest).
+@MainActor
+@Test func aRemountAwaitsTheHydrateTheFirstMountStarted() async {
+    let vm = FeedVM()
+    let ledger = CueHydrationLedger()
+    let hydrate = ParkedCall()
+    let calls = cueCalls(hydrateCues: { try await hydrate.park() })
+    let first = Task {
+        await CueViewportObserver.hydrateIfNeeded(
+            feedVM: vm, calls: calls, hydrated: ledger, onError: { _, _ in })
+    }
+    await hydrate.untilParked()
+    var secondReturned = false
+    let second = Task {
+        await CueViewportObserver.hydrateIfNeeded(
+            feedVM: vm, calls: calls, hydrated: ledger, onError: { _, _ in })
+        secondReturned = true
+    }
+    for _ in 0..<50 { await Task.yield() }
+    #expect(!secondReturned, "a re-mount went on while the first mount's hydrate was parked")
+    hydrate.succeed()
+    await first.value
+    await second.value
+    #expect(secondReturned)
+}
+
 /// The Layer-B producer contributes only once the manager's cached opt-in is
 /// hydrated (`engagement-cues.md` § Layer B), so feed init must hydrate it —
 /// once per manager generation, beside the cue rollup — and a failure there

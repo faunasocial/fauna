@@ -27,6 +27,7 @@ import time
 import pytest
 
 import fauna_ffi
+from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -98,6 +99,16 @@ class TestConflictReviewList:
         self.port = nest_instance["port"]
         self.signing_key = bytes(test_user["signing_key"])
         self.secret_hex = bytes(test_user["signing_key"]).hex()
+        self.user = test_user
+
+    def _own_device(self, label: str) -> str:
+        """A device registered to the test user — a conflict report must name
+        one of the caller's own devices (`folder_handlers.rs`, the report's
+        device binding). Registered sealed, as `test_folder_place_editor.py`
+        says why."""
+        from helpers import enrollment
+
+        return enrollment.register_device(self.nest_url, self.user, label)
 
     def _refresh_folders(self):
         """Force a Folders-page refresh: the page reloads its snapshot whenever
@@ -122,6 +133,9 @@ class TestConflictReviewList:
         # The re-point below lands only because the file's verified version
         # history lists it (the review list signs nothing the nest alone names).
         cand_a = _candidate(100, created_at=10)
+        # The reporter must be one of the account's own devices (the nest binds
+        # a report's device to the caller), and it is cand_a's author.
+        cand_a["device_id"] = self._own_device("conflict-loser-reporter")
         cand_b = _candidate(200, created_at=20)
         _report_conflict(
             self.nest_url,
@@ -205,6 +219,84 @@ class TestConflictReviewList:
         assert self.app.driver.count("conflict-type-badge") >= 1
 
     @pytest.mark.feature("folders")
+    def test_a_repoint_to_a_version_the_nest_does_not_hold_changes_nothing(self):
+        """Folders outcome 20, its nest-folder half: "use the other version"
+        points only at a version the nest still holds (`ui/folders.md`
+        § Conflicts; writer-signed change records, ruling (10)). The losing
+        candidate here was reported by ANOTHER device, so no report signed it and
+        the file's verified version history does not list it (the reporter is a
+        real device of the account — the nest binds a report's device to the
+        caller — but neither candidate is its own version): the gesture
+        declines with the reason on the page's error and records no head. The
+        retention half — the loser kept by its author on a group set — is
+        `test_offline_share_two_seat.py`'s concurrent-edit test."""
+        from common import sync_changes_list
+        from helpers import enrollment
+
+        name = self._make_set()
+        # Registered sealed, as `test_folder_place_editor.py` says why.
+        reporter = enrollment.register_device(self.nest_url, self.user, "conflict-reporter")
+        path = f"/docs/unheld-{secrets.token_hex(3)}.txt"
+        cand_a = _candidate(100, created_at=10)
+        cand_b = _candidate(200, created_at=20)
+        _report_conflict(
+            self.nest_url,
+            self.signing_key,
+            name,
+            path,
+            [cand_a, cand_b],
+            resolution="latest_wins",
+            winning=cand_b,
+            # One of the account's own devices, but neither candidate's:
+            # nothing retains cand_a as a version.
+            reporter_device=reporter,
+        )
+
+        self._refresh_folders()
+        info = self.app.driver
+        deadline = time.time() + 15
+        index = None
+        while index is None and time.time() < deadline:
+            for i in range(info.count("conflict-file-info")):
+                if path.lstrip("/") in info.get_text("conflict-file-info", index=i):
+                    index = i
+                    break
+            else:
+                time.sleep(0.5)
+        assert index is not None, (
+            f"the review list never painted the row for {path!r}; "
+            f"{info.diagnose('conflict-file-info')} error={self.app.error_text()!r}"
+        )
+        # The button sits on the same row as the file info (one per resolved row,
+        # in the list's order — the sibling test's one-per-row count).
+        info.click("conflict-resolve-button", index=index)
+
+        wait_until(
+            lambda: "verified history" in (self.app.error_text() or ""),
+            15.0,
+            diagnose=lambda: (
+                f"the decline never surfaced its reason; error={self.app.error_text()!r}"
+            ),
+        )
+        wanted = {
+            fauna_ffi.seal_path(self.signing_key, p) for p in (path, path.lstrip("/"))
+        }
+        rows = sync_changes_list(
+            self.port, secret_key=self.secret_hex, folder=name, since=0
+        )["changes"]
+        # The report's own winner head is there; the unheld loser must never be.
+        recorded = [
+            c
+            for c in rows
+            if bytes(c.get("path_sealed") or b"") in wanted
+            and c.get("manifest_hash") == cand_a["manifest_hash"]
+        ]
+        assert recorded == [], (
+            f"a declined re-point must record nothing, yet the change log holds "
+            f"the unheld version as {recorded!r}"
+        )
+
+    @pytest.mark.feature("folders")
     def test_unresolved_conflict_row_is_informational(self):
         name = self._make_set()
 
@@ -223,6 +315,7 @@ class TestConflictReviewList:
             name,
             "/docs/legacy.txt",
             [_candidate(100), _candidate(200)],
+            reporter_device=self._own_device("conflict-degraded-reporter"),
         )
 
         self._refresh_folders()

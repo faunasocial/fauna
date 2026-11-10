@@ -94,7 +94,16 @@ extension BridgeInfo {
                   supportsFollows: ffi.supportsFollows,
                   supportsFollowRequests: ffi.supportsFollowRequests,
                   linkModes: ffi.linkModes.map { $0.map(BridgeLinkMode.init(ffi:)) },
-                  error: ffi.error)
+                  error: ffi.error,
+                  glyph: ffi.glyph)
+    }
+
+    /// The Bridges page card's title: `"<emoji> <name>"` for a consented
+    /// bridge app that declared a glyph, the bare name otherwise — from the
+    /// shared `fauna_client_bridges::bridge_card_title`, the one map every app
+    /// paints through (`bridges.md` § Coverage contract, outcome 11).
+    public var cardTitle: String {
+        bridgeCardTitle(name: name, glyph: glyph)
     }
 }
 

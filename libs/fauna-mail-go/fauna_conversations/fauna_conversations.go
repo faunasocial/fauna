@@ -746,6 +746,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_sort_order_name()
+		})
+		if checksum != 53782 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_sort_order_name: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_accept_add_participant_chip()
 		})
 		if checksum != 28076 {
@@ -1025,6 +1034,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_discard_queued_send()
+		})
+		if checksum != 28043 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_discard_queued_send: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_drafts_snapshot_bytes()
 		})
 		if checksum != 46350 {
@@ -1205,6 +1223,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_unsent_sends()
+		})
+		if checksum != 23442 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_unsent_sends: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_withheld_messages()
 		})
 		if checksum != 45086 {
@@ -1219,6 +1246,15 @@ func uniffiCheckChecksums() {
 		if checksum != 17150 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_attachment: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_message()
+		})
+		if checksum != 9691 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_message: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1255,6 +1291,15 @@ func uniffiCheckChecksums() {
 		if checksum != 1294 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_reply_recipient: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_thread()
+		})
+		if checksum != 7579 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_remove_thread: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1318,6 +1363,15 @@ func uniffiCheckChecksums() {
 		if checksum != 53254 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_retire_conversations_engine: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_retry_queued_send()
+		})
+		if checksum != 31031 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_retry_queued_send: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2292,6 +2346,11 @@ type ConversationsManagerInterface interface {
 	DeleteMessage(thread ThreadId, message MessageId)
 	// Demote an admin of a governed room to member (owner only).
 	DemoteAdmin(id ThreadId, addr TypedAddress)
+	// Discard the not-sent own copy `message_id`
+	// (`dm-message-discard-confirm-button`, behind its confirm). `false` =
+	// not a queued copy, its intent not parked, or the outbox failed
+	// (logged).
+	DiscardQueuedSend(messageId MessageId) bool
 	// The whole conversations-rail draft set serialised to its canonical
 	// at-rest bytes. The client glue seals these under the owner's `BackupKey`
 	// and uploads them to the `__drafts` reserved folder after a compose
@@ -2609,6 +2668,12 @@ type ConversationsManagerInterface interface {
 	// painted; back on, the kept verdicts reappear. A failed switch read
 	// keeps the last one known.
 	RefreshMessageScanResults(id ThreadId)
+	// Re-read which queued MLS sends the outbox parked, so the next
+	// [`thread_detail`](Self::thread_detail) paints each queued own copy's
+	// [`crate::message::QueuedSendState`]. Apps call it when a thread opens
+	// and wherever the outbox may have drained (a reconnect). No outbox lent
+	// is a no-op; a failed read keeps what the last read said.
+	RefreshUnsentSends()
 	// Read the account's own queue rows for the withheld-message badge of
 	// every own fauna-native message in thread `id` (`moderation.md` § Legal
 	// takedown → *App render*) — `fauna.moderation.actions` through the
@@ -2625,6 +2690,15 @@ type ConversationsManagerInterface interface {
 	// are left in the store — harmless (in-memory, cleared on next login) and
 	// keeps the remove cheap; a shared blob could still be referenced elsewhere.
 	RemoveAttachment(id ThreadId, index uint32)
+	// Remove the nest's copy of `message` in `thread`
+	// (`dm-message-remove-button` → `dm-message-remove-confirm-button`) — a
+	// *remove*, never a *delete*: the far side keeps its copy
+	// (`bridged-adapter.md` § Removing bridged rows, rules 1 and 5). Refused
+	// unless the message's snapshot says `can_remove`. The message leaves
+	// the manager when the nest answers, never optimistically — the nest is
+	// the store; a refusal, the precondition's or the nest's, surfaces on
+	// `error-message`.
+	RemoveMessage(thread ThreadId, message MessageId)
 	// Remove the staged attachment at `index` from the new-thread compose.
 	RemoveNewThreadAttachment(index uint32)
 	// Remove a participant (`thread-member-chip[i]` →
@@ -2642,6 +2716,13 @@ type ConversationsManagerInterface interface {
 	// (`dm-reply-recipient-remove`). Drops the recipient from *this reply
 	// only* — thread participants and history are untouched.
 	RemoveReplyRecipient(id ThreadId, addr TypedAddress)
+	// Remove the nest's copy of the whole of `thread` and hide it until a new
+	// row reopens it (`room-remove-button` → `room-remove-confirm`;
+	// `bridged-adapter.md` § Removing bridged rows, rules 4 and 5). Refused
+	// unless the thread's capabilities say `supports_local_remove`. The
+	// thread leaves the manager when the nest answers, never optimistically;
+	// a refusal surfaces on `error-message`.
+	RemoveThread(thread ThreadId)
 	// Rename a thread (`thread-rename-button` → `manager.rename_thread`).
 	// Snapshot: relabel immediately. Wire op: a bound FaunaMls group posts an
 	// encrypted `GroupMeta::NameChanged` application message so peers apply the
@@ -2768,6 +2849,10 @@ type ConversationsManagerInterface interface {
 	// calls this on the OUTGOING one first; the call is the same explicit
 	// ordered hand-over, moved to the one seam the factory cannot see.
 	RetireConversationsEngine()
+	// Retry the not-sent own copy `message_id` (`dm-message-retry-button`).
+	// `false` = not a queued copy, its intent not parked, or the outbox
+	// failed (logged).
+	RetryQueuedSend(messageId MessageId) bool
 	// Opt this message into loading its remote images. Adds it to the in-memory
 	// reveal set and re-emits, so the next [`thread_detail`](Self::thread_detail)
 	// projects `RemoteImage.revealed: true` for it. **In-memory only** — the
@@ -3670,6 +3755,39 @@ func (_self *ConversationsManager) DemoteAdmin(id ThreadId, addr TypedAddress) {
 
 }
 
+// Discard the not-sent own copy `message_id`
+// (`dm-message-discard-confirm-button`, behind its confirm). `false` =
+// not a queued copy, its intent not parked, or the outbox failed
+// (logged).
+func (_self *ConversationsManager) DiscardQueuedSend(messageId MessageId) bool {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	res, _ := uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_conversations_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_discard_queued_send(
+			_pointer, FfiConverterTypeMessageIdINSTANCE.Lower(messageId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_i8(handle)
+		},
+	)
+
+	return res
+}
+
 // The whole conversations-rail draft set serialised to its canonical
 // at-rest bytes. The client glue seals these under the owner's `BackupKey`
 // and uploads them to the `__drafts` reserved folder after a compose
@@ -4296,6 +4414,37 @@ func (_self *ConversationsManager) RefreshMessageScanResults(id ThreadId) {
 
 }
 
+// Re-read which queued MLS sends the outbox parked, so the next
+// [`thread_detail`](Self::thread_detail) paints each queued own copy's
+// [`crate::message::QueuedSendState`]. Apps call it when a thread opens
+// and wherever the outbox may have drained (a reconnect). No outbox lent
+// is a no-op; a failed read keeps what the last read said.
+func (_self *ConversationsManager) RefreshUnsentSends() {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_refresh_unsent_sends(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
+}
+
 // Read the account's own queue rows for the withheld-message badge of
 // every own fauna-native message in thread `id` (`moderation.md` § Legal
 // takedown → *App render*) — `fauna.moderation.actions` through the
@@ -4344,6 +4493,40 @@ func (_self *ConversationsManager) RemoveAttachment(id ThreadId, index uint32) {
 			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id), FfiConverterUint32INSTANCE.Lower(index), _uniffiStatus)
 		return false
 	})
+}
+
+// Remove the nest's copy of `message` in `thread`
+// (`dm-message-remove-button` → `dm-message-remove-confirm-button`) — a
+// *remove*, never a *delete*: the far side keeps its copy
+// (`bridged-adapter.md` § Removing bridged rows, rules 1 and 5). Refused
+// unless the message's snapshot says `can_remove`. The message leaves
+// the manager when the nest answers, never optimistically — the nest is
+// the store; a refusal, the precondition's or the nest's, surfaces on
+// `error-message`.
+func (_self *ConversationsManager) RemoveMessage(thread ThreadId, message MessageId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_remove_message(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(thread), FfiConverterTypeMessageIdINSTANCE.Lower(message)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
 }
 
 // Remove the staged attachment at `index` from the new-thread compose.
@@ -4413,6 +4596,38 @@ func (_self *ConversationsManager) RemoveReplyRecipient(id ThreadId, addr TypedA
 			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id), FfiConverterTypedAddressINSTANCE.Lower(addr), _uniffiStatus)
 		return false
 	})
+}
+
+// Remove the nest's copy of the whole of `thread` and hide it until a new
+// row reopens it (`room-remove-button` → `room-remove-confirm`;
+// `bridged-adapter.md` § Removing bridged rows, rules 4 and 5). Refused
+// unless the thread's capabilities say `supports_local_remove`. The
+// thread leaves the manager when the nest answers, never optimistically;
+// a refusal surfaces on `error-message`.
+func (_self *ConversationsManager) RemoveThread(thread ThreadId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_remove_thread(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(thread)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
 }
 
 // Rename a thread (`thread-rename-button` → `manager.rename_thread`).
@@ -4683,6 +4898,38 @@ func (_self *ConversationsManager) RetireConversationsEngine() {
 			_pointer, _uniffiStatus)
 		return false
 	})
+}
+
+// Retry the not-sent own copy `message_id` (`dm-message-retry-button`).
+// `false` = not a queued copy, its intent not parked, or the outbox
+// failed (logged).
+func (_self *ConversationsManager) RetryQueuedSend(messageId MessageId) bool {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	res, _ := uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_conversations_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_retry_queued_send(
+			_pointer, FfiConverterTypeMessageIdINSTANCE.Lower(messageId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_i8(handle)
+		},
+	)
+
+	return res
 }
 
 // Opt this message into loading its remote images. Adds it to the in-memory
@@ -6991,6 +7238,15 @@ type MessageSnapshot struct {
 	// stale one. Additive (`serde` + UniFFI defaults), so the at-rest slice
 	// stays byte-identical and no app constructor has to name it.
 	CanDelete bool
+	// Whether **this viewer** may remove the nest's copy of this message —
+	// the one fact behind `dm-message-remove-button`: a *remove*, never a
+	// *delete*, the far side keeping its copy (`bridged-adapter.md`
+	// § Removing bridged rows, rule 1). Assigned on every message of a thread
+	// whose `capabilities.supports_local_remove` holds — the user's own Sent
+	// copies included — by [`crate::ConversationsManager::thread_detail`],
+	// never stored, like [`Self::can_delete`]. Additive (`serde` + UniFFI
+	// defaults), so the at-rest slice stays byte-identical.
+	CanRemove bool
 	// Whether this is the viewer's **own message that its bridge never
 	// took**: the bridge that carried the room was disconnected with the
 	// message still queued, and the nest deleted the undeliverable item and
@@ -7054,6 +7310,16 @@ type MessageSnapshot struct {
 	// bubble) or [`admin_block_reason`](Self::admin_block_reason) (which
 	// names one ground only).
 	Withheld *WithheldOwnMessage
+	// The state of an own copy a send made with no nest left in the device's
+	// outbox — the `queued:<intent>` copy (`devices.md` § Offline compose;
+	// `account-offline-mutation.md` § The offline-mutation contract →
+	// *The unsent-changes surface*, point 2): `Queued` paints
+	// `dm-message-queued`, `Unsent` paints `dm-message-unsent` with its
+	// reason and offers retry and discard. Projected on every
+	// [`crate::ConversationsManager::thread_detail`] from the outbox rows
+	// [`crate::ConversationsManager::refresh_unsent_sends`] reads; never
+	// stored. `None` on every message that is not a queued own copy.
+	QueuedSend *QueuedSendState
 }
 
 func (r *MessageSnapshot) Destroy() {
@@ -7074,11 +7340,13 @@ func (r *MessageSnapshot) Destroy() {
 	FfiDestroyerSequenceContentLabelEntry{}.Destroy(r.Labels)
 	FfiDestroyerOptionalPlaneRef{}.Destroy(r.PlaneRef)
 	FfiDestroyerBool{}.Destroy(r.CanDelete)
+	FfiDestroyerBool{}.Destroy(r.CanRemove)
 	FfiDestroyerBool{}.Destroy(r.Undelivered)
 	FfiDestroyerOptionalMailWarmupHold{}.Destroy(r.WarmupHold)
 	FfiDestroyerSequenceLocalizedText{}.Destroy(r.ScanResultLines)
 	FfiDestroyerOptionalString{}.Destroy(r.DeliveredTo)
 	FfiDestroyerOptionalWithheldOwnMessage{}.Destroy(r.Withheld)
+	FfiDestroyerOptionalQueuedSendState{}.Destroy(r.QueuedSend)
 }
 
 type FfiConverterMessageSnapshot struct{}
@@ -7109,10 +7377,12 @@ func (c FfiConverterMessageSnapshot) Read(reader io.Reader) MessageSnapshot {
 		FfiConverterOptionalPlaneRefINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalMailWarmupHoldINSTANCE.Read(reader),
 		FfiConverterSequenceLocalizedTextINSTANCE.Read(reader),
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalWithheldOwnMessageINSTANCE.Read(reader),
+		FfiConverterOptionalQueuedSendStateINSTANCE.Read(reader),
 	}
 }
 
@@ -7142,11 +7412,13 @@ func (c FfiConverterMessageSnapshot) Write(writer io.Writer, value MessageSnapsh
 	FfiConverterSequenceContentLabelEntryINSTANCE.Write(writer, value.Labels)
 	FfiConverterOptionalPlaneRefINSTANCE.Write(writer, value.PlaneRef)
 	FfiConverterBoolINSTANCE.Write(writer, value.CanDelete)
+	FfiConverterBoolINSTANCE.Write(writer, value.CanRemove)
 	FfiConverterBoolINSTANCE.Write(writer, value.Undelivered)
 	FfiConverterOptionalMailWarmupHoldINSTANCE.Write(writer, value.WarmupHold)
 	FfiConverterSequenceLocalizedTextINSTANCE.Write(writer, value.ScanResultLines)
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.DeliveredTo)
 	FfiConverterOptionalWithheldOwnMessageINSTANCE.Write(writer, value.Withheld)
+	FfiConverterOptionalQueuedSendStateINSTANCE.Write(writer, value.QueuedSend)
 }
 
 type FfiDestroyerMessageSnapshot struct{}
@@ -8361,6 +8633,15 @@ type ThreadCapabilities struct {
 	// registry, never declared by a bridge — like `encryption` — so an app
 	// withholds the bar on `!can_send` and never branches on a rail.
 	CanSend bool
+	// Remove this device's account's copy of a message or of the whole
+	// conversation from its nest — a *remove*, never a *delete*: the far
+	// side sees nothing (`bridged-adapter.md` § Removing bridged rows, rule
+	// 1). Paints `dm-message-remove-button` (through
+	// [`crate::message::MessageSnapshot::can_remove`]) and lights
+	// `room-remove-button`. Derived from the rail, never declared — like
+	// `encryption` — so a bridge's manifest cannot claim it: `true` on
+	// [`Rail::Bridged`], `false` on every other rail today.
+	SupportsLocalRemove bool
 }
 
 func (r *ThreadCapabilities) Destroy() {
@@ -8383,6 +8664,7 @@ func (r *ThreadCapabilities) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.CanLeaveRoom)
 	FfiDestroyerBool{}.Destroy(r.CanSearchRoom)
 	FfiDestroyerBool{}.Destroy(r.CanSend)
+	FfiDestroyerBool{}.Destroy(r.SupportsLocalRemove)
 }
 
 type FfiConverterThreadCapabilities struct{}
@@ -8406,6 +8688,7 @@ func (c FfiConverterThreadCapabilities) Read(reader io.Reader) ThreadCapabilitie
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterDeliveryModeINSTANCE.Read(reader),
 		FfiConverterThreadEncryptionINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
@@ -8445,6 +8728,7 @@ func (c FfiConverterThreadCapabilities) Write(writer io.Writer, value ThreadCapa
 	FfiConverterBoolINSTANCE.Write(writer, value.CanLeaveRoom)
 	FfiConverterBoolINSTANCE.Write(writer, value.CanSearchRoom)
 	FfiConverterBoolINSTANCE.Write(writer, value.CanSend)
+	FfiConverterBoolINSTANCE.Write(writer, value.SupportsLocalRemove)
 }
 
 type FfiDestroyerThreadCapabilities struct{}
@@ -8815,6 +9099,7 @@ var ErrBackendErrorAuthRequired = fmt.Errorf("BackendErrorAuthRequired")
 var ErrBackendErrorRefusal = fmt.Errorf("BackendErrorRefusal")
 var ErrBackendErrorInternal = fmt.Errorf("BackendErrorInternal")
 var ErrBackendErrorWelcomeNotAddressedHere = fmt.Errorf("BackendErrorWelcomeNotAddressedHere")
+var ErrBackendErrorRemovalUnsevered = fmt.Errorf("BackendErrorRemovalUnsevered")
 
 // Variant structs
 type BackendErrorNotSupported struct {
@@ -9062,6 +9347,53 @@ func (self BackendErrorWelcomeNotAddressedHere) Is(target error) bool {
 	return target == ErrBackendErrorWelcomeNotAddressedHere
 }
 
+// A community-room removal whose **unseat landed but whose rotation did
+// not** — the named, recoverable residue (`community-rooms.md`
+// § Implementation status today → *A removal severs*). `member` is off
+// the floor and cannot send, but can still open traffic sealed under the
+// un-rotated tip until the next owner's or admin's tend pass reads the
+// floor's `severance_owed` and mints.
+//
+// Its own variant, never [`Internal`](Self::Internal): `Internal` renders
+// as the generic failure and the manager answers a failed removal by
+// putting the member chip back — a severance reported as not having
+// happened while the unseat landed. The manager keeps the chip gone on
+// this variant and renders [`user_detail`](Self::user_detail)'s sentence.
+// `member` is the display name (filled by the caller that knows it);
+// `cause` is the rotation's own error, for the log only.
+type BackendErrorRemovalUnsevered struct {
+	message string
+}
+
+// A community-room removal whose **unseat landed but whose rotation did
+// not** — the named, recoverable residue (`community-rooms.md`
+// § Implementation status today → *A removal severs*). `member` is off
+// the floor and cannot send, but can still open traffic sealed under the
+// un-rotated tip until the next owner's or admin's tend pass reads the
+// floor's `severance_owed` and mints.
+//
+// Its own variant, never [`Internal`](Self::Internal): `Internal` renders
+// as the generic failure and the manager answers a failed removal by
+// putting the member chip back — a severance reported as not having
+// happened while the unseat landed. The manager keeps the chip gone on
+// this variant and renders [`user_detail`](Self::user_detail)'s sentence.
+// `member` is the display name (filled by the caller that knows it);
+// `cause` is the rotation's own error, for the log only.
+func NewBackendErrorRemovalUnsevered() *BackendError {
+	return &BackendError{err: &BackendErrorRemovalUnsevered{}}
+}
+
+func (e BackendErrorRemovalUnsevered) destroy() {
+}
+
+func (err BackendErrorRemovalUnsevered) Error() string {
+	return fmt.Sprintf("RemovalUnsevered: %s", err.message)
+}
+
+func (self BackendErrorRemovalUnsevered) Is(target error) bool {
+	return target == ErrBackendErrorRemovalUnsevered
+}
+
 type FfiConverterBackendError struct{}
 
 var FfiConverterBackendErrorINSTANCE = FfiConverterBackendError{}
@@ -9097,6 +9429,8 @@ func (c FfiConverterBackendError) Read(reader io.Reader) *BackendError {
 		return &BackendError{&BackendErrorInternal{message}}
 	case 7:
 		return &BackendError{&BackendErrorWelcomeNotAddressedHere{message}}
+	case 8:
+		return &BackendError{&BackendErrorRemovalUnsevered{message}}
 	default:
 		panic(fmt.Sprintf("Unknown error code %d in FfiConverterBackendError.Read()", errorID))
 	}
@@ -9119,6 +9453,8 @@ func (c FfiConverterBackendError) Write(writer io.Writer, value *BackendError) {
 		writeInt32(writer, 6)
 	case *BackendErrorWelcomeNotAddressedHere:
 		writeInt32(writer, 7)
+	case *BackendErrorRemovalUnsevered:
+		writeInt32(writer, 8)
 	default:
 		_ = variantValue
 		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterBackendError.Write", value))
@@ -9142,6 +9478,8 @@ func (_ FfiDestroyerBackendError) Destroy(value *BackendError) {
 	case BackendErrorInternal:
 		variantValue.destroy()
 	case BackendErrorWelcomeNotAddressedHere:
+		variantValue.destroy()
+	case BackendErrorRemovalUnsevered:
 		variantValue.destroy()
 	default:
 		_ = variantValue
@@ -9384,6 +9722,81 @@ func (FfiConverterPrincipalKind) Write(writer io.Writer, value PrincipalKind) {
 type FfiDestroyerPrincipalKind struct{}
 
 func (_ FfiDestroyerPrincipalKind) Destroy(value PrincipalKind) {
+}
+
+// Where a queued own copy's intent stands ([`MessageSnapshot::queued_send`]).
+type QueuedSendState interface {
+	Destroy()
+}
+
+// Waiting to send — pending in the outbox, or held behind a parked
+// message of the same conversation.
+type QueuedSendStateQueued struct {
+}
+
+func (e QueuedSendStateQueued) Destroy() {
+}
+
+// Not sent: the drain parked it. `reason_code` is the stored stable code;
+// `reason` is it in words (`fauna_protocol::offline_describe::reason_text`).
+type QueuedSendStateUnsent struct {
+	ReasonCode string
+	Reason     fauna_core.LocalizedText
+}
+
+func (e QueuedSendStateUnsent) Destroy() {
+	FfiDestroyerString{}.Destroy(e.ReasonCode)
+	fauna_core.FfiDestroyerLocalizedText{}.Destroy(e.Reason)
+}
+
+type FfiConverterQueuedSendState struct{}
+
+var FfiConverterQueuedSendStateINSTANCE = FfiConverterQueuedSendState{}
+
+func (c FfiConverterQueuedSendState) Lift(rb RustBufferI) QueuedSendState {
+	return LiftFromRustBuffer[QueuedSendState](c, rb)
+}
+
+func (c FfiConverterQueuedSendState) Lower(value QueuedSendState) C.RustBuffer {
+	return LowerIntoRustBuffer[QueuedSendState](c, value)
+}
+
+func (c FfiConverterQueuedSendState) LowerExternal(value QueuedSendState) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[QueuedSendState](c, value))
+}
+func (FfiConverterQueuedSendState) Read(reader io.Reader) QueuedSendState {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return QueuedSendStateQueued{}
+	case 2:
+		return QueuedSendStateUnsent{
+			FfiConverterStringINSTANCE.Read(reader),
+			fauna_core.FfiConverterLocalizedTextINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterQueuedSendState.Read()", id))
+	}
+}
+
+func (FfiConverterQueuedSendState) Write(writer io.Writer, value QueuedSendState) {
+	switch variant_value := value.(type) {
+	case QueuedSendStateQueued:
+		writeInt32(writer, 1)
+	case QueuedSendStateUnsent:
+		writeInt32(writer, 2)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.ReasonCode)
+		fauna_core.FfiConverterLocalizedTextINSTANCE.Write(writer, variant_value.Reason)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterQueuedSendState.Write", value))
+	}
+}
+
+type FfiDestroyerQueuedSendState struct{}
+
+func (_ FfiDestroyerQueuedSendState) Destroy(value QueuedSendState) {
+	value.Destroy()
 }
 
 type Rail uint
@@ -11333,6 +11746,47 @@ type FfiDestroyerOptionalGuardianState struct{}
 func (_ FfiDestroyerOptionalGuardianState) Destroy(value *GuardianState) {
 	if value != nil {
 		FfiDestroyerGuardianState{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalQueuedSendState struct{}
+
+var FfiConverterOptionalQueuedSendStateINSTANCE = FfiConverterOptionalQueuedSendState{}
+
+func (c FfiConverterOptionalQueuedSendState) Lift(rb RustBufferI) *QueuedSendState {
+	return LiftFromRustBuffer[*QueuedSendState](c, rb)
+}
+
+func (_ FfiConverterOptionalQueuedSendState) Read(reader io.Reader) *QueuedSendState {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterQueuedSendStateINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalQueuedSendState) Lower(value *QueuedSendState) C.RustBuffer {
+	return LowerIntoRustBuffer[*QueuedSendState](c, value)
+}
+
+func (c FfiConverterOptionalQueuedSendState) LowerExternal(value *QueuedSendState) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*QueuedSendState](c, value))
+}
+
+func (_ FfiConverterOptionalQueuedSendState) Write(writer io.Writer, value *QueuedSendState) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterQueuedSendStateINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalQueuedSendState struct{}
+
+func (_ FfiDestroyerOptionalQueuedSendState) Destroy(value *QueuedSendState) {
+	if value != nil {
+		FfiDestroyerQueuedSendState{}.Destroy(*value)
 	}
 }
 
@@ -13290,6 +13744,16 @@ func NextSortOrder(current SortOrder) SortOrder {
 	return FfiConverterSortOrderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_conversations_fn_func_next_sort_order(FfiConverterSortOrderINSTANCE.Lower(current), _uniffiStatus),
+		}
+	}))
+}
+
+// [`SortOrder::name`] over UniFFI — the stable label a cycle-button's
+// automation value reads (Swift `ConversationsUI.sortLabel` hand-wrote it).
+func SortOrderName(order SortOrder) string {
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_func_sort_order_name(FfiConverterSortOrderINSTANCE.Lower(order), _uniffiStatus),
 		}
 	}))
 }

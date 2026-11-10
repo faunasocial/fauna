@@ -1154,6 +1154,115 @@ async fn a_derived_reply_reads_back_with_marked_tags_in_a_real_client() {
     anon.disconnect().await;
 }
 
+/// `monetization.md` § The Nostr advertisement of a sold post — the real-client
+/// leg: an advertised sold post, materialized by the nest's own publish path
+/// (`advertise::kick_account`, what `fauna.nostr.advertise.set` runs), is
+/// read back anonymously by a real rust-nostr client as an ordinary kind-1
+/// note whose tags carry NIP-99's `["price", value, unit]` — the marker a
+/// client sizes the zap from — and whose content is the teaser alone.
+#[cfg(feature = "zaps")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_advertised_sold_post_reads_back_with_its_price_in_a_real_client() {
+    use fauna_core::data::{ContentHash, Post, PostBody, Timestamp};
+    use fauna_core::identity::ActorId;
+    use fauna_core::subscription::types::{GatedInfo, KeyAccess};
+    use nostr_sdk::prelude::*;
+
+    let relay = spawn_relay().await;
+    let author = [0x71u8; 32];
+    let actor_hex = hex::encode(author);
+    let user_kp = link_custodial(&relay.state, &actor_hex).await;
+
+    let post = Post {
+        author: ActorId(author),
+        created_at: Timestamp(1_710_892_800_000_000),
+        body: PostBody::Text {
+            content: "the public teaser".into(),
+            facets: vec![],
+        },
+        references: vec![],
+        expires_at: None,
+        gated: Some(GatedInfo {
+            encrypted_ref: ContentHash::from_digest_raw([9u8; 32]),
+            key_access: KeyAccess::Broadcast {
+                key_blob_ref: ContentHash::from_digest_raw([8u8; 32]),
+            },
+            tier: "post-unlock-interop".into(),
+            tier_rank: 2,
+            seal_id: ContentHash::from_digest_raw([7u8; 32]),
+            attachment_refs: vec![],
+        }),
+        content_warning: None,
+        origin: None,
+    };
+    let cid = fauna_core::encoding::compute_post_id(&post).unwrap();
+    let digest: [u8; 32] = cid.as_bytes()[4..].try_into().unwrap();
+    let bytes = fauna_core::encoding::canonical_encode(&post).unwrap();
+    relay
+        .state
+        .db
+        .put_post(&digest, &bytes, None)
+        .await
+        .unwrap();
+    relay
+        .state
+        .db
+        .create_subscription_tier(
+            &author,
+            "post-unlock-interop",
+            2,
+            None,
+            None,
+            None,
+            false,
+            Some(&hex::encode(digest)),
+            Some(&fauna_protocol::subscriptions::TierAskingPrice::msats(
+                21_000,
+            )),
+            false,
+        )
+        .await
+        .unwrap();
+    relay
+        .state
+        .db
+        .conn()
+        .await
+        .execute(
+            "UPDATE content_meta SET nostr_advertised_at = 1 WHERE content_id = ?1",
+            [digest.as_slice()],
+        )
+        .unwrap();
+    fauna_nest::nostr::advertise::kick_account(&relay.state, &actor_hex).await;
+
+    let anon = Client::default();
+    anon.add_relay(&relay.url).await.unwrap();
+    anon.connect().await;
+    let user = PublicKey::from_hex(&user_kp.public_key_hex()).unwrap();
+    let filter = Filter::new().kinds([Kind::TextNote]).authors([user]);
+    let events = anon
+        .fetch_events(filter)
+        .timeout(Duration::from_secs(5))
+        .await
+        .expect("REQ replay");
+    let read = events
+        .first()
+        .expect("the advertisement rests on the relay");
+    assert_eq!(read.content, "the public teaser");
+    let price: Vec<Vec<String>> = read
+        .tags
+        .iter()
+        .map(|t| t.as_slice().to_vec())
+        .filter(|t| t.first().map(String::as_str) == Some("price"))
+        .collect();
+    assert_eq!(
+        price,
+        vec![vec!["price".to_string(), "21000".into(), "msat".into()]],
+        "rust-nostr must read the asking price off the advertised note"
+    );
+    anon.disconnect().await;
+}
+
 /// Read relay frames off a raw socket, skipping the connect-time `AUTH`
 /// challenge, until `want` accepts one (or 5 s pass).
 async fn next_frame_where(

@@ -129,7 +129,7 @@ fun ProfileTiersContent(
     providers: List<ProviderItem> = emptyList(),
     providerKinds: List<String> = emptyList(),
     claims: List<ClaimItem> = emptyList(),
-    onSetProvider: (String, String, String) -> Unit = { _, _, _ -> },
+    onSetProvider: (String, String, String, String) -> Unit = { _, _, _, _ -> },
     onRemoveProvider: (String) -> Unit = {},
     onMintClaim: (String) -> Unit = {},
     onVoidClaim: (String) -> Unit = {},
@@ -344,9 +344,10 @@ fun ProfileTiersContent(
                     ProviderForm(
                         kinds = providerKinds,
                         tierNames = tiers.map { it.name },
+                        providers = providers,
                         working = working,
-                        onSubmit = { kind, secret, tier ->
-                            onSetProvider(kind, secret, tier); providerFormOpen = false
+                        onSubmit = { kind, secret, tier, product ->
+                            onSetProvider(kind, secret, tier, product); providerFormOpen = false
                         },
                         onCancel = { providerFormOpen = false },
                         webhookUrl = webhookUrl,
@@ -633,13 +634,20 @@ private fun ProviderRow(
  * the same constant the nest builds its ingress route from (never
  * hand-assembled here). No client-side validation — the nest rejects unknown
  * kinds / dangling tiers / empty secrets with typed `fauna.payments.*` errors.
+ *
+ * The optional product (`subscription-provider-form-product`; `monetization.md`
+ * § Pillar 3 → *Configuration*, on Stripe the Payment Link id) is not a secret:
+ * one config per kind, so picking a configured kind pre-fills its saved product
+ * from [providers], a kind with no config starts empty, and the field is sent as
+ * shown on save (tui's `ProviderForm::product`).
  */
 @Composable
 private fun ProviderForm(
     kinds: List<String>,
     tierNames: List<String>,
+    providers: List<ProviderItem>,
     working: Boolean,
-    onSubmit: (String, String, String) -> Unit,
+    onSubmit: (String, String, String, String) -> Unit,
     onCancel: () -> Unit,
     webhookUrl: (String) -> String,
     returnUrl: (String) -> String?,
@@ -649,6 +657,9 @@ private fun ProviderForm(
     var tier by remember(tierNames) {
         mutableStateOf(tierNames.firstOrNull().orEmpty())
     }
+    fun savedProduct(k: String): String =
+        providers.firstOrNull { it.kind == k }?.productRef.orEmpty()
+    var product by remember { mutableStateOf(savedProduct(kind)) }
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_PROVIDER_FORM)) {
         Column(
@@ -659,7 +670,7 @@ private fun ProviderForm(
                 label = stringResource(R.string.subscriptions_provider_kind_label),
                 options = kinds,
                 selected = kind,
-                onSelect = { kind = it },
+                onSelect = { kind = it; product = savedProduct(it) },
                 testTag = Ids.SUBSCRIPTION_PROVIDER_FORM_KIND,
             )
             OutlinedTextField(
@@ -676,6 +687,14 @@ private fun ProviderForm(
                 selected = tier,
                 onSelect = { tier = it },
                 testTag = Ids.SUBSCRIPTION_PROVIDER_FORM_TIER_MAP,
+            )
+            OutlinedTextField(
+                value = product,
+                onValueChange = { product = it },
+                singleLine = true,
+                label = { Text(stringResource(R.string.subscriptions_product_label)) },
+                supportingText = { Text(stringResource(R.string.subscriptions_product_hint)) },
+                modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_PROVIDER_FORM_PRODUCT),
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -727,7 +746,7 @@ private fun ProviderForm(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    onClick = { onSubmit(kind, secret, tier) },
+                    onClick = { onSubmit(kind, secret, tier, product) },
                     enabled = saveGate.enabled,
                     modifier = Modifier.testTag(Ids.SUBSCRIPTION_PROVIDER_FORM_SAVE),
                 ) { Text(stringResource(R.string.subscriptions_save)) }

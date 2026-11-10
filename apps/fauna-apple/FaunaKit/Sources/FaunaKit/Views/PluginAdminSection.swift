@@ -88,9 +88,18 @@ public struct PluginAdminSection: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = PluginAdminVM()
     private let isAdmin: Bool
+    /// The host page's `appState.navGeneration`: a navigate to the already-open
+    /// Bridges page re-reads the list, as every other settings and admin page
+    /// re-fetches on its `reloadToken` (the e2e poll-by-re-navigate pattern) —
+    /// a plugin's fault count and last fault land AFTER the first read, and a
+    /// list keyed on the session alone painted the first read's `Running`
+    /// for the poll's whole deadline (`test_a_faulted_plugin_shows_its_fault_
+    /// count_and_last_fault`, macos and ios).
+    private let reloadToken: Int
 
-    public init(isAdmin: Bool) {
+    public init(isAdmin: Bool, reloadToken: Int = 0) {
         self.isAdmin = isAdmin
+        self.reloadToken = reloadToken
     }
 
     public var body: some View {
@@ -99,7 +108,8 @@ public struct PluginAdminSection: View {
                 content
             }
         }
-        .task(id: SessionKey(client, reloadToken: isAdmin ? 1 : 0)) {
+        // Non-admin reads 0; an admin's key moves with every re-navigate.
+        .task(id: SessionKey(client, reloadToken: isAdmin ? reloadToken + 1 : 0)) {
             guard isAdmin, let client else {
                 vm.reset()
                 return

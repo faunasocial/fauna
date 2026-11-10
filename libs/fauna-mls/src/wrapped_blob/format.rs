@@ -1182,6 +1182,21 @@ impl ScopeTuple {
     /// (`folder-deposit.md` § The depositor signs, the owner's device
     /// verifies); no `kind` or `tier`. Constructed by [`Self::folder_deposit`].
     pub const CLASS_DEPOSIT: &'static str = fauna_core::grant_event::CLASS_DEPOSIT;
+    /// The **materialization** class (`encryption-at-rest.md` § Capability
+    /// tiering → *The materialization grant*, part (a)) — **keyless always**,
+    /// like `custody` and `content.label-write`: the tuple wraps nothing. It
+    /// rides one grant beside the master-key `content.read{kind}` tuple whose
+    /// wrap carries the keys, and says what that pair licenses: the holder —
+    /// the nest's own in-process materializer, never anyone else — may keep a
+    /// readable derived view (a search index) of the owner's `kind` on its
+    /// disk while the grant stands. It is what makes the tier auditable in
+    /// the declared scope the Now lens reads, and one revoke ends the keys and
+    /// the views together. `kind` is the own-actor kind (v1: `mail`);
+    /// `set`/`tier` mirror the read tuple's qualifiers where the kind has
+    /// them. Reserved to device apps and nest-hosted code
+    /// ([`Self::reserved_for_device_or_hosted`]). Constructed by
+    /// [`Self::materialize`].
+    pub const CLASS_MATERIALIZE: &'static str = "materialize";
 
     /// `kind` value for the custody `Account` form (the owner's whole
     /// single-principal scope set, current and future — one tuple, no `set`).
@@ -1196,6 +1211,12 @@ impl ScopeTuple {
     pub const KIND_MAIL: &'static str = "mail";
     /// `kind` value for calendar content / the calendar index.
     pub const KIND_CALENDAR: &'static str = "calendar";
+    /// `kind` value for address-book (CardDAV card) content. Its payload is
+    /// the standing card secret (`owner-key-material.md` § Path B-sibling-6),
+    /// which opens `card-record` envelopes only; the one grant that names it
+    /// is the card materialization grant (`encryption-at-rest.md`
+    /// § Capability tiering → *The materialization grant*, part (a)).
+    pub const KIND_CARD: &'static str = "card";
     /// `kind` value for audience-restricted-post content / the post index.
     pub const KIND_POST: &'static str = "post";
     /// `kind` value for a `web`-mode folder's content keys (the web-paywall
@@ -1346,6 +1367,25 @@ impl ScopeTuple {
         }
     }
 
+    /// The keyless `materialize{kind}` tuple (see [`Self::CLASS_MATERIALIZE`]):
+    /// no `set`, `tier` or `factor` — mail, the v1 kind, has none of them.
+    #[must_use]
+    pub fn materialize(kind: &str) -> Self {
+        Self {
+            class: Self::CLASS_MATERIALIZE.to_string(),
+            kind: Some(kind.to_string()),
+            tier: None,
+            set: None,
+            factor: None,
+        }
+    }
+
+    /// Is this a `materialize` tuple, over any kind?
+    #[must_use]
+    pub fn is_materialize(&self) -> bool {
+        self.class == Self::CLASS_MATERIALIZE
+    }
+
     /// The keyless `content.label-write` tuple: `factor: None` licenses the
     /// built-in perimeter factors (the composed MDA role); `Some(f)`
     /// licenses writing exactly the factor `f`.
@@ -1401,6 +1441,13 @@ impl ScopeTuple {
                     .unwrap_or_default();
                 base.is_empty() || !fauna_core::ext_kind::is_ext_kind(base)
             }
+            // Keyless, yet reserved: what it licenses — a readable view of
+            // the owner's sealed content on the box's disk — is exactly what
+            // TP4 keeps from a remote holder; the nest's mint door narrows it
+            // further, to this nest's own materializer. Named, not left to
+            // the default arm, so placing a class never un-reserves it.
+            #[allow(clippy::match_same_arms)]
+            Self::CLASS_MATERIALIZE => true,
             _ => true,
         }
     }
@@ -2569,6 +2616,11 @@ mod tests {
             with_class("a.class.added.later", Some(ScopeTuple::KIND_MAIL)),
             with_class("a.class.added.later", None),
             with_class(ScopeTuple::CLASS_CONTENT_READ, None),
+            // Keyless, yet reserved: a readable view of pre-existing sealed
+            // content is never a remote principal's (the materialization
+            // grant, part (a)) — over an `ext.*` kind too.
+            ScopeTuple::materialize(ScopeTuple::KIND_MAIL),
+            with_class(ScopeTuple::CLASS_MATERIALIZE, Some(EXT)),
         ] {
             assert!(reserved.reserved_for_device_or_hosted(), "{reserved:?}");
         }

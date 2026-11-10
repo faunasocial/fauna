@@ -10,7 +10,8 @@ The nest outcomes of three catalog pages that no test asserted until now:
   connected able to act) and **27** (a lock request more than five minutes old
   is refused);
 * ``docs/features/devices.md`` **16** (removing a device ends every sign-in it
-  made);
+  made) and **28** (removing a device closes every connection it still had
+  open, at once — the bound one included);
 * ``docs/features/take-your-account-back.md`` **26, 27** (the successor is not
   locked; the stolen key can no longer lock it and is told where it went).
 
@@ -491,6 +492,97 @@ def test_removing_a_device_ends_every_sign_in_it_made_for_good(lockout_nest):
 
 def _as_bearer(reply: dict) -> _BearerToken:
     return _BearerToken(token=reply["token"], expires_at=time.time() + 3600, token_id=reply["token_id"])
+
+
+# ── devices 28: removing a device closes every connection it still had open ──
+
+
+def _bind_in_band(nest, actor, client: WsRpcAdminClient, device_key: SigningKey) -> None:
+    """``fauna.auth.device_bind`` over ``client``'s own connection — web's one
+    socket binding itself to the device in band (``devices.md`` § Listing
+    Devices → *The binding*). The bearer it was upgraded with stays the
+    account's own sign-in: no row of the token store names the device."""
+    import secrets
+
+    from clients.ws_rpc_anon_client import WsRpcAnonClient
+    from common.nest_identity import read_nest_identity
+    from common.sig_domain import device_bind_signed_message
+
+    with WsRpcAnonClient(nest["url"]) as anon:
+        nest_id = read_nest_identity(anon)
+    device_pub = bytes(device_key.verify_key)
+    timestamp = int(time.time() * 1000)
+    nonce = secrets.token_bytes(32)
+    signature = device_key.sign(
+        device_bind_signed_message(actor["actor_id_bytes"], device_pub, timestamp, nest_id, nonce)
+    ).signature
+    client.call(
+        "fauna.auth.device_bind",
+        {
+            "actor_id": actor["actor_id_hex"],
+            "device_key": device_pub.hex(),
+            "timestamp": timestamp,
+            "nonce": nonce,
+            "signature": signature.hex(),
+        },
+    )
+
+
+#: The two doors a user removes a device through on the Devices page and the
+#: sign-out of a machine: the row, and the key's grant
+#: (`transport-connection.md` § Connection lifecycle → *The per-device twin*).
+_REMOVAL_DOORS = ("devices.delete", "device_grant.revoke")
+
+
+@pytest.mark.feature("devices")
+@pytest.mark.parametrize("door", _REMOVAL_DOORS)
+def test_removing_a_device_closes_every_connection_it_still_had_open_at_once(lockout_nest, door):
+    """devices 28 (`transport-connection.md` § Connection lifecycle → *The
+    per-device twin*): the teardown selects on the connection's binding, not
+    on the sign-ins the removal revokes — so a connection bound to the device
+    in band, whose bearer is the account's own sign-in and names no device,
+    closes too, with the connection the device's own sign-in opened. The
+    account's own connection and another device's stay open and answering."""
+    nest = lockout_nest
+    actor = _fresh_actor(nest)
+    device_id, device_key = _granted_device(nest, actor)
+    _other_id, other_key = _granted_device(nest, actor)
+    minted = _device_sign_in(nest, actor, device_key)
+    other = _device_sign_in(nest, actor, other_key)
+    bound_bearer = _sign_in(nest, actor)
+
+    with _client(nest, actor) as app, _held(nest, actor, _as_bearer(minted)) as by_key, _held(
+        nest, actor, bound_bearer
+    ) as bound, _held(nest, actor, _as_bearer(other)) as kept:
+        _bind_in_band(nest, actor, bound, device_key)
+        sessions = {s["token_id"]: s.get("minted_by_device") for s in app.call(SESSIONS_LIST, {})["sessions"]}
+        assert sessions.get(bound_bearer.token_id) is None, (
+            "precondition: the in-band-bound connection's bearer is the account's own "
+            f"sign-in, which names no device — {sessions}"
+        )
+        app_raw, kept_raw = app._ws, kept._ws
+
+        if door == "devices.delete":
+            assert app.call("fauna.sync.devices.delete", {"device_id": device_id})["deleted"] is True
+        else:
+            app.call(
+                "fauna.sync.device_grant.revoke",
+                {"device_key": bytes(device_key.verify_key).hex()},
+            )
+
+        assert _close_code(by_key) == CLOSE_AUTH_REVOKED, (
+            f"{door}: the connection the device's own sign-in opened must close at once (4401)"
+        )
+        assert _close_code(bound) == CLOSE_AUTH_REVOKED, (
+            f"{door}: the connection bound to the device in band must close at once (4401) — "
+            "its bearer names no device, so only the binding reaches it; without the "
+            "per-device sweep it keeps dispatching as the account"
+        )
+
+        _listed_ids(kept)
+        _assert_still_this_socket(kept, kept_raw, "another device's connection")
+        _listed_ids(app)
+        _assert_still_this_socket(app, app_raw, "the account's own connection")
 
 
 # ── take-your-account-back 26, 27 ────────────────────────────────────────────

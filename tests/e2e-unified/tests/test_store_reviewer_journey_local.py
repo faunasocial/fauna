@@ -51,12 +51,22 @@ from urllib.parse import urlsplit
 import pytest
 
 from helpers.org_account_session import (
+    ACCOUNT_TIMEOUT_S,
     admit_accounts,
+    poll,
     seed_accounts,
+    seed_sales,
     sign_in_fresh,
     sign_out,
 )
-from helpers.staging_box import REVIEWER_ACCOUNTS, actor_hex_for, witness_tester_localpart
+from helpers.staging_box import (
+    REVIEWER_ACCOUNTS,
+    SEED_SOLD_POST,
+    SEED_TIER,
+    SEEDING_ACCOUNT,
+    actor_hex_for,
+    witness_tester_localpart,
+)
 from helpers.store_reviewer_walk import ACCOUNTS, Nest, run_reviewer_journey
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
@@ -139,4 +149,60 @@ def test_a_witness_tester_admitted_by_public_key_alone_signs_in(request, app, se
     # What the witness host does with the seed it kept: a fresh app instance,
     # import the identity, type the handle, continue — to Connected.
     sign_in_fresh(app, {"localpart": localpart, "secret_hex": seed}, where, signed_in=True)
+    sign_out(app)
+
+
+def test_the_seeded_tester_sells_a_tier_and_a_post_a_stranger_sees(
+    request, app, seeded_reviewers, self_signed_nest
+):
+    """The staging boxes' sales seed (``org_account_session.seed_sales``, run by
+    the drive on `dev.fauna.build` and `test.fauna.build` only): the tester,
+    on this full build, makes the priced tier and sells the post through the
+    app's own forms; a second run adds nothing; and an account that is
+    neither the tester's contact nor a subscriber — what the iOS store
+    driver's buyer half signs in as — finds the tester by handle and sees the
+    tier among the profile's offers and the sold post, badged, on the Posts
+    tab (`docs/features/store-install.md` outcomes 2 and 3, the premise the
+    store build's reading rests on)."""
+    from conftest import _login_admin_as
+
+    app.subscriptions.require_sell_post_seller_fanout_leg_supported()
+    app.profile.require_other_profile_offers_browse_supported()
+    accounts, nest = seeded_reviewers
+    where = nest.where
+    stranger = {"localpart": "stranger", "secret_hex": secrets.token_bytes(32).hex()}
+    _login_admin_as(app, request, self_signed_nest, spa_url_fixture="spa_url",
+                    fixture_name="sales_stranger")
+    admit_accounts(app, {"stranger": stranger})
+
+    sign_in_fresh(app, accounts[SEEDING_ACCOUNT], where, signed_in=True)
+    seed_sales(app)
+    assert seed_sales(app) == ("kept", "kept"), "a rerun of the sales seed made something new"
+
+    sign_in_fresh(app, stranger, where, signed_in=True)
+    app.contacts.navigate()
+    app.contacts.find_by_handle(SEEDING_ACCOUNT)
+    tester_actor = actor_hex_for(accounts[SEEDING_ACCOUNT]["secret_hex"])
+    poll(lambda: (app.contacts.actor_id_result_text() == tester_actor,
+                  f"result={app.contacts.actor_id_result_text()!r} "
+                  f"find-error={app.contacts.find_error_text()!r}"),
+         "the stranger finding the tester by handle", ACCOUNT_TIMEOUT_S, interval=2.0)
+    app.contacts.open_found_profile()
+
+    app.profile.open_tiers_tab()
+    assert app.profile.wait_for_offer(SEED_TIER["name"], timeout=60.0), (
+        f"the tester's priced tier {SEED_TIER['name']!r} is not among the offers a "
+        f"stranger sees: offers={app.profile._offer_count_safe()} "
+        f"error={app.error_text()!r}")
+
+    def _sold_badged():
+        app.profile.open_posts_tab()
+        texts = app.profile._post_card_texts_safe()
+        hits = [i for i, t in enumerate(texts) if SEED_SOLD_POST["preview"] in t]
+        badges = [app.profile.post_card_badge(i) for i in hits]
+        return (bool(hits) and all(badges),
+                f"cards={texts} badges={badges} error={app.error_text()!r}")
+
+    poll(_sold_badged, "the stranger seeing the tester's sold post, badged, on the Posts tab",
+         ACCOUNT_TIMEOUT_S, interval=2.0)
     sign_out(app)

@@ -206,8 +206,9 @@ fn relayed_share_change(
 }
 
 /// The cached roster as the reader's judge takes it
-/// ([`fauna_peer_share::reader_over_cached_roster`]): the cached writers, each
-/// with its proven predecessors nearest first — the shape one roster read
+/// ([`fauna_peer_share::reader_over_cached_roster`]): the cached writers and
+/// former writers (ruling (12)(e)), each with its proven predecessors nearest
+/// first — the shape one roster read
 /// installs on the nest pull's reader, so the peer door judges over the same
 /// thing offline — the read's owner row included, which a reader whose binding
 /// names no owner judges by (ruling (11)(c)). An id that does not decode is
@@ -218,6 +219,7 @@ pub fn cached_writer_roster(db: &SyncDb) -> fauna_protocol::sync_row_verify::Wri
     let id = |hex: &String| fauna_core::hex32::decode(hex).ok();
     fauna_protocol::sync_row_verify::WriterRoster {
         writers: cached.writers.iter().filter_map(id).collect(),
+        former_writers: cached.former_writers.iter().filter_map(id).collect(),
         predecessors: cached
             .chains
             .iter()
@@ -284,7 +286,16 @@ where
             // admitted as a writer itself. The peer door's judge reads the
             // chain ([`cached_writer_roster`]) and places a retired
             // identity's row offline as the nest pull places it.
-            let roster = fauna_protocol::sync_row_verify::writer_roster(&reply.members);
+            //
+            // The former writers ride beside them (ruling (12)(e)): the peer
+            // door admits a former writer's sequenced row offline as the nest
+            // pull does, and its chain is walked the same way.
+            let roster = fauna_protocol::sync_row_verify::writer_roster(
+                &reply.members,
+                &reply.former_writers,
+            );
+            let former_writers: Vec<String> =
+                roster.former_writers.iter().map(hex::encode).collect();
             let chains: Vec<(String, Vec<String>)> = roster
                 .predecessors
                 .iter()
@@ -295,7 +306,8 @@ where
             // The read's owner row, marked on its member row: the owner a
             // reader that holds no marker judges by, offline as online.
             let owner = roster.owner.as_ref().map(hex::encode);
-            match db.cache_share_writer_roster(&members, &chains, owner.as_deref()) {
+            match db.cache_share_writer_roster(&members, &chains, owner.as_deref(), &former_writers)
+            {
                 Ok(()) => {
                     // The success path was the quietest of the three, and it
                     // is the one that decides whether ANY peer row is ever
@@ -322,7 +334,7 @@ where
             if e.as_rpc_error()
                 .is_some_and(|r| r.code == "fauna.folders.not_shared") =>
         {
-            if let Err(e) = db.cache_share_writer_roster(&[], &[], None) {
+            if let Err(e) = db.cache_share_writer_roster(&[], &[], None, &[]) {
                 tracing::warn!(error = %e, "clearing the writer roster failed; stale roster stands");
                 return RosterRefresh::KeptStale;
             }
@@ -1508,6 +1520,7 @@ pub(crate) mod tests {
         FolderActorMember {
             actor_id: actor.to_string(),
             handle: String::new(),
+            domain: None,
             role: role.to_string(),
             access: access.map(str::to_string),
             succession_statements: Vec::new(),
@@ -1671,6 +1684,83 @@ pub(crate) mod tests {
         )
         .await;
         assert!(cached_writer_roster(&db).predecessors.is_empty());
+    }
+
+    /// Ruling (12)(e): the cache keeps the read's former writers beside the
+    /// writers — an evicted one with no member row, a demoted one on its
+    /// reader row, a re-granted one on its writer row — each with its proven
+    /// chain, and none of them a cached WRITER unless the read lists it as
+    /// one; a later read without them drops them wholesale.
+    #[tokio::test]
+    async fn the_cached_roster_keeps_the_former_writers_beside_the_writers() {
+        use fauna_core::identity::ActorKeypair;
+        let kp = |b: u8| ActorKeypair::from_secret([b; 32]);
+        let (owner, demoted, evicted, evicted_old, regranted) = (kp(1), kp(2), kp(3), kp(4), kp(5));
+        let db = SyncDb::open_in_memory().unwrap();
+        let mut reply = roster_reply(vec![
+            member(&owner.actor_id().to_hex(), "owner", None),
+            member(&demoted.actor_id().to_hex(), "member", Some("reader")),
+            member(&regranted.actor_id().to_hex(), "member", Some("writer")),
+        ]);
+        reply.former_writers = vec![
+            fauna_protocol::folders::FolderFormerWriter {
+                actor_id: demoted.actor_id().to_hex(),
+                ..Default::default()
+            },
+            fauna_protocol::folders::FolderFormerWriter {
+                actor_id: evicted.actor_id().to_hex(),
+                succession_statements: vec![succession_link(&evicted_old, &evicted, &evicted)],
+                ..Default::default()
+            },
+            fauna_protocol::folders::FolderFormerWriter {
+                actor_id: regranted.actor_id().to_hex(),
+                ..Default::default()
+            },
+        ];
+        refresh_writer_roster_via(&db, "photos", ScriptedRoster(Ok(reply))).await;
+        let cached = cached_writer_roster(&db);
+        assert_eq!(
+            cached.former_writers,
+            [
+                demoted.actor_id().0,
+                evicted.actor_id().0,
+                regranted.actor_id().0
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            cached.writers,
+            [owner.actor_id().0, regranted.actor_id().0]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            cached.predecessors.get(&evicted.actor_id().0),
+            Some(&vec![evicted_old.actor_id().0])
+        );
+        for standing_none in [&demoted, &evicted, &evicted_old] {
+            assert!(
+                !db.cached_share_writer(&standing_none.actor_id().to_hex())
+                    .unwrap()
+            );
+        }
+        assert!(
+            db.cached_share_writer(&regranted.actor_id().to_hex())
+                .unwrap()
+        );
+
+        refresh_writer_roster_via(
+            &db,
+            "photos",
+            ScriptedRoster(Ok(roster_reply(vec![member(
+                &owner.actor_id().to_hex(),
+                "owner",
+                None,
+            )]))),
+        )
+        .await;
+        assert!(cached_writer_roster(&db).former_writers.is_empty());
     }
 
     /// A later read replaces wholesale: a demoted/departed writer drops to

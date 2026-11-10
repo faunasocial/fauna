@@ -41,9 +41,16 @@ mirroring ``test_federation_exchange_originator.py``'s note):
   · a hostile peer's inflated ``score_pm``/``engager_count`` buying nothing —
     ``conformance_federation_channel.rs::trends_exchange_is_presence_only_and_export_never_launders``
     (H pushes ``score_pm: 60_000, engager_count: 90_000`` over the real channel wire);
-  · time-decay driving withdraw — ``scoring.rs::velocity_decays_by_half_each_half_life``
-    + ``db/trends.rs::sweep_re_decays_and_withdraws``. (The withdraw *mechanism*
-    IS exercised here, via the real unlike wire zeroing local velocity.)
+  · the decay curve's exact shape — ``scoring.rs::velocity_decays_by_half_each_half_life``
+    + ``db/trends.rs::sweep_re_decays_and_withdraws``. (Withdraw-at-zero IS
+    exercised here, via the real unlike wire zeroing local velocity, and the
+    wall-clock sweep's fade-out by
+    ``test_a_post_with_no_new_engagement_fades_out_of_trending`` below.)
+
+Note: this cycle test's fetch observables are also produced by B's discovery
+poller's index stub for the same id (its feed rule matches the post), so the
+fetch leg's own witness is ``test_a_peer_cannot_substitute_content_for_a_trending_post``,
+whose rules match nothing and leave the fetch the only way in.
 """
 
 import sqlite3
@@ -464,3 +471,210 @@ def test_a_room_post_never_trends_nor_crosses_the_exchange(two_trend_nests):
         "a room post never appears in any export"
     )
     assert _trend_score(nest_b["db_path"], room_id) is None, "B: no room-post trend row"
+
+
+# ── the two mechanisms only a test hook brings inside a test's lifetime ──
+#
+# `bins/fauna-nest/src/trending_test_hook.rs` (built into every `test-hooks`
+# nest): a one-shot run of the production trend sweep at an advanced clock, and
+# a switch making a nest's `post.get` answer serve bytes that no longer hash to
+# the requested id. Both stand in for a clock or a peer, never for a user: every
+# user act below still goes over the real client wire.
+
+
+def _hook(nest: dict, path: str, body: dict | None = None) -> dict:
+    """Call a `/api/v1/test/trending/*` hook on `nest` (POST with a body, else GET)."""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{nest['url']}/api/v1/test/trending/{path}",
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="GET" if body is None else "POST",
+    )
+    with urllib.request.urlopen(req, timeout=30.0) as resp:
+        assert resp.status == 200, f"trending hook {path} returned {resp.status}"
+        return json.loads(resp.read())
+
+
+def _trending_score_in_read(port: int, reader: dict, post_id: str):
+    """The post's composed score in the Trending read, or ``None`` when the read
+    does not list it."""
+    for item in ws_api.trending_feed_posts(port, reader, limit=200):
+        if item.get("post_id") == post_id:
+            return item.get("score")
+    return None
+
+
+@pytest.fixture()
+def one_trend_nest(request, nest_mode, tmp_path_factory):
+    """A DEDICATED nest: the sweep hook re-scores every live trending row on the
+    nest it runs on, which must never reach another test's rows."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "trending-decay")
+    try:
+        yield nest
+    finally:
+        cleanup()
+
+
+@pytest.mark.feature("trending")
+def test_a_post_with_no_new_engagement_fades_out_of_trending(one_trend_nest):
+    """`trending` outcome 7 (`trending.md` § Local velocity): the factor is a
+    decayed velocity, re-decayed by a ~15-minute wall-clock sweep that withdraws
+    a row fallen to 0‰ — so a post nobody engages with again sinks and leaves.
+
+    The sweep under test is the production `CacheDb::sweep_trend_scores`, run by
+    the hook at the real clock plus an advance (the half-life is hours). Three
+    readings of the same post, no new act between them: at the present the row
+    keeps its score (the control: the sweep alone withdraws nothing live); one
+    half-life on, it has decayed but still trends; a week on, the row is gone
+    and the Trending read scores the post 0. Each sweep returns after its
+    writes commit, so every reading is settled state (convention 14)."""
+    nest = one_trend_nest
+    port = nest["port"]
+    admin_sk = nest["admin"]["signing_key"]
+
+    author = create_actor_and_register(port, admin_signing_key=admin_sk)
+    post_id = ws_api.create_post(
+        port,
+        author,
+        sign_and_encode_post(
+            author["signing_key"],
+            int(time.time() * 1_000_000),
+            "Hot for an afternoon: fadebeacon",
+            tags=[],
+        ),
+    )
+    for _ in range(3):
+        liker = create_actor_and_register(port, admin_signing_key=admin_sk)
+        ws_api.interact(port, liker, post_id, action="like")
+    assert _trend_score(nest["db_path"], post_id) == 130, "3 fresh likes → 130‰"
+
+    reader = create_actor_and_register(port, admin_signing_key=admin_sk)
+    fresh = _trending_score_in_read(port, reader, post_id)
+    assert fresh is not None and fresh > 0, f"the post trends in the read: {fresh!r}"
+
+    # Control: a sweep at the present re-scores the live row to what it was.
+    assert _hook(nest, "sweep", {"advance_s": 0})["rescored"] >= 1
+    assert _trend_score(nest["db_path"], post_id) == 130, (
+        "a sweep at the present leaves a freshly-engaged post's score alone"
+    )
+
+    # One half-life (6 h) on: decayed, still trending.
+    _hook(nest, "sweep", {"advance_s": 6 * 3600})
+    faded = _trend_score(nest["db_path"], post_id)
+    assert faded is not None and 0 < faded < 130, (
+        f"after a half-life with no new engagement the score has decayed: {faded!r}"
+    )
+
+    # A week on: withdrawn at zero, and the Trending read no longer lifts it.
+    _hook(nest, "sweep", {"advance_s": 7 * 24 * 3600})
+    assert _trend_score(nest["db_path"], post_id) is None, (
+        "a post with no engagement for a week is withdrawn from trending (row DELETEd)"
+    )
+    stale = _trending_score_in_read(port, reader, post_id)
+    assert not stale, (
+        f"the Trending read scores the faded post 0 (or drops it), was {fresh}: {stale!r}"
+    )
+
+
+@pytest.mark.feature("trending")
+def test_a_peer_cannot_substitute_content_for_a_trending_post(two_trend_nests):
+    """`trending` outcome 8 (`trending.md` § Import-triggered public-post fetch):
+    a post Trending brings from a peer is fetched over `post.get` and accepted
+    only if its bytes hash to the id the peer exported (plus the author's
+    signature), so the peer cannot hand over other content under it.
+
+    A stands in for a substituting peer through the hook (its `post.get` serves
+    the stored bytes with the last byte flipped); nothing on A is written. B's
+    discovery feed seeds A with rules that match NONE of A's posts, so B's
+    discovery poller never writes an index stub for the id — the stub is a
+    `content_meta` row, which the fetch reads as "already seen" and skips. The
+    fetch leg is therefore the only way the post can reach B.
+
+    Latency-independent (convention 14): A's serve counters are the barriers.
+    The tampered serve proves B fetched; B then holds no `content_meta` and no
+    trending row. Once A answers honestly and B is nudged again, an HONEST serve
+    proves the first was refused — a B that had stored the substitute would
+    hold the id and never ask again — and B ends with the genuine post trending
+    on the single-peer ramp."""
+    nest_a, nest_b = two_trend_nests
+    port_a, port_b = nest_a["port"], nest_b["port"]
+    admin_sk_a = nest_a["admin"]["signing_key"]
+
+    author = create_actor_and_register(port_a, admin_signing_key=admin_sk_a)
+    post_id = ws_api.create_post(
+        port_a,
+        author,
+        sign_and_encode_post(
+            author["signing_key"],
+            int(time.time() * 1_000_000),
+            "The genuine words: substitutebeacon",
+            tags=[],
+        ),
+    )
+    for _ in range(3):
+        liker = create_actor_and_register(port_a, admin_signing_key=admin_sk_a)
+        ws_api.interact(port_a, liker, post_id, action="like")
+    assert _trend_score(nest_a["db_path"], post_id) == 130, "A: the post is trending"
+
+    assert _hook(nest_a, "tamper-post-get", {"on": True})["on"] is True
+
+    b_user = create_actor_and_register(
+        port_b, admin_signing_key=nest_b["admin"]["signing_key"]
+    )
+
+    def _peer_with_a(name: str) -> None:
+        # A peering event (`fauna.feed.create` scope=discovery with a seed)
+        # nudges B's exchange originator; the rules match nothing A holds.
+        ws_api.create_feed(
+            port_b,
+            b_user,
+            name,
+            rules=[{"BodyContains": {"terms": ["nothingonamatchesthis"]}}],
+            scope="discovery",
+            contributor_seeds=[nest_a["peer_url"]],
+        )
+
+    _peer_with_a("substitution probe")
+
+    waiting.wait_until(
+        lambda: _hook(nest_a, "tamper-post-get")["tampered_serves"] >= 1,
+        budgets.FEDERATION_EXCHANGE_CYCLE_S,
+        interval=1.0,
+        diagnose=lambda: f"B never fetched the post from A: {_hook(nest_a, 'tamper-post-get')!r}",
+    )
+    assert _peer_trend_row(nest_b["db_path"], post_id) is not None, (
+        "B imported A's presence bit (the pull lands before the fetch)"
+    )
+    content_meta = _query_one(
+        nest_b["db_path"],
+        "SELECT 1 FROM content_meta WHERE content_id = ?",
+        (bytes.fromhex(post_id),),
+    )
+    assert content_meta is None, "B refused the substituted bytes: no content_meta row"
+    assert _trend_score(nest_b["db_path"], post_id) is None, (
+        "B: no trending row for a post it has not seen"
+    )
+
+    # A answers honestly from here; a second peering event nudges B again (its
+    # per-peer throttle reschedules the cycle, never drops it).
+    assert _hook(nest_a, "tamper-post-get", {"on": False})["on"] is False
+    _peer_with_a("substitution probe, honest")
+
+    b_score = _await_trend_score(
+        nest_b["db_path"], post_id, "B never fetched the honest post"
+    )
+    assert b_score == 100, f"B: the genuine post trends on the single-peer ramp; got {b_score}"
+    served = _hook(nest_a, "tamper-post-get")
+    assert served["honest_serves"] >= 1, (
+        f"B asked A again after the substitute — it had refused it: {served!r}"
+    )
+    trending = ws_api.trending_feed_posts(port_b, b_user)
+    assert trending and trending[0]["post_id"] == post_id, (
+        "B's Trending read surfaces the genuine post"
+    )

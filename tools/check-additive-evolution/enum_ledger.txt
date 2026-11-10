@@ -127,6 +127,7 @@ open fauna-conversations::compose::ResolveState  # drafts blob; writers store on
 open fauna-conversations::compose::SendState  # drafts blob; writers store only Idle, so a hand-written decode reads an unknown, unit or data, as Idle; no reader writes the value back, so the arm collapses rather than carries
 open fauna-conversations::keying::ThreadKey  # drafts blob, merged and rewritten by every device; `Unknown { canonical }` carries the key, which matches no thread here, so its draft stays parked and is re-emitted unchanged
 local fauna-conversations::message::BodyFormat  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-conversations::message::QueuedSendState  # view model: projected on every thread_detail from the outbox rows, never stored; crosses only FFI or wasm to the same build's UI
 local fauna-conversations::message::WithheldGround  # view model: derived client-side from the moderation queue's obligation action, held in the manager's in-memory cache, crosses only FFI or wasm to the same build's UI
 local fauna-conversations::room::PrincipalKind  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-conversations::room::RoomClass  # view model: crosses only FFI or wasm to the same build's UI
@@ -145,6 +146,8 @@ local fauna-conversations::store::attachments::AttachmentCoordinates  # view mod
 open fauna-conversations::thread::ThreadFlavor  # history slice, merged and re-uploaded; `Unknown { canonical }` crosses FFI; the thread shows with every affordance withheld
 
 # fauna-core
+local fauna-core::offline_intent::UnsentState  # view model: derived as the drain derives its hold (derive_unsent_states), never stored; crosses only FFI or wasm to the same build's UI
+local fauna-core::offline_intent::IntentTarget  # view model: described from an outbox payload for the unsent-changes surface, never stored; crosses only FFI or wasm to the same build's UI
 closed-ladder fauna-core::content_policy::ContentVerdict  # the published content-policy document (a region's signed artifact, a nest's signed self-description, a guardian's policy); decode_document peeks GRAMMAR_VERSION first and a newer grammar reads as inert
 closed-ladder fauna-core::content_policy::ScorerKind  # as ContentVerdict; Keywords and Prompt came with GRAMMAR_VERSION 2
 local fauna-core::content_policy::Publisher  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
@@ -241,6 +244,7 @@ local fauna-feed::SourceKind  # view model: crosses only FFI or wasm to the same
 local fauna-feed::personalization::TrainVerb  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::personalization::TrainResult  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::FeedStatus  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::snapshot::LikeState  # view model: the like control's state word on PostSummary; crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::FeedEmptyState  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::ReplyAudience  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::PostResolution  # view model: crosses only FFI or wasm to the same build's UI
@@ -297,6 +301,7 @@ skip fauna-mls::types::GroupMetaMessage  # inside ChannelMessageBody; pinned by 
 closed-ladder fauna-mls::wrapped_blob::format::SerKdfParams  # KDF selector under the blob's format version; check_stamp_before_decode reads the version before the strict decode, so a newer blob refuses as UnsupportedVersion
 
 # fauna-nest
+local fauna-nest::web_render_park_test_hook::Action  # a test-hook request body, read only from the same build's e2e harness and never compiled into a release image's routes
 locked fauna-nest::config::SubmissionPolicy  # nest.toml; no image seeds or writes it (absent → Open), so only a hand edit could carry a value an older image cannot parse
 locked fauna-nest::config::AcmeMode  # nest.toml; no image seeds or writes it (absent → Http01, its one variant)
 skip fauna-nest::db::mail_import::ImportFold  # at rest in import_sessions.quota_holds; an undecodable blob folds to no holds and the progress write still lands (pinned: an_undecodable_quota_hold_folds_to_none_and_the_write_lands)

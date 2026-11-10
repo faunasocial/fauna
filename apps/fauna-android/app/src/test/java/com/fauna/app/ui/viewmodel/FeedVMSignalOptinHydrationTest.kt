@@ -10,6 +10,7 @@ import com.fauna.ffi.FfiFeedManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -50,7 +51,7 @@ class FeedVMSignalOptinHydrationTest {
             host,
             api,
             mock(SecureStorage::class.java),
-            mock(ContentPolicyStore::class.java),
+            policyStoreWithNoSpamMarks(),
             mock(FamilyNotifyStore::class.java),
             mock(WebPublishStore::class.java),
         )
@@ -81,5 +82,13 @@ class FeedVMSignalOptinHydrationTest {
             "a failed opt-in read must not surface on error-message",
             vm.cueError.value == null,
         )
+    }
+
+    /** FeedVM's init collects the store's spam marks; a bare mock answers null and
+     *  the collector's NPE leaks into whichever test class runs next. */
+    private fun policyStoreWithNoSpamMarks(): ContentPolicyStore {
+        val store = mock(ContentPolicyStore::class.java)
+        whenever(store.spamMarked).thenReturn(MutableStateFlow(emptyList()))
+        return store
     }
 }

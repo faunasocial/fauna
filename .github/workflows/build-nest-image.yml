@@ -1,4 +1,8 @@
 name: Build, stage and verify the nest Docker image
+# A dispatch naming a commit says so in its title: the release attempt finds its
+# run, and reads the BUILT commit, by that title (the run's head_sha stays the
+# branch head).
+run-name: ${{ inputs.commit && format('Build, stage and verify the nest Docker image at {0}', inputs.commit) || 'Build, stage and verify the nest Docker image' }}
 
 # ONE workflow file for both of the project's repositories (image-pipeline.md
 # § Image tags & channels → *The two pipelines on GitHub-hosted runners*). It is
@@ -83,10 +87,18 @@ on:
         type: choice
         options: [amd64, arm64, both]
         default: amd64
+      cold_cache:
+        description: "PRIVATE repository, self-hosted leg, dry run only: every cache mount starts empty (FAUNA_CACHE_SALT), so a crate, module or tool the warm daemon cache holds cannot mask a fetch the change broke — the witness of an image-plumbing change (image-pipeline.md § Witnessing an image-plumbing change). The hosted leg is always cold"
+        type: boolean
+        default: false
       hang_test:
         description: "PRIVATE repository, self-hosted leg, dry run only: the build's first pass sleeps past a 5-minute bound instead of compiling, proving the bound stops a hung build and leaves nothing behind. The run fails by design"
         type: boolean
         default: false
+      commit:
+        description: "The commit to build (full 40-hex), which must be on the dispatched branch; empty = the branch head. A release attempt names its tip here, so `main` moving on after the retip no longer moves what the image builds (release-attempt.md § The release attempt, step 9). Every tag, stamp and verify reads it"
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -103,7 +115,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/faunasocial/nest
-  SHA_TAG: sha-${{ github.sha }}
+  SHA_TAG: sha-${{ inputs.commit || github.sha }}
   # The repository decides the stage tag and the box that verifies it.
   STAGE_TAG: ${{ github.repository == 'faunasocial/fauna' && 'test' || 'dev' }}
   VERIFY_HOST: ${{ github.repository == 'faunasocial/fauna' && 'test.fauna.build' || 'dev.fauna.build' }}
@@ -117,6 +129,9 @@ env:
   # spells out (runs-on cannot read env): self-hosted only on the organisation's
   # private repository, and only when not dispatched `hosted`.
   RUNNER_LEG: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && 'self-hosted' || 'hosted' }}
+  # The cache-mount salt of a cold witness (the `cold_cache` input): empty on
+  # every other run, so the ids and the warm daemon caches are the ordinary ones.
+  CACHE_SALT: ${{ inputs.cold_cache && '-witness-cold' || '' }}
 
 jobs:
   build:
@@ -156,7 +171,7 @@ jobs:
       # indistinguishable). run_attempt is in the value because a re-run
       # rebuilds and must not reuse an id. Both arches carry the same id.
       BUILD_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-      ARCH_TAG: sha-${{ github.sha }}-${{ matrix.arch }}
+      ARCH_TAG: sha-${{ inputs.commit || github.sha }}-${{ matrix.arch }}
     steps:
       # The self-hosted runner is the private repository's: no other repository
       # schedules a job on it (`runs-on` above), and a dispatch elsewhere that
@@ -175,13 +190,42 @@ jobs:
           echo "::error::hang_test is honoured only on a dry run of the private repository's self-hosted leg"
           exit 1
 
+      # A cold witness renames the cache mounts of the self-hosted daemon; the
+      # hosted leg's builder is cold on every run, and a non-dry run moves the
+      # stage tag, which a witness never does.
+      - name: A cold cache is a self-hosted dry run's alone
+        if: inputs.cold_cache && (env.RUNNER_LEG != 'self-hosted' || !inputs.dry_run)
+        run: |
+          echo "::error::cold_cache is honoured only on a dry run of the private repository's self-hosted leg"
+          exit 1
+
+      # A named commit must be a full sha: checked before anything is fetched.
+      - name: Check the commit input is a full sha
+        if: ${{ inputs.commit != '' }}
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit must be a full 40-hex sha, got: $COMMIT"; exit 1; }
+
       # Full history: the upgrade smoke decides its expected-incompatible window
       # by pin ancestry (`git merge-base --is-ancestor`), which a depth-1 clone
-      # cannot answer.
+      # cannot answer — and the guard below asks the same of the named commit.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.commit || github.sha }}
           fetch-depth: 0
+
+      # ...and one the dispatched branch carries, so a dispatch can never build
+      # a commit that is not on it. Every later job needs this one, so the guard
+      # holds for the whole run.
+      - name: Check the commit input is on the dispatched branch
+        if: ${{ inputs.commit != '' }}
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          git merge-base --is-ancestor "$COMMIT" "$GITHUB_SHA" \
+            || { echo "::error::commit $COMMIT is not on the dispatched branch ($GITHUB_SHA)"; exit 1; }
 
       # The upgrade smoke decides its window through a Python helper run under uv.
       - name: Install uv
@@ -293,11 +337,16 @@ jobs:
             --builder default
             --platform "linux/${{ matrix.arch }}"
             --build-arg BUILD_JOBS="${{ steps.jobs.outputs.jobs }}"
-            --build-arg FAUNA_BUILD_COMMIT=${{ github.sha }}
+            --build-arg FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }}
             --build-arg FAUNA_BUILD_ID="$BUILD_ID"
             --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }}
           )
           bound=180m
+          if [ -n "$CACHE_SALT" ]; then
+            # The witness's mounts start empty: drop any a red witness left.
+            docker buildx prune --builder default --force --filter "description~=witness-cold" > /dev/null || true
+            args+=(--build-arg FAUNA_CACHE_SALT="$CACHE_SALT")
+          fi
           if [ "$HANG_TEST" = true ]; then
             bound=5m
             args+=(--build-arg HANG_SECONDS=3600)
@@ -340,7 +389,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           build-args: |
             BUILD_JOBS=${{ steps.jobs.outputs.jobs }}
-            FAUNA_BUILD_COMMIT=${{ github.sha }}
+            FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }}
             FAUNA_BUILD_ID=${{ env.BUILD_ID }}
           cache-from: type=gha,scope=nest-${{ matrix.arch }}-rust-wasm
           cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}-rust-wasm
@@ -365,7 +414,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           build-args: |
             BUILD_JOBS=${{ steps.jobs.outputs.jobs }}
-            FAUNA_BUILD_COMMIT=${{ github.sha }}
+            FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }}
             FAUNA_BUILD_ID=${{ env.BUILD_ID }}
           cache-from: type=gha,scope=nest-${{ matrix.arch }}-rust-native
           cache-to: type=gha,mode=max,scope=nest-${{ matrix.arch }}-rust-native
@@ -389,7 +438,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           build-args: |
             BUILD_JOBS=${{ steps.jobs.outputs.jobs }}
-            FAUNA_BUILD_COMMIT=${{ github.sha }}
+            FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }}
             FAUNA_BUILD_ID=${{ env.BUILD_ID }}
             FAUNA_VERSION=${{ steps.version.outputs.version }}
           cache-from: |
@@ -470,7 +519,7 @@ jobs:
             previous=(--previous-image "$IMAGE:latest")
           fi
           ./scripts/image-upgrade-smoke.sh "$IMAGE:$ARCH_TAG" \
-            --expect-commit ${{ github.sha }} "${previous[@]}"
+            --expect-commit ${{ inputs.commit || github.sha }} "${previous[@]}"
 
       # The served web tree — the Dockerfile's `web-tree` stage, exactly what
       # the image serves from /usr/share/fauna-web/ — leaves every green build
@@ -489,17 +538,31 @@ jobs:
         run: |
           builder=()
           if [ "$RUNNER_LEG" = self-hosted ]; then builder=(--builder default); fi
+          # A cold witness's stages are keyed on its salt: the same build args.
+          if [ -n "$CACHE_SALT" ]; then builder+=(--build-arg FAUNA_CACHE_SALT="$CACHE_SALT"); fi
           rm -rf "$RUNNER_TEMP/web-tree"
           docker buildx build "${builder[@]}" \
             --platform "linux/${{ matrix.arch }}" \
             --build-arg BUILD_JOBS="${{ steps.jobs.outputs.jobs }}" \
-            --build-arg FAUNA_BUILD_COMMIT=${{ github.sha }} \
+            --build-arg FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }} \
             --build-arg FAUNA_BUILD_ID="$BUILD_ID" \
             --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }} \
             --target web-tree \
             --output type=local,dest="$RUNNER_TEMP/web-tree" .
+          # The compiler that built the chunks is the rust-wasm stage's pinned
+          # clang, not this runner's: export its version (a cached stage).
+          rm -rf "$RUNNER_TEMP/wasm32-cc"
+          docker buildx build "${builder[@]}" \
+            --platform "linux/${{ matrix.arch }}" \
+            --build-arg BUILD_JOBS="${{ steps.jobs.outputs.jobs }}" \
+            --build-arg FAUNA_BUILD_COMMIT=${{ inputs.commit || github.sha }} \
+            --build-arg FAUNA_BUILD_ID="$BUILD_ID" \
+            --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }} \
+            --target wasm32-cc-version \
+            --output type=local,dest="$RUNNER_TEMP/wasm32-cc" .
           uv run --no-project python scripts/web-asset-manifest.py write \
-            "$RUNNER_TEMP/web-tree" --commit ${{ github.sha }}
+            "$RUNNER_TEMP/web-tree" --commit ${{ inputs.commit || github.sha }} \
+            --wasm32-cc-version-file "$RUNNER_TEMP/wasm32-cc/wasm32-cc-version.txt"
           test -f "$RUNNER_TEMP/web-tree/share-viewer.html" \
             || { echo "::error::the exported web tree holds no share-viewer.html"; exit 1; }
           du -sh "$RUNNER_TEMP/web-tree"
@@ -551,6 +614,14 @@ jobs:
             rm -f "$f"
           done
 
+      # A cold witness's salted cache mounts are the run's own: dropped, green
+      # or red, so they never hold the runner's disk and the next witness
+      # starts cold. Matched by the salt in the mount id, never a daemon-wide
+      # prune. Never fails the job.
+      - name: Drop a cold witness's cache mounts from the self-hosted daemon
+        if: always() && env.RUNNER_LEG == 'self-hosted' && env.CACHE_SALT != ''
+        run: docker buildx prune --builder default --force --filter "description~=witness-cold" > /dev/null || true
+
   stage:
     needs: build
     if: ${{ !inputs.dry_run || github.repository != 'faunasocial/fauna' }}
@@ -570,6 +641,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.commit || github.sha }}
 
       # The mirror step reads the vetted table through `uv run`.
       - name: Install uv
@@ -687,6 +759,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.commit || github.sha }}
 
       # The scanner probe and the admission run under uv.
       - name: Install uv
@@ -733,7 +806,7 @@ jobs:
       - name: Verify the staged deploy serves this build
         run: |
           ./scripts/deploy-verify-serving.sh "https://$VERIFY_HOST" \
-            --expect-commit ${{ github.sha }} \
+            --expect-commit ${{ inputs.commit || github.sha }} \
             --expect-build-id "${{ needs.build.outputs.build_id }}" \
             --soak 300 \
             --mail-ports "$VERIFY_HOST:993,$VERIFY_HOST:465,$VERIFY_HOST:587"
@@ -768,6 +841,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.commit || github.sha }}
 
       - name: Install uv
         run: |

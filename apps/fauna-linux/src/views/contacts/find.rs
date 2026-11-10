@@ -171,7 +171,9 @@ fn apply_knock_outcome(
     outcome: KnockSend,
 ) -> Option<String> {
     match outcome {
-        KnockSend::Sent => {
+        // `Queued` folds as a sent knock (the identity drain sends it); linux
+        // lends no outbox to its knock send yet, so it never reaches here.
+        KnockSend::Sent | KnockSend::Queued => {
             knock_btn.set_label(contacts_strings::SENT);
             knock_btn.set_sensitive(false);
             None

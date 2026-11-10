@@ -33,11 +33,13 @@ Stamped 2026-09-26 at ef1315baff.
 |---|---|---|
 | web | — absent | |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.3-dev+7135fff0.dirty standalone |
+| windows | ✅ full | 0.1.6-dev+96cf2220 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | — absent | |
 | android | — absent | |
 | tui | ✅ full | 0.1.5 docker |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

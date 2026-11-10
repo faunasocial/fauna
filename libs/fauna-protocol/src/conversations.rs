@@ -1053,6 +1053,23 @@ pub struct RoomListRosterReply {
     /// Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub birth_salt: Option<ByteBuf>,
+    /// Whether the room **owes a severance mint**: its current generation
+    /// still wraps to a roster entry that is off the floor — a member row the
+    /// home nest has unseated (`removed_at` set) whose entry the tip's wrap
+    /// set still names. A removal is two acts (the unseat, then the mint), and
+    /// a mint that never landed leaves the removed member reading new traffic
+    /// until one does; this is the fact an owner's or admin's tend pass reads
+    /// to complete it without a gesture (`community-rooms.md` § Implementation
+    /// status today → *A removal severs*, the retry paragraph;
+    /// `recipient-set-scheme.md` § Mint triggers — trigger (1) is a fact about
+    /// merged state).
+    ///
+    /// Served to every live member, the same read and the same posture as
+    /// [`RoomRosterMemberWire::tip_wrapped`]: entry facts only, never a wrap.
+    /// `None` when the room has no generation yet, and from a nest older than
+    /// the field — both read as "nothing owed". Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severance_owed: Option<bool>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1471,6 +1488,43 @@ pub struct RoomRemoveReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── fauna.conversations.room.remove_remote ─────────────────────────────
+
+/// The same removal as [`RoomRemoveRequest`], for a room homed on **another
+/// nest** — the rank-scoped twin of [`RoomLeaveRemoteRequest`]: the caller's
+/// own nest originates `fauna.federation.conversation.room.remove` to
+/// `nest_url`, the room's home, which gates the caller on its foreign-member
+/// binding and then runs the same-nest removal body — the caller's
+/// owner-or-admin rank read off the floor, the target's refusals, the purge
+/// before the unseat (`../architecture/federation.md` § Federation residue
+/// surface, the *Conversation room remove* row). The reply is
+/// [`RoomRemoveReply`], the home's ack forwarded and unstored.
+///
+/// A **distinct kind** rather than an additive `nest_url` on
+/// [`RoomRemoveRequest`], for the `channel.actors_remote` reason: an old
+/// own-nest that ignored an additive field would run its same-nest door on a
+/// room it does not home and answer "no such room" — an `invalid_params` the
+/// seam cannot tell from a mistyped id, while the real home kept the member
+/// seated and reading. An unknown kind fails loud.
+///
+/// **`forbid_replay=false`, where the same-nest door is `true`** —
+/// [`RoomLeaveRemoteRequest`]'s divergence for its reason: the removal is the
+/// first act of a two-act ceremony whose second, the severance mint, is built
+/// only once this ack is in hand, so a §4.D re-send of a frame that landed must
+/// report the unseat that landed; the home answers a target its floor stamped
+/// removed with the live count, and still refuses a target never seated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomRemoveRemoteRequest {
+    /// Hex-encoded room id (32 bytes). A room id *is* its channel id.
+    pub room_id: String,
+    /// Hex-encoded principal id (32 bytes) to remove.
+    pub principal: String,
+    /// The room's home nest — the recorded `ChannelHome` of the room.
+    pub nest_url: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// Leave a room — remove yourself (`conversation-rooms.md` § Roles and
 /// authorization: leave is an admin's and a member's, and the **owner must
 /// transfer ownership first**).
@@ -1699,6 +1753,38 @@ pub struct RoomPublishGenerationReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── fauna.conversations.room.publish_generation_remote ─────────────────
+
+/// The same keying act as [`RoomPublishGenerationRequest`], for a room homed
+/// on **another nest**: the caller's own nest verifies the mint's minter is the
+/// caller and its signature holds, then originates
+/// `fauna.federation.conversation.room.publish_generation` to `nest_url`, the
+/// room's home, which gates the caller on its foreign-member binding and runs
+/// the same-nest admission body — rank, minter binding, parent ratchet, roster
+/// coverage judged on ITS floor (`../architecture/federation.md` § Federation
+/// residue surface, the *Conversation room generation publish and backfill*
+/// row). The reply is [`RoomPublishGenerationReply`], forwarded and unstored.
+///
+/// A **distinct kind** rather than an additive `nest_url`, for the
+/// `generations_remote` reason — this is key material: an old own-nest that
+/// ignored an additive field would answer "no such room" for a mint the
+/// caller believes landed. An unknown kind fails loud.
+///
+/// `forbid_replay=true`, as the same-nest door is: a mint claims no
+/// idempotence; the retry is a fresh mint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomPublishGenerationRemoteRequest {
+    /// Hex-encoded room id (32 bytes).
+    pub room_id: String,
+    /// The mint, exactly as [`RoomPublishGenerationRequest::mint`] carries it.
+    #[serde(with = "serde_bytes")]
+    pub mint: Vec<u8>,
+    /// The room's home nest — the recorded `ChannelHome` of the room.
+    pub nest_url: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ── fauna.conversations.room.generations ───────────────────────────────
 
 /// Read back the room's generations, each with **the caller's own wrap** —
@@ -1838,6 +1924,35 @@ pub struct RoomBackfillGenerationsReply {
     /// How many generations the room retains in total, so a caller can see
     /// whether the policy withheld any of them without a second read.
     pub retained: u64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── fauna.conversations.room.backfill_generations_remote ───────────────
+
+/// The same archival backfill as [`RoomBackfillGenerationsRequest`], for a
+/// room homed on **another nest**: the caller's own nest originates
+/// `fauna.federation.conversation.room.backfill_generations` to `nest_url`,
+/// the room's home, which gates the caller on its foreign-member binding and
+/// runs the same-nest backfill body (`../architecture/federation.md`
+/// § Federation residue surface, the *Conversation room generation publish
+/// and backfill* row). The reply is [`RoomBackfillGenerationsReply`],
+/// forwarded and unstored.
+///
+/// A **distinct kind** for the `generations_remote` reason (key material; an
+/// unknown kind fails loud). `forbid_replay=true`, as the same-nest door is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoomBackfillGenerationsRemoteRequest {
+    /// Hex-encoded room id (32 bytes).
+    pub room_id: String,
+    /// Hex-encoded actor id (32 bytes) of the member being covered.
+    pub target_actor_id: String,
+    /// The wraps, exactly as [`RoomBackfillGenerationsRequest::wraps`]
+    /// carries them.
+    #[serde(with = "fauna_core::byte_array::vec_of_bufs")]
+    pub wraps: Vec<Vec<u8>>,
+    /// The room's home nest — the recorded `ChannelHome` of the room.
+    pub nest_url: String,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -3006,6 +3121,82 @@ mod tests {
         );
     }
 
+    /// The relayed remove names its room, its target AND the home — a remove
+    /// carrying no `nest_url` is the same-nest kind, and the two must not be
+    /// decodable as one another (the distinct-kind ruling).
+    #[test]
+    fn room_remove_remote_request_round_trips_and_names_its_home() {
+        let req = RoomRemoveRemoteRequest {
+            room_id: "ef".repeat(32),
+            principal: "ab".repeat(32),
+            nest_url: "https://home.example".into(),
+            extra: Default::default(),
+        };
+        let bytes = encode_canonical(&req).unwrap();
+        let decoded: RoomRemoveRemoteRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, req);
+        let same_nest = encode_canonical(&RoomRemoveRequest {
+            room_id: "ef".repeat(32),
+            principal: "ab".repeat(32),
+            extra: Default::default(),
+        })
+        .unwrap();
+        assert!(
+            decode::<RoomRemoveRemoteRequest>(&same_nest).is_err(),
+            "a remove with no home must not relay to nowhere"
+        );
+    }
+
+    /// The relayed mint carries the mint verbatim AND names the home.
+    #[test]
+    fn room_publish_generation_remote_request_round_trips_and_names_its_home() {
+        let req = RoomPublishGenerationRemoteRequest {
+            room_id: "ef".repeat(32),
+            mint: vec![1, 2, 3, 4],
+            nest_url: "https://home.example".into(),
+            extra: Default::default(),
+        };
+        let bytes = encode_canonical(&req).unwrap();
+        let decoded: RoomPublishGenerationRemoteRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, req);
+        let same_nest = encode_canonical(&RoomPublishGenerationRequest {
+            room_id: "ef".repeat(32),
+            mint: vec![1, 2, 3, 4],
+            extra: Default::default(),
+        })
+        .unwrap();
+        assert!(
+            decode::<RoomPublishGenerationRemoteRequest>(&same_nest).is_err(),
+            "a mint with no home must not relay to nowhere"
+        );
+    }
+
+    /// The relayed backfill carries its wraps verbatim AND names the home.
+    #[test]
+    fn room_backfill_generations_remote_request_round_trips_and_names_its_home() {
+        let req = RoomBackfillGenerationsRemoteRequest {
+            room_id: "ef".repeat(32),
+            target_actor_id: "ab".repeat(32),
+            wraps: vec![vec![9, 9], vec![7]],
+            nest_url: "https://home.example".into(),
+            extra: Default::default(),
+        };
+        let bytes = encode_canonical(&req).unwrap();
+        let decoded: RoomBackfillGenerationsRemoteRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, req);
+        let same_nest = encode_canonical(&RoomBackfillGenerationsRequest {
+            room_id: "ef".repeat(32),
+            target_actor_id: "ab".repeat(32),
+            wraps: vec![vec![9, 9], vec![7]],
+            extra: Default::default(),
+        })
+        .unwrap();
+        assert!(
+            decode::<RoomBackfillGenerationsRemoteRequest>(&same_nest).is_err(),
+            "a backfill with no home must not relay to nowhere"
+        );
+    }
+
     /// The relayed invite names its room's home AND carries the signed act
     /// verbatim — an invite carrying no `nest_url` is the same-nest kind, and
     /// the two must not be decodable as one another (the distinct-kind
@@ -3241,5 +3432,35 @@ mod tests {
             decoded.tip_wrapped, None,
             "a row without the key reads as unknown"
         );
+    }
+
+    /// **`severance_owed` is additive on the roster reply**: it round-trips in
+    /// its own field, never the catch-all, and a reply without it (an older
+    /// nest's) decodes as `None` — which every reader takes as nothing owed.
+    #[test]
+    fn a_roster_reply_carries_an_optional_severance_owed_answer() {
+        let owed = RoomListRosterReply {
+            members: Vec::new(),
+            class: "community".into(),
+            policy_version: Some(3),
+            policy: None,
+            labelers: None,
+            policy_at_version: None,
+            policy_versions: None,
+            birth_salt: None,
+            severance_owed: Some(true),
+            extra: BTreeMap::new(),
+        };
+        let decoded: RoomListRosterReply = decode(&encode_canonical(&owed).unwrap()).unwrap();
+        assert_eq!(owed, decoded);
+        assert!(decoded.extra.is_empty(), "not in the catch-all");
+
+        let older = RoomListRosterReply {
+            severance_owed: None,
+            ..owed
+        };
+        let bytes = encode_canonical(&older).unwrap();
+        let decoded: RoomListRosterReply = decode(&bytes).unwrap();
+        assert_eq!(decoded.severance_owed, None, "absent reads as None");
     }
 }

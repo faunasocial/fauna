@@ -1299,6 +1299,7 @@ table content_meta
   col reply_count INTEGER notnull=1 default=0 pk=0 hidden=0
   col repost_count INTEGER notnull=1 default=0 pk=0 hidden=0
   col preview TEXT notnull=0 default=- pk=0 hidden=0
+  col nostr_advertised_at INTEGER notnull=0 default=- pk=0 hidden=0
   item admin_block_report_id TEXT
   item content_id BLOB PRIMARY KEY
   item gated_room BLOB
@@ -1307,6 +1308,7 @@ table content_meta
   item is_reply INTEGER NOT NULL DEFAULT 0
   item legal_takedown_ref TEXT
   item like_count INTEGER NOT NULL DEFAULT 0
+  item nostr_advertised_at INTEGER
   item preview TEXT
   item quarantined INTEGER NOT NULL DEFAULT 0
   item quote_count INTEGER NOT NULL DEFAULT 0
@@ -1813,6 +1815,12 @@ table folder_deposit_parts
   item idx INTEGER NOT NULL
   item plain_length INTEGER NOT NULL DEFAULT 0
   item sealed BLOB NOT NULL
+table folder_former_writers
+  col channel_id BLOB notnull=1 default=- pk=1 hidden=0
+  col actor_id BLOB notnull=1 default=- pk=2 hidden=0
+  item PRIMARY KEY (channel_id, actor_id)
+  item actor_id BLOB NOT NULL
+  item channel_id BLOB NOT NULL
 table folder_member_access
   col channel_id BLOB notnull=1 default=- pk=1 hidden=0
   col actor_id BLOB notnull=1 default=- pk=2 hidden=0
@@ -3200,6 +3208,14 @@ table personalization_models
   item sample_count INTEGER NOT NULL DEFAULT 0
   item sealed_blob BLOB NOT NULL
   item updated_at INTEGER NOT NULL
+table plugin_account_settings
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col principal_id BLOB notnull=1 default=- pk=2 hidden=0
+  col value BLOB notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, principal_id)
+  item actor_id BLOB NOT NULL
+  item principal_id BLOB NOT NULL
+  item value BLOB NOT NULL
 table plugin_state
   col principal_id BLOB notnull=1 default=- pk=1 hidden=0
   col key TEXT notnull=1 default=- pk=2 hidden=0
@@ -4068,6 +4084,16 @@ table sync_signer_certs
   item cert_actor_id BLOB NOT NULL
   item device_key BLOB NOT NULL
   item updated_at INTEGER NOT NULL
+table third_party_former_writers
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col client_id TEXT notnull=1 default=- pk=2 hidden=0
+  col writer_ed25519 BLOB notnull=1 default=- pk=3 hidden=0
+  col ended_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, client_id, writer_ed25519)
+  item actor_id BLOB NOT NULL
+  item client_id TEXT NOT NULL
+  item ended_at INTEGER NOT NULL
+  item writer_ed25519 BLOB NOT NULL
 table third_party_principals
   col actor_id BLOB notnull=1 default=- pk=1 hidden=0
   col principal_id BLOB notnull=1 default=- pk=2 hidden=0

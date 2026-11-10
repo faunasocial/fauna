@@ -23,6 +23,28 @@ func TestCombinedSpamScoreMilli(t *testing.T) {
 	}
 }
 
+// EffectiveSpamScoreMilli adds the report:spam term (× 15) on top of the
+// classifier max: k=3's 200‰ is 3 points, the peer-only 100‰ is 1.5, a
+// saturated 1000‰ is 15, and no report leaves the combination unchanged.
+func TestEffectiveSpamScoreMilli(t *testing.T) {
+	cases := []struct {
+		rspamd, bayes int32
+		report        int64
+		want          int32
+	}{
+		{0, 1200, 200, 4200},
+		{0, 0, 100, 1500},
+		{0, 0, 1000, 15000},
+		{3000, 7500, 0, 7500},
+		{3000, 7500, 200, 10500},
+	}
+	for _, c := range cases {
+		if got := EffectiveSpamScoreMilli(c.rspamd, c.bayes, c.report); got != c.want {
+			t.Errorf("Effective(%d,%d,%d): got %d, want %d", c.rspamd, c.bayes, c.report, got, c.want)
+		}
+	}
+}
+
 // defaultPolicy mirrors the permissive auto-Junk catalog default
 // (SpamPolicyThresholds::default): spam_folder=5,
 // reject=0 (off).

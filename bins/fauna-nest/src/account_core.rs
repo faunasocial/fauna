@@ -789,6 +789,9 @@ pub async fn lockout_core(
     // tokens they would need to open a new one (`transport.md` § Revocation
     // teardown).
     state.close_actor_sockets(&actor_bytes);
+    // …and the sessions a bridge holds for the account: its mail, calendar,
+    // contacts, file and ATProto apps.
+    state.end_bridge_held_sessions(&actor_bytes).await;
 
     tracing::info!(
         actor = %hex::encode(actor_bytes),
@@ -803,6 +806,62 @@ pub async fn lockout_core(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    /// the emergency lockout ends the sessions a bridge
+    /// holds for the account, which no WS-RPC socket of the actor carries
+    /// (`AppState::end_bridge_held_sessions`): its mailbox-state push
+    /// subscriptions are dropped — an IDLE session from before the lock
+    /// receives nothing more — and every live ATProto session is revoked.
+    /// Another account's are untouched.
+    #[tokio::test]
+    async fn the_emergency_lockout_ends_the_account_s_bridge_held_sessions() {
+        let db = std::sync::Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let state = crate::routes::AppState::for_test(db.clone());
+        let sk = SigningKey::from_bytes(&[0x4Cu8; 32]);
+        let actor = *sk.verifying_key().as_bytes();
+        let other = [0x0Fu8; 32];
+        for (a, h) in [(actor, "locked"), (other, "bystander")] {
+            db.create_user_with_handle(&a, "personal", h, None)
+                .await
+                .unwrap();
+            db.insert_atproto_session(&a, b"live", "app_credential", None, None, i64::MAX)
+                .await
+                .unwrap();
+            state
+                .bridge_push_registry
+                .register(&a, "INBOX", [0x55u8; 32]);
+        }
+
+        let ts = fauna_core::data::Timestamp::now_secs() as u64;
+        let msg = fauna_protocol::account::account_lockout_signed_message(&actor, ts);
+        let sig = hex::encode(sk.sign(&msg).to_bytes());
+        lockout_core(&state, &hex::encode(actor), ts, &sig)
+            .await
+            .expect("lockout");
+
+        assert!(
+            state
+                .bridge_push_registry
+                .matching(&actor, "INBOX")
+                .is_empty(),
+            "an IDLE session from before the lock must receive nothing more"
+        );
+        assert_eq!(
+            state.bridge_push_registry.matching(&other, "INBOX").len(),
+            1,
+            "another account's subscriptions stand"
+        );
+        assert_eq!(
+            db.revoke_all_atproto_sessions(&actor).await.unwrap(),
+            0,
+            "the lock must already have revoked every live ATProto session"
+        );
+        assert_eq!(
+            db.revoke_all_atproto_sessions(&other).await.unwrap(),
+            1,
+            "another account's ATProto session stands"
+        );
+    }
 
     /// Build the register signature over the tagged, length-prefixed
     /// `register_signed_message` (the client-side `build_register_request`

@@ -25,9 +25,13 @@ import com.fauna.ffi.contentTypeForFilename
 import com.fauna.ffi.dialBudgetClearForTest
 import com.fauna.ffi.launchClockNowSecsForTest
 import com.fauna.ffi.launchClockOffsetSecsForTest
+import com.fauna.ffi.logEmitBurstForTest
+import com.fauna.ffi.logReloadE2eCapsForTest
 import com.fauna.ffi.setDelegationClockOffsetSecs
 import com.fauna.ffi.setMailTokenRefreshClockOffsetSecs
 import com.fauna.ffi.setTrustClockOffsetSecs
+import com.fauna.ffi.subscriptionsHoldAuthorDrainForTest
+import com.fauna.ffi.subscriptionsReleaseAuthorDrainForTest
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -90,6 +94,12 @@ interface TestAgentEntryPoint {
      * [TestAgent.registerSessionOverrideDrop].
      */
     fun accountStores(): com.fauna.app.core.AccountStores
+
+    /**
+     * Which launch is the current one — the session patch retires a launch
+     * still in flight, and the state publishes its `launch_verdicts` counters.
+     */
+    fun launchCurrency(): com.fauna.app.core.LaunchCurrency
 }
 
 /**
@@ -175,6 +185,8 @@ object TestAgent {
     @Volatile private var storeConsentStore: com.fauna.app.core.StoreConsentStore? = null
     @Volatile private var atprotoSettingsHost: com.fauna.app.core.atproto.AtprotoSettingsHost? = null
     @Volatile private var actorScope: com.fauna.app.core.ActorScope? = null
+    /** See [TestAgentEntryPoint.launchCurrency]. `null` until [start] (unit tests). */
+    @Volatile private var launchCurrency: com.fauna.app.core.LaunchCurrency? = null
     @Volatile private var accountStores: com.fauna.app.core.AccountStores? = null
     @Volatile private var photoBackupEngine: com.fauna.app.core.PhotoBackupEngine? = null
 
@@ -301,6 +313,15 @@ object TestAgent {
         // manager host) before the early-return guard, so a re-entrant call
         // still leaves the flag set.
         isE2EActive = true
+        // app-log's lowered size cap (`FAUNA_E2E_LOG_TOTAL_CAP_BYTES`): FaunaApp
+        // installed the rolling log before MainActivity re-exported the launch
+        // intent's extras as process env, so the open writer re-reads the
+        // variable now and lowers its caps at its next write
+        // (`fauna_log::rolling::reload_e2e_caps_for_test`). Before the guard,
+        // so a re-delivered launch re-reads it too.
+        logReloadE2eCapsForTest()
+        // Record what each document body paints, for the `document_painted` read below.
+        com.fauna.app.ui.components.DocumentPaint.recording = true
         if (job != null) return
         appContext = context.applicationContext
         val db = FaunaDatabase.getInstance()
@@ -355,6 +376,7 @@ object TestAgent {
         // The same canonical drop production's switch / sign-out / factory reset
         // go through, so this agent's own teardown arms cannot drift from them.
         actorScope = entryPoint.actorScope()
+        launchCurrency = entryPoint.launchCurrency()
         registry = entryPoint.accountRegistry()
         accountStores = entryPoint.accountStores()
         registerSessionOverrideDrop(appState, entryPoint.accountStores())
@@ -458,6 +480,19 @@ object TestAgent {
      */
     fun observeConnectionReport(state: com.fauna.ffi.FfiConnectionState) =
         E2eLoudSurfaces.observeConnectionReport(state)
+
+    /**
+     * Count one knock push the knock-toast arm received, before the muted gate
+     * (`fauna_e2e_agent::KNOCK_NOTICES_KEY`) — called by
+     * `NotificationHelper.postKnockNotification`. Production code, so it
+     * reaches the test-flavor log through this delegate, whose shipping twin is
+     * a no-op (the [observeConnectionReport] shape).
+     */
+    fun observeKnockNotice() = E2eLoudSurfaces.observeKnockNotice()
+
+    /** Log one knock toast handed to the platform — at the firing site only. */
+    fun recordKnockNotice(key: String?, text: String, replaceId: Int) =
+        E2eLoudSurfaces.recordKnockNotice(key, text, replaceId)
 
     /**
      * The auto-renew tick's wait, raceable by `auto_renew_wake` — called once
@@ -802,6 +837,14 @@ object TestAgent {
             runs.put(JSONObject().put("text", run.text).put("tags", JSONArray().put(tag)))
         }
         return runs.toString()
+    }
+
+    /** The `document_painted` reply: [com.fauna.app.ui.components.DocumentPaint.linesAt]
+     *  as a JSON array string, `null` when no recorded body sits under [frame]. */
+    internal fun documentPaintedJson(frame: String?): String? {
+        if (frame.isNullOrEmpty()) return null
+        val lines = com.fauna.app.ui.components.DocumentPaint.linesAt(frame) ?: return null
+        return JSONArray(lines).toString()
     }
 
     internal fun feedPostsJson(raw: String?): JSONArray {
@@ -1154,6 +1197,16 @@ object TestAgent {
             put("account_pump_cycles", accountPumpCycles)
             put("custody_ceremony_ingest", custodyCeremonyIngest)
             put("feed_reloads", feedReloads)
+            // `capture_posture` — security.md § On-screen secret exposure, rule 2's
+            // running-app witness (`helpers/capture_posture.py`; apple's
+            // `ScreenCapturePosture` owns the shape). FLAG_SECURE is a real window
+            // bit, so `window_excluded` is read back off the window, not inferred.
+            put("capture_posture", com.fauna.app.ui.util.CapturePostureProbe.read().let { r ->
+                JSONObject()
+                    .put("mechanism", "window-exclusion")
+                    .put("holds", r.holds)
+                    .put("window_excluded", r.windowExcluded)
+            })
             // Convention 17's "a region Block never renders silent" counts
             // (`helpers/frame_invariants.py`): on-screen items the region blocks,
             // registered at the verdict, vs. block placeholders composed —
@@ -1207,6 +1260,16 @@ object TestAgent {
             // at depth one (`session_generation` / `activation_gestures`).
             put("session_generation", sessionGeneration)
             put("activation_gestures", activationGestures)
+            // `fauna_e2e_agent::LAUNCH_VERDICTS_KEY` (`{"routed","superseded"}`):
+            // every delivered launch verdict, counted by `LaunchCurrency.deliver`
+            // before anything of it is rendered or dropped — the barrier the
+            // superseded-verdict witness waits on. Absent before [start].
+            launchCurrency?.let { currency ->
+                put("launch_verdicts", JSONObject().apply {
+                    put("routed", currency.routedCount)
+                    put("superseded", currency.supersededCount)
+                })
+            }
             // The launch clock this process signs in on — the tui/linux/web/apple
             // `clock` twin (`fauna_e2e_agent::CLOCK_KEY` owns the shape:
             // `{"offset_secs", "now_secs"}`), the wrong-clock launch witness's
@@ -1529,16 +1592,13 @@ object TestAgent {
                 // `runAllKinds()` → close the periodic `CustodianHostWorker`
                 // runs, over the same unscoped store base.
                 //
-                // The pass reads the wall clock itself and takes no offset, so a
-                // shifted clock would be silently ignored and a 24-hour-jump test
-                // would pass against the real clock proving nothing — refused by
-                // name (convention 11), exactly as ios does.
+                // `now_offset_secs` shifts the clock this ONE pass runs at
+                // (convention 14's fake clock, for the self-audit's 24-hour
+                // debounce): the test-only `runAllKindsAtOffset` applies it to the
+                // pass's own `now`, the desktop agent's `CustodianRunPassNow`
+                // twin, and reports the agent's six fields (`audit_state`
+                // included) so one witness reads every app alike.
                 val offset = cmd.optLong("now_offset_secs", 0L)
-                if (offset != 0L) {
-                    return "custodian_pull_run_now: this device hosts its replica in the app " +
-                        "process, whose pass (`FfiCustodianHost.runAllKinds`) takes no clock " +
-                        "offset, so now_offset_secs=$offset cannot be honoured — only 0 is"
-                }
                 val api = apiClient
                     ?: return "custodian_pull_run_now: no ApiClient wired (TestAgent.start " +
                         "has not run yet), so there is no device to host a replica"
@@ -1560,13 +1620,13 @@ object TestAgent {
                         body.put("hosting", false).put("held_bytes", 0)
                     } else {
                         try {
-                            val s = host.runAllKinds()
-                            body.put("hosting", true)
-                                .put("held_bytes", s.heldBytes.toLong())
-                                .put("stored_segments", s.storedSegments.toLong())
-                                .put("tombstoned_segments", s.tombstonedSegments.toLong())
-                                .put("cap_reached", s.capReached)
-                                .put("checked_in", s.checkedIn)
+                            val r = host.runAllKindsAtOffset(offset)
+                            body.put("hosting", r.hosting)
+                                .put("kinds_run", r.kindsRun.toLong())
+                                .put("held_bytes", r.heldBytes.toLong())
+                                .put("cap_state", r.capState ?: JSONObject.NULL)
+                                .put("audit_state", r.auditState ?: JSONObject.NULL)
+                                .put("checked_in", r.checkedIn)
                         } finally {
                             host.close()
                         }
@@ -1736,6 +1796,18 @@ object TestAgent {
                 machineMethodResult = runs
                 if (runs == null) return "compose_text_runs: no conversations compose field is on screen"
             }
+            "document_painted" -> {
+                // A document body AS PAINTED — what get_attr(<id>, "painted") answers on
+                // android for `feed-post-text` / `dm-message-text` (drivers/android.py
+                // routes that attribute here with the element's `frame`, as it routes
+                // `text-runs`): one line per painted text line, its box glyph kept and
+                // its laid-out indent as leading spaces (`helpers/painted_lines.py`,
+                // `document-painted-read` in surfaces.toml). No body under the frame is
+                // a refusal, never an empty read.
+                val lines = documentPaintedJson(cmd.optString("frame"))
+                machineMethodResult = lines
+                if (lines == null) return "document_painted: no document body is painted at that frame"
+            }
             "feed_inject_posts" -> {
                 // Mirrors linux `handle_feed_inject_posts` (main.rs) / windows
                 // `FeedCommands.InjectPosts`. Forwards the raw `posts` JSON array
@@ -1800,6 +1872,26 @@ object TestAgent {
                     return "feed_seed_cue_rollup_for_test threw ${e::class.simpleName}: ${e.message}"
                 }
             }
+            "feed_cue_verdict_for_test" -> {
+                // The live engagement-cue engine's verdict for `{content_id}` and
+                // whether it has hydrated from the nest yet — the JSON
+                // `{hydrated, verdict}` (`verdict` kebab-case or null), read-only:
+                // how a seat witnesses the rollup another device saved
+                // (`engagement-cues.md` § At rest). Over the shared FFI face
+                // `FfiFeedManager.cueVerdictForTest`; twin of tui's, linux's,
+                // web's, windows' and apple's arms of the same name.
+                val manager = feedManagerFor(action).getOrElse { return it.message }
+                val contentId = cmd.optString("content_id", "")
+                if (contentId.isEmpty()) return "feed_cue_verdict_for_test carried no `content_id`"
+                machineMethodResult = manager.cueVerdictForTest(contentId)
+            }
+            // Hold / release this process's subscriptions author drain, so a
+            // payment-backed subscribe request stands in the author's §2 while
+            // the test reads its paid badge (`monetization.md` § Pillar 3). The
+            // flag is shared Rust's process-wide one, which the in-process
+            // author pump reads. Twins of tui's and linux's arms.
+            "subscriptions_hold_author_drain" -> subscriptionsHoldAuthorDrainForTest()
+            "subscriptions_release_author_drain" -> subscriptionsReleaseAuthorDrainForTest()
             "feed_hold_next_reload", "feed_release_held_reload" -> {
                 // Arm (or release) the feed manager's one-shot reload hold: the
                 // NEXT reload publishes the list it kept or cleared, then parks
@@ -1836,6 +1928,25 @@ object TestAgent {
                     return reason
                 }
                 machineMethodResult = reply.toString()
+            }
+            "app_log_emit" -> {
+                // Write `count` tagged `info` lines through the app's own
+                // tracing subscriber — ring, rolling file and stderr alike —
+                // each padded to about `bytes` bytes: the volume app-log's
+                // size-cap witness needs to push the on-device file past its
+                // lowered cap. The shared body
+                // (`fauna_log::rolling::emit_burst_for_test` through
+                // `log_emit_burst_for_test`), twin of tui's and linux's arms;
+                // a refusal is a loud `{"error"}` result (convention 11).
+                val reply = logEmitBurstForTest(
+                    cmd.optString("tag"),
+                    cmd.optLong("count", 1L).coerceAtLeast(0L).toULong(),
+                    cmd.optLong("bytes", 0L).coerceAtLeast(0L).toULong(),
+                )
+                machineMethodResult = reply
+                JSONObject(reply).optString("error").takeIf { it.isNotEmpty() }?.let {
+                    return "app_log_emit: $it"
+                }
             }
             "conversations_inject_send_failure" -> {
                 // Stamp thread_id's compose into send_state = Failed { reason }
@@ -2012,6 +2123,22 @@ object TestAgent {
                     com.fauna.app.widget.WidgetDataWorker.enqueueOneShot(ctx)
                 } catch (e: Exception) {
                     return "widget_refresh_scheduled_pass_now threw ${e::class.simpleName}: ${e.message}"
+                }
+            }
+            "photo_backup_scheduled_pass_now" -> {
+                // Photo backup's scheduled-pass poke (convention 14's `run_now`;
+                // `fauna_e2e_agent::PHOTO_BACKUP_SCHEDULED_PASS_NOW`, the iOS
+                // arm's twin): one `PhotoBackupWorker` enqueued through
+                // WorkManager, so the poke constructs and runs the identical
+                // worker the 15-minute schedule does — never its body called
+                // around WorkManager. Fire-and-forget: the barrier is the
+                // `photo_backup` pass counters in `serializeState`, not this ack.
+                val ctx = appContext
+                    ?: return "photo_backup_scheduled_pass_now: the agent holds no application context"
+                try {
+                    com.fauna.app.service.PhotoBackupWorker.enqueueOneShot(ctx)
+                } catch (e: Exception) {
+                    return "photo_backup_scheduled_pass_now threw ${e::class.simpleName}: ${e.message}"
                 }
             }
             "backup_audit_run_now" -> {
@@ -2198,7 +2325,7 @@ object TestAgent {
                 // testing.md convention 14's fake clock + `run_now` poke for the
                 // screen-time usage heartbeat (family-safety.md § Screen time,
                 // Slice E) — the android twin of linux `screen_time_heartbeat`
-                // (main.rs) / web `#lib/screen-time-e2e.ts`. Advances the ward
+                // (lib.rs) / web `#lib/screen-time-e2e.ts`. Advances the ward
                 // client's clock by `minutes` of foreground use and runs one
                 // production heartbeat step, so a tier_3 journey can prove the
                 // budget half WITHOUT waiting on wall-clock time — a test that
@@ -2209,10 +2336,14 @@ object TestAgent {
                 // that the client really calls `fauna.family.usage_report` and
                 // feeds the reply back into the lock.
                 val minutes = cmd.optInt("minutes", 0)
+                // `focused` (additive, default true): `false` advances the
+                // clock with the app out of front, which bills nothing — the
+                // billing witness's drive (tui / linux / web twins).
+                val focused = cmd.optBoolean("focused", true)
                 val store = screenTimeStore
                     ?: return "screen_time_heartbeat arrived before the " +
                         "ScreenTimeStore was wired (TestAgent.start has not run yet)"
-                store.advanceTestClockAndTick(minutes)
+                store.advanceTestClockAndTick(minutes, focused)
             }
             "store_consent_inject" -> {
                 // The store-consent lock journey's platform seam
@@ -2674,6 +2805,14 @@ object TestAgent {
             appState.session.actorId = session.getString("actor_id")
         }
         if (session.has("authenticated") && session.getBoolean("authenticated")) {
+            // A newer session is being built without a launch: a launch still in
+            // flight is retired here, so its verdict — decided off the store as it
+            // stood before this patch — is dropped when it lands instead of tearing
+            // this session down (`onboarding.md` § App-launch routing → *A verdict
+            // renders only while its own launch is still the current one*; tui's
+            // `launch::retire_in_flight`, linux's `launch_currency`). A settled
+            // launch holds nothing in flight, so this is a no-op for it.
+            launchCurrency?.retireInFlight()
             appState.session.isAuthenticated = true
             appState.isOnboarding = false
             // The e2e login shortcut: mirror the real account-switch teardown +

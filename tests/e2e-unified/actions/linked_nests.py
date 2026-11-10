@@ -111,6 +111,14 @@ class LinkedNestsActions:
         pairings = self.pairing_count()
         return all_ids[-pairings:] if pairings else []
 
+    def capability_lines(self) -> list[str]:
+        """The capabilities line (`nests-item-capabilities`) of each *pairing*
+        row, sliced like :meth:`nest_ids` — the shared row's
+        `capability_labels`, resolved and joined by the shell."""
+        all_lines = [t or "" for t in self.driver.get_texts("nests-item-capabilities")]
+        pairings = self.pairing_count()
+        return all_lines[-pairings:] if pairings else []
+
     def link(self, nest_id: str) -> None:
         """Link a nest: reveal the add form (`*-add-button`), type the nest
         identity (`*-add-input`), submit (`*-add-submit-button`).

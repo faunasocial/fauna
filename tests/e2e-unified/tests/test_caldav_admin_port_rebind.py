@@ -64,6 +64,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.tui,
     pytest.mark.web,
+    pytest.mark.windows,
 ]
 
 # The PLAIN CalDAV credential the client mints and the MUA authenticates with.

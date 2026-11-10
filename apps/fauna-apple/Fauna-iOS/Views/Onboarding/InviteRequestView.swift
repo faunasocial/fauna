@@ -66,10 +66,7 @@ struct InviteRequestView: View {
         // The store-age round (Declared Age Range → band → App Attest) runs as
         // the page appears, so its notice above paints before submit/redeem.
         .task { await vm.attachStoreAgeClaim(signals: AppleStoreAgeSignals()) }
-        .task(id: vm.isInvitePendingReview) {
-            guard vm.isInvitePendingReview else { return }
-            await vm.pollPendingInviteWhileNeeded()
-        }
+        .task(id: vm.isInviteRequestPending) { vm.armInvitePollIfNeeded() }
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button(L.common.back) { vm.inviteBack() }

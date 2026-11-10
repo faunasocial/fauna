@@ -87,6 +87,8 @@ impl CacheDb {
         if !enabled {
             let affected = self.delete_reports_by_reporter(&actor, prefix).await?;
             for key in affected {
+                // An opt-out only lowers or withdraws aggregates, and the
+                // writer re-opens only on a rise — nothing to wake.
                 self.recompute_report_score(&key).await?;
             }
         }
@@ -255,7 +257,12 @@ impl CacheDb {
     /// joins through the `segment_records.report_hash` mirror for mail; a
     /// post IS its hash). Below k — including after opt-outs — every row for
     /// the factor+items is withdrawn.
-    pub async fn recompute_report_score(&self, key: &ReportKey) -> Result<()> {
+    ///
+    /// Returns the actors whose `INBOX` copies the write re-opened (the
+    /// metadata re-open below); every handler-level caller fires
+    /// `crate::segments::notify_mail_flags_changed` for each, so the app's
+    /// flag-change pass runs now rather than at its periodic sweep.
+    pub async fn recompute_report_score(&self, key: &ReportKey) -> Result<Vec<[u8; 32]>> {
         let k = key.clone();
         let conn = self.conn.lock().await;
         let local: u32 = conn
@@ -314,6 +321,56 @@ impl CacheDb {
             items.push((k.content_hash.to_vec(), "post", None));
         }
 
+        // The re-open (`report-sharing.md` § Applying the aggregate — the
+        // aggregate re-opens scoring; it never moves mail; and *The re-open is
+        // a metadata change, not a flag change*): on an UPWARD transition of a
+        // mail copy's `report:spam` score — the first write at k included —
+        // that copy's INBOX row is re-opened unless it carries the `$NotJunk`
+        // veto: its `$FaunaSpamScored` watermark removed where present, and
+        // its modseq advanced either way, so a copy the app never watermarked
+        // (an actor with no trained model) reaches the app's flag-change feed
+        // too. A level or downward transition (a withdrawal) re-opens nothing;
+        // the post item needs nothing (its collapse reads the row directly).
+        let mut reopen: std::collections::BTreeMap<Vec<u8>, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        // Only the mark-as-spam factor: the `signal:*` cue factors share this
+        // writer, but no mail scoring position reads them.
+        if exposed && k.factor == fauna_core::scoring::factor::REPORT_SPAM {
+            for (content_id, kind, actor) in &items {
+                let (true, Some(actor)) = (*kind == "mail", actor) else {
+                    continue;
+                };
+                let previous: Option<i64> = conn
+                    .query_row(
+                        "SELECT score FROM content_scores
+                         WHERE content_id = ?1 AND factor = ?2",
+                        rusqlite::params![content_id, k.factor],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .context("read the previous report score")?;
+                if score <= previous.unwrap_or(0) {
+                    continue;
+                }
+                let inbox: Option<(i64, String)> = conn
+                    .query_row(
+                        "SELECT uid, flags FROM bridge_imap_messages
+                         WHERE actor_id = ?1 AND mailbox = 'INBOX' AND message_id = ?2",
+                        rusqlite::params![actor, content_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .context("read the copy's INBOX row")?;
+                let Some((uid, flags)) = inbox else { continue };
+                let vetoed = flags
+                    .split_whitespace()
+                    .any(|f| f == fauna_protocol::email::NOT_JUNK_KEYWORD);
+                if !vetoed {
+                    reopen.entry(actor.clone()).or_default().push(uid as u32);
+                }
+            }
+        }
+
         if exposed {
             let now = now_epoch_millis();
             for (content_id, kind, actor) in &items {
@@ -352,7 +409,22 @@ impl CacheDb {
                 .context("withdraw report bus row")?;
             }
         }
-        Ok(())
+
+        // The re-open, under the same lock as the score write it follows: one
+        // metadata write per actor (never the general STORE path, whose no-op
+        // idempotency replay relies on).
+        let mut reopened = Vec::new();
+        for (actor, uids) in reopen {
+            let Ok(actor) = <[u8; 32]>::try_from(actor.as_slice()) else {
+                continue;
+            };
+            if super::bridge_imap::reopen_inbox_copies_locked(&conn, &actor, &uids)
+                .context("re-open scoring")?
+            {
+                reopened.push(actor);
+            }
+        }
+        Ok(reopened)
     }
 
     /// Test-only read of one item's `report:spam` bus row (`None` = no row).
@@ -566,28 +638,30 @@ pub const MAX_PEER_REPORT_ROWS_TOTAL: i64 = 64 * MAX_REPORT_EXCHANGE_ENTRIES as 
 /// either way the affected aggregate recomputes. The opt-in check is folded
 /// into the insert itself ([`CacheDb::insert_content_report`]), so there is
 /// no separate check/insert window to race. Failures here must never fail
-/// the train itself — callers log-and-continue.
+/// the train itself — callers log-and-continue. Returns the actors whose
+/// `INBOX` copies the recompute re-opened, for the caller's
+/// `fauna.mail.flags_changed` wake ([`CacheDb::recompute_report_score`]).
 pub async fn capture_report(
     db: &CacheDb,
     reporter: &[u8; 32],
     key: &ReportKey,
     is_spam_flag: bool,
-) -> Result<()> {
+) -> Result<Vec<[u8; 32]>> {
     if is_spam_flag {
         if db
             .insert_content_report(key, reporter, REPORT_PREF_COLUMN)
             .await?
         {
-            db.recompute_report_score(key).await?;
+            return db.recompute_report_score(key).await;
         }
     } else {
         // A withdrawal applies regardless of the current pref — a reporter
         // who opted out after flagging can still retract the earlier flag.
         if db.delete_content_report(key, reporter).await? {
-            db.recompute_report_score(key).await?;
+            return db.recompute_report_score(key).await;
         }
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -771,6 +845,209 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    /// Place one seeded mail copy in the owner's INBOX with `flags`.
+    async fn place_in_inbox(db: &CacheDb, owner: &[u8; 32], rid: &[u8; 32], flags: &str) {
+        db.ensure_bridge_imap_mailboxes(owner).await.unwrap();
+        db.place_inbound_mail(owner, rid, "INBOX", 1_751_000_000, flags, "", true)
+            .await
+            .unwrap()
+            .expect("placed");
+    }
+
+    async fn inbox_flags(db: &CacheDb, owner: &[u8; 32], rid: &[u8; 32]) -> (String, i64) {
+        let conn = db.conn.lock().await;
+        conn.query_row(
+            "SELECT flags, modseq FROM bridge_imap_messages
+              WHERE actor_id = ?1 AND mailbox = 'INBOX' AND message_id = ?2",
+            rusqlite::params![&owner[..], &rid[..]],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("INBOX row")
+    }
+
+    /// The re-open (`report-sharing.md` § Applying the aggregate): an upward
+    /// transition — the first write at k, then a later reporter — removes the
+    /// `$FaunaSpamScored` watermark from every INBOX copy of the hash that
+    /// carries no `$NotJunk`, with a modseq bump; a `$NotJunk` copy keeps it;
+    /// a downward transition (a withdrawal) touches no flag.
+    #[tokio::test]
+    async fn upward_transition_reopens_watermarked_inbox_copies_but_not_vetoed_ones() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let hash = [0xE1; 32];
+        let (open_owner, open_item) = ([0x31u8; 32], [0x07u8; 32]);
+        let (veto_owner, veto_item) = ([0x32u8; 32], [0x08u8; 32]);
+        seed_mail_item(&db, &open_owner, &open_item, &hash).await;
+        seed_mail_item(&db, &veto_owner, &veto_item, &hash).await;
+        place_in_inbox(&db, &open_owner, &open_item, "$FaunaSpamScored \\Seen").await;
+        place_in_inbox(&db, &veto_owner, &veto_item, "$FaunaSpamScored $NotJunk").await;
+        let key = mail_key(hash);
+        let reporters = [[0x71u8; 32], [0x72; 32], [0x73; 32], [0x74; 32]];
+
+        // Below k: no row, no flag touched.
+        for r in &reporters[..2] {
+            opt_in(&db, r).await;
+            capture_report(&db, r, &key, true).await.unwrap();
+        }
+        let (flags, modseq_before) = inbox_flags(&db, &open_owner, &open_item).await;
+        assert_eq!(flags, "$FaunaSpamScored \\Seen");
+
+        // First write at k → re-opened, modseq bumped; the vetoed copy kept.
+        opt_in(&db, &reporters[2]).await;
+        capture_report(&db, &reporters[2], &key, true)
+            .await
+            .unwrap();
+        let (flags, modseq_after) = inbox_flags(&db, &open_owner, &open_item).await;
+        assert_eq!(flags, "\\Seen", "watermark removed at the first write at k");
+        assert!(
+            modseq_after > modseq_before,
+            "CONDSTORE readers see the change"
+        );
+        assert_eq!(
+            inbox_flags(&db, &veto_owner, &veto_item).await.0,
+            "$FaunaSpamScored $NotJunk",
+            "a $NotJunk copy is never re-opened"
+        );
+
+        // The scorer re-stamps the copy; a later reporter re-opens it again.
+        db.apply_store_flags(
+            &open_owner,
+            "INBOX",
+            &[1],
+            crate::db::bridge_imap::StoreFlagsDbOp::Add,
+            &["$FaunaSpamScored".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+        opt_in(&db, &reporters[3]).await;
+        capture_report(&db, &reporters[3], &key, true)
+            .await
+            .unwrap();
+        assert_eq!(report_row_score(&db, &open_item).await, Some(217));
+        assert_eq!(inbox_flags(&db, &open_owner, &open_item).await.0, "\\Seen");
+
+        // Re-stamp, then a withdrawal (217 → 200): no flag touched.
+        db.apply_store_flags(
+            &open_owner,
+            "INBOX",
+            &[1],
+            crate::db::bridge_imap::StoreFlagsDbOp::Add,
+            &["$FaunaSpamScored".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+        capture_report(&db, &reporters[0], &key, false)
+            .await
+            .unwrap();
+        assert_eq!(report_row_score(&db, &open_item).await, Some(200));
+        assert_eq!(
+            inbox_flags(&db, &open_owner, &open_item).await.0,
+            "$FaunaSpamScored \\Seen",
+            "a downward transition re-opens nothing"
+        );
+    }
+
+    /// The INBOX's `highestmodseq` for `owner`.
+    async fn inbox_hms(db: &CacheDb, owner: &[u8; 32]) -> i64 {
+        db.list_bridge_imap_flag_changes(owner, "INBOX", i64::MAX, 0, 1)
+            .await
+            .unwrap()
+            .2
+    }
+
+    /// *The re-open is a metadata change, not a flag change*
+    /// (`report-sharing.md` § Applying the aggregate): a copy the app never
+    /// watermarked (an actor with no trained model) is re-opened too — its
+    /// flags untouched, its modseq advanced to the mailbox's one bumped
+    /// `highestmodseq` — and a watermarked copy loses the watermark under the
+    /// same kind of stamp; the write names every actor it re-opened (the
+    /// caller's `flags_changed` wake). A `$NotJunk` copy is untouched, and a
+    /// level or downward transition bumps nothing.
+    #[tokio::test]
+    async fn an_untrained_copy_is_reopened_by_a_modseq_bump_with_its_flags_unchanged() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let hash = [0xE2; 32];
+        let (plain_owner, plain_item) = ([0x41u8; 32], [0x0Au8; 32]);
+        let (marked_owner, marked_item) = ([0x42u8; 32], [0x0Bu8; 32]);
+        let (veto_owner, veto_item) = ([0x43u8; 32], [0x0Cu8; 32]);
+        seed_mail_item(&db, &plain_owner, &plain_item, &hash).await;
+        seed_mail_item(&db, &marked_owner, &marked_item, &hash).await;
+        seed_mail_item(&db, &veto_owner, &veto_item, &hash).await;
+        place_in_inbox(&db, &plain_owner, &plain_item, "\\Seen").await;
+        place_in_inbox(&db, &marked_owner, &marked_item, "$FaunaSpamScored").await;
+        place_in_inbox(&db, &veto_owner, &veto_item, "$NotJunk").await;
+        let key = mail_key(hash);
+        let reporters = [[0x81u8; 32], [0x82; 32], [0x83; 32], [0x84; 32]];
+        for r in &reporters {
+            opt_in(&db, r).await;
+        }
+        for r in &reporters[..2] {
+            assert!(capture_report(&db, r, &key, true).await.unwrap().is_empty());
+        }
+        let (_, plain_before) = inbox_flags(&db, &plain_owner, &plain_item).await;
+        let plain_hms_before = inbox_hms(&db, &plain_owner).await;
+        let veto_before = inbox_flags(&db, &veto_owner, &veto_item).await;
+        let veto_hms_before = inbox_hms(&db, &veto_owner).await;
+
+        // The first write at k re-opens both un-vetoed copies.
+        let mut reopened = capture_report(&db, &reporters[2], &key, true)
+            .await
+            .unwrap();
+        reopened.sort();
+        assert_eq!(reopened, vec![plain_owner, marked_owner]);
+        let (flags, plain_after) = inbox_flags(&db, &plain_owner, &plain_item).await;
+        assert_eq!(flags, "\\Seen", "a metadata change moves no flag");
+        assert!(
+            plain_after > plain_before,
+            "the untrained copy's modseq advanced"
+        );
+        assert_eq!(inbox_hms(&db, &plain_owner).await, plain_hms_before + 1);
+        assert_eq!(
+            plain_after,
+            plain_hms_before + 1,
+            "the write's one shared modseq"
+        );
+        let (flags, marked_after) = inbox_flags(&db, &marked_owner, &marked_item).await;
+        assert_eq!(flags, "", "the watermark removed");
+        assert_eq!(marked_after, inbox_hms(&db, &marked_owner).await);
+        assert_eq!(
+            inbox_flags(&db, &veto_owner, &veto_item).await,
+            veto_before,
+            "a $NotJunk copy is untouched"
+        );
+        assert_eq!(inbox_hms(&db, &veto_owner).await, veto_hms_before);
+
+        // A fourth reporter (200 → 217) re-opens again; then a withdrawal
+        // (217 → 200) and a level recompute (200 → 200) bump nothing.
+        assert_eq!(
+            capture_report(&db, &reporters[3], &key, true)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let hms = inbox_hms(&db, &plain_owner).await;
+        assert!(
+            capture_report(&db, &reporters[0], &key, false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(report_row_score(&db, &plain_item).await, Some(200));
+        assert_eq!(
+            inbox_hms(&db, &plain_owner).await,
+            hms,
+            "a withdrawal bumps nothing"
+        );
+        assert!(db.recompute_report_score(&key).await.unwrap().is_empty());
+        assert_eq!(
+            inbox_hms(&db, &plain_owner).await,
+            hms,
+            "a level write bumps nothing"
         );
     }
 

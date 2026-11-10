@@ -908,10 +908,10 @@ mod native {
     };
     use fauna_client_sync::agent::PendingBind;
     use fauna_client_sync::agent::{
-        AgentCapabilityInputs, AgentControlError, AgentHealthState, LocationBindingsModel,
-        ReachabilityObserver, SuccessionCorpusContext, SyncAgentProvisioner, agent_health_state,
+        AgentBearerSource, AgentCapabilityInputs, AgentControlError, AgentHealthState,
+        LocationBindingsModel, ReachabilityObserver, SuccessionCorpusContext, SyncAgentProvisioner,
+        agent_health_state,
     };
-    use fauna_sync_engine::share_glue::AgentBearerSource;
 
     use super::{DEVICE_LABEL, SyncAgentState};
     use crate::app::{DataMessage, UiMessage};

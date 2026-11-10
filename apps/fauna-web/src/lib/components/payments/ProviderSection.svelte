@@ -54,6 +54,17 @@
   let providerKind = $state('');
   let providerSecret = $state('');
   let providerTier = $state('');
+  // The optional product the tier is sold as (monetization.md § Pillar 3 →
+  // *Configuration*; on Stripe the Payment Link id). Not a secret: pre-filled
+  // from the listed provider of the picked kind, sent as shown on save, so an
+  // emptied field clears the saved mapping (tui's `ProviderForm::product`).
+  let providerProduct = $state('');
+
+  // One config per kind: picking a kind that is already configured edits that
+  // provider, so its saved product pre-fills; a kind with no config starts empty.
+  function prefillProduct(kind: string): void {
+    providerProduct = providers.find((p) => p.kind === kind)?.product_ref ?? '';
+  }
 
   $effect(() => {
     const s = secretHex;
@@ -101,6 +112,7 @@
     // The secret is never pre-filled (the nest doesn't echo it back).
     providerSecret = '';
     providerKind = paymentsKnownKinds()[0] ?? '';
+    prefillProduct(providerKind);
     if (!tiers.some((tr) => tr.name === providerTier)) providerTier = tiers[0]?.name ?? '';
     onerror('');
     formVisible = true;
@@ -112,7 +124,7 @@
     const s = secretHex;
     if (!s || !providerTier) return;
     try {
-      await paymentsProvidersSet(s, providerKind, providerSecret, providerTier);
+      await paymentsProvidersSet(s, providerKind, providerSecret, providerTier, providerProduct);
       // The secret is a credential — don't leave it in the field post-save.
       providerSecret = '';
       formVisible = false;
@@ -171,6 +183,7 @@
         <select
           id="provider-kind-select" class="input"
           data-testid={PAYMENTS_IDS.SUBSCRIPTION_PROVIDER_FORM_KIND} bind:value={providerKind}
+          onchange={() => prefillProduct(providerKind)}
         >
           {#each paymentsKnownKinds() as kind (kind)}
             <option value={kind}>{kind}</option>
@@ -192,6 +205,12 @@
           {/each}
         </select>
       </div>
+      <input
+        class="input" type="text" placeholder={t.subscriptions.product_label}
+        aria-label={t.subscriptions.product_label}
+        data-testid={PAYMENTS_IDS.SUBSCRIPTION_PROVIDER_FORM_PRODUCT} bind:value={providerProduct}
+      />
+      <p class="muted hint">{t.subscriptions.product_hint}</p>
       <!-- The exact URL to register at the provider's dashboard, live as soon
            as the form opens and recomputed as the kind select changes — so the
            creator never hand-assembles it. Read-only: the nest owns the route. -->
@@ -269,6 +288,7 @@
   }
   .section h2 { font-size: 1rem; margin: 0 0 0.75rem; }
   .muted { color: var(--text-muted, #8b949e); }
+  .hint { font-size: 0.8rem; margin: 0; }
   .mono {
     font-family: monospace;
     min-width: 0;

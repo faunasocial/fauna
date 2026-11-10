@@ -20,6 +20,7 @@ fn row() -> ConnectedAppRow {
         lasts_until_millis: None,
         connected: true,
         paused: false,
+        suspended: false,
         mail: None,
         signer_burned: false,
         oracle: None,
@@ -161,6 +162,34 @@ fn a_paused_row_says_paused_not_merely_not_connected() {
     r.paused = false;
     let facts = text(&r).pop().unwrap();
     assert!(facts.starts_with(lookup("connected_apps.not_connected").unwrap()));
+}
+
+/// A row a step-down suspended reads paused in the words that name its undo
+/// (sign in again after stepping back up), and states no end at all — not
+/// even "until you disconnect it" — since nothing it holds runs.
+#[test]
+fn a_suspended_row_names_its_own_undo_and_no_end() {
+    let mut r = row();
+    r.connected = false;
+    r.paused = true;
+    r.suspended = true;
+    let facts = text(&r).pop().unwrap();
+    assert!(
+        facts.starts_with(lookup("connected_apps.paused_suspended").unwrap()),
+        "{facts}"
+    );
+    assert!(
+        !facts.contains(lookup("connected_apps.paused").unwrap()),
+        "{facts}"
+    );
+    assert!(
+        !facts.contains(lookup("connected_apps.open_ended").unwrap()),
+        "{facts}"
+    );
+    assert!(
+        !facts.contains("Until"),
+        "no lasts-until on a suspended row: {facts}"
+    );
 }
 
 #[test]

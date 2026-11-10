@@ -94,6 +94,7 @@ from .helpers import (
     remove_container,
     remove_network,
     start_container_with_ports,
+    start_fake_scanner_sidecars,
     start_stub_mx_sidecar,
     submit_message_tls,
     wait_for_health,
@@ -155,14 +156,25 @@ def stub_mx(request, docker_image):
     import os as _os
 
     _os.chmod(out_dir, 0o777)
+    clamd_name = f"fauna-out-clamd-{suffix}"
+    rspamd_name = f"fauna-out-rspamd-{suffix}"
+    fakes_dir = str(get_repo_root() / "tests" / "e2e-unified" / "fakes")
     create_network(network)
     try:
         target = start_stub_mx_sidecar(
             network, helpers_dir, out_dir, name=stub_name, require_starttls=require_starttls)
+        # A public box with no content scanners refuses to enable mail
+        # (`fauna.bridges.mail_unavailable_here` — the fail-closed scan gate),
+        # so the nest is wired to the shared fake clamd/rspamd sidecars on the
+        # same net, as every other mail-serving docker fixture is.
+        scanners = start_fake_scanner_sidecars(
+            network, fakes_dir, clamd_name=clamd_name, rspamd_name=rspamd_name)
         yield {"network": network, "target": target, "out_dir": out_dir,
-               "require_starttls": require_starttls}
+               "require_starttls": require_starttls, **scanners}
     finally:
         remove_container(stub_name)
+        remove_container(clamd_name)
+        remove_container(rspamd_name)
         remove_network(network)
         shutil.rmtree(out_dir, ignore_errors=True)
 
@@ -185,6 +197,8 @@ def outbound_nest(docker_image, stub_mx):
             # Static outbound route: relay external.test to the stub-MX sidecar
             # (reached by container name on the shared net) instead of public MX.
             "FAUNA_MTA_MX_OVERRIDE": f"{EXTERNAL_DOMAIN}={stub_mx['target']}",
+            "FAUNA_CLAMD_ADDR": stub_mx["clamd_addr"],
+            "FAUNA_RSPAMD_URL": stub_mx["rspamd_url"],
         },
         network=stub_mx["network"],
     )

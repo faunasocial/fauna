@@ -101,6 +101,7 @@ fun ProfileScreen(
     LaunchedEffect(overlayEpoch) { privateVm.reload() }
     val following by vm.following.collectAsState()
     val followWorking by vm.followWorking.collectAsState()
+    val unfollowArmed by vm.unfollowArmed.collectAsState()
     val blocked by vm.blocked.collectAsState()
     val blockWorking by vm.blockWorking.collectAsState()
     val blockKnown by vm.blockKnown.collectAsState()
@@ -116,6 +117,8 @@ fun ProfileScreen(
         vm.refreshHeader()
         // OTHER profile: seed the Block⇄Unblock toggle from the current edge.
         if (!vm.isSelf) vm.refreshBlockState()
+        // OTHER profile: seed the Follow ⇄ Following toggle from `status.get`.
+        if (!vm.isSelf && !BuildConfig.KIDS) vm.refreshFollowStatus()
         // OTHER header holds no handle: re-read the contact roster now so a
         // contact accepted a moment ago is named by the roster's handle
         // (`value-formatting.md` § Peer display label → *the roster handle*).
@@ -210,16 +213,21 @@ fun ProfileScreen(
                     modifier = Modifier.testTag(Ids.PROFILE_EDIT_BUTTON),
                 ) { Text(stringResource(R.string.profile_edit)) }
             } else if (!BuildConfig.KIDS) {
-                // OTHER: profile-follow-button = subscribe to the free "followers" tier.
+                // OTHER: profile-follow-button = the Follow ⇄ Following toggle over
+                // the free "followers" tier (subscriptions.md § The free followers
+                // tier — follow and unfollow, rule 4); armed, it names the cost.
                 // Not in Fauna Kids: following is a subscription (monetization),
                 // excised with the Tiers tab below (family-safety.md § The account
                 // age band, the kids-app bullet, item (4)).
                 OutlinedButton(
                     onClick = { vm.follow() },
-                    enabled = !followWorking && !following,
+                    enabled = !followWorking,
                     modifier = Modifier.testTag(Ids.PROFILE_FOLLOW_BUTTON),
                 ) {
-                    Text(resolveLocalized(context, com.fauna.ffi.followToggleLabel(following)).orEmpty())
+                    Text(
+                        if (unfollowArmed) stringResource(R.string.profile_unfollow_confirm)
+                        else resolveLocalized(context, com.fauna.ffi.followToggleLabel(following)).orEmpty()
+                    )
                 }
             }
         }

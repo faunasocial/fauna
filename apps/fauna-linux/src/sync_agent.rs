@@ -56,7 +56,9 @@ use fauna_client_sync::agent::{
 use fauna_client_sync::agent_spawner::{
     self, ChildSpawner, SystemctlUser, UNIT_NAME, UnitControl, UnitExec,
 };
-use fauna_sync_engine::share_glue::AgentBearerSource;
+// Named at its home, not through `fauna_sync_engine::share_glue`'s re-export:
+// that module rides `p2p-share`, and the store-safe flavor drives the agent too.
+use fauna_client_sync::agent::AgentBearerSource;
 
 use crate::client::FaunaClient;
 use crate::sync::LocationBinding;

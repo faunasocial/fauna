@@ -25,7 +25,9 @@ founds it and invites across the nest boundary; the invitation stands atop
 the member's list on the other nest and accepting it (through their own
 nest) opens the room; the founder's device keys the foreign seat with no
 gesture; a message crosses each way, sealed under the room's generation,
-through the member's relay.
+through the member's relay. A third journey seats a second home account
+beside them and has the foreign member, appointed admin, remove it through
+the relayed removal and rotation.
 
 **Latency-independent by construction** (convention 14): every wait is a
 deadline poll over projected state — never "sleep N then assert".
@@ -43,7 +45,9 @@ from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture 
     MESSAGE_BUDGET_S,
     WELCOME_BUDGET_S,
     Seat,
+    admit_web_seat_origins,
     found_community_room,
+    index_of,
     launch_seat,
     room_app,
     seat_app_path,
@@ -96,6 +100,10 @@ def cross_nest_room_seats(cross_nest_foreign, cross_nest_foreign_ephemeral, room
         seats.append(founder)
         member = launch_seat(away, app_path, room_app, request, actor=away["actor"])
         seats.append(member)
+        # Each web seat's page is served from a proxy of its own, born after
+        # these session-scoped nests were seeded; the member's attachment
+        # upload goes raw to the home, so both nests admit both pages.
+        admit_web_seat_origins([home, away], seats, request)
         conv_api.accept_contact(away["port"], member.actor, founder.actor_hex, scheme="https")
         yield founder, member
     finally:
@@ -391,4 +399,170 @@ def test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_throug
     assert S.moderation.category.commercial in badge, (
         f"the detail names the room labeler's verdict "
         f"({S.moderation.category.commercial!r}); got {badge!r}"
+    )
+
+
+@pytest.fixture()
+def cross_nest_room_trio(cross_nest_foreign, cross_nest_foreign_ephemeral, room_app, request):
+    """``(founder, member, third)``: :func:`cross_nest_room_seats`' pair plus a
+    THIRD seat, a second fresh account on the room's home (``home``), which
+    accepts the founder as a contact there — the member a foreign admin's
+    removal will unseat."""
+    home = cross_nest_foreign
+    away = cross_nest_foreign_ephemeral
+    app_path = seat_app_path(request, room_app)
+    seats: list[Seat] = []
+    try:
+        founder = launch_seat(home, app_path, room_app, request)
+        seats.append(founder)
+        member = launch_seat(away, app_path, room_app, request, actor=away["actor"])
+        seats.append(member)
+        third = launch_seat(home, app_path, room_app, request)
+        seats.append(third)
+        admit_web_seat_origins([home, away], seats, request)
+        conv_api.accept_contact(away["port"], member.actor, founder.actor_hex, scheme="https")
+        conv_api.accept_contact(home["port"], third.actor, founder.actor_hex, scheme="https")
+        yield founder, member, third
+    finally:
+        teardown_seats(seats)
+
+
+def _home_floor(home: dict, reader: dict, room: str) -> list[str] | None:
+    """The live floor's principal hexes, read off the room's HOME nest by
+    ``reader`` (a seat homed there), or ``None`` on a refusal worth polling."""
+    try:
+        roster = conv_api.room_list_roster(home["port"], reader, room, scheme="https")
+    except Exception:
+        return None
+    return [m["principal"] for m in roster["members"]]
+
+
+def _home_tip(home: dict, reader: dict, room: str) -> str | None:
+    """The id of the tip generation wrapped to ``reader`` on the room's home."""
+    try:
+        gens = conv_api.room_generations(home["port"], reader, room, scheme="https")
+    except Exception:
+        return None
+    return next((g["generation_id"] for g in gens if g.get("is_tip")), None)
+
+
+@pytest.mark.feature("group-conversations")
+def test_a_foreign_admin_removes_a_home_member_through_the_relay(
+    cross_nest_room_trio, cross_nest_foreign, cross_nest_foreign_ephemeral
+):
+    """A member homed on ANOTHER nest, appointed admin, removes a member homed
+    on the room's home through their chip — the relayed twins of `room.remove`
+    and `room.publish_generation` (``federation.md`` § Federation residue
+    surface, the *Conversation room remove* and *… generation publish and
+    backfill* rows): the unseat, then the severance mint, each through the
+    admin's own nest to the room's home. The same-nest journey's closing leg
+    (``test_conversation_room_community.py``), run from the foreign seat.
+
+    Every mutation is a gesture (convention 8): the founding with two chips,
+    both acceptances, the founder's appointment in the policy editor, the
+    admin's chip tap. The witness is the home nest's own floor and tip, read
+    by the founder (convention 5); every wait is a deadline poll (convention
+    14)."""
+    founder, member, third = cross_nest_room_trio
+    home = cross_nest_foreign
+    away = cross_nest_foreign_ephemeral
+
+    # ── founding: the foreign member's handle and the home third's id ─────
+    conv = founder.app.conversations
+    conv.navigate()
+    founder.app.driver.click("new-conversation-button")
+    conv.add_recipient(f"{member.handle}@{away['authority']}")
+    conv.add_recipient(third.actor_hex)
+    conv.toggle_home_nest()
+    assert conv.prospective_room_class() == "community", (
+        f"{seat_element(founder, 'recipient-picker-class')}"
+    )
+    founder.app.driver.type_text("dm-text-field", f"hello {secrets.token_hex(4)}")
+    founder.app.driver.click("dm-send-button")
+    room = wait_for(
+        "the founder's community room binding to its room id",
+        lambda: _founded_room(founder),
+        lambda t: t is not None,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: f"{seat_story(founder)}\n{seat_log(founder, 'found', 'room', 'invite')}",
+    )
+    room_id = room.channel_id_hex
+
+    # ── both invitees accept, each through their own nest ────────────────
+    for seat, budget in ((member, CROSSING_BUDGET_S), (third, WELCOME_BUDGET_S)):
+        wait_for(
+            "the invitation standing on the invitee's list",
+            lambda seat=seat: seat.app.conversations.room_invitation_count(),
+            lambda n: n >= 1,
+            budget,
+            diagnose=lambda seat=seat: f"{seat_story(seat)}\n{seat_log(seat, 'invitation', 'room')}",
+        )
+        seat.app.conversations.accept_room_invitation(0)
+        wait_for(
+            "the invitee's seat being keyed in",
+            lambda seat=seat: thread_by_channel(seat.app, room_id),
+            lambda t: t is not None and (t.room or {}).get("awaiting_key") is False,
+            CROSSING_BUDGET_S,
+            diagnose=lambda seat=seat: (
+                f"{seat_story(seat)}\n{seat_story(founder)}\n"
+                f"{seat_log(founder, 'key-in', 'key_in', 'tend', 'mint')}"
+            ),
+        )
+        assert not seat.app.has_error(), seat.app.error_text()
+
+    # ── the founder appoints the foreign member admin ────────────────────
+    listed = wait_for(
+        "both invitees listed on the founder's thread",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None
+        and member.actor_hex in t.participant_actor_ids
+        and third.actor_hex in t.participant_actor_ids,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: seat_story(founder),
+    )
+    conv.open_thread_by_id(listed.thread_id)
+    conv.open_room_settings()
+    member_index = index_of(listed, member.actor_hex)
+    conv.toggle_room_admin(member_index)
+    assert conv.room_admin_staged(member_index)
+    conv.save_room_settings(timeout_s=MEMBERSHIP_BUDGET_S)
+    assert not founder.app.has_error(), founder.app.error_text()
+
+    admin_view = wait_for(
+        "the foreign member's projection granting the removal",
+        lambda: thread_by_channel(member.app, room_id),
+        lambda t: t is not None
+        and (t.capabilities or {}).get("can_remove_members")
+        and third.actor_hex in t.participant_actor_ids,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"{seat_story(member)}\n{seat_log(member, 'floor', 'roster', 'policy')}",
+    )
+
+    # ── the foreign admin removes the home member through the chip ───────
+    tip_before = _home_tip(home, founder.actor, room_id)
+    assert tip_before is not None, "the founder holds the room's tip before the removal"
+    mconv = member.app.conversations
+    mconv.open_thread_by_id(admin_view.thread_id)
+    mconv.remove_member(index_of(admin_view, third.actor_hex))
+    wait_for(
+        "the third member leaving the home nest's floor",
+        lambda: _home_floor(home, founder.actor, room_id),
+        lambda seats: seats is not None and third.actor_hex not in seats,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"error={member.app.error_text()!r}\n{seat_story(member)}\n"
+        f"{seat_log(member, 'remove', 'room', 'relay')}",
+    )
+    wait_for(
+        "the foreign admin's removal rotating the room's generation on its home",
+        lambda: _home_tip(home, founder.actor, room_id),
+        lambda tip: tip is not None and tip != tip_before,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"error={member.app.error_text()!r}\n"
+        f"{seat_log(member, 'remove', 'rotate', 'mint', 'relay')}",
+    )
+    assert member.actor_hex in (_home_floor(home, founder.actor, room_id) or []), (
+        "the removal was scoped to its target — the admin stays seated"
+    )
+    assert not member.app.has_error(), (
+        f"the relayed removal and its relayed rotation both landed: {member.app.error_text()!r}"
     )

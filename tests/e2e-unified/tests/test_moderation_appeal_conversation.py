@@ -32,6 +32,14 @@ names the ground and opens that row's appeal. The takedown journey appeals
 FROM the badge (it must land on the queue's own appeal form, one flow); the
 block journey reads the badge and appeals from the queue row.
 
+The block journey also witnesses the other members' side (§ Admin block →
+*The author keeps their own view*: every other caller's fetch gets the
+withheld entry): its third seat is a late reader, closed while the message is
+sent and blocked, as in ``test_legal_takedown_notice.py`` — the nest withholds
+only from future fetches — whose reopened thread paints the notice in the
+message's place: one more bubble with a timestamp and no body, the words
+nowhere, no badge (``admin-nest`` outcome 44).
+
 The author's queue is read on the author's own seat, which never signs in as
 anyone else: the queue is the author's one signal, since their own devices
 keep the real copy and never receive the tombstone (§ Legal takedown →
@@ -54,6 +62,9 @@ import uuid
 
 import pytest
 
+from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.connection import wait_until_online
+from helpers.conversations_restart import wait_replica_settled
 from helpers.mail_dedicated_nest import login_as_nest_admin
 from i18n.strings import S
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seats are pytest fixtures adopted by import
@@ -64,6 +75,7 @@ from helpers.room_seats import (  # noqa: F401 — room_app/room_seats are pytes
     seat_story,
     wait_for,
     wait_snippet,
+    wait_thread_by_channel,
 )
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux, pytest.mark.android, pytest.mark.macos, pytest.mark.ios, pytest.mark.windows]
@@ -126,13 +138,17 @@ def _queue_facts(app):
     ]
 
 
-def _send_and_report(seats, reason, note):
+def _send_and_report(seats, reason, note, before_send=None):
     """The room, the author's message, and a member's report of it from the
     message menu. Returns the author's queue baseline (rows, appeal handles) —
     taken before any decision, so every row asserted later is this one's —
-    the author's thread id and the message's words."""
+    the author's thread id and the message's words. ``before_send(channel)``
+    runs once the room stands and before the message is written (the block
+    journey closes its late reader's app there)."""
     author_seat, reporter, _ = seats
     owner_thread, channel = bootstrap_room(*seats)
+    if before_send is not None:
+        before_send(channel)
     token = uuid.uuid4().hex[:10]
     words = f"appealbody{token}"
 
@@ -175,6 +191,86 @@ def _author_badge(author_app, owner_thread, words, action):
     texts = [author_app.driver.get_text("dm-message-text", index=i) for i in range(author_app.driver.count("dm-message-text"))]
     assert any(words in (t or "") for t in texts), (
         "the author's copy keeps its body beside the badge — never collapsed to a tombstone"
+    )
+
+
+def _bubble_gap(seat):
+    """Bubbles in the seat's open thread that paint no body: every render arm
+    paints ``dm-message-timestamp`` (ui.yaml ``dm-message-bubble``), while the
+    admin-block notice painted in a message's place carries no ID of its own
+    (``takedown-and-block.md`` § Admin block → *App surface*: no new
+    conversation ID) — so it is observed as a bubble with a timestamp and no
+    ``dm-message-text``. Its wording is each app's paint unit test's."""
+    d = seat.app.driver
+    return d.count("dm-message-timestamp") - d.count("dm-message-text")
+
+
+def _close_late_reader(reader, nest_instance, channel):
+    """The late reader reads the room's first message, opens the thread (the
+    baseline of bodiless bubbles), lets its copy of the room settle on the nest
+    and closes the app with its store pinned, so the reopened app is the same
+    device resuming from before the message (``test_legal_takedown_notice.py``'s
+    shape: the nest withholds a blocked record only from FUTURE fetches).
+    Returns the baseline gap."""
+    wait_thread_by_channel(reader, channel, what="the reader's device applying the Welcome")
+    wait_snippet(reader, channel, "hi room", what="the reader reading the room's first message")
+    assert reader.app.driver.preserve_state_across_relaunch(), (
+        "the late reader's store must survive the relaunch, or the reopened app "
+        "is a fresh device rather than the one that was away"
+    )
+    reader.app.conversations.navigate()
+    reader.app.conversations.open_thread_by_channel(channel)
+    _poll(
+        lambda: reader.app.driver.count("dm-message-text") > 0,
+        _PAGE_BUDGET_S,
+        "the late reader's thread paints the room's first message",
+        diagnose=lambda: seat_story(reader),
+    )
+    gap = _bubble_gap(reader)
+
+    def client():
+        return WsRpcAdminClient(
+            nest_instance["url"],
+            actor_id=reader.actor["actor_id_bytes"],
+            signing_key=bytes(reader.actor["signing_key"]),
+        )
+
+    wait_replica_settled(client, f"history/{channel}")
+    wait_replica_settled(client, "provider")
+    reader.app.driver.quit_app()
+    return gap
+
+
+def _late_reader_sees_notice(reader, channel, words, gap):
+    """The late reader comes back after the block: its first fetch of the
+    message follows the block, so the thread paints the notice in the
+    message's place — one more bubble with no body — and the words nowhere."""
+    reader.app.driver.hard_reload()
+    wait_until_online(reader.app.driver)
+    reader.app.conversations.enable_real_faunamls()
+    wait_thread_by_channel(reader, channel, what="the reopened reader's room")
+    reader.app.conversations.navigate()
+    reader.app.conversations.open_thread_by_channel(channel)
+    wait_for(
+        "the blocked message's slot painting a notice with no body",
+        lambda: _bubble_gap(reader),
+        lambda g: g == gap + 1,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: seat_story(reader),
+    )
+    d = reader.app.driver
+    # The gap above makes these non-vacuous: the record's slot painted, so its
+    # words would have come with it.
+    painted = [d.get_text("dm-message-text", index=i) or "" for i in range(d.count("dm-message-text"))]
+    assert not any(words in t for t in painted), f"no bubble carries the blocked words: {painted!r}"
+    assert d.count("dm-message-legal-takedown") == 0, (
+        "a block is not a takedown: the member's notice is the block's, never the takedown tombstone"
+    )
+    assert not reader.app.conversations.withheld_badges(), (
+        "the withheld badge is the author's alone; a member sees the notice in place"
+    )
+    assert not reader.app.has_error(), (
+        f"the notice stands in the bubble, never a page error: {reader.app.error_text()!r}"
     )
 
 
@@ -356,15 +452,26 @@ def test_the_author_appeals_a_conversation_takedown_from_the_queue(room_seats, n
 
 
 @pytest.mark.real_conversations
-@pytest.mark.feature("moderation-queue")
+@pytest.mark.feature("moderation-queue", "admin-nest")
 def test_the_author_appeals_a_conversation_block_from_the_queue(room_seats, nest_instance):
-    """a member reports the author's message for harassment → the admin Blocks
-    it from the report row → the author's queue gains the Blocked row whose
-    category is the report's reason, with its appeal handle → the appeal is
-    recorded → the admin Unblocks → the row survives, still appealable."""
+    """the late reader closes their app → a member reports the author's
+    message for harassment → the admin Blocks it from the report row → the
+    author's queue gains the Blocked row whose category is the report's
+    reason, with its appeal handle; the author's own thread keeps the body
+    with the badge beside it; the late reader's thread shows the notice in
+    the message's place and no body → the appeal is recorded → the admin
+    Unblocks → the row survives, still appealable."""
     author, reporter, third = room_seats
     note = f"conversation appeal block {uuid.uuid4().hex[:10]}"
-    baseline, owner_thread, words = _send_and_report((author, reporter, third), BLOCK_REASON, note)
+    late = {}
+
+    def close_reader(channel):
+        late["channel"] = channel
+        late["gap"] = _close_late_reader(third, nest_instance, channel)
+
+    baseline, owner_thread, words = _send_and_report(
+        (author, reporter, third), BLOCK_REASON, note, before_send=close_reader
+    )
 
     admin = reporter.app
     button = _admin_finds_report(admin, nest_instance, note)
@@ -397,6 +504,9 @@ def test_the_author_appeals_a_conversation_block_from_the_queue(room_seats, nest
     # The author's copy was synced before the block, so the badge is its one
     # notice; the appeal stays the queue row's.
     _author_badge(author.app, owner_thread, words, BLOCKED_ACTION)
+    # --- The other members: the notice in the message's place, no body
+    # (`admin-nest` outcome 44's members' half).
+    _late_reader_sees_notice(third, late["channel"], words, late["gap"])
     _open_queue(author.app)
     _appeal(author.app, row, rows)
 

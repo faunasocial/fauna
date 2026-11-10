@@ -41,7 +41,7 @@ use fauna_core::data::{
     DelegationConfig, ModerationConfig, MutedKeyword, ParticipantRef, PersonalizationConfig,
     SyncPrefsConfig, TaskAssignment, TrainedFactorMeta,
 };
-use fauna_core::moderation_rows::HiddenContentMark;
+use fauna_core::moderation_rows::{HiddenContentMark, SpamMark};
 use fauna_core::read_marker::ReadMarker;
 use fauna_core::seen_set::{SeenRef, SeenScopeSet, SeenWatermark};
 
@@ -109,9 +109,11 @@ fn pin_moderation(v: &ModerationConfig) {
     let ModerationConfig {
         muted_keywords,
         hidden_content,
+        spam_marked,
     } = v;
     assert_secret_free(muted_keywords);
     assert_secret_free(hidden_content);
+    assert_secret_free(spam_marked);
 }
 
 fn pin_sync_prefs(v: &SyncPrefsConfig) {
@@ -136,6 +138,13 @@ fn pin_muted_keyword(v: &MutedKeyword) {
 /// kind's second row family, pinned through the kind's probe.
 fn pin_hidden_content_mark(v: &HiddenContentMark) {
     let HiddenContentMark { id } = v;
+    assert_secret_free(id);
+}
+
+/// A `spam/` row's value (`fauna_core::moderation_rows`) — the moderation
+/// kind's third row family, pinned through the kind's probe.
+fn pin_spam_mark(v: &SpamMark) {
+    let SpamMark { id } = v;
     assert_secret_free(id);
 }
 
@@ -277,6 +286,7 @@ delegable_payload_pins! {
             pin_moderation(&ModerationConfig::default());
             pin_muted_keyword(&MutedKeyword::new(""));
             pin_hidden_content_mark(&HiddenContentMark { id: String::new() });
+            pin_spam_mark(&SpamMark { id: String::new() });
         }
     ),
     crate::merge_policy::records::SYNC_PREFS => (

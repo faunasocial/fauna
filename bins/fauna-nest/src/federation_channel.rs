@@ -1099,7 +1099,10 @@ pub(crate) async fn validate_peer_url(base: &str, origin: PeerUrlOrigin) -> anyh
     // e.g. the CalDAV `127.0.0.1:8444` listener instead of a plain ws one) —
     // same class, same bound: a blind WS-upgrade reachability oracle for an
     // already-authenticated actor; non-federation endpoints reject the upgrade.
-    let is_loopback_literal = matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]");
+    // The IP side is the exact literals; the name side is the shared RFC 6761
+    // reading (`fauna_core::resolve::is_localhost_name`, `*.localhost` included).
+    let is_loopback_literal = matches!(host, "127.0.0.1" | "::1" | "[::1]")
+        || fauna_core::resolve::is_localhost_name(host);
     if (scheme == "http" || scheme == "https") && is_loopback_literal {
         return Ok(());
     }

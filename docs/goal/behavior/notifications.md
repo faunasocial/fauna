@@ -194,7 +194,8 @@ body to an OS surface which interprets markup escapes it too (linux's
 freedesktop body: `&`, `<`, `>`, applied in the one builder every linux
 notifier starts from), and a knock toast carries one notification id per app,
 never one per sender, so a flood of fresh keys replaces one toast instead of
-stacking.
+stacking — the shared `KNOCK_TOAST_REPLACE_ID`, which web, whose browser
+`Notification` replaces by a string tag, spells as the tag `fauna-knock-<id>`.
 
 **The sender arg — named by the app, not the nest (ruled 2026-10-29).** A fauna-native row's `{sender}` (`notifications.row_knock`, `notifications.row_like`) is filled by the nest with the 8-hex prefix of the row's `sender_id`: the nest cannot know the viewer's nickname for them, which [`value-formatting.md`](value-formatting.md) § Peer display label puts first. So the app replaces it — `fauna_client_notifications::notification_text_naming(&NotifItem, name_sender)`, where `name_sender` is `fauna_conversations::ContactsCache::known_peer_label` (the one `peer_display_label` chain over the viewer's nickname and the contact roster's handle). Only a `source = "fauna"` row's arg that still equals the prefix is replaced, and only when the viewer knows the person; a stranger's knock keeps the prefix, and a bridged row's sender (the nest's own answer, a display name) always stands. The arg passes the same plain-line reduction as every other. The nest sending the handle instead was rejected: it would still lose the nickname, and it would be a second resolver beside the one chain.
 
@@ -567,12 +568,53 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
   two predicates (`fauna_client_notifications::{notification_muted,
   notification_push_muted}`) and both ids are in; tui collapses a row behind
   `notification-muted` with its reveal, witnessed by
-  `test_notifications_muted.py` (`muted-words` outcome 8). tui raises no
-  notification or knock toast, so rule 6 has no tui leg. **web and linux
+  `test_notifications_muted.py` (`muted-words` outcome 8, and `notifications`
+  outcome 14 for rule 5). tui raises no toast over `PushEvent::Notification`;
+  **its knock toast is built 2026-11-07** (`App::raise_knock_toast` over the
+  shared `fauna_client_notifications::knock_toast`, which asks rule 6 against
+  the in-memory list before the text, fired through `os_notify::notify_knock`
+  under the shared `KNOCK_TOAST_REPLACE_ID`), so the knock toast is tui's one
+  rule-6 leg; witness `test_notifications_knock_toast.py` (`notifications`
+  outcome 15) over the shared fired-toast log
+  `fauna_e2e_agent::KNOCK_NOTICES_KEY`. **linux and android publish the log
+  since 2026-11-07** (the witness carries both markers): linux's
+  `PushEvent::Knock` arm calls `notifications::raise_knock_toast` over the
+  shared `knock_toast`, and its knock toast no longer waits for the window to
+  lose focus (outcome 15 names no such exception — the message banner's
+  conformance fix); android's `postKnockNotification` feeds the `test-helpers`
+  UniFFI `FfiKnockNoticesForTest` through `TestAgent` and posts under the
+  shared id (UniFFI `knock_toast_replace_id`, replacing its own `0x4B4E`).
+  **web raises the knock toast and publishes the log since 2026-11-07** (the
+  witness carries the web marker): `#lib/knock-toast` subscribes app-wide at
+  sign-in and asks the wasm `knockToast` (the shared `knock_toast`) against the
+  session-held muted list (`#lib/muted-words`, loaded at sign-in, re-held by
+  every page read and Settings write — web's one copy), then raises a browser
+  `Notification` under the tag `fauna-knock-1003`, derived one-to-one from the
+  shared id, which the log records as its `replace_id`; the log is the
+  `test-helpers` wasm `KnockNotices`. **macos and ios publish the log since
+  2026-11-08** (the witness carries both markers; a bare-binary macOS launch
+  has no notification host and skips as an environment, replayed under
+  `--macos-artifact`): FaunaKit's `startKnockObserver` feeds the
+  `test-helpers` UniFFI `FfiKnockNoticesForTest` through `E2eLoudSurfaces`,
+  observing before the muted gate and recording only a toast handed to
+  `UNUserNotificationCenter`, and posts under the identifier
+  `fauna-knock-1003`, spelled from the shared id (replacing its own
+  `"knock"`), which the log records as its `replace_id`. Since 2026-11-09 the
+  pump subscribes BEFORE it reads the muted-word list: a knock pushed before
+  the subscription exists has no receiver, and on a fresh launch the store
+  read took long enough to drop the witness's whole flood; the gate still
+  runs before the first knock is taken off the subscription. The macOS column
+  is witnessed on the bundle launch (`--macos-artifact`). **windows publishes
+  the log since 2026-11-08** (the witness carries the windows marker):
+  `NotificationService.ShowKnockNotification` feeds the `test-helpers` UniFFI
+  `FfiKnockNoticesForTest` through `E2eLoudSurfaces`, observing before every
+  gate and recording only once `AppNotificationManager.Show` returned, and
+  tags the toast `fauna-knock-1003`, spelled from the shared id (replacing its
+  own `"knock"`), which the log records as its `replace_id`; the state
+  serializer publishes it as `knock_notices`. **web and linux
   built 2026-10-17** (the witness carries both markers): web collapses over
-  the wasm `notificationMuted` and raises no notification or knock toast (its
-  one in-page `Notification` is the conversation message banner), so rule 6
-  has no web leg; linux collapses in `views/notifications.rs` and gates
+  the wasm `notificationMuted`; it raises no toast over
+  `PushEvent::Notification`, so its knock toast is its one rule-6 leg; linux collapses in `views/notifications.rs` and gates
   `notify_unified` and `notify_knock` at the `app.rs` push arm and the list
   load's toast. The UniFFI and wasm façades are in. tui, web and linux paint
   their feed and conversation collapse with `muted_words.collapsed` /

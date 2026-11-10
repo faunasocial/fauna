@@ -272,13 +272,17 @@ class TestAgentRefusalSurfaceTest {
     /**
      * The feed witnesses' test-state commands — `feed_inject_error` and the
      * reload-hold pair (`test_feed_error.py`, `test_feed.py`'s refresh witness)
-     * — each have their OWN arm: before [TestAgent.start] wires the host they
+     * — and the cue verdict read (`test_engagement_cues.py`'s second-device
+     * witness) — each have their OWN arm: before [TestAgent.start] wires the host they
      * refuse naming the command and the missing collaborator, never the
      * catch-all "no arm" (convention 11's complete-table half).
      */
     @Test
     fun theFeedWitnessCommandsAreRecognisedAndRefuseBeforeTheHostIsWired() {
-        for (action in listOf("feed_inject_error", "feed_hold_next_reload", "feed_release_held_reload")) {
+        for (action in listOf(
+            "feed_inject_error", "feed_hold_next_reload", "feed_release_held_reload",
+            "feed_cue_verdict_for_test",
+        )) {
             val appState = AppState()
             dispatch(action, command(action), appState)
             val refusal = errorFromStateProtocol(appState)
@@ -635,11 +639,11 @@ class TestAgentRefusalSurfaceTest {
         }
     }
 
-    // ── `custodian_pull_run_now`: android hosts its replica in-app, so the pass
-    // takes no clock offset (ios's twin refuses it by name too). ──────────────
+    // ── `custodian_pull_run_now`: android hosts its replica in-app, and the pass
+    // takes a clock offset (`FfiCustodianHost.runAllKindsAtOffset`, test-only). ──
 
     @Test
-    fun aCustodianPullWithAClockOffsetIsRefusedByName() {
+    fun aCustodianPullWithAClockOffsetIsNoLongerRefusedForTheOffset() {
         val appState = AppState()
 
         dispatch(
@@ -648,11 +652,13 @@ class TestAgentRefusalSurfaceTest {
             appState,
         )
 
+        // Unwired, so it is still refused — but for the missing session, never
+        // for the offset the in-app pass now honours.
         val shown = errorFromStateProtocol(appState)
-        assertNotNull("a shifted clock must be refused, not silently ignored", shown)
+        assertNotNull("an unwired agent must refuse, not answer an empty report", shown)
         assertTrue(
-            "the refusal must name the command and the unhonoured offset: $shown",
-            shown!!.contains("custodian_pull_run_now") && shown.contains("now_offset_secs=86400"),
+            "the refusal must name the missing session, not the offset: $shown",
+            shown!!.contains("no ApiClient wired") && !shown.contains("now_offset_secs="),
         )
     }
 

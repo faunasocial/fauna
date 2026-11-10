@@ -22,8 +22,11 @@ final class SettingsE2ETests: XCTestCase {
         let settingsTab = app.tabBars.buttons["Settings"]
         settingsTab.tap()
 
+        // The identity cell sits on the Status sub-page beside the actor id.
+        app.buttons["settings-nav-row[status]"].waitAndTap()
         let handleLabel = app.staticTexts["settings-handle-label"]
         handleLabel.waitForLabel(containing: config.activeUser.handle)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
 
         app.buttons["account-settings-link"].waitAndTap()
 

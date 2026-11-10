@@ -87,29 +87,24 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.requires_surface("on-demand-replica-serve-seat"),
+    # The subject — an on-demand root the AGENT hosts, behind the bound row's
+    # switch — exists on a linux host (FUSE) and a windows host (cfapi) alone: a
+    # bound location on a macOS host is always-resident by design
+    # (on-demand-files.md), so a tui there has no switch to flip and its trio
+    # would fail at the bound row, saying nothing about a placeholder. Declared
+    # for the whole witness (convention 7's fourth skip kind). The `macos` mark
+    # stays so the macos column keeps citing the declared-unbuilt surface; its
+    # arm is another seat (the File Provider extension, another process) and
+    # lands as a witness of its own, with its own host platform.
+    pytest.mark.host_platform("linux", "windows"),
 ]
 
 _ON_LINUX = sys.platform.startswith("linux")
 
-# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape. The
-# `requires_surface` marker answers by APP alone, and the tui is a serving seat
-# where it hosts the agent's on-demand root (linux FUSE, windows cfapi) — but a
-# tui on a macOS host binds always-resident (`apps/fauna-tui/src/sync_agent.rs`,
-# `BindingView::mode` is `None` there), so its trio has no switch to flip and
-# would fail at the bound row rather than say anything about a placeholder. It
-# lands with the same File Provider seat as the macos arm (module docstring).
-OWED_SEATS: dict = {
-    "darwin": {
-        "tui": "a tui on a macOS host binds always-resident: apple's on-demand "
-        "replica is the File Provider extension, which serves no sibling yet "
-        "(surfaces.toml `on-demand-replica-serve-seat`)",
-    },
-}
-
 _SEAT_TRIOS = [
     pytest.param(trio, id=sync_seats.seat_set_param_id(trio))
     for trio in sync_seats.seat_sets_for_platform(
-        sys.platform, sync_seats.DEFAULT_TRIOS, unbuilt=OWED_SEATS
+        sys.platform, sync_seats.DEFAULT_TRIOS
     )
 ]
 

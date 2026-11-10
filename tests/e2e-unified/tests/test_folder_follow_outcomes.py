@@ -488,3 +488,90 @@ def test_a_followed_row_says_whose_folder_it_is(follower_app, nest_instance, cro
         "a follow of a folder on another nest names its owner by the "
         f"handle@domain it was followed by: {remote_row!r}"
     )
+
+
+# ── follow-a-public-folder outcome 11 ───────────────────────────────────────
+
+# Seat B's publish, the nest's relay and seat A's walk — pump passes, poked
+# where each seat holds the pump (`test_store_change_notice.py`'s budget).
+_CONVERGE_S = 240.0
+
+
+@pytest.fixture
+def sibling_seats(request, nest_instance):
+    """Second enrolled seats on the session nest (`helpers.fleet.SiblingSeats`)."""
+    from helpers.fleet import SiblingSeats
+
+    seats = SiblingSeats(request, nest_instance)
+    try:
+        yield seats
+    finally:
+        seats.teardown()
+
+
+@pytest.mark.feature("follow-a-public-folder")
+def test_follows_are_the_same_on_another_of_your_devices_and_an_unfollow_reaches_both(
+    app, request, nest_instance, sibling_seats
+):
+    """Outcome 11 — *the folders you follow are the same on all your devices,
+    and stopping on one stops on the others* (`config-dissolution.md`
+    § Implementation status today: `fauna.state.follows` keeps concurrent
+    follows and converges a cross-device unfollow).
+
+    Two seats of one fresh account on this machine (convention 16): seat A the
+    app under test, seat B the fleet's tui sibling. A follows a public folder
+    through its UI; B lists it on its own Folders page. B unfollows it; the row
+    leaves A. Each poll re-visits the page it reads, so this states the "same
+    everywhere" fact, not the open-page repaint. The follower is a FRESH
+    account (never `follower_app`'s), because the follows plane outlives the
+    test."""
+    from helpers import enrollment
+    from helpers.fleet import poked_pass
+
+    url = nest_instance["url"]
+    user = _make_user(nest_instance)
+    enrollment.sign_in(app, request, nest_instance, user)
+    enrollment.await_enrollment(app, url, user)
+    seat_b = sibling_seats.launch(user=user)
+    enrollment.await_enrollment(seat_b, url, user)
+
+    owner = _owner(nest_instance)
+    folder = _folder_for(nest_instance, owner)
+
+    _follow(app, owner["actor_id_hex"], folder)
+
+    def b_lists_it():
+        poked_pass(app.driver, what="seat A's publish")
+        poked_pass(seat_b.driver, what="seat B's walk")
+        _revisit_folders(seat_b)
+        return _row_of(seat_b, folder) is not None
+
+    wait_until(
+        b_lists_it, _CONVERGE_S, interval=1.0,
+        diagnose=lambda: (
+            f"the follow of {folder!r} made on seat A never listed on the same "
+            f"account's other device: seat B {_followed_rows_diagnosis(seat_b)}"
+        ),
+    )
+
+    i = _row_of(seat_b, folder)
+    seat_b.driver.click("folder-unfollow-button", scope=f"folder-followed-item[{i}]")
+    wait_until(
+        lambda: _row_of(seat_b, folder) is None,
+        _UI_WINDOW_S,
+        diagnose=lambda: f"seat B's own unfollow never took: {_followed_rows_diagnosis(seat_b)}",
+    )
+
+    def a_drops_it():
+        poked_pass(seat_b.driver, what="seat B's publish")
+        poked_pass(app.driver, what="seat A's walk")
+        _revisit_folders(app)
+        return _row_of(app, folder) is None
+
+    wait_until(
+        a_drops_it, _CONVERGE_S, interval=1.0,
+        diagnose=lambda: (
+            f"the unfollow of {folder!r} made on seat B never reached seat A, "
+            f"which still lists it: {_followed_rows_diagnosis(app)}"
+        ),
+    )

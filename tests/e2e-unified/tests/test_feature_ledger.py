@@ -2014,7 +2014,7 @@ COMMIT_A, COMMIT_B = "a" * 40, "c" * 40
 
 
 def _lg_session(monkeypatch, directory, outcomes, *, commit=COMMIT_A, dirty=False,
-                tagged=(), config=None):
+                tagged=(), config=None, directory_platform="linux"):
     """One pytest session of the directory's event, driven through the live conftest's
     own hooks: collection (`_apply_feature_axis`), a report per phase per test
     (`pytest_runtest_logreport`) and the session-end merge. `outcomes` maps a pytest
@@ -2032,7 +2032,7 @@ def _lg_session(monkeypatch, directory, outcomes, *, commit=COMMIT_A, dirty=Fals
                 fl.note_skip_class(outcome.partition(":")[2])
             for report in _phases(nodeid, outcome):
                 real.pytest_runtest_logreport(report)
-        path = lg.write(directory, platform="linux")
+        path = lg.write(directory, platform=directory_platform)
         baseline = copy.deepcopy(real._baseline_results)
         ledger = copy.deepcopy(fl._records)
     fl.reset_test_state()
@@ -2071,7 +2071,24 @@ def test_a_red_then_a_green_at_the_same_commit_is_flaky(tmp_path, _origin):
     tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_B)
     rec = tests[LG_KEY_A]
     assert rec["flaky"]["count"] == 1 and rec["flaky"]["last"] == rec["last"]["time"]
+    assert rec["flaky"]["times"] == [rec["last"]["time"]], rec
     assert rec["red_since"] is None and rec["last_green"]["commit"] == COMMIT_B
+
+
+def test_the_flake_times_are_kept_newest_last_and_bounded():
+    """The janitor counts flakes inside a window, so the record keeps their times."""
+    run = {"commit": COMMIT_B, "base": RUN_BASE, "dirty": False, "origin": "session",
+           "today": "2026-11-08"}
+    rec = None
+    for i in range(lg.FLAKY_TIMES_KEPT + 2):
+        rec = lg.observe(rec, outcome="red", time=f"2026-11-08T00:{i:02d}:00+00:00",
+                         duration=1.0, run=run)
+        rec = lg.observe(rec, outcome="green", time=f"2026-11-08T00:{i:02d}:30+00:00",
+                         duration=1.0, run=run)
+    times = rec["flaky"]["times"]
+    assert rec["flaky"]["count"] == lg.FLAKY_TIMES_KEPT + 2
+    assert len(times) == lg.FLAKY_TIMES_KEPT and times[-1] == rec["flaky"]["last"], times
+    assert times == sorted(times)
 
 
 @pytest.mark.parametrize("red_dirty,green_dirty", [(True, True), (True, False), (False, True)])
@@ -2084,6 +2101,33 @@ def test_a_red_then_a_green_on_a_dirty_tree_is_no_flake(tmp_path, _origin, red_d
     rec = tests[LG_KEY_A]
     assert rec["flaky"]["count"] == 0, rec
     assert rec["red_since"] is None and rec["last_green"]["dirty"] is green_dirty
+
+
+@pytest.mark.parametrize("moved", ["rebased", "edited"])
+def test_a_tree_that_moves_under_the_run_marks_the_run_dirty(tmp_path, _origin, moved):
+    """Dirt is read again at the session's end: a run whose tree was rebased or
+    edited while it ran is not the commit collection read, so its red and a later
+    clean green there are no flake — the text checks of a script edited under a
+    long tier_1 run were filed as flaky this way (mac, 2026-11-02)."""
+    import conftest as real
+
+    _origin.setenv(lg.HOME_ENV, str(tmp_path))
+    heads = iter([COMMIT_B, COMMIT_A if moved == "rebased" else COMMIT_B])
+    dirt = iter([[], [] if moved == "rebased" else [" M README.md"]])
+    _origin.setattr(fl, "head_commit", lambda repo=None: next(heads))
+    _origin.setattr(fl, "main_base", lambda c, repo=None: RUN_BASE)
+    _origin.setattr(fl, "tree_dirt", lambda repo=None: next(dirt))
+    with _isolated_last_green():
+        real._apply_feature_axis(_LgConfig(), [_Item([], LG_A)])
+        for report in _phases(LG_A, "failed"):
+            real.pytest_runtest_logreport(report)
+        real._write_last_green(None)
+    fl.reset_test_state()
+    rec = lg.load(tmp_path / f"{fl.host_platform()}.json")[LG_KEY_A]
+    assert rec["last"] == {**rec["last"], "outcome": "red", "commit": COMMIT_B, "dirty": True}, rec
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_B,
+                        directory_platform=fl.host_platform())
+    assert tests[LG_KEY_A]["flaky"]["count"] == 0, tests[LG_KEY_A]
 
 
 def test_a_red_twice_is_broken_and_its_last_green_stays(tmp_path, _origin):
@@ -2441,3 +2485,23 @@ def test_an_unknown_host_platform_word_is_a_collection_error():
     with pytest.raises(pytest.UsageError, match="darwin"):
         conftest._check_host_platform_markers([_MarkedItem("t.py::x", ("darwin",))])
     conftest._check_host_platform_markers([_MarkedItem("t.py::x", ("macos",))])
+
+
+# ── the kids channels (feature-catalog.md § Cell semantics, *A second store identity …*)
+def test_a_kids_run_writes_its_own_file_keyed_on_its_parents_platform(tmp_path, monkeypatch):
+    """`--app android-kids` parametrizes the item by the kids value, so it is attributed
+    to the kids column: its record lands in `android-kids.json`, never in the parent's
+    file, keyed by the host platform the parent's driver runs on."""
+    import features_catalog as fc
+
+    monkeypatch.setattr(fl, "host_platform", lambda: "linux")
+    fl.note_param_apps({"android-kids"})
+    fl.note_app("android-kids")
+    assert fl.attributed_apps() == {"android-kids"}
+    for app in fl.attributed_apps():
+        _record(app, "feed-read", "t.py::a")
+    fl.write(tmp_path, surfaces=SURFACES)
+    assert {p.name for p in tmp_path.glob("*.json")} == {"android-kids.json"}
+    data = json.loads((tmp_path / "android-kids.json").read_text(encoding="utf-8"))
+    platforms = set(data["features"]["feed-read"]["tests"]["t.py::a"])
+    assert platforms == {"linux"} and platforms <= fc.COLUMN_PLATFORMS["android"]

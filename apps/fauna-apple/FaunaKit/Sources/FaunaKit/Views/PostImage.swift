@@ -17,6 +17,11 @@ import SwiftUI
 public struct PostImage: View {
     let source: PostImageSource
     let activate: (() -> Void)?
+    /// The picture's label (render-model.md § D6c, the `alt` paragraph): its author's
+    /// description or the shared fixed text, already settled by
+    /// ``documentMediaElements(_:)``. Published as the element's `alt` attribute and
+    /// spoken as its accessibility label; `nil` publishes none.
+    let alt: String?
 
     /// The picture that has actually appeared. Set only by the painted view's own
     /// `.onAppear`, so nothing but a decoded image on screen can answer `painted`;
@@ -24,8 +29,9 @@ public struct PostImage: View {
     /// mistaken for the one that loaded.
     @State private var paintedKey: PaintKey?
 
-    public init(source: PostImageSource, activate: (() -> Void)? = nil) {
+    public init(source: PostImageSource, alt: String? = nil, activate: (() -> Void)? = nil) {
         self.source = source
+        self.alt = alt
         self.activate = activate
     }
 
@@ -35,14 +41,19 @@ public struct PostImage: View {
         // (`PostImageSource.placeholderText`); every other source has no text,
         // so the read falls back to `state`, as before.
         let text = source.placeholderText
+        let attributes: [String: String] = alt.map { ["alt": $0] } ?? [:]
         if let activate {
             pixels
+                .accessibilityLabel(alt ?? "")
                 .accessibilityIdentifier(Ids.postImage)
-                .automationActivate(Ids.postImage, text: { text }, value: { state }, perform: activate)
+                .automationActivate(Ids.postImage, text: { text }, value: { state },
+                                    attributes: { attributes }, perform: activate)
         } else {
             pixels
+                .accessibilityLabel(alt ?? "")
                 .accessibilityIdentifier(Ids.postImage)
-                .automationValue(Ids.postImage, text: { text }, value: { state })
+                .automationValue(Ids.postImage, text: { text }, value: { state },
+                                 attributes: { attributes })
         }
     }
 

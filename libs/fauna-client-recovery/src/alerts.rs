@@ -27,6 +27,10 @@
 use fauna_core::identity::ActorId;
 use fauna_protocol::{RpcErrorClass, RpcRequester};
 
+/// The registry the veto settles ([`sync_alert_after_veto`]) — re-exported so
+/// a caller of the gesture names the type through this crate.
+pub use fauna_client_alerts::CriticalAlerts;
+
 use crate::error::Result;
 use crate::nest::RecoveryClient;
 use crate::replacement::{PendingReplacement, pending_replacement};
@@ -36,9 +40,10 @@ use crate::replacement::{PendingReplacement, pending_replacement};
 /// (`fauna_client_core::recovery_pending`, whose module note says how the
 /// readings merge).
 pub use fauna_client_core::recovery_pending::{
-    BOUND_SOURCE, LinkedReading, alert_key, linked_source, linked_windows,
-    pending_replacement_alert_lines, record_linked_readings, retain_linked_sources,
-    sync_linked_readings, sync_pending_replacement_from,
+    BOUND_SOURCE, LinkedReading, LinkedReadingsChanged, alert_key, earliest_linked_window,
+    linked_readings_generation, linked_source, linked_windows, pending_replacement_alert_lines,
+    record_linked_readings, retain_linked_sources, settle_linked_readings, sync_linked_readings,
+    sync_pending_replacement_from,
 };
 #[cfg(test)]
 use fauna_client_core::recovery_pending::{PENDING_ALARM_DETAIL_KEY, PENDING_ALARM_KEY};
@@ -66,6 +71,29 @@ pub fn sync_pending_replacement_alert(
         );
     }
     sync_pending_replacement_from(alerts, actor_id, BOUND_SOURCE, pending, now);
+}
+
+/// Settle the alert from a veto's answers, in the gesture's own call: the
+/// bound nest's reading clears when it answered (`bound_answered` — a veto it
+/// accepted leaves no window there, whether or not one was pending), each
+/// linked nest that answered loses its reading
+/// ([`settle_linked_readings`]), and the readings left — the nests the veto
+/// could not reach, whose windows stay loud by `linked_fanout`'s promise —
+/// are posted again. So "one veto clears it" holds on the device's banner
+/// the moment it holds at the nests, instead of at the leg's next pass and
+/// the sweep's after it.
+pub fn sync_alert_after_veto(
+    alerts: &fauna_client_alerts::CriticalAlerts,
+    actor_id: &ActorId,
+    bound_answered: bool,
+    linked_answered: &[[u8; 32]],
+    now: i64,
+) {
+    if bound_answered {
+        sync_pending_replacement_from(alerts, actor_id, BOUND_SOURCE, None, now);
+    }
+    settle_linked_readings(actor_id, linked_answered);
+    sync_linked_readings(alerts, actor_id, now);
 }
 
 /// Read the pending-replacement status and sync the alert from it.
@@ -139,6 +167,38 @@ mod tests {
         let p = pending(&"ab".repeat(32), 100);
         let lines = pending_replacement_alert_lines(&p, 5_000);
         assert_eq!(lines[1].args["days"], "0");
+    }
+
+    /// A veto's answers settle the banner at once: the nests it reached lose
+    /// their reading, the one it could not reach keeps the alert standing.
+    #[test]
+    fn a_veto_settles_the_reached_nests_and_keeps_an_unreached_one_loud() {
+        let alerts = CriticalAlerts::new();
+        // A distinct identity: the readings are process-wide.
+        let actor = actor(0xb1);
+        let (reached, unreached) = ([0x11; 32], [0x22; 32]);
+        let window = pending(&"ab".repeat(32), 9_000);
+        sync_pending_replacement_alert(&alerts, &actor, Some(&window), 0);
+        record_linked_readings(
+            &actor,
+            &[
+                (reached, LinkedReading::Read(Some(window.clone()))),
+                (unreached, LinkedReading::Read(Some(window.clone()))),
+            ],
+        );
+        sync_linked_readings(&alerts, &actor, 0);
+        assert_eq!(alerts.sources(&alert_key(&actor)).len(), 3);
+
+        sync_alert_after_veto(&alerts, &actor, true, &[reached], 0);
+        assert_eq!(
+            alerts.sources(&alert_key(&actor)),
+            vec![linked_source(&unreached)],
+            "the unreached nest alone still holds the alert"
+        );
+
+        // The bound nest refused (its reading stands), the last nest answered.
+        sync_alert_after_veto(&alerts, &actor, false, &[unreached], 0);
+        assert!(alerts.active().is_empty(), "nothing pends anywhere");
     }
 
     #[test]

@@ -4,6 +4,9 @@ title: Bridges: approve and rotate keys
 section: admin area
 goal: docs/goal/behavior/admin.md § Approved-bridges roster
 guide: docs/guides/admin-tour.md § Bridges
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,7 +18,7 @@ what that costs.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at 308c995169.
+Stamped 2026-11-07 at ac836c937b.
 
 1. [app] A pending helper shows as a card naming what it does, and approving it takes it off the list — `docs/goal/behavior/admin.md` § Bridge display naming
    - `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves`
@@ -59,6 +62,11 @@ Stamped 2026-10-01 at 308c995169.
     - `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_pending_card_shows_when_it_first_asked`
 18. [nest] After a mail helper's key is rotated, mail flows again: a message arrives and a message leaves — `docs/goal/behavior/mail-bridge-lifecycle.md` § Service-user re-keying
     - `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed`
+19. [nest] Only a process on the nest's own machine can ask to enroll as a bridge: a remote caller is refused and the door is not reachable over public TLS — `docs/goal/behavior/mail-bridge-lifecycle.md` § Lifecycle phases
+   - `tests/e2e-unified/tests/api/test_bridge_enroll_loopback_only.py::test_a_remote_caller_cannot_ask_to_enroll_as_a_bridge`
+   - `tests/e2e-unified/tests/api/test_bridge_enroll_loopback_only.py::test_a_process_on_the_nests_own_machine_can_ask_to_enroll_as_a_bridge`
+   - `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_stranger_crossing_the_sni_router_cannot_ask_to_enroll_as_a_bridge`
+   - `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_forged_proxy_header_through_the_sni_router_cannot_pass_for_loopback`
 
 ## Status
 
@@ -71,7 +79,9 @@ Stamped 2026-10-01 at 308c995169.
 | macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.4-dev+b5779216.dirty standalone |
+| tui | ✅ full | 0.1.6-dev+8f244c6f standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -99,4 +109,8 @@ Stamped 2026-10-01 at 308c995169.
 | 16 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_approved_row_shows_name_and_when_approved` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_pending_card_shows_when_it_first_asked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/api/test_bridge_enroll_loopback_only.py::test_a_remote_caller_cannot_ask_to_enroll_as_a_bridge` | nest (linux): passed |
+| 19 | nest | `tests/e2e-unified/tests/api/test_bridge_enroll_loopback_only.py::test_a_process_on_the_nests_own_machine_can_ask_to_enroll_as_a_bridge` | nest (linux): passed |
+| 19 | nest | `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_stranger_crossing_the_sni_router_cannot_ask_to_enroll_as_a_bridge` | nest (linux): passed |
+| 19 | nest | `tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py::test_a_forged_proxy_header_through_the_sni_router_cannot_pass_for_loopback` | nest (linux): passed |
 <!-- features-render:end -->

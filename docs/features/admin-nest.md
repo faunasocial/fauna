@@ -4,6 +4,9 @@ title: Nest: network mode, pairing, ports, updates, region, identity, sign-in ke
 section: admin area
 goal: docs/goal/behavior/admin.md § N. Nest
 guide: docs/guides/admin-tour.md § Nest
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -18,7 +21,7 @@ post that you can overturn.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e129e78aa0.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] The network mode flips from the page and is read back from the nest — `docs/goal/behavior/admin.md` § N. Nest
    - `tests/e2e-unified/tests/test_admin_nat_mode.py::test_nat_mode_control_renders`
@@ -123,19 +126,34 @@ Stamped 2026-10-01 at e129e78aa0.
 38. [nest] A newly built server whose first download of the nest fails keeps trying until it succeeds, on every start, so a registry outage or a build not yet published never leaves it out of reach — `docs/goal/architecture/installers/vps.md` § What Happens Behind the Scenes
     - `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_runcmd_starts_the_unit_instead_of_the_compose`
     - `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_nest_up_retries_until_compose_succeeds`
+39. [nest] A legal takedown also withdraws the post where your nest had published it, on Bluesky and Nostr — `docs/goal/architecture/content-moderation-and-ranking.md` § Implementation status today
+    - `tests/e2e-unified/tests/api/test_legal_takedown_off_box_retraction.py::test_a_legal_takedown_withdraws_the_post_from_bluesky_and_nostr`
+40. [app] The update status line also says how soon new builds are picked up on the channel the server follows: within about a minute on Dev and Test, within the hour on Stable — `docs/goal/architecture/nest/update-channel.md` § The UI
+   - `tests/e2e-unified/tests/test_admin_update_channel.py::test_admin_moves_the_box_between_channels_and_the_status_follows_the_decision`
+   - `tests/e2e-unified/tests/test_admin_update_channel.py::test_a_pinned_box_follows_no_channel_until_one_is_chosen`
+41. [nest] When the server has stayed on an older build than its channel offers for longer than the channel's check interval plus a short allowance, the nest warns once in its log for that newer build — `docs/goal/architecture/nest/update-channel.md` § What the updater reports
+   - `tests/e2e-unified/tests/api/test_update_channel.py::test_an_unapplied_newer_head_is_said_overdue_once`
+42. [nest] A taken-down post also leaves its author's website, their export archive, Search and what other nests fetch, and a restore brings the web page back — `docs/goal/behavior/takedown-and-block.md` § Legal takedown
+   - `tests/e2e-unified/tests/api/test_takedown_serve_doors.py::test_a_taken_down_post_leaves_the_website_export_search_and_peers_and_a_restore_reopens_the_page`
+43. [nest] No door serves the attachments of a taken-down or blocked item — not the feed, a share link or a website — `docs/goal/behavior/takedown-and-block.md` § Legal takedown
+   - `tests/e2e-unified/tests/api/test_takedown_serve_doors.py::test_no_door_serves_a_withheld_posts_attachment`
+44. [app] The admin blocks a reported conversation message: the other members see a notice in its place, and its author keeps the message with the notice beside it — `docs/goal/behavior/takedown-and-block.md` § Admin block of a reported item
+   - `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
-| linux | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
+| web | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
+| linux | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
 | windows | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
-| macos | ✅ full | 0.1.5-dev+409ac563 standalone |
-| ios | ✅ full | 0.1.5-dev+407a19e1 standalone |
+| macos | ⚠ partial | 0.1.5-dev+409ac563 standalone |
+| ios | ⚠ partial | 0.1.5-dev+407a19e1 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
+| tui | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -147,7 +165,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 3 | app | `tests/e2e-unified/tests/test_serving_port.py::test_serving_port_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_serving_port.py::test_serving_port_invalid_surfaces_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_host_maintenance.py::test_os_maintenance_status_not_reported_without_host_data` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_host_maintenance.py::test_os_maintenance_status_up_to_date` | web (linux): passed, linux (linux): passed, windows (windows): error, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_host_maintenance.py::test_os_maintenance_status_up_to_date` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_host_maintenance.py::test_os_restart_pending_shows_button_and_triggers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_nest.py::test_region_declaration_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_nest.py::test_malformed_region_is_refused_client_side` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -157,11 +175,11 @@ Stamped 2026-10-01 at e129e78aa0.
 | 8 | nest | `tests/e2e-unified/tests/api/test_nest_rotation_chain.py::test_the_chain_carries_the_hop_a_real_rotation_wrote` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_nest_rotation_chain.py::test_a_rotation_evicts_every_bearer_minted_before_it` | nest (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_admin_oauth_issuer_keys.py::test_the_admin_walks_the_three_sign_in_key_controls_through_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_restricted_posts_text_reaches_the_admins_when_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_restricted_posts_text_reaches_the_admins_when_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_restricted_posts_text_reaches_the_admins_when_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_restricted_posts_text_reaches_the_admins_when_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 13 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_many_reports_of_one_thing_in_a_day_ring_the_admin_once` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_resolving_a_report_changes_nothing_about_the_content_or_its_author` | nest (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_serving_port.py::test_a_router_fronted_nest_shows_the_serving_port_read_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -204,4 +222,11 @@ Stamped 2026-10-01 at e129e78aa0.
 | 37 | app | `tests/e2e-unified/tests/test_admin_update_channel.py::test_a_nest_the_image_does_not_run_says_so_and_its_controls_are_inert` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 38 | nest | `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_runcmd_starts_the_unit_instead_of_the_compose` | nest (linux): passed |
 | 38 | nest | `tests/e2e-unified/tests/platform/docker/test_first_boot_nest_up.py::test_nest_up_retries_until_compose_succeeds` | nest (linux): passed |
+| 39 | nest | `tests/e2e-unified/tests/api/test_legal_takedown_off_box_retraction.py::test_a_legal_takedown_withdraws_the_post_from_bluesky_and_nostr` | nest (linux): passed |
+| 40 | app | `tests/e2e-unified/tests/test_admin_update_channel.py::test_admin_moves_the_box_between_channels_and_the_status_follows_the_decision` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 40 | app | `tests/e2e-unified/tests/test_admin_update_channel.py::test_a_pinned_box_follows_no_channel_until_one_is_chosen` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 41 | nest | `tests/e2e-unified/tests/api/test_update_channel.py::test_an_unapplied_newer_head_is_said_overdue_once` | — |
+| 42 | nest | `tests/e2e-unified/tests/api/test_takedown_serve_doors.py::test_a_taken_down_post_leaves_the_website_export_search_and_peers_and_a_restore_reopens_the_page` | nest (linux): passed |
+| 43 | nest | `tests/e2e-unified/tests/api/test_takedown_serve_doors.py::test_no_door_serves_a_withheld_posts_attachment` | nest (linux): passed |
+| 44 | app | `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue` | web (linux): failed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

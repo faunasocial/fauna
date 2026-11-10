@@ -4,6 +4,9 @@ title: TLS failure reports are read for you, not mailed to you
 section: your nest
 goal: docs/goal/behavior/smtp-server.md § TLSRPT inbound report listener (RFC 8460)
 guide: docs/guides/own-your-mail.md § Addresses: aliases, plus-addresses, and role addresses
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -40,6 +43,8 @@ Stamped 2026-10-11 at e663c0077a.
 | ios | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | android | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | tui | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

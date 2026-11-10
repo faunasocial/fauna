@@ -539,7 +539,7 @@ impl LocalWriteHost for SyncEngine {
             Ok(_stats) => true,
             Err(e) => {
                 tracing::error!(
-                    "reconcile ({}): {e}",
+                    "reconcile ({}): {e:#}",
                     fauna_core::log_redact::log_folder_name(folder)
                 );
                 false
@@ -835,8 +835,11 @@ pub async fn apply_local_write<H: LocalWriteHost>(
                     Ok(outcome) if outcome.recorded => recorded.push(rel),
                     Ok(_) => {}
                     Err(e) => {
+                        // `{e:#}`, not `{e}`: the outer context names only the
+                        // step ("upload_sealed: checking chunks with
+                        // destination"); the chain names why it failed.
                         tracing::error!(
-                            "upload ({folder_r}) {}: {e}",
+                            "upload ({folder_r}) {}: {e:#}",
                             fauna_core::log_redact::log_path(&rel)
                         );
                     }
@@ -850,7 +853,7 @@ pub async fn apply_local_write<H: LocalWriteHost>(
         LocalWrite::Delete(rel) => {
             if let Err(e) = host.handle_delete(&rel).await {
                 tracing::error!(
-                    "delete ({folder_r}) {}: {e}",
+                    "delete ({folder_r}) {}: {e:#}",
                     fauna_core::log_redact::log_path(&rel)
                 );
             }
@@ -1538,6 +1541,14 @@ pub async fn run_watch_loop(
                         }
                         pull_siblings(&engine, &folder).await;
                         drain_owed_restores(&engine, &folder).await;
+                        // Then UPLOAD what waited (`file-sync.md` § 5, Offline
+                        // Catch-Up step 3 — apply, then upload): a record or an
+                        // upload that failed while the socket was down is
+                        // re-driven only by a converge, which until 2026-11-07
+                        // ran here only on the rescan tick — up to 300 s after
+                        // the socket came back. The same pass the tick runs; as
+                        // there, this root ignores the recorded rels.
+                        let _ = LocalWriteHost::converge(&*engine, &folder).await;
                         engine.refresh_share_writer_roster().await;
                     }
                     // The control plane is gone for good. Park the arm rather

@@ -485,17 +485,82 @@ impl ChildSpawner {
     /// sibling every convergence tick/poke: the agent's own `InstanceLock`
     /// (fauna-ipc `unix_transport`) makes a duplicate exit harmlessly, but
     /// gating here avoids the per-tick process churn in the first place.
-    pub fn spawn_command(&self, mut cmd: Command) {
+    pub fn spawn_command(&self, cmd: Command) {
+        #[cfg(all(unix, any(test, debug_assertions, feature = "test-helpers")))]
+        let own_group = own_group_pid_file(std::env::var_os(AGENT_OWN_GROUP_ENV).as_deref());
+        #[cfg(not(all(unix, any(test, debug_assertions, feature = "test-helpers"))))]
+        let own_group: Option<PathBuf> = None;
+        self.spawn_command_with(cmd, own_group.as_deref());
+    }
+
+    /// [`Self::spawn_command`] over an explicit own-group pid file (`None` =
+    /// the agent stays in the parent's process group, the only production
+    /// shape). With `Some(path)` (unix only — windows has no process groups
+    /// and ignores it) the child is started as the leader of a NEW process
+    /// group, with no stdin, and its pid — which is also its pgid — is written
+    /// to `path`; see [`AGENT_OWN_GROUP_ENV`] for why the harness wants that.
+    pub fn spawn_command_with(&self, mut cmd: Command, own_group: Option<&std::path::Path>) {
         let mut children = self.children.lock().unwrap();
         children.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_))));
         if !children.is_empty() {
             return;
         }
+        #[cfg(unix)]
+        if own_group.is_some() {
+            use std::os::unix::process::CommandExt as _;
+            // Not the pty's foreground group any more, so the hangup the kernel
+            // sends that group when the session leader (the app) exits misses
+            // it; and with no tty stdin a background read cannot SIGTTIN it.
+            // No tty stdout either: an agent that outlives the app while still
+            // holding the pty slave makes the harness's close of the pty master
+            // block in the kernel on macOS (it logs to its own file, and its
+            // writes would only shred the app's frames). stderr stays the
+            // launch's own stderr file, never the tty.
+            cmd.process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null());
+        }
         match cmd.spawn() {
-            Ok(child) => children.push(child),
+            Ok(child) => {
+                #[cfg(unix)]
+                if let Some(path) = own_group
+                    && let Err(e) = std::fs::write(path, child.id().to_string())
+                {
+                    tracing::warn!(
+                        "could not record the agent's pgid at {}: {e}",
+                        path.display()
+                    );
+                }
+                #[cfg(not(unix))]
+                let _ = own_group;
+                children.push(child);
+            }
             Err(e) => tracing::warn!("agent child spawn failed: {e}"),
         }
     }
+}
+
+/// Starts an e2e-spawned agent in a process group of its OWN and records its
+/// pgid at the path this env names. Set ONLY by the e2e harness, on a launch
+/// that opts in (the `FAUNA_E2E_*` runtime-gate family, testing.md point 15);
+/// the read is compiled out of a plain `--release` build (convention 15), so
+/// production — the systemd/launchd unit and the Flatpak/Snap child — never
+/// sees it.
+///
+/// Why: under e2e the agent is a plain child of the app ([`ChildSpawner`]), so
+/// it sits in the app's process group — the pty's foreground group on tui — and
+/// the kernel's hangup on the session leader's exit kills it the moment the app
+/// quits. In production the agent is a user unit and keeps syncing app-dead
+/// (local-folder-sync outcome 23); a test witnessing that needs the agent to
+/// survive the quit. The recorded pgid is how the harness still owns it: the
+/// driver kills that group at teardown and in its unclean kill, so a run leaves
+/// no agent behind (e2e-launch-isolation.md, convention 10).
+pub const AGENT_OWN_GROUP_ENV: &str = "FAUNA_E2E_SYNC_AGENT_PGID_FILE";
+
+/// The own-group pid file from a raw env value: empty or unset means "stay in
+/// the parent's group". Pure, so the meaning of "set" is pinned without a spawn.
+pub fn own_group_pid_file(raw: Option<&OsStr>) -> Option<PathBuf> {
+    raw.filter(|r| !r.is_empty()).map(PathBuf::from)
 }
 
 /// The ready-made [`AgentSpawner`] for a client that is always a plain
@@ -1895,6 +1960,83 @@ mod tests {
             let _ = c.kill();
             let _ = c.wait();
         }
+    }
+
+    /// The process group `pid` belongs to, read through `ps` (no libc
+    /// dependency in this crate; `ps -o pgid=` is the same on linux and macOS).
+    #[cfg(unix)]
+    fn pgid_of(pid: u32) -> u32 {
+        let out = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps runs");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("no pgid for pid {pid}: {out:?}"))
+    }
+
+    #[test]
+    fn own_group_pid_file_reads_empty_as_unset() {
+        assert_eq!(own_group_pid_file(None), None);
+        assert_eq!(own_group_pid_file(Some(OsStr::new(""))), None);
+        assert_eq!(
+            own_group_pid_file(Some(OsStr::new("/x/agent.pgid"))),
+            Some(PathBuf::from("/x/agent.pgid"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_child_without_own_group_stays_in_the_parent_group() {
+        let spawner = ChildSpawner::new();
+        spawner.spawn_command_with(long_lived_cmd(), None);
+        let pid = spawner.children.lock().unwrap()[0].id();
+        assert_eq!(
+            pgid_of(pid),
+            pgid_of(std::process::id()),
+            "the production shape: the child shares the parent's process group"
+        );
+        kill_children(&spawner);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_child_with_own_group_leads_a_new_group_and_records_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.pgid");
+        let spawner = ChildSpawner::new();
+        spawner.spawn_command_with(long_lived_cmd(), Some(&file));
+        let pid = spawner.children.lock().unwrap()[0].id();
+        assert_eq!(pgid_of(pid), pid, "the child leads a group of its own");
+        assert_ne!(pgid_of(pid), pgid_of(std::process::id()));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            pid.to_string(),
+            "the recorded pgid is the child's own"
+        );
+        kill_children(&spawner);
+    }
+
+    /// The own-group agent keeps no handle on the app's terminal: its stdout
+    /// is overridden to null whatever the caller set (here a pipe, which would
+    /// otherwise surface as `child.stdout`). An agent that outlives the app
+    /// while still holding the pty slave blocks the harness's close of the pty
+    /// master in the kernel on macOS.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_child_with_own_group_holds_no_stdout_of_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.pgid");
+        let spawner = ChildSpawner::new();
+        let mut cmd = long_lived_cmd();
+        cmd.stdout(std::process::Stdio::piped());
+        spawner.spawn_command_with(cmd, Some(&file));
+        assert!(
+            spawner.children.lock().unwrap()[0].stdout.is_none(),
+            "the own-group agent's stdout must be null, never the app's tty"
+        );
+        kill_children(&spawner);
     }
 
     #[test]

@@ -35,6 +35,22 @@ pub struct CreateFolderRequest {
     /// column default (`auto`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
+    /// Create-time audience — `Some("public")` for a folder born public
+    /// (`ui/folders.md` § Audience and website serving → *Born public*),
+    /// `None` for every other create (the nest's default, private). The
+    /// shared create site attests a public one over the id the create mints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+}
+
+/// What a create that LANDED reports. The folder exists whatever this says;
+/// `unattested` names a born-public create whose attesting follow-up update
+/// failed — the folder rests public and unattested, which every seat reads as
+/// sealed, until the owner row's re-confirm door heals it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreatedFolder {
+    /// The follow-up update's error detail, when it failed.
+    pub unattested: Option<String>,
 }
 
 /// One device place to set — the payload of `fauna.folders.places.set`.

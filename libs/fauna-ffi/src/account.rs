@@ -337,6 +337,24 @@ pub fn describe_pending_action(action_type: String, target: Option<String>) -> S
     fauna_protocol::pending_actions::describe_pending_action(&action_type, target.as_deref())
 }
 
+/// `fauna_protocol::pending_actions::describe_pending_action_with_folder` —
+/// [`describe_pending_action`] naming the folder an automatic prune targets,
+/// by the name the app's folder roster gave (`DevicesMachine.folderName`);
+/// `None` paints the neutral sentence. See `docs/goal/ui/settings.md`
+/// § Pending actions.
+#[uniffi::export]
+pub fn describe_pending_action_with_folder(
+    action_type: String,
+    target: Option<String>,
+    folder_name: Option<String>,
+) -> String {
+    fauna_protocol::pending_actions::describe_pending_action_with_folder(
+        &action_type,
+        target.as_deref(),
+        folder_name.as_deref(),
+    )
+}
+
 // ── FfiAccountClient ───────────────────────────────────────────────────
 
 /// UniFFI handle for the `fauna.account.*` / `fauna.quota.get` /

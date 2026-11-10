@@ -23,6 +23,7 @@ import com.fauna.app.payments.ZapSignerItem
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.QrCanvas
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.SuppressScreenCapture
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
@@ -714,6 +715,10 @@ private fun ConnectedAppsSection(
             DisabledControlReasonText(inviteGate.reason)
 
             if (bunkerInvite != null) {
+                // security.md § On-screen secret exposure, rule 2: the connect
+                // string is a minted, revocable credential — capture is suppressed
+                // for exactly as long as it shows.
+                SuppressScreenCapture()
                 Spacer(Modifier.height(8.dp))
                 Text(stringResource(R.string.nostr_connected_apps_reveal_title), style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(8.dp))

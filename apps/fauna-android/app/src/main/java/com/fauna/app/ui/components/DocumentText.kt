@@ -14,7 +14,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -75,11 +79,20 @@ fun DocumentBlocks(
     }
     val images = remember(document) { documentRemoteImages(document) }
 
+    val paintKey = remember { Any() }
+    DisposableEffect(paintKey) { onDispose { DocumentPaint.forget(paintKey) } }
+    val view = LocalView.current
+    val density = LocalDensity.current.density
+
     Column {
         ClickableText(
             text = annotated,
             style = style,
-            modifier = modifier,
+            // The debug test agent's painted read (DocumentPaint): a no-op unless it is recording.
+            modifier = modifier.onGloballyPositioned { coords ->
+                DocumentPaint.place(paintKey, view, coords)
+            },
+            onTextLayout = { DocumentPaint.laidOut(paintKey, it, density) },
             onClick = { offset ->
                 // No link to open in Fauna Kids (the walker emits no URL annotation).
                 if (BuildConfig.KIDS) return@ClickableText
@@ -202,6 +215,18 @@ fun documentProxiedPostImagePath(document: RenderDocument): String? =
 fun documentProxiedPostVideoPath(document: RenderDocument): String? =
     com.fauna.ffi.renderDocumentProxiedPostVideo(document)?.path
 
+/** Every trusted media block (`Image` / `Video` / `ProxiedImage` / `ProxiedVideo`) of
+ *  `document`, in body order — what the feed paints from, one `post-image` per picture block
+ *  and one `video-thumbnail` per video block (render-model.md § D6b *Accessors*). The
+ *  image-vs-video branch is made once, in shared Rust: read over the
+ *  `render_document_media_blocks` UniFFI face, nothing composed app-side. */
+fun documentMediaBlocks(document: RenderDocument): List<RenderBlock> =
+    com.fauna.ffi.renderDocumentMediaBlocks(document)
+
+/** The label a media element carries: the block's own `alt` when the author wrote one, else
+ *  the shared fixed text (render-model.md § D6c → *Proxied video*, the `alt` paragraph). */
+fun mediaAlt(alt: String, fallback: String): String = alt.ifEmpty { fallback }
+
 /** The Resolved link previews in `document`, in body order (render-model.md § D4) — the feed
  *  screen paints one card per entry. The og:image (`imageHash`) is blocked-by-default like a
  *  `RemoteImage`: painted only when `revealed` (the D3 twin). Title/description/domain always show.
@@ -252,8 +277,17 @@ internal fun BlockedRemoteImage(alt: String) {
     }
 }
 
+/**
+ * The lead a list item at nesting [depth] paints before its glyph: one em space per level, so a
+ * nested list sits visibly right of its parent (render-model.md § D7b; tui leads with spaces,
+ * web nests `<ul>`s). The body is one [AnnotatedString], so the indent is in the text itself —
+ * a `ParagraphStyle` indent would split it into separate paragraphs and change its line breaks.
+ * Top-level items ([depth] 0) lead with nothing, as before.
+ */
+internal fun listIndent(depth: Int): String = "\u2003".repeat(depth)
+
 @OptIn(ExperimentalTextApi::class)
-private fun renderDocument(
+internal fun renderDocument(
     document: RenderDocument,
     linkColor: Color,
     codeBackground: Color
@@ -276,7 +310,7 @@ private fun renderDocument(
             is RenderBlock.QuotedPost, is RenderBlock.QuotedMessage, is RenderBlock.LinkPreview -> Unit
             else -> {
                 if (emitted) append("\n\n")
-                appendBlock(block, linkColor, codeBackground)
+                appendBlock(block, linkColor, codeBackground, depth = 0)
                 emitted = true
             }
         }
@@ -287,7 +321,8 @@ private fun renderDocument(
 private fun AnnotatedString.Builder.appendBlock(
     block: RenderBlock,
     linkColor: Color,
-    codeBackground: Color
+    codeBackground: Color,
+    depth: Int,
 ) {
     when (block) {
         is RenderBlock.Heading -> {
@@ -307,11 +342,13 @@ private fun AnnotatedString.Builder.appendBlock(
             // The shared model carries no item numbers — an ordered list renumbers from 1.
             block.items.forEachIndexed { i, item ->
                 if (i > 0) append("\n")
+                append(listIndent(depth))
                 append(if (block.ordered) "${i + 1}. " else "• ")
-                // A markdown list item is one paragraph; append its block content inline.
+                // A markdown list item is one paragraph; append its block content inline. A
+                // list inside the item is one level deeper (render-model.md § D7b).
                 item.blocks.forEachIndexed { j, b ->
                     if (j > 0) append("\n")
-                    appendBlock(b, linkColor, codeBackground)
+                    appendBlock(b, linkColor, codeBackground, depth + 1)
                 }
             }
         }
@@ -321,10 +358,11 @@ private fun AnnotatedString.Builder.appendBlock(
         is RenderBlock.TaskList -> {
             block.items.forEachIndexed { i, item ->
                 if (i > 0) append("\n")
+                append(listIndent(depth))
                 append(if (item.checked) "☑ " else "☐ ")
                 item.blocks.forEachIndexed { j, b ->
                     if (j > 0) append("\n")
-                    appendBlock(b, linkColor, codeBackground)
+                    appendBlock(b, linkColor, codeBackground, depth + 1)
                 }
             }
         }
@@ -332,7 +370,7 @@ private fun AnnotatedString.Builder.appendBlock(
             // linux/web add an indent / `<blockquote>`; Compose signals the quote with italics.
             block.blocks.forEachIndexed { i, b ->
                 if (i > 0) append("\n")
-                appendBlock(b, linkColor, codeBackground)
+                appendBlock(b, linkColor, codeBackground, depth)
             }
         }
         is RenderBlock.CodeBlock -> withStyle(

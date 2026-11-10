@@ -272,6 +272,19 @@ public partial class App : Application
     /// </summary>
     internal static INestHttpClient? CurrentNest => (Current as App)?._nestClient;
 
+    /// <summary>
+    /// The identity the launch machine serving this window last published — its latest
+    /// verify reply's handle and domain — or <c>null</c> before one resolved (or with no
+    /// machine, as an e2e state-protocol login has none). Read per call through the
+    /// observer the app wired onto the machine it built last, so an account switch's new
+    /// machine is followed without re-wiring. The profile SELF header reads it over the
+    /// registry cache (<see cref="Core.Services.SelfDisplayHandle"/>): the reply is
+    /// published, not persisted, so after a mid-session primary rename only it carries
+    /// the new primary.
+    /// </summary>
+    internal static uniffi.fauna_launch_machine.LaunchIdentity? CurrentLaunchIdentity =>
+        (Current as App)?._selfAddressHealObserver?.Machine?.Snapshot().@identity;
+
 #if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// This session's live WS-RPC client, or <c>null</c> before login / after
@@ -1668,6 +1681,9 @@ public partial class App : Application
         // handler re-saves the clamped physical size).
         const int MinWindowDip = 600;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+#if DEBUG || FAUNA_E2E_AGENT
+        _mainWindowHandle = hwnd;
+#endif
         var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
         var appWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId);
         var dpiScale = GetDpiForWindow(hwnd) / 96.0;   // 96 = 100%, 192 = 200%, …
@@ -3238,13 +3254,7 @@ public partial class App : Application
                             machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
                             onOnboardingCompleted);
                     },
-                    Fallthrough: () =>
-                    {
-                        rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
-                            _nestClient, _cryptoService, account,
-                            SeedSecret: secretHex,
-                            OnOnboardingCompleted: onOnboardingCompleted));
-                    });
+                    Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted));
                 rootFrame.Navigate(typeof(Views.LaunchSignInRefusedPage), ctx);
                 return;
             }
@@ -3271,13 +3281,7 @@ public partial class App : Application
                             machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
                             onOnboardingCompleted);
                     },
-                    Fallthrough: () =>
-                    {
-                        rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
-                            _nestClient, _cryptoService, account,
-                            SeedSecret: secretHex,
-                            OnOnboardingCompleted: onOnboardingCompleted));
-                    },
+                    Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted),
                     // box-recovery.md § Recovery UI (step 4), surviving-device
                     // entry: RevealLaunchRecoverButtonAsync below already read
                     // this box list off the saved nest before the button became
@@ -3325,13 +3329,7 @@ public partial class App : Application
                 }
                 var ctx = new Views.LaunchNeedsUpdateContext(
                     Message: lastError ?? string.Empty,
-                    Fallthrough: () =>
-                    {
-                        rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
-                            _nestClient, _cryptoService, account,
-                            SeedSecret: secretHex,
-                            OnOnboardingCompleted: onOnboardingCompleted));
-                    });
+                    Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted));
                 rootFrame.Navigate(typeof(Views.LaunchNeedsUpdatePage), ctx);
                 return;
             }
@@ -3372,13 +3370,7 @@ public partial class App : Application
                             machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
                             onOnboardingCompleted);
                     },
-                    Fallthrough: () =>
-                    {
-                        rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
-                            _nestClient, _cryptoService, account,
-                            SeedSecret: secretHex,
-                            OnOnboardingCompleted: onOnboardingCompleted));
-                    },
+                    Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted),
                     IsFork: snap.@identityFork,
                     PinnedHex: changed.@pinnedHex,
                     SeenHex: changed.@seenHex);
@@ -3403,13 +3395,7 @@ public partial class App : Application
                             machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
                             onOnboardingCompleted);
                     },
-                    Fallthrough: () =>
-                    {
-                        rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
-                            _nestClient, _cryptoService, account,
-                            SeedSecret: secretHex,
-                            OnOnboardingCompleted: onOnboardingCompleted));
-                    },
+                    Fallthrough: () => FallThroughToWizard(rootFrame, account, secretHex, onOnboardingCompleted),
                     Recover: (boxes) =>
                     {
                         if (secretHex is null) return;
@@ -3430,6 +3416,48 @@ public partial class App : Application
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// "Use a different nest": walk the launch-target account away from its nest,
+    /// keeping the identity, then seed the wizard at <c>handle_entry</c> with that
+    /// identity — the one body every launch surface's fallthrough CTA runs (tui's
+    /// <c>walk_away_from_nest</c>; <c>account-scoping.md</c> § Concurrent instances,
+    /// the delete corollary).
+    ///
+    /// <para>The registry's <c>ClearNestBinding</c> deletes the account's
+    /// (nest_url, device_id) slots and its reach hint and keeps the secret, so an
+    /// abandoned re-onboard relaunches at the handle step instead of silently
+    /// retrying the same nest (connect-and-sign-in outcome 16). The account is
+    /// derived from <paramref name="secretHex"/> itself — the very seed the wizard
+    /// receives — so the seed and the clear can never name two accounts, whichever
+    /// dispatch path (plain launch, bound launch, switch, retry) handed the secret
+    /// in. The identity-changed pin is not one of the slots the shared call
+    /// deletes, so the fallthrough still never forgets it. Best-effort, as on
+    /// tui/linux/android/web: a failed clear is logged and the seed goes ahead.</para>
+    /// </summary>
+    private void FallThroughToWizard(
+        Frame rootFrame, ISessionAccount account, string? secretHex, System.Action onOnboardingCompleted)
+    {
+        if (secretHex is { Length: > 0 })
+        {
+            try
+            {
+                var actor = Convert.ToHexString(uniffi.fauna_ffi.FaunaFfiMethods.ActorIdFromSecret(
+                    Convert.FromHexString(secretHex))).ToLowerInvariant();
+                using var registry = CredentialStore.Registry();
+                registry.ClearNestBinding(actor);
+            }
+            catch (Exception ex)
+            {
+                ShellLog.Warn("App",
+                    $"[launch] use-a-different-nest could not clear the nest binding: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+        rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
+            _nestClient, _cryptoService, account,
+            SeedSecret: secretHex,
+            OnOnboardingCompleted: onOnboardingCompleted));
     }
 
     /// <summary>The locked launch surface this process is showing (and following),
@@ -3734,12 +3762,12 @@ public partial class App : Application
         // critical-alerts.md § Mechanism → How often the detector runs: the re-sweep
         // loop rides the SAME universal post-auth hook as the two calls above, and
         // never returns — StartMainAppAsync is process-lifetime, which is the scope
-        // a loop that only stops at identity teardown needs. A re-entry for the
-        // identity whose loop is already running gets one pass instead of a second
-        // loop (StartForIdentity's split). Best-effort, fire-and-forget — never
-        // awaited for sign-in to proceed.
-        Core.Helpers.CriticalAlertsSweep.StartForIdentity(
-            _rpcClient, baseUrl, _cryptoService!.ActorIdHex);
+        // a loop that only stops at identity teardown needs. A loop also ends with
+        // the client it rides, and the old _rpcClient was just disposed above, so a
+        // same-identity re-entry starts the re-established loop on the new client
+        // (StartForIdentity's split). Best-effort, fire-and-forget — never awaited
+        // for sign-in to proceed.
+        Core.Helpers.CriticalAlertsSweep.StartForIdentity(_rpcClient, baseUrl);
 
         // The S8 seal backfill (file-sync.md § Sealed names & paths → Implementation
         // status today): rides the same universal post-auth hook, through the just-
@@ -4054,14 +4082,13 @@ public partial class App : Application
         // Fire-and-forget, but ACTOR-scoped, not app-lifetime: it holds an
         // ActorScope lease and the next actor change retires it (see its header —
         // spawning one per Online transition with no seam is exactly how windows
-        // came to accumulate a live cadence per login). Skipped under the E2E bridge: it would
-        // open a second WS to the test nest, and its 6h first-delay means it never
-        // ticks within a test anyway (the auto-renew *checkbox* is the e2e surface,
-        // not the cadence).
-        if (string.IsNullOrEmpty(E2eEnv.Bridge))
-        {
-            _ = RunAutoRenewCadenceAsync(_rpcClient);
-        }
+        // came to accumulate a live cadence per login), and it is one per client
+        // and actor generation, so a second spawn here or at the e2e login's seam
+        // joins the live one. It runs under the E2E bridge too: it rides the
+        // session's own connection (no second WS), and its 6 h first wait is what
+        // the e2e `auto_renew_wake` poke races (tls-certificates.md § C.3, the
+        // tick witness).
+        _ = RunAutoRenewCadenceAsync(_rpcClient);
 
         // The blessed-nests trust auto-renew loop (nests.md § Expiry / renewal →
         // Duration and blessing): app start, then every AUTO_RENEW_CHECK_SECS,
@@ -4475,6 +4502,18 @@ public partial class App : Application
     /// the next actor change, disposing the machine it owns (it holds the session
     /// client's connection, so a leaked machine would keep that connection
     /// dialling).</para>
+    ///
+    /// <para><b>One per client and actor generation.</b> It is spawned from two
+    /// post-auth sites: production's <c>StartMainAppAsync</c>, and the e2e login's
+    /// <c>session</c> seam, which never reaches it and re-fires on every e2e session
+    /// patch, often over the same client. A spawn that finds a live cadence on the
+    /// same client in the same actor generation leaves at once
+    /// (<see cref="_liveAutoRenewCadence"/>), so neither site stacks a second loop.</para>
+    ///
+    /// <para><b>The e2e poke.</b> In a Debug or <c>FAUNA_E2E_AGENT</c> build the wait
+    /// is an <see cref="Core.Helpers.AutoRenewWake"/> minted for this loop, which the
+    /// agent's <c>auto_renew_wake</c> ends early (convention 14). A Release build
+    /// waits on the bare clock and carries no notifier (convention 15).</para>
     /// </summary>
     private static async Task RunAutoRenewCadenceAsync(Core.Services.INestRpcClient rpc)
     {
@@ -4482,7 +4521,46 @@ public partial class App : Application
         // below is the honest report that no cadence is live for this actor.
         using var lease = Core.Services.ActorScope.BeginBackgroundLoop();
         var actorGone = lease.Token;
+        lock (_autoRenewCadenceGate)
+        {
+            if (_liveAutoRenewCadence is { } running
+                && ReferenceEquals(running.Rpc, rpc)
+                && !running.ActorGone.IsCancellationRequested)
+            {
+                return;
+            }
+            _liveAutoRenewCadence = (rpc, actorGone);
+        }
+        try
+        {
+            await RunClaimedAutoRenewCadenceAsync(rpc, actorGone);
+        }
+        finally
+        {
+            lock (_autoRenewCadenceGate)
+            {
+                // Only our own record: a successor's must outlive this loop's exit.
+                if (_liveAutoRenewCadence is { } running
+                    && ReferenceEquals(running.Rpc, rpc)
+                    && running.ActorGone == actorGone)
+                {
+                    _liveAutoRenewCadence = null;
+                }
+            }
+        }
+    }
 
+    private static readonly object _autoRenewCadenceGate = new();
+
+    /// The client and actor-generation token of the live auto-renew cadence; null
+    /// when none runs. Read and written under <see cref="_autoRenewCadenceGate"/>.
+    private static (Core.Services.INestRpcClient Rpc, CancellationToken ActorGone)? _liveAutoRenewCadence;
+
+    /// The body of <see cref="RunAutoRenewCadenceAsync"/>, once it holds the
+    /// one-per-client claim.
+    private static async Task RunClaimedAutoRenewCadenceAsync(
+        Core.Services.INestRpcClient rpc, CancellationToken actorGone)
+    {
         uniffi.fauna_client_dns.DnsManagementMachine machine;
         try
         {
@@ -4496,11 +4574,20 @@ public partial class App : Application
 
         var pollInterval = TimeSpan.FromSeconds(
             uniffi.fauna_client_dns.FaunaClientDnsMethods.AutoRenewPollSecs());
+#if DEBUG || FAUNA_E2E_AGENT
+        // Minted once the machine is built, so a wake is refused until this loop can
+        // run a pass. Retired in the finally below.
+        var wake = Core.Helpers.AutoRenewWake.Mint(actorGone);
+#endif
         try
         {
         while (!actorGone.IsCancellationRequested)
         {
+#if DEBUG || FAUNA_E2E_AGENT
+            await wake.WaitAsync(pollInterval, actorGone);
+#else
             await Task.Delay(pollInterval, actorGone);
+#endif
             try
             {
                 var domains = await machine.AutoRenewScan();
@@ -4532,6 +4619,9 @@ public partial class App : Application
         }
         finally
         {
+#if DEBUG || FAUNA_E2E_AGENT
+            Core.Helpers.AutoRenewWake.Retire(wake);
+#endif
             // This cadence owns the machine outright (nobody else has a handle), so
             // it must dispose it: the machine holds the session's FfiNestClient, and
             // a leaked holder keeps that client auto-reconnecting to the nest — see
@@ -5291,6 +5381,11 @@ public partial class App : Application
             // `{"count", "showing"}` (`fauna_e2e_agent::PAINTED_ERRORS_KEY`). Fed
             // by `Testing.PaintedErrorObserver`; counted by shared Rust.
             ["painted_errors"] = DecodeObservable(Core.Services.E2eLoudSurfaces.PaintedErrorsJson()),
+            // Every knock push the knock-toast arm received and every toast it
+            // showed — `{"seen", "fired": [{"key", "text", "replace_id"}]}`
+            // (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, notifications outcome 15).
+            // Fed by `NotificationService.ShowKnockNotification`; logged by shared Rust.
+            ["knock_notices"] = DecodeObservable(Core.Services.E2eLoudSurfaces.KnockNoticesJson()),
             // The switcher's "open in new window" spawns (account-scoping.md
             // § Concurrent instances → the running instance's surface). Cross-app
             // shape — apple's InstanceSpawner.stateRecords, linux's
@@ -5455,7 +5550,39 @@ public partial class App : Application
                 ["window_activated"] = _launchWindowActivated is bool activated ? activated : null,
             };
         }
+        // The screen-capture posture (security.md § On-screen secret exposure; the
+        // running-app witness in its § Implementation status today): TOP-level, the
+        // shape apple's ScreenCapturePosture publishes, read by
+        // helpers/capture_posture.py.
+        state["capture_posture"] = CapturePostureForSerialization();
         return state;
+    }
+
+    /// <summary>The main window's HWND, resolved on the UI thread where the window is
+    /// built: <c>WinRT.Interop.WindowNative.GetWindowHandle</c> calls into a thread-affine
+    /// WinRT object, and <see cref="SerializeState"/> runs on the agent's thread pool.</summary>
+    private static volatile IntPtr _mainWindowHandle;
+
+    /// <summary><c>capture_posture</c>: <c>mechanism</c> = <c>window-exclusion</c>
+    /// (<c>WDA_EXCLUDEFROMCAPTURE</c>), <c>holds</c> = every live hold the shared guard
+    /// keeps across windows, and <c>window_excluded</c> = the main window's REAL display
+    /// affinity read back with <c>GetWindowDisplayAffinity</c> — left out, never a
+    /// stand-in <c>false</c>, while there is no window or the platform will not answer.
+    /// A user32 read, so the state provider still does no blocking I/O
+    /// (convention 11).</summary>
+    private static Dictionary<string, object?> CapturePostureForSerialization()
+    {
+        var guard = Core.Services.ScreenCaptureGuard.Shared;
+        var posture = new Dictionary<string, object?>
+        {
+            ["mechanism"] = "window-exclusion",
+            ["holds"] = guard.TotalHolds,
+        };
+        if (guard.WindowExcluded(_mainWindowHandle) is bool excluded)
+        {
+            posture["window_excluded"] = excluded;
+        }
+        return posture;
     }
 
     /// <summary>
@@ -5861,8 +5988,9 @@ public partial class App : Application
     /// <summary>
     /// A shared-Rust JSON observable decoded for the state serializer — never the
     /// raw string (the double-encode trap <see cref="ConvReceiveCyclesForSerialization"/>
-    /// names). Used for <c>connection_reports</c> and <c>painted_errors</c>, whose
-    /// counters are process-wide and start at zero, so there is no pre-session arm.
+    /// names). Used for <c>connection_reports</c>, <c>painted_errors</c> and
+    /// <c>knock_notices</c>, whose logs are process-wide and start empty, so there is
+    /// no pre-session arm.
     /// </summary>
     private static object? DecodeObservable(string json) =>
         System.Text.Json.JsonSerializer.Deserialize<object>(json);
@@ -6212,7 +6340,7 @@ public partial class App : Application
         // while it is still going has to wait for the store to close — the e2e
         // `reset`/`logout` arms' ClearCredentialNamespace on the very next line,
         // and a remove-account of the identity a switch just left
-        // (AccountStateDir.EraseWhenStoppedAsync). Tracked in a set, never one
+        // (AccountStateDir.RemoveAccountGestureAsync). Tracked in a set, never one
         // field: two switches in a row leave two stops running, and the erase
         // waits for both (Core.Services.AccountRuntimeStops).
         if (oldRpc is not null)
@@ -6947,6 +7075,23 @@ public partial class App : Application
                         rpc?.StartKnockPump();
                         Core.Logs.E2eTrace.Write("[cmd-session] after StartKnockPump");
 
+                        // …and the knock OS toast production hangs on that pump
+                        // (StartMainAppAsync's KnockReceived += ShowKnockNotification).
+                        // notifications outcome 15's witness
+                        // (test_notifications_knock_toast.py) reads the log
+                        // ShowKnockNotification feeds; without this the pump raised each
+                        // knock to the Contacts roster alone and the app logged `seen: 0`.
+                        // `-=` first: a repeat `session` patch on a surviving client must
+                        // not stack a second handler (one toast per knock). The toast host
+                        // is initialised here for the same reason as BuildE2eConvSessionAsync
+                        // does it (idempotent).
+                        if (rpc is not null)
+                        {
+                            NotificationService.Initialize();
+                            rpc.KnockReceived -= NotificationService.ShowKnockNotification;
+                            rpc.KnockReceived += NotificationService.ShowKnockNotification;
+                        }
+
                         // Admin host-address report for the e2e login (the set_state path
                         // never reaches StartMainAppAsync, where production runs it) — the
                         // never-publish-a-private-address witness
@@ -6987,23 +7132,37 @@ public partial class App : Application
                         // nothing ever dispatched the sweep under e2e. Best-effort,
                         // fire-and-forget — the SAME call as StartMainAppAsync's, so the
                         // e2e build runs the product's loop: a first or identity-changing
-                        // login starts the re-sweep LOOP (what `alert_sweep_wake` wakes),
-                        // and a same-identity re-auth — this handler re-fires on every
-                        // e2e login in one process — gets one pass instead of a second,
-                        // stacked loop. linux's converge arm makes the same split.
+                        // login starts the re-sweep LOOP (what `alert_sweep_wake` wakes).
+                        // A same-identity re-auth — this handler re-fires on every e2e
+                        // login in one process — disposed the previous client above
+                        // (DisposeNestClients), which ended the loop riding it, so it
+                        // starts the re-established loop on this new client: never a
+                        // second loop on a live client, never a loop left on a dead one.
                         // (The temporary sweep-block traces that sat here came out once
                         // their regression was found and fixed, 2026-09-01: the repaint
                         // ran inline on the FFI callback thread — CriticalAlertsHost's
                         // _uiContext note.)
                         if (account.NestUrl is string sweepNestUrl && rpc is not null)
                         {
-                            Core.Helpers.CriticalAlertsSweep.StartForIdentity(
-                                rpc, sweepNestUrl, crypto.ActorIdHex);
+                            Core.Helpers.CriticalAlertsSweep.StartForIdentity(rpc, sweepNestUrl);
                         }
                         else
                         {
                             Core.Logs.E2eTrace.Write("[cmd-session] sweep SKIPPED — LoadNestUrl returned null, or no session client");
                         }
+
+                        // The certificate auto-renew cadence (tls-certificates.md § C.3)
+                        // rides the SAME universal post-auth hook in production
+                        // (StartMainAppAsync), which this login never reaches. Without
+                        // this call no e2e login would run the tick, and the
+                        // `auto_renew_wake` poke (test_admin_dns_cert_auto_renew_tick.py)
+                        // would have no loop to wake. The SAME call as production's: one
+                        // cadence per client and actor generation, so a repeat `session`
+                        // patch over the same client joins the live loop rather than
+                        // stacking another. It sits on its 6 h wait until woken, so
+                        // deterministic suites are unaffected. Mirrors linux, which runs
+                        // the cadence for every e2e login.
+                        if (rpc is not null) _ = RunAutoRenewCadenceAsync(rpc);
 
                         // succession-aftermath.md § Re-key scope's `BackupKey` corpus
                         // row: the aftermath rides the SAME universal post-auth hook as

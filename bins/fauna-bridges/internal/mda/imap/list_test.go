@@ -83,12 +83,14 @@ func TestSessionListPatternFiltersAndStandardAttrs(t *testing.T) {
 			Mailboxes []wsrpc.MailboxEntry `cbor:"mailboxes"`
 		}{
 			Mailboxes: []wsrpc.MailboxEntry{
+				// Attrs as the nest sends them (special_use_attrs):
+				// LIST writes them verbatim, keeping no table of its own.
 				{Name: "INBOX"},
-				{Name: "Drafts"},
-				{Name: "Sent"},
-				{Name: "Trash"},
-				{Name: "Junk"},
-				{Name: "Archive"},
+				{Name: "Drafts", Attrs: []string{`\Drafts`}},
+				{Name: "Sent", Attrs: []string{`\Sent`}},
+				{Name: "Trash", Attrs: []string{`\Trash`}},
+				{Name: "Junk", Attrs: []string{`\Junk`}},
+				{Name: "Archive", Attrs: []string{`\Archive`}},
 				{Name: "Custom/Sub"},
 			},
 		},

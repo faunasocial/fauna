@@ -22,6 +22,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::seq::SliceRandom;
+#[cfg(feature = "outbound-net")]
+use std::sync::Arc;
+
+#[cfg(feature = "outbound-net")]
+use crate::outbound::dnssec_path::{DnssecPath, ResolverPath};
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PER_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -218,11 +223,13 @@ const _USED: &[Duration] = &[
 /// exists is satisfied; it is validating the name the attacker chose.
 ///
 /// So the bit travels with the hosts, and the caller gates DANE on it.
-/// `false` is the fail-safe value: an answer of unknown provenance is
-/// treated as not-DANE-capable, falling back to the MTA-STS /
-/// opportunistic posture exactly as an Insecure *TLSA* answer already
-/// does. Falling back is the correct direction — a non-secure MX answer
-/// must **skip** DANE, never fail delivery.
+/// `false` means DANE is not applicable — a provably Insecure RRset, or any
+/// answer on a resolver path that does not carry DNSSEC
+/// ([`crate::outbound::dnssec_path`]) — and narrows the posture to
+/// MTA-STS / opportunistic TLS, exactly as an Insecure *TLSA* answer does.
+/// A Bogus or Indeterminate answer on a DNSSEC-capable path is NOT a
+/// `false`: it is a lookup failure that delays delivery (RFC 7672 §2.1.1,
+/// §2.1.2; [`lookup_mx_on_path`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MxAnswer {
     /// `(priority, hostname)` pairs as published, unsorted.
@@ -258,114 +265,269 @@ impl MxRrsetResolver for NullMxRrsetResolver {
     }
 }
 
-/// Resolve `domain`'s MX RRset with mandatory DNSSEC validation, reporting
-/// both the hosts and whether the RRset proved `Secure`.
+/// Resolve `domain`'s MX RRset on the resolver path's posture
+/// (`smtp-server.md` § MX resolution item 1, the Bogus / Indeterminate rule
+/// and the resolver-path paragraph under it).
 ///
-/// Outcomes:
-/// - MX RRset present, every returned record proves `Secure` → hosts +
-///   `secure: true`.
-/// - MX RRset present but the proof is Insecure / Bogus / Indeterminate →
-///   the hosts are still returned (delivery must proceed) with
-///   `secure: false`, so the caller skips DANE and falls back to the
-///   MTA-STS / opportunistic posture.
-/// - **No MX RRset** (NXDOMAIN / NoData) → implicit MX per RFC 5321 §5.1:
-///   `[(0, domain)]` with `secure: true`. The SMTP target is the envelope's
-///   own recipient domain, not a name any DNS answer chose, so the
-///   RFC 7672 §2.2 concern — a forged MX indirection — cannot apply. An
-///   attacker who strips a real MX RRset gains nothing: reaching DANE at
-///   the apex still requires a `Secure` TLSA at `_25._tcp.<domain>`, which
-///   they cannot forge for a signed zone and which does not exist for an
-///   unsigned one.
-/// - Resolver / network error → propagated. **A failed lookup is not a
-///   "no MX RR" answer** (§ MX resolution item 1): the caller tempfails
-///   into the retry curve rather than delivering to the domain's own A
-///   record.
+/// **Capable path** — validation on, and NEVER a re-read without it:
+/// - every MX record proves `Secure` → hosts + `secure: true`;
+/// - the RRset proves `Insecure` (an unsigned zone or an opt-out
+///   delegation — a provable fact, not a failure) → hosts + `secure: false`,
+///   so the caller skips DANE and falls back to MTA-STS / opportunistic TLS;
+/// - any record whose proof is neither (Bogus, Indeterminate), a validation
+///   error, SERVFAIL, a timeout → `Err`. RFC 7672 §2.1.1 equates a Bogus or
+///   Indeterminate answer with lookup failure and §2.1.2 says an MX lookup
+///   failure MUST delay delivery: re-reading the RRset without validation
+///   would let a DNS spoofer who corrupts a DANE-protected recipient's signed
+///   MX answer steer the mail, over opportunistic TLS, to a host they named;
+/// - **no MX RRset** (NXDOMAIN / NoData) → implicit MX per RFC 5321 §5.1:
+///   `[(0, domain)]` with `secure: true` (the target is the envelope's own
+///   recipient domain, which no DNS answer chose — see [`MxAnswer`]).
 ///
-/// Native-only (`outbound-net` feature): `hickory-resolver` does not
-/// cross-compile to wasm32 and must not enter the client FFI surface.
+/// **Incapable path** — the nest is a pre-DANE opportunistic-TLS MTA: the
+/// lookup runs without validation and every answer, the implicit MX
+/// included, travels at `secure: false`.
+///
+/// On either path a failed lookup is not a "no MX RR" answer (§ MX
+/// resolution item 1): it propagates and the caller tempfails into the retry
+/// curve rather than delivering to the domain's own A record.
 #[cfg(feature = "outbound-net")]
-pub async fn lookup_mx_secure(domain: &str) -> anyhow::Result<MxAnswer> {
+pub async fn lookup_mx_on_path(domain: &str, path: ResolverPath) -> anyhow::Result<MxAnswer> {
+    let name = domain.trim_end_matches('.');
+    match path {
+        ResolverPath::Capable => capable_mx_answer(name, raw_mx_lookup(name, true).await),
+        ResolverPath::Incapable => incapable_mx_answer(name, raw_mx_lookup(name, false).await),
+    }
+}
+
+#[cfg(feature = "outbound-net")]
+/// One MX record's DNSSEC proof, as our policy reads hickory's `Proof`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordProof {
+    Secure,
+    Insecure,
+    /// Bogus, Indeterminate — or a record read without validation at all.
+    Unproven,
+}
+
+#[cfg(feature = "outbound-net")]
+/// One MX lookup's outcome before the [`MxAnswer`] policy is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RawMx {
+    /// NXDOMAIN / NoData, or an answer carrying no MX RDATA: the domain
+    /// publishes no MX RRset.
+    NoRecords,
+    /// `(priority, exchange, proof)` per MX record.
+    Records(Vec<(u16, String, RecordProof)>),
+}
+
+/// One MX lookup through hickory, DNSSEC validation on or off.
+#[cfg(feature = "outbound-net")]
+async fn raw_mx_lookup(name: &str, validate: bool) -> anyhow::Result<RawMx> {
     use hickory_resolver::TokioResolver;
-    use hickory_resolver::config::ResolverOpts;
     use hickory_resolver::proto::dnssec::Proof;
     use hickory_resolver::proto::rr::RData;
 
-    let mut opts = ResolverOpts::default();
-    opts.validate = true; // Require DNSSEC validation for the chain.
-    let resolver = TokioResolver::builder_tokio()
-        .map_err(|e| anyhow::anyhow!("build resolver: {e}"))?
-        .with_options(opts)
-        .build()
-        .map_err(|e| anyhow::anyhow!("build resolver: {e}"))?;
-
-    let name = domain.trim_end_matches('.');
-    let rrset = match resolver.mx_lookup(name).await {
-        Ok(rrset) => rrset,
-        Err(e) => {
-            // NXDOMAIN / NoData → the domain publishes no MX RRset, which
-            // is an *answer*, not a failure: implicit MX. Every other
-            // error propagates (see the doc comment).
-            if e.is_no_records_found() {
-                return Ok(MxAnswer {
-                    hosts: vec![(0, name.to_string())],
-                    secure: true,
-                });
-            }
-            return Err(anyhow::anyhow!("MX lookup failed: {e}"));
-        }
+    // A validating read goes through the one TCP-only validating resolver
+    // (`dnssec_path::validating_resolver`, smtp-server.md § MX resolution item
+    // 1, the TCP paragraph); the incapable path's non-validating read keeps
+    // the default transports (UDP, then TCP on a well-formed truncation), so a
+    // resolver with no TCP at all still delivers mail, pre-DANE.
+    let resolver = if validate {
+        crate::outbound::dnssec_path::validating_resolver()?
+    } else {
+        TokioResolver::builder_tokio()
+            .map_err(|e| anyhow::anyhow!("build resolver: {e}"))?
+            .build()
+            .map_err(|e| anyhow::anyhow!("build resolver: {e}"))?
     };
 
-    let mut hosts = Vec::new();
-    let mut all_secure = true;
-    let mut saw_record = false;
-    // Mirrors `dane::lookup_tlsa`'s walk: hickory populates each record's
-    // per-record DNSSEC `proof` because `opts.validate = true`.
-    for record in rrset.answers() {
-        if let RData::MX(mx) = &record.data {
-            saw_record = true;
-            if record.proof != Proof::Secure {
-                all_secure = false;
-            }
-            hosts.push((
+    let rrset = match resolver.mx_lookup(name).await {
+        Ok(rrset) => rrset,
+        // NXDOMAIN / NoData → the domain publishes no MX RRset, which is an
+        // *answer*, not a failure: implicit MX.
+        Err(e) if e.is_no_records_found() => return Ok(RawMx::NoRecords),
+        Err(e) => return Err(anyhow::anyhow!("MX lookup failed: {e}")),
+    };
+    // hickory populates each record's per-record DNSSEC `proof` when
+    // `opts.validate = true`; a record read without validation is unproven.
+    let records: Vec<(u16, String, RecordProof)> = rrset
+        .answers()
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::MX(mx) => Some((
                 mx.preference,
                 mx.exchange.to_utf8().trim_end_matches('.').to_string(),
-            ));
-        }
-    }
-
-    if !saw_record {
+                match (validate, record.proof) {
+                    (true, Proof::Secure) => RecordProof::Secure,
+                    (true, Proof::Insecure) => RecordProof::Insecure,
+                    _ => RecordProof::Unproven,
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    if records.is_empty() {
         // An MX lookup that succeeded but carried no MX RDATA is the same
-        // "publishes no MX" answer the NoData branch above handles.
-        return Ok(MxAnswer {
+        // "publishes no MX" answer.
+        return Ok(RawMx::NoRecords);
+    }
+    Ok(RawMx::Records(records))
+}
+
+/// The capable-path [`MxAnswer`] policy over the validating lookup's outcome.
+#[cfg(feature = "outbound-net")]
+fn capable_mx_answer(name: &str, raw: anyhow::Result<RawMx>) -> anyhow::Result<MxAnswer> {
+    let raw = raw.map_err(|e| {
+        e.context(format!(
+            "validating MX lookup for {name} failed; delivery is delayed, never retried \
+             without validation (RFC 7672 §2.1.2)"
+        ))
+    })?;
+    match raw {
+        // Implicit MX (RFC 5321 §5.1): the target is the envelope's own
+        // recipient domain, which no DNS answer chose — see `MxAnswer`.
+        RawMx::NoRecords => Ok(MxAnswer {
             hosts: vec![(0, name.to_string())],
             secure: true,
-        });
+        }),
+        RawMx::Records(records) => {
+            if records.iter().any(|(_, _, p)| *p == RecordProof::Unproven) {
+                anyhow::bail!(
+                    "MX RRset for {name} failed DNSSEC validation (Bogus / Indeterminate); \
+                     delivery is delayed (RFC 7672 §2.1.1, §2.1.2)"
+                );
+            }
+            let secure = records.iter().all(|(_, _, p)| *p == RecordProof::Secure);
+            if !secure {
+                tracing::info!(
+                    domain = %name,
+                    "MX RRset is provably Insecure; delivering without DANE (RFC 7672 §2.2)"
+                );
+            }
+            Ok(MxAnswer {
+                hosts: records.into_iter().map(|(p, h, _)| (p, h)).collect(),
+                secure,
+            })
+        }
     }
+}
 
-    if !all_secure {
-        tracing::warn!(
-            domain = %name,
-            "MX RRset is not DNSSEC-secure; delivering without DANE (RFC 7672 §2.2)"
-        );
-    }
-
+/// The incapable-path [`MxAnswer`] policy: every answer at `secure: false`.
+#[cfg(feature = "outbound-net")]
+fn incapable_mx_answer(name: &str, raw: anyhow::Result<RawMx>) -> anyhow::Result<MxAnswer> {
+    let hosts = match raw? {
+        RawMx::NoRecords => vec![(0, name.to_string())],
+        RawMx::Records(records) => records.into_iter().map(|(p, h, _)| (p, h)).collect(),
+    };
     Ok(MxAnswer {
         hosts,
-        secure: all_secure,
+        secure: false,
     })
 }
 
-/// Live [`MxRrsetResolver`] over the DNSSEC-validating [`lookup_mx_secure`].
-/// The production outbound path holds an `Arc<dyn MxRrsetResolver>`; this is
-/// the network-touching impl (mirrors
-/// [`crate::outbound::dane::LiveTlsaResolver`]).
+#[cfg(all(test, feature = "outbound-net"))]
+mod path_policy_tests {
+    use super::*;
+
+    fn recs(proofs: &[RecordProof]) -> anyhow::Result<RawMx> {
+        Ok(RawMx::Records(
+            proofs
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (10 + i as u16, format!("mx{i}.beta.test"), *p))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn capable_secure_rrset_is_secure() {
+        let a = capable_mx_answer("beta.test", recs(&[RecordProof::Secure])).unwrap();
+        assert_eq!(a.hosts, vec![(10, "mx0.beta.test".to_string())]);
+        assert!(a.secure);
+    }
+
+    #[test]
+    fn capable_insecure_rrset_delivers_without_dane() {
+        let a = capable_mx_answer(
+            "beta.test",
+            recs(&[RecordProof::Secure, RecordProof::Insecure]),
+        )
+        .unwrap();
+        assert_eq!(a.hosts.len(), 2);
+        assert!(!a.secure);
+    }
+
+    #[test]
+    fn capable_unproven_record_is_a_lookup_failure() {
+        // A Bogus / Indeterminate record anywhere in the RRset delays
+        // delivery — never a delivery at `secure: false`.
+        let r = capable_mx_answer(
+            "beta.test",
+            recs(&[RecordProof::Secure, RecordProof::Unproven]),
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn capable_validation_error_propagates_and_is_never_reread() {
+        // There is no plain re-read to fall back on: the policy only ever sees
+        // the validating lookup's own outcome.
+        let r = capable_mx_answer(
+            "beta.test",
+            Err(anyhow::anyhow!(
+                "MX lookup failed: DNSSEC validation failed"
+            )),
+        );
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(msg.contains("delayed"), "{msg}");
+        assert!(msg.contains("DNSSEC validation failed"), "{msg}");
+    }
+
+    #[test]
+    fn capable_no_records_is_the_secure_implicit_mx() {
+        let a = capable_mx_answer("beta.test", Ok(RawMx::NoRecords)).unwrap();
+        assert_eq!(a.hosts, vec![(0, "beta.test".to_string())]);
+        assert!(a.secure);
+    }
+
+    #[test]
+    fn incapable_answers_are_never_secure_implicit_mx_included() {
+        let a = incapable_mx_answer("beta.test", recs(&[RecordProof::Unproven])).unwrap();
+        assert_eq!(a.hosts, vec![(10, "mx0.beta.test".to_string())]);
+        assert!(!a.secure);
+        let a = incapable_mx_answer("beta.test", Ok(RawMx::NoRecords)).unwrap();
+        assert_eq!(a.hosts, vec![(0, "beta.test".to_string())]);
+        assert!(!a.secure);
+    }
+
+    #[test]
+    fn incapable_lookup_failure_is_an_error_not_an_implicit_mx() {
+        assert!(incapable_mx_answer("beta.test", Err(anyhow::anyhow!("timed out"))).is_err());
+    }
+}
+
+/// Live [`MxRrsetResolver`] over [`lookup_mx_on_path`], consulting the
+/// process's [`DnssecPath`] posture on every lookup. The production outbound
+/// path holds an `Arc<dyn MxRrsetResolver>`; this is the network-touching
+/// impl (mirrors [`crate::outbound::dane::LiveTlsaResolver`], which shares
+/// the same `DnssecPath`).
 #[cfg(feature = "outbound-net")]
-pub struct LiveMxRrsetResolver;
+pub struct LiveMxRrsetResolver {
+    path: Arc<DnssecPath>,
+}
+
+#[cfg(feature = "outbound-net")]
+impl LiveMxRrsetResolver {
+    pub fn new(path: Arc<DnssecPath>) -> Self {
+        Self { path }
+    }
+}
 
 #[cfg(feature = "outbound-net")]
 #[async_trait]
 impl MxRrsetResolver for LiveMxRrsetResolver {
     async fn lookup(&self, domain: &str) -> anyhow::Result<MxAnswer> {
-        lookup_mx_secure(domain).await
+        lookup_mx_on_path(domain, self.path.posture().await).await
     }
 }

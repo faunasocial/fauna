@@ -161,11 +161,15 @@ pub async fn serve_http01(
 /// away from a dead old primary). The infra SANs still hang off the apex name
 /// and keep their own independent resolve gates — a dead apex fails those too,
 /// so they need no second rule here.
+/// `rename` carries an in-flight primary-domain rename's MX hosts
+/// ([`RenameSans`], built by [`rename_sans_for_cycle`]); they go last, after the
+/// infra hosts, so the set's order is stable across a rename's start.
 pub fn desired_san_domains(
     node_domain: &str,
     mail_domain_names: &[String],
     infra: &InfraSans,
     apex_sans: ApexSans,
+    rename: &RenameSans,
 ) -> Vec<String> {
     fn add(out: &mut Vec<String>, candidate: &str) {
         let d = candidate.trim().to_ascii_lowercase();
@@ -206,7 +210,103 @@ pub fn desired_san_domains(
             add(&mut out, &format!("{label}.{apex}"));
         }
     }
+    for host in rename.hosts() {
+        add(&mut out, host);
+    }
     out
+}
+
+/// The MX hosts an in-flight **primary-domain rename** adds to the desired SAN
+/// set — one named field per host, so a call site cannot swap the two
+/// (`mail-primary-domain-rename.md` § Behavior — cert chain re-issue ordering →
+/// *Issuer-independence — the rename driver*, rule 1). Built by ONE helper,
+/// [`rename_sans_for_cycle`], which every consumer of the set calls — the
+/// HTTP-01 order ([`cert_lifecycle_loop`]), the `desired_sans` a DNS-01 client
+/// orders (`tls_handlers::desired_listener_sans`) and the at-risk nudge
+/// ([`crate::cert_nudge`]) — so the three can never disagree about which hosts
+/// the rename wants; only the gate differs ([`RenameSanGate`]).
+///
+/// `Default` is "no rename in flight" (both `None`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenameSans {
+    /// `mail.<new-primary>` while the rename is pre-flip
+    /// (`requested`/`cert_issuance`/`cert_ready`) — the one SAN the rename adds.
+    pub new_mail_host: Option<String>,
+    /// `mail.<old-primary>` while the rename is post-flip and non-terminal
+    /// (`grace`/`ready_to_complete`) — kept so a renewal during grace cannot
+    /// narrow the cert under peers still on a cached `MX → mail.<old>`.
+    pub old_mail_host: Option<String>,
+}
+
+impl RenameSans {
+    /// The hosts present, `mail.<new>` before `mail.<old>` (at most one is set
+    /// at a time — pre-flip and post-flip are exclusive — but the order is fixed
+    /// regardless).
+    fn hosts(&self) -> impl Iterator<Item = &str> + '_ {
+        self.new_mail_host
+            .iter()
+            .chain(self.old_mail_host.iter())
+            .map(String::as_str)
+    }
+}
+
+/// Which gate [`rename_sans_for_cycle`] applies to the rename's hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameSanGate {
+    /// Strong-check-or-DROP ([`rename_mail_host_reachable`]): the HTTP-01 issuer,
+    /// whose all-or-nothing order an unvalidatable name would take down, and the
+    /// at-risk nudge, which shares the issuer's gates so it never nudges about a
+    /// name the issuer declines to order.
+    Reachable,
+    /// No gate: the `desired_sans` a DNS-01 client orders. DNS-01 validates by a
+    /// TXT in the zone, so the client's credential filter is the gate that
+    /// matters there, exactly as for every other name in that set.
+    Ungated,
+}
+
+/// This cycle's [`RenameSans`] — the single builder of the rename's additions
+/// to the desired SAN set (see [`RenameSans`]). Re-derived from the persisted
+/// rename row on every call, so a crash or restart never loses a host. Names
+/// are lower-cased to match [`desired_san_domains`].
+pub(crate) async fn rename_sans_for_cycle(
+    app_state: &crate::routes::AppState,
+    gate: RenameSanGate,
+) -> RenameSans {
+    async fn admit(
+        app_state: &crate::routes::AppState,
+        gate: RenameSanGate,
+        host: String,
+    ) -> Option<String> {
+        let host = host.to_ascii_lowercase();
+        match gate {
+            RenameSanGate::Ungated => Some(host),
+            RenameSanGate::Reachable => {
+                if rename_mail_host_reachable(app_state, &host).await {
+                    Some(host)
+                } else {
+                    tracing::info!(
+                        domain = %host,
+                        "cert-lifecycle: a rename MX host does not resolve to the mail address \
+                         — deferring its SAN (the primary cert is unaffected; it is picked up \
+                         once the name points here)"
+                    );
+                    None
+                }
+            }
+        }
+    }
+    let new_mail_host = match active_rename_new_mail_host(app_state).await {
+        Some((_, host, _)) => admit(app_state, gate, host).await,
+        None => None,
+    };
+    let old_mail_host = match active_rename_old_mail_host(app_state).await {
+        Some((_, host, _)) => admit(app_state, gate, host).await,
+        None => None,
+    };
+    RenameSans {
+        new_mail_host,
+        old_mail_host,
+    }
 }
 
 /// Which resolve-gated **infra-subdomain** SANs may join the apex ACME order on
@@ -661,7 +761,7 @@ pub(crate) async fn apex_sans_for_cycle(
 /// from the normal apex path, [`desired_san_domains`]), or its new-primary
 /// domain row has vanished. Reads the new domain's name from `mail_domains`
 /// (the rename row carries only the id).
-async fn active_rename_new_mail_host(
+pub(crate) async fn active_rename_new_mail_host(
     app_state: &crate::routes::AppState,
 ) -> Option<([u8; 16], String, fauna_mail::RenameState)> {
     let rename = app_state.db.get_active_rename().await.ok().flatten()?;
@@ -711,7 +811,7 @@ async fn active_rename_old_mail_host(
 /// reused for a rename's `new_cert_fingerprint` rather than a whole-cert digest
 /// (`mail-primary-domain-rename.md` § Implementation status today). `None` on a
 /// PEM/DER parse failure.
-fn leaf_spki_fingerprint_hex(pem_data: &[u8]) -> Option<String> {
+pub(crate) fn leaf_spki_fingerprint_hex(pem_data: &[u8]) -> Option<String> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(pem_data).ok()?;
     let spki = crate::acme::spki_sha256_of_cert_der(&pem.contents)?;
     Some(hex::encode(spki))
@@ -1138,118 +1238,6 @@ fn install_ip_cert(
     }
 }
 
-/// The cert-independent tail of one cert-lifecycle tick for a primary-domain
-/// rename (`mail-primary-domain-rename.md` § Lifecycle, § Crash recovery): the
-/// anchor flip of a row that was `cert_ready` at the start of the tick, the
-/// unconditional identity-projection reconcile, and the grace watcher.
-/// [`cert_lifecycle_loop`] runs it every tick; the `test-hooks` rename hook
-/// (`crate::rename_cert_test_hook`) runs the same steps on a test nest, where
-/// no ACME loop is spawned.
-pub(crate) async fn rename_post_cert_steps(
-    app_state: &Arc<crate::routes::AppState>,
-    rename_cert_ready_at_tick_start: Option<[u8; 16]>,
-) {
-    // Primary-domain rename (SLICE 3): the anchor flip. A rename that was
-    // `cert_ready` at the START of this tick (captured by the caller) flips now — the
-    // tick *after* cert_ready, so `cert_ready` stays an observable resting
-    // state. `advance_rename_to_grace` atomically flips `is_primary` + enters
-    // `grace` (`mail-primary-domain-rename.md` § Lifecycle / § Data — Mutations
-    // to mail_domains). The runtime identity projection + the
-    // `config_changed`/`local_domains` push follow from the **unconditional
-    // reconcile below**, which reads the freshly-flipped DB primary — so the
-    // flip itself only owns the DB transition. Crash-safe: the flip is ONE DB
-    // transaction, so a restart re-derives the identity from the flipped
-    // primary row at boot.
-    if let Some(rid) = rename_cert_ready_at_tick_start {
-        match app_state.db.advance_rename_to_grace(&rid).await {
-            Ok(_) => tracing::info!(
-                "primary-domain rename: anchor flip committed — is_primary flipped, entering grace"
-            ),
-            Err(e) => tracing::warn!("primary-domain rename: anchor flip failed: {e:#}"),
-        }
-    }
-
-    // Identity-projection self-heal.
-    // The deployment's identity domain is an in-memory projection of the
-    // primary `mail_domains` row (`identity_domain_core`), so re-derive it
-    // from the DB primary **unconditionally each tick** — NOT only while a
-    // rename is post-flip-active. This one reconcile covers every source of
-    // divergence with a single self-healing rule: the anchor flip (new
-    // primary just promoted), the abort re-flip (old primary restored), AND
-    // any raced divergence the old rename-gated reconcile could not heal —
-    // a stale tick re-applying a since-aborted `new` (which then had no
-    // active rename left to trigger a heal), or the abort handler's own
-    // silent skip-on-lookup-failure. Whatever the source, the next tick
-    // converges the projection onto the DB truth
-    // (`mail-primary-domain-rename.md` § Crash recovery — self-healing).
-    //
-    // Gated exactly like the other identity setter (`add_local_domain_handler`)
-    // and `apply_primary_identity`'s own contract: act only when a primary
-    // mail domain exists and is non-local. An IP / domainless-claimed box
-    // registers no `mail_domains` row (`lookup_primary_mail_domain` → None),
-    // so its identity comes from the registration handle and is left
-    // untouched. The `!=` guard makes the steady state a pure no-op — boot's
-    // `resolve_identity_domain` seeds `identity_domain` from the same
-    // `domain_name`, so no reconcile fires and no `config_changed` is pushed
-    // unless the projection has actually drifted.
-    if let Ok(Some(primary)) = app_state.db.lookup_primary_mail_domain().await
-        && fauna_core::resolve::is_public_dns_name(&primary.domain_name)
-        && app_state.handle_domain() != primary.domain_name
-    {
-        crate::identity_domain_core::apply_primary_identity(app_state, &primary.domain_name);
-        crate::bridge_routing_handlers::notify_bridges_config_changed(
-            app_state,
-            fauna_protocol::bridge_routing::config_change_reason::LOCAL_DOMAINS,
-        )
-        .await;
-        // Every ATProto handle on the box is derived from this domain, so the
-        // identity domain moving renames the WHOLE roster at once
-        // (`atproto-pds-bridge.md` § Identity — a Fauna handle *or domain*
-        // change re-derives). No actor hint: the nudge covers all of them.
-        // This one site catches every cause — the anchor flip, the abort
-        // re-flip, and any raced divergence — because it is the single place
-        // the projection actually converges onto the DB primary. Latency
-        // only: the bridge's own pass compares derived-vs-published, so a
-        // dropped push delays a rename, never loses it.
-        crate::bridge_atproto_handlers::notify_bridges_atproto_projection_ready(app_state, None)
-            .await;
-        tracing::info!(
-            domain = %primary.domain_name,
-            "primary-domain identity reconcile: projection swapped to the DB primary + config_changed(local_domains) pushed"
-        );
-    }
-
-    // Primary-domain rename (SLICE 4): the grace watcher. When a `grace` row's
-    // wall-clock window has elapsed (`NOW() > grace_ends_at`), promote it to
-    // `ready_to_complete` — the source-of-truth advancement past grace
-    // (`mail-primary-domain-rename.md` § Architectural rules — no admin action
-    // is needed for `grace → ready_to_complete`; the admin's `complete` gates
-    // only `ready_to_complete → completed`). No cert/DNS/identity side effect:
-    // `ready_to_complete` is functionally identical to `grace` for the keep-
-    // alives (both `is_post_flip_active`), so nothing to re-derive. Idempotent
-    // + crash-safe — re-read fresh from the persisted row each tick, so a
-    // restart mid-grace resumes the watch; a row that just entered `grace` this
-    // tick has `grace_ends_at = now + grace_days`, so it won't promote early.
-    if let Some(rename) = app_state.db.get_active_rename().await.ok().flatten()
-        && rename.parsed_state() == Some(fauna_mail::RenameState::Grace)
-        && let Some(ends_at) = rename.grace_ends_at
-        && crate::db::now_epoch_millis() > ends_at
-    {
-        match app_state
-            .db
-            .advance_rename_to_ready_to_complete(&rename.rename_id)
-            .await
-        {
-            Ok(_) => tracing::info!(
-                "primary-domain rename: grace window elapsed — ready_to_complete (awaiting admin complete)"
-            ),
-            Err(e) => tracing::warn!(
-                "primary-domain rename: grace watcher advance to ready_to_complete failed: {e:#}"
-            ),
-        }
-    }
-}
-
 /// The cert-lifecycle loop body, parameterised over the issuance operation and
 /// an optional iteration cap. `cert_lifecycle_task` is the production caller
 /// (real `obtain_certificate`, `max_iterations = None` → runs forever); tests
@@ -1301,19 +1289,6 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
         // serves meanwhile.
         let apex = app_state.handle_domain();
         let apex_orderable = !apex.is_empty() && fauna_core::resolve::is_public_dns_name(&apex);
-        // Primary-domain rename (SLICE 3): capture whether a rename was already
-        // `cert_ready` at the START of this tick, so the anchor flip fires on the
-        // tick *after* cert_ready is reached (not the same tick that stamps it) —
-        // keeping `cert_ready` an observable resting state and advancing one
-        // lifecycle step per tick. The flip itself runs at the bottom of the tick.
-        let rename_cert_ready_at_tick_start = app_state
-            .db
-            .get_active_rename()
-            .await
-            .ok()
-            .flatten()
-            .filter(|r| r.parsed_state() == Some(fauna_mail::RenameState::CertReady))
-            .map(|r| r.rename_id);
         // Desired SAN set from nest state. Apex is present only when orderable;
         // mail hosts only for domains the admin has actually configured (see
         // desired_san_domains).
@@ -1357,99 +1332,24 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
         // `cert_issuance` order that must add `mail.<new>`, which is the deadlock
         // (`apex_sans_for_cycle`; `mail-primary-domain-rename.md` § Renaming away
         // from a dead domain). A live old zone keeps both SANs.
-        let mut desired = if apex_orderable {
+        // …and widen it with an in-flight primary-domain rename's MX hosts — the
+        // pre-flip `mail.<new>` and the in-grace `mail.<old>` — strong-check-or-DROP
+        // gated (`rename_sans_for_cycle` with `RenameSanGate::Reachable`) so an
+        // unpublished or seized rename host can never fail the all-or-nothing
+        // order and take the primary's cert down (`mail-primary-domain-rename.md`
+        // § Behavior — cert chain re-issue ordering). This loop is only the
+        // rename's ORDERING half: the state machine's motion — `cert_issuance`,
+        // the `cert_ready` stamp, the anchor flip, the reconcile, the grace
+        // watcher — is the rename driver's (`crate::rename_driver`), which runs
+        // on every nest, this issuer or none (§ *Issuer-independence*).
+        let desired = if apex_orderable {
             let reachable = reachable_mail_domains(&app_state, &apex, &mail_domain_names).await;
             let apex_sans = apex_sans_for_cycle(&app_state, &apex).await;
-            desired_san_domains(&apex, &reachable, &infra, apex_sans)
+            let rename = rename_sans_for_cycle(&app_state, RenameSanGate::Reachable).await;
+            desired_san_domains(&apex, &reachable, &infra, apex_sans, &rename)
         } else {
             Vec::new()
         };
-
-        // Primary-domain rename (SLICE 2): while a rename is pre-flip, widen the
-        // single managed cert with the ONE new SAN `mail.<new-primary>`, resolve-
-        // gated exactly like a secondary apex so an unpublished/unpropagated
-        // `mail.<new>` can never fail the all-or-nothing order and take the
-        // primary's cert down (`mail-primary-domain-rename.md` § Behavior — cert
-        // chain re-issue ordering). The loop is the idempotent driver: it advances
-        // `requested → cert_issuance`, adds the gated SAN, and — once the (re-)
-        // issued cert covers it — stamps `cert_ready` (below, after issuance).
-        // Crash-safe: every step re-derives from the persisted row each tick, and
-        // there is no persisted-failure state (§ Crash recovery). The listeners
-        // keep only the old SAN graph bound — `mail.<new>` is a cert SAN but a
-        // dormant served hostname until anchor flip (slice 3).
-        let mut rename_cert_ready_pending: Option<([u8; 16], String)> = None;
-        if apex_orderable
-            && let Some((rename_id, mail_host, state)) =
-                active_rename_new_mail_host(&app_state).await
-        {
-            // Advance `requested → cert_issuance` (idempotent). The `start` handler
-            // advances on the RPC; this re-assertion covers a crash between insert
-            // and that advance (§ Crash recovery).
-            let effective_state = if state == fauna_mail::RenameState::Requested {
-                match app_state
-                    .db
-                    .advance_rename_to_cert_issuance(&rename_id)
-                    .await
-                {
-                    Ok(r) => r
-                        .parsed_state()
-                        .unwrap_or(fauna_mail::RenameState::CertIssuance),
-                    Err(e) => {
-                        tracing::warn!(
-                            "cert-lifecycle: advance rename to cert_issuance failed: {e:#}"
-                        );
-                        state
-                    }
-                }
-            } else {
-                state
-            };
-            // Resolve-gate the new MX host against the mail-host address, then add
-            // the single SAN (deduped, lower-cased to match `desired_san_domains`).
-            if rename_mail_host_reachable(&app_state, &mail_host).await {
-                let m = mail_host.to_ascii_lowercase();
-                if !desired.iter().any(|x| x == &m) {
-                    desired.push(m.clone());
-                }
-                // Only stamp `cert_ready` from `cert_issuance` (strict). A re-
-                // observe on a later tick (row already `cert_ready`) leaves it be.
-                if effective_state == fauna_mail::RenameState::CertIssuance {
-                    rename_cert_ready_pending = Some((rename_id, m));
-                }
-            } else {
-                tracing::info!(
-                    domain = %mail_host,
-                    "cert-lifecycle: rename new MX host does not resolve to the mail address yet \
-                     — deferring its ACME SAN (the primary cert is unaffected; it is picked up \
-                     once `mail.<new>` points here)"
-                );
-            }
-        }
-
-        // Primary-domain rename (SLICE 3): while a rename is post-flip non-terminal
-        // (grace), keep `mail.<old-primary>` in the desired SAN set so a cert
-        // renewal during grace can't narrow the superset and drop the old MX host
-        // that peers with a cached `<domain> MX → mail.<old>` still reach
-        // (`mail-primary-domain-rename.md` § Behavior — cert chain, During grace).
-        // Resolve-gated (mirroring the pre-flip `mail.<new>` gate) so it can never
-        // fail the all-or-nothing order — `mail.<old>` is the established MX host
-        // whose A record the assembler keeps alive, so this normally passes.
-        // Strong-check-or-DROP on uncertainty (`rename_mail_host_reachable`): a
-        // dead or seized old zone parks `mail.<old>` at someone else's address,
-        // and keeping it here would fail every renewal of the NEW primary's cert
-        // for the whole grace window — the pre-flip deadlock, re-armed after the
-        // flip. Dropping it only costs peers still on a cached `MX → mail.<old>`,
-        // who defer and retry until their cache turns over.
-        if apex_orderable
-            && let Some((_rid, old_mail_host, _state)) =
-                active_rename_old_mail_host(&app_state).await
-            && rename_mail_host_reachable(&app_state, &old_mail_host).await
-        {
-            let m = old_mail_host.to_ascii_lowercase();
-            if !desired.iter().any(|x| x == &m) {
-                desired.push(m);
-            }
-        }
 
         let need_issue = if desired.is_empty() {
             // No orderable apex yet (domainless-booted box pre-claim, or a
@@ -1593,41 +1493,6 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
             retry.save(&config.acme_dir);
         }
 
-        // Primary-domain rename (SLICE 2): once the (re-)issued managed cert on
-        // disk actually covers `mail.<new-primary>`, stamp the rename `cert_ready`
-        // with the acquired leaf's SPKI fingerprint (`mail-primary-domain-
-        // rename.md` § Lifecycle). Re-derived each tick from the on-disk cert, so
-        // a crash between issuance and this stamp is recovered next tick (the cert
-        // already covers `mail.<new>`, so no re-issue is needed to complete it);
-        // `mark_rename_cert_ready` is strict `cert_issuance → cert_ready`, so a
-        // later re-observe (row already `cert_ready`) is a harmless refusal that
-        // never overwrites the original acquisition stamp.
-        if let Some((rename_id, mail_host)) = rename_cert_ready_pending
-            && let Ok(pem) = tokio::fs::read(&cert_path).await
-            && cert_covers_sans(&pem, std::slice::from_ref(&mail_host))
-        {
-            match leaf_spki_fingerprint_hex(&pem) {
-                Some(fp) => match app_state
-                    .db
-                    .mark_rename_cert_ready(&rename_id, &fp, crate::db::now_epoch_millis())
-                    .await
-                {
-                    Ok(_) => tracing::info!(
-                        domain = %mail_host,
-                        "primary-domain rename: managed cert now covers the new MX host — cert_ready"
-                    ),
-                    Err(e) => {
-                        tracing::warn!("primary-domain rename: mark cert_ready failed: {e:#}")
-                    }
-                },
-                None => tracing::warn!(
-                    "primary-domain rename: could not fingerprint the cert leaf; retry next tick"
-                ),
-            }
-        }
-
-        rename_post_cert_steps(&app_state, rename_cert_ready_at_tick_start).await;
-
         iterations += 1;
         if let Some(max) = max_iterations
             && iterations >= max
@@ -1685,7 +1550,7 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use fauna_acme_http01::test_support::make_multi_san_cert_pem;
 
@@ -2007,6 +1872,7 @@ mod tests {
             &[],
             &InfraSans::default(),
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert_eq!(sans, vec!["nest.example.com".to_string()]);
     }
@@ -2020,6 +1886,7 @@ mod tests {
             &["example.com".to_string()],
             &InfraSans::default(),
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert_eq!(
             sans,
@@ -2041,6 +1908,7 @@ mod tests {
             ],
             &InfraSans::default(),
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert_eq!(
             sans,
@@ -2064,6 +1932,7 @@ mod tests {
             &["primary.test".to_string(), "secondary.test".to_string()],
             &InfraSans::default(),
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert_eq!(
             sans,
@@ -2090,6 +1959,7 @@ mod tests {
             &mails,
             &InfraSans::default(),
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert!(
             !off.iter().any(|s| s.starts_with("relay.")),
@@ -2105,6 +1975,7 @@ mod tests {
                 ..Default::default()
             },
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert_eq!(
             on,
@@ -2127,6 +1998,7 @@ mod tests {
             &mails,
             &InfraSans::default(),
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert!(
             !off.iter().any(|s| s.starts_with("pds.")),
@@ -2142,6 +2014,7 @@ mod tests {
                 ..Default::default()
             },
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert_eq!(
             on,
@@ -2166,6 +2039,7 @@ mod tests {
                 pds: true,
             },
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert_eq!(
             sans,
@@ -2191,6 +2065,7 @@ mod tests {
                 pds: true,
             },
             ApexSans::INCLUDED,
+            &RenameSans::default(),
         );
         assert!(
             sans.is_empty(),
@@ -3130,7 +3005,34 @@ mod tests {
         }
     }
 
-    async fn rename_test_state(
+    /// One test tick = one HTTP-01 loop iteration (the ORDERING half: it widens
+    /// and places the order) followed by one rename-driver tick (the state
+    /// machine's motion: `cert_issuance`, the `cert_ready` stamp off the installed
+    /// cert, the one-tick-later flip) — the two tasks a public HTTP-01 nest runs
+    /// side by side (`mail-primary-domain-rename.md` § *Issuer-independence — the
+    /// rename driver*).
+    async fn ticks_loop_then_driver<I, Fut>(
+        dir: &std::path::Path,
+        st: &StdArc<crate::routes::AppState>,
+        issue: I,
+        ticks: usize,
+    ) where
+        I: Fn(Vec<String>) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        for _ in 0..ticks {
+            cert_lifecycle_loop_domain_only(
+                test_config(dir.to_path_buf()),
+                st.clone(),
+                &issue,
+                Some(1),
+            )
+            .await;
+            crate::rename_driver::tick_once(st, dir).await;
+        }
+    }
+
+    pub(crate) async fn rename_test_state(
         db: &StdArc<crate::db::CacheDb>,
         resolver_a: crate::dns_verifier::LookupOutcome,
     ) -> StdArc<crate::routes::AppState> {
@@ -3183,13 +3085,7 @@ mod tests {
         let st = rename_test_state(&db, LookupOutcome::Records(vec!["203.0.113.7".into()])).await;
         let cert_path = dir.path().join(crate::acme::CERT_FILENAME);
 
-        cert_lifecycle_loop_domain_only(
-            test_config(dir.path().to_path_buf()),
-            st,
-            cert_writing_issuer(cert_path),
-            Some(1),
-        )
-        .await;
+        ticks_loop_then_driver(dir.path(), &st, cert_writing_issuer(cert_path), 1).await;
 
         let row = db
             .get_active_rename()
@@ -3222,13 +3118,7 @@ mod tests {
         let st = rename_test_state(&db, LookupOutcome::Empty).await;
         let cert_path = dir.path().join(crate::acme::CERT_FILENAME);
 
-        cert_lifecycle_loop_domain_only(
-            test_config(dir.path().to_path_buf()),
-            st,
-            cert_writing_issuer(cert_path),
-            Some(1),
-        )
-        .await;
+        ticks_loop_then_driver(dir.path(), &st, cert_writing_issuer(cert_path), 1).await;
 
         let row = db.get_active_rename().await.unwrap().unwrap();
         assert_eq!(
@@ -3256,13 +3146,7 @@ mod tests {
 
         // Tick 1 → cert_ready; tick 2 → anchor flip → grace (the flip fires the
         // tick *after* cert_ready, so cert_ready stays observable).
-        cert_lifecycle_loop_domain_only(
-            test_config(dir.path().to_path_buf()),
-            st.clone(),
-            cert_writing_issuer(cert_path),
-            Some(2),
-        )
-        .await;
+        ticks_loop_then_driver(dir.path(), &st, cert_writing_issuer(cert_path), 2).await;
 
         let row = db
             .get_active_rename()
@@ -3299,13 +3183,7 @@ mod tests {
 
         // Tick 1 → cert_ready; tick 2 → flip → grace; tick 3 → a grace tick that
         // re-issues keeping `mail.<old>` in the desired SAN set (superset).
-        cert_lifecycle_loop_domain_only(
-            test_config(dir.path().to_path_buf()),
-            st.clone(),
-            cert_writing_issuer(cert_path.clone()),
-            Some(3),
-        )
-        .await;
+        ticks_loop_then_driver(dir.path(), &st, cert_writing_issuer(cert_path.clone()), 3).await;
 
         assert_eq!(
             db.get_active_rename()
@@ -3486,11 +3364,11 @@ mod tests {
 
         // Tick 1 → cert_ready (the widened order issues at last); tick 2 → the
         // anchor flip, so this pins the whole escape, not just its first step.
-        cert_lifecycle_loop_domain_only(
-            test_config(dir.path().to_path_buf()),
-            st,
+        ticks_loop_then_driver(
+            dir.path(),
+            &st,
             all_or_nothing_issuer(cert_path, validatable, orders.clone()),
-            Some(2),
+            2,
         )
         .await;
 
@@ -3553,9 +3431,9 @@ mod tests {
         let cert_path = dir.path().join(crate::acme::CERT_FILENAME);
         let orders = StdArc::new(StdMutex::new(Vec::new()));
 
-        cert_lifecycle_loop_domain_only(
-            test_config(dir.path().to_path_buf()),
-            st,
+        ticks_loop_then_driver(
+            dir.path(),
+            &st,
             all_or_nothing_issuer(
                 cert_path,
                 vec![
@@ -3566,7 +3444,7 @@ mod tests {
                 ],
                 orders.clone(),
             ),
-            Some(1),
+            1,
         )
         .await;
 
@@ -3702,11 +3580,11 @@ mod tests {
             "new.example.com".to_string(),
         ];
 
-        cert_lifecycle_loop_domain_only(
-            test_config(dir.path().to_path_buf()),
-            st,
+        ticks_loop_then_driver(
+            dir.path(),
+            &st,
             all_or_nothing_issuer(cert_path.clone(), validatable, orders.clone()),
-            Some(2),
+            2,
         )
         .await;
 
@@ -3780,6 +3658,7 @@ mod tests {
             &["primary.test".to_string(), "secondary.test".to_string()],
             &InfraSans::default(),
             ApexSans::DROPPED,
+            &RenameSans::default(),
         );
         assert_eq!(
             sans,
@@ -3799,6 +3678,7 @@ mod tests {
                 apex: true,
                 mail_host: false,
             },
+            &RenameSans::default(),
         );
         assert_eq!(
             sans,

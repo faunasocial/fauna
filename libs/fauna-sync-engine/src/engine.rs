@@ -2119,7 +2119,10 @@ impl SyncEngine {
         let own = self.own_actor_id().0;
         let unplaced: Vec<[u8; 32]> = {
             let reader = self.row_reader.read().unwrap_or_else(|e| e.into_inner());
-            if !reader.is_writer(&own) {
+            // STANDING, not admission (ruling (12)(d)): only a seat that may
+            // write now walks for its own retired identities — a former
+            // writer's seat is parked.
+            if !reader.is_current_writer(&own) {
                 return false;
             }
             let mut unplaced = Vec::new();
@@ -2156,7 +2159,8 @@ impl SyncEngine {
     /// **The reader's writer-roster leg** (ruling (3)) — ungated, unlike the
     /// share leg's [`Self::refresh_share_writer_roster`]: one
     /// `fauna.folders.members.list_actors` read replaces the reader's roster
-    /// with the set's `writer`-access members. `not_shared` is a successful
+    /// with the set's `writer`-access members and its former writers (ruling
+    /// (12)(c), admitted by, never standing). `not_shared` is a successful
     /// read of an owner-only set (the roster is the owner, who is always a
     /// writer); a failed read keeps the last roster (offline, the last roster
     /// stands; never read ⇒ owner-only, and a member's signed rows hold the
@@ -2187,10 +2191,14 @@ impl SyncEngine {
             None => client.actor_members_list(&folder).await,
         };
         let writers = match read {
-            // Each writer with the predecessors its carried succession
-            // statements prove (ruling (8)(b), source (i)) — a member's rows
-            // signed under a retired identity resolve to the member.
-            Ok(reply) => fauna_protocol::sync_row_verify::writer_roster(&reply.members),
+            // Each writer of record — current, and former (ruling (12)(c)) —
+            // with the predecessors its carried succession statements prove
+            // (ruling (8)(b), source (i)): a member's rows signed under a
+            // retired identity resolve to the member.
+            Ok(reply) => fauna_protocol::sync_row_verify::writer_roster(
+                &reply.members,
+                &reply.former_writers,
+            ),
             Err(e)
                 if fauna_protocol::RpcErrorClass::as_rpc_error(&e).is_some_and(|r| {
                     r.code == fauna_protocol::sync_row_verify::ROSTER_NOT_SHARED
@@ -4957,7 +4965,10 @@ impl SyncEngine {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(path = %fauna_core::log_redact::log_path(relative_path), error = %e, "failed to record change on node");
+                    // `{e:#}`: the outer context is only the RPC kind, so the
+                    // chain is the one place the nest's answer (or the
+                    // transport fault) is named.
+                    tracing::warn!(path = %fauna_core::log_redact::log_path(relative_path), error = %format!("{e:#}"), "failed to record change on node");
                     self.leave_unrecorded_pending(relative_path, force_record);
                 }
             }
@@ -5533,7 +5544,7 @@ impl SyncEngine {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(path = %fauna_core::log_redact::log_path(relative_path), error = %e, "failed to record change on node (streaming)");
+                    tracing::warn!(path = %fauna_core::log_redact::log_path(relative_path), error = %format!("{e:#}"), "failed to record change on node (streaming)");
                     self.leave_unrecorded_pending(relative_path, force_record);
                 }
             }
@@ -6411,7 +6422,12 @@ impl SyncEngine {
     ///   [`Begun`](crate::db::AdoptionState::Begun) — judged as it arrived
     ///   ([`Self::set_adoption_marker`]) — and the spend is recorded after the
     ///   pass completes, so a re-pushed marker never adopts twice and a crash
-    ///   part-way adopts the remainder at the next start.
+    ///   part-way adopts the remainder at the next start. The adoption is
+    ///   bound to its first pass: that pass records each candidate's
+    ///   `(path_hash, head seq)` ([`SyncDb::adoption_candidates`]), and a later
+    ///   pass under the same marker adopts only those, so a nest that holds the
+    ///   adoption open (a swallowed or failed record) cannot extend it to a
+    ///   head it serves afterwards.
     /// - **How:** bytes under an owner root are opened under the signer's
     ///   roots and re-sealed under the current one
     ///   ([`Self::reseal_nest_copy_windowed_under`]); bytes under a content key
@@ -6515,6 +6531,25 @@ impl SyncEngine {
             .filter(|e| e.state != SyncState::Deleted)
             .map(|e| (hex::encode(fauna_core::sync::path_hash(&e.path)), e))
             .collect();
+        // The adoption is bound to the candidates its first pass saw (ruling
+        // (11)(j), residual (3)): that pass records each `(path_hash, head
+        // seq)` beside the marker, and a later pass under the same marker
+        // adopts only those still undone. A head the nest serves afterwards,
+        // or a newer one at a recorded path, falls to the local-state rule.
+        let bound: std::collections::HashSet<(String, i64)> = match (adopting, marker.as_ref()) {
+            (true, Some(nonce)) => match self.db.adoption_candidates(nonce)? {
+                Some(set) => set.into_iter().collect(),
+                None => {
+                    let set: Vec<(String, i64)> = candidates
+                        .iter()
+                        .map(|(hash, c)| (hash.clone(), c.head.seq))
+                        .collect();
+                    self.db.set_adoption_candidates(nonce, Some(&set))?;
+                    set.into_iter().collect()
+                }
+            },
+            _ => std::collections::HashSet::new(),
+        };
         tracing::info!(
             candidates = candidates.len(),
             rule = if adopting {
@@ -6528,6 +6563,28 @@ impl SyncEngine {
         let mut rerecorded = 0usize;
         // A transient failure (the door, a fetch) keeps an adoption unspent.
         let mut complete = true;
+        // The candidates the pass leaves on purpose without a line of their
+        // own, counted into its closing line: a pass that skipped every
+        // candidate silently read as one that never finished.
+        #[derive(Default)]
+        struct TakeOverSkips {
+            /// No entry on this device, and no adoption marker to adopt by.
+            not_held: usize,
+            /// No entry on this device, and a head the adoption's first pass
+            /// did not see (new, or newer than the one it recorded).
+            outside_first_pass: usize,
+            /// The entry this device holds names no recorded manifest yet.
+            entry_unrecorded: usize,
+            /// A history delete this device does not re-record: the owner's
+            /// own, or one over a path it still holds.
+            delete_not_owed: usize,
+            /// The head's name refused for a reason other than its signer's
+            /// roots (that one is warned).
+            name_unopened: usize,
+            /// The manifest address does not parse.
+            manifest_unparsed: usize,
+        }
+        let mut skipped = TakeOverSkips::default();
         for (hash, candidate) in &candidates {
             let head = candidate.head;
             let entry = held.get(hash);
@@ -6536,6 +6593,7 @@ impl SyncEngine {
             // What this device records, and under whose bound it opens.
             let (manifest_hex, size_bytes, content_stamp, thumbnail, signer) = if is_delete {
                 if !candidate.over_member || entry.is_some() {
+                    skipped.delete_not_owed += 1;
                     continue;
                 }
                 (
@@ -6549,6 +6607,7 @@ impl SyncEngine {
                 match entry {
                     Some(e) => {
                         let Some(manifest) = e.manifest_hash else {
+                            skipped.entry_unrecorded += 1;
                             continue;
                         };
                         (
@@ -6560,6 +6619,10 @@ impl SyncEngine {
                                 .map_or(RecordSigner::Other, |a| self.record_signer_of(&a)),
                         )
                     }
+                    None if adopting && !bound.contains(&(hash.clone(), head.seq)) => {
+                        skipped.outside_first_pass += 1;
+                        continue;
+                    }
                     None if adopting => (
                         head.manifest_hash.clone(),
                         head.size_bytes,
@@ -6567,7 +6630,10 @@ impl SyncEngine {
                         head.thumbnail_hash.clone(),
                         self.record_signer_of(&candidate.signed_as),
                     ),
-                    None => continue,
+                    None => {
+                        skipped.not_held += 1;
+                        continue;
+                    }
                 }
             };
             let keys = fauna_core::file_download::FileDownloadKeys {
@@ -6599,7 +6665,10 @@ impl SyncEngine {
                             );
                             continue;
                         }
-                        _ => continue,
+                        _ => {
+                            skipped.name_unopened += 1;
+                            continue;
+                        }
                     },
                 },
             };
@@ -6610,6 +6679,7 @@ impl SyncEngine {
             let mut thumbnail = thumbnail;
             if let Some(hex_hash) = manifest_hex.clone() {
                 let Ok(manifest) = Self::parse_manifest_hash(&hex_hash) else {
+                    skipped.manifest_unparsed += 1;
                     continue;
                 };
                 let owner_root = content_stamp.is_none()
@@ -6744,6 +6814,32 @@ impl SyncEngine {
         {
             self.db
                 .set_adoption_state(nonce, crate::db::AdoptionState::Spent)?;
+            self.db.set_adoption_candidates(nonce, None)?;
+        }
+        // The pass's own verdict, whichever door ran it: the pull's nonce-gain
+        // trigger ([`Self::take_over_if_owed`]) and an engine start's corpus
+        // passes (`always_resident::converge_corpus_at_start` — the only one an
+        // on-demand root runs, its inbound rail being the placeholder fold)
+        // each log in their own words, so a reader of either needs this one.
+        if rerecorded > 0 {
+            tracing::info!(
+                candidates = candidates.len(),
+                rerecorded,
+                complete,
+                "succession take-over: re-recorded history heads as this identity"
+            );
+        } else if !candidates.is_empty() {
+            tracing::info!(
+                candidates = candidates.len(),
+                not_held = skipped.not_held,
+                outside_first_pass = skipped.outside_first_pass,
+                entry_unrecorded = skipped.entry_unrecorded,
+                delete_not_owed = skipped.delete_not_owed,
+                name_unopened = skipped.name_unopened,
+                manifest_unparsed = skipped.manifest_unparsed,
+                complete,
+                "succession take-over: re-recorded nothing this pass"
+            );
         }
         Ok(rerecorded)
     }

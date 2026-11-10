@@ -25,6 +25,11 @@ use super::{CacheDb, blob_to_array};
 use anyhow::Context;
 use rusqlite::OptionalExtension;
 
+/// The kind of the drafts rail, `__drafts` — its one spelling, read by the
+/// mint below and by the reserved-address enumeration
+/// ([`crate::db::snapshots::reserved_rail_names`]).
+pub const DRAFTS_RAIL_KIND: &str = "drafts";
+
 impl CacheDb {
     /// Raw read of the calling actor's sealed `__drafts` blob for `path`
     /// (`fauna.drafts.get`): returns the **opaque, client-`BackupKey`-sealed
@@ -129,7 +134,7 @@ impl CacheDb {
     ) -> anyhow::Result<()> {
         let fs_id = {
             let conn = self.conn.lock().await;
-            crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, "drafts")?
+            crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, DRAFTS_RAIL_KIND)?
         };
         let path_hash: [u8; 32] = *blake3::hash(path.as_bytes()).as_bytes();
         let head_seq = self

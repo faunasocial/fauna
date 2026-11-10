@@ -18,6 +18,7 @@
     ensureWasm,
     shortId,
     accountDisplayLabel,
+    qualifiedHandle,
     parseCountI64,
     devicePlaceLabel,
     accountEnrolledDeviceRow,
@@ -33,6 +34,7 @@
     versionRetentionEditFromBounds,
     audienceOptions,
     audienceHint,
+    audienceLabel,
     normalizeAudience,
     websiteServeHint,
     writerGrantReach,
@@ -1249,6 +1251,13 @@
   function wizardSetName(name: string): void {
     machine?.wizard()?.setName(name);
   }
+  // Who can see the new folder (`wizard-audience-select`, ui/folders.md §
+  // Audience and website serving → *Born public*, ruling 1). Picking Public
+  // commits nothing — nothing exists yet, so the select paints the choice and
+  // Create later arms the declassify confirm.
+  function wizardSetAudience(audience: string): void {
+    machine?.wizard()?.setAudience(audience);
+  }
   // No `wizardSetMode`: a folder has no type (slice e), so the wizard never sets
   // one. The machine still defaults new folders to `sync`, which is what the
   // `mode` column keeps until phase 3 contracts it.
@@ -1282,7 +1291,12 @@
   async function wizardCreate(): Promise<void> {
     const w = machine?.wizard();
     if (!w) return;
-    const step = await w.submit();
+    // On a Public wizard `submit()` creates nothing: it arms the declassify
+    // confirm (`review.declassify_armed`) and resolves `Review`; the dialog
+    // below paints off the machine's arm, and its confirm is what creates.
+    await afterWizardSubmit(await w.submit());
+  }
+  async function afterWizardSubmit(step: string): Promise<void> {
     applySnapshot();
     if (step === 'Done') {
       machine?.closeWizard();
@@ -1290,7 +1304,19 @@
       applySnapshot();
     }
     // Otherwise the wizard stays on Review with the failure in
-    // `snap.wizard.review` (phase/created/failed_members/error).
+    // `snap.wizard.review` (phase/created/failed_members/error), or with the
+    // declassify confirm armed.
+  }
+  // The armed wizard's confirm → `confirm_public_create()`, which creates the
+  // folder public and attests it in one shared gesture (Born public, ruling 3).
+  async function wizardConfirmPublic(): Promise<void> {
+    const w = machine?.wizard();
+    if (!w) return;
+    await afterWizardSubmit(await w.confirmPublicCreate());
+  }
+  // Dismissing sends nothing and stays on Review (Born public, ruling 2).
+  function wizardCancelPublic(): void {
+    machine?.wizard()?.cancelPublicCreate();
   }
 
   // ── Derived helpers ──
@@ -1355,8 +1381,11 @@
   <!-- The declassify confirm — picking Public arms, this commits. Both
        consequences are stated because each surprised readers on its own: names
        and paths go public too (they become the address of each file), and
-       flipping back re-seals only FUTURE content. -->
-  {#if pendingPublicFs}
+       flipping back re-seals only FUTURE content. ONE snippet for both doors
+       to public — the owner row's select and a Public wizard's Create — so the
+       copy and ids cannot drift between them (ui/folders.md § Audience and
+       website serving → *Born public*, ruling 2: reused, never copied). -->
+  {#snippet declassifyDialog(onConfirm: () => void, onCancel: () => void)}
     <div class="overlay" role="dialog">
       <div class="dialog">
         <h3>{t.devices.declassify_title}</h3>
@@ -1366,12 +1395,15 @@
           <button
             class="btn btn-danger"
             data-testid={IDS.FOLDER_AUDIENCE_PUBLIC_CONFIRM}
-            onclick={confirmPublicAudience}>{t.devices.declassify_confirm}</button
+            onclick={onConfirm}>{t.devices.declassify_confirm}</button
           >
-          <button class="btn" onclick={() => (pendingPublicFs = null)}>{t.common.cancel}</button>
+          <button class="btn" onclick={onCancel}>{t.common.cancel}</button>
         </div>
       </div>
     </div>
+  {/snippet}
+  {#if pendingPublicFs}
+    {@render declassifyDialog(confirmPublicAudience, () => (pendingPublicFs = null))}
   {/if}
 
   <!-- The content-residency confirm (folders re-model phase 5 — file-sync.md §
@@ -1522,7 +1554,9 @@
                 {fs.name}
                 {#if isMemberRow(fs)}
                   <span class="badge shared-badge" data-testid={IDS.FOLDER_SHARED_BADGE}
-                    >{t.devices.shared_by({ who: fs.owner_display || t.common.unknown })}</span
+                    >{(fs.seat_forked ? t.devices.shared_by_owner_changed : t.devices.shared_by)({
+                      who: fs.owner_display || t.common.unknown,
+                    })}</span
                   >
                   <button
                     class="btn btn-small"
@@ -1790,7 +1824,10 @@
                             {@const publishedWarning = publishedWriterWarning(fs, member.access ?? 'reader')}
                             <tr data-testid={IDS.FOLDER_MEMBER_ITEM}>
                               <td data-testid={IDS.FOLDER_MEMBER_HANDLE}
-                                >{accountDisplayLabel(member.handle, member.actor_id)}</td
+                                >{accountDisplayLabel(
+                                  qualifiedHandle(member.handle, member.domain),
+                                  member.actor_id,
+                                )}</td
                               >
                               <td data-testid={IDS.FOLDER_MEMBER_STATUS}>{t.common.active}</td>
                               <td>
@@ -2233,6 +2270,32 @@
             {#if !wiz.name.continue_enabled}
               <p class="muted">{t.devices.wizard.name_required}</p>
             {/if}
+            <!-- Who can see the new folder — a field of this step, never a step
+                 of its own (ui/folders.md § Audience and website serving → *Born
+                 public*, ruling 1). Absent on a seam that cannot attest a
+                 born-public create: a control that cannot work must not paint.
+                 A new folder is unbound, so the shared option set is exactly
+                 Private | Public. The select paints the user's choice — nothing
+                 exists yet, so there is no current audience to protect. -->
+            {#if wiz.name.audience_offered}
+              <label class="field">
+                <span>{t.devices.folder_audience}</span>
+                <select
+                  data-testid={IDS.WIZARD_AUDIENCE_SELECT}
+                  value={wiz.name.audience}
+                  onchange={(e) => wizardSetAudience(e.currentTarget.value)}
+                >
+                  {#each audienceOptions(false, wiz.name.audience) as opt}
+                    <option value={opt.value} disabled={!opt.selectable}>
+                      {resolveLocalized(opt.label)}
+                    </option>
+                  {/each}
+                </select>
+                <span class="muted" data-testid={IDS.WIZARD_AUDIENCE_HINT}>
+                  {resolveLocalized(audienceHint(false, wiz.name.audience))}
+                </span>
+              </label>
+            {/if}
           </div>
 
         <!--
@@ -2293,6 +2356,10 @@
             <div class="review-grid">
               <div><strong>{t.devices.wizard.review_name}:</strong> {wiz.review.name}</div>
               <div>
+                <strong>{t.devices.wizard.review_audience}:</strong>
+                {resolveLocalized(audienceLabel(wiz.review.audience))}
+              </div>
+              <div>
                 <strong>{t.devices.wizard.review_devices}:</strong>
                 {#each wiz.review.enrolled as d}
                   <span class="badge">{d.label}</span>
@@ -2328,6 +2395,12 @@
         </div>
       </div>
     </div>
+    <!-- A Public wizard's Create armed the owner row's SAME declassify dialog;
+         the machine owns the arm (`review.declassify_armed`), the page keeps no
+         flag of its own. Rendered after the wizard so it stacks above it. -->
+    {#if wiz.step === 'Review' && wiz.review.declassify_armed}
+      {@render declassifyDialog(wizardConfirmPublic, wizardCancelPublic)}
+    {/if}
   {/if}
 {/if}
 

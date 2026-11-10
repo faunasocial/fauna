@@ -37,7 +37,6 @@ from helpers.waiting import wait_until
 from tests.test_folder_location_mode_toggle import (
     _assert_served,
     _bind_fresh_folder,
-    _require_placeholder_host,
 )
 
 pytestmark = [
@@ -46,6 +45,11 @@ pytestmark = [
     # device id this witness keys on (module docstring for windows).
     pytest.mark.linux,
     pytest.mark.tui,
+    # A placeholder host runs the leg: windows (cfapi) and linux (the agent's
+    # FUSE root); a macOS host's bound location is always-resident by design
+    # (feature-catalog.md ruling (i): a declaration, not an in-body absence —
+    # the same pair the mode-toggle module declares).
+    pytest.mark.host_platform("linux", "windows"),
 ]
 
 
@@ -58,7 +62,6 @@ def test_showing_a_folder_on_demand_enrols_a_place_less_device_once(
     from helpers.set_names import addressed
 
     app = logged_in_app
-    _require_placeholder_host(app)
     loc = app.sync_locations
 
     client = WsRpcAdminClient(

@@ -612,11 +612,15 @@ public struct NostrSettingsView: View {
             if let matrix = try? qrMatrix(data: invite.connectString) {
                 QrCodeView(matrix: matrix)
                     .frame(width: 200, height: 200)
+                    // The QR encodes the whole connect string, so it is the same
+                    // minted credential and suppresses capture like the text
+                    // below — on macOS its own reveal window.
+                    .suppressScreenCapture()
                     .accessibilityIdentifier(Ids.nostrBunkerConnectQr)
                     .accessibilityLabel(L.nostr.connectedApps.qrAlt)
                     .automationValue(Ids.nostrBunkerConnectQr, text: { "\(matrix.size)" })
             }
-            automationText(Ids.nostrBunkerConnectString, invite.connectString)
+            Text(invite.connectString)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
                 .lineLimit(3)
@@ -625,7 +629,12 @@ public struct NostrSettingsView: View {
                 // one-time bunker connect string is a minted, revocable
                 // credential, and this view exists only while it is shown — so
                 // the hold's lifetime is the reveal's with no flag needed.
+                // Innermost, with the id registered outside it (`automationText`
+                // split for this): on macOS the text is hosted again in the
+                // reveal window, and the id must register once.
                 .suppressScreenCapture()
+                .accessibilityIdentifier(Ids.nostrBunkerConnectString)
+                .automationValue(Ids.nostrBunkerConnectString, text: { invite.connectString })
             CopyButton(Ids.nostrBunkerConnectCopyBtn, text: invite.connectString)
             Text(L.nostr.connectedApps.revealHint)
                 .font(.caption)

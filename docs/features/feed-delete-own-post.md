@@ -4,6 +4,9 @@ title: Delete your own post
 section: everyday
 goal: docs/goal/ui/feed.md § Post deletion
 guide: docs/guides/app-tour.md § Feeds
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -44,6 +47,8 @@ Stamped 2026-11-01 at a6047fbd8b.
 | ios | ✅ full | 0.1.5-dev+962dc452 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+962dc452 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

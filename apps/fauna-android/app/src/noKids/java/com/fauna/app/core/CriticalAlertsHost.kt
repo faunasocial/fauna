@@ -1,9 +1,12 @@
 package com.fauna.app.core
 
+import com.fauna.ffi.FfiNestClient
 import com.fauna.ffi.criticalAlertsRegistry
+import com.fauna.ffi.startCriticalAlertSweep
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,8 +38,8 @@ class CriticalAlertsHost @Inject constructor() {
     // Process-wide, same shape as `ConversationsManagerHost.draftsScope` /
     // `ApiClient.connectionScope`: the re-sweep loop (`startSweep` below)
     // must outlive whatever UI scope triggered it, since it only stops itself
-    // on the identity-teardown boundary (`clearAll`), never earlier.
-    private val sweeps = CriticalAlertSweepDispatcher(CoroutineScope(SupervisorJob() + Dispatchers.IO))
+    // on the identity-teardown boundary (`clearAll`) or its client's, never earlier.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _active = MutableStateFlow<List<CriticalAlertRow>>(emptyList())
 
@@ -62,28 +65,31 @@ class CriticalAlertsHost @Inject constructor() {
      * teardown path every identity change on android already routes through.
      */
     fun clearAll() {
+        // The registry's teardown-epoch bump is the loop's own stop signal and
+        // the shared claim's forget: nothing else to drop here.
         registry.clearAll()
-        // The registry's teardown-epoch bump is the loop's own stop signal, so
-        // the dispatcher's record drops in the same breath: the two can never
-        // disagree, and the next sign-in starts a loop of its own.
-        sweeps.forget()
     }
 
     /**
-     * The post-auth hook's one entry point, the split every app makes
-     * ([CriticalAlertSweepDispatcher]): [loop] (`ApiClient.runCriticalAlertSweepLoop`)
-     * on a first or identity-changing sign-in, [onePass]
-     * (`ApiClient.runCriticalAlertSweep`) on a same-identity re-establish.
+     * The post-auth hook's one entry point: the shared
+     * `com.fauna.ffi.startCriticalAlertSweep` (`libs/fauna-ffi/src/critical_alerts.rs`),
+     * which decides the split (loop / one pass / loop on a re-established
+     * client) itself — a loop rides one client and ends with it, so this class
+     * keeps no record of its own.
      *
-     * Both run on this singleton's own process-wide scope, not the caller's —
-     * the loop never returns under normal operation (it stops itself on the
-     * first wake after [clearAll] runs), so launching it from a UI-triggered
-     * scope (a `LaunchedEffect`/ViewModel scope, which dies with its own
-     * lifecycle rather than at identity teardown) would kill it early.
-     * Fire-and-forget, same posture as every other universal post-auth hook on
-     * this class.
+     * Runs on this singleton's own process-wide scope, not the caller's — the
+     * loop never returns under normal operation, so launching it from a
+     * UI-triggered scope (a `LaunchedEffect`/ViewModel scope, which dies with
+     * its own lifecycle rather than at identity teardown) would kill it early.
+     * Fire-and-forget: a failure is logged, never thrown.
      */
-    fun startSweep(identityKey: String, loop: suspend () -> Unit, onePass: suspend () -> Unit) {
-        sweeps.start(identityKey, loop, onePass)
+    fun startSweep(nest: FfiNestClient, secret: ByteArray, nestUrl: String) {
+        scope.launch {
+            try {
+                startCriticalAlertSweep(nest, secret, nestUrl)
+            } catch (e: Exception) {
+                ShellLog.w("CriticalAlertSweepGlue", "startCriticalAlertSweep failed: ${e.message}")
+            }
+        }
     }
 }

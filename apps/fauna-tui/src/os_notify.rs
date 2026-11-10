@@ -100,8 +100,48 @@ const MAX_SNIPPET: usize = 160;
 /// just means no popup. The message is in the conversations list either way —
 /// the banner is an accelerator, never the only delivery.
 pub fn notify_message(label: &str, snippet: &str) {
-    dispatch(arm(), label, snippet, show_desktop, emit);
+    let summary = fauna_i18n::strings::notifications::message_from(label);
+    dispatch(
+        arm(),
+        label,
+        snippet,
+        |_, body| show_desktop(&summary, body, None),
+        emit,
+    );
 }
+
+/// Raise the knock toast — `behavior/notifications.md` § Localized body, *The
+/// knock toast*: titled `notifications.knock_title`, saying `body` (the shared
+/// `fauna_client_notifications::knock_toast` decision, resolved through the
+/// catalog), on the same one-arm-per-banner dispatch as [`notify_message`].
+///
+/// Returns the replace id this build raises every knock toast under: on a
+/// freedesktop build the one shared
+/// [`fauna_client_notifications::KNOCK_TOAST_REPLACE_ID`], handed to the
+/// desktop post so a flood of fresh keys replaces one toast instead of
+/// stacking. `None` on a build whose desktop arm has no replace id (windows:
+/// `notify-rust` carries no tag there; macOS: no desktop arm). An OSC 9/777
+/// escape — the SSH degradation, or a failed desktop post — has no id field
+/// at all, so there a flood stacks in the user's terminal emulator; `tui.md`
+/// § System integration records both gaps.
+pub fn notify_knock(body: &str) -> Option<u32> {
+    let title = fauna_i18n::strings::notifications::KNOCK_TITLE;
+    dispatch(
+        arm(),
+        title,
+        body,
+        |summary, body| show_desktop(summary, body, KNOCK_REPLACE_ID),
+        emit,
+    );
+    KNOCK_REPLACE_ID
+}
+
+/// The knock toast's replace id on the desktop arm — freedesktop only, the one
+/// `notify-rust` platform arm that carries an id.
+#[cfg(all(unix, not(target_os = "macos")))]
+const KNOCK_REPLACE_ID: Option<u32> = Some(fauna_client_notifications::KNOCK_TOAST_REPLACE_ID);
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+const KNOCK_REPLACE_ID: Option<u32> = None;
 
 /// Route one banner to exactly one sink. The sinks are parameters so the
 /// one-arm-per-banner property is a unit test, not a promise.
@@ -164,18 +204,22 @@ fn term() -> String {
     std::env::var("TERM").unwrap_or_default()
 }
 
-/// The desktop arm: the summary/body shape linux's `notify_message` uses,
-/// restricted to the builder calls every `notify-rust` platform arm offers.
+/// The desktop arm: the summary/body shape linux's notifiers use, restricted
+/// to the builder calls every `notify-rust` platform arm offers — plus the
+/// replace id where the platform arm has one (`replace_id` is `None` off
+/// freedesktop, see [`KNOCK_REPLACE_ID`]).
 #[cfg(not(target_os = "macos"))]
-fn show_desktop(label: &str, snippet: &str) -> Result<(), ()> {
+fn show_desktop(summary: &str, body: &str, replace_id: Option<u32>) -> Result<(), ()> {
     off_runtime(|| {
-        notify_rust::Notification::new()
-            .summary(&fauna_i18n::strings::notifications::message_from(label))
-            .body(snippet)
-            .appname("Fauna")
-            .show()
-            .map(|_| ())
-            .map_err(|_| ())
+        let mut notif = notify_rust::Notification::new();
+        notif.summary(summary).body(body).appname("Fauna");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(id) = replace_id {
+            notif.id(id);
+        }
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let _ = replace_id;
+        notif.show().map(|_| ()).map_err(|_| ())
     })
     .unwrap_or(Err(()))
 }
@@ -195,7 +239,7 @@ fn off_runtime<T: Send>(post: impl FnOnce() -> T + Send) -> Option<T> {
 /// is unused there; this keeps [`dispatch`]'s call site platform-uniform and,
 /// were it ever reached, degrades to the escape like any failed desktop post.
 #[cfg(target_os = "macos")]
-fn show_desktop(_label: &str, _snippet: &str) -> Result<(), ()> {
+fn show_desktop(_summary: &str, _body: &str, _replace_id: Option<u32>) -> Result<(), ()> {
     Err(())
 }
 

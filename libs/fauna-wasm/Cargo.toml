@@ -85,6 +85,9 @@ test-helpers = [
   # The Nests trust facet's render clock (`trustSetClockOffsetForTest`, the
   # `trust_facet_advance_clock` command's mechanism) — forwarded, rule (b).
   "fauna-client-capabilities/e2e-agent",
+  # The author drain's hold (`subscriptionsHoldAuthorDrainForTest`, the
+  # `subscriptions_hold_author_drain` command's mechanism) — forwarded, rule (b).
+  "fauna-client-subscriptions/test-helpers",
   # The submission-token refresh's clock (`mailTokenRefreshSetClockOffsetForTest`,
   # the `mail_token_refresh_advance_clock` command's mechanism) — forwarded,
   # rule (b).

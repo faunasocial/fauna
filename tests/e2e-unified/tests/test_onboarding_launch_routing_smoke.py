@@ -489,6 +489,7 @@ def test_smoke_d_unreachable_dns_fail_shows_retry_surface(launch_harness):
 @pytest.mark.parametrize(
     "launch_harness", _clients(*WEB_FIT, "windows"), indirect=True
 )
+@pytest.mark.feature("connect-and-sign-in")
 def test_smoke_e_previously_signed_in_identity_refused_by_claimed_nest_lands_refused_surface(
     nest_instance, launch_harness, live_node_url
 ):
@@ -629,13 +630,17 @@ def test_smoke_e2_suspended_while_signed_in_lands_refused_surface_without_relaun
 # ---------------------------------------------------------------------------
 # F — "Use a different nest" fallthrough on the retry surface → handle_entry
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("launch_harness", _clients(*WEB_FIT), indirect=True)
+@pytest.mark.parametrize(
+    "launch_harness", _clients(*WEB_FIT, "windows"), indirect=True
+)
 @pytest.mark.feature("connect-and-sign-in")
 def test_smoke_f_retry_surface_fallthrough_goes_to_handle_entry(launch_harness):
     """From the retry surface, clicking `launch-fallthrough-button` ("Use a
     different nest") seeds the identity and lands the wizard at `handle_entry`
     (onboarding.md row 509 fallthrough). This is the current home of the old
-    procedure-doc "case D" intent."""
+    procedure-doc "case D" intent. windows joins as case E did: the same
+    seed-and-launch call, and the first proof that a windows launch reaches the
+    retry surface on a closed port, which F2's windows arm stands on."""
     dead_url = f"http://127.0.0.1:{_free_closed_port()}"
     driver = launch_harness.launch_and_route(
         secret_hex=secrets.token_hex(32), node_url=dead_url, trust=None
@@ -646,6 +651,61 @@ def test_smoke_f_retry_surface_fallthrough_goes_to_handle_entry(launch_harness):
     assert driver.is_visible(HANDLE_INPUT), (
         "fallthrough must land the wizard at handle_entry so the user can pick "
         "a different nest"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F2 — "Use a different nest" clears the binding: the NEXT launch starts at
+# handle_entry, never the old nest's retry surface
+# ---------------------------------------------------------------------------
+# Every app. macos and ios relaunch on the same file-backed CredStore harness
+# case G relaunches on (`NATIVE_ONLY`), which keeps the app's stored registry
+# across the force-quit, so the relaunch reads exactly what the fallthrough's
+# `clearNestBinding` left (`FaunaMacApp.useADifferentNest` /
+# `FaunaApp.useADifferentNest`). linux's relaunch, like tui's, keeps the harness-owned store (linux's private
+# Secret Service daemon outlives the force-quit until harness teardown);
+# android's `AndroidLaunchHarness.relaunch()` keeps the app's own store (case A
+# relies on it); web's is a hard reload that keeps localStorage; the windows
+# driver passes `--nest-url` on its first launch only, so its relaunch routes on
+# the stored binding alone, as every other native relaunch does.
+@pytest.mark.parametrize(
+    "launch_harness",
+    _clients("tui", "linux", "android", "web", "windows", "macos", "ios"),
+    indirect=True,
+)
+@pytest.mark.feature("connect-and-sign-in")
+def test_smoke_f2_fallthrough_clears_the_binding_so_relaunch_starts_at_handle_entry(
+    launch_harness,
+):
+    """connect-and-sign-in outcome 16: "Use a different nest" walks the account
+    away from its nest through the registry (`clear_nest_binding`), keeping the
+    identity. Without the clear, the stale (nest_url, device_id) binding survives
+    an abandoned re-onboard and the next launch silently retries the same dead
+    nest. So: fall through, force-quit before picking a new nest, relaunch, and
+    the routed surface is `handle_entry` — the identity kept, no retry surface."""
+    dead_url = f"http://127.0.0.1:{_free_closed_port()}"
+    driver = launch_harness.launch_and_route(
+        secret_hex=secrets.token_hex(32), node_url=dead_url, trust=None
+    )
+    driver.wait_for(LAUNCH_FALLTHROUGH, timeout=ROUTE_TIMEOUT)
+    driver.click(LAUNCH_FALLTHROUGH)
+    driver.wait_for(HANDLE_INPUT, timeout=15)
+
+    launch_harness.relaunch()
+    driver = launch_harness.driver
+    driver.wait_for(HANDLE_INPUT, timeout=ROUTE_TIMEOUT)
+    assert driver.is_visible(HANDLE_INPUT), (
+        "after 'Use a different nest' the next launch must start at handle_entry"
+    )
+    assert driver.is_absent(LAUNCH_RETRY), (
+        "the cleared binding must not route the relaunch back to the old nest's "
+        "retry surface"
+    )
+    assert driver.is_absent(LAUNCH_FALLTHROUGH), (
+        "no launch retry surface at all on the relaunch — the binding is gone"
+    )
+    assert driver.is_absent(CREATE_IDENTITY), (
+        "the identity is kept: the relaunch must not fall back to identity_choice"
     )
 
 

@@ -213,6 +213,88 @@ def test_settings_tier_delete(admin_app, nest_instance):
     assert in_use in admin_app.admin.tier_names()
 
 
+@pytest.mark.feature("admin-tiers")
+def test_settings_tier_negative_cap_saves_as_zero_and_garbage_is_refused(
+    admin_app, nest_instance
+):
+    """value-formatting.md § Tier cap validation: a negative typed into a tier
+    cap is parseable, so it is a real edit and clamps to ``0`` — never the
+    4294967293 a negative once became, never a negative allowance sent to the
+    nest. A cap that does not parse (here: words) is refused locally and the
+    persisted value stays (tui paints ``SAVE_TIER_ERROR_INVALID_CAP`` on
+    ``error-message``, the other apps revert silently — two sanctioned consume
+    shapes, so this test reads only what both share: the stored value).
+
+    Both edits go through the page (convention 8) on a tier of this run's own,
+    defined through the admin API as setup; the add form's own negative clamp
+    is read too, on a second per-run tier defined from the page.
+    """
+    port, url = nest_instance["port"], nest_instance["url"]
+    sk = nest_instance["admin"]["signing_key"]
+    # Per-run names: the nest outlives one app of a cross-app sweep.
+    suffix = secrets.token_hex(3)
+    edited, added = f"e2e-neg-edit-{suffix}", f"e2e-neg-add-{suffix}"
+    ensure_tier(port, admin_signing_key=sk, name=edited, base_url=url)
+
+    admin_app.admin.navigate_settings()
+    wait_until(
+        lambda: edited in admin_app.admin.tier_names(),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"rows: {admin_app.admin.tier_names()!r}; "
+        f"error: {admin_app.error_text()!r}",
+    )
+
+    def row() -> int:
+        return admin_app.admin.tier_names().index(edited)
+
+    def feeds_cap() -> str:
+        return admin_app.admin.tier_cap_value("feeds", index=row()).strip()
+
+    # A negative in an existing row: saved, and saved as 0.
+    admin_app.admin.edit_tier_cap("feeds", "-1", index=row())
+    admin_app.admin.save_tier(index=row())
+    wait_until(
+        lambda: feeds_cap() == "0",
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"a negative feeds cap must save as 0; reads "
+        f"{feeds_cap()!r}; error: {admin_app.error_text()!r}",
+    )
+
+    # Words do not parse: whichever sanctioned shape the app takes (tui refuses
+    # the save and says why; the others revert to the persisted value), the
+    # nest keeps the 0 — an unparseable edit never zeroes or changes a cap.
+    admin_app.admin.edit_tier_cap("feeds", "lots", index=row())
+    admin_app.admin.save_tier(index=row())
+    with WsRpcAdminClient(
+        url, actor_id=nest_instance["admin"]["actor_id_bytes"], signing_key=bytes(sk)
+    ) as ws:
+        stored = {t["name"]: t for t in ws.call("fauna.admin.tiers.list", {})["tiers"]}
+    assert stored[edited]["max_feeds"] == 0, (
+        f"the nest must hold 0 after the clamp and keep it past the refused "
+        f"edit; holds {stored[edited]!r}"
+    )
+
+    # The add form clamps a negative the same way.
+    admin_app.admin.navigate_settings()
+    _wait_for_tier_rows(admin_app)
+    admin_app.admin.edit_new_tier_name(added)
+    for cap, value in {"inbox": "1000", "storage": "1000", "devices": "2",
+                       "blob-size": "1000", "feeds": "-7"}.items():
+        admin_app.admin.edit_new_tier_cap(cap, value)
+    admin_app.admin.add_tier()
+    wait_until(
+        lambda: added in admin_app.admin.tier_names(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the tier with a negative cap was not defined; rows: "
+        f"{admin_app.admin.tier_names()!r}; error: {admin_app.error_text()!r}",
+    )
+    at = admin_app.admin.tier_names().index(added)
+    assert admin_app.admin.tier_cap_value("feeds", index=at).strip() == "0", (
+        f"a negative typed into the add form must define the cap as 0; reads "
+        f"{admin_app.admin.tier_cap_value('feeds', index=at)!r}"
+    )
+
+
 @pytest.mark.feature("admin-dashboard")
 def test_admin_dashboard_loads(admin_app):
     """Admin dashboard shows stat cards after claiming admin."""

@@ -13,6 +13,7 @@
   import { connectionStatus, identity, onActorChange } from '#lib/store';
   import { registerActorScopedReset } from '#lib/actorScope';
   import C2paImage from '#lib/components/C2paImage.svelte';
+  import Lightbox from '#lib/components/Lightbox.svelte';
   import {
     ensureWasm,
     legalTakedownTombstone,
@@ -20,8 +21,9 @@
     matchesMutedKeywords,
     backupAuditObserve,
   } from '#lib/wasm';
-  import { mutedKeywordsList, type MutedKeyword } from '#lib/rpc';
-  import { contentRender, guardianReasonOf, hydrateContentPolicy } from '#lib/contentPolicy.svelte';
+  import { type MutedKeyword } from '#lib/rpc';
+  import { loadMutedWords } from '#lib/muted-words';
+  import { contentRender, guardianReasonOf, hydrateContentPolicy, showAgain, showAgainFor } from '#lib/contentPolicy.svelte';
   import { registerRegionBlockCounter } from '#lib/region.svelte';
   import { registerNestBlockCounter } from '#lib/nestRules.svelte';
   import RegionPlaceholder from '#lib/components/RegionPlaceholder.svelte';
@@ -90,6 +92,10 @@
 
   let manager: WasmConversationsManager | null = $state(null);
   let ready = $state(false);
+  // The declared text of the placeholder picture whose lightbox is open, or '' —
+  // a picture without its bytes still opens `image-lightbox` (conversations.md
+  // § User actions, the `dm-attachment-image[i]` row).
+  let placeholderLightbox = $state('');
   // Unregisters the actor-scope reset + change handler this page installs in
   // `onMount` (see there). Held so `onDestroy` can drop both — a component-local
   // closure that outlived its component would keep clearing state that no longer
@@ -529,7 +535,7 @@
     try {
       // The collapse wants only the terms; the record's `loaded` bit belongs to
       // the Settings page's empty state, and there is no empty state here.
-      mutedKeywords = (await mutedKeywordsList(id.secretHex)).keywords;
+      mutedKeywords = await loadMutedWords(id.secretHex);
     } catch {
       // No identity / not reachable yet — leave the list empty (no collapse).
     }
@@ -567,7 +573,11 @@
   // paints ahead of every other arm; its collapse shares the family reveal set.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function msgRender(msg: any): ContentRender {
-    return contentRender(msg.labels, {
+    return contentRender(msg.labels, msgItem(msg));
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function msgItem(msg: any) {
+    return {
       contentIdHex: msg.message_id,
       authorHex: null,
       // The viewer's own reports key a message by its plane record digest and
@@ -577,7 +587,27 @@
       text: msg.body ?? '',
       hashtags: [],
       hasMedia: false,
-    });
+    };
+  }
+  // The reporter's show-again beside the bubble's reported placeholder
+  // (`moderation.md` § Corollary — the reporter's hide is theirs to undo): the
+  // shared fold's ids + label over the keys the render matched; `null` on any
+  // other placeholder.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function showAgainForMsg(msg: any) {
+    return msgRender(msg).reported ? showAgainFor(msgItem(msg)) : null;
+  }
+  /** The show-again press — the un-hide per matched id; a failure goes to
+   *  `error-message`, and the report itself is never withdrawn. */
+  async function showAgainMsg(ids: string[]): Promise<void> {
+    const id = $identity;
+    if (!id) return;
+    reportError = '';
+    try {
+      await showAgain(id.secretHex, ids);
+    } catch (e) {
+      reportError = e instanceof Error ? e.message : String(e);
+    }
   }
   // The sender's hex actor id for a Fauna-rail address (`{ Fauna: { actor_id } }`,
   // the id as raw bytes), else null — mail and bridged senders have none.
@@ -1757,6 +1787,16 @@
                 data-source={msgRender(msg).reported ? 'reported' : undefined}
                 class="message-deleted message-content-blocked"
               >{msgRender(msg).reported ? t.moderation.report.hidden_placeholder : t.family.content_blocked_notice}</div>
+              {#if showAgainForMsg(msg)}
+                {#each [showAgainForMsg(msg)!] as again}
+                  <button
+                    type="button"
+                    data-testid={IDS.CONTENT_POLICY_SHOW_AGAIN_BUTTON}
+                    class="message-show-again"
+                    onclick={() => showAgainMsg(again.ids)}
+                  >{resolveLocalized(again.label)}</button>
+                {/each}
+              {/if}
               {#if guardianReasonOf(msgRender(msg))}
                 <!-- The guardian rule's reason, verbatim beside the frame
                      (`nest-rules.md` § The shared rule editor → *The reason is
@@ -1971,7 +2011,7 @@
                        `data-testid`/`data-state` ride `...rest` onto the <img>. -->
                   <C2paImage data-testid={IDS.DM_ATTACHMENT_IMAGE} data-state="painted" class="dm-attachment dm-attachment-image" src={url} bytes={manager?.attachmentBytes(att.blob_hash)} mimeType={att.mime_type} alt={att.filename} title={att.filename} />
                 {:else}
-                  <span data-testid={IDS.DM_ATTACHMENT_IMAGE} data-state="placeholder" class="dm-attachment dm-attachment-file" title={att.filename}>🖼 {att.filename} · {byteSize(att.size_bytes)}</span>
+                  <button type="button" data-testid={IDS.DM_ATTACHMENT_IMAGE} data-state="placeholder" class="dm-attachment dm-attachment-file dm-attachment-placeholder" title={att.filename} onclick={() => { placeholderLightbox = `${att.filename} · ${byteSize(att.size_bytes)}`; }}>🖼 {att.filename} · {byteSize(att.size_bytes)}</button>
                 {/if}
               {:else}
                 {@const url = attachmentUrl(att)}
@@ -2470,6 +2510,10 @@
   </section>
 </div>
 
+{#if placeholderLightbox}
+  <Lightbox placeholder={placeholderLightbox} onclose={() => { placeholderLightbox = ''; }} />
+{/if}
+
 <style>
   .conversations { display: flex; height: calc(100vh - 3rem); gap: 0; }
   .list-pane {
@@ -2635,6 +2679,10 @@
   a.dm-attachment-file { color: var(--accent); text-decoration: none; }
   a.dm-attachment-file:hover { text-decoration: underline; }
   span.dm-attachment-file { color: var(--text-muted); }
+  button.dm-attachment-placeholder {
+    color: var(--text-muted); background: none; border: none; padding: 0;
+    font: inherit; font-size: 0.82rem; text-align: left; cursor: pointer;
+  }
 
   .recipient-picker { display: flex; flex-direction: column; gap: 0.4rem; padding-bottom: 0.5rem; }
   .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }

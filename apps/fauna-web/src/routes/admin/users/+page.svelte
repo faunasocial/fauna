@@ -54,6 +54,7 @@
   } from '#lib/wasm';
   import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import { IDS } from '#lib/generated/uiIds';
+  import { localTimestamp } from '#lib/value-format';
 
   // Consolidated admin-users hub (admin.md § 2) — five sections: Pending
   // requests / Registration / Admit / Invite / Users. Drives the shared `fauna.admin.*`
@@ -908,7 +909,7 @@
         </span>
         <span data-testid={IDS.ADMIN_PENDING_ACTION_EXECUTE_AFTER}>
           {t.settings.pending_actions.applies({
-            time: new Date(action.execute_after * 1000).toLocaleString(),
+            time: localTimestamp(action.execute_after * 1000),
           })}
         </span>
         <span data-testid={IDS.ADMIN_PENDING_ACTION_APPROVALS}>

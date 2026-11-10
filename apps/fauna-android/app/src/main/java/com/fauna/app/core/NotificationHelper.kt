@@ -7,12 +7,14 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.fauna.app.MainActivity
 import com.fauna.app.R
+import com.fauna.app.testing.TestAgent
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiKnock
 import com.fauna.ffi.FfiNotificationText
 import com.fauna.ffi.knockPushMutedFor
 import com.fauna.ffi.knockTextFor
+import com.fauna.ffi.knockToastReplaceId
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -130,10 +132,19 @@ class NotificationHelper @Inject constructor(
      * § Muted words rule 6): the toast paints the same relayed text as the
      * knock's row and cannot be revealed, so it asks the shared
      * [knockPushMutedFor] over [mutedKeywords] first. Returns whether it fired.
+     *
+     * Every push is counted, and every toast handed to the platform logged, on
+     * the shared fired-toast log (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, the
+     * witness for `notifications` outcome 15) through [TestAgent], whose
+     * shipping twin is a no-op: the count before the muted gate, the entry
+     * after the post, so it means "the user was shown this".
      */
     fun postKnockNotification(knock: FfiKnock, mutedKeywords: List<MutedKeyword>): Boolean {
+        TestAgent.observeKnockNotice()
         if (knockPushMutedFor(knock, mutedKeywords)) return false
-        val body = when (val text = knockTextFor(knock)) {
+        val text = knockTextFor(knock)
+        val key = (text as? FfiNotificationText.Localized)?.text?.key
+        val body = when (text) {
             is FfiNotificationText.Localized -> resolveLocalized(context, text.text).orEmpty()
             is FfiNotificationText.Verbatim -> text.text
         }
@@ -157,6 +168,7 @@ class NotificationHelper @Inject constructor(
         return try {
             NotificationManagerCompat.from(context)
                 .notify(KNOCK_NOTIFICATION_ID, notification)
+            TestAgent.recordKnockNotice(key, body, KNOCK_NOTIFICATION_ID)
             true
         } catch (_: SecurityException) {
             false
@@ -204,7 +216,9 @@ class NotificationHelper @Inject constructor(
          * One id for every knock toast, as linux's `NOTIF_ID_KNOCK`: a knock is a
          * stranger's and keys cost nothing, so a per-sender id would let a flood of
          * fresh keys stack unbounded heads-up alerts. Each new knock replaces the last.
+         * The value is the shared `fauna_client_notifications::KNOCK_TOAST_REPLACE_ID`
+         * (UniFFI [knockToastReplaceId]), the one id every app's knock toast carries.
          */
-        const val KNOCK_NOTIFICATION_ID = 0x4B4E
+        val KNOCK_NOTIFICATION_ID: Int by lazy { knockToastReplaceId().toInt() }
     }
 }

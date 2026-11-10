@@ -8,7 +8,15 @@ namespace FaunaApp.Services;
 
 public static class NotificationService
 {
-    private static bool _initialized;
+    // Volatile: the notify paths read it on whichever thread raises a toast, with
+    // no lock. Set last, after Identity, so a reader that sees it also sees the identity.
+    private static volatile bool _initialized;
+
+    // Serializes Initialize: its callers run on thread-pool threads at about the same
+    // time at a login (the conversations-session continuation, and the agent attachment
+    // under its own gate), and a second AppNotificationManager.Register() while the
+    // first is still running throws "Registration is in progress!" (measured 2026-11-09).
+    private static readonly object InitGate = new();
 
     /// <summary>
     /// The AUMID this process's toasts are posted under, once <see cref="Initialize"/>
@@ -21,23 +29,30 @@ public static class NotificationService
     /// </summary>
     public static string? Identity { get; private set; }
 
+    /// <summary>Register this process's notification host once. Safe to call from any
+    /// thread, concurrently: the first caller registers, the others wait for it and
+    /// return. A failed registration leaves the flag unset, so a later call tries again.</summary>
     public static void Initialize()
     {
         if (_initialized) return;
-        try
+        lock (InitGate)
         {
-            AppNotificationManager.Default.Register();
-            _initialized = true;
-            Identity = ResolveIdentity();
-        }
-        catch (Exception ex)
-        {
-            // Notifications may not be available in this launch shape; the app runs on
-            // without toasts. Said in the log rather than swallowed: a DM banner the
-            // user was never shown is otherwise undiagnosable, and the e2e witness's
-            // failure message folds every "banner" line of the app log in (`_why`).
-            ShellLog.Warn("NotificationService",
-                $"[banner] toasts unavailable: AppNotificationManager.Register() threw {ex.GetType().Name}: {ex.Message}");
+            if (_initialized) return;
+            try
+            {
+                AppNotificationManager.Default.Register();
+                Identity = ResolveIdentity();
+                _initialized = true;
+            }
+            catch (Exception ex)
+            {
+                // Notifications may not be available in this launch shape; the app runs on
+                // without toasts. Said in the log rather than swallowed: a DM banner the
+                // user was never shown is otherwise undiagnosable, and the e2e witness's
+                // failure message folds every "banner" line of the app log in (`_why`).
+                ShellLog.Warn("NotificationService",
+                    $"[banner] toasts unavailable: AppNotificationManager.Register() threw {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 
@@ -114,14 +129,22 @@ public static class NotificationService
     /// carries a muted word raises none (<see cref="KnockToastText.Withheld"/>) —
     /// gated here, not on <c>KnockReceived</c>, which also refreshes the contacts
     /// roster.
+    ///
+    /// <para>Under e2e the arm feeds the shared knock-toast log
+    /// (<c>state.knock_notices</c>, <c>notifications</c> outcome 15): every push it
+    /// receives is counted before any gate, and a toast is recorded only once
+    /// <c>Show</c> has returned — so an entry means "the user was shown this". No-ops
+    /// in a Release build (<see cref="Core.Services.E2eLoudSurfaces"/>).</para>
     /// </summary>
     internal static void ShowKnockNotification(FfiKnock knock)
     {
+        Core.Services.E2eLoudSurfaces.ObserveKnockNotice();
         if (!_initialized || KnockToastText.Withheld(knock, MutedKeywordsCache.Keywords)) return;
         try
         {
-            var (title, body) = KnockToastText.For(knock);
+            var (title, body, bodyKey) = KnockToastText.For(knock);
             AppNotificationManager.Default.Show(KnockToastBuilder.Build(title, body));
+            Core.Services.E2eLoudSurfaces.RecordKnockNotice(bodyKey, body, KnockToastBuilder.ReplaceId);
         }
         catch { }
     }

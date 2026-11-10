@@ -504,13 +504,21 @@ public class KeychainStore {
             return
         }
         let data = Data(value.utf8)
-        // Remove any prior copies in EITHER sync state, then re-land the copy-set the current
-        // policy requires. Copy-not-move (§ iCloud-backup accessibility policy): the device-bound
-        // working copy is written FIRST and always exists; the synchronizable *backup* copy is
-        // added only to an identity row when opted in, so no device's only copy is ever the shared
-        // iCloud-circle row.
+        // Re-land the device-bound working copy; the circle copy follows this device's choice.
+        // Copy-not-move (§ iCloud-backup accessibility policy): the device-bound working copy is
+        // written FIRST and always exists; the synchronizable *backup* copy is added only to an
+        // identity row when opted in, so no device's only copy is ever the shared iCloud-circle
+        // row. A prior circle copy of a device-scoped row is a stray and goes with the prior
+        // working copy; an identity row's goes under an opt-out and is replaced under an opt-in
+        // — and stays where this device has made no choice (no preference row: a restored
+        // device), since only a person's own toggle deletes a circle copy (`BackupPreference`).
         let plane = writePlane
-        _ = backend.delete(Self.matchQuery(service: service, account: rawKey, plane: plane))
+        let preference = backupPreference()
+        let identity = Self.isIdentityScoped(rawKey)
+        let priorCopies = identity && preference == .unset
+            ? syncStateKey(account: rawKey, synchronizable: false)
+            : Self.matchQuery(service: service, account: rawKey, plane: plane)
+        _ = backend.delete(priorCopies)
         let status = backend.add(
             Self.addQuery(
                 service: service, account: rawKey, data: data, policy: .forBackup(enabled: false),
@@ -520,7 +528,7 @@ public class KeychainStore {
         }
         // Synchronizable backup copy, best-effort like the rest of the store — a failure leaves the
         // working copy intact and `reconcileCredentialAccessibility()` re-lands the backup next launch.
-        if Self.isIdentityScoped(rawKey), iCloudBackupEnabled() {
+        if identity, preference == .on {
             _ = backend.add(
                 Self.addQuery(
                     service: service, account: rawKey, data: data, policy: .forBackup(enabled: true),
@@ -643,17 +651,42 @@ public class KeychainStore {
 
     // MARK: - iCloud backup toggle
 
-    /// Whether this device backs the identity up to iCloud Keychain. Default `false`
-    /// (device-bound) — a fresh or upgraded install never syncs until the user opts in.
-    public func iCloudBackupEnabled() -> Bool {
+    /// The device-local backup preference as the keychain holds it. `unset` is no row at all
+    /// — a restored device (the row is device-bound, so no restore brings it) or a device that
+    /// never saw the toggle — and is NOT a choice (`ios.md` § Credential Storage, the opt-in
+    /// bullet's three readings): a device that
+    /// chose nothing adds no circle copy and deletes none. Only the store writes the row, as
+    /// `"1"` or `"0"`.
+    enum BackupPreference: Equatable {
+        case on, off, unset
+    }
+
+    /// The preference row, read the way every credential row is read: this device's own
+    /// device-bound copy — the row is device-scoped, so a circle copy of it is another
+    /// device's choice and reads as absent.
+    func backupPreference() -> BackupPreference {
+        let raw: String?
         if inMemory {
             Self.storeLock.lock()
             defer { Self.storeLock.unlock() }
             Self.e2eReload()
-            return Self.memoryStore[Self.backupPreferenceAccount] == "1"
+            raw = Self.memoryStore[Self.backupPreferenceAccount]
+        } else {
+            raw = loadValue(account: Self.backupPreferenceAccount)
         }
-        // The same read as every credential row.
-        return loadValue(account: Self.backupPreferenceAccount) == "1"
+        switch raw {
+        case nil: return .unset
+        case "1": return .on
+        default: return .off
+        }
+    }
+
+    /// Whether this device backs the identity up to iCloud Keychain — the toggle's reading.
+    /// Default `false` (device-bound): a fresh, upgraded or restored install never syncs
+    /// until the user opts in. A missing row and a row reading 0 both read OFF here; the
+    /// reconcile and `save` tell them apart (`backupPreference()`).
+    public func iCloudBackupEnabled() -> Bool {
+        backupPreference() == .on
     }
 
     /// Persist the device-local preference, best-effort like the rest of the store.
@@ -671,38 +704,46 @@ public class KeychainStore {
     @discardableResult
     public func setICloudBackup(enabled: Bool) -> Bool {
         writeBackupPreference(enabled)
-        let landed = rewriteAllCredentials(toBackupEnabled: enabled)
+        let landed = rewriteAllCredentials(to: enabled ? .on : .off)
         guard enabled, !landed else { return true }
         writeBackupPreference(false)
-        _ = rewriteAllCredentials(toBackupEnabled: false)
+        _ = rewriteAllCredentials(to: .off)
         return false
     }
 
-    /// Bring every credential row's copy-set in line with the current preference. Runs at
+    /// Bring every credential row's copy-set in line with this device's preference. Runs at
     /// launch (idempotent, self-healing): it re-converges any row a crash mid-`setICloudBackup`
-    /// left behind.
+    /// left behind, and re-lands a device-bound working copy on a restored device holding only
+    /// the synced copies. The preference has three readings (`BackupPreference`): ON converges
+    /// each identity row to both copies, OFF to the device-bound copy alone, and no row at all —
+    /// a restored device, which no restore brings the device-bound preference row to — lands the
+    /// working copy and leaves every identity circle copy as it found it, writing no preference:
+    /// a device that has made no choice deletes nothing (`ios.md` § Credential Storage, the
+    /// opt-in bullet). A stray circle copy of a device-scoped row goes under every reading
+    /// (*What the copy carries*).
     ///
     /// A preference standing ON where a copy did not land is cleared only off the
     /// data-protection plane, which can never hold one. On that plane a failed pass is
     /// transient and the person's choice stands: the next launch retries it.
     public func reconcileCredentialAccessibility() {
-        let enabled = iCloudBackupEnabled()
-        let landed = rewriteAllCredentials(toBackupEnabled: enabled)
-        if enabled, !landed, writePlane != .dataProtection {
+        let preference = backupPreference()
+        let landed = rewriteAllCredentials(to: preference)
+        if preference == .on, !landed, writePlane != .dataProtection {
             writeBackupPreference(false)
         }
     }
 
     /// Converge every row in the service namespace to the copy-set its scope and the target
-    /// policy require. The in-memory store has no accessibility to migrate. Returns whether the
-    /// target holds: with backup on, every identity row's synchronizable copy reads back, a
-    /// device-scoped row never having one. A keychain holding no row at all holds the target.
-    /// An enumeration that fails is a pass that never ran, so it reports false: the legacy
-    /// plane answers this one −50, which is why a legacy-plane build never reports a landing.
+    /// preference require. The in-memory store has no accessibility to migrate. Returns whether
+    /// the target holds: with backup on, every identity row's synchronizable copy reads back, a
+    /// device-scoped row never having one. A keychain holding no row at all holds the target,
+    /// as does every keychain under OFF or no preference. An enumeration that fails is a pass
+    /// that never ran, so it reports false: the legacy plane answers this one −50, which is why
+    /// a legacy-plane build never reports a landing.
     ///
     /// Enumerates BOTH sync states and groups by account, because copy-not-move means an opted-in
     /// row exists as two copies (device-bound + synchronizable) under the same account.
-    private func rewriteAllCredentials(toBackupEnabled enabled: Bool) -> Bool {
+    private func rewriteAllCredentials(to preference: BackupPreference) -> Bool {
         guard !inMemory else { return true }
         let (status, result) = backend.copyMatching(
             Self.enumerateQuery(service: service, plane: writePlane))
@@ -725,8 +766,8 @@ public class KeychainStore {
         for account in Set(deviceBoundData.keys).union(syncData.keys) {
             convergeRow(
                 account: account, deviceBoundData: deviceBoundData[account],
-                syncData: syncData[account], enabled: enabled)
-            if enabled, Self.isIdentityScoped(account),
+                syncData: syncData[account], preference: preference)
+            if preference == .on, Self.isIdentityScoped(account),
                let data = deviceBoundData[account] ?? syncData[account],
                !verifyReadable(account: account, synchronizable: true, expected: data) {
                 landed = false
@@ -735,10 +776,12 @@ public class KeychainStore {
         return landed
     }
 
-    /// Converge one account's copy-set to the target policy without ever leaving the device
+    /// Converge one account's copy-set to the target preference without ever leaving the device
     /// without a readable device-bound copy. Device-scoped row → whatever device-bound copy it
-    /// has, and no circle copy; identity row, target OFF → exactly `{ device-bound }`; identity
-    /// row, target ON → exactly `{ device-bound, synchronizable }`.
+    /// has, and no circle copy; identity row, OFF → exactly `{ device-bound }`; identity row, ON
+    /// → exactly `{ device-bound, synchronizable }`; identity row, no preference → the
+    /// device-bound copy landed, the circle copy as found (another device's backup, never added
+    /// and never deleted by a device that made no choice).
     ///
     /// Order is lockout-safe (§ policy): the device-bound *working* copy is ensured FIRST (added +
     /// read-back-verified when it has to be landed from the synchronizable value), and only then
@@ -748,7 +791,9 @@ public class KeychainStore {
     /// the synchronizable value is only ever promoted to it on a restored device that has no
     /// device-bound copy yet (never re-promoting a possibly cross-identity-clobbered circle value
     /// when a real working copy exists).
-    private func convergeRow(account: String, deviceBoundData: Data?, syncData: Data?, enabled: Bool) {
+    private func convergeRow(
+        account: String, deviceBoundData: Data?, syncData: Data?, preference: BackupPreference
+    ) {
         guard Self.isIdentityScoped(account) else {
             // Never promoted: a stray circle copy names another device, so a keychain holding
             // only that ends up holding nothing, and this device mints its own row.
@@ -776,7 +821,8 @@ public class KeychainStore {
                 return  // working copy not verified — keep the source, retry next launch
             }
         }
-        if enabled {
+        switch preference {
+        case .on:
             // Ensure the synchronizable backup copy exists carrying the device-bound value.
             let syncPolicy = AccessPolicy.forBackup(enabled: true)
             let addStatus = backend.add(
@@ -788,9 +834,14 @@ public class KeychainStore {
                     syncStateKey(account: account, synchronizable: true),
                     [kSecAttrAccessible as String: syncPolicy.accessible, kSecValueData as String: data])
             }
-        } else {
+        case .off:
             // Opt-out: delete ONLY the synchronizable (circle) copy; the device-bound copy stays.
             _ = backend.delete(syncStateKey(account: account, synchronizable: true))
+        case .unset:
+            // No choice made on this device: a circle copy here is another device's backup of
+            // this identity and stays as it is — neither added nor deleted. The toggle reads OFF
+            // until the person chooses.
+            break
         }
     }
 

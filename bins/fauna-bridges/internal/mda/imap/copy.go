@@ -127,18 +127,16 @@ func (s *Session) copy(
 // a `\Junk` training signal, and which label fires.
 //
 // Per `mail-spam.md` § Training signal sources: relocating *into*
-// the canonical `\Junk` mailbox implies "user thinks this is spam"
-// (label=spam); relocating *out of* `\Junk` implies "user thinks this
-// is legitimate" (label=ham). The detection currently keys on the
-// canonical mailbox name ("Junk") via `canonicalMailboxAttr`; once
-// Phase D.6 lands CREATE-with-SPECIAL-USE, this helper extends to
-// also honor user-marked \Junk mailboxes via a nest-side metadata
-// lookup.
+// the `\Junk` mailbox implies "user thinks this is spam"
+// (label=spam); relocating *out of* it implies "user thinks this
+// is legitimate" (label=ham). Only the standard Junk mailbox carries
+// `\Junk` (imap-server.md § Standard mailboxes: no other mailbox is
+// assigned a SPECIAL-USE attribute, and Junk is immovable), so the
+// name test is the attribute test; the name is wsrpc.JunkMailbox,
+// pinned to the nest's owner of the table.
 func junkMoveLabel(source, dest string) (wsrpc.SpamLabel, bool) {
-	_, srcIsJunk := canonicalMailboxAttr(source)
-	srcIsJunk = srcIsJunk && source == "Junk"
-	_, dstIsJunk := canonicalMailboxAttr(dest)
-	dstIsJunk = dstIsJunk && dest == "Junk"
+	srcIsJunk := source == wsrpc.JunkMailbox
+	dstIsJunk := dest == wsrpc.JunkMailbox
 	switch {
 	case dstIsJunk && !srcIsJunk:
 		return wsrpc.SpamLabelSpam, true

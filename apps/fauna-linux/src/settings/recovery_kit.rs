@@ -2326,7 +2326,7 @@ mod tests {
     /// The switch is the boundary the obligation exists to cross, so
     /// `reset_actor_scoped_state` deliberately cannot reach these cells; the
     /// erase destroys every identity on the box, so there is no successor left
-    /// to owe a kit to. `account_scope::erase_all_known_accounts` is the one
+    /// to owe a kit to. `account_scope::finish` is the one
     /// caller, beside `clear_succession_sweep`.
     #[test]
     fn the_owed_kit_does_not_survive_an_all_accounts_erase() {

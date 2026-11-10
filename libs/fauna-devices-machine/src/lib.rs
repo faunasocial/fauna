@@ -40,7 +40,7 @@ pub mod this_device;
 
 pub use machine::{
     DevicesMachine, FleetMembersView, FleetRemoval, FleetRemovalRefusal, FolderChannelOwners,
-    FollowedFoldersSource, ForeignSetRow, ForeignSetsSource, MlsQuery, NestDeletion,
+    FollowedFoldersSource, ForeignSetRow, ForeignSetsSource, ForkedSeatRow, MlsQuery, NestDeletion,
     P2pParticipation, UnaccountedMember, devices_refreshes_json,
 };
 #[cfg(feature = "rpc-glue")]

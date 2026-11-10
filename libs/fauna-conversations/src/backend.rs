@@ -13,6 +13,7 @@ use fauna_mls::types::{ChannelId, ReactionOp};
 // trait).
 use fauna_core::MaybeSendSync;
 use fauna_core::data::ArrivalDisposition;
+pub use fauna_core::scoring::inbox_catch_up::SpamScorerState;
 use thiserror::Error;
 
 /// Wire-shaped inbound message handed to the manager by a backend.
@@ -98,6 +99,7 @@ pub(crate) fn bucket_inbound_common(
         subject,
         in_reply_to: msg.in_reply_to.clone(),
         message: crate::message::MessageSnapshot {
+            queued_send: None,
             message_id: msg.message_id,
             sender: msg.sender,
             sender_display: String::new(),
@@ -115,6 +117,7 @@ pub(crate) fn bucket_inbound_common(
             labels: vec![],
             plane_ref: msg.plane_ref,
             can_delete: false,
+            can_remove: false,
             undelivered: false,
             warmup_hold: None,
             scan_result_lines: Vec::new(),
@@ -469,6 +472,27 @@ pub struct InboundMailRecord {
     /// ([`MailWarmupHold`]); `None` on every `INBOX` record, on a sent message
     /// the warm-up never held, and once its release has passed.
     pub warmup_hold: Option<MailWarmupHold>,
+    /// What the record's feed `flags` and `scores` say for the spam catch-up
+    /// ([`MailSpamFacts`]): an `INBOX` copy ingested without the watermark
+    /// enters the held un-watermarked set. Meaningless on a `Sent` record.
+    pub spam: MailSpamFacts,
+}
+
+/// The three per-copy facts the app's held un-watermarked set mirrors
+/// (`mail-spam.md` § Scoring placement → *The app's catch-up*), read off a
+/// copy's feed `flags` and `scores` — at ingest ([`InboundMailRecord::spam`])
+/// and on the flag-change feed ([`MailFlagChange`]). The default — not
+/// watermarked, not vetoed, unreported — is what a copy with no flags reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MailSpamFacts {
+    /// The copy carries the scorer's `$FaunaSpamScored` watermark.
+    pub scored: bool,
+    /// The copy carries `$NotJunk`, the per-message ham veto: the catch-up
+    /// watermarks it without opening it, and never files it.
+    pub not_junk: bool,
+    /// The copy's live `report:spam` score (per mille); `0` when it carries
+    /// no report row.
+    pub report_spam_pm: i64,
 }
 
 /// IMAP's read flag, as the mail feeds spell it in a record's flag set.
@@ -518,14 +542,25 @@ pub struct InboundMailPage {
 }
 
 /// One `INBOX` message whose flag set changed, as
-/// [`InboundMailSource::flag_changes`] delivered it — reduced to the one flag
-/// the conversations store reads.
+/// [`InboundMailSource::flag_changes`] delivered it — reduced to the two flags
+/// and the one score the conversations store reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MailFlagChange {
     pub uid: u32,
     pub modseq: u64,
     /// Whether the message's whole current flag set carries `\Seen`.
     pub has_seen_flag: bool,
+    /// The watermark, the veto and the `report:spam` score as the change
+    /// delivered them. One rule reads them (`mail-spam.md` § Scoring placement
+    /// → *The app's catch-up*): a held copy delivered without the watermark
+    /// is in the held un-watermarked set with these facts, one delivered with
+    /// it leaves the set — whether a pass then scores it is the take's filter
+    /// (every copy for a trained scorer, a reported one for a report-only
+    /// scorer), never this feed's. The nest advances a copy's modseq,
+    /// removing the watermark, when the community aggregate rises
+    /// (`report-sharing.md` § Applying the aggregate → *The re-open is a
+    /// metadata change, not a flag change*).
+    pub spam: MailSpamFacts,
 }
 
 /// One page of `fauna.email.inbox.flag_changes`: the changes past the cursor
@@ -606,7 +641,33 @@ pub trait InboundMailSource: MaybeSendSync {
     /// `(scored_uids, junk_uids)` here into one `apply_spam_disposition`
     /// (watermark + move the junk subset INBOX→Junk) — the native twin of the web
     /// loop's `flushSpamScoring`. Default no-op; best-effort.
-    async fn end_pass(&self) {}
+    ///
+    /// Returns the UIDs the flush watermarked — every UID the pass's scorer
+    /// recorded, once the disposition went through; empty when nothing was
+    /// scored or the flush failed. The driver hands them to
+    /// [`crate::ConversationsManager::note_spam_disposition`], so they leave
+    /// the held un-watermarked set (`mail-spam.md` § Scoring placement → *The
+    /// app's catch-up*); a failed flush leaves them in it, owed the next pass.
+    async fn end_pass(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// What this source's scorer could score at its latest
+    /// [`Self::begin_pass`] — the filter the catch-up takes the held
+    /// un-watermarked set through
+    /// ([`crate::backends::smtp::rescore_held_inbox_copies`]). Read without a
+    /// round trip, so a sweep over a set the scorer cannot score (an untrained
+    /// actor's unreported copies) costs nothing. Default
+    /// [`SpamScorerState::Absent`]: only the native `INBOX` source scores.
+    fn scorer_state(&self) -> SpamScorerState {
+        SpamScorerState::Absent
+    }
+
+    /// Record, between [`Self::begin_pass`] and [`Self::end_pass`], a held
+    /// copy carrying `$NotJunk` the catch-up took without fetching it: the
+    /// pass's scorer records it scored and never junk, so `end_pass`
+    /// watermarks it (the MDA's `vetoedUIDs`). Default no-op.
+    fn record_vetoed(&self, _uid: u32) {}
 
     /// `fauna.email.inbox.mark_seen` — set `\Seen` on each named `INBOX` UID
     /// (`mail-app-surface.md` § Read state). Idempotent, and an unknown UID is
@@ -627,6 +688,23 @@ pub trait InboundMailSource: MaybeSendSync {
         _after_uid: u32,
         _limit: u32,
     ) -> Result<MailFlagChangesPage, MailFlagCallError> {
+        Err(MailFlagCallError::Unsupported)
+    }
+
+    /// Score again one `INBOX` copy this run already holds and the catch-up
+    /// took from the held un-watermarked set, between
+    /// [`Self::begin_pass`] and [`Self::end_pass`]: re-read and re-open the
+    /// record (the store keeps no raw bytes — the one re-decrypt per held
+    /// un-watermarked copy `mail-spam.md` § Scoring placement → *The app's
+    /// catch-up* budgets) and hand it,
+    /// with its current flags and `scores`, to the pass's scorer, which records
+    /// it for `end_pass`'s disposition. `Ok(Some(true))` — filed Junk, so the
+    /// caller takes it out of the view; `Ok(Some(false))` — kept (or not
+    /// scored); `Ok(None)` — the mailbox no longer holds it. Never a delivery:
+    /// no `REPLY` merge. Default [`MailFlagCallError::Unsupported`]: the native
+    /// `INBOX` source overrides it; the web loop re-scores outside this seam
+    /// ([`crate::backends::smtp::sync_mail_seen_and_flags`]).
+    async fn rescore_held(&self, _uid: u32) -> Result<Option<bool>, MailFlagCallError> {
         Err(MailFlagCallError::Unsupported)
     }
 }
@@ -662,6 +740,21 @@ pub struct BridgedRecord {
     /// `BridgedMessageInfo.undelivered` (`apps/bridges.md` § Phase G →
     /// *When the bridge stops serving*, consequence 3).
     pub undelivered: bool,
+    /// `true` on a tombstone — a row the user removed from the nest, served
+    /// with no content so a from-the-start read can name it
+    /// (`bridged-adapter.md` § Removing bridged rows, rule 5): the driver has
+    /// the manager forget it rather than ingest it.
+    pub removed: bool,
+}
+
+/// One bridged room as the shared crate names it — its bridge and its far
+/// participants, sorted, the account's own address excluded: what a thread's
+/// participants reduce to. The glue maps it onto the nest's room id, which no
+/// thread carries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BridgedRoomRef {
+    pub bridge_id: String,
+    pub participants: Vec<String>,
 }
 
 /// What the nest answered for a typed address — the bridge whose declared
@@ -719,6 +812,22 @@ pub trait BridgedSink: MaybeSendSync {
 
     /// Seal and submit one outbound message (see [`BridgedOutbound`]).
     async fn send(&self, outbound: BridgedOutbound) -> Result<BridgedSent, String>;
+
+    /// Remove the nest's copy of the rows `ids` of `room` —
+    /// `fauna.bridges.conversation.messages.remove` (`bridged-adapter.md`
+    /// § Removing bridged rows, rule 6). Answers how many live rows the nest
+    /// tombstoned (a repeat answers 0). The default refuses: a sink that does
+    /// not speak the kind removes nothing.
+    async fn remove_messages(&self, _room: BridgedRoomRef, _ids: Vec<i64>) -> Result<u32, String> {
+        Err(fauna_i18n::strings::error::send::NOT_SUPPORTED.to_string())
+    }
+
+    /// Remove the nest's copy of every row of `room` and hide the room —
+    /// `fauna.bridges.conversation.rooms.remove`. Same answer and default as
+    /// [`Self::remove_messages`].
+    async fn remove_room(&self, _room: BridgedRoomRef) -> Result<u32, String> {
+        Err(fauna_i18n::strings::error::send::NOT_SUPPORTED.to_string())
+    }
 }
 
 /// Transport seam for the bridged inbox — `fauna.bridges.conversation.rooms.list`
@@ -1018,6 +1127,47 @@ pub trait ConversationsRpc: MaybeSendSync {
         attachment_refs: Vec<String>,
     ) -> Result<i64, ConvRpcError>;
 
+    /// [`Self::channel_send`] (blind application append) with
+    /// `idempotency_key` as the envelope's key — the MLS outbox drain's send,
+    /// so a replayed intent gets the nest's recorded ack from its durable
+    /// idempotency table, never a second message (`devices.md` § Offline
+    /// compose → *Idempotency*). Default: refused — a seam that cannot carry
+    /// the key must never send a queued intent unkeyed.
+    async fn channel_send_keyed(
+        &self,
+        channel_id_hex: String,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<i64, ConvRpcError> {
+        let _ = (channel_id_hex, envelope, attachment_refs, idempotency_key);
+        Err(ConvRpcError::Rejected {
+            message: "this transport cannot send a queued message".to_string(),
+        })
+    }
+
+    /// [`Self::channel_send_remote`] (blind application append) keyed as
+    /// [`Self::channel_send_keyed`] is. Default: refused, for the same reason.
+    async fn channel_send_remote_keyed(
+        &self,
+        channel_id_hex: String,
+        home_nest_url: String,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<i64, ConvRpcError> {
+        let _ = (
+            channel_id_hex,
+            home_nest_url,
+            envelope,
+            attachment_refs,
+            idempotency_key,
+        );
+        Err(ConvRpcError::Rejected {
+            message: "this transport cannot send a queued message".to_string(),
+        })
+    }
+
     /// `fauna.conversations.channel.send_remote` — the foreign-member send for
     /// a channel whose log lives on `home_nest_url` (the recorded Welcome
     /// `nest_url`): the caller's own nest relays the envelope to the channel's
@@ -1308,6 +1458,15 @@ pub enum ConvPushEvent {
     /// `flag_changes` drain ([`crate::backends::smtp::sync_mail_read_state`]),
     /// and the periodic sweep backstops a missed one.
     MailFlagsChanged,
+    /// `fauna.bridges.push.spam_model_updated` — the actor's spam model changed
+    /// (a lesson here, on another device, or through a mail client). A bare
+    /// wake: the loop runs its mail sweep, whose drain rebuilds the pass's
+    /// scorer and whose read-state sync ends in the catch-up, so held
+    /// un-watermarked copies a model that first exists mid-run can now score
+    /// are filed within one sweep (`mail-spam.md` § Scoring placement → *The
+    /// app's catch-up*). `spam_model_reset` needs no wake: an actor with no
+    /// model scores nothing, and the set waits.
+    MailSpamModelChanged,
     /// `fauna.bridges.push.conversation_changed` — a bridged room changed: a
     /// deposit, a room report or a receipt (`architecture/apps/bridges.md`
     /// § Bridge-kind catalogue → Phase G). A bare wake like
@@ -1359,6 +1518,16 @@ pub enum ConvPushEvent {
     /// named set. Riding it here is a second, independent subscriber on the same
     /// broadcast — the index walk neither consumes nor delays the engine's copy.
     SyncFilesChanged,
+    /// `fauna.calendar.changed` — an event or calendar write landed in one of
+    /// this actor's calendars, on any device, through the MDA or by inbound
+    /// scheduling (`transport.md` § Push events). The address-book wake's
+    /// twin: a bare "reconcile now" for the calendar reconcile walk, payload
+    /// unread (the walk re-reads by ctag). **Freshness only** — the walk at
+    /// attach and on every sweep carries correctness.
+    ///
+    /// ⚠ A second, independent subscriber on the same broadcast: the Events
+    /// page's own refresh keeps its copy.
+    CalendarChanged,
 }
 
 /// The minimal Welcome shape the receive loop needs: the channel id (hex) the
@@ -1688,6 +1857,42 @@ pub trait FolderCustodySink: MaybeSendSync {
     /// every share pass's read, so no sweep reaches its rows). Best-effort
     /// like the record drop; default no-op.
     async fn drop_share_endpoints(&self, channel_id: &[u8; 32]) -> bool {
+        let _ = channel_id;
+        true
+    }
+
+    /// Drop this member's own roster row on a shared set whose seat the
+    /// folder rail marked **forked** (`federation-shared-folders.md` § Cross-nest
+    /// shared folders + channel append → *A forked seat is final, says so, and
+    /// heals only by a fresh Welcome*, part (b)) — the self-scoped
+    /// `fauna.folders.leave`, relayed cross-nest when `home_nest_url` names
+    /// the set's home: the decline's nest half and nothing of its local half.
+    /// Off the roster, the owner's ordinary re-share takes the ghost-heal arm
+    /// and mints the fresh Welcome that alone can re-seat this member.
+    /// `group_id_hex` is the raw MLS group id the leave is addressed by.
+    ///
+    /// Answers whether the drop **landed** (an idempotent `left == false` is
+    /// landed too): the backend records the unlist only on `true` and asks
+    /// again on the next marking pass otherwise. Default `false` — a sink that
+    /// cannot reach the nest leaves the drop owed.
+    async fn unlist_forked_seat(
+        &self,
+        group_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> bool {
+        let _ = (group_id_hex, home_nest_url);
+        false
+    }
+
+    /// Clear the durable row a forked SAME-nest seat kept in the member's
+    /// Folders list (`fauna_core::data::ForkedFolderSeat`, written by the
+    /// native sink just before [`Self::unlist_forked_seat`]'s drop): called
+    /// when a fresh Welcome replaces the seat (part (c)) and on a leave, so
+    /// the row stops standing in for a set the nest lists again, or that the
+    /// member left. Best-effort — a record left standing is display-only, and
+    /// the page paints it only while the engine reads the seat joined and
+    /// forked. Default no-op.
+    async fn clear_forked_seat(&self, channel_id: &[u8; 32]) -> bool {
         let _ = channel_id;
         true
     }
@@ -2397,6 +2602,15 @@ pub struct RoomFloor {
     /// it. `None` when the room named none, and when the nest's reply omits
     /// it.
     pub labelers: Option<Vec<u8>>,
+    /// Whether the room **owes a severance mint** — the home nest's answer
+    /// that its current generation still wraps to an entry the floor has
+    /// unseated (a removal whose mint never landed). An owner's or admin's
+    /// tend pass that reads `Some(true)` mints on that pass; a plain member's
+    /// reads it and mints nothing (`community-rooms.md` § Implementation
+    /// status today → *A removal severs*, the retry paragraph). `None` from a
+    /// room never keyed and from an older nest's reply — both read as nothing
+    /// owed, the `tip_wrapped` posture.
+    pub severance_owed: Option<bool>,
 }
 
 impl RoomFloor {
@@ -2720,10 +2934,17 @@ pub trait RoomCeremonyRpc: MaybeSendSync {
     /// mint (canonical dag-cbor `GroupGenerationMintRecord::Minted`) as the
     /// room's next generation. The nest *admits* it and never performs it:
     /// key authority is the room's owner and admins (§ Don't do these).
+    ///
+    /// `home_nest_url` is the room's recorded home, as on [`Self::room_leave`]:
+    /// `Some(url)` routes the mint over the distinct relay kind
+    /// `room.publish_generation_remote`, which this account's own nest
+    /// forwards to the room's home — how a foreign owner or admin mints
+    /// (`../architecture/federation.md` § Federation residue surface).
     async fn room_publish_generation(
         &self,
         room_id_hex: String,
         mint: Vec<u8>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError>;
 
     /// `fauna.conversations.room.invite` — the inviter's signed act
@@ -2770,11 +2991,16 @@ pub trait RoomCeremonyRpc: MaybeSendSync {
     /// `fauna.conversations.room.backfill_generations` — cover a newly-seated
     /// member with the generations its room's history policy allows. `wraps`
     /// are canonical dag-cbor `GroupTopupRecord` values, admitted as a batch.
+    ///
+    /// `home_nest_url`: `Some(url)` routes over the distinct relay kind
+    /// `room.backfill_generations_remote`, as [`Self::room_publish_generation`]
+    /// does.
     async fn room_backfill_generations(
         &self,
         room_id_hex: String,
         target_actor_id_hex: String,
         wraps: Vec<Vec<u8>>,
+        home_nest_url: Option<String>,
     ) -> Result<(), ConvRpcError>;
 
     /// Every invitation standing for **this** account — the read half of
@@ -2834,10 +3060,15 @@ pub trait RoomCeremonyRpc: MaybeSendSync {
     /// traffic is the rotation that follows — a caller of this method owes one
     /// ([`super::backends::fauna_mls::FaunaMlsBackend::remove_room_member`]
     /// performs both).
+    ///
+    /// `home_nest_url`: `Some(url)` routes the removal over the distinct relay
+    /// kind `room.remove_remote`, as [`Self::room_leave`] routes a departure —
+    /// how a foreign owner or admin removes.
     async fn room_remove(
         &self,
         room_id_hex: String,
         principal_hex: String,
+        home_nest_url: Option<String>,
     ) -> Result<u32, ConvRpcError>;
 
     /// `fauna.conversations.room.leave` — unseat **this** account. Answers the
@@ -3051,6 +3282,9 @@ pub struct PendingRoomInvitation {
     /// § Join rules and invites → *A cross-nest invitation*), and it is what
     /// the acceptance is relayed to.
     pub room_node: Option<String>,
+    /// That home's identity, stamped by this account's nest beside
+    /// [`Self::room_node`] from the same verified handshake; `None` same-nest.
+    pub home_nest_actor_id: Option<String>,
 }
 
 /// One hit of a community room's search, as [`RoomCeremonyRpc::room_search`]
@@ -3478,6 +3712,9 @@ pub enum NestCorpus {
     /// the walk is a cross-set `fauna.media.list` drain with no per-set cursor to
     /// narrow, so telling it *which* set moved would buy nothing it could act on.
     Files,
+    /// The actor's CalDAV calendars (`fauna.calendar.changed`) — the calendar
+    /// arm's corpus, under the mail/calendar key class.
+    Calendar,
 }
 
 /// Transport seam for the **durable inbox-apply backstop** — the missed-push
@@ -3627,6 +3864,26 @@ pub enum BackendError {
     /// [`user_detail`](Self::user_detail), and no send path can produce it.
     #[error("welcome addressed to no key package this device holds")]
     WelcomeNotAddressedHere,
+    /// A community-room removal whose **unseat landed but whose rotation did
+    /// not** — the named, recoverable residue (`community-rooms.md`
+    /// § Implementation status today → *A removal severs*). `member` is off
+    /// the floor and cannot send, but can still open traffic sealed under the
+    /// un-rotated tip until the next owner's or admin's tend pass reads the
+    /// floor's `severance_owed` and mints.
+    ///
+    /// Its own variant, never [`Internal`](Self::Internal): `Internal` renders
+    /// as the generic failure and the manager answers a failed removal by
+    /// putting the member chip back — a severance reported as not having
+    /// happened while the unseat landed. The manager keeps the chip gone on
+    /// this variant and renders [`user_detail`](Self::user_detail)'s sentence.
+    /// `member` is the display name (filled by the caller that knows it);
+    /// `cause` is the rotation's own error, for the log only.
+    #[error(
+        "{member} is off this room's floor, but the room's key was NOT rotated, so they can \
+         still read traffic sealed under the current generation until the next owner's or \
+         admin's tend pass completes the removal: {cause}"
+    )]
+    RemovalUnsevered { member: String, cause: String },
 }
 
 impl BackendError {
@@ -3663,6 +3920,11 @@ impl BackendError {
             Self::AuthRequired => send::AUTH_REQUIRED.to_string(),
             Self::NotSupported => send::NOT_SUPPORTED.to_string(),
             Self::Internal(_) | Self::WelcomeNotAddressedHere => send::GENERIC.to_string(),
+            Self::RemovalUnsevered { member, .. } => {
+                fauna_i18n::strings::conversations::unified::error_remove_participant_unsevered(
+                    member,
+                )
+            }
         }
     }
 }
@@ -4307,6 +4569,30 @@ pub trait RailBackend: MaybeSendSync {
         Err(BackendError::NotSupported)
     }
 
+    /// Remove the nest's copy of one message of `thread` — a *remove*, never
+    /// a *delete*: the far side sees nothing (`bridged-adapter.md` § Removing
+    /// bridged rows, rule 1). The manager calls it only on a message whose
+    /// snapshot says `can_remove`, and forgets the message on `Ok`.
+    ///
+    /// Default `NotSupported`: only the bridged rail derives
+    /// `supports_local_remove`.
+    async fn remove_message(
+        &self,
+        _thread: &ThreadDetail,
+        _message: &MessageId,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
+    /// Remove the nest's copy of the whole of `thread` and hide it until a
+    /// new row reopens it (`bridged-adapter.md` § Removing bridged rows, rule
+    /// 4). Called only on a thread whose capabilities say
+    /// `supports_local_remove`; the manager drops the thread on `Ok`.
+    /// Default `NotSupported`, as [`Self::remove_message`].
+    async fn remove_thread(&self, _thread: &ThreadDetail) -> Result<(), BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
     /// Grant (`true`) or withdraw (`false`) the home nest's read of the
     /// community room `thread_id` is — a key rotation, never a roster edit,
     /// and the owner's or an admin's act (`conversation-rooms.md`
@@ -4481,6 +4767,34 @@ pub trait RailBackend: MaybeSendSync {
     /// `ChannelId` (`docs/goal/ui/conversations.md` § Architectural rules #2).
     fn channel_binding_hex(&self, _thread_id: &ThreadId) -> Option<String> {
         None
+    }
+
+    /// The channel (hex) an offline send on `thread_id` may queue for as an
+    /// MLS plaintext intent (`devices.md` § Offline compose), or `None` when
+    /// the send must stay online: no rail but FaunaMls queues, and there only
+    /// a thread already bound to an MLS group this device holds — a first send
+    /// bootstraps the group (key packages, a Welcome: membership, which stays
+    /// online-only), and a community room seals under its home nest's
+    /// generation instead of a channel ratchet. Answers the channel and this
+    /// device's sender address on it (the queued own copy's sender). Default
+    /// `None`.
+    fn queueable_channel(&self, _thread_id: &ThreadId) -> Option<(String, TypedAddress)> {
+        None
+    }
+
+    /// Send a queued MLS intent's compose on `thread` — sealed now, at the
+    /// channel's then-current epoch, and appended under `intent_id` as its
+    /// idempotency key (`devices.md` § Offline compose → *Drain*). Never
+    /// bootstraps: an unbound thread or a group this device no longer holds
+    /// refuses. Default [`BackendError::NotSupported`].
+    async fn send_queued(
+        &self,
+        _thread: &ThreadDetail,
+        _compose: &ComposeState,
+        _attachments: &[ResolvedAttachment],
+        _intent_id: [u8; 16],
+    ) -> Result<SendOutcome, BackendError> {
+        Err(BackendError::NotSupported)
     }
 
     /// The rail's **authoritative** membership roster for `thread_id`, when the

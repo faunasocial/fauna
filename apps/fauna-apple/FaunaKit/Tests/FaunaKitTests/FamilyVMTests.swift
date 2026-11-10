@@ -264,3 +264,46 @@ private func approval(
         windowEnd: try parseTimeOfDay(input: "20:00"),
         dailyMinutes: try parseDailyMinutes(input: "0")))
 }
+
+// MARK: - The family composer (account-offline-mutation.md § Implementation
+// status today, the family composer)
+//
+// With no nest `FfiFamilyClient.approvalsDecideOrQueue` answers QUEUED (the
+// device outbox holds the decision and drains it when the nest is back — the
+// queue-then-send half is pinned in Rust, `libs/fauna-ffi/src/family.rs`'s
+// `decide_through` tests over an explicit queue). These pin the page's half,
+// which this unit target can reach without a socket: a queued decision drops
+// its item from the local list through the shared fold and is NOT re-read; a
+// sent one re-reads and folds nothing. Mirrors android's `FamilyVMTest`.
+
+private func heldMail(_ id: UInt8) -> FfiFamilyApprovalEntry {
+    FfiFamilyApprovalEntry(
+        supervisedActorId: Data(repeating: 3, count: 32), supervisedHandle: "kid", kind: "mail_hold",
+        peerActorId: Data(), peerAddress: "", messageId: Data(repeating: id, count: 32),
+        summary: "", peerHandle: "", bridgeId: "", operation: "", target: "", createdAt: 0)
+}
+
+@MainActor @Test func aQueuedDecisionLeavesTheLocalListWithoutAReRead() {
+    let vm = FamilyVM()
+    let decided = heldMail(9)
+    let other = heldMail(8)
+    vm.approvals = [decided, other]
+
+    let reRead = vm.settleDecision(decided, queued: true)
+
+    #expect(!reRead, "a queued decision has no nest to re-read from")
+    #expect(vm.approvals.map(\.messageId) == [other.messageId],
+            "the decided item leaves the local list by its item key; the other held message stays")
+}
+
+@MainActor @Test func aSentDecisionReReadsAndFoldsNothing() {
+    let vm = FamilyVM()
+    let decided = heldMail(9)
+    vm.approvals = [decided]
+
+    let reRead = vm.settleDecision(decided, queued: false)
+
+    #expect(reRead, "a sent decision re-reads from the nest, like every mutation here")
+    #expect(vm.approvals.map(\.messageId) == [decided.messageId],
+            "the local list waits for the nest's word, never folded by hand")
+}

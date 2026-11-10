@@ -35,7 +35,17 @@
 //! randomness of its own; that dep-agnostic shape is right for a pure algorithm
 //! and is untouched by this.
 
+//!
+//! ## The one other primitive: background work
+//!
+//! [`spawn_background`] — where a synchronous machine setter's
+//! fire-and-forget work runs, on both targets ([`background`] owns why). Same
+//! split, same crate: tokio natively, the browser's queue on wasm.
+
 use core::time::Duration;
+
+pub mod background;
+pub use background::spawn_background;
 
 /// Sleep for `d`, on whichever target this was compiled for.
 ///

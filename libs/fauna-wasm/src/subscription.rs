@@ -88,6 +88,16 @@ pub fn mint_key_blob(
     Ok(MintedKeyBlob { envelope, bytes })
 }
 
+/// The shared checkout reference rule (`fauna_core::subscription::checkout_url`,
+/// `monetization.md` § Pillar 3, the Q13 ruling, rule 2), hex face: `undefined`
+/// for an unsafe payment URL or a malformed actor id; the URL carrying
+/// `client_reference_id=<buyer>` for a host the rule names; any other host's
+/// URL unchanged.
+#[wasm_bindgen(js_name = checkoutUrlForBuyer)]
+pub fn checkout_url_for_buyer(payment_url: &str, buyer_actor_hex: &str) -> Option<String> {
+    fauna_core::subscription::checkout_url_for_buyer(payment_url, buyer_actor_hex)
+}
+
 /// Host-testable core of [`mint_key_blob`]. Returns the minted blob's
 /// `(envelope, bytes)` embed-as-bytes pair, or a human-readable error string.
 #[allow(clippy::too_many_arguments)]

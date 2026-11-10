@@ -477,6 +477,9 @@ impl FolderWizardMachine {
                 client,
                 Some(custody),
                 Some(owner_seal),
+                // The same secret attests a born-public create — the twin of
+                // `setAudienceAttestor` on the devices machine.
+                Some(Arc::new(keypair)),
                 observer,
                 devices,
             ),
@@ -551,6 +554,32 @@ impl FolderWizardMachine {
         self.0.set_default_conflict_policy(policy)
     }
 
+    /// The Name step's `wizard-audience-select` — `"private"` | `"public"`
+    /// (`ui/folders.md` § Audience and website serving → *Born public*);
+    /// ignored unless `nameSnapshotJson().audience_offered`.
+    #[wasm_bindgen(js_name = setAudience)]
+    pub fn set_audience(&self, audience: String) {
+        self.0.set_audience(audience)
+    }
+
+    /// Answer the declassify confirm a Public wizard's `submit()` armed
+    /// (`reviewSnapshotJson().declassify_armed`): create the folder public.
+    /// Resolves to the resulting step name, as `submit()` does.
+    #[wasm_bindgen(js_name = confirmPublicCreate)]
+    pub fn confirm_public_create(&self) -> js_sys::Promise {
+        let inner = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let step = inner.confirm_public_create().await;
+            Ok(JsValue::from_str(&format!("{step:?}")))
+        })
+    }
+
+    /// Dismiss the declassify confirm — back to Review, nothing created.
+    #[wasm_bindgen(js_name = cancelPublicCreate)]
+    pub fn cancel_public_create(&self) {
+        self.0.cancel_public_create()
+    }
+
     #[wasm_bindgen(js_name = next)]
     pub fn next(&self) {
         self.0.next()
@@ -610,6 +639,10 @@ extern "C" {
     pub type JsMlsQuery;
     #[wasm_bindgen(method, js_name = isJoinedSharedSet)]
     fn is_joined_shared_set(this: &JsMlsQuery, mls_group_id_hex: &str) -> bool;
+    /// Whether the channel's seat is marked forked (final until a fresh
+    /// Welcome), backed by the MAIN bundle's per-channel fork slot.
+    #[wasm_bindgen(method, js_name = isForkedSharedSet)]
+    fn is_forked_shared_set(this: &JsMlsQuery, mls_group_id_hex: &str) -> bool;
     /// The channel's MLS-recorded folder owner (hex actor id), or nothing —
     /// the member-row declassification anchor, backed by the MAIN bundle's
     /// `WasmConversationsManager.foldersChannelOwner`.
@@ -630,6 +663,9 @@ impl fauna_devices_machine::FolderChannelOwners for MlsQueryShim {
 impl InnerMlsQuery for MlsQueryShim {
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
         self.0.is_joined_shared_set(mls_group_id_hex)
+    }
+    fn is_forked_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        self.0.is_forked_shared_set(mls_group_id_hex)
     }
 }
 
@@ -844,6 +880,14 @@ impl DevicesMachine {
     #[wasm_bindgen(js_name = refreshesJson)]
     pub fn refreshes_json(&self) -> String {
         self.0.refreshes_json()
+    }
+
+    /// `DevicesMachine::folder_name` — the name of the folder whose id is
+    /// `id` off this machine's roster, or `undefined`. The Settings
+    /// pending-actions row's lookup (`ui/settings.md` § Pending actions).
+    #[wasm_bindgen(js_name = folderName)]
+    pub fn folder_name(&self, id: String) -> Option<String> {
+        self.0.folder_name(id)
     }
 
     /// The open folder wizard, if any — drivable via the returned

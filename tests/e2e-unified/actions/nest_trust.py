@@ -446,6 +446,12 @@ class NestTrustActions:
             return ""
         return self.driver.get_text("nests-custody-restore-notice") or ""
 
+    def revoke_custody(self, index: int = 0) -> None:
+        """Take back the custody on custodian-NEST row `index`
+        (`nest-trust-custody-revoke-button`) — the same shared revoke the
+        Devices page's holder card runs, from the row the Nests page folds."""
+        self.driver.click("nest-trust-custody-revoke-button", index=index)
+
     def restore_from_custody_row(self, index: int = 0) -> None:
         """The warm gesture on custodian row `index`
         (`nest-trust-custody-restore-button`), the row's own address."""

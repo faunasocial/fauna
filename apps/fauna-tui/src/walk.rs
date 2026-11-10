@@ -679,6 +679,8 @@ fn dump_folder_overlays(app: &mut App) {
         name: NameSnapshot {
             name: "corpus".into(),
             continue_enabled: true,
+            audience: "private".into(),
+            audience_offered: false,
         },
         device_places: DevicePlacesSnapshot {
             devices: seats(),
@@ -693,6 +695,8 @@ fn dump_folder_overlays(app: &mut App) {
             created: false,
             failed_members: Vec::new(),
             error: None,
+            audience: "private".into(),
+            declassify_armed: false,
         },
     };
     let with_wizard = |wizard: FolderWizardSnapshot| DevicesSnapshot {

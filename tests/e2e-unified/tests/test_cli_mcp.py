@@ -3,27 +3,34 @@
 
 The device shell is launched the way an LLM host launches a local MCP server
 (``fauna-cli mcp``, JSON-RPC over stdio — ``drivers/cli_mcp.py``), and the
-user's own app is tui on the Connected apps page. One journey:
+user approves the typed code app-less, on their own WS-RPC session
+(``helpers/typed_code_consent.py``). The journeys launch no app driver: the
+assistant's reach is a ``[nest]`` outcome of the cli's own catalog page,
+observed from outside by the MCP driver, and the approving app is a helper
+seat that only seeds the grant (``docs/goal/architecture/feature-catalog.md``
+§ The two surfaces). What the approval card itself shows for the cli — its
+name and the assistant-reach line — is connected-apps' ``[app]`` outcome,
+witnessed on the app (``test_connected_apps.py``). One journey:
 
 - **red first** — before any grant, a feed tool answers the host "not
   connected, ask for the handle", never an empty success; a mail tool is not in
   the catalog at all (mail is a later plane's arm — § Reach grows one plane at
   a time), so a host asking for one is refused;
 - ``connect(handle)`` starts the typed-code ceremony and answers the code for
-  the HUMAN; typing it into *Connect an app* on tui opens the card, approving it
+  the HUMAN; typing it on the user's own session opens the card, approving it
   releases the shell's poll (``authorization-server.md`` § Consent → the typed
   code) — and until then every tool answers "waiting for approval";
 - the cli then reads the account's feed through the fourth arm
   (``fauna:feed:read:account``) and posts through the oracle's ``post.author``
   door, and the local timeline serves the post;
-- the owner's roster row shows the app and the operation the oracle performed
-  for it (``ui/connected-apps.md`` § Layout & flow, region 3);
-- the profile arm: the display name tui publishes is what ``nest://profile``
-  and its template read (``authorization-server.md`` § Scope grammar → *The
-  profile arm*);
-- the oracle's ``profile.author`` door: ``profile_set`` edits the bio through
-  the custodian, and ``nest://profile`` then reads the new bio beside the name
-  tui published, untouched (``key-material-hierarchy.md`` § *The oracle*, the
+- the owner's roster row (``fauna.principals.list``, the read the Connected
+  apps page composes from) carries the operation the oracle performed for it
+  (``ui/connected-apps.md`` § Layout & flow, region 3);
+- the profile arm and the oracle's ``profile.author`` door: ``profile_set``
+  edits the display name through the custodian and ``nest://profile`` and its
+  template read it (``authorization-server.md`` § Scope grammar → *The
+  profile arm*); a second ``profile_set`` edits the bio alone, and the name
+  survives it, untouched (``key-material-hierarchy.md`` § *The oracle*, the
   ``profile.author`` row);
 - the notifications arms: a like from a second actor is polled, marked read
   through the write arm, and the unread count then reads 0 (*The
@@ -51,9 +58,9 @@ redialled for a read and never retried for a write. One pins custody on a box
 with no usable OS secret store: the unattended arm's declared ``0600`` file,
 resumed by a relaunch.
 
-Every user mutation goes through the apps (convention 8): the consent is typed
-and approved on tui, the post is the cli's own tool call. The nest and the
-real PDS bridge are ``helpers/atproto_consent.py``'s, because a grant is
+The subject's mutations are the cli's own tool calls; the consent is the
+grant's seed, given on the approving account's own session as a Fauna app
+gives it. The nest and the real PDS bridge are ``helpers/atproto_consent.py``'s, because a grant is
 refused unless the approving account's ATProto identity is active.
 """
 
@@ -66,23 +73,26 @@ from pathlib import Path
 import pytest
 
 from actions.api_actor import ApiActor
-from actions.connected_apps import ConnectedAppsActions
 from helpers.admin_wire import admit_adult
 from drivers.cli_mcp import CliArgv, CliMcpSession
 from helpers.atproto_consent import (  # noqa: F401 — pytest fixtures adopted by import
     HANDLE_DOMAIN,
     consent_bridge,
     consent_nest,
-    consent_spa_url,
 )
 from helpers.client_metadata_server import (  # noqa: F401 — pytest fixtures adopted by import
     CLI_CLIENT_ID,
-    CLI_CLIENT_NAME,
     cli_metadata,
     consent_nest_env,
 )
 from helpers.budgets import ORCHESTRATION_STEP_S, RPC_ROUNDTRIP_S
-from i18n.strings import S
+from helpers.typed_code_consent import (
+    answer_typed_code_as,
+    approve_typed_code_as,
+    pending_consents,
+    user_session,
+)
+from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier_3]
 
@@ -90,22 +100,6 @@ pytestmark = [pytest.mark.tier_3]
 #: (`apps/cli.md` § Open decisions 1), which ``cli_metadata`` serves through
 #: the mapped host.
 _CLIENT_ID = CLI_CLIENT_ID
-
-
-@pytest.fixture
-def connected_app(request, app, consent_nest, consent_bridge):
-    """`app`, logged in as alice on the consent nest, on the Connected apps page."""
-    from conftest import _login_app_as
-
-    _login_app_as(
-        app, request, consent_nest, consent_nest["user"], spa_url_fixture="consent_spa_url"
-    )
-    ca = app.connected_apps
-    ca.navigate()
-    assert ca.is_page_visible(), (
-        f"the Connected apps page did not render. error: {ca.current_error_text()!r}"
-    )
-    return app
 
 
 @pytest.fixture(params=["stdio"])
@@ -145,12 +139,12 @@ def _until_notified(cli: CliMcpSession, sender_hex: str) -> dict:
         time.sleep(1.0)  # sleep-ok: paces a deadline poll on the inbox's own state, never asserted on
 
 
-@pytest.mark.tui
+@pytest.mark.feature("fauna-for-ai-assistants")
 @pytest.mark.parametrize("cli", ["stdio", "http"], indirect=True)
 def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
-    connected_app, cli, consent_nest
+    cli, consent_nest, consent_bridge
 ):
-    ca: ConnectedAppsActions = connected_app.connected_apps
+    alice = consent_nest["user"]
     init = cli.initialize()
     assert init["serverInfo"]["name"] == "fauna-cli", init
 
@@ -173,7 +167,7 @@ def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
     poll_before = cli.call("notifications_poll")
     assert poll_before["isError"] and "call connect" in cli.text(poll_before), poll_before
 
-    # ── The typed code: the shell answers it for the human; tui approves. ──
+    # ── The typed code: the shell answers it for the human, who approves it. ──
     started = cli.call("connect", {"handle": "alice"}, timeout=RPC_ROUNDTRIP_S)
     assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
     user_code = started["structuredContent"]["user_code"]
@@ -182,21 +176,9 @@ def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
         f"until the human approves, a tool says so with the code: {pending!r}"
     )
 
-    ca.connect_with_code(user_code)
-    index = ca.wait_for_request_from(_CLIENT_ID)
-    assert index is not None, (
-        "typing the cli's code must open its card in the tray. "
-        f"error: {ca.current_error_text()!r}"
-    )
-    card = ca.request_text(index)
-    # The card names the cli by its published document, and says what the
-    # grant reaches (`apps/cli.md` § Hosting cases).
-    assert CLI_CLIENT_NAME in card, f"the card names the published client: {card!r}"
-    assert S.connected_apps.consent_assistant_reach in card, (
-        f"the cli's card says the grant reaches the assistant: {card!r}"
-    )
-    ca.approve_request(index)
-    assert ca.current_error_text() == "", ca.current_error_text()
+    # The card is the cli's, under its published identity.
+    card = approve_typed_code_as(consent_nest, alice, user_code)
+    assert card["client_id"] == _CLIENT_ID, f"the code opens the cli's own card: {card!r}"
 
     # ── The fourth arm: the account's feed, read as the account. ──
     local = _until_connected(cli)
@@ -221,25 +203,31 @@ def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
     )
 
     # ── The owner's roster: the row, and what the oracle did for it. ──
-    row = ca.wait_for_oracle_item_containing(_CLIENT_ID)
-    assert row is not None, (
-        "the cli's roster row must carry the oracle's record of the post. "
-        f"error: {ca.current_error_text()!r}"
-    )
-    ops = ca.item_oracle_ops(row)
-    assert ops is not None and ops.isdigit(), f"the window's count, as a value: {ops!r}"
+    with user_session(consent_nest, alice) as ws:
 
-    # ── The profile arm: the name tui publishes is what `nest://profile` reads. ──
-    alice = consent_nest["user"]
-    profile = connected_app.profile
-    profile.navigate()
-    profile.open_edit_form()
-    published = "Alice, read by an assistant"
-    profile.set_display_name(published)
-    profile.save()
-    assert profile.wait_for_handle(published), (
-        f"tui must publish the profile first; got {profile.handle_text()!r}, "
-        f"error={profile.error_text()!r}"
+        def served_row():
+            rows = [
+                p
+                for p in ws.call("fauna.principals.list", {})["principals"]
+                if p["client_id"] == _CLIENT_ID and p.get("oracle")
+            ]
+            return rows[0] if rows and rows[0]["oracle"].get("ops_in_window", 0) >= 1 else None
+
+        row = wait_until(
+            served_row,
+            RPC_ROUNDTRIP_S,
+            diagnose=lambda: ws.call("fauna.principals.list", {})["principals"],
+        )
+    assert row["oracle"].get("last_op"), (
+        f"the cli's roster row carries the oracle's record of the post: {row!r}"
+    )
+
+    # ── The profile arm, through the oracle's door: the name the cli sets is
+    # what `nest://profile` and its template read. ──
+    published = f"Alice, set by an assistant over {cli.transport}"
+    named = cli.call("profile_set", {"display_name": published})
+    assert not named["isError"], (
+        f"profile.author edits the display name as the account: {named!r}\n{cli.diagnostics()}"
     )
     for uri in ("nest://profile", f"nest://profile/{alice['actor_id_hex']}"):
         read = cli.request("resources/read", {"uri": uri})
@@ -249,8 +237,7 @@ def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
             f"{cli.diagnostics()}"
         )
 
-    # ── The profile class: the cli edits the bio through the oracle's door;
-    # the name tui published survives it. ──
+    # ── The profile class: the cli edits the bio alone; the name survives it. ──
     bio = f"edited by an assistant over {cli.transport}"
     edited = cli.call("profile_set", {"bio": bio})
     assert not edited["isError"], (
@@ -287,9 +274,9 @@ def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
     )
 
 
-@pytest.mark.tui
+@pytest.mark.feature("fauna-for-ai-assistants")
 def test_the_argv_shell_is_the_same_principal_at_the_terminal(
-    connected_app, cli_binary, consent_nest, tmp_path
+    cli_binary, consent_nest, consent_bridge, tmp_path
 ):
     """The ``argv`` shell (``apps/cli.md`` § One catalog, many front-ends →
     *The ``argv`` shell*): the same binary driven by command lines, one process
@@ -298,7 +285,7 @@ def test_the_argv_shell_is_the_same_principal_at_the_terminal(
     - **red first**: before any grant a command fails with the tool's own
       "call connect" refusal on stderr and exit code 1;
     - ``fauna-cli connect alice`` prints the code for *Connect an app*, waits,
-      and exits 0 once tui has approved it — the connection is stored;
+      and exits 0 once the user has approved it — the connection is stored;
     - the next command resumes it: ``feed list`` prints exactly what an MCP
       session on the same credential namespace answers for ``feed_list``;
     - ``post create`` posts through the oracle door, and ``feed local`` serves
@@ -306,7 +293,6 @@ def test_the_argv_shell_is_the_same_principal_at_the_terminal(
     - ``post delete`` is destructive: off a terminal, without ``--yes``, it
       exits 2 and the post is still served; with ``--yes`` it deletes.
     """
-    ca: ConnectedAppsActions = connected_app.connected_apps
     shell = CliArgv(cli_binary, consent_nest["url"], tmp_path)
 
     # ── Red first: nothing is reachable before the user's grant. ──
@@ -315,10 +301,10 @@ def test_the_argv_shell_is_the_same_principal_at_the_terminal(
         before.diagnostics()
     )
 
-    # ── `connect <handle>`: the code on stdout, the approval on tui. ──
+    # ── `connect <handle>`: the code on stdout, the user's approval. ──
     connecting = shell.start("connect", "alice")
     started = json.loads(connecting.first_line(RPC_ROUNDTRIP_S))
-    _approve_code(ca, started["user_code"])
+    approve_typed_code_as(consent_nest, consent_nest["user"], started["user_code"])
     assert connecting.wait(ORCHESTRATION_STEP_S) == 0, connecting.diagnostics()
 
     # ── The stored connection, read by argv and by MCP alike. ──
@@ -371,29 +357,18 @@ def _until_served(cli: CliMcpSession, tool: str) -> dict:
         time.sleep(1.0)  # sleep-ok: paces a deadline poll on the shell's own state, never asserted on
 
 
-def _approve_code(ca: ConnectedAppsActions, code: str) -> None:
-    """Type ``code`` into *Connect an app* and approve the card it opens — found
-    by its code, never by position or client id (an earlier card from the same
-    client may still be listed)."""
-    ca.connect_with_code(code)
-    index = ca.wait_for_request_code(code)
-    assert index is not None, (
-        f"typing {code} must open its card in the tray. error: {ca.current_error_text()!r}"
-    )
-    ca.approve_request(index)
-
-
-@pytest.mark.tui
+@pytest.mark.feature("fauna-for-ai-assistants")
 def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
-    request, connected_app, cli, consent_nest
+    cli, consent_nest, consent_bridge
 ):
     """The admin arms end to end (``authorization-server.md`` § Scope grammar →
     *The admin arms*; ``apps/bridges.md`` § Capability-allowlist enforcement →
     rule (e)), both ways:
 
     - **a member cannot grant an admin string**: alice, a member, approves the
-      cli's ``connect(admin)`` card on tui; the approve resolves nothing — the
-      card stays pending in her tray and the cli keeps waiting on its code;
+      cli's ``connect(admin)`` card on her own session; the approve resolves
+      nothing — the card stays pending in her tray and the cli keeps waiting
+      on its code;
     - alice is then made the nest's second admin — a sole admin's
       ``fauna.admin.admins.add`` runs on its delay alone, brought due by the
       ``pending_actions/run_due`` test hook (``helpers.admin_wire.grant_admin``).
@@ -406,8 +381,8 @@ def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
       ``permission_denied``;
     - **served after it**: a second connection asking for every admin string
       the catalog names, approved by the admin, reads the dashboard and the
-      member list, admits a member that the admin's own tui then lists on
-      ``admin-users``, defines a tier the users page's tier list then names,
+      member list, admits a member that the member list then carries,
+      defines a tier the users page's tier list then names,
       and reads one kind of each nest-side page;
     - **the mail-side pages**, one case each on the same connection: a
       one-field mail policy save read back with the rest of its section kept,
@@ -418,10 +393,8 @@ def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
       absent, a sovereign act refused) is pinned at tier_1
       (``principal_handlers::tests::the_mail_side_pages_serve_their_strings_and_never_a_sovereign_act``).
     """
-    from conftest import _login_app_as
     from helpers.admin_wire import grant_admin
 
-    ca: ConnectedAppsActions = connected_app.connected_apps
     alice = consent_nest["user"]
     cli.initialize()
 
@@ -429,25 +402,34 @@ def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
     started = cli.call("connect", {"handle": "alice", "admin": True}, timeout=RPC_ROUNDTRIP_S)
     assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
     member_code = started["structuredContent"]["user_code"]
-    _approve_code(ca, member_code)
-    still = ca.wait_for_request_code(member_code)
-    assert still is not None, (
-        "a member's approve of an admin string must leave the card pending. "
-        f"error: {ca.current_error_text()!r}"
+    card, answer = answer_typed_code_as(consent_nest, alice, member_code)
+    assert answer == {"resolved": False}, (
+        f"a member's approve of an admin string resolves nothing: {card!r} {answer!r}"
     )
-    waiting = cli.call("admin_dashboard")
-    assert waiting["isError"] and member_code in cli.text(waiting), (
-        f"the cli keeps waiting on the member's unresolved card: {waiting!r}\n{cli.diagnostics()}"
-    )
-    ca.decline_request(still)
+    with user_session(consent_nest, alice) as ws:
+        pending = pending_consents(ws, _CLIENT_ID)
+        assert card["consent_id"] in {c["consent_id"] for c in pending}, (
+            f"a member's approve of an admin string must leave the card pending: {pending!r}"
+        )
+        waiting = cli.call("admin_dashboard")
+        assert waiting["isError"] and member_code in cli.text(waiting), (
+            f"the cli keeps waiting on the member's unresolved card: {waiting!r}\n{cli.diagnostics()}"
+        )
+        declined = ws.call(
+            "fauna.bridges.atproto.resolve_consent",
+            {"consent_id": card["consent_id"], "approved": False},
+        )
+        assert declined["resolved"], f"the member declines the card: {declined!r}"
 
-    # ── Alice becomes the nest's second admin. ──
+    # ── Alice becomes the nest's second admin (kept on the nest: a later grant
+    # would wait for a quorum — `_admin_connected`). ──
     grant_admin(consent_nest, alice)
+    consent_nest["cli_admin_member"] = alice
 
     # ── Red before the grant: no admin arm, no admin tool. ──
     started = cli.call("connect", {"handle": "alice"}, timeout=RPC_ROUNDTRIP_S)
     assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
-    _approve_code(ca, started["structuredContent"]["user_code"])
+    approve_typed_code_as(consent_nest, alice, started["structuredContent"]["user_code"])
     local = _until_connected(cli)
     assert not local["isError"], f"the plain connection completes: {local!r}\n{cli.diagnostics()}"
     for tool in (
@@ -468,7 +450,7 @@ def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
     # ── Served after it: the admin approves the admin arms. ──
     started = cli.call("connect", {"handle": "alice", "admin": True}, timeout=RPC_ROUNDTRIP_S)
     assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
-    _approve_code(ca, started["structuredContent"]["user_code"])
+    approve_typed_code_as(consent_nest, alice, started["structuredContent"]["user_code"])
     dashboard = _until_served(cli, "admin_dashboard")
     assert not dashboard["isError"], (
         f"the admin's principal reads the dashboard: {dashboard!r}\n{cli.diagnostics()}"
@@ -577,21 +559,14 @@ def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
             f"no active domain: the add is refused, not performed: {added!r}"
         )
 
-    # ── The admin's own tui lists the member the cli admitted. ──
-    _login_app_as(
-        connected_app, request, consent_nest, alice, spa_url_fixture="consent_spa_url"
-    )
-    admin = connected_app.admin
-    admin.navigate_users()
-    deadline = time.monotonic() + ORCHESTRATION_STEP_S
-    while not admin.has_user_row(admitted) and time.monotonic() < deadline:
-        admin.navigate_users()
-    assert admin.has_user_row(admitted), (
-        f"the admin's tui lists the member the cli admitted ({admitted[:12]}…). "
-        f"error: {admin.users_action_error_text()!r}"
+    # ── The member list carries the member the cli admitted. ──
+    listed = cli.call("admin_users_list")
+    assert admitted in {u["actor_id"] for u in listed["structuredContent"]["users"]}, (
+        f"the member list carries the member the cli admitted ({admitted[:12]}…): {listed!r}"
     )
 
 
+@pytest.mark.feature("fauna-for-ai-assistants")
 def test_the_http_listener_refuses_a_foreign_origin_and_host(cli_binary, tmp_path):
     """``fauna-cli mcp --listen`` has no auth header — loopback is the trust
     boundary — so a page in the user's browser reaching the port through DNS
@@ -618,8 +593,323 @@ def test_the_http_listener_refuses_a_foreign_origin_and_host(cli_binary, tmp_pat
         status, body = session.http_exchange(ping, origin=f"http://localhost:{port}")
         assert status == 200 and json.loads(body)["result"] == {}, (status, body)
         assert session.http_exchange("", method="GET")[0] == 405
+        # A body that is not JSON is refused 415 before the method layer, even
+        # from a loopback origin: the listener speaks JSON-RPC and nothing else.
+        status, body = session.http_exchange(ping, content_type="text/plain")
+        assert status == 415 and "jsonrpc" not in body, (
+            f"a text/plain POST must be refused 415: {status} {body!r}\n{session.diagnostics()}"
+        )
     finally:
         session.close()
+
+
+def _connect_account(cli: CliMcpSession, nest: dict, user: dict, handle: str, **flags) -> None:
+    """Connect ``user`` (ATProto identity active) to ``cli`` — the typed code
+    answered for the human and approved on the user's own session — and wait
+    for the poll to turn into a session. ``flags`` ride ``connect`` (``admin``)."""
+    started = cli.call("connect", {"handle": handle, **flags}, timeout=RPC_ROUNDTRIP_S)
+    assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
+    approve_typed_code_as(nest, user, started["structuredContent"]["user_code"])
+    served = _until_connected(cli)
+    assert not served["isError"], f"the connection completes: {served!r}\n{cli.diagnostics()}"
+
+
+@pytest.mark.feature("fauna-for-ai-assistants")
+def test_the_feed_tools_read_one_feeds_definition_and_its_posts(
+    cli, consent_nest, consent_bridge
+):
+    """``feed_list`` names the account's feeds; ``feed_get`` reads one feed's
+    definition by the id the list carries, ``feed_posts`` the posts it selects,
+    and ``feed_trending`` the nest's trending posts — each over the account arm,
+    app-less. A feed id the account does not hold is the nest's refusal, never an
+    empty success."""
+    alice = consent_nest["user"]
+    cli.initialize()
+    _connect_account(cli, consent_nest, alice, "alice")
+
+    actor = ApiActor(
+        consent_nest["url"], alice["token"], alice["actor_id_hex"], bytes(alice["signing_key"])
+    )
+    name = f"cli-feed-{os.urandom(3).hex()}"
+    feed_id = actor.create_feed(name)
+    # The post is the cli's own (the oracle door): the catch-all feed indexes it.
+    posted = cli.call("post_create", {"text": f"seen through feed_posts {name}"})
+    assert not posted["isError"], f"post_create: {posted!r}\n{cli.diagnostics()}"
+    post_id = posted["structuredContent"]["post_id"]
+
+    listed = cli.call("feed_list")
+    assert not listed["isError"], f"{listed!r}\n{cli.diagnostics()}"
+    assert feed_id in json.dumps(listed["structuredContent"]), (
+        f"feed_list names the feed the account made: {listed!r}"
+    )
+
+    got = cli.call("feed_get", {"feed_id": feed_id})
+    assert not got["isError"], f"feed_get reads the feed the list names: {got!r}\n{cli.diagnostics()}"
+    assert name in json.dumps(got["structuredContent"]), (
+        f"feed_get carries the feed's definition: {got!r}"
+    )
+
+    def feed_post_ids() -> set[str] | None:
+        result = cli.call("feed_posts", {"feed_id": feed_id})
+        assert not result["isError"], f"feed_posts reads the feed: {result!r}\n{cli.diagnostics()}"
+        ids = {p["post_id"] for p in result["structuredContent"]["posts"]}
+        return ids if post_id in ids else None
+
+    # Ingest indexes the post into the feed asynchronously: poll the feed's own
+    # state (convention 14).
+    wait_until(feed_post_ids, RPC_ROUNDTRIP_S, diagnose=lambda: cli.call("feed_posts", {"feed_id": feed_id}))
+
+    trending = cli.call("feed_trending")
+    assert not trending["isError"], f"feed_trending reads: {trending!r}\n{cli.diagnostics()}"
+    assert isinstance(trending["structuredContent"].get("posts"), list), trending
+
+    missing = cli.call("feed_get", {"feed_id": os.urandom(16).hex()})
+    assert missing["isError"], f"a feed the account does not hold is refused: {missing!r}"
+
+
+def _admin_connected(cli: CliMcpSession, nest: dict, handle: str) -> dict:
+    """The nest's second admin connected to ``cli`` with every admin string.
+    ``grant_admin`` needs the nest's sole admin (a later grant would wait for a
+    quorum and expire), so the member it makes is kept on ``nest`` and shared:
+    by the admin-plane journey (alice) and by these tests, in any order."""
+    from helpers.admin_wire import grant_admin
+
+    member = nest.get("cli_admin_member")
+    if member is None:
+        # Alice, whose ATProto identity the fixture already activated.
+        member = nest["user"]
+        grant_admin(nest, member)
+        nest["cli_admin_member"] = member
+    cli.initialize()
+    _connect_account(cli, nest, member, member["handle"], admin=True)
+    return member
+
+
+@pytest.mark.feature("fauna-for-ai-assistants")
+def test_admission_admits_a_supervised_member_under_a_guardian_and_an_age_band(
+    cli, consent_nest, consent_bridge
+):
+    """``admin_users_admit`` with ``guardian_actor`` and ``age_band`` (the
+    direct-admission arm of ``family-safety.md`` § The guardianship link): the
+    admitted account's OWN family status names the guardian and reads the band
+    back, the member list carries it, and a band without a guardian is the
+    nest's refusal. ``admin_registration_mode_get`` reads the posture."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from nacl.signing import SigningKey
+
+    _admin_connected(cli, consent_nest, "admitadmincli")
+    guardian = admit_adult(consent_nest, "admitguardiancli", domain=HANDLE_DOMAIN)
+
+    tools = {t["name"]: t for t in cli.request("tools/list")["tools"]}
+    bands = tools["admin_users_admit"]["inputSchema"]["properties"]["age_band"]["enum"]
+    assert bands, "the catalog lists the age bands from the shared type"
+    band = bands[0]
+
+    ward_key = SigningKey.generate()
+    ward_hex = bytes(ward_key.verify_key).hex()
+    admitted = cli.call(
+        "admin_users_admit",
+        {
+            "actor_id": ward_hex,
+            "tier": "free",
+            "handle": "admitwardcli",
+            "guardian_actor": guardian["actor_id_hex"],
+            "age_band": band,
+        },
+    )
+    assert not admitted["isError"], f"a guardian admission is served: {admitted!r}\n{cli.diagnostics()}"
+
+    listed = cli.call("admin_users_list")
+    assert ward_hex in {u["actor_id"] for u in listed["structuredContent"]["users"]}, (
+        f"the member list carries the supervised member: {listed!r}"
+    )
+
+    def ward_status():
+        try:
+            with WsRpcAdminClient(
+                consent_nest["url"], actor_id=bytes(ward_key.verify_key), signing_key=bytes(ward_key)
+            ) as me:
+                return me.call("fauna.family.status", {})
+        except Exception:  # the admitted account authenticates once the admission lands
+            return None
+
+    status = wait_until(ward_status, RPC_ROUNDTRIP_S, diagnose=lambda: "the ward never authenticated")
+    supervised_by = status.get("supervised_by") or {}
+    assert bytes(supervised_by["actor_id"]).hex() == guardian["actor_id_hex"], (
+        f"the admitted account is supervised by the guardian: {status!r}"
+    )
+    assert (status.get("age_band") or {}).get("band") == band, (
+        f"the admitted account reads the band the admission stated: {status!r}"
+    )
+
+    bandless = cli.call(
+        "admin_users_admit",
+        {"actor_id": os.urandom(32).hex(), "tier": "free", "handle": "bandlesscli", "age_band": band},
+    )
+    assert bandless["isError"], f"a band without a guardian is refused by the nest: {bandless!r}"
+
+    posture = cli.call("admin_registration_mode_get")
+    assert not posture["isError"], f"the registration posture reads: {posture!r}\n{cli.diagnostics()}"
+    assert posture["structuredContent"], posture
+
+
+@pytest.mark.feature("fauna-for-ai-assistants")
+def test_the_admin_reads_one_dmarc_reports_raw_archive(
+    cli, consent_nest, consent_bridge, mail_bridge_binary, seal_helper_binary, tmp_path
+):
+    """``admin_mail_reports_dmarc_get`` (outcome 13's "reports down to a
+    report's raw archive"): a DMARC aggregate report mailed into the nest's MX
+    for its own domain is listed by ``admin_mail_reports_dmarc``, and the get,
+    named by the entry's three keys, answers that entry and the report's XML as
+    text, whole.
+
+    The report is seeded the only way one enters a nest — mailed to its MX —
+    so the consent nest gets an MTA bridge of its own here
+    (``conftest._spawn_mta_bridge``). This test owns the nest-global mail state
+    that needs (`_spawn_mta_bridge`'s contract): the claim already registered
+    ``HANDLE_DOMAIN`` as the primary mail domain; the admin clears the
+    DNS-dependent perimeter gates and opens the mail gate BEFORE the spawn, so
+    the bridge binds at once. Nothing else on the module's nest reads mail
+    state, so leaving it on is harmless to the tests after this one."""
+    from types import SimpleNamespace
+
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from conftest import MTA_FIXTURE_SPAM_POSTURE, _spawn_mta_bridge
+    from fakes.fake_clamd import FakeClamd
+    from fakes.fake_rspamd import FakeRspamd
+    from helpers.dmarc_reports import mail_report, report_message, report_xml
+
+    admin = consent_nest["admin"]
+    with WsRpcAdminClient(
+        consent_nest["url"],
+        actor_id=bytes(admin["signing_key"].verify_key),
+        signing_key=bytes(admin["signing_key"]),
+    ) as admin_ws:
+        admin_ws.call("fauna.bridges.put_spam_policy", dict(MTA_FIXTURE_SPAM_POSTURE))
+        admin_ws.call("fauna.bridges.set_mail_enabled", {"enabled": True})
+
+    fake_clamd = FakeClamd().start()
+    fake_rspamd = FakeRspamd().start()
+    mta_tmp = tmp_path / "mta"
+    mta_tmp.mkdir()
+    mta = _spawn_mta_bridge(
+        mail_bridge_binary=mail_bridge_binary,
+        seal_helper_binary=seal_helper_binary,
+        nest_instance=consent_nest,
+        tmp=mta_tmp,
+        bridge_id="cli-dmarc-mta-1",
+        domain=HANDLE_DOMAIN,
+        operator_hatch_extra=(
+            f'clamd_addr = "{fake_clamd.addr}"\n'
+            f'rspamd_url = "{fake_rspamd.url}"\n'
+        ),
+    )
+    try:
+        report_id = f"cli-raw-{int(time.time() * 1000)}"
+        org = "cli-reporter.test"
+        xml = report_xml(HANDLE_DOMAIN, report_id, org_name=org)
+        rcpt = f"dmarc-report@{HANDLE_DOMAIN}"
+        # The 250 on `.` is the barrier: the hand-off to the nest completes
+        # inside DATA, before the reply.
+        mail_report(
+            SimpleNamespace(mx_port=mta.mx_port, domain=HANDLE_DOMAIN),
+            rcpt,
+            report_message(rcpt, xml, report_id),
+        )
+    finally:
+        mta.cleanup()
+        fake_clamd.stop()
+        fake_rspamd.stop()
+
+    _admin_connected(cli, consent_nest, "dmarcadmincli")
+
+    listed = _until_served(cli, "admin_mail_reports_dmarc")
+    assert not listed["isError"], f"the report list reads: {listed!r}\n{cli.diagnostics()}"
+    entries = [
+        r for r in listed["structuredContent"]["reports"] if r["report_id"] == report_id
+    ]
+    assert len(entries) == 1, f"the mailed report is listed once: {listed!r}"
+    entry = entries[0]
+    assert entry["our_domain"] == HANDLE_DOMAIN.lower(), entry
+    assert entry["submitter"] == f"{org} <dmarc-noreply@reporter.test>", entry
+
+    got = cli.call(
+        "admin_mail_reports_dmarc_get",
+        {
+            "our_domain": entry["our_domain"],
+            "submitter": entry["submitter"],
+            "report_id": entry["report_id"],
+        },
+    )
+    assert not got["isError"], f"the get reads the listed report: {got!r}\n{cli.diagnostics()}"
+    answer = got["structuredContent"]
+    assert answer["report"]["report_id"] == report_id, answer["report"]
+    assert answer["report"]["submitter"] == entry["submitter"], answer["report"]
+    assert answer["raw"] == xml, "the raw view is the report's XML as the provider sent it"
+    assert answer["raw_truncated"] is False, answer
+    assert answer["raw_bytes"] == len(xml.encode()), answer
+
+    missing = cli.call(
+        "admin_mail_reports_dmarc_get",
+        {"our_domain": entry["our_domain"], "submitter": entry["submitter"], "report_id": "no-such-report"},
+    )
+    assert missing["isError"], f"a report the nest never stored is refused: {missing!r}"
+
+
+#: Name fragments no sovereign act may carry in a tool (`apps/cli.md` § The
+#: sovereign-act boundary): the admin grant plane, key material and secrets,
+#: identity acts, and what a user cannot recreate.
+_SOVEREIGN_FRAGMENTS = (
+    "admins_add", "admins_remove", "admin_add", "admin_remove",
+    "bridge_approve", "bridges_approve", "bridge_reject", "bridges_reject",
+    "bridge_revoke", "bridges_revoke", "custody", "pending_action",
+    "seed", "issuer", "session_secret", "tls_cert", "dkim_key", "dkim_rotate",
+    "srs", "unsubscribe_secret", "client_secret", "handle_clear", "clear_handle",
+    "users_delete", "user_delete", "evict", "takedown", "factory_reset",
+    "domain_rename_start", "domain_rename_set", "domain_rename_cancel",
+)
+#: Pages whose every mutation is sovereign: no tool at all, or reads only.
+_SOVEREIGN_PAGES = ("devices", "sessions", "nests", "backups", "connected-apps")
+
+
+@pytest.mark.feature("fauna-for-ai-assistants")
+def test_the_catalog_names_no_tool_for_a_sovereign_act(cli, consent_nest, consent_bridge):
+    """The sovereign-never list read against what a host sees (``apps/cli.md`` §
+    The sovereign-act boundary): ``tools/list`` is exactly the catalog snapshot;
+    it carries no ``onboarding`` page tool and, on the devices, sessions, nests,
+    backups and connected-apps pages, nothing that mutates (``connect`` is the
+    one ceremony the user approves); and no tool name spells an admin grant, a
+    key or secret act, a handle clear, a domain rename, a user delete, an
+    eviction or the factory reset. Read on an admin-consented connection, whose
+    host is offered the widest list."""
+    import yaml
+
+    _admin_connected(cli, consent_nest, "sovereignadmincli")
+    tools = {t["name"]: t for t in cli.request("tools/list")["tools"]}
+
+    snapshot = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent / "catalog-actual-cli.yaml").read_text()
+    )
+    pages = {t["name"]: t["page"] for t in snapshot["tools"]}
+    assert set(pages) <= set(tools), (
+        f"tools/list lacks catalog tools: {sorted(set(pages) - set(tools))}"
+    )
+
+    onboarding = [n for n, p in pages.items() if p.startswith("onboarding")]
+    assert not onboarding, f"the onboarding ceremony is no tool: {onboarding}"
+    sovereign_writes = [
+        n
+        for n, p in pages.items()
+        if p in _SOVEREIGN_PAGES and n != "connect" and not tools[n]["annotations"]["readOnlyHint"]
+    ]
+    assert not sovereign_writes, f"the grant plane offers reads only: {sovereign_writes}"
+    # A read of the same plane (a roster, a status) is allowed; the act is not.
+    spelled = sorted(
+        n
+        for n, t in tools.items()
+        if not t["annotations"]["readOnlyHint"] and any(f in n for f in _SOVEREIGN_FRAGMENTS)
+    )
+    assert not spelled, f"a sovereign act is no tool: {spelled}"
 
 
 def _activate_atproto(nest: dict, user: dict) -> None:
@@ -658,18 +948,16 @@ def _until_served_as(cli: CliMcpSession, account: str) -> dict:
         time.sleep(1.0)  # sleep-ok: paces a deadline poll on the shell's own state, never asserted on
 
 
-@pytest.mark.tui
+@pytest.mark.feature("fauna-for-ai-assistants")
 def test_two_accounts_are_two_principals_and_a_call_names_which(
-    request, connected_app, cli, cli_binary, consent_nest, tmp_path
+    cli, cli_binary, consent_nest, consent_bridge, tmp_path
 ):
     """Several accounts are several principals (``apps/cli.md`` § The device
-    shell): alice and bob each approve the cli's card on their own tui; with
+    shell): alice and bob each approve the cli's card on their own session; with
     both held, a call that names no account is refused naming both, a call
     naming one acts as that account — each post's author is the account the
     call named — and a relaunch resumes both from the credential store with no
     new ceremony."""
-    from conftest import _login_app_as
-
     alice = consent_nest["user"]
     bob = admit_adult(consent_nest, "bobaccounts", domain=HANDLE_DOMAIN, token=True)
     _activate_atproto(consent_nest, bob)
@@ -678,17 +966,14 @@ def test_two_accounts_are_two_principals_and_a_call_names_which(
     started = cli.call("connect", {"handle": "alice"}, timeout=RPC_ROUNDTRIP_S)
     assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
     assert started["structuredContent"]["account"] == "alice", started
-    _approve_code(connected_app.connected_apps, started["structuredContent"]["user_code"])
+    approve_typed_code_as(consent_nest, alice, started["structuredContent"]["user_code"])
     one = _until_connected(cli)
     assert not one["isError"], f"alice's connection completes: {one!r}\n{cli.diagnostics()}"
 
     started = cli.call("connect", {"handle": "@bobaccounts"}, timeout=RPC_ROUNDTRIP_S)
     assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
     assert started["structuredContent"]["account"] == "bobaccounts", started
-    _login_app_as(connected_app, request, consent_nest, bob, spa_url_fixture="consent_spa_url")
-    ca = connected_app.connected_apps
-    ca.navigate()
-    _approve_code(ca, started["structuredContent"]["user_code"])
+    approve_typed_code_as(consent_nest, bob, started["structuredContent"]["user_code"])
     served = _until_served_as(cli, "bobaccounts")
     assert not served["isError"], f"bob's connection completes: {served!r}\n{cli.diagnostics()}"
 
@@ -729,9 +1014,9 @@ def test_two_accounts_are_two_principals_and_a_call_names_which(
         relaunched.close()
 
 
-@pytest.mark.tui
+@pytest.mark.feature("fauna-for-ai-assistants")
 def test_with_no_os_store_the_connection_rests_in_a_declared_0600_file_and_resumes(
-    connected_app, cli_binary, consent_nest, tmp_path
+    cli_binary, consent_nest, consent_bridge, tmp_path
 ):
     """The unattended arm (``apps/cli.md`` § The device shell →
     *Credentials*): launched as on a box with no usable OS secret store, the
@@ -749,7 +1034,9 @@ def test_with_no_os_store_the_connection_rests_in_a_declared_0600_file_and_resum
             f"the connect answer declares the unattended arm: {started!r}"
         )
         assert custody in started["structuredContent"]["for_the_user"], started
-        _approve_code(connected_app.connected_apps, started["structuredContent"]["user_code"])
+        approve_typed_code_as(
+            consent_nest, consent_nest["user"], started["structuredContent"]["user_code"]
+        )
         served = _until_connected(shell)
         assert not served["isError"], f"the connection completes: {served!r}\n{shell.diagnostics()}"
     finally:
@@ -774,9 +1061,9 @@ def test_with_no_os_store_the_connection_rests_in_a_declared_0600_file_and_resum
         relaunched.close()
 
 
-@pytest.mark.tui
+@pytest.mark.feature("fauna-for-ai-assistants")
 def test_a_dropped_session_is_redialled_a_read_runs_again_and_a_write_never_does(
-    connected_app, cli, consent_nest
+    cli, consent_nest, consent_bridge
 ):
     """A principal session the nest dropped (``apps/cli.md`` § The device shell
     → *A dropped session*): the nest restarts in place (``restart_nest``, the
@@ -791,7 +1078,9 @@ def test_a_dropped_session_is_redialled_a_read_runs_again_and_a_write_never_does
     cli.initialize()
     started = cli.call("connect", {"handle": "alice"}, timeout=RPC_ROUNDTRIP_S)
     assert not started["isError"], f"connect refused: {started!r}\n{cli.diagnostics()}"
-    _approve_code(connected_app.connected_apps, started["structuredContent"]["user_code"])
+    approve_typed_code_as(
+        consent_nest, consent_nest["user"], started["structuredContent"]["user_code"]
+    )
     local = _until_connected(cli)
     assert not local["isError"], f"the connection completes: {local!r}\n{cli.diagnostics()}"
 

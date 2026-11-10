@@ -34,7 +34,13 @@ BUILD_TIMEOUT = 1800
 #: How long a build waits for its `build` slot before giving up — a saturated box
 #: queues builds for a while, and the wait is not the build's own time.
 SLOT_WAIT_TIMEOUT = 3600
-from helpers.budgets import CONTAINER_HEALTH_S, ROUTER_CHANNEL_S  # noqa: E402
+from helpers.budgets import (  # noqa: E402
+    CONTAINER_HEALTH_S,
+    MAIL_BRIDGE_RECONNECT_S,
+    ROUTER_CHANNEL_S,
+    SERVING_ENABLEMENT_S,
+    SIDECAR_LISTENING_S,
+)
 
 #: Kept under its old name for the modules importing it; the budget is named in
 #: ``helpers/budgets.py``.
@@ -219,6 +225,68 @@ def _image_created(image: str) -> str | None:
 
 #: How long `_image_created` waits for the daemon to answer an image inspect.
 IMAGE_INSPECT_S = 120.0
+
+
+#: The line a test-double sidecar's snippet prints once its fake has bound its
+#: sockets (`_await_sidecar_listening`).
+SIDECAR_READY_LINE = "fauna-sidecar listening"
+
+
+def _await_sidecar_listening(name: str, what: str) -> None:
+    """Hold until sidecar ``name`` prints :data:`SIDECAR_READY_LINE` — its fake's
+    sockets are bound — and fail fast, with its logs, if it exits first.
+
+    `State.Running` proves the process, not its listener: a container that boots
+    and then crashes on an import or a bind is briefly Running (the stub-mx
+    sidecar's ready line is the precedent; convention 14)."""
+    from helpers.waiting import wait_until  # noqa: PLC0415 — the shared poll
+    seen: dict = {"logs": "", "running": None}
+
+    def listening():
+        logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True, timeout=30)
+        seen["logs"] = logs.stdout + logs.stderr
+        if SIDECAR_READY_LINE in seen["logs"]:
+            return True
+        running = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", name],
+                                 capture_output=True, text=True, timeout=30)
+        seen["running"] = running.stdout.strip()
+        if running.returncode == 0 and seen["running"] == "false":
+            raise RuntimeError(f"{what} sidecar {name} exited before listening:\n{seen['logs']}")
+        return False
+
+    wait_until(listening, SIDECAR_LISTENING_S, interval=0.5, diagnose=lambda: (
+        f"{what} sidecar {name} never printed {SIDECAR_READY_LINE!r} "
+        f"(running={seen['running']!r}):\n{seen['logs'][-2000:]}"))
+
+
+def container_exit_code(name: str) -> str:
+    """A stopped container's exit code, as docker reports it.
+
+    The `_image_created` treatment for a container inspect: an inspect that times
+    out or errors on a loaded box is asked again until the daemon answers, and a
+    daemon that never does raises with what it said — a one-shot inspect with a
+    hard timeout would fail the witness on the daemon's latency, not on the code
+    (convention 14)."""
+    seen: list[str] = []
+
+    def answer():
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", name, "--format", "{{.State.ExitCode}}"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            seen.append("docker inspect timed out after 30 s")
+            return None
+        if inspected.returncode == 0 and inspected.stdout.strip():
+            return inspected.stdout.strip()
+        seen.append(f"exit {inspected.returncode}: {inspected.stderr.strip()[:300]}")
+        return None
+
+    from helpers.waiting import wait_until  # noqa: PLC0415 — the shared poll
+    return wait_until(answer, IMAGE_INSPECT_S, interval=2.0, diagnose=lambda: (
+        f"the docker daemon never reported {name}'s exit code; it answered "
+        f"{seen[-3:]!r}"))
 
 
 def docker_build(repo_root: Path) -> str:
@@ -981,7 +1049,7 @@ def write_data_file(path: str, rel: str, data: bytes) -> None:
         raise RuntimeError(f"write /data/{rel} failed: {r.stderr.decode(errors='replace')}")
 
 
-def wait_for_smtp_banner(host: str, port: int, timeout: float = 30.0):
+def wait_for_smtp_banner(host: str, port: int, timeout: float = MAIL_BRIDGE_RECONNECT_S):
     """Poll until host:port serves an SMTP banner (`220 ...`).
 
     docker-proxy accepts TCP at the host layer before the container-side
@@ -1277,7 +1345,7 @@ def restart_service(name: str, service: str) -> None:
     )
 
 
-def await_keypairs(name: str, roles=ROLES, timeout: float = 30.0) -> dict[str, str]:
+def await_keypairs(name: str, roles=ROLES, timeout: float = MAIL_BRIDGE_RECONNECT_S) -> dict[str, str]:
     """Poll until every role has self-generated its keypair; return {role: hex}."""
     pubkeys: dict[str, str] = {}
     deadline = time.monotonic() + timeout
@@ -1353,7 +1421,7 @@ def await_bridges_serving(name: str, nest, mail_ports: dict[int, int],
     *different act* there, not a declared absence.
     """
     with admin_ws(nest) as admin:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + SERVING_ENABLEMENT_S
         while time.monotonic() < deadline:
             if flag_present(name) and all(is_commanded_up(svstat(name, f"fauna-mail-bridge-{r}")) for r in roles):
                 break
@@ -1387,7 +1455,7 @@ def await_bridges_serving(name: str, nest, mail_ports: dict[int, int],
             # Poll the (idempotent) cert provisioning until it fans out sealed to
             # every role — the observable proof each bridge re-dialed + attested
             # its x25519 on the restart-as-approved cold boot (Gap E).
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + MAIL_BRIDGE_RECONNECT_S
             sealed_roles: set[str] = set()
             reply: dict = {}
             while time.monotonic() < deadline:
@@ -1402,12 +1470,12 @@ def await_bridges_serving(name: str, nest, mail_ports: dict[int, int],
                 f"skipped={[b['role'] for b in reply.get('bridges_skipped_no_x25519', [])]}"
             )
 
-            wait_for_smtp_banner("127.0.0.1", mail_ports[25], timeout=60)
-            wait_for_smtp_banner("127.0.0.1", mail_ports[587], timeout=60)
+            wait_for_smtp_banner("127.0.0.1", mail_ports[25], timeout=MAIL_BRIDGE_RECONNECT_S)
+            wait_for_smtp_banner("127.0.0.1", mail_ports[587], timeout=MAIL_BRIDGE_RECONNECT_S)
             for r in roles:
                 sighup_service(name, f"fauna-mail-bridge-{r}")
-            wait_for_tls_handshake("127.0.0.1", mail_ports[465], expect_banner_prefixes=(b"220 ", b"220-"), timeout=60)
-            wait_for_tls_handshake("127.0.0.1", mail_ports[993], expect_banner_prefixes=(b"* OK", b"* "), timeout=60)
+            wait_for_tls_handshake("127.0.0.1", mail_ports[465], expect_banner_prefixes=(b"220 ", b"220-"), timeout=MAIL_BRIDGE_RECONNECT_S)
+            wait_for_tls_handshake("127.0.0.1", mail_ports[993], expect_banner_prefixes=(b"* OK", b"* "), timeout=MAIL_BRIDGE_RECONNECT_S)
         except (AssertionError, TimeoutError) as e:
             raise AssertionError(f"{e}\n\n── bridge diagnostics ──\n{bridge_diag(name, roles)}") from e
 
@@ -1473,7 +1541,7 @@ def bring_atproto_bridge_to_serving(name: str, nest, domain: str) -> None:
     SAN to `[domain]`)."""
     enable_atproto_bridge(name)
 
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + SERVING_ENABLEMENT_S
     while time.monotonic() < deadline:
         if is_commanded_up(svstat(name, ATPROTO_SERVICE)):
             break
@@ -1521,7 +1589,8 @@ def bring_atproto_bridge_to_serving(name: str, nest, domain: str) -> None:
 # ── Mail user provisioning + inbound round-trip wire (new deploy model) ─────
 
 
-def relax_spam_policy(nest, *, helo_identity_required: bool | None = None) -> None:
+def relax_spam_policy(nest, *, helo_identity_required: bool | None = None,
+                      max_message_bytes: int | None = None) -> None:
     """Set the MTA spam policy permissively so an inbound from the docker
     host-gateway peer is accepted (the same settings the process-level
     `mail_bridge_mta` fixture uses): no DNSBL (loopback/gateway peers else 550
@@ -1537,12 +1606,17 @@ def relax_spam_policy(nest, *, helo_identity_required: bool | None = None) -> No
     EHLO host is the sender box's primary mail domain (`localhost`) and so cannot
     A-resolve to the connecting container IP. The write is REPLACE-semantics
     (`mail_policy.rs::write_policy_overrides` writes the whole row), so this field
-    rides in the same put as the rest — it can't be a second call."""
+    rides in the same put as the rest — it can't be a second call.
+
+    `max_message_bytes` (None = omitted, the catalog's 50 MB default) sets the
+    admin's live size cap in the same put, for a test that streams past it."""
     policy = {"dnsbl_servers": [], "greylist_enabled": False, "greylist_delay_secs": 0,
               "fcrdns_mode": "off", "max_conn_per_min": 1000,
               "baseline_standing_publish": False}
     if helo_identity_required is not None:
         policy["helo_identity_required"] = helo_identity_required
+    if max_message_bytes is not None:
+        policy["max_message_bytes"] = max_message_bytes
     with admin_ws(nest) as admin:
         admin.call("fauna.bridges.put_spam_policy", policy)
 
@@ -1797,27 +1871,18 @@ def start_fake_scanner_sidecars(
         )
         if r.returncode != 0:
             raise RuntimeError(f"start sidecar {cname} failed: {r.stderr}")
-        # Guard against an import/bind crash: the python process binds in the
-        # fake's __init__, so a still-running container after a beat means it's
-        # listening (the scan gate dials it minutes later, after serving).
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            st = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", cname],
-                                capture_output=True, text=True, timeout=10)
-            if st.stdout.strip() == "true":
-                return
-            time.sleep(0.5)
-        logs = subprocess.run(["docker", "logs", cname], capture_output=True, text=True, timeout=10)
-        raise RuntimeError(f"sidecar {cname} exited early:\n{logs.stdout}\n{logs.stderr}")
+        # The fake binds in its __init__ and the snippet prints the ready line
+        # after `start()`, so the line is the listener's own witness.
+        _await_sidecar_listening(cname, "scanner")
 
     _run(clamd_name,
          f"import sys, time; sys.path.insert(0, '/fakes'); "
          f"from fake_clamd import FakeClamd; "
-         f"FakeClamd(host='0.0.0.0', port={clamd_port}).start(); time.sleep(10**9)")
+         f"FakeClamd(host='0.0.0.0', port={clamd_port}).start(); print({SIDECAR_READY_LINE!r}, flush=True); time.sleep(10**9)")
     _run(rspamd_name,
          f"import sys, time; sys.path.insert(0, '/fakes'); "
          f"from fake_rspamd import FakeRspamd; "
-         f"FakeRspamd(host='0.0.0.0', port={rspamd_port}).start(); time.sleep(10**9)")
+         f"FakeRspamd(host='0.0.0.0', port={rspamd_port}).start(); print({SIDECAR_READY_LINE!r}, flush=True); time.sleep(10**9)")
     # IP literals (not container names) so the nest's scan-gate dials bypass
     # docker embedded DNS — see container_ip() for the SERVFAIL flake it avoids.
     return {"clamd_addr": f"{container_ip(clamd_name)}:{clamd_port}",
@@ -1944,7 +2009,8 @@ def start_fake_dns_sidecar(
         f"import sys, time; sys.path.insert(0, '/fakes'); "
         f"from fake_dns import FakeDns; "
         f"FakeDns(host='0.0.0.0', port={port}, txt_records={txt_records!r}, "
-        f"a_records={a_records or {}!r}{records_kw}).start(); time.sleep(10**9)"
+        f"a_records={a_records or {}!r}{records_kw}).start(); "
+        f"print({SIDECAR_READY_LINE!r}, flush=True); time.sleep(10**9)"
     )
     mounts = ["-v", f"{fakes_dir}:/fakes:ro"]
     if records_dir:
@@ -1961,17 +2027,10 @@ def start_fake_dns_sidecar(
     )
     if r.returncode != 0:
         raise RuntimeError(f"start fake_dns sidecar {name} failed: {r.stderr}")
-    # Both sockets bind in FakeDns.__init__, so a still-running container after
-    # a beat means it's listening (the nest queries it minutes later, at DATA).
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        st = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", name],
-                            capture_output=True, text=True, timeout=10)
-        if st.stdout.strip() == "true":
-            return container_ip(name)
-        time.sleep(0.5)
-    logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True, timeout=10)
-    raise RuntimeError(f"fake_dns sidecar {name} exited early:\n{logs.stdout}\n{logs.stderr}")
+    # Both sockets bind in FakeDns.__init__ and the snippet prints the ready
+    # line after `start()`, so the line is the listener's own witness.
+    _await_sidecar_listening(name, "fake_dns")
+    return container_ip(name)
 
 
 def write_dns_records(records_dir: str, *, txt: dict[str, str] | None = None,
@@ -2862,7 +2921,7 @@ def await_mda_only_serving(name: str, nest, imap_host_port: tuple[str, int],
     ``admin-mail-enabled-toggle`` — ``test_private_relay_hetzner.py``) reuses the
     same convergence logic."""
     with admin_ws(nest) as admin:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + SERVING_ENABLEMENT_S
         while time.monotonic() < deadline:
             if flag_present(name) and is_commanded_up(svstat(name, "fauna-mail-bridge-mda")):
                 break
@@ -2886,7 +2945,7 @@ def await_mda_only_serving(name: str, nest, imap_host_port: tuple[str, int],
         restart_service(name, "fauna-mail-bridge-mda")
 
     try:
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + MAIL_BRIDGE_RECONNECT_S
         sealed: set[str] = set()
         reply: dict = {}
         while time.monotonic() < deadline:
@@ -2898,7 +2957,7 @@ def await_mda_only_serving(name: str, nest, imap_host_port: tuple[str, int],
         assert "mda" in sealed, f"cert must fan out sealed to mda; last sealed={sealed}"
         sighup_service(name, "fauna-mail-bridge-mda")
         host, port = imap_host_port
-        wait_for_tls_handshake(host, port, expect_banner_prefixes=(b"* OK", b"* "), timeout=60)
+        wait_for_tls_handshake(host, port, expect_banner_prefixes=(b"* OK", b"* "), timeout=MAIL_BRIDGE_RECONNECT_S)
     except (AssertionError, TimeoutError) as e:
         raise AssertionError(f"{e}\n\n── bridge diagnostics ──\n{bridge_diag(name, ('mda',))}") from e
 

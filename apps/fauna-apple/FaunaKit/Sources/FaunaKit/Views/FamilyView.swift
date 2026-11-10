@@ -266,9 +266,11 @@ public struct FamilyView: View {
                 // Notify knob, which stays in the policy form. ──
                 Divider()
 
+                #if !FAUNA_KIDS  // the shared rule editor is excised from the kids build
                 if let client, let ward = vm.selectedWard {
                     FamilyRulesSection(api: client.api, ward: ward) { await vm.load() }
                 }
+                #endif
 
                 policyToggle(
                     L.family.policyContentNotifyLabel,

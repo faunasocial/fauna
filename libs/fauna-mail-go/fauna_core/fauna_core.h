@@ -385,6 +385,11 @@ int8_t uniffi_fauna_core_fn_func_mta_can_run(RustBuffer node_mode, RustBuffer sc
 RustBuffer uniffi_fauna_core_fn_func_perimeter_mail_score_rows(int32_t spam_score_milli, RustBuffer clamav, RustBuffer rspamd, RustBuffer verdicts, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_CHECKOUT_URL_FOR_BUYER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_CHECKOUT_URL_FOR_BUYER
+RustBuffer uniffi_fauna_core_fn_func_checkout_url_for_buyer(RustBuffer payment_url, RustBuffer buyer_actor_hex, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_IS_SAFE_PAYMENT_URL
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_FN_FUNC_IS_SAFE_PAYMENT_URL
 int8_t uniffi_fauna_core_fn_func_is_safe_payment_url(RustBuffer url, RustCallStatus *out_status
@@ -665,6 +670,12 @@ uint16_t uniffi_fauna_core_checksum_func_mta_can_run(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_PERIMETER_MAIL_SCORE_ROWS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_PERIMETER_MAIL_SCORE_ROWS
 uint16_t uniffi_fauna_core_checksum_func_perimeter_mail_score_rows(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_CHECKOUT_URL_FOR_BUYER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CORE_CHECKSUM_FUNC_CHECKOUT_URL_FOR_BUYER
+uint16_t uniffi_fauna_core_checksum_func_checkout_url_for_buyer(void
     
 );
 #endif

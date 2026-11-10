@@ -32,7 +32,8 @@ export function isSafeNavUrl(url: string | null | undefined): boolean {
 /** True for the hosts a browser treats as a secure context over plain http:
  * `localhost`, `*.localhost`, the 127.0.0.0/8 loopback block, and `::1`.
  * `URL.hostname` lowercases ASCII and brackets IPv6, so the comparisons are
- * exact. `0.0.0.0` is a bind address, never a client locator, so it is excluded. */
+ * exact. `0.0.0.0` is a bind address, never a client locator, so it is excluded.
+ * The browser's rule, meant to agree on names with `fauna_core::resolve::is_localhost_name`. */
 function isLoopbackHostname(hostname: string): boolean {
   if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
   if (hostname === '[::1]') return true;

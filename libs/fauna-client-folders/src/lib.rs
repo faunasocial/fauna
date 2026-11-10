@@ -701,6 +701,48 @@ impl<R: RpcRequester> FoldersClient<R> {
         .map(|_| ())
     }
 
+    /// Whether this client can attest a `→public` flip — it holds the owner's
+    /// identity key ([`Self::with_audience_attestor`]). A surface that cannot
+    /// attest must not offer a born-public create
+    /// (`ui/folders.md` § Audience and website serving → *Born public*).
+    pub fn can_attest_public(&self) -> bool {
+        self.attestor.is_some()
+    }
+
+    /// The born-public twin of [`Self::set_audience`]'s mint — the second of
+    /// the two mint sites, both in this file, both reached only from the
+    /// owner's confirmed declassify gesture (here the wizard's confirmed
+    /// create, inside [`crate::set_lifecycle::create_set_with_owner_root`]).
+    ///
+    /// Signs over `folder_id`, the id the create's reply just named, so no
+    /// list read is needed and there is no previous attestation to count above:
+    /// the row is fresh. Sends `audience: public` again beside it, as every
+    /// attested flip does. Crate-private: the only caller is the shared create
+    /// site, which checks [`Self::can_attest_public`] before the create.
+    pub(crate) async fn attest_born_public(
+        &self,
+        folder_id: i64,
+        name: &str,
+    ) -> Result<(), R::Error> {
+        let audience_attestation = self.attestor.as_ref().map(|keypair| {
+            fauna_protocol::folders::AudienceAttestation::mint(
+                keypair,
+                folder_id,
+                name,
+                fauna_core::data::Timestamp::now_millis_or_zero(),
+                None,
+            )
+        });
+        self.update(fauna_protocol::folders::FolderUpdateRequest {
+            name: name.to_string(),
+            audience: Some(fauna_protocol::folders::AUDIENCE_PUBLIC.to_string()),
+            audience_attestation,
+            ..Default::default()
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Set a folder's **content residency** — `"full"` (the nest keeps chunk
     /// bytes; the default) or `"metadata_only"` (bytes never rest on the nest:
     /// seats skip byte upload, the nest drops its copy, content moves between

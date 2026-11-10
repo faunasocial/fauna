@@ -175,10 +175,14 @@ pub(crate) async fn enforce_imap_storage_quota(
 ///    user's "Disable mail", default ON; `docs/goal/behavior/mail-credentials.md`
 ///    § Trigger taxonomy, the Disable-mail row). Read here and nowhere else, so
 ///    the CalDAV, CardDAV and WebDAV handlers keep serving the same credential.
+/// 3. **The account stands** — not suspended, not locked, not gone
+///    ([`crate::bridge_routing_handlers::ensure_target_stands`]). Read per call,
+///    so an IMAP session AUTHed before the lock reads nothing after it.
 pub(crate) async fn require_local_mail_serving(
     state: &std::sync::Arc<crate::routes::AppState>,
     target: &[u8; 32],
 ) -> Result<(), fauna_protocol::RpcError> {
+    crate::bridge_routing_handlers::ensure_target_stands(state, target).await?;
     require_local_mail_store(state, target).await?;
     ensure_actor_mail_enabled(state, target).await?;
     Ok(())
@@ -267,7 +271,9 @@ pub(crate) fn split_flags(s: &str) -> Vec<String> {
 /// column (`imap-server.md` § SEARCH). Flags are stored space-separated; the
 /// wire surface exposes them as a `Vec<String>` (empty Vec when whitespace). A
 /// record whose segment can't be opened reports size 0 (mirror/disk divergence,
-/// logged by `record_sizes`) rather than failing the whole listing.
+/// logged by `record_sizes`) rather than failing the whole listing. Each meta
+/// carries the copy's live `content_scores` rows (`scores`), read in one
+/// query for the whole page.
 async fn rows_to_message_metas(
     state: &std::sync::Arc<crate::routes::AppState>,
     actor: &[u8; 32],
@@ -278,10 +284,19 @@ async fn rows_to_message_metas(
     let sizes = crate::segments::record_sizes(&state.mail_segments, actor, &refs)
         .await
         .map_err(internal)?;
+    // The copies' live bus rows, one query for the page (`report-sharing.md`
+    // § Applying the aggregate — the MDA's scorer reads `report:spam` here).
+    let ids: Vec<[u8; 32]> = rows.iter().map(|r| r.message_id).collect();
+    let mut scores = state
+        .db
+        .get_content_scores_many(&ids)
+        .await
+        .map_err(internal)?;
     Ok(rows
         .into_iter()
         .zip(sizes)
         .map(|(r, size)| MessageMeta {
+            scores: scores.remove(&r.message_id).unwrap_or_default(),
             uid: r.uid,
             message_id: r.message_id.to_vec(),
             modseq: r.modseq,
@@ -387,6 +402,7 @@ fn list_mailboxes_handler() -> crate::rpc_router::RpcHandler {
                     .await
                     .map_err(internal)?;
                 mailboxes.push(MailboxEntry {
+                    attrs: fauna_protocol::email::special_use_attrs(&row.name),
                     name: row.name,
                     uid_validity: row.uid_validity,
                     uid_next: row.uid_next,
@@ -2128,7 +2144,15 @@ async fn capture_mail_report(
             match crate::db::reports::capture_report(&state.db, reporter, &report_key, is_spam_flag)
                 .await
             {
-                Ok(()) => state.notify_exchange_transition(),
+                Ok(reopened) => {
+                    // The re-open is a metadata change the app learns of from
+                    // its flag-change feed — wake it now (`report-sharing.md`
+                    // § Applying the aggregate).
+                    for actor in &reopened {
+                        crate::segments::notify_mail_flags_changed(&state.ws, actor);
+                    }
+                    state.notify_exchange_transition();
+                }
                 Err(e) => tracing::warn!("report capture failed (the write succeeded): {e}"),
             }
         }
@@ -2210,6 +2234,44 @@ pub(crate) fn put_spam_model_handler() -> crate::rpc_router::RpcHandler {
             // (`apply_model_write_op`).
             if req.sealed_model.is_empty() {
                 return Err(malformed("sealed_model must not be empty"));
+            }
+            // Every opaque field is bounded (): the nest cannot open a
+            // seal, so each gets its plaintext bound plus the envelope, and
+            // nothing over a cap is written.
+            if req.sealed_model.len() > crate::spam_model_seal::SEALED_MODEL_MAX_BYTES {
+                return Err(invalid_params("sealed_model exceeds the model size bound"));
+            }
+            if let Some(SpamHistoryOp::Insert {
+                message_id,
+                sealed_subject,
+                sealed_delta,
+                ..
+            }) = &req.history_op
+            {
+                if message_id.is_empty()
+                    || message_id.len() > crate::spam_model_seal::HISTORY_MESSAGE_ID_MAX_BYTES
+                {
+                    return Err(invalid_params(
+                        "history_op.message_id must be 1..=256 bytes",
+                    ));
+                }
+                if sealed_subject.len() > crate::spam_model_seal::SEALED_SUBJECT_MAX_BYTES {
+                    return Err(invalid_params(
+                        "history_op.sealed_subject exceeds the subject size bound",
+                    ));
+                }
+                if sealed_delta.len() > crate::spam_model_seal::SEALED_DELTA_MAX_BYTES {
+                    return Err(invalid_params(
+                        "history_op.sealed_delta exceeds the delta size bound",
+                    ));
+                }
+            }
+            if let Some(c) = &req.holder_copy
+                && c.sealed_copy.len() > crate::spam_model_seal::SEALED_MODEL_MAX_BYTES
+            {
+                return Err(invalid_params(
+                    "holder_copy.sealed_copy exceeds the model size bound",
+                ));
             }
             // The model rests ONLY sealed: a blob that decodes as a plaintext
             // `SpamModel` is refused, never stored (`mail-spam.md`
@@ -2379,6 +2441,19 @@ pub(crate) fn put_spam_model_handler() -> crate::rpc_router::RpcHandler {
             // aggregate. Runs after the write committed and never fails it.
             if let Some((message_id, label)) = inserted_lesson {
                 capture_mail_report(&state, &target, &message_id, label == SpamLabel::Spam).await;
+                // The per-message veto (`report-sharing.md` § Applying the
+                // aggregate): a ham lesson — the app's not-spam mark or a
+                // move out of Junk — stamps the copy `$NotJunk`, so no
+                // scoring position re-files it and no later community report
+                // re-opens it. The undo path below withdraws a report but is
+                // not a ham judgment, so it stamps nothing. Never fails the
+                // committed write.
+                if label == SpamLabel::Ham
+                    && let Ok(mid) = <[u8; 32]>::try_from(message_id.as_slice())
+                    && let Err(e) = state.db.stamp_not_junk(&target, &mid).await
+                {
+                    tracing::warn!("$NotJunk stamp failed (the write succeeded): {e}");
+                }
             }
             if let Some(lesson) = undone
                 && Some(lesson.label.as_str()) == spam_label_wire(SpamLabel::Spam)
@@ -3660,6 +3735,50 @@ pub(crate) mod tests {
         assert!(names.contains(&"Drafts"));
         assert!(names.contains(&"Trash"));
         assert!(names.contains(&"Junk"));
+    }
+
+    /// The nest owns the SPECIAL-USE table (`imap-server.md` § Standard
+    /// mailboxes): every standard mailbox carries its RFC 6154 attribute on
+    /// the `list_mailboxes` wire — INBOX none, it is identified by name — and
+    /// the MDA writes them verbatim, keeping no table of its own.
+    #[tokio::test]
+    async fn list_mailboxes_carries_special_use_attrs_for_every_standard_mailbox() {
+        let state = fixture_state().await;
+        let mda = [9u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let target = [43u8; 32];
+        state
+            .db
+            .create_bridge_imap_mailbox(&target, "Projects", 7)
+            .await
+            .expect("create user mailbox");
+
+        let req = ListMailboxesRequest {
+            actor_id: target.to_vec(),
+            ..Default::default()
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        let bytes = list_mailboxes_handler()(state, mda, payload)
+            .await
+            .expect("handler ok");
+        let reply: ListMailboxesReply = fauna_cbor::decode_strict(&bytes).unwrap();
+        let attrs_of = |name: &str| -> Vec<String> {
+            reply
+                .mailboxes
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("{name} listed"))
+                .attrs
+                .clone()
+        };
+        for name in crate::db::bridge_imap::STANDARD_MAILBOXES {
+            let want: Vec<String> = match *name {
+                "INBOX" => vec![],
+                other => vec![format!("\\{other}")],
+            };
+            assert_eq!(attrs_of(name), want, "{name} attrs on the wire");
+        }
+        assert!(attrs_of("Projects").is_empty(), "user mailbox has no attr");
     }
 
     #[tokio::test]
@@ -8362,6 +8481,112 @@ pub(crate) mod tests {
         }
     }
 
+    /// The untrained-actor re-open through the real train path
+    /// (`report-sharing.md` § Applying the aggregate → *The re-open is a
+    /// metadata change, not a flag change*): a person whose app never
+    /// watermarked their copy holds it in `INBOX`; at the third reporter's
+    /// lesson the copy's modseq advances with its flags unchanged, the person's
+    /// own sessions hear `fauna.mail.flags_changed`, and the flag-change feed
+    /// delivers the copy with its `report:spam` entry beside its flags.
+    #[tokio::test]
+    async fn the_reopen_wakes_an_untrained_holder_and_the_feed_carries_the_report() {
+        let state = fixture_state().await;
+        let mda = [9u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let hash = [0x5D; 32];
+        let person = [78u8; 32];
+        state.db.create_user(&person, "free", "test").await.unwrap();
+        let (person_uid, person_msg) =
+            seed_message_with_report_hash(&state, &person, b"reopen campaign", hash).await;
+        let row = |state: Arc<crate::routes::AppState>| async move {
+            let rows = state
+                .db
+                .query_bridge_imap_messages(&person, "INBOX", None, None, Some(&[person_uid]), None)
+                .await
+                .unwrap();
+            let r = rows.into_iter().find(|r| r.uid == person_uid).unwrap();
+            (r.flags, r.modseq)
+        };
+        let (flags_before, modseq_before) = row(state.clone()).await;
+        assert!(
+            !flags_before.contains(fauna_protocol::email::SPAM_SCORED_KEYWORD),
+            "fixture: never watermarked"
+        );
+        let (_conn, mut rx) = state.ws.subscribe(person);
+        let woken = |rx: &mut tokio::sync::mpsc::Receiver<bytes::Bytes>| {
+            let mut n = 0;
+            while let Ok(bytes) = rx.try_recv() {
+                let fauna_protocol::Frame::Push(push) =
+                    fauna_protocol::decode_frame(&bytes).expect("decode frame")
+                else {
+                    continue;
+                };
+                if matches!(
+                    fauna_protocol::PushEvent::from_push(&push.kind, push.payload),
+                    fauna_protocol::PushEvent::MailFlagsChanged(_)
+                ) {
+                    n += 1;
+                }
+            }
+            n
+        };
+
+        let reporters = [[81u8; 32], [82u8; 32], [83u8; 32]];
+        for (i, reporter) in reporters.iter().enumerate() {
+            state.db.set_share_reports(reporter, true).await.unwrap();
+            let (_uid, msg_id) =
+                seed_message_with_report_hash(&state, reporter, b"reopen campaign", hash).await;
+            mda_lesson(
+                &state,
+                mda,
+                *reporter,
+                msg_id,
+                SpamLabel::Spam,
+                TrainingSource::ImapJunkFlag,
+            )
+            .await;
+            if i < 2 {
+                assert_eq!(woken(&mut rx), 0, "below k nothing re-opens");
+            }
+        }
+        assert_eq!(woken(&mut rx), 1, "the re-open fires the holder's wake");
+        let (flags_after, modseq_after) = row(state.clone()).await;
+        assert_eq!(flags_after, flags_before, "a metadata change moves no flag");
+        assert!(modseq_after > modseq_before, "the copy's modseq advanced");
+
+        // The feed past the pre-report cursor carries the copy and its score.
+        let mut b = crate::rpc_router::RpcRouter::builder();
+        crate::email_handlers::register_email_handlers(&mut b);
+        let router = b.build();
+        let meta = router
+            .kind_meta("fauna.email.inbox.flag_changes")
+            .expect("kind registered");
+        let req = fauna_protocol::email::FlagChangesRequest {
+            since_modseq: modseq_before as u64,
+            ..Default::default()
+        };
+        let reply = (meta.handler)(
+            state.clone(),
+            person,
+            bytes::Bytes::from(fauna_protocol::encode_canonical(&req).unwrap().to_vec()),
+        )
+        .await
+        .expect("flag_changes ok");
+        let reply: fauna_protocol::email::FlagChangesReply =
+            fauna_protocol::decode_strict(&reply).unwrap();
+        let change = reply
+            .changes
+            .iter()
+            .find(|c| c.uid == person_uid)
+            .expect("the re-opened copy is in the feed");
+        assert_eq!(
+            fauna_core::scoring::reports::report_spam_pm(&change.scores),
+            200,
+            "the copy's report:spam row rides beside its flags"
+        );
+        assert_eq!(state.db.test_report_row_score(&person_msg).await, Some(200));
+    }
+
     /// Undoing a spam lesson withdraws the report it captured — a withdrawn
     /// judgment leaves no residue (report-sharing.md § Report capture,
     /// *Symmetry*). The nest reads the removed row's message and label inside
@@ -9643,6 +9868,257 @@ pub(crate) mod tests {
                 .is_empty(),
             "no refused write left a row"
         );
+    }
+
+    /// Every opaque field has a size cap and `message_id` must be the
+    /// 32-byte content id: each cap accepts its exact bound and refuses one byte
+    /// over with `invalid_params`, writing nothing.
+    #[tokio::test]
+    async fn put_spam_model_caps_each_opaque_field_and_checks_message_id() {
+        use crate::spam_model_seal::{
+            HISTORY_MESSAGE_ID_MAX_BYTES, SEALED_DELTA_MAX_BYTES, SEALED_MODEL_MAX_BYTES,
+            SEALED_SUBJECT_MAX_BYTES,
+        };
+        let state = fixture_state().await;
+        approve_bridge(&state.db, &[200u8; 32], BridgeRole::ContentProcessor).await;
+        let user = [0x94u8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        let req = |model_len: usize,
+                   msg_len: usize,
+                   subject_len: usize,
+                   delta_len: usize,
+                   copy_len: Option<usize>| PutSpamModelRequest {
+            sealed_model: vec![0xEEu8; model_len],
+            history_op: Some(SpamHistoryOp::Insert {
+                message_id: vec![0x95u8; msg_len],
+                mailbox: "Junk".into(),
+                sealed_subject: vec![0xC1u8; subject_len],
+                sealed_delta: vec![0xD1u8; delta_len],
+                label: SpamLabel::Spam,
+                source: TrainingSource::ManualOther,
+            }),
+            holder_copy: copy_len.map(|n| fauna_protocol::wrapped_blob::SpamModelHolderCopy {
+                holder_pubkey: vec![9u8; 32],
+                sealed_copy: vec![0xB1u8; n],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let over: Vec<(&str, PutSpamModelRequest)> = vec![
+            ("model", req(SEALED_MODEL_MAX_BYTES + 1, 32, 24, 48, None)),
+            (
+                "subject",
+                req(64, 32, SEALED_SUBJECT_MAX_BYTES + 1, 48, None),
+            ),
+            ("delta", req(64, 32, 24, SEALED_DELTA_MAX_BYTES + 1, None)),
+            (
+                "holder copy",
+                req(64, 32, 24, 48, Some(SEALED_MODEL_MAX_BYTES + 1)),
+            ),
+            ("empty message_id", req(64, 0, 24, 48, None)),
+            (
+                "long message_id",
+                req(64, HISTORY_MESSAGE_ID_MAX_BYTES + 1, 24, 48, None),
+            ),
+        ];
+        for (what, r) in over {
+            let err = call_put_spam_model(state.clone(), user, r)
+                .await
+                .expect_err(what);
+            assert_eq!(err.code, "fauna.email.invalid_params", "{what}");
+        }
+        assert!(
+            state.db.get_spam_model(&user).await.unwrap().is_none(),
+            "no refused write left a model"
+        );
+        assert!(
+            state
+                .db
+                .list_spam_training_history(&user, 10, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no refused write left a row"
+        );
+        // Exactly at every bound is accepted.
+        let ok = call_put_spam_model(
+            state.clone(),
+            user,
+            req(
+                SEALED_MODEL_MAX_BYTES,
+                32,
+                SEALED_SUBJECT_MAX_BYTES,
+                SEALED_DELTA_MAX_BYTES,
+                Some(SEALED_MODEL_MAX_BYTES),
+            ),
+        )
+        .await
+        .expect("a write at every bound lands");
+        assert_eq!(ok.outcome, PutSpamModelOutcome::Written);
+        // Exactly at the id cap, and a conversation-shaped id, are accepted.
+        for len in [HISTORY_MESSAGE_ID_MAX_BYTES, 1] {
+            let r = req(64, len, 24, 48, None);
+            call_put_spam_model(state.clone(), user, r)
+                .await
+                .expect("an id within the cap lands");
+        }
+        let mut conv = req(64, 1, 24, 48, None);
+        if let Some(SpamHistoryOp::Insert { message_id, .. }) = conv.history_op.as_mut() {
+            *message_id = format!("conv:{}:7", "ab".repeat(32)).into_bytes();
+        }
+        call_put_spam_model(state.clone(), user, conv)
+            .await
+            .expect("a conv:<hex>:<seq> id lands");
+    }
+
+    /// The prune's inner SELECT is actor-scoped: another actor holding the
+    /// ceiling's worth of NEWER rows must not push the caller's own history
+    /// past the offset.
+    #[tokio::test]
+    async fn put_spam_model_prune_ranks_only_the_callers_rows() {
+        use crate::spam_model_seal::SPAM_HISTORY_MAX_ROWS_PER_ACTOR;
+        let state = fixture_state().await;
+        let user = [0x9Au8; 32];
+        let other = [0x9Bu8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        {
+            let conn = state.db.conn().await;
+            let tx = conn.unchecked_transaction().unwrap();
+            for (actor, i, ts) in (0..3i64)
+                .map(|i| (user, i, i + 1))
+                .chain((0..SPAM_HISTORY_MAX_ROWS_PER_ACTOR).map(|i| (other, i, 1_000 + i)))
+            {
+                tx.execute(
+                    "INSERT INTO spam_training_history
+                        (history_id, actor_id, message_id, mailbox, label, source, model_delta_applied, created_at, sealed_subject)
+                     VALUES (?1, ?2, ?3, 'Junk', 'spam', 'manual_other', x'D1', ?4, x'C1')",
+                    rusqlite::params![
+                        (i as u64 + if actor == other { 1 << 40 } else { 0 })
+                            .to_be_bytes()
+                            .to_vec(),
+                        actor.to_vec(),
+                        vec![0x10u8; 32],
+                        ts,
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        call_put_spam_model(
+            state.clone(),
+            user,
+            PutSpamModelRequest {
+                sealed_model: vec![0xEEu8; 64],
+                history_op: Some(SpamHistoryOp::Insert {
+                    message_id: vec![0x99u8; 32],
+                    mailbox: "Junk".into(),
+                    sealed_subject: vec![0xC1u8; 24],
+                    sealed_delta: vec![0xD1u8; 48],
+                    label: SpamLabel::Spam,
+                    source: TrainingSource::ManualOther,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("insert lands");
+        let conn = state.db.conn().await;
+        let count = |actor: [u8; 32]| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM spam_training_history WHERE actor_id = ?1",
+                [actor.to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(user), 4, "the caller's own rows are all kept");
+        assert_eq!(count(other), SPAM_HISTORY_MAX_ROWS_PER_ACTOR);
+    }
+
+    /// The per-actor ceiling: an insert past
+    /// `SPAM_HISTORY_MAX_ROWS_PER_ACTOR` prunes the actor's oldest row and keeps
+    /// the newest; another actor's rows are untouched.
+    #[tokio::test]
+    async fn put_spam_model_history_insert_past_the_ceiling_prunes_the_oldest() {
+        use crate::spam_model_seal::SPAM_HISTORY_MAX_ROWS_PER_ACTOR;
+        let state = fixture_state().await;
+        let user = [0x96u8; 32];
+        let other = [0x97u8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        // Fill the ceiling with old rows (distinct ascending created_at), plus
+        // one row of another actor that must survive.
+        {
+            let conn = state.db.conn().await;
+            let tx = conn.unchecked_transaction().unwrap();
+            for (actor, i) in (0..SPAM_HISTORY_MAX_ROWS_PER_ACTOR)
+                .map(|i| (user, i))
+                .chain(std::iter::once((other, 0)))
+            {
+                tx.execute(
+                    "INSERT INTO spam_training_history
+                        (history_id, actor_id, message_id, mailbox, label, source, model_delta_applied, created_at, sealed_subject)
+                     VALUES (?1, ?2, ?3, 'Junk', 'spam', 'manual_other', x'D1', ?4, x'C1')",
+                    rusqlite::params![
+                        (i as u64 + if actor == other { 1 << 40 } else { 0 })
+                            .to_be_bytes()
+                            .to_vec(),
+                        actor.to_vec(),
+                        vec![0x10u8; 32],
+                        i + 1,
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let outcome = call_put_spam_model(
+            state.clone(),
+            user,
+            PutSpamModelRequest {
+                sealed_model: vec![0xEEu8; 64],
+                history_op: Some(SpamHistoryOp::Insert {
+                    message_id: vec![0x98u8; 32],
+                    mailbox: "Junk".into(),
+                    sealed_subject: vec![0xC1u8; 24],
+                    sealed_delta: vec![0xD1u8; 48],
+                    label: SpamLabel::Spam,
+                    source: TrainingSource::ManualOther,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("insert past the ceiling still lands")
+        .outcome;
+        assert_eq!(outcome, PutSpamModelOutcome::Written);
+        let conn = state.db.conn().await;
+        let count = |actor: [u8; 32]| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM spam_training_history WHERE actor_id = ?1",
+                [actor.to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(user), SPAM_HISTORY_MAX_ROWS_PER_ACTOR);
+        assert_eq!(count(other), 1, "another actor's rows are untouched");
+        let oldest_left: i64 = conn
+            .query_row(
+                "SELECT MIN(created_at) FROM spam_training_history WHERE actor_id = ?1",
+                [user.to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(oldest_left, 2, "the single oldest row (created_at 1) went");
+        let newest: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spam_training_history WHERE actor_id = ?1 AND message_id = ?2",
+                rusqlite::params![user.to_vec(), vec![0x98u8; 32]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(newest, 1, "the newest row is kept");
     }
 
     /// The MDA path parses `req.actor_id` as the 32-byte target; a short id is
@@ -12882,6 +13358,51 @@ pub(crate) mod tests {
         list_mailboxes_handler()(state, mda, list(a))
             .await
             .expect("A is served again once mail is back on");
+    }
+
+    /// an IMAP session signed in before the lock reads
+    /// nothing after it. Every IMAP serving call asks whether the account
+    /// stands (`require_local_mail_serving` → `ensure_target_stands`), so the
+    /// session's next command is refused with `account_revoked` — the code the
+    /// MDA turns into a BYE — and a lapsed lock serves again.
+    #[tokio::test]
+    async fn imap_refuses_a_locked_or_suspended_account_and_serves_when_it_stands() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let mda = [0xEDu8; 32];
+        approve_bridge(&db, &mda, BridgeRole::Mda).await;
+        let a = [0xA3u8; 32];
+        db.create_user_with_handle(&a, "personal", "imaplock", None)
+            .await
+            .unwrap();
+        let list = || {
+            let req = ListMailboxesRequest {
+                actor_id: a.to_vec(),
+                ..Default::default()
+            };
+            Bytes::from(encode_canonical(&req).unwrap().to_vec())
+        };
+        list_mailboxes_handler()(state.clone(), mda, list())
+            .await
+            .expect("a standing account is served");
+
+        let now = now_epoch_secs();
+        db.set_locked_until(&a[..], Some(now + 3600)).await.unwrap();
+        let err = list_mailboxes_handler()(state.clone(), mda, list())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.account_revoked");
+
+        db.set_locked_until(&a[..], Some(now - 1)).await.unwrap();
+        list_mailboxes_handler()(state.clone(), mda, list())
+            .await
+            .expect("a lapsed lock serves again");
+
+        db.suspend_user_now(&a, "abuse", "abuse").await.unwrap();
+        let err = list_mailboxes_handler()(state, mda, list())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.account_revoked");
     }
 
     // ── I5 Phase D.7 — SUBSCRIBE / UNSUBSCRIBE handler tests ──────────

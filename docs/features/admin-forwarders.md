@@ -4,6 +4,9 @@ title: Aliases that forward outside
 section: admin area
 goal: docs/goal/behavior/admin.md § 4. Aliases
 guide: docs/guides/admin-tour.md § Aliases
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -61,6 +64,8 @@ Stamped 2026-10-01 at 308c995169.
 | ios | ✅ full | 0.1.5-dev+0daa3736 docker |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+0daa3736 docker |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

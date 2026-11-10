@@ -16,7 +16,7 @@ on to that nest's administrators too, without your name. A report removes nothin
 
 ## Coverage contract
 
-Stamped 2026-10-01 at e5a7e5d758.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] You can report someone else's post from its menu, picking a reason and adding a note if you wish; a report with no reason cannot be sent — `docs/goal/behavior/moderation.md` § What a report carries
    - `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns`
@@ -62,35 +62,41 @@ Stamped 2026-10-01 at e5a7e5d758.
    - `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_withdrawing_a_report_deletes_its_note_and_excerpt_on_both_nests`
 21. [nest] Deleting your account withdraws every report of yours that is still open, and leaves the resolved ones as the record of what was decided — `docs/goal/behavior/moderation.md` § Where it lands
    - `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_deleting_the_reporters_account_withdraws_open_reports_and_keeps_resolved_ones`
+22. [app] An account or post you hid by reporting it is hidden on your other devices too, and showing it again on one shows it on all — `docs/goal/architecture/content-moderation-and-ranking.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_reported_account_is_hidden_and_shown_again_on_every_own_device`
+23. [app] You can show again what you hid by reporting it, from the note in its place; the note names whether the post or the whole account comes back, and the report itself stays filed — `docs/goal/behavior/moderation.md` § Corollary — the reporter's hide is theirs to undo
+   - `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_hidden_post_is_shown_again_from_its_placeholder`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
-| linux | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
-| windows | ⚠ partial | 0.1.3-dev+60888d4e standalone |
+| web | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
+| linux | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
+| windows | 🚧 unbuilt | 0.1.5-dev+4d41bfdd.dirty standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+662ece79 standalone |
+| ios | ⚠ partial | 0.1.5-dev+662ece79 standalone |
 | android | 🚧 unbuilt | 0.1.5-dev+4d41bfdd.dirty standalone |
-| tui | ✅ full | 0.1.5-dev+30282079.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
+| android-kids | 🚧 unbuilt | 0.1.5-dev+4d41bfdd.dirty standalone |
+| ios-kids | 🚧 unbuilt | 0.1.5-dev+4d41bfdd.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_restricted_posts_text_reaches_the_admins_when_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_a_post_can_block_its_author_in_the_same_step` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_is_not_offered_on_your_own_post_or_profile` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_on_a_foreign_post_reaches_its_home_nest_and_the_outcome_returns` — requires `federated-report-sheet` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_an_account_hides_everything_it_wrote` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_restricted_posts_text_reaches_the_admins_when_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_a_post_can_block_its_author_in_the_same_step` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_is_not_offered_on_your_own_post_or_profile` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_ticked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 8 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_on_a_foreign_post_reaches_its_home_nest_and_the_outcome_returns` — requires `federated-report-sheet` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_an_account_hides_everything_it_wrote` — requires `content-policy-show-again-button` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_the_reported_author_is_told_nothing` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_report_changes_nothing_for_anyone_but_the_reporter` | nest (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_reporter_is_rate_limited_and_holds_one_open_report_per_subject` | nest (linux): passed |
@@ -101,4 +107,6 @@ Stamped 2026-10-01 at e5a7e5d758.
 | 19 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_forwarded_report_names_no_reporter_and_its_outcome_comes_back` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_withdrawing_a_report_deletes_its_note_and_excerpt_on_both_nests` | nest (linux): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_deleting_the_reporters_account_withdraws_open_reports_and_keeps_resolved_ones` | nest (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_reported_account_is_hidden_and_shown_again_on_every_own_device` — requires `content-policy-show-again-button` (not built: windows, android-kids, ios-kids) | web (linux): failed, windows (windows): skipped, macos (macos): passed, tui (linux): passed, tui (windows): passed |
+| 23 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_hidden_post_is_shown_again_from_its_placeholder` — requires `content-policy-show-again-button` (not built: windows, android-kids, ios-kids) | web (linux): passed, windows (windows): skipped, macos (macos): passed, tui (linux): passed, tui (windows): passed |
 <!-- features-render:end -->

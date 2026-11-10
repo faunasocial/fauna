@@ -107,10 +107,10 @@ PLAN = {
         capability_withhold_test_hook cert_nudge_test_hook eviction_test_hook invite_request_prune_test_hook
         acme_issuance_error_test_hook atproto_identity_test_hook rename_cert_test_hook domain_expiry_test_hook
         release_test_hook spam_baseline_cadence_test_hook recovery_landing_test_hook web_paywall_test_hook
-        web_render_fault_test_hook version_prune_test_hook pending_actions_test_hook web_blank_site_test_hook
+        web_render_fault_test_hook web_render_park_test_hook version_prune_test_hook pending_actions_test_hook web_blank_site_test_hook
         outbound_clock_test_hook keypackage_age_test_hook share_link_age_test_hook mta_sts_advance_test_hook
         mail_domain_gc_test_hook mail_health_state_test_hook mass_mailing_test_hook membership_lapse_test_hook
-        blocklist_self_check_test_hook spam_history_gc_test_hook""",
+        blocklist_self_check_test_hook spam_history_gc_test_hook room_seat_key_test_hook""",
     "nest": "<lib.rs> <main.rs> bridge_legs bridge_schema",
 }
 

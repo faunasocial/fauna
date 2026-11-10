@@ -2487,6 +2487,65 @@ async fn materialize_supersedes_a_never_used_targets_mailbox_scaffolding() {
     );
 }
 
+/// **The test seam's tear leaves the real half-state, and a retry completes
+/// it** — the api tier's way into the interrupted flip
+/// (`fauna_nest::materialize_tear_test_hook`). For each named point the REAL
+/// verb is stopped there: the call fails carrying the seam's text, the
+/// in-flight marker stands, nothing is served, and the next call — an
+/// ordinary retry — makes the corpus live and retires the marker.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+async fn the_test_seam_tears_a_flip_at_each_named_point_and_a_retry_completes_it() {
+    use fauna_nest::materialize_tear_test_hook::{TORN_DETAIL, TearPoint};
+    for point in [
+        TearPoint::BetweenContainersAndHalves,
+        TearPoint::AfterJournalAdopt,
+    ] {
+        let (source, dest, _d_url) = delivered_filed().await;
+        dest.materialize_tear.arm(Some(point));
+        let err = materialize(&dest, "__mail")
+            .await
+            .unwrap_err_or_panic("an armed tear stops the flip");
+        assert_eq!(err.code, "fauna.backup.custody_unreadable", "{point:?}");
+        assert!(
+            format!("{err:?}").contains(TORN_DETAIL),
+            "{point:?}: the refusal names the seam: {err:?}"
+        );
+        assert!(
+            dest.db
+                .materialize_in_flight_get(&OWNER, KIND)
+                .await
+                .expect("read the marker")
+                .is_some(),
+            "{point:?}: the marker the interrupted run left stands"
+        );
+        assert!(
+            serve_mailbox(&dest, &OWNER, "INBOX").await.is_empty(),
+            "{point:?}: the torn flip serves nothing"
+        );
+
+        let reply = materialize(&dest, "__mail")
+            .await
+            .expect("the retry completes the torn flip");
+        assert_eq!(reply.placements, Some(FILED.len() as u64), "{point:?}");
+        for mailbox in ["INBOX", "Archive"] {
+            assert_eq!(
+                serve_mailbox(&dest, &OWNER, mailbox).await,
+                serve_mailbox(&source, &OWNER, mailbox).await,
+                "{point:?}"
+            );
+        }
+        assert!(
+            dest.db
+                .materialize_in_flight_get(&OWNER, KIND)
+                .await
+                .expect("read the marker")
+                .is_none(),
+            "{point:?}: the retry retired the marker"
+        );
+    }
+}
+
 /// **A crash between the journal adopt and the commit resumes on retry.**
 ///
 /// Staged as the real half-state ([`uncommit`]): both families are on disk and
@@ -5389,7 +5448,7 @@ async fn assert_every_served_row_verifies(nest: &Arc<AppState>, folder: &str, ex
         account: Some(OWNER),
         ..Default::default()
     });
-    reader.install_roster(writer_roster(&[]));
+    reader.install_roster(writer_roster(&[], &[]));
     let pseudo = hex::encode(fauna_core::label_custody::reseed_pseudo_device_id(&OWNER));
     for row in &page.changes {
         assert!(

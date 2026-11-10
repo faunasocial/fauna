@@ -508,7 +508,7 @@ this seam has no way to fire the second one until the seam says so.
 
 **The self-description is push-fed — `nest_info`.** `fauna.nest.info_changed` (a hint-less, payload-free push the nest sends every connected member, never a bridge) stales the `fauna.nest.info` read and nothing else; the reconnect sweep and `ResyncRequired` stale it too, since a dropped push may have staled it. Today its one producer is an accepted write of the admin's published rules ([`../behavior/nest-rules.md`](../behavior/nest-rules.md) § Acceptance at joining, and a change of rules owns when it fires and what the device does with the newer sequence).
 
-**One surface no *single* kind stales — `devices`.** The Devices & Folders reads (the device, folder and conflict lists, and each open folder row's per-set rosters) are stale after a reconnect and after `ResyncRequired`, and never from one kind alone: `fauna.sync.changed` stales one set's row, which the app matches by the payload's set at its own call site (the per-payload fetch above), and a gap may have swallowed that push. The sweep is also what retires a row read's nest-down error once the nest answers ([`../ui/folders.md`](../ui/folders.md) § Errors & edge cases). *Status (2026-10-31):* linux serves it with a `DevicesMachine` refresh, whose list rebuild re-fires every open row's reads; windows serves it with the machine's `Resync()` (`DevicesMachineHost`, so the Devices and Folders pages are both covered), raised from `FfiStaleSurfaces.devices` on `ResyncRequired` and from the reconnect pump's `StaleSurfacesOnReconnect()` — not from its blanket `Reconnected` event, which every `Notification` push also fires — and each of its four row reads holds its own error-bar slot; tui serves it (2026-10-31) by re-reading the open sub-page's lists and the expanded row's reads (`devices_stale_ops`); web serves it (2026-10-31) with the machine's `resync()` and a re-read of the expanded row, from `reconnectTick` and from a push whose `StaleSurfaces.devices` is set; android (2026-10-31) the same, from `reconnectTick` and `devicesStaleTick`; apple (macos+ios, 2026-10-31) the same, with `DevicesMachineVM.devicesStale()` from `.faunaDevicesStale`, which `FaunaClient` posts on a reconnect and on a push whose `FfiStaleSurfaces.devices` is set.
+**The Devices & Folders surface — `devices`.** The Devices & Folders reads (the device, folder and conflict lists, and each open folder row's per-set rosters) are stale after a reconnect, after `ResyncRequired`, and after `fauna.sync.devices.changed` — the hint-less roster push the nest sends the actor's own sockets after a committed rename, removal or participation write ([`../behavior/devices.md`](../behavior/devices.md) § Listing Devices → *An open roster follows a sibling's write* owns when it fires; added 2026-11-07) — and from no other kind: `fauna.sync.changed` stales one set's row, which the app matches by the payload's set at its own call site (the per-payload fetch above), and a gap may have swallowed that push. The sweep is also what retires a row read's nest-down error once the nest answers ([`../ui/folders.md`](../ui/folders.md) § Errors & edge cases). *Status (2026-10-31):* linux serves it with a `DevicesMachine` refresh, whose list rebuild re-fires every open row's reads; windows serves it with the machine's `Resync()` (`DevicesMachineHost`, so the Devices and Folders pages are both covered), raised from `FfiStaleSurfaces.devices` on `ResyncRequired` and from the reconnect pump's `StaleSurfacesOnReconnect()` — not from its blanket `Reconnected` event, which every `Notification` push also fires — and each of its four row reads holds its own error-bar slot; tui serves it (2026-10-31) by re-reading the open sub-page's lists and the expanded row's reads (`devices_stale_ops`); web serves it (2026-10-31) with the machine's `resync()` and a re-read of the expanded row, from `reconnectTick` and from a push whose `StaleSurfaces.devices` is set; android (2026-10-31) the same, from `reconnectTick` and `devicesStaleTick`; apple (macos+ios, 2026-10-31) the same, with `DevicesMachineVM.devicesStale()` from `.faunaDevicesStale`, which `FaunaClient` posts on a reconnect and on a push whose `FfiStaleSurfaces.devices` is set.
 
 > **Implementation status today (2026-08-22): tui and linux derive from the seam;
 > the other five apps still hand-derive their own.** This section previously
@@ -1094,7 +1094,7 @@ this seam has no way to fire the second one until the seam says so.
 
 The typed push payloads (defined in `libs/fauna-protocol/src/push_events.rs`;
 the enum + `PushEvent::kind()` are the source of truth — regenerate this table
-from them when editing; 36 kinds as of 2026-10-01):
+from them when editing; 39 kinds as of 2026-11-07):
 
 | Wire kind | Payload type |
 |---|---|
@@ -1112,6 +1112,7 @@ from them when editing; 36 kinds as of 2026-10-01):
 | `fauna.mail.received` | `MailReceivedPayload` |
 | `fauna.mail.flags_changed` | `MailFlagsChangedPayload` (an `INBOX` flag write — a wake for `fauna.email.inbox.flag_changes`, `mail-app-surface.md` § Read state) |
 | `fauna.sync.changed` | `SyncChangedPayload { folder }` (same-nest folder download nudge — `file-sync.md` § Remote-change nudge) |
+| `fauna.sync.devices.changed` | `DevicesChangedPayload` (hint-less roster nudge, own-device fanout — `../behavior/devices.md` § Listing Devices) |
 | `fauna.bridges.push.mailbox_state` | `bridge_routing::BridgeMailboxStatePush` (IDLE/NOTIFY — `imap-server.md`) |
 | `fauna.bridges.config_changed` | `bridge_routing::BridgeConfigChangedPush` (`mail-bridge-lifecycle.md` § Running) |
 | `fauna.bridges.atproto.sessions_changed` | `atproto_pds::BridgeAtprotoSessionsChangedPush` (`atproto-pds-full.md` § WS-RPC kind surface) |
@@ -1122,6 +1123,7 @@ from them when editing; 36 kinds as of 2026-10-01):
 | `fauna.bridges.atproto.service_auth_requested` | `atproto_pds::BridgeAtprotoServiceAuthRequestedPush` — the nest→bridge half of the oracle's `atproto.service_auth` class: the door decided, and the PDS bridge, the repo signing key's only holder, mints; it answers over the BRIDGE-class kind `fauna.bridges.atproto.deliver_service_auth` (`key-material-hierarchy.md` § The oracle → *The bridge-held custodian*) |
 | `fauna.bridges.outbound_ready` | `bridge_routing::BridgeOutboundReadyPush` (`smtp-server.md` § Outbound delivery) |
 | `fauna.bridges.rescore_ready` | `bridge_routing::BridgeRescoreReadyPush` (`content-scoring.md` § Timing) |
+| `fauna.bridges.account_revoked` | `bridge_routing::BridgeAccountRevokedPush` (bridge-held session teardown — `transport-connection.md` § Revocation teardown) |
 | `fauna.bridges.spam_baseline_publish` | `bridge_routing::BridgeSpamBaselinePublishPush` (`mail-spam.md` § Encrypted-mode interaction) |
 | `fauna.bridges.push.spam_model_updated` | `bridge_routing::BridgeSpamModelUpdatedPush` (`mail-spam.md`) |
 | `fauna.bridges.push.spam_model_reset` | `bridge_routing::BridgeSpamModelResetPush` (`mail-spam.md`) |
@@ -1129,11 +1131,14 @@ from them when editing; 36 kinds as of 2026-10-01):
 | `fauna.bridges.push.import_progress` | `bridge_routing::BridgeImportProgressPush` (`mailbox-migration.md` § Progress lives nest-side) |
 | `fauna.bridges.push.import_error` | `bridge_routing::BridgeImportErrorPush` (`mailbox-migration.md`) |
 | `fauna.bridges.push.import_complete` | `bridge_routing::BridgeImportCompletePush` (`mailbox-migration.md`) |
+| `fauna.bridges.push.import_session_changed` | `bridge_routing::BridgeImportSessionChangedPush` (cancel/discard nudge — `mailbox-migration.md` § A failed import is a record the wizard shows until the user moves on) |
 | `fauna.bridges.push.export_progress` | `bridge_routing::BridgeExportProgressPush` (`mail-export.md` § Session row model) |
 | `fauna.bridges.push.export_error` | `bridge_routing::BridgeExportErrorPush` (`mail-export.md`) |
 | `fauna.bridges.push.export_complete` | `bridge_routing::BridgeExportCompletePush` (`mail-export.md`) |
+| `fauna.bridges.push.export_session_changed` | `bridge_routing::BridgeExportSessionChangedPush` (cancel/discard nudge — `mail-export.md` § A failed export is a record the wizard shows until the user moves on) |
 | `fauna.push.notification` | `PushNotificationPayload { title, body, url }` (a `ws-device` push row's delivery over the device's own connection — `apps/common.md` § Push Notifications → *Transports*) |
 | `fauna.sync.chunk.wanted` | `SyncChunkWantedPayload { request_id, folder, store_key }` (the relay's ask to the one connection that announced the folder; answered on the bulk rail — `relay-serving.md` § Relay serving) |
+| `fauna.nest.info_changed` | `NestInfoChangedPayload` (hint-less, every connected member — `../behavior/nest-rules.md` § Acceptance at joining, and a change of rules) |
 
 Application code on the nest side calls `state.ws.notify_push(actor,
 PushEvent::...)`; the WS layer encodes, allocates `seq`, and emits.

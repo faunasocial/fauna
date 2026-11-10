@@ -289,7 +289,7 @@ class ApiActor:
 
     def subscription_create_tier(
         self, name: str, *, rank: int = 1, auto_approve: bool = False,
-        price_hint: str | None = None,
+        price_hint: str | None = None, payment_url: str | None = None,
     ) -> dict:
         """Create a subscription tier owned by the calling actor
         (`fauna.subscriptions.tiers.create`, author-bearer), carrying the
@@ -305,12 +305,14 @@ class ApiActor:
         (`monetization.md` § Pillar 1 → the headless-author corollary), or
         keep the key themselves via :meth:`subscription_create_tier_with_key`."""
         reply, _period_key = self.subscription_create_tier_with_key(
-            name, rank=rank, auto_approve=auto_approve, price_hint=price_hint)
+            name, rank=rank, auto_approve=auto_approve, price_hint=price_hint,
+            payment_url=payment_url)
         return reply
 
     def subscription_create_tier_with_key(
         self, name: str, *, rank: int = 1, auto_approve: bool = False,
         price_hint: str | None = None, unlocks_post: str | None = None,
+        payment_url: str | None = None,
     ) -> tuple[dict, bytes]:
         """Create a tier as :meth:`subscription_create_tier` does, but KEEP the
         fresh period key and return it beside the reply — the custody an
@@ -330,6 +332,8 @@ class ApiActor:
             payload["price_hint"] = price_hint
         if unlocks_post is not None:
             payload["unlocks_post"] = unlocks_post
+        if payment_url is not None:
+            payload["payment_url"] = payment_url
         return self._ws_call("fauna.subscriptions.tiers.create", payload), period_key
 
     def subscription_grant_pending(

@@ -6,13 +6,12 @@ namespace FaunaApp.Core.Media;
 /// One <c>media-folder-filter</c> option as the page paints it.
 /// </summary>
 /// <param name="Value">What the machine is handed back, verbatim and never parsed —
-/// the item's <c>Tag</c> and its UIA AutomationId, which the FlaUI bridge's
-/// <c>select</c> matches first, so <c>driver.select</c> names the value on every
-/// app.</param>
-/// <param name="Label">The painted text — the item's <c>Content</c>.</param>
-/// <param name="AutomationName">The item's UIA Name: what the bridge's <c>options</c>
-/// attribute lists and what <c>get_text</c> reads back for the selected item.</param>
-internal readonly record struct MediaFilterEntry(string Value, string Label, string AutomationName);
+/// the item's key (its <c>Tag</c> and UIA AutomationId), which the FlaUI bridge's
+/// <c>select</c> matches first and its <c>get_text</c> reads back, so
+/// <c>driver.select</c> names the value on every app.</param>
+/// <param name="Label">The painted text — the item's <c>Content</c> and UIA Name,
+/// what the bridge's <c>options</c> attribute lists.</param>
+internal readonly record struct MediaFilterEntry(string Value, string Label);
 
 /// <summary>
 /// The <c>media-folder-filter</c> option list, built from the shared-Rust
@@ -25,12 +24,10 @@ internal readonly record struct MediaFilterEntry(string Value, string Label, str
 /// <c>MediaPageSnapshot.followed</c> for the followed scopes, which ride after the
 /// sets — so a same-named own / shared pair is two options, never one.
 ///
-/// <para>Each item follows the windows picker shape <c>FeedPage.FactorOption</c> and
-/// <c>BackupsPage.FolderOption</c> already use: its UIA Name is the label it paints
-/// (what a screen reader reads and the cross-app <c>option_texts</c> contract lists)
-/// and its AutomationId the value. The one exception is the all-media sentinel,
-/// whose Name stays its value: <c>get_text</c> reads the selected item's Name, and
-/// every app reads the default view back as <see cref="AllValue"/>.</para>
+/// <para>The page builds each item with <c>FaunaApp.Helpers.PickerOption</c>, the one
+/// windows picker shape: Name = the label (what a screen reader reads and the
+/// cross-app <c>option_texts</c> contract lists), key = the value — the all-media
+/// sentinel included, which reads back as <see cref="AllValue"/> through its key.</para>
 ///
 /// <para>UI-free and in <c>FaunaApp.Core</c> so <c>FaunaApp.Tests</c> can pin it
 /// without a WinUI window (the <see cref="UploadPathGuard"/> reasoning).</para>
@@ -51,10 +48,10 @@ internal static class MediaFilterOptions
     {
         var entries = new List<MediaFilterEntry>(1 + folderOptions.Count + followed.Count)
         {
-            new(AllValue, allLabel, AllValue),
+            new(AllValue, allLabel),
         };
-        entries.AddRange(folderOptions.Select(o => new MediaFilterEntry(o.value, o.label, o.label)));
-        entries.AddRange(followed.Select(f => new MediaFilterEntry(f.value, f.label, f.label)));
+        entries.AddRange(folderOptions.Select(o => new MediaFilterEntry(o.value, o.label)));
+        entries.AddRange(followed.Select(f => new MediaFilterEntry(f.value, f.label)));
         return entries;
     }
 }

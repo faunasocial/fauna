@@ -158,7 +158,14 @@ pub enum DataMessage {
     /// The `LaunchMachine` settled on a phase. Carries the snapshot rather than
     /// a bare tick because the routing decision consumes `phase` + `last_error`
     /// atomically — re-reading the machine could observe a later transition.
-    LaunchPhase(fauna_launch_machine::LaunchSnapshot),
+    /// Carries the machine that produced it too: the handler renders it only
+    /// while that machine is still [`App::launch_machine`]
+    /// (`crate::launch::deliver`; `onboarding.md` § App-launch routing → *A
+    /// verdict renders only while its own launch is still the current one*).
+    LaunchPhase {
+        origin: crate::launch::LaunchOrigin,
+        snapshot: fauna_launch_machine::LaunchSnapshot,
+    },
     /// The `LaunchMachine` changed state **on its own** — the tick its
     /// observer relays (`launch::SnapshotRelay`). Payload-free, unlike
     /// [`Self::LaunchPhase`]: nothing settled is being handed over, so the
@@ -263,8 +270,8 @@ pub enum DataMessage {
     /// rendered through tui's `LocalizedText` resolver.
     /// Surfaced onto the shared `warning-message` element (`app.injected_warning`)
     /// so the admin learns total-box-loss recovery isn't protected rather than
-    /// discovering it only at box loss — tui's idiom of linux's
-    /// `ActionResult::Failed` toast. Carried as a message because the leg is a
+    /// discovering it only at box loss — the same surface linux paints through
+    /// its `UiMessage::RecoveryCustodyWarning`. Carried as a message because the leg is a
     /// fire-and-forget bg task (`crate::recovery::spawn_custody_leg`).
     RecoveryCustodyWarning(String),
     /// The `FeedManager` mutated — re-read its snapshot and redraw. Like
@@ -695,6 +702,22 @@ pub fn apply_page_outcome(app: &mut App, outcome: PageOutcome) {
 /// both in one pass — so either flag means exactly one refresh here.
 fn contacts_stale(r: &StaleSurfaces) -> bool {
     r.knocks || r.contacts
+}
+
+/// Resolve the shared knock-toast text through tui's catalog: the catalog key
+/// it resolved from (`None` for a verbatim text) and the painted sentence —
+/// the pair [`App::raise_knock_toast`] fires and logs.
+fn knock_toast_body(
+    text: fauna_client_notifications::NotificationText,
+) -> (Option<String>, String) {
+    use fauna_client_notifications::NotificationText;
+    match text {
+        NotificationText::Localized(text) => {
+            let body = text.resolve(fauna_i18n::strings::lookup);
+            (Some(text.key), body)
+        }
+        NotificationText::Verbatim(text) => (None, text),
+    }
 }
 
 /// What a gesture implies **beyond** its synchronous local half — the return of
@@ -1250,6 +1273,10 @@ pub struct App {
     /// `fauna_e2e_agent::CONNECTION_REPORTS_KEY`. Fed only by the
     /// `ConnectionState` message, i.e. by exactly what the indicator paints from.
     pub connection_reports: fauna_e2e_agent::ConnectionReports,
+    /// Every knock push the toast arm received and every knock toast it
+    /// raised — `fauna_e2e_agent::KNOCK_NOTICES_KEY`. Fed only by
+    /// [`App::raise_knock_toast`], at the firing site.
+    pub knock_notices: fauna_e2e_agent::KnockNotices,
     /// Every error surface a painted frame has shown this process — the
     /// "no error anywhere" observable behind `fauna_e2e_agent::PAINTED_ERRORS_KEY`.
     /// Fed by the render loop from each frame's registry, which only exists
@@ -1396,6 +1423,14 @@ pub struct App {
     /// pass (`session::spawn_ledger_aftermath`) re-reads both surfaces the
     /// moment it lands. Drops with the rest of the authenticated state.
     pub ledger_store: Option<Arc<dyn fauna_client_config::SuccessionLedgerStore>>,
+    /// The device's offline outbox as the shared `OfflineQueued` composer's
+    /// queue (`account-offline-mutation.md` § The offline-mutation contract):
+    /// built at the `AccountStoreReady` edge over the handle, fed this app's
+    /// connection word on every `ConnectionState` (the word the offline gate
+    /// reads, so a control the gate keeps live is one whose gesture queues),
+    /// and lent to the managers that compose queued kinds — the feed's
+    /// interactions first. Drops with the rest of the authenticated state.
+    pub account_outbox: Option<Arc<fauna_sync_engine::offline_intent_queue::AccountOutbox>>,
     /// The successor still owes itself a recovery kit — set by the succession
     /// fold the instant the ceremony lands, consumed by the *successor's*
     /// post-auth hook, which mints and displays it as the ceremony's closing
@@ -1636,6 +1671,11 @@ pub struct App {
     /// The shared launch machine, alive for the process: `Retry` re-runs its
     /// silent challenge, and once `Online` it is the session's bearer source.
     pub launch_machine: Option<std::sync::Arc<fauna_launch_machine::LaunchMachine>>,
+    /// Delivered launch verdicts rendered / dropped as superseded — the two
+    /// counters `fauna_e2e_agent::LAUNCH_VERDICTS_KEY` publishes, bumped only by
+    /// [`crate::launch::deliver`].
+    pub launch_verdicts_routed: u64,
+    pub launch_verdicts_superseded: u64,
     /// The long-term credential store, resolved once at construction and owned
     /// for the process. Everything that reads or writes an account goes through
     /// this handle rather than reconstructing one from the environment, so the
@@ -1689,6 +1729,23 @@ pub struct App {
     /// *The nest hint*). Never persisted; an add-account wizard never sees it.
     pub pending_nest_hint: Option<String>,
     pub should_quit: bool,
+    /// Every load-more [`Self::page_on_arrival`] fired, in order — the unit
+    /// tests' view of a spawn they cannot otherwise observe (the gesture's
+    /// work runs on a task the test runtime drops). Never read by production.
+    #[cfg(test)]
+    pub paging_fired: Vec<PagingEdge>,
+}
+
+/// Which bottom-edge load-more gestures the focus ring sits on: the feed's
+/// last card ([`crate::feed::at_last_card`]) and the profile Posts tab's
+/// ([`crate::profile::at_last_post`]). Sampled before a focus move by
+/// [`App::paging_edge`] and handed to [`App::page_on_arrival`] after it, so the
+/// load-more fires on the ring's ARRIVAL at the edge — once — and not on every
+/// move that leaves it resting there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PagingEdge {
+    pub feed: bool,
+    pub profile_posts: bool,
 }
 
 /// The async work a field write implies, across pages — the single type
@@ -1746,6 +1803,7 @@ impl App {
             session: None,
             connection: ConnectionState::Disconnected,
             connection_reports: fauna_e2e_agent::ConnectionReports::default(),
+            knock_notices: fauna_e2e_agent::KnockNotices::default(),
             painted_errors: fauna_e2e_agent::PaintedErrorTally::default(),
             errors: PageErrors::new(),
             was_on_settings_account: false,
@@ -1765,6 +1823,7 @@ impl App {
             member_reviews: Vec::new(),
             filter_marks: Vec::new(),
             ledger_store: None,
+            account_outbox: None,
             refused_agent_command: None,
             barrier_probe: None,
             barrier_ack_probe: None,
@@ -1798,6 +1857,8 @@ impl App {
             unlock: crate::unlock::UnlockState::default(),
             locked: crate::locked::LockedState::default(),
             launch_machine: None,
+            launch_verdicts_routed: 0,
+            launch_verdicts_superseded: 0,
             credentials,
             tx: tx.clone(),
             stops: fauna_client_account_runtime::StopQueue::default(),
@@ -1808,6 +1869,8 @@ impl App {
             pending_route: None,
             pending_nest_hint: None,
             should_quit: false,
+            #[cfg(test)]
+            paging_fired: Vec::new(),
         }
     }
 
@@ -2140,7 +2203,10 @@ impl App {
                 crate::launch::LaunchSurface::IdentityStolenEntry { .. } => {
                     crate::locked::entry_elements(self)
                 }
-                _ => self.launch.elements(),
+                _ => {
+                    let identity = crate::session::launch_identity_line(self);
+                    self.launch.elements_with_identity(identity.as_deref())
+                }
             };
         }
         // The ward's screen-time lock REPLACES the page pane while it holds
@@ -3014,6 +3080,13 @@ impl App {
     /// persisting a silent-challenge result would land its slots behind the
     /// sweep and resurrect the identity the reset just destroyed.
     pub fn reset(&mut self) {
+        // The decision first, durably, before anything awaits: the sign-out
+        // record names every account this erase reaches and owes the wipe, so
+        // a process killed anywhere after this line is finished by the next
+        // launch (`account-scoping.md` § Erasure follows scope → *The sign-out
+        // record is on all 7 apps*, decisions 1 and 7). The gestures that run
+        // this ask the serving question before calling it.
+        let recorded = crate::account_scope::record_sign_out(self);
         // Tear down every per-identity writer + manager first (this drops the WS
         // supervisor and the launch machine — the only things that persist to the
         // credential store), THEN wipe the namespace: a namespace delete is not
@@ -3067,33 +3140,32 @@ impl App {
         // must never meet a store still open, and the wizard must not come up
         // (and persist a new identity) before the sweep below has passed. The
         // UI loop keeps running meanwhile, refusing input (`teardown_pending`).
-        self.after_stops(Self::erase_after_sign_out);
+        self.after_stops(move |app| app.erase_after_sign_out(recorded));
     }
 
     /// The half of [`Self::reset`] that must follow the account runtime's stop
     /// — every line of it: the erase, the residue report, the wizard.
-    fn erase_after_sign_out(&mut self) {
-        // Erase every known account's scoped local state (account-scoping.md
-        // § Serialized switching, "Erasure follows scope") BEFORE the
-        // credential namespace is wiped below — this reads the registry to
-        // know which actors existed; reading it after would find an
-        // already-empty registry and erase nothing.
-        let survivors = crate::account_scope::erase_all_known_accounts(self);
-        // …and the credential half, for the same reason one namespace lower.
-        // The namespace wipe erases `fauna-tui` and CANNOT reach the shared
-        // `fauna-account-store` namespace where this machine's writer key and
-        // each account's principal bundle live — a credential key is a
-        // (namespace, key) pair and the backend binds the namespace into the
-        // physical row — so the registry's per-actor sweep runs first, then the
-        // wipe, then a read-back of what both left: one shared sequence
-        // (`fauna_credential_store::erase_all_credentials`,
-        // `long-term-store.md` § Cleanup contract). After
-        // `erase_all_known_accounts`, which enumerates through the same registry
-        // index the wipe destroys.
-        let credentials = fauna_credential_store::erase_all_credentials(
-            &crate::session::registry(self),
-            &self.credentials,
-        );
+    fn erase_after_sign_out(&mut self, recorded: fauna_client_accounts::SignOutRecord) {
+        // The one routine every caller runs (`account_scope::finish`, the
+        // shared `fauna_client_accounts::finish_sign_out_with`), over the
+        // sign-out record this reset wrote before its first await: the serving
+        // question, then the wipe — `fauna-tui`'s own credential namespace,
+        // `before_wipe` naming every account the registry lists first — then
+        // each recorded account's erase (its scopes under the three erase
+        // bases and its slots in the shared `fauna-account-store` namespace),
+        // the residual sweep, and the handover of anything left to the residue
+        // record before the record is cleared (`account-scoping.md` § Erasure
+        // follows scope → *The sign-out record is on all 7 apps*, decisions 2
+        // to 6). The sync agent was dismissed by the stop this follows.
+        //
+        // Best-effort BY DESIGN — a sign-out completes even when a scope or a
+        // credential will not go, and that must not be reversed. What it must
+        // not do is look identical to a sign-out that removed everything, so
+        // the residue is reported both ways: paths and key names to the log,
+        // the fact to the user, as `identity_choice`'s `sign-out-residue` view
+        // — painted here, after `drop_authenticated_state` above cleared the
+        // injected lines, so nothing earlier in the teardown can wipe it.
+        let outcome = crate::account_scope::finish(self, false, Some(recorded));
         // The window serves no account now: put down the process holder's
         // instance lock and its shared-root serving lock, AFTER the erase (the
         // erase guard's probe already put our own down around itself). A
@@ -3102,24 +3174,9 @@ impl App {
         // § Concurrent instances → *An erase refuses while a sibling serves
         // the account*).
         fauna_client_accounts::release_process_session_instance();
-        // The erase is best-effort BY DESIGN — a sign-out completes even when a
-        // scope or a credential will not go (`account-scoping.md` § Erasure
-        // follows scope), and that must not be reversed. What it must not do is
-        // look identical to a sign-out that removed everything, so the residue
-        // is reported both ways: paths and key names to the log, the fact to
-        // the user.
-        //
-        // Built HERE, after BOTH halves, and nowhere earlier. This line used to
-        // be written straight after the filesystem erase, so it answered for
-        // half a sign-out: a keyring that refused the wipe was a `warn!` below
-        // it, painted over by a clean "Signed out" (2026-09-13). And it must
-        // follow `drop_authenticated_state` above, which is what clears the three
-        // injected lines, so nothing earlier in the teardown can wipe it. It is
-        // RECORDED (install-scoped, so it outlives this process) and painted as
-        // `identity_choice`'s `sign-out-residue` view — the surface this reset
-        // lands on (`account_scope::record_residue`).
-        self.sign_out_residue = crate::account_scope::record_residue(&survivors, &credentials);
         self.launch = crate::launch::LaunchSurface::Wizard;
+        self.unlock = crate::unlock::UnlockState::default();
+        self.sign_out_residue = outcome.surface(fauna_i18n::strings::lookup);
         // On the sealed headless arm the wipe above also RELOCKED the store
         // (the file is gone; the next onboarding re-chooses its passphrase),
         // so the create surface must come back before the wizard can persist
@@ -3127,7 +3184,6 @@ impl App {
         // — `route_locked_store` only reroutes a locked sealed backend, and a
         // fresh-reset launch has nothing for `launch::start` to challenge, so
         // this deliberately does NOT re-run launch routing on those arms.
-        self.unlock = crate::unlock::UnlockState::default();
         if self.credentials.needs_unlock() {
             self.launch = crate::launch::LaunchSurface::CreatePassphrase;
         }
@@ -3159,9 +3215,9 @@ impl App {
     /// (`atproto-custody:<did>`) and nothing re-checks a departed DID, so one
     /// left standing accuses an account the user no longer has, on every page,
     /// un-dismissably — **and** the call bumps `CriticalAlerts::teardown_epoch`,
-    /// the only stop signal `critical_alerts::spawn_session_start_sweep`'s
+    /// the only stop signal `critical_alerts::spawn_post_auth_sweep`'s
     /// 6-hourly loop watches.
-    fn begin_identity_teardown(&mut self) {
+    pub(crate) fn begin_identity_teardown(&mut self) {
         self.session_generation = self.session_generation.saturating_add(1);
         self.alerts.clear_all();
         // Whatever ceremony was in flight belongs to the departing session:
@@ -3408,6 +3464,7 @@ impl App {
         // per-nest autoincrement, so the collision is not even hypothetical.
         self.filter_marks.clear();
         self.ledger_store = None;
+        self.account_outbox = None;
         self.errors.clear();
         self.injected_error = None;
         self.injected_warning = None;
@@ -3476,7 +3533,22 @@ impl App {
             UiMessage::BarrierProbe(token) => self.barrier_probe = Some(token),
             UiMessage::Data(DataMessage::ConnectionState(state)) => {
                 self.connection_reports.observe(state.as_wire_word());
+                let was_online =
+                    fauna_protocol::offline_class::is_online(self.connection_state_word());
                 self.connection = state;
+                if let Some(outbox) = self.account_outbox.as_ref() {
+                    outbox.set_connection_state(self.connection_state_word());
+                }
+                // Back online: queued MLS sends and identity-bound intents
+                // drain (`devices.md` § Offline compose → *Drain*, on
+                // reconnect; `account-offline-mutation.md` § The
+                // offline-mutation contract → *Identity-bound intents
+                // compose at drain*).
+                if !was_online
+                    && fauna_protocol::offline_class::is_online(self.connection_state_word())
+                {
+                    crate::session::spawn_outbox_drain(self);
+                }
             }
             // Cache the viewer's own thresholds for content-policy render
             // enforcement. Fetched at login so it is live before the first feed
@@ -3604,6 +3676,9 @@ impl App {
                     {
                         self.spawn_page_op(PageOp::Settings(op));
                     }
+                }
+                if let PushEvent::Knock(ref p) = event {
+                    self.raise_knock_toast(p);
                 }
                 self.apply_resync(event.invalidates());
             }
@@ -3781,6 +3856,14 @@ impl App {
                     // (`fauna_client_recovery::ledger_aftermath`).
                     self.ledger_store = Some(Arc::new(handle.clone()));
                     crate::session::spawn_ledger_aftermath(self);
+                    // The offline outbox door the shared `OfflineQueued`
+                    // composer queues through while there is no nest.
+                    self.account_outbox =
+                        Some(fauna_sync_engine::offline_intent_queue::AccountOutbox::new(
+                            handle.clone(),
+                            self.connection_state_word(),
+                        ));
+                    crate::session::lend_offline_outbox(self);
                     // The deployment-seed custody leg (`box-recovery.md`
                     // § The plane-era recovery floor, (c) The writes): this
                     // edge normally lands second after the post-auth hook,
@@ -3960,11 +4043,12 @@ impl App {
             // `sync-agent-status` line. It is shell chrome, not a focusable
             // element, so the focus ring is untouched.
             UiMessage::Data(DataMessage::SyncAgentStatusChanged) => {}
-            UiMessage::Data(DataMessage::LaunchPhase(snapshot)) => {
+            UiMessage::Data(DataMessage::LaunchPhase { origin, snapshot }) => {
                 let tx = self.tx.clone();
-                crate::launch::route(self, &tx, snapshot);
-                // The new surface has a different element count.
-                self.focus = 0;
+                if crate::launch::deliver(self, &tx, origin, snapshot) {
+                    // The new surface has a different element count.
+                    self.focus = 0;
+                }
             }
             UiMessage::Data(DataMessage::LaunchMachineChanged) => {
                 let tx = self.tx.clone();
@@ -3989,12 +4073,21 @@ impl App {
                 {
                     conv.set_self_address(addr);
                 }
+                // The Events page's organizer / responding-attendee address
+                // rides the same refresh, so a bare-handle session's invites
+                // and RSVPs mail their iMIP REQUEST / REPLY once it resolves.
+                let events_addr = crate::session::session_self_address(self);
+                crate::events::set_self_address(&mut self.events, events_addr);
                 // The profile SELF header's display handle rides the same
                 // refresh: `<handle>@<current primary>`, so a primary rename the
                 // nest's answer carries moves it (`mail-primary-domain-rename.md`
                 // § Display-handle interaction).
                 let display = crate::session::session_display_handle(self);
                 crate::profile::set_self_address(&mut self.profile, display);
+                // The Settings identity cell (`settings.md` § Layout & flow
+                // item 1) re-reads the cache the verify reply just merged.
+                let identity = crate::session::session_identity_cell(self);
+                self.settings.set_identity_cell(identity);
             }
             UiMessage::Data(DataMessage::NestIdentityChanged) => {
                 // `security.md` § Post-auth surfacing: route the verdict to the
@@ -4221,8 +4314,7 @@ impl App {
         // fires on the ring's arrival at the last card — the EDGE — and not once
         // per keystroke for as long as it rests there. (Same discipline as the
         // wizard's page-entry reads, which fire on the step edge, not the tick.)
-        let was_at_last_card = crate::feed::at_last_card(self);
-        let was_at_last_post = crate::profile::at_last_post(self);
+        let paging_before = self.paging_edge();
         match key.code {
             // Abandon an in-flight append-mode "Add account" and return to the live
             // session — the guaranteed in-app escape (`long-term-store.md`
@@ -4359,26 +4451,56 @@ impl App {
             _ => {}
         }
 
-        // Reaching the bottom of the feed asks for the next page — the TUI's
-        // equivalent of a GUI app's scroll-edge trigger. `has_more` gates it,
-        // and the edge check above keeps it to one request per arrival.
-        if !was_at_last_card && crate::feed::at_last_card(self) {
-            self.spawn_gesture(crate::element::Gesture::Feed(crate::feed::Action::LoadMore));
-        }
-        // …and the bottom of the profile's Posts tab, the same gesture on the
-        // page's own author window (`profile.md` § The Posts tab → *Order and
-        // paging*).
-        if !was_at_last_post && crate::profile::at_last_post(self) {
-            self.spawn_gesture(crate::element::Gesture::Profile(
-                crate::profile::Action::LoadMorePosts,
-            ));
-        }
+        // Reaching the bottom of the feed (or the profile's Posts tab) asks
+        // for the next page — the one edge hook every focus move runs.
+        self.page_on_arrival(paging_before);
         // The nav-edge hook's other ordinary call site (`gesture_work`'s doc
         // comment names the first): catches the Esc arms above, which mutate
         // `self.settings.sub` directly and never reach `gesture_work` at all.
         // Redundant-but-harmless for a key whose arm already ran through
         // `gesture_work` via `spawn_gesture`/`actuate_focused` above.
         self.sync_recovery_message_nav_edge();
+    }
+
+    /// Where the focus ring sits against the bottom-edge load-more gestures —
+    /// the "before" half of [`Self::page_on_arrival`].
+    pub fn paging_edge(&self) -> PagingEdge {
+        PagingEdge {
+            feed: crate::feed::at_last_card(self),
+            profile_posts: crate::profile::at_last_post(self),
+        }
+    }
+
+    /// Ask for the next page when a focus move just ARRIVED on the last card —
+    /// the TUI's equivalent of a GUI app's scroll-edge trigger. `before` is
+    /// [`Self::paging_edge`] sampled ahead of the move; `has_more` gates both
+    /// predicates, and the edge keeps it to one request per arrival.
+    ///
+    /// The one door for paging: [`Self::handle_key`] runs it after every key,
+    /// and the automation surface's focus moves (`focus_move`, the targeted
+    /// scroll-into-view) run it after theirs, so a driven scroll reaches the
+    /// same load-more a keystroke does (`e2e-conventions.md` convention 11).
+    pub fn page_on_arrival(&mut self, before: PagingEdge) {
+        let now = self.paging_edge();
+        let fired = PagingEdge {
+            feed: !before.feed && now.feed,
+            profile_posts: !before.profile_posts && now.profile_posts,
+        };
+        if fired.feed {
+            self.spawn_gesture(crate::element::Gesture::Feed(crate::feed::Action::LoadMore));
+        }
+        // …the bottom of the profile's Posts tab: the same gesture on the
+        // page's own author window (`profile.md` § The Posts tab → *Order and
+        // paging*).
+        if fired.profile_posts {
+            self.spawn_gesture(crate::element::Gesture::Profile(
+                crate::profile::Action::LoadMorePosts,
+            ));
+        }
+        #[cfg(test)]
+        if fired != PagingEdge::default() {
+            self.paging_fired.push(fired);
+        }
     }
 
     /// Hand the keyboard to the page pane, ring at the top.
@@ -4569,6 +4691,29 @@ impl App {
             let outcome = op.run().await;
             let _ = tx.send(UiMessage::Data(DataMessage::Page(generation, outcome)));
         });
+    }
+
+    /// Raise the knock toast for an inbound knock push — tui's leg of
+    /// `behavior/notifications.md` § Localized body, *The knock toast* ("every
+    /// app raises an OS-level toast for an inbound knock"), the twin of linux
+    /// `app.rs`'s `PushEvent::Knock` arm.
+    ///
+    /// Both decisions are shared (`fauna_client_notifications::knock_toast`):
+    /// rule 6 withholds the toast for a knock whose row a muted word would
+    /// collapse, against the one in-memory list the notifications collapse
+    /// reads; otherwise the text is the knock row's own sentence. Only the
+    /// firing is tui's ([`crate::os_notify::notify_knock`]), and the log entry
+    /// is written after it, so it means "the user was shown this".
+    fn raise_knock_toast(&mut self, push: &fauna_protocol::push_events::KnockPayload) {
+        self.knock_notices.observe();
+        let Some(text) =
+            fauna_client_notifications::knock_toast(self.settings.muted_words.keywords(), push)
+        else {
+            return;
+        };
+        let (key, body) = knock_toast_body(text);
+        let replace_id = crate::os_notify::notify_knock(&body);
+        self.knock_notices.record(key.as_deref(), &body, replace_id);
     }
 
     /// Spawn the refetches a [`StaleSurfaces`] asks for — the shared body behind
@@ -5242,7 +5387,7 @@ pub(crate) mod tests {
     ///
     /// ⚠ The alert half is the one with a live consequence, and it is why this
     /// asserts `teardown_epoch` and not merely an empty `active()`: the epoch is
-    /// the ONLY stop signal `critical_alerts::spawn_session_start_sweep`'s
+    /// the ONLY stop signal `critical_alerts::spawn_post_auth_sweep`'s
     /// 6-hourly loop watches, and the `NestIdentityChanged` surface's Trust
     /// action re-`route`s straight back into `session::establish`, which spawns a
     /// fresh one. Un-bumped, every re-trust leaks a loop that keeps polling the
@@ -6584,6 +6729,44 @@ pub(crate) mod tests {
     /// either one means exactly one refresh. The shared vocabulary keeps them
     /// apart because linux re-reads them independently — folding them is tui's
     /// call, not the seam's.
+    /// The knock toast paints the knock row's own localized sentence and logs
+    /// the key it came from; a bodyless knock falls back to the toast's own
+    /// sentence naming the sender's 8-hex prefix — never the raw `summary`.
+    #[test]
+    fn the_knock_toast_says_the_rows_sentence_and_names_its_key() {
+        use fauna_protocol::push_events::KnockPayload;
+
+        let with_body = KnockPayload {
+            sender_id: "ab".repeat(32),
+            summary: "hi, it's me".into(),
+            body: Some(
+                fauna_protocol::LocalizedText::new("notifications.row_knock")
+                    .with_arg("sender", "abababab")
+                    .with_arg("message", "hi, it's me"),
+            ),
+            ..Default::default()
+        };
+        let (key, body) = knock_toast_body(fauna_client_notifications::knock_push_text(&with_body));
+        assert_eq!(key.as_deref(), Some("notifications.row_knock"));
+        assert_eq!(
+            body,
+            fauna_i18n::strings::notifications::row_knock("abababab", "hi, it's me")
+        );
+
+        let bodyless = KnockPayload {
+            sender_id: "cd".repeat(32),
+            summary: "raw message".into(),
+            ..Default::default()
+        };
+        let (key, body) = knock_toast_body(fauna_client_notifications::knock_push_text(&bodyless));
+        assert_eq!(key.as_deref(), Some("notifications.knock_body"));
+        assert_eq!(
+            body,
+            fauna_i18n::strings::notifications::knock_body("cdcdcdcd")
+        );
+        assert!(!body.contains("raw message"));
+    }
+
     #[test]
     fn a_knock_and_a_roster_change_both_reach_tuis_one_contacts_op() {
         use fauna_protocol::push_events::{KnockPayload, StaleSurfaces};

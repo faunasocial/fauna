@@ -1,7 +1,9 @@
-//! The web leg of the two window-claim observables the connection-gap
-//! journeys rest on — `fauna_e2e_agent::CONNECTION_REPORTS_KEY` and
-//! `fauna_e2e_agent::PAINTED_ERRORS_KEY` — counted by the natives' own code
-//! (`fauna-e2e-contract`), never a TypeScript twin of it.
+//! The web leg of the shared e2e observables counted in Rust: the two
+//! window-claim observables the connection-gap journeys rest on —
+//! `fauna_e2e_agent::CONNECTION_REPORTS_KEY` and
+//! `fauna_e2e_agent::PAINTED_ERRORS_KEY` — and the knock-toast log
+//! (`fauna_e2e_agent::KNOCK_NOTICES_KEY`), each counted by the natives' own
+//! code (`fauna-e2e-contract`), never a TypeScript twin of it.
 //!
 //! Connection reports are counted inside the transport's reconnect loop
 //! (`fauna_rpc_wasm::connection_reports_json`), where every report is visible:
@@ -48,4 +50,38 @@ pub fn painted_errors_observe_for_test(ids: Vec<String>, texts: Vec<String>) {
 #[wasm_bindgen(js_name = paintedErrorsForTest)]
 pub fn painted_errors_for_test() -> String {
     PAINTED_ERRORS.with_borrow(|tally| tally.json().to_string())
+}
+
+// The web leg of `fauna_e2e_agent::KNOCK_NOTICES_KEY` — the knock toasts this
+// tab raised, the witness for `notifications` outcome 15. The shared
+// `fauna_e2e_contract::KnockNotices` (tui's, linux's and android's log too),
+// fed by the SPA's one firing site (`#lib/knock-toast.ts`): `observe` before
+// the muted-word gate, `record` after the browser `Notification` was handed
+// over, so the log means "the user was shown this".
+#[cfg(feature = "test-helpers")]
+thread_local! {
+    static KNOCK_NOTICES: RefCell<fauna_e2e_contract::KnockNotices> =
+        RefCell::new(fauna_e2e_contract::KnockNotices::default());
+}
+
+/// A knock push reached the firing arm (called before the muted-word gate).
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = knockNoticesObserveForTest)]
+pub fn knock_notices_observe_for_test() {
+    KNOCK_NOTICES.with_borrow_mut(|log| log.observe());
+}
+
+/// A knock toast was raised: the catalog `key` its text resolved from (`None`
+/// for a verbatim text), the painted `text`, and the id it replaces under.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = knockNoticesRecordForTest)]
+pub fn knock_notices_record_for_test(key: Option<String>, text: String, replace_id: Option<u32>) {
+    KNOCK_NOTICES.with_borrow_mut(|log| log.record(key.as_deref(), &text, replace_id));
+}
+
+/// The `knock_notices` state value, as JSON text.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = knockNoticesForTest)]
+pub fn knock_notices_for_test() -> String {
+    KNOCK_NOTICES.with_borrow(|log| log.json().to_string())
 }

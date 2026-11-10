@@ -67,6 +67,7 @@ def _wait(predicate, what: str, diag, timeout: float = 30.0):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 @pytest.mark.parametrize("verb", sorted(VERBS))
 def test_a_bluesky_like_or_repost_and_its_undo_reach_bluesky(

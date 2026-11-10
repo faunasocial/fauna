@@ -1052,7 +1052,7 @@ pub(crate) fn recovery_result(
 /// `this_device_id` is this device's sync id as its own custodian store was
 /// reported (empty when none was), which picks out this device's own row.
 #[cfg(feature = "backup-audit")]
-fn audit_row(
+pub(crate) fn audit_row(
     record: &fauna_client_backup::audit::DestinationAuditRecord,
     destinations: &[BackupDestination],
     this_device_id: &str,

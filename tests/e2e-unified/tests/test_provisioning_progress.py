@@ -27,7 +27,13 @@ import pytest
 from common.nest import start_nest_in_place, stop_nest
 from drivers.machine_test_setter import set_provisioning_snapshot
 from helpers.budgets import ORCHESTRATION_STEP_S, UI_SETTLE_S
-from helpers.provisioning_drive import point_providers_at, seed_standard_path_run
+from helpers.provisioning_drive import (
+    assert_one_server_order,
+    overall,
+    point_providers_at,
+    seed_standard_path_run,
+    step_status,
+)
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -779,7 +785,113 @@ def test_cancel_mid_online_then_retry_succeeds(app, fake_cloud, provision_target
         f"{app.driver.diagnose('provisioning-cancel-button')}"
     )
 
+    # The Retry carried on with the box the first attempt ordered: the Server
+    # step's name-only pre-flight found it, so the provider sold ONE box
+    # (onboarding-provisioning.md § 6, the one-box resume).
+    assert_one_server_order(fake_cloud, after="after Cancel → Retry,")
+    assert step_status(app, "Server") == "Skipped", (
+        "the retried run must have found the box (pre-flight) rather than "
+        f"ordered one: Server={step_status(app, 'Server')!r}"
+    )
+
     # The run above is the only free path that drives the REAL orchestrator, so
     # it is the one place the per-attempt narration can be proven end-to-end
     # without spending a live box.
     _assert_orchestrator_narrated_its_attempts(app)
+
+
+@pytest.mark.feature("set-up-a-nest-from-the-app")
+def test_start_over_mid_build_onto_the_same_domain_resumes_the_same_box(
+    app, fake_cloud, provision_target_nest
+):
+    """A "start over" mid-build onto the same domain carries on with the box
+    the first run ordered — one order at the provider, and the run completes.
+
+    `onboarding-provisioning.md` § 6: `reset()` ("start over") deliberately
+    keeps the pending-provision row, and the Server step's pre-flight is
+    name-only, so a fresh run of the same `(domain, handle)` finds the box and
+    skips `create_server`, presenting the row's claim code. Were the row
+    dropped at the reset, or the pre-flight skipped, the second run would rent
+    a second box that boots with a code no client holds — a bill the user can
+    stop only at the provider.
+
+    The window is the sibling cancel→retry journey's: the box exists (ordered)
+    but its nest is stopped, so `Online` parks in its retry backoff. Cancel
+    first, then start over — a reset under a still-running orchestrator would
+    leave two runs racing one snapshot, which is no user's gesture.
+
+    ⚠ **The start over is the machine's own `reset`, through the machine
+    bridge.** That is the call every app's start-over gesture makes (tui's
+    "Add account" entry and its abandon, the sign-out teardown); no app paints
+    a start-over control on the provisioning page itself today, so there is no
+    page-local click to drive. The re-run is then seeded exactly as the first
+    one (`seed_standard_path_run`), the shape a user who walks the wizard
+    again onto the same domain arrives with.
+    """
+    drv = app.driver
+    point_providers_at(
+        app, fake_cloud, nest_base_url=provision_target_nest["url"], nest=provision_target_nest
+    )
+    stop_nest(provision_target_nest)
+    seed_standard_path_run(app, claim_code=provision_target_nest["claim_code"])
+    app.click("provisioning-start-button")
+
+    wait_until(
+        lambda: step_status(app, "Online") == "Running",
+        ORCHESTRATION_STEP_S,
+        diagnose=lambda: (
+            "the first run never reached a Running Online step, so the box was "
+            "never ordered and a start over would prove nothing about resuming "
+            "it. snapshot=" + json.dumps(drv.call_machine_method("provisioning_snapshot"))
+        ),
+    )
+    assert_one_server_order(fake_cloud, after="once the first run reached Online,")
+
+    app.click("provisioning-cancel-button")
+    wait_until(
+        lambda: app.is_visible("provisioning-retry-button"),
+        ORCHESTRATION_STEP_S,
+        diagnose=lambda: (
+            "the cancel never landed (no Retry button), so the first run may "
+            "still be driving the snapshot the start over resets. snapshot="
+            + json.dumps(drv.call_machine_method("provisioning_snapshot"))
+        ),
+    )
+
+    # Start over: the wizard forgets the run, then the user walks it again onto
+    # the same domain.
+    drv.call_machine_method("reset")
+    # The provider overrides are harness wiring, not run state, and must survive
+    # the reset — else the re-run would order from the live internet and the
+    # order count below would read a fake nobody called.
+    for leg, want in (
+        ("vps", fake_cloud.url_map()["vps"]),
+        ("nest", provision_target_nest["url"]),
+    ):
+        got = drv.call_machine_method("provider_base_url", json.dumps(leg))
+        assert got == want, (
+            f"the {leg} override did not survive the start over: {got!r} != {want!r}"
+        )
+    seed_standard_path_run(app, claim_code=provision_target_nest["claim_code"])
+    assert overall(app) == "Idle", (
+        "a start over must return the provisioning page to a clean Idle run: "
+        f"overall={overall(app)!r}"
+    )
+
+    start_nest_in_place(provision_target_nest)
+    app.click("provisioning-start-button")
+    wait_until(
+        lambda: app.is_enabled("provisioning-continue-button"),
+        ORCHESTRATION_STEP_S,
+        diagnose=lambda: (
+            "the run after the start over never reached Succeeded (built AND "
+            "claimed). snapshot="
+            + json.dumps(drv.call_machine_method("provisioning_snapshot"))
+            + f" {drv.diagnose('provisioning-continue-button')}"
+        ),
+    )
+    assert_one_server_order(fake_cloud, after="after a start over onto the same domain,")
+    assert step_status(app, "Server") == "Skipped", (
+        "the run after the start over must have found the box (pre-flight) "
+        f"rather than ordered one: Server={step_status(app, 'Server')!r}"
+    )

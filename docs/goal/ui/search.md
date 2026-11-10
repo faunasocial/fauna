@@ -22,7 +22,13 @@ policy-gated **public bridge corpus** (`bridge.<id>` rows, owned by
 there is no per-nest availability difference and the former `not_server_side`
 refusal is gone — no nest ever returns it. Local/sealed search (mail, calendar,
 conversations) is a separate, capability-position story (owner: content-index.md),
-not this page's wire surface.
+not this page's wire surface. **One designed exception (2026-11-08):** on a nest
+whose materializer holds the signed-in owner's materialization grant,
+`fauna.search.query` also answers from that owner's readable nest-side mail index
+— the shape that gives the web SPA and a phone-only user full mail search with no
+local engine, and no change to this page (owner:
+`../architecture/capability-grants.md` § Capability tiering → *The
+materialization grant*, part (d); unbuilt).
 
 The tantivy/`fauna-index` architecture, the `__index` reserved-set sync model,
 and the per-app availability matrix are owned by
@@ -213,6 +219,11 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
 - **Wire + backend:** `fauna.search.query` over `content_fts` is
   live and serves the Search page on all seven apps, uniformly on every nest
   (§ The page's wire surface).
+- **The materialization fast path (§ The page's wire surface, the designed
+  exception) is designed 2026-11-08 and unbuilt:** no nest yet
+  merges an owner's readable mail index into the reply; the page needs no change
+  when it lands — the shared snapshot dedups the nest's mail hit against a local
+  one by `(kind, content_id)`.
 - **The `content_id` contract is pinned, and its spelling fixed (2026-08-03).**
   The owed nest conformance pin exists
   (`conformance_search.rs::a_post_class_content_id_is_the_post_id_and_navigates`),
@@ -266,6 +277,7 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
   **Both were discharged 2026-08-10 the same way** — a shared lookup that joins
   on the durable identity, never a cast at the call site; see *`Contact`
   navigation* and *`File` navigation* below.
+- **`SearchNav::Event` landed 2026-11-08** with the calendar arm of backend 2 (`../behavior/content-index-ingest.md` § Ingest triggers, v1 → *The calendar arm is BUILT*). It carries the event's `uid_hash` (hex-lowercase) — the identity that survives an in-place edit and the CalDAV wire's own dedup key — and its target is the Events page's `event_detail` for that event. Unlike `Contact`, no locate read is owed: the Events page keys its rows by that same hex `uid_hash`, so the hit's id IS the detail's key. tui, macos and ios open the detail (the Apple pair stage the hex `uid_hash` on the shared `EventsVM.pendingEventOpen`, which the Events page opens once loaded); the other four apps carry a match arm that lands on the Events page itself, and opening the detail there is their trickle-down. The snippet is the event's *current* summary, resolved at query time; a deleted event's hit is DROPPED.
 - **Shared render lift — adopted on all seven apps:** the prefix-aware badge map
   + FTS-marker snippet cleanup live in `libs/fauna-client-search/src/render.rs`
   (`content_type_badge` → `LocalizedText`, `clean_snippet`), exposed as UniFFI

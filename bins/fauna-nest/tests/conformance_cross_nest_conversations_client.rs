@@ -201,6 +201,11 @@ async fn start_home_nest_on(
             // The subscription plane: a follow of an author homed on the other
             // nest rides `fauna.subscriptions.*` and its federated twin.
             fauna_nest::subscription_handlers::register_subscription_handlers(&mut b);
+            // The payments plane: a claim code minted on one nest redeems from
+            // the buyer's own nest through `fauna.payments.claims.redeem` and
+            // its federated twin.
+            #[cfg(feature = "payments")]
+            fauna_nest::payment_handlers::register_payment_handlers(&mut b);
             // The recovery plane: a follow's succession is verified by the
             // peer's pull from the identity's home (`succession_pull`).
             fauna_nest::recovery_handlers::register_recovery_handlers(&mut b);
@@ -308,6 +313,11 @@ async fn start_foreign_nest_with_http(
             // The subscription plane: a follow of an author homed on the other
             // nest rides `fauna.subscriptions.*` and its federated twin.
             fauna_nest::subscription_handlers::register_subscription_handlers(&mut b);
+            // The payments plane: a claim code minted on one nest redeems from
+            // the buyer's own nest through `fauna.payments.claims.redeem` and
+            // its federated twin.
+            #[cfg(feature = "payments")]
+            fauna_nest::payment_handlers::register_payment_handlers(&mut b);
             // The recovery plane: a follow's succession is verified by the
             // peer's pull from the identity's home (`succession_pull`).
             fauna_nest::recovery_handlers::register_recovery_handlers(&mut b);
@@ -2602,6 +2612,47 @@ async fn a_foreign_member_searches_its_community_room_through_its_own_nest() {
     let _ = (h_state, f_state);
 }
 
+/// The room's `severance_owed` answer, read twice through the client's own
+/// roster seam: the same-nest way by `home_reader` on H, and relayed by
+/// `foreign_reader` through its own nest F — which forwards the room home's
+/// reply unchanged (`community-rooms.md` § Implementation status today → *A
+/// removal severs*, the retry paragraph). Answers `(same-nest, relayed)`.
+async fn severance_owed_both_ways(
+    f_base: &str,
+    h_base: &str,
+    room_hex: &str,
+    home_reader: &ActorKeypair,
+    foreign_reader: &ActorKeypair,
+) -> (Option<bool>, Option<bool>) {
+    let home = connected_client(
+        h_base,
+        ActorKeypair::from_secret(*home_reader.secret_bytes()),
+    )
+    .await;
+    let same_nest = fauna_conversations::backend::RoomRosterReader::read_roster(
+        &NestConversationsRpc::new(home),
+        room_hex.to_string(),
+        None,
+    )
+    .await
+    .or_absent()
+    .expect("a home member reads the floor");
+    let foreign = connected_client(
+        f_base,
+        ActorKeypair::from_secret(*foreign_reader.secret_bytes()),
+    )
+    .await;
+    let relayed = fauna_conversations::backend::RoomRosterReader::read_roster(
+        &NestConversationsRpc::new(foreign),
+        room_hex.to_string(),
+        Some(h_base.to_string()),
+    )
+    .await
+    .or_absent()
+    .expect("a foreign member reads the floor through its own nest");
+    (same_nest.severance_owed, relayed.severance_owed)
+}
+
 /// The relayed roster read exactly as a foreign member's own device makes it:
 /// F relays `room.list_roster_remote` to H's `conversation.roster.fetch`, and
 /// the seam degrades **any** refusal to `None` — "this member stays elided"
@@ -2779,7 +2830,7 @@ async fn a_removed_foreign_members_relayed_roster_read_and_mint_die_with_the_bin
     let alice_nest =
         connected_client(&h_base, ActorKeypair::from_secret(*alice.secret_bytes())).await;
     NestConversationsRpc::new(alice_nest)
-        .room_remove(room_hex.clone(), bob_hex.clone())
+        .room_remove(room_hex.clone(), bob_hex.clone(), None)
         .await
         .expect("the owner removes the foreign member");
 
@@ -3752,6 +3803,384 @@ async fn the_generic_channel_leave_unseats_on_a_room_and_the_relayed_leave_is_id
     let _ = (h_state, f_state);
 }
 
+/// **A foreign ADMIN removes, rotates and keys in through its own nest** — the
+/// relayed twins of `room.remove`, `room.publish_generation` and
+/// `room.backfill_generations` (`federation.md` § Federation residue surface,
+/// the *Conversation room remove* and *Conversation room generation publish
+/// and backfill* rows).
+///
+/// Two real nests. H homes the room: Alice (owner) and Dave on H; Bob (an
+/// admin by the signed policy), Carol and Erin on F. Bob, through F:
+///
+/// 1. removes Dave (homed on H) — off H's floor; a re-send converges with the
+///    live count; removes Carol (homed on F) — off the floor AND her binding
+///    purged, so her own relayed reads die with the seat;
+/// 2. is refused exactly where a home admin is — the owner, the home nest's
+///    seat, a principal never seated; Erin, a plain member, is refused by
+///    rank; Carol, unseated, is refused at the gate;
+/// 3. publishes a generation H admits against ITS floor (the tip moves), a
+///    replayed mint is refused by the ratchet, and a mint whose minter is not
+///    Bob is refused before F forwards it;
+/// 4. keys in a newcomer seated after that mint.
+#[tokio::test]
+async fn a_foreign_admin_removes_rotates_and_keys_in_through_its_own_nest() {
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, _f_authority, f_state) = start_foreign_nest().await;
+    let f_nest_id = f_state.nest_identity.public_key_bytes();
+
+    let bob = ActorKeypair::generate();
+    let carol = ActorKeypair::generate();
+    let erin = ActorKeypair::generate();
+    for (who, handle) in [(&bob, "bob"), (&carol, "carol"), (&erin, "erin")] {
+        f_state
+            .db
+            .create_user_with_handle(&who.actor_id().0, "free", handle, None)
+            .await
+            .unwrap();
+    }
+    let alice = ActorKeypair::generate();
+    let dave = ActorKeypair::generate();
+    let frank = ActorKeypair::generate();
+    for (who, handle) in [(&alice, "alice"), (&dave, "dave"), (&frank, "frank")] {
+        h_state
+            .db
+            .create_user_with_handle(&who.actor_id().0, "free", handle, None)
+            .await
+            .unwrap();
+    }
+
+    let alice_recv = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+    let bob_recv = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+    let erin_recv = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+    let frank_recv = GroupReceptionKeyRecord::mint(1_700_000_000_000);
+
+    let mut room_id = [0u8; 32];
+    getrandom::fill(&mut room_id).unwrap();
+    let room_hex = hex::encode(room_id);
+    // A real signed policy naming Bob an admin: the backfill reads the room's
+    // history policy off it, and the floor's ranks are its projection.
+    let mut policy =
+        fauna_mls::room_policy::RoomPolicy::initial(alice.actor_id(), Some("the commons".into()));
+    policy.set_admins([bob.actor_id()]);
+    let policy_blob = fauna_protocol::encode_canonical(
+        &policy
+            .sign_community(&room_id, &alice)
+            .expect("the owner signs"),
+    )
+    .unwrap()
+    .to_vec();
+    let seat = |principal_id: [u8; 32], kind: &str, role: &str, home: &str, recv: Vec<u8>| {
+        ReportedMember {
+            principal_id,
+            principal_kind: kind.into(),
+            role: Some(role.into()),
+            home_node_url: home.into(),
+            reception_pubkey: recv,
+        }
+    };
+    let nest_principal = h_state.nest_identity.public_key_bytes();
+    assert!(
+        h_state
+            .db
+            .found_room(
+                &room_id,
+                "community",
+                &alice.actor_id().0,
+                1,
+                &policy_blob,
+                &[0x8Au8; 32],
+                &[
+                    seat(
+                        alice.actor_id().0,
+                        "user",
+                        "owner",
+                        "",
+                        alice_recv.reception_pubkey().unwrap(),
+                    ),
+                    seat(dave.actor_id().0, "user", "member", "", Vec::new()),
+                    seat(
+                        bob.actor_id().0,
+                        "user",
+                        "admin",
+                        &f_base,
+                        bob_recv.reception_pubkey().unwrap(),
+                    ),
+                    seat(carol.actor_id().0, "user", "member", &f_base, Vec::new()),
+                    seat(
+                        erin.actor_id().0,
+                        "user",
+                        "member",
+                        &f_base,
+                        erin_recv.reception_pubkey().unwrap(),
+                    ),
+                    seat(nest_principal, "nest", "member", "", Vec::new()),
+                ],
+            )
+            .await
+            .expect("found the room")
+    );
+    for who in [&bob, &carol, &erin] {
+        h_state
+            .db
+            .register_foreign_channel_member(
+                &room_id,
+                &who.actor_id().0,
+                &f_nest_id,
+                None,
+                RebindPower::InsertOnly,
+            )
+            .await
+            .expect("bind the foreign member");
+    }
+
+    let rpc_for = |who: &ActorKeypair| {
+        let secret = *who.secret_bytes();
+        let f_base = f_base.clone();
+        async move {
+            NestConversationsRpc::new(
+                connected_client(&f_base, ActorKeypair::from_secret(secret)).await,
+            )
+        }
+    };
+    let bob_rpc = rpc_for(&bob).await;
+    let home = Some(h_base.clone());
+    let is_member = |who: [u8; 32]| {
+        let h_state = h_state.clone();
+        async move { h_state.db.is_room_member(&room_id, &who).await.unwrap() }
+    };
+
+    // ── 1. Removals through Bob's own nest. ──
+    let left = bob_rpc
+        .room_remove(
+            room_hex.clone(),
+            hex::encode(dave.actor_id().0),
+            home.clone(),
+        )
+        .await
+        .expect("a foreign admin removes a member homed on the room's home");
+    assert_eq!(
+        left, 5,
+        "the home's own live count: Alice, Bob, Carol, Erin and the home nest's seat"
+    );
+    assert!(!is_member(dave.actor_id().0).await, "Dave is off H's floor");
+    let again = bob_rpc
+        .room_remove(
+            room_hex.clone(),
+            hex::encode(dave.actor_id().0),
+            home.clone(),
+        )
+        .await
+        .expect("a re-sent removal that already landed converges — the severance mint must follow");
+    assert_eq!(again, 5, "the same live count");
+
+    bob_rpc
+        .room_remove(
+            room_hex.clone(),
+            hex::encode(carol.actor_id().0),
+            home.clone(),
+        )
+        .await
+        .expect("a foreign admin removes a foreign member");
+    assert!(
+        !is_member(carol.actor_id().0).await,
+        "Carol is off H's floor"
+    );
+    let refused = fauna_nest::federation_pool::originate_room_roster(
+        &f_state.federation_pool,
+        &f_state,
+        &h_base,
+        &hex::encode(carol.actor_id().0),
+        &room_hex,
+        None,
+        None,
+    )
+    .await
+    .expect("the federation channel itself is healthy")
+    .expect_err("the removed member's binding went with her seat");
+    assert_eq!(refused.code, "fauna.federation.forbidden");
+
+    // ── 2. Refused exactly where a home admin is. ──
+    for (target, why) in [
+        (alice.actor_id().0, "the owner"),
+        (nest_principal, "the home nest's seat"),
+        (
+            ActorKeypair::generate().actor_id().0,
+            "a principal never seated",
+        ),
+    ] {
+        bob_rpc
+            .room_remove(room_hex.clone(), hex::encode(target), home.clone())
+            .await
+            .expect_err(why);
+    }
+    rpc_for(&erin)
+        .await
+        .room_remove(
+            room_hex.clone(),
+            hex::encode(bob.actor_id().0),
+            home.clone(),
+        )
+        .await
+        .expect_err("a plain member removes nobody — the rank is read off H's floor");
+    assert!(is_member(bob.actor_id().0).await, "and Bob is still seated");
+    rpc_for(&carol)
+        .await
+        .room_remove(
+            room_hex.clone(),
+            hex::encode(erin.actor_id().0),
+            home.clone(),
+        )
+        .await
+        .expect_err("an unseated requester is refused at the gate — its binding is gone");
+    assert!(is_member(erin.actor_id().0).await);
+
+    // ── 3. The severance mint, through F, judged against H's floor. ──
+    let targets = live_wrap_targets(&h_state, &room_id).await;
+    assert_eq!(
+        targets.len(),
+        3,
+        "Alice, Bob and Erin — the coverable floor after the removals"
+    );
+    let parents = h_state
+        .db
+        .room_generation_tip(&room_id)
+        .await
+        .unwrap()
+        .map(|t| vec![t.generation_id])
+        .unwrap_or_default();
+    let built = group_generation_wraps::build_group_mint(
+        &targets,
+        parents,
+        Vec::new(),
+        bob.signing_key(),
+        Vec::new(),
+        1_700_000_000_000,
+    )
+    .expect("the mint assembles");
+    let mint = fauna_protocol::encode_canonical(&built.record)
+        .unwrap()
+        .to_vec();
+    bob_rpc
+        .room_publish_generation(room_hex.clone(), mint.clone(), home.clone())
+        .await
+        .expect("H admits a foreign admin's mint against its own floor");
+    assert_eq!(
+        h_state
+            .db
+            .room_generation_tip(&room_id)
+            .await
+            .unwrap()
+            .expect("a tip")
+            .generation_id,
+        built.generation_id,
+        "the tip moved"
+    );
+    bob_rpc
+        .room_publish_generation(room_hex.clone(), mint, home.clone())
+        .await
+        .expect_err("a replayed mint is refused by the parent ratchet");
+
+    let alices = group_generation_wraps::build_group_mint(
+        &targets,
+        vec![built.generation_id],
+        Vec::new(),
+        alice.signing_key(),
+        Vec::new(),
+        1_700_000_000_001,
+    )
+    .expect("the mint assembles");
+    let err = bob_rpc
+        .room_publish_generation(
+            room_hex.clone(),
+            fauna_protocol::encode_canonical(&alices.record)
+                .unwrap()
+                .to_vec(),
+            home.clone(),
+        )
+        .await
+        .expect_err("a nest never forwards a keying act under its member's name");
+    assert!(
+        matches!(
+            err,
+            fauna_conversations::backend::ConvRpcError::Rejected { .. }
+        ),
+        "refused as a definite rejection (the minter binding), never a transient fault: {err:?}"
+    );
+    assert_eq!(
+        h_state
+            .db
+            .room_generation_tip(&room_id)
+            .await
+            .unwrap()
+            .expect("a tip")
+            .generation_id,
+        built.generation_id,
+        "and the tip did not move"
+    );
+
+    // ── 4. A newcomer seated after the mint, keyed in through F. ──
+    h_state
+        .db
+        .record_room_invite_and_deliver(
+            &room_id,
+            &frank.actor_id().0,
+            &alice.actor_id().0,
+            "member",
+            "",
+            b"the invitation",
+            b"the inbox envelope",
+            false,
+        )
+        .await
+        .expect("invite Frank");
+    assert!(
+        h_state
+            .db
+            .accept_room_invite(
+                &room_id,
+                &frank.actor_id().0,
+                &frank_recv.reception_pubkey().unwrap(),
+                None,
+            )
+            .await
+            .expect("accept")
+            .seated()
+    );
+    let frank_target = live_wrap_targets(&h_state, &room_id)
+        .await
+        .into_iter()
+        .find(|m| m.member_actor.0 == frank.actor_id().0)
+        .expect("Frank is keyable");
+    let (_, topup) = group_generation_wraps::build_group_topup_wrap(
+        &built.gen_key,
+        &frank_target,
+        &built.generation_id,
+        bob.signing_key(),
+        1_700_000_000_002,
+    )
+    .expect("the top-up assembles");
+    bob_rpc
+        .room_backfill_generations(
+            room_hex.clone(),
+            hex::encode(frank.actor_id().0),
+            vec![fauna_protocol::encode_canonical(&topup).unwrap().to_vec()],
+            home.clone(),
+        )
+        .await
+        .expect("a foreign admin keys a newcomer in through its own nest");
+    assert!(
+        h_state
+            .db
+            .get_room_generation_wrap(&room_id, &built.generation_id, &frank_target.entry_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "H stored Frank's wrap for the tip"
+    );
+
+    let _ = (h_state, f_state);
+}
+
 /// **A cross-nest invitation seats a member of another nest through its own
 /// nest** — the last open clause of
 /// `conversation-rooms.md` § Done definition's community box, and the ruling
@@ -3895,6 +4324,15 @@ async fn a_cross_nest_invitation_seats_the_foreign_member_through_its_own_nest()
         standing[0].room_node.as_deref(),
         Some(h_base.as_str()),
         "F wrote the room's home from H's verified identity, and it is what the accept relays to"
+    );
+    // ...and the identity itself rides beside the URL: the knock is how a
+    // community room's member learns what its attachment legs pin a
+    // self-signed home by (`conversation-rooms.md` § The home nest →
+    // *Attachment bytes*), the Welcome's stamp for the class a knock joins.
+    assert_eq!(
+        standing[0].home_nest_actor_id.as_deref(),
+        Some(hex::encode(h_state.nest_identity.public_key_bytes()).as_str()),
+        "F stamped H's handshake-verified identity on the knock"
     );
     let delivered: fauna_mls::room_policy::SignedRoomInvite =
         fauna_core::encoding::canonical_decode(&standing[0].signed_invite)
@@ -4887,6 +5325,16 @@ async fn a_generation_minted_while_a_foreign_member_is_away_does_not_open_at_the
         .expect("a foreign member leaves through its own nest");
     assert_eq!(left, 3, "Alice, Carol and the home nest's reader seat");
 
+    // ── The debt the departure leaves, on both reads. ──
+    // G1 still wraps to the slot he left, so the room owes a severance mint
+    // until one lands — the fact a governing tend pass reads to pay it, served
+    // the same on H and relayed through F unchanged.
+    assert_eq!(
+        severance_owed_both_ways(&f_base, &h_base, &room_hex, &alice, &carol).await,
+        (Some(true), Some(true)),
+        "a tip that still wraps to an unseated entry is owed a severance, on both reads"
+    );
+
     // ── (1) The floor no longer obliges a wrap to the seat that left. ──
     // The control first, so the admission below cannot be a gate that never
     // refuses: a mint that skips Carol, who IS still seated, is refused.
@@ -4948,6 +5396,11 @@ async fn a_generation_minted_while_a_foreign_member_is_away_does_not_open_at_the
     assert!(
         !tip_entries.contains(&entry_before),
         "and the tip's wraps do not name the slot he left"
+    );
+    assert_eq!(
+        severance_owed_both_ways(&f_base, &h_base, &room_hex, &alice, &carol).await,
+        (Some(false), Some(false)),
+        "and once a mint past his slot lands, nothing is owed on either read"
     );
 
     // ── (2) He comes back — on a different slot. ──
@@ -6194,6 +6647,15 @@ async fn cross_nest_shared_folder_reads_evict_and_leave_through_client_stack() {
         )
         .await
         .expect("relayed change-log read");
+    // The home nest's reachability verdict rides the relay verbatim beside
+    // `residency` — a full folder the home nest holds is reachable
+    // (`federation-shared-folders.md` § Relay serving across nests, the
+    // `reachable` stamp; `ui/media.md` § Cross-nest shared sets).
+    assert_eq!(
+        listed.reachable,
+        Some(true),
+        "the relayed change-log read carries the home nest's `reachable` stamp"
+    );
     // Post-S9-flip the relay is hash-addressed too: find by `path_hash`, name
     // only in the sealed label (`file-sync.md` § Sealed names & paths).
     let change = listed
@@ -8614,6 +9076,1001 @@ async fn a_reader_follows_an_author_on_another_nest_through_their_own_nest() {
     );
 }
 
+/// **The cross-nest claim redeem** (`behavior/monetization.md` § Pillar 3 →
+/// *Which nest an in-app redeem binds on*; `behavior/federated-follow.md`
+/// § Decision 2 → *The redeem twin*). Alice on H mints a code for her paid
+/// `gold` tier; Bob on F redeems it through F's own `claims.redeem`, carrying
+/// Alice's home and his own signed intent: H stamps the code to Bob, H's
+/// payment-entitled request names F as Bob's home, F records a `pending` remote
+/// follow; Alice's approval reaches F as a `follow.state` push, and Bob's
+/// key-blob read relayed by F is H's blob. Carol's later redeem of the same code
+/// is `claim_already_redeemed`. A home named for an author F hosts takes F's
+/// local arm, and a request with no intent is today's local redeem.
+#[cfg(feature = "payments")]
+#[tokio::test]
+async fn a_buyer_redeems_a_code_minted_on_another_nest_through_their_own_nest() {
+    use fauna_core::identity::ActorId;
+    use fauna_core::subscription::types::ClaimRedeemIntent;
+    use fauna_nest::db::remote_follows::RemoteFollowState;
+    use fauna_protocol::payments::{ClaimRedeemReply, ClaimRedeemRequest};
+    use fauna_protocol::subscriptions::{KeyBlobGetReply, KeyBlobGetRequest};
+
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, _f_authority, f_state) = start_foreign_nest().await;
+    let f_nest_id = f_state.nest_identity.public_key_bytes();
+
+    let alice = ActorKeypair::generate();
+    h_state
+        .db
+        .create_user_with_handle(&alice.actor_id().0, "free", "alice", None)
+        .await
+        .unwrap();
+    // Through the real `tiers.create` door, so the tier carries its birth
+    // KeyBlob — the prior `requests.approve` below requires.
+    let h_router = {
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::subscription_handlers::register_subscription_handlers(&mut b);
+        b.build()
+    };
+    common::create_tier(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        common::tier_create_request(&alice, "gold", 1),
+    )
+    .await
+    .expect("Alice creates the gold tier");
+    h_state
+        .db
+        .insert_payment_claim(
+            "XNEST-0001",
+            &alice.actor_id().0,
+            "gold",
+            "manual",
+            "x1",
+            None,
+        )
+        .await
+        .unwrap();
+    let (bob, carol) = (ActorKeypair::generate(), ActorKeypair::generate());
+    for (kp, handle) in [(&bob, "bob"), (&carol, "carol")] {
+        f_state
+            .db
+            .create_user_with_handle(&kp.actor_id().0, "free", handle, None)
+            .await
+            .unwrap();
+    }
+    let intent = |redeemer: &ActorKeypair, author: ActorId, code: &str| {
+        let intent = ClaimRedeemIntent {
+            redeemer: redeemer.actor_id(),
+            author,
+            code: code.into(),
+            home_nest_id: f_nest_id,
+            created_at: fauna_core::data::Timestamp(
+                fauna_core::data::Timestamp::now().0 - 1_000_000,
+            ),
+        };
+        let (bytes, env) = fauna_core::encoding::sign_envelope(redeemer, &intent).unwrap();
+        fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)
+    };
+    let across =
+        |redeemer: &ActorKeypair, author: ActorId, code: &str, home: &str| ClaimRedeemRequest {
+            code: code.into(),
+            author_home_url: Some(home.into()),
+            intent: Some(intent(redeemer, author, code)),
+            extra: Default::default(),
+        };
+
+    // Bob's own act, relayed by his own nest.
+    let bob_nest = connected_client(&f_base, ActorKeypair::from_secret(*bob.secret_bytes())).await;
+    let redeemed: ClaimRedeemReply = bob_nest
+        .request(
+            "fauna.payments.claims.redeem",
+            across(&bob, alice.actor_id(), "XNEST-0001", &h_base),
+        )
+        .await
+        .expect("Bob's own nest relays the redeem to the code's home");
+    assert_eq!(redeemed.author, alice.actor_id());
+    assert_eq!((redeemed.tier.as_str(), redeemed.queued), ("gold", true));
+
+    // H: the claim is Bob's, and the payment-entitled request names F.
+    let claim = h_state
+        .db
+        .get_payment_claim("XNEST-0001")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.redeemed_by, Some(bob.actor_id().0.to_vec()));
+    let rows = h_state
+        .db
+        .list_subscribe_requests(&alice.actor_id().0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].payment_entitled);
+    assert_eq!(rows[0].home_nest_url.as_deref(), Some(f_base.as_str()));
+    assert_eq!(
+        h_state.db.subscribe_request_home(rows[0].id).await.unwrap(),
+        Some(f_nest_id)
+    );
+    // F: a pending remote follow for the tier the reply named.
+    let follow_state = || async {
+        let follows = f_state
+            .db
+            .remote_follows_of(&bob.actor_id().0, &alice.actor_id().0)
+            .await
+            .unwrap();
+        assert_eq!(follows.len(), 1);
+        assert_eq!(follows[0].tier, "gold");
+        follows[0].state
+    };
+    assert_eq!(follow_state().await, RemoteFollowState::Pending);
+
+    // Alice's client drains the request, minting the gold blob over Bob.
+    common::approve_with_mint(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        rows[0].id,
+        "gold",
+        &[bob.actor_id()],
+        &[0x6B; 32],
+        fauna_core::data::Timestamp::now().0,
+    )
+    .await
+    .expect("Alice's drain approves the paid request");
+    match fauna_nest::outbox::drain_outbox_once(&h_state).await {
+        fauna_nest::outbox::DrainOutcome::Processed { forwarded, failed } => {
+            assert_eq!(
+                (forwarded, failed),
+                (1, 0),
+                "one follow.state push, delivered"
+            )
+        }
+        other => panic!("the follow.state push drains on a public nest: {other:?}"),
+    }
+    assert_eq!(follow_state().await, RemoteFollowState::Approved);
+
+    // Bob's key-blob read for the tier, relayed by F, is H's blob.
+    let key_blob_req = || KeyBlobGetRequest {
+        author_id: alice.actor_id(),
+        tier_name: "gold".into(),
+        extra: Default::default(),
+    };
+    let relayed: KeyBlobGetReply = bob_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .expect("F relays Bob's key-blob read to Alice's home");
+    let alice_nest =
+        connected_client(&h_base, ActorKeypair::from_secret(*alice.secret_bytes())).await;
+    let at_home: KeyBlobGetReply = alice_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .expect("Alice reads her own blob");
+    assert_eq!(relayed, at_home);
+
+    // Carol's redeem of the same code: the home's refusal, verbatim.
+    let carol_nest =
+        connected_client(&f_base, ActorKeypair::from_secret(*carol.secret_bytes())).await;
+    let err = carol_nest
+        .request::<_, ClaimRedeemReply>(
+            "fauna.payments.claims.redeem",
+            across(&carol, alice.actor_id(), "XNEST-0001", &h_base),
+        )
+        .await
+        .expect_err("a redeemed code is refused");
+    assert_eq!(refusal_code(&err), "fauna.payments.claim_already_redeemed");
+
+    // Dave is hosted on F: a home named for him is a stale hint, and F's local
+    // arm redeems his code; so does a request carrying no intent at all.
+    let dave = ActorKeypair::generate().actor_id();
+    f_state
+        .db
+        .create_user_with_handle(&dave.0, "free", "dave", None)
+        .await
+        .unwrap();
+    f_state
+        .db
+        .create_subscription_tier(
+            &dave.0, "gold", 1, None, None, None, false, None, None, false,
+        )
+        .await
+        .unwrap();
+    for code in ["LOCAL-0001", "LOCAL-0002"] {
+        f_state
+            .db
+            .insert_payment_claim(code, &dave.0, "gold", "manual", code, None)
+            .await
+            .unwrap();
+    }
+    let local: ClaimRedeemReply = bob_nest
+        .request(
+            "fauna.payments.claims.redeem",
+            across(&bob, dave, "LOCAL-0001", &h_base),
+        )
+        .await
+        .expect("an author hosted here redeems locally whatever home is named");
+    assert_eq!(local.author, dave);
+    let plain: ClaimRedeemReply = carol_nest
+        .request(
+            "fauna.payments.claims.redeem",
+            ClaimRedeemRequest {
+                code: "LOCAL-0002".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a request with no intent is today's local redeem");
+    assert_eq!(plain.author, dave);
+    assert!(
+        f_state
+            .db
+            .remote_follows_of(&bob.actor_id().0, &dave.0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a local redeem records no remote follow"
+    );
+}
+
+/// **The rank cascade reaches a remote buyer's own nest**
+/// (`behavior/monetization.md` § Per-post pay-to-unlock; `behavior/federated-follow.md`
+/// § Decision 2, the state leg). Alice on H holds a ranked `gold` tier and a
+/// per-post tier at a lower rank; Bob on F redeems a `gold` code through F. H's
+/// fan-out enrolls him in the per-post tier with F as his home, Alice's drain
+/// approves both requests, and each approval's `follow.state` push lands on F
+/// — the per-post tier's opening its own remote follow, since F holds no ranks
+/// — so Bob's key-blob read for the per-post tier, relayed by F, is H's blob.
+#[cfg(feature = "payments")]
+#[tokio::test]
+async fn a_remote_buyers_nest_follows_the_per_post_tiers_their_paid_tier_includes() {
+    use fauna_core::subscription::types::ClaimRedeemIntent;
+    use fauna_nest::db::remote_follows::RemoteFollowState;
+    use fauna_protocol::payments::{ClaimRedeemReply, ClaimRedeemRequest};
+    use fauna_protocol::subscriptions::{KeyBlobGetReply, KeyBlobGetRequest, TierCreateRequest};
+
+    const UNLOCK_TIER: &str = "post-unlock";
+    let unlocked_post = hex::encode([0x33u8; 32]);
+
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, _f_authority, f_state) = start_foreign_nest().await;
+    let f_nest_id = f_state.nest_identity.public_key_bytes();
+
+    let alice = ActorKeypair::generate();
+    h_state
+        .db
+        .create_user_with_handle(&alice.actor_id().0, "free", "alice", None)
+        .await
+        .unwrap();
+    let h_router = {
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::subscription_handlers::register_subscription_handlers(&mut b);
+        b.build()
+    };
+    common::create_tier(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        common::tier_create_request(&alice, "gold", 2),
+    )
+    .await
+    .expect("Alice creates the gold tier");
+    common::create_tier(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        TierCreateRequest {
+            unlocks_post: Some(unlocked_post),
+            ..common::tier_create_request(&alice, UNLOCK_TIER, 1)
+        },
+    )
+    .await
+    .expect("Alice creates a per-post tier below gold");
+    h_state
+        .db
+        .insert_payment_claim(
+            "XNEST-RANK",
+            &alice.actor_id().0,
+            "gold",
+            "manual",
+            "r1",
+            None,
+        )
+        .await
+        .unwrap();
+    let bob = ActorKeypair::generate();
+    f_state
+        .db
+        .create_user_with_handle(&bob.actor_id().0, "free", "bob", None)
+        .await
+        .unwrap();
+    let intent = ClaimRedeemIntent {
+        redeemer: bob.actor_id(),
+        author: alice.actor_id(),
+        code: "XNEST-RANK".into(),
+        home_nest_id: f_nest_id,
+        created_at: fauna_core::data::Timestamp(fauna_core::data::Timestamp::now().0 - 1_000_000),
+    };
+    let (bytes, env) = fauna_core::encoding::sign_envelope(&bob, &intent).unwrap();
+    let bob_nest = connected_client(&f_base, ActorKeypair::from_secret(*bob.secret_bytes())).await;
+    let redeemed: ClaimRedeemReply = bob_nest
+        .request(
+            "fauna.payments.claims.redeem",
+            ClaimRedeemRequest {
+                code: "XNEST-RANK".into(),
+                author_home_url: Some(h_base.clone()),
+                intent: Some(fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)),
+                extra: Default::default(),
+            },
+        )
+        .await
+        .expect("Bob's own nest relays the redeem to the code's home");
+    assert_eq!((redeemed.tier.as_str(), redeemed.queued), ("gold", true));
+
+    // H: the fan-out enrolled Bob in the per-post tier, homed at F.
+    let mut rows = h_state
+        .db
+        .list_subscribe_requests(&alice.actor_id().0)
+        .await
+        .unwrap();
+    rows.sort_by_key(|r| r.tier_name != "gold");
+    let tiers: Vec<&str> = rows.iter().map(|r| r.tier_name.as_str()).collect();
+    assert_eq!(tiers, ["gold", UNLOCK_TIER]);
+    for row in &rows {
+        assert_eq!(
+            h_state.db.subscribe_request_home(row.id).await.unwrap(),
+            Some(f_nest_id),
+            "{} names Bob's home",
+            row.tier_name
+        );
+    }
+
+    // Alice's client drains both requests, minting each blob over Bob.
+    for (row, key) in rows.iter().zip([[0x6C; 32], [0x6D; 32]]) {
+        common::approve_with_mint(
+            &h_router,
+            h_state.clone(),
+            &alice,
+            row.id,
+            &row.tier_name,
+            &[bob.actor_id()],
+            &key,
+            fauna_core::data::Timestamp::now().0,
+        )
+        .await
+        .expect("Alice's drain approves the request");
+    }
+    match fauna_nest::outbox::drain_outbox_once(&h_state).await {
+        fauna_nest::outbox::DrainOutcome::Processed { forwarded, failed } => {
+            assert_eq!(
+                (forwarded, failed),
+                (2, 0),
+                "two follow.state pushes, delivered"
+            )
+        }
+        other => panic!("the follow.state pushes drain on a public nest: {other:?}"),
+    }
+
+    // F: a remote follow per tier, both approved, both homed at H.
+    let follows = f_state
+        .db
+        .remote_follows_of(&bob.actor_id().0, &alice.actor_id().0)
+        .await
+        .unwrap();
+    let seen: Vec<(&str, RemoteFollowState, &str)> = follows
+        .iter()
+        .map(|f| (f.tier.as_str(), f.state, f.home_nest_url.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("gold", RemoteFollowState::Approved, h_base.as_str()),
+            (UNLOCK_TIER, RemoteFollowState::Approved, h_base.as_str()),
+        ]
+    );
+
+    // Bob's key-blob read for the per-post tier, relayed by F, is H's blob.
+    let key_blob_req = || KeyBlobGetRequest {
+        author_id: alice.actor_id(),
+        tier_name: UNLOCK_TIER.into(),
+        extra: Default::default(),
+    };
+    let relayed: KeyBlobGetReply = bob_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .expect("F relays Bob's per-post key-blob read to Alice's home");
+    let alice_nest =
+        connected_client(&h_base, ActorKeypair::from_secret(*alice.secret_bytes())).await;
+    let at_home: KeyBlobGetReply = alice_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .expect("Alice reads her own per-post blob");
+    assert_eq!(relayed, at_home);
+}
+
+/// One signed `fake`-provider delivery to `author`'s webhook on the nest
+/// `state` serves, naming `buyer` as the checkout's reference — what a
+/// signed-in Stripe checkout's `client_reference_id` becomes at the waist.
+#[cfg(feature = "payments")]
+async fn deliver_checkout(
+    state: &Arc<AppState>,
+    author: [u8; 32],
+    buyer: [u8; 32],
+    event_id: &str,
+) -> axum::http::StatusCode {
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
+    let body = serde_json::json!({
+        "id": event_id,
+        "event": "payment",
+        "reference": hex::encode(buyer),
+        "purchase": format!("pi_{event_id}"),
+    })
+    .to_string();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        fauna_payments::fake::SIGNATURE_HEADER,
+        fauna_payments::fake::sign("whsec_q13", body.as_bytes())
+            .parse()
+            .unwrap(),
+    );
+    fauna_nest::payment_routes::payment_webhook(
+        State(state.clone()),
+        Path((hex::encode(author), "fake".to_string())),
+        headers,
+        bytes::Bytes::from(body),
+    )
+    .await
+    .status()
+}
+
+/// **A checkout-bound buyer homed on another nest** (`behavior/monetization.md`
+/// § Pillar 3 → *Buyer↔actor binding (Q4)* → *A checkout-bound buyer homed on
+/// another nest*, the Q13 ruling; `behavior/federated-follow.md` § Decision 2).
+/// Alice on H sells `gold` through a provider; the checkout's reference names
+/// an actor, never a home, so the buyer's relayed subscribe and the provider's
+/// payment are the two halves of ONE request row at H, in either order.
+/// **(a) intent first** — Bob on F subscribes through F; the payment marks that
+/// row entitled, H lists it with his home, the approval reaches F as
+/// `approved`, and F relays Bob's key-blob read to H's blob. **(b) payment
+/// first** — Carol's payment opens a half-row H neither lists nor approves;
+/// her relayed subscribe completes it, and from there it is (a). **(c) a
+/// buyer H hosts** — Dave's payment row is listed and approved as before.
+#[cfg(feature = "payments")]
+#[tokio::test]
+async fn a_checkout_bound_buyer_homed_on_another_nest_meets_their_payment_on_one_request() {
+    use fauna_core::subscription::types::{FollowIntent, FollowIntentKind};
+    use fauna_nest::db::remote_follows::RemoteFollowState;
+    use fauna_protocol::payments::{ProviderSetReply, ProviderSetRequest};
+    use fauna_protocol::subscriptions::{
+        KeyBlobGetReply, KeyBlobGetRequest, RequestsListReply, RequestsListRequest, SubscribeReply,
+        SubscribeRequest,
+    };
+
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, _f_authority, f_state) = start_foreign_nest().await;
+    let f_nest_id = f_state.nest_identity.public_key_bytes();
+
+    let alice = ActorKeypair::generate();
+    h_state
+        .db
+        .create_user_with_handle(&alice.actor_id().0, "free", "alice", None)
+        .await
+        .unwrap();
+    let h_router = {
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::subscription_handlers::register_subscription_handlers(&mut b);
+        fauna_nest::payment_handlers::register_payment_handlers(&mut b);
+        b.build()
+    };
+    common::create_tier(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        common::tier_create_request(&alice, "gold", 1),
+    )
+    .await
+    .expect("Alice creates the gold tier");
+    let set = fauna_protocol::encode_canonical(&ProviderSetRequest {
+        kind: "fake".into(),
+        webhook_secret: "whsec_q13".into(),
+        tier: "gold".into(),
+        product_ref: None,
+        extra: Default::default(),
+    })
+    .unwrap();
+    let _: ProviderSetReply = fauna_protocol::decode_strict(
+        &common::call_raw(
+            &h_router,
+            h_state.clone(),
+            "fauna.payments.providers.set",
+            alice.actor_id().0,
+            bytes::Bytes::from(set.to_vec()),
+        )
+        .await
+        .expect("Alice connects her provider"),
+    )
+    .unwrap();
+
+    let (bob, carol) = (ActorKeypair::generate(), ActorKeypair::generate());
+    for (kp, handle) in [(&bob, "bob"), (&carol, "carol")] {
+        f_state
+            .db
+            .create_user_with_handle(&kp.actor_id().0, "free", handle, None)
+            .await
+            .unwrap();
+    }
+    // The buyer's own act, relayed by their own nest: a subscribe to `gold`.
+    let subscribe_through_f = |buyer: &ActorKeypair| {
+        let intent = FollowIntent {
+            subscriber: buyer.actor_id(),
+            author: alice.actor_id(),
+            tier: "gold".into(),
+            kind: FollowIntentKind::Subscribe,
+            home_nest_id: f_nest_id,
+            created_at: fauna_core::data::Timestamp(
+                fauna_core::data::Timestamp::now().0 - 1_000_000,
+            ),
+        };
+        let (bytes, env) = fauna_core::encoding::sign_envelope(buyer, &intent).unwrap();
+        SubscribeRequest {
+            author_id: alice.actor_id(),
+            tier: "gold".into(),
+            mlkem_encaps_key: None,
+            home_nest_url: Some(h_base.clone()),
+            intent: Some(fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)),
+            extra: Default::default(),
+        }
+    };
+    let list = || async {
+        let req = fauna_protocol::encode_canonical(&RequestsListRequest {}).unwrap();
+        let reply: RequestsListReply = fauna_protocol::decode_strict(
+            &common::call_raw(
+                &h_router,
+                h_state.clone(),
+                "fauna.subscriptions.requests.list",
+                alice.actor_id().0,
+                bytes::Bytes::from(req.to_vec()),
+            )
+            .await
+            .expect("requests.list"),
+        )
+        .unwrap();
+        reply.requests
+    };
+    let follow_state = |buyer: [u8; 32]| {
+        let f_state = f_state.clone();
+        let author = alice.actor_id().0;
+        async move {
+            let follows = f_state.db.remote_follows_of(&buyer, &author).await.unwrap();
+            assert_eq!(follows.len(), 1);
+            follows[0].state
+        }
+    };
+    let drain_one_push = || async {
+        match fauna_nest::outbox::drain_outbox_once(&h_state).await {
+            fauna_nest::outbox::DrainOutcome::Processed { forwarded, failed } => {
+                assert_eq!((forwarded, failed), (1, 0), "one follow.state push");
+            }
+            other => panic!("the follow.state push drains on a public nest: {other:?}"),
+        }
+    };
+    let now = fauna_core::data::Timestamp::now().0;
+
+    // ── (a) intent first ────────────────────────────────────────────────
+    let bob_nest = connected_client(&f_base, ActorKeypair::from_secret(*bob.secret_bytes())).await;
+    let queued: SubscribeReply = bob_nest
+        .request("fauna.subscriptions.subscribe", subscribe_through_f(&bob))
+        .await
+        .expect("F relays Bob's subscribe to Alice's home");
+    let SubscribeReply::Queued {
+        request_id: bob_req,
+    } = queued
+    else {
+        panic!("a first subscribe to a judged tier is queued: {queued:?}");
+    };
+    assert_eq!(
+        follow_state(bob.actor_id().0).await,
+        RemoteFollowState::Pending
+    );
+    assert!(
+        deliver_checkout(&h_state, alice.actor_id().0, bob.actor_id().0, "evt_bob")
+            .await
+            .is_success()
+    );
+    let listed = list().await;
+    assert_eq!(listed.len(), 1, "one row, both halves: {listed:?}");
+    assert_eq!(listed[0].request_id, bob_req);
+    assert!(listed[0].payment_entitled, "the payment marked it");
+    assert_eq!(listed[0].home.as_deref(), Some(f_base.as_str()));
+    common::approve_with_mint(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        bob_req,
+        "gold",
+        &[bob.actor_id()],
+        &[0x6B; 32],
+        now,
+    )
+    .await
+    .expect("Alice's drain approves the paid request");
+    drain_one_push().await;
+    assert_eq!(
+        follow_state(bob.actor_id().0).await,
+        RemoteFollowState::Approved
+    );
+    let key_blob_req = || KeyBlobGetRequest {
+        author_id: alice.actor_id(),
+        tier_name: "gold".into(),
+        extra: Default::default(),
+    };
+    let relayed: KeyBlobGetReply = bob_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .expect("F relays Bob's key-blob read to Alice's home");
+    let alice_nest =
+        connected_client(&h_base, ActorKeypair::from_secret(*alice.secret_bytes())).await;
+    let at_home: KeyBlobGetReply = alice_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .expect("Alice reads her own blob");
+    assert_eq!(relayed, at_home);
+
+    // ── (b) payment first ───────────────────────────────────────────────
+    assert!(
+        deliver_checkout(
+            &h_state,
+            alice.actor_id().0,
+            carol.actor_id().0,
+            "evt_carol"
+        )
+        .await
+        .is_success()
+    );
+    let half = h_state
+        .db
+        .list_subscribe_requests(&alice.actor_id().0)
+        .await
+        .unwrap();
+    assert_eq!(half.len(), 1, "the payment opened Carol's row: {half:?}");
+    assert!(half[0].payment_entitled && !half[0].complete);
+    let carol_req = half[0].id;
+    assert!(list().await.is_empty(), "a half-row is not listed");
+    let refused = common::approve_with_mint(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        carol_req,
+        "gold",
+        &[bob.actor_id(), carol.actor_id()],
+        &[0x6C; 32],
+        now + 1_000_000,
+    )
+    .await
+    .expect_err("a half-row is not approvable by id");
+    assert_eq!(refused.code, "fauna.subscriptions.request_incomplete");
+    assert!(
+        !h_state
+            .db
+            .is_subscriber(&alice.actor_id().0, &carol.actor_id().0, "gold")
+            .await
+            .unwrap(),
+        "the refusal wrote no roster row"
+    );
+    let carol_nest =
+        connected_client(&f_base, ActorKeypair::from_secret(*carol.secret_bytes())).await;
+    let completed: SubscribeReply = carol_nest
+        .request("fauna.subscriptions.subscribe", subscribe_through_f(&carol))
+        .await
+        .expect("F relays Carol's subscribe to Alice's home");
+    assert!(
+        matches!(completed, SubscribeReply::Queued { request_id } if request_id == carol_req),
+        "her intent lands on the row her payment opened: {completed:?}"
+    );
+    let listed = list().await;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].request_id, carol_req);
+    assert!(listed[0].payment_entitled);
+    assert_eq!(listed[0].home.as_deref(), Some(f_base.as_str()));
+    common::approve_with_mint(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        carol_req,
+        "gold",
+        &[bob.actor_id(), carol.actor_id()],
+        &[0x6C; 32],
+        now + 2_000_000,
+    )
+    .await
+    .expect("the completed row approves");
+    drain_one_push().await;
+    assert_eq!(
+        follow_state(carol.actor_id().0).await,
+        RemoteFollowState::Approved
+    );
+    let carol_relayed: KeyBlobGetReply = carol_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .expect("F relays Carol's key-blob read to Alice's home");
+    let at_home: KeyBlobGetReply = alice_nest
+        .request("fauna.subscriptions.key_blob.get", key_blob_req())
+        .await
+        .unwrap();
+    assert_eq!(carol_relayed, at_home);
+
+    // ── (c) a buyer H hosts ─────────────────────────────────────────────
+    let dave = ActorKeypair::generate();
+    h_state
+        .db
+        .create_user_with_handle(&dave.actor_id().0, "free", "dave", None)
+        .await
+        .unwrap();
+    assert!(
+        deliver_checkout(&h_state, alice.actor_id().0, dave.actor_id().0, "evt_dave")
+            .await
+            .is_success()
+    );
+    let listed = list().await;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(listed[0].payment_entitled);
+    assert_eq!(listed[0].home, None, "a local buyer carries no home");
+    common::approve_with_mint(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        listed[0].request_id,
+        "gold",
+        &[bob.actor_id(), carol.actor_id(), dave.actor_id()],
+        &[0x6D; 32],
+        now + 3_000_000,
+    )
+    .await
+    .expect("a hosted buyer's paid request approves as before");
+    assert!(
+        h_state
+            .db
+            .is_subscriber(&alice.actor_id().0, &dave.actor_id().0, "gold")
+            .await
+            .unwrap()
+    );
+}
+
+/// A fake provider's refund of the purchase [`deliver_checkout`] opened for
+/// `buyer_event_id`, through the same ingress.
+async fn deliver_refund(
+    state: &Arc<AppState>,
+    author: [u8; 32],
+    buyer_event_id: &str,
+    event_id: &str,
+) -> axum::http::StatusCode {
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
+    let body = serde_json::json!({
+        "id": event_id,
+        "event": "refund",
+        "purchase": format!("pi_{buyer_event_id}"),
+    })
+    .to_string();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        fauna_payments::fake::SIGNATURE_HEADER,
+        fauna_payments::fake::sign("whsec_q13", body.as_bytes())
+            .parse()
+            .unwrap(),
+    );
+    fauna_nest::payment_routes::payment_webhook(
+        State(state.clone()),
+        Path((hex::encode(author), "fake".to_string())),
+        headers,
+        bytes::Bytes::from(body),
+    )
+    .await
+    .status()
+}
+
+/// **A refunded remote buyer is removed through the leave's path**
+/// (`behavior/monetization.md` § Pillar 3 → *Expiry & revocation*, the
+/// 2026-11-09 ruling; `behavior/federated-follow.md` § Decision 2 → *The state
+/// leg back*). Bob on F buys Alice's `gold` on H and is approved; a refund at
+/// H voids his window and queues the `unsubscribe` row carrying his home; the
+/// author's drain commits it, so H pushes `removed` and F's follow row reads
+/// it, and — Bob being the only subscriber homed at F — H's pending
+/// deliveries to F are discarded.
+#[cfg(feature = "payments")]
+#[tokio::test]
+async fn a_refunded_buyer_homed_on_another_nest_is_removed_through_the_leaves_path() {
+    use fauna_core::subscription::types::{FollowIntent, FollowIntentKind};
+    use fauna_nest::db::remote_follows::RemoteFollowState;
+    use fauna_protocol::payments::{ProviderSetReply, ProviderSetRequest};
+    use fauna_protocol::subscriptions::{SubscribeReply, SubscribeRequest};
+
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, _f_authority, f_state) = start_foreign_nest().await;
+    let f_nest_id = f_state.nest_identity.public_key_bytes();
+
+    let alice = ActorKeypair::generate();
+    let author = alice.actor_id().0;
+    h_state
+        .db
+        .create_user_with_handle(&author, "free", "alice", None)
+        .await
+        .unwrap();
+    let h_router = {
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::subscription_handlers::register_subscription_handlers(&mut b);
+        fauna_nest::payment_handlers::register_payment_handlers(&mut b);
+        b.build()
+    };
+    common::create_tier(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        common::tier_create_request(&alice, "gold", 1),
+    )
+    .await
+    .expect("Alice creates the gold tier");
+    let set = fauna_protocol::encode_canonical(&ProviderSetRequest {
+        kind: "fake".into(),
+        webhook_secret: "whsec_q13".into(),
+        tier: "gold".into(),
+        product_ref: None,
+        extra: Default::default(),
+    })
+    .unwrap();
+    let _: ProviderSetReply = fauna_protocol::decode_strict(
+        &common::call_raw(
+            &h_router,
+            h_state.clone(),
+            "fauna.payments.providers.set",
+            author,
+            bytes::Bytes::from(set.to_vec()),
+        )
+        .await
+        .expect("Alice connects her provider"),
+    )
+    .unwrap();
+
+    let bob = ActorKeypair::generate();
+    let buyer = bob.actor_id().0;
+    f_state
+        .db
+        .create_user_with_handle(&buyer, "free", "bob", None)
+        .await
+        .unwrap();
+    let follow_state = || async {
+        let follows = f_state.db.remote_follows_of(&buyer, &author).await.unwrap();
+        assert_eq!(follows.len(), 1);
+        follows[0].state
+    };
+    let drain_one_push = || async {
+        match fauna_nest::outbox::drain_outbox_once(&h_state).await {
+            fauna_nest::outbox::DrainOutcome::Processed { forwarded, failed } => {
+                assert_eq!((forwarded, failed), (1, 0), "one follow.state push");
+            }
+            other => panic!("the follow.state push drains on a public nest: {other:?}"),
+        }
+    };
+    let now = fauna_core::data::Timestamp::now().0;
+
+    // Bob subscribes through F, pays, and Alice's drain approves him.
+    let intent = FollowIntent {
+        subscriber: bob.actor_id(),
+        author: alice.actor_id(),
+        tier: "gold".into(),
+        kind: FollowIntentKind::Subscribe,
+        home_nest_id: f_nest_id,
+        created_at: fauna_core::data::Timestamp(now - 1_000_000),
+    };
+    let (bytes, env) = fauna_core::encoding::sign_envelope(&bob, &intent).unwrap();
+    let bob_nest = connected_client(&f_base, ActorKeypair::from_secret(*bob.secret_bytes())).await;
+    let queued: SubscribeReply = bob_nest
+        .request(
+            "fauna.subscriptions.subscribe",
+            SubscribeRequest {
+                author_id: alice.actor_id(),
+                tier: "gold".into(),
+                mlkem_encaps_key: None,
+                home_nest_url: Some(h_base.clone()),
+                intent: Some(fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)),
+                extra: Default::default(),
+            },
+        )
+        .await
+        .expect("F relays Bob's subscribe to Alice's home");
+    let SubscribeReply::Queued { request_id } = queued else {
+        panic!("a first subscribe to a judged tier is queued: {queued:?}");
+    };
+    assert!(
+        deliver_checkout(&h_state, author, buyer, "evt_bob")
+            .await
+            .is_success()
+    );
+    common::approve_with_mint(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        request_id,
+        "gold",
+        &[bob.actor_id()],
+        &[0x6B; 32],
+        now,
+    )
+    .await
+    .expect("Alice's drain approves the paid request");
+    drain_one_push().await;
+    assert_eq!(follow_state().await, RemoteFollowState::Approved);
+
+    // A delivery of Alice's still waits in H's outbox for F.
+    h_state
+        .db
+        .outbox_enqueue_to_peer(&author, b"post", "follow_deliver", &f_nest_id)
+        .await
+        .unwrap();
+    let pending_deliveries_to_f = || async {
+        let conn = h_state.db.conn().await;
+        conn.query_row(
+            "SELECT COUNT(*) FROM outbox WHERE author_id = ?1 AND peer_nest_id = ?2
+               AND entry_type IN ('follow_deliver', 'follow_delete')",
+            rusqlite::params![author.as_slice(), f_nest_id.as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(pending_deliveries_to_f().await, 1);
+
+    // The refund at H: the window is voided and the leave's removal queued,
+    // carrying Bob's home.
+    assert!(
+        deliver_refund(&h_state, author, "evt_bob", "evt_bob_refund")
+            .await
+            .is_success()
+    );
+    assert!(
+        !h_state
+            .db
+            .is_subscriber(&author, &buyer, "gold")
+            .await
+            .unwrap()
+    );
+    let rows = h_state.db.list_subscribe_requests(&author).await.unwrap();
+    assert_eq!(rows.len(), 1, "exactly the removal: {rows:?}");
+    assert_eq!(rows[0].kind, "unsubscribe");
+    assert_eq!(rows[0].home_nest_url.as_deref(), Some(f_base.as_str()));
+    assert_eq!(follow_state().await, RemoteFollowState::Approved);
+
+    // Alice's drain commits it: `removed` reaches F, H's deliveries to F go.
+    common::drain_commits_removal(
+        &h_router,
+        h_state.clone(),
+        &alice,
+        buyer,
+        "gold",
+        &[],
+        &[0x6C; 32],
+        now + 1_000_000,
+    )
+    .await
+    .expect("Alice's drain commits the removal");
+    assert_eq!(
+        pending_deliveries_to_f().await,
+        0,
+        "no subscriber of Alice is homed at F any more"
+    );
+    drain_one_push().await;
+    assert_eq!(follow_state().await, RemoteFollowState::Removed);
+    assert!(
+        h_state
+            .db
+            .list_subscribers(&author, "gold")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the refunded buyer is off the roster"
+    );
+}
+
 /// **The federated follow's delivery** (`behavior/federated-follow.md`
 /// § Decision 1, § Decision 3, § Decision 4, § Decision 5's delete paragraph).
 /// Alice on H has posted once before Bob on F follows her: the approval
@@ -9881,4 +11338,108 @@ async fn a_delivered_room_post_is_fetched_from_its_home_into_the_rooms_view_on_t
     }
 
     let _ = (h_state, f_state);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A cross-nest FOLDER member is named on the owner's "Shared with" roster by its
+// own home nest, at share time (`federation-shared-folders.md` § Cross-nest
+// shared folders + channel append, the id→handle bullet → *The folder roster*).
+// The owner's nest holds no `users` row for the member and never asks; the
+// member's nest — the authority for handles at its own domain — volunteers
+// `handle@domain` on its REPLY to the Welcome relay the owner's nest originates
+// (the one-shot carrier; the member's own `channel.fetch` drains carry the
+// standing announce afterwards), and the owner's nest records the pair on the
+// member's binding row only after binding the domain to the replying nest's
+// key — awaited inline, so the roster row the share creates is named the
+// moment it exists. The domain binding is the announce's own
+// (`bind_domain_to_origin`), whose spoof refusal the test above pins.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn a_cross_nest_folder_member_is_named_on_the_owners_roster_at_share_time() {
+    use fauna_client_conversations::ConversationsClient;
+    use fauna_protocol::conversations::WelcomeKind;
+
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, f_authority, f_state) = start_foreign_nest().await;
+
+    // Alice owns a claimed folder channel on H.
+    let mut alice_secret = [0u8; 32];
+    getrandom::fill(&mut alice_secret).unwrap();
+    let alice_id = ActorKeypair::from_secret(alice_secret).actor_id();
+    h_state
+        .db
+        .create_user_with_handle(&alice_id.0, "free", "alice", None)
+        .await
+        .unwrap();
+    let folder_channel = [0x7eu8; 32];
+    h_state
+        .db
+        .claim_folder_channel(&alice_id.0, &folder_channel)
+        .await
+        .unwrap();
+
+    // Bob lives on F with a registered handle; H holds no row for him.
+    let mut bob_secret = [0u8; 32];
+    getrandom::fill(&mut bob_secret).unwrap();
+    let bob_id = ActorKeypair::from_secret(bob_secret).actor_id();
+    f_state
+        .db
+        .create_user_with_handle(&bob_id.0, "free", "bob", None)
+        .await
+        .unwrap();
+
+    // 1. The carrier: F names its own user, both halves, on its reply to the
+    //    folder relay H originates — H asks nothing.
+    let reply = fauna_nest::federation_pool::originate_welcome_deliver(
+        &h_state.federation_pool,
+        &h_state,
+        &f_base,
+        fauna_nest::federation_handlers::FedWelcomeDeliverRequest {
+            recipient_actor_id: hex::encode(bob_id.0),
+            channel_id: Some(hex::encode(folder_channel)),
+            welcome_bytes: b"probe-welcome".to_vec(),
+            channel_type: Some("folder".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the folder relay delivers");
+    assert_eq!(
+        reply.recipient_handle.as_deref(),
+        Some("bob"),
+        "the recipient's nest stamps the handle off its own users row"
+    );
+    assert_eq!(
+        reply.recipient_domain.as_deref(),
+        Some(f_authority.as_str()),
+        "beside its own handle domain — both or neither"
+    );
+
+    // 2. End to end: alice's same-nest `welcome.deliver` with bob's nest URL
+    //    relays, registers bob's binding on H, and names it — before bob's
+    //    client has drained anything.
+    let alice_nest = connected_client(&h_base, ActorKeypair::from_secret(alice_secret)).await;
+    let alice_convs = ConversationsClient::new(Arc::clone(&alice_nest));
+    alice_convs
+        .welcome_deliver(
+            hex::encode(bob_id.0),
+            hex::encode(folder_channel),
+            b"share-welcome".to_vec(),
+            WelcomeKind::Folder {
+                group_id: hex::encode(folder_channel),
+            },
+            Some(f_base.clone()),
+        )
+        .await
+        .expect("the owner's cross-nest folder share relays");
+    assert_eq!(
+        h_state
+            .db
+            .foreign_member_handle(&folder_channel, &bob_id.0)
+            .await
+            .unwrap(),
+        Some(("bob".to_string(), f_authority.clone())),
+        "the owner's nest names the member the moment the share creates its \
+         binding row — the reply's pair, domain-bound to F's key, awaited inline"
+    );
 }

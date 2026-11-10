@@ -17,7 +17,7 @@
   // callback props.
   import { hasNip07, nip07LinkFields } from '#lib/nostr';
   import { identity } from '#lib/store';
-  import { bridgeLinkBlock, bridgeModeApplies, followDisplay, shortId } from '#lib/wasm';
+  import { bridgeCardTitle, bridgeLinkBlock, bridgeModeApplies, followDisplay, shortId } from '#lib/wasm';
   import BridgeSettingRows from '#lib/components/BridgeSettingRows.svelte';
   import { onMount } from 'svelte';
   import { t } from '#lib/i18n/strings';
@@ -125,7 +125,8 @@
 </script>
 
 <div class="card" data-testid={IDS.BRIDGE_CARD}>
-  <h3>{bridge.name}</h3>
+  <!-- The title through the shared composition: a consented bridge app's declared glyph heads it (bridges.md § Coverage contract, outcome 11). -->
+  <h3 data-testid={IDS.BRIDGE_CARD_NAME}>{bridgeCardTitle(bridge.name, bridge.glyph)}</h3>
   {#if !bridge.available}
     <p class="muted">{t.bridges.not_available({ name: bridge.name })}</p>
   {:else if bridge.linked}

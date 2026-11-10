@@ -129,6 +129,11 @@ pub use feed_rules::*;
 mod feed_manager;
 #[cfg(feature = "feed-manager")]
 pub use feed_manager::*;
+// The device's offline outbox (`devices.md` § Offline compose): one per
+// process, wired by the feed manager's connection word and lent to the
+// conversations session too. See src/offline_outbox.rs.
+#[cfg(feature = "feed-manager")]
+mod offline_outbox;
 // The post-blob plane's face takes the cross-crate `fauna_feed::PostSummary`
 // (`post_blob_home`), so it rides the same `feed-manager` gate. See
 // src/post_blob.rs.

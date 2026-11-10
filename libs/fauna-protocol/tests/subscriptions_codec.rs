@@ -372,6 +372,14 @@ fn unsubscribe_request_roundtrip() {
         home_nest_url: None,
         intent: None,
         author_id: ActorId([2u8; 32]),
+        tier: None,
+        extra: Default::default(),
+    });
+    roundtrip(UnsubscribeRequest {
+        home_nest_url: None,
+        intent: None,
+        author_id: ActorId([2u8; 32]),
+        tier: Some("followers".into()),
         extra: Default::default(),
     });
 }

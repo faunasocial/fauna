@@ -48,6 +48,43 @@ pub struct ListedVersion {
     pub signed_as: Option<[u8; 32]>,
 }
 
+/// One **foreign browse scope**'s listing (`ui/media.md` § Cross-nest shared
+/// sets — the foreign browse scope): the set's change log through the
+/// member's own nest, folded to its heads, every head judged under the
+/// scope's custody — what [`MediaNestApi::foreign_listing`] answers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForeignListing {
+    /// The admitted heads as items, each stamped with who the judge found it
+    /// signed as. `folder` is empty and `folder_id` `None`: the set's identity
+    /// and rendered name are the scope's, and the machine renders each
+    /// `path_sealed` under the scope's custody.
+    pub items: Vec<fauna_client_media::media::MediaItem>,
+    /// Heads the judge could not judge yet (a roster unread) — absent from
+    /// this listing, re-read on the page's settle as a held aggregate row is.
+    pub held: usize,
+    /// The HOME nest's content-reachability verdict for the set, relayed
+    /// verbatim; `None` when the home nest stated none.
+    pub reachable: Option<bool>,
+    /// The home nest's residency stamp (`"full"` / `"metadata_only"`) — the
+    /// reading the dot falls back to when `reachable` is absent.
+    pub residency: Option<String>,
+}
+
+impl ForeignListing {
+    /// What `media-source-status` reads for every item of the scope
+    /// (`ui/media.md` § Cross-nest shared sets, the `reachable` stamp): the
+    /// home nest's verdict; absent, the residency the verdict's own first
+    /// term reads — full ⇒ reachable, metadata-only (or unstated) ⇒ not, the
+    /// cautious side.
+    #[must_use]
+    pub fn source_online(&self) -> bool {
+        self.reachable.unwrap_or_else(|| {
+            fauna_core::data::ForeignResidency::parse_stamp(self.residency.as_deref())
+                == Some(false)
+        })
+    }
+}
+
 fauna_core::declare_api_error!(
     @uniffi_flat_error
     /// Failure of a Media page nest interaction (the cross-set read, the
@@ -207,6 +244,32 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// (`media.md` O-4 § Folder scope).
     async fn list_folders(&self) -> Result<Vec<MediaFolder>, MediaApiError>;
 
+    /// The **foreign browse scope**'s listing for the set whose channel is
+    /// `channel`, homed at `home_nest_url` (`ui/media.md` § Cross-nest shared
+    /// sets — the foreign browse scope): `fauna.sync.changes.list { nest_url,
+    /// channel_id }` paged by `since` through the member's own nest, the one
+    /// head fold (`fauna_protocol::sync::head_rows`, sealed-path heads kept),
+    /// every head through the shared judge under the scope's custody
+    /// (`fauna_client_sync::row_judge::judge_foreign_rows`) — a refused or
+    /// held head is absent.
+    ///
+    /// The two failure families stay apart: the home nest's refusal of the
+    /// membership itself (the member was removed —
+    /// `fauna_client_sync::is_access_revoked`) is [`MediaApiError::NotFound`],
+    /// the removal the page names; every other failure is never `NotFound`.
+    ///
+    /// A seam that cannot reach another nest answers unsupported.
+    async fn foreign_listing(
+        &self,
+        _channel: [u8; 32],
+        _home_nest_url: &str,
+    ) -> Result<ForeignListing, MediaApiError> {
+        Err(MediaApiError::Transient {
+            detail: "browsing a folder homed on another nest is not supported on this platform"
+                .to_string(),
+        })
+    }
+
     /// `fauna.sync.changes.record` (`change_type = "create"`) — record a
     /// just-uploaded file as a manifest member of `folder` from the
     /// write-capable `device_id`. For an **owner-only** set `manifest_hash` is
@@ -252,6 +315,39 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         thumbnail_hash: Option<String>,
         path_sealed: Option<Vec<u8>>,
     ) -> Result<(), MediaApiError>;
+
+    /// `fauna.sync.changes.record { nest_url, channel_id }` — a cross-nest
+    /// writer member's record, relayed by the member's own nest to the set's
+    /// home nest as `fauna.federation.folder.changes.record`, where the home
+    /// nest's foreign-member + writer gate decides it
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append; `ui/media.md` § Cross-nest shared sets, *Upload*). One door for
+    /// the upload's `create` (`manifest_hash` set) and the delete's tombstone
+    /// (`change_type = "delete"`, `manifest_hash = None`, `size_bytes = 0`).
+    /// `folder` is the set's name as the record carries it (the channel form
+    /// is the address); the other arguments are [`Self::record_member`]'s.
+    ///
+    /// A seam that cannot reach another nest answers unsupported.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_foreign(
+        &self,
+        _channel: [u8; 32],
+        _home_nest_url: &str,
+        _folder: &str,
+        _device_id: &str,
+        _path: &str,
+        _manifest_hash: Option<String>,
+        _size_bytes: i64,
+        _change_type: &str,
+        _content_key_version: Option<u64>,
+        _thumbnail_hash: Option<String>,
+        _path_sealed: Option<Vec<u8>>,
+    ) -> Result<(), MediaApiError> {
+        Err(MediaApiError::Transient {
+            detail: "writing to a folder homed on another nest is not supported on this platform"
+                .to_string(),
+        })
+    }
 
     /// `fauna.sync.changes.record` (`change_type = "delete"`, `manifest_hash =
     /// None`) — tombstone a member of `folder` from the write-capable
@@ -300,6 +396,30 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         path: &str,
         include_pruned: bool,
     ) -> Result<Vec<ListedVersion>, MediaApiError>;
+
+    /// The version history of the file at `path` in a set homed on **another
+    /// nest** (`ui/media.md` § Cross-nest shared sets): `fauna.files.versions.list
+    /// { nest_url, channel_id }` through the member's own nest, relayed to the
+    /// home nest's `fauna.federation.folder.versions.list`, every version
+    /// judged under the scope's custody
+    /// (`fauna_client_sync::SyncClient::versions_list_judged_foreign`) — a
+    /// refused or held version is absent, as in [`Self::file_versions`].
+    ///
+    /// The failure families are [`Self::foreign_listing`]'s: the home nest's
+    /// refusal of the membership is [`MediaApiError::NotFound`].
+    ///
+    /// A seam that cannot reach another nest answers unsupported.
+    async fn foreign_versions(
+        &self,
+        _channel: [u8; 32],
+        _home_nest_url: &str,
+        _path: &str,
+    ) -> Result<Vec<ListedVersion>, MediaApiError> {
+        Err(MediaApiError::Transient {
+            detail: "reading a folder homed on another nest is not supported on this platform"
+                .to_string(),
+        })
+    }
 
     /// `fauna.files.versions.undelete` — restore a soft-pruned version of the
     /// file at `path` to the listable population (`file-versions.md`

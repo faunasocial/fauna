@@ -29,6 +29,9 @@
 //! - a buyer of one unlock tier is **not** fanned into another rank-1
 //!   unlock tier (the fan-out fires only for undesignated grants — one
 //!   cheap post must never unlock every sold post);
+//! - a pure pay-per-view purchase (minted above `gold`) enrolls the buyer in
+//!   nothing else — neither `gold` nor `followers`, at grant time or at the
+//!   reconcile (rule (a), re-ruled 2026-11-07);
 //! - a pay-per-view tier (rank above the author's highest regular tier)
 //!   is not delivered to a lower-rank subscriber;
 //! - the free rank-0 follower is not fanned into any rank-≥1 unlock tier;
@@ -1231,23 +1234,30 @@ async fn a_client_minted_grant_delivers_the_undesignated_cascade() {
     assert_readable(&state, &author_id, "bronze", &sub, &bronze_key).await;
 }
 
-/// Face 2: `monetization.md:126` ratifies that "buyers of it also
-/// become followers, the ratified rank-0 cascade" — but the pre-fix enqueue
-/// returned `Ok(0)` for a designated grant, so a buyer of a sold post was
-/// enrolled in nothing. Designated→undesignated is the edge that must fire;
-/// designated→designated stays blocked (see
-/// `buying_one_unlock_tier_does_not_unlock_another`, green through this change).
+/// Rule (a)'s designated edge, re-ruled 2026-11-07 (`monetization.md` §
+/// Per-post pay-to-unlock, rule (a); `subscriptions.md` § The free followers
+/// tier — follow and unfollow, rule 6): **a purchase enrolls the buyer in
+/// nothing else.** The fixture is the pure pay-per-view shape no earlier pin
+/// sold — the unlock tier minted ABOVE the author's highest paid tier
+/// (`gold` at 2, the sale at 3), where the old "designated reaches every
+/// undesignated tier at or below it" edge enqueued the buyer for `gold` and
+/// `followers` perpetually: one cheap post buying the paid subscription for
+/// ever. Asserted at both doors that carried the edge — the grant-time
+/// enqueue (`apply_payment`) and the boot/edit reconcile
+/// (`enqueue_unlock_fanout_for_author`, the reconcile's one-author form) —
+/// each absence behind a positive barrier: the buyer's own unlock row IS
+/// pending, and the reconcile DOES heal a real subscriber's missed row in the
+/// same pass.
 #[tokio::test]
-async fn a_buyer_of_a_sold_post_becomes_a_follower() {
+async fn a_pure_pay_per_view_purchase_enrolls_the_buyer_in_nothing_else() {
     let (router, state) = router_with_db().await;
     let author = seed_actor(&state, "author").await;
     let follower = seed_actor(&state, "follower").await;
     let buyer = seed_actor(&state, "buyer").await;
     let author_id = author.actor_id().0;
 
-    // A first follow auto-provisions the reserved rank-0 `followers` tier
-    // (`ensure_followers_tier` writes the ROW only — never a period key), which
-    // is what the rank-0 cascade enrols into.
+    // A first follow provisions the reserved rank-0 `followers` tier, so the
+    // old edge had a rank-0 target to reach.
     subscribe(
         &router,
         state.clone(),
@@ -1256,26 +1266,27 @@ async fn a_buyer_of_a_sold_post_becomes_a_follower() {
         FOLLOWERS_TIER,
     )
     .await;
-
+    create_tier(&router, state.clone(), &author, "gold", 2, None)
+        .await
+        .expect("gold creates");
     create_tier(
         &router,
         state.clone(),
         &author,
-        "post-unlock-a",
-        1,
+        "post-unlock-x",
+        3,
         Some(POST_A),
     )
     .await
-    .expect("unlock tier creates");
+    .expect("pay-per-view tier creates above gold");
 
-    // The buyer pays for the sold post through the unchanged waist.
     let entitlement = PaymentEntitlement {
         provider: "fake".into(),
         payee: ActorId(author_id),
         buyer: Buyer::Actor(buyer.actor_id()),
-        tier: "post-unlock-a".into(),
+        tier: "post-unlock-x".into(),
         valid_until_secs: None,
-        external_ref: "pay_unlock_a".into(),
+        external_ref: "pay_unlock_x".into(),
         return_ref: None,
         purchase_refs: Vec::new(),
         product_reference: None,
@@ -1284,33 +1295,43 @@ async fn a_buyer_of_a_sold_post_becomes_a_follower() {
         .await
         .expect("apply ok");
 
-    let rows = pending(&router, state.clone(), author_id).await;
-    let followers_row = pending_for_sub(&rows, FOLLOWERS_TIER, buyer.actor_id()).expect(
-        "a buyer of a sold post becomes a follower — the ratified rank-0 cascade (monetization.md:126)",
-    );
-    assert!(
-        followers_row.payment_entitled,
-        "the fanned-in rank-0 row must be payment_entitled — the drain pump approves it without creator judgment"
+    let assert_bought_nothing_else = |rows: &[PendingRequest], door: &str| {
+        assert!(
+            pending_for_sub(rows, "post-unlock-x", buyer.actor_id()).is_some(),
+            "barrier ({door}): the buyer's own purchase row is pending"
+        );
+        for tier in ["gold", FOLLOWERS_TIER] {
+            assert!(
+                pending_for_sub(rows, tier, buyer.actor_id()).is_none(),
+                "{door}: a purchase must enroll the buyer in nothing else — \
+                 found a {tier:?} request (monetization.md § Per-post pay-to-unlock, rule (a))"
+            );
+        }
+    };
+    assert_bought_nothing_else(
+        &pending(&router, state.clone(), author_id).await,
+        "grant time",
     );
 
-    // And it is a real follow: the author's client mints, the buyer reads.
-    let followers_key = [0x61u8; 32];
-    common::approve_with_mint(
-        &router,
-        state.clone(),
-        &author,
-        followers_row.request_id,
-        FOLLOWERS_TIER,
-        // Only the buyer: the seeding follower's own follow is still *pending*
-        // (it enqueued — `followers` is keyless), so it is not on the roster the
-        // approve arm reconciles against.
-        &[buyer.actor_id()],
-        &followers_key,
-        2_000,
-    )
-    .await
-    .expect("followers approve ok");
-    assert_readable(&state, &author_id, FOLLOWERS_TIER, &buyer, &followers_key).await;
+    // The reconcile door: a gold subscriber whose fan-out was never enqueued
+    // is the positive control the same sweep must heal.
+    let subscriber = seed_actor(&state, "subscriber").await;
+    state
+        .db
+        .add_subscriber(&author_id, &subscriber.actor_id().0, "gold", None)
+        .await
+        .unwrap();
+    state
+        .db
+        .enqueue_unlock_fanout_for_author(&author_id)
+        .await
+        .expect("reconcile ok");
+    let rows = pending(&router, state.clone(), author_id).await;
+    assert!(
+        pending_for_sub(&rows, FOLLOWERS_TIER, subscriber.actor_id()).is_some(),
+        "barrier (reconcile): the sweep heals a gold subscriber's missed followers row"
+    );
+    assert_bought_nothing_else(&rows, "reconcile");
 }
 
 /// Boundary rule 2 — the granted tier is excluded from its own fan-out. The

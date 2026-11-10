@@ -4,6 +4,9 @@ title: Search within a feed
 section: everyday
 goal: docs/goal/ui/feed.md § Where logic lives
 guide: docs/guides/app-tour.md § Feeds
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -13,7 +16,7 @@ tag; clear it and the full feed is back.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 23b3189e2b.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] Searching narrows the feed by text or tag, and clearing restores it — `docs/goal/ui/feed.md` § Where logic lives
    - `tests/e2e-unified/tests/test_feed_search.py::test_feed_search_filters_posts`
@@ -24,6 +27,10 @@ Stamped 2026-09-19 at 23b3189e2b.
    - `tests/e2e-unified/tests/api/test_feed_search_api.py::test_custom_any_feed_search_narrows_by_body`
 3. [app] A search that matches no posts says so, instead of leaving a blank list — `docs/goal/ui/feed.md` § Errors & edge cases
    - `tests/e2e-unified/tests/test_feed_empty_state.py::test_a_search_with_no_matches_says_so`
+4. [nest] Search, and a custom feed's text rule, match posts from Bluesky, the fediverse and Nostr by their words, and stop matching them once that bridge is turned off — `docs/goal/architecture/feed-read-model.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_feed_search_bridged.py::test_a_fediverse_post_is_found_by_its_words_until_the_bridge_is_off_for_search`
+   - `tests/e2e-unified/tests/api/test_feed_search_bridged.py::test_a_bluesky_post_is_found_by_its_words_until_the_bridge_is_off_for_search`
+   - `tests/e2e-unified/tests/api/test_feed_search_bridged.py::test_a_nostr_post_is_found_by_its_words_until_the_bridge_is_off_for_search`
 
 ## Status
 
@@ -37,6 +44,8 @@ Stamped 2026-09-19 at 23b3189e2b.
 | ios | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -46,4 +55,7 @@ Stamped 2026-09-19 at 23b3189e2b.
 | 2 | nest | `tests/e2e-unified/tests/api/test_feed_search_api.py::test_local_feed_search_narrows_by_body` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_feed_search_api.py::test_custom_any_feed_search_narrows_by_body` | nest (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_feed_empty_state.py::test_a_search_with_no_matches_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_feed_search_bridged.py::test_a_fediverse_post_is_found_by_its_words_until_the_bridge_is_off_for_search` | nest (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_feed_search_bridged.py::test_a_bluesky_post_is_found_by_its_words_until_the_bridge_is_off_for_search` | nest (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_feed_search_bridged.py::test_a_nostr_post_is_found_by_its_words_until_the_bridge_is_off_for_search` | nest (linux): passed |
 <!-- features-render:end -->

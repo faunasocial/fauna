@@ -462,6 +462,13 @@ fn open_search_result(
                 );
             }
         }
+        // The Events page; opening the hit's `event_detail` by its `uid_hash`
+        // (the Events rows' id) is tui's shape and lifts here with the events
+        // trickle-down — until then the jump lands on the page itself.
+        SearchNav::Event { uid_hash: _ } => {
+            stack.set_visible_child_name("events");
+            client.fetch_calendars();
+        }
     }
 }
 

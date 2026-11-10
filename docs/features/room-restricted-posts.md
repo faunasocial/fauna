@@ -4,6 +4,9 @@ title: Post to a room
 section: everyday
 goal: docs/goal/behavior/restricted-posts.md § Encryption at rest
 guide: docs/guides/app-tour.md § Feeds
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -17,7 +20,7 @@ which room it was for.
 
 ## Coverage contract
 
-Stamped 2026-10-13 at f8d0f9ac76.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] When you write a post, your group rooms are offered as its audience, and a post you address to one is sealed under that room's key, so its members open it and someone who was never in the room cannot — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
    - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked`
@@ -70,6 +73,8 @@ Stamped 2026-10-13 at f8d0f9ac76.
     - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock`
 25. [nest] A member who joined a community room without access to its earlier history is never shown, by the room's search, a room post written before they joined — `docs/goal/behavior/community-rooms.md` § Implementation status today
     - `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_a_joiner_without_the_rooms_history_never_finds_an_earlier_room_post`
+26. [app] A member of the room sees the room's name on a repost of one of its posts — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
+    - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock`
 
 ## Status
 
@@ -83,6 +88,8 @@ Stamped 2026-10-13 at f8d0f9ac76.
 | ios | ✅ full | 0.1.5-dev+17b5832c standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -112,4 +119,5 @@ Stamped 2026-10-13 at f8d0f9ac76.
 | 23 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_photo_attached_before_the_room_is_chosen_is_still_sealed_for_the_room` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 24 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 25 | nest | `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_a_joiner_without_the_rooms_history_never_finds_an_earlier_room_post` | nest (linux): passed, nest (macos): passed |
+| 26 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

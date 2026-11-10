@@ -395,6 +395,7 @@ pages:
       - feed-imported-clear   # button — leaves the imported-posts selection for Local (clear_imported); present only beside feed-imported-notice. User-approved 2026-11-01; tui first.
       - content-policy-blocked-notice # text, indexed — v1.x family content-floor block placeholder in place of a post body (renders only for supervised accounts; family-safety.md § Content policy; IDs user-approved 2026-07-15; built on all 7 apps, tui last 2026-08-02). `state` attribute blocked | collapsed (user-approved 2026-10-16; tui first 2026-10-17)
       - content-policy-collapsed-reveal-button # button, indexed — scoped in post-card[i]; a content-policy `collapse` verdict's reveal (user-approved 2026-10-16; tui first 2026-10-17)
+      - content-policy-show-again-button # button, indexed — scoped in post-card[i]; beside the notice with source="reported" only: un-hides what the viewer's own report hid, persisted (moderation.md § Corollary — the reporter's hide is theirs to undo; user-approved 2026-11-08; tui first)
       - content-policy-blocked-reason  # text, indexed — scoped in post-card[i] (and the post detail dialog); the guardian rule's reason, verbatim, beside the notice; absent for a floor (nest-rules.md § The shared rule editor; user-approved 2026-10-20; tui first)
       - region-blocked-notice          # text, indexed — region-policy placeholder in place of a post body, scoped in post-card[i]: blocked/collapsed by which region (region-blocking.md § The blocked render; IDs user-approved 2026-09-25; tui first 2026-09-26)
       - region-blocked-authority       # text, indexed — scoped in post-card[i]; the authority's name as the registry enrols it
@@ -550,6 +551,7 @@ pages:
       - labeler-inspect-model-entries  # view — text-model inspect only
       - content-policy-blocked-notice  # text, indexed — v1.x family content-floor block placeholder in place of a bubble body (renders only for supervised accounts; family-safety.md § Content policy; IDs user-approved 2026-07-15; built on all 7 apps, tui last 2026-08-02). `state` attribute blocked | collapsed (user-approved 2026-10-16; tui first 2026-10-17)
       - content-policy-collapsed-reveal-button # button, indexed — scoped with the notice; a content-policy `collapse` verdict's reveal (user-approved 2026-10-16; tui first 2026-10-17)
+      - content-policy-show-again-button # button, indexed — scoped with the notice; beside the notice with source="reported" only: un-hides what the viewer's own report hid, persisted (moderation.md § Corollary — the reporter's hide is theirs to undo; user-approved 2026-11-08; tui first)
       - content-policy-blocked-reason  # text, indexed — scoped with the notice; the guardian rule's reason, verbatim; absent for a floor (nest-rules.md § The shared rule editor; user-approved 2026-10-20; tui first)
       - region-blocked-notice          # text, indexed — region-policy placeholder in place of a bubble body: blocked/collapsed by which region (region-blocking.md § The blocked render; IDs user-approved 2026-09-25; tui first 2026-09-26)
       - region-blocked-authority       # text, indexed — scoped with the notice; the authority's name as the registry enrols it
@@ -1144,6 +1146,16 @@ pages:
       - account-settings-link      # button — navigate to account settings / page landmark
       - account-actor-id           # text — actor ID display
       - account-actor-id-copy-btn  # button — copy actor ID to clipboard
+      # The identity cell beside the actor id (settings.md § Layout & flow item 1,
+      # ratified 2026-11-07): your own handle and tier, both painted from the
+      # account registry's server-data cache (long-term-store.md § Cross-app
+      # server-data cache), never the quota reply, so they are on the sub-page's
+      # first frame and stay in place while the nest is unreachable; both absent,
+      # not empty, while the cache holds no handle. The handle label was an
+      # optional element from 2026-08-15; promoted to required on all 7 apps and
+      # the tier label added, user-approved 2026-11-08 under rule A. tui leads.
+      - settings-handle-label      # text — the account's own address, "handle@domain", undecorated (fauna_client_accounts::self_address::display_handle)
+      - settings-tier-label        # text — the account's tier name, bare; the shared common.tier label sits beside it, never inside
       - quota-section              # view — quota information section
       - quota-inbox                # text — inbox quota display
       - quota-storage              # text — storage quota display
@@ -1282,12 +1294,8 @@ pages:
       - settings-nest-rules-item         # text, indexed — one rule: verdict, level, reason
       - settings-nest-rules-version      # text — sequence + issued-at
       - settings-nest-rules-inert-notice # text, indexed — a rule, or the document, not applied on this device
-      # Handle display label. Previously registered but never referenced by any
-      # list (2026-08-15) — real on ios (Settings root list, per
-      # SettingsView.swift), windows (Account sub-page), and web (default/status
-      # sub-page); absent on linux — a separate linux-area parity gap, not this
-      # row's job (see tests/e2e-unified/tests/test_navigation.py's landmark note).
-      - settings-handle-label      # text — user's handle, "@handle@domain"
+      # (settings-handle-label sat here from 2026-08-15 to 2026-11-08; it is now a
+      # required element of the identity cell — see the page's elements.)
       # Desktop Settings sidebar-swap shell — the single "leave settings" rail-top
       # affordance (settings.md § Navigation model, ratified 2026-06-03). Landed on
       # all four desktop shell clients (linux reference, web, windows, macos —
@@ -2711,6 +2719,9 @@ pages:
       - folder-paywall-hint     # text, indexed — the "create a tier first" line beside folder-paywall-tier-select, present exactly while the select is disabled for want of an own tier (user-approved 2026-10-16)
       # ── Create wizard (name entered ONCE, here) ──
       - wizard-name-input        # text_input — folder name (entered once, at create)
+      # Create-time audience (born public; folders.md § Audience and website serving → Born public; IDs user-approved 2026-11-08).
+      - wizard-audience-select   # select — who can see the new folder: Private | Public (audience_options(false, current); default Private), a field of the Name step, never a step; on Public, wizard-create-button arms folder-audience-public-confirm and confirming is the gesture that creates
+      - wizard-audience-hint     # text — the line beside wizard-audience-select that audience_hint(false, current) resolves to (the owner row's same text)
       - wizard-device-check      # checkbox, indexed — device enrollment checkbox
       # Place flags replace the role picker (phase 2 slice e, IDs user-approved 2026-08-15).
       # There is NO type step: a folder has no mode (folders.md § Target re-model).
@@ -4149,6 +4160,15 @@ onboarding:
   # user-approved 2026-08-11 under rule A — no convention sibling; widened to iOS
   # (one shared FaunaKit view on both apple targets) user-approved 2026-11-01.
   launch_progress:
+    elements:
+      # onboarding.md § App-launch routing → The cached identity on the launch
+      # surfaces (ratified 2026-11-07; id user-approved 2026-11-08 under rule A):
+      # the bound account's cached identity, "handle@domain · tier", from the
+      # account registry's server-data cache, composed once in shared Rust —
+      # absent, not empty, when the cache holds no handle (a first launch, an
+      # import). Shared with launch_retry; the other launch surfaces each name
+      # their own problem and do not carry it. tui leads.
+      - launch-identity-label
     platform_elements:
       macos: [launch-status]
       ios: [launch-status]
@@ -4171,6 +4191,11 @@ onboarding:
       # launch-recover-button it needs no custodied seed, only a cloud token.
       # Opens nest_retire (rule-A approved 2026-09-25).
       - launch-retire-button
+      # The bound account's cached identity, "handle@domain · tier" — the same
+      # element launch_progress carries (onboarding.md § App-launch routing →
+      # The cached identity on the launch surfaces; user-approved 2026-11-08
+      # under rule A). Absent, not empty, when the cache holds no handle.
+      - launch-identity-label
     optional_elements:
       # box-recovery.md § Restore: total box loss leaves a surviving pinned
       # device's launch flow here (nest permanently unreachable). This is the
@@ -5129,19 +5154,31 @@ components:
         wired on feed's post-image tap in the list card (PostCardView.swift) — mirrors
         web's C2paImage wiring on the same surface. Fixed 2026-07-18: the prior note
         claimed this worked, but the component existed with zero callers anywhere
-        (dead code, same class of gap as linux's) until this session wired it."
+        (dead code, same class of gap as linux's) until this session wired it.
+        Conversations too since 2026-11-06: a received dm-attachment-image's tap
+        (DmMessageBubble.swift, shared with macos) opens it over the thread; Escape
+        (a cancel-action shortcut, and the driver's press_key door) dismisses it. Since
+        2026-11-09 a placeholder dm-attachment-image (bytes absent) opens it as well,
+        painting the declared filename and size where the picture would be."
       macos: "Shared FaunaKit ImageLightbox (same component as iOS — the legacy
         macOS-only LightboxOverlay this note used to describe was deleted 2026-05-11
         with the unified-conversations migration and never reinstated until this
         session), wired on feed's post-image tap in the list card
-        (MacPostCardView.swift)."
+        (MacPostCardView.swift), and since 2026-11-06 on a received
+        dm-attachment-image in the shared DmMessageBubble (the iOS note's wiring);
+        since 2026-11-09 the placeholder (bytes absent) opens it too, in its
+        placeholder form (the declared filename and size in place of the picture)."
       linux: "views/lightbox.rs::show_image_lightbox (Modal Window with Picture widget).
         WIRED on feed's post-image since 2026-07-30 via the sibling
         show_image_lightbox_paintable, which reuses the gdk::Texture the card already
         decoded. Before that it had ZERO callers from the feed: the click wrote the blob
         to a hard-coded /work/tmp/fauna-blob-… path and opened nothing (a stale doc
         comment on post_list.rs::build_post_image claimed otherwise). conversations'
-        dm-attachment-image still has no click handler — the remaining per-page gap."
+        dm-attachment-image is wired too since 2026-11-06: the bubble's picture is a flat
+        button whose click opens the same paintable lightbox, and the lightbox window
+        binds Escape to close. Since 2026-11-08 the placeholder (bytes absent) is the
+        same flat button, opening show_image_lightbox_placeholder — the same window,
+        the declared filename and size in place of the picture."
       tui: "One painter, lightbox.rs, serves both wired pages: a modal overlay element
         painted while feed.lightbox (a post-image click) or conversations.lightbox (a
         received dm-attachment-image click, since 2026-11-05) is Some, dismissed with
@@ -5152,9 +5189,12 @@ components:
         kitty/iTerm2/sixel terminal the graphics painter scales the same pixels into the
         bigger rect, so it gains real detail. An image whose bytes never arrived still
         opens, as the placeholder (never a silently-dropped click)."
-      web: "Lightbox.svelte component, wired ONLY on feed's post-image (via C2paImage's
-        onclick) — verified 2026-07-17. conversations' dm-attachment-image is a plain
-        <img> with no click handler; media's items aren't wired either."
+      web: "Lightbox.svelte component, wired on feed's post-image (via C2paImage's
+        onclick) — verified 2026-07-17 — and since 2026-11-06 on conversations'
+        dm-attachment-image (the bubble's picture is a C2paImage too); since 2026-11-08
+        the placeholder (bytes absent) is a button opening the same component in its
+        placeholder mode, the declared filename and size in place of the picture;
+        media's items aren't wired."
       all: >
         SURFACE (settled 2026-07-30, closing what this component's notes previously
         called "a real priority-#1 divergence, not just a coverage gap"): the unified
@@ -5164,7 +5204,9 @@ components:
         remaining work is per-page, not per-app. Conversations: activating a
         received dm-attachment-image opens the lightbox over the thread, Escape
         closes it — wired on tui first (2026-11-05,
-        test_conversations_image_lightbox.py), the other six to follow. Media: a
+        test_conversations_image_lightbox.py), then linux, web, macos and ios
+        (2026-11-06; macos and ios through the shared DmMessageBubble) and windows
+        (2026-11-08), android to follow. Media: a
         media-item tap already opens media-item-detail, so the page has no free
         gesture; whether a preview inside media-item-detail becomes the trigger or
         media leaves used_in waits on an owner ruling, and no app wires it until then.
@@ -5173,7 +5215,12 @@ components:
         count=1/visible=False to FlaUI, 2026-09-07). Wired on feed's post-image and on
         the profile's Posts tab (the same post-card). The ContentDialog twins
         ConversationsPage and MediaPage carried had no caller and were retired
-        2026-11-04: a page that wires a trigger hosts this one control."
+        2026-11-04: a page that wires a trigger hosts this one control.
+        Conversations since 2026-11-08: ConversationsPage hosts it, and a
+        dm-attachment-image click (the bubble's picture is a transparent Button, the
+        post-image's shape) opens it over the thread, as the declared placeholder when
+        the bytes are absent; it focuses itself on open, closes on Escape, and closes
+        when its thread is left."
 
   c2pa-badge:
     description: "Content provenance badge showing C2PA verification status and details"
@@ -5354,7 +5401,7 @@ components:
       linux: "Inline in post_list.rs."
 
   feed-post-actions-menu:
-    description: "Per-post-card overflow flyout opened by feed-post-actions-button (the dm-message-actions-menu precedent applied to posts). Hosts the trained-topic-factor training verbs (topic-factors.md § Authoring surface, IDs user-approved 2026-07-09) — more/less-like-this train the current feed's dominant trained factor directly (train-in-context); with no in-context factor they open feed-post-train-target-sheet — and own-post delete (feed.md § State & data shape → Post deletion, IDs user-approved 2026-07-16). Training verbs: DONE on all 6 pre-flip clients (topic-factors.md § Implementation status today — S8 closed 2026-07-18 on android, the last one) and on tui. Delete: DONE on all 7 apps (linux lead 2026-07-16; web 2026-07-17; windows + android + apple 2026-07-18 — feed.md § Implementation status today; tui 2026-08-13, closing the last gap). The web-publish family below is BUILT on all 7 apps: tui (lead) 2026-08-13, linux/web/android the same day, macos/ios 2026-08-14, windows 2026-08-15."
+    description: "Per-post-card overflow flyout opened by feed-post-actions-button (the dm-message-actions-menu precedent applied to posts). Hosts the trained-topic-factor training verbs (topic-factors.md § Authoring surface, IDs user-approved 2026-07-09) — more/less-like-this train the current feed's dominant trained factor directly (train-in-context); with no in-context factor they open feed-post-train-target-sheet — and own-post delete (feed.md § State & data shape → Post deletion, IDs user-approved 2026-07-16). Training verbs: DONE on all 6 pre-flip clients (topic-factors.md § Implementation status today — S8 closed 2026-07-18 on android, the last one) and on tui. Delete: DONE on all 7 apps (linux lead 2026-07-16; web 2026-07-17; windows + android + apple 2026-07-18 — feed.md § Implementation status today; tui 2026-08-13, closing the last gap). The web-publish family below is BUILT on all 7 apps: tui (lead) 2026-08-13, linux/web/android the same day, macos/ios 2026-08-14, windows 2026-08-15. Also hosts the spam/report pair on someone else's post — feed-post-report-button (moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; built on all 7 apps by 2026-10-08) beside feed-post-mark-as-spam-button (report-sharing.md § Report capture → The post's mark-as-spam verb; ruled and IDs user-approved 2026-11-07; unbuilt, tui leads) — the dm-message-actions-menu spam/report pair applied to posts."
     elements:
       - feed-post-more-like-this      # indexed — train this post as a POSITIVE example into the target trained factor (explicit signal; toggle — tap again to undo)
       - feed-post-less-like-this      # indexed — train this post as a NEGATIVE example (toggle; flipping verbs re-trains)
@@ -5368,7 +5415,8 @@ components:
       - feed-post-unpublish-web-button     # indexed — take the published page down (fauna.web.publish.unset; one-tap — idempotent + reversible, unlike delete); gated is_own && web_slug
       - feed-post-copy-web-link-button     # indexed — copy the public page URL (shared site_link_view origin + post/{slug}.html; the selling link — visitors get the teaser); gated is_own && web_slug; disabled with reason when no serving origin
       - feed-post-copy-paywall-link-button # indexed — mint + copy a short-lived full-access capability URL (fauna.web.paywall.mint_token; UI copy states the ~10-min validity — durable comps are Pillar-3 claim codes); gated is_own && web_slug && gated_tier (monetization.md § Pillar 2 → Creator comp-link surface)
-      - feed-post-report-button            # indexed — report this post to your nest admins (opens the shared report-sheet with subject post {cid}); gated !is_own (moderation.md § User-initiated reporting → App surface; IDs user-approved 2026-09-25; unbuilt on every app — tui leads)
+      - feed-post-report-button            # indexed — report this post to your nest admins (opens the shared report-sheet with subject post {cid}); gated !is_own (moderation.md § User-initiated reporting → App surface; IDs user-approved 2026-09-25; built on all 7 apps by 2026-10-08). The post's mark-as-spam verb sits beside it (report-sharing.md § Report capture → The post's mark-as-spam verb, ruled 2026-11-07; IDs user-approved 2026-11-07)
+      - feed-post-mark-as-spam-button      # indexed — mark someone else's post as spam, or un-mark it (a toggle; state on/off off the spam_marked list): MailSettingsMachine::train_moderation_correction(post_id, is_spam) — the sealed model half when mail is on, then fauna.moderation.train {spam|ham} (the opt-in report:spam capture) — plus the marker's own spam collapse (report-sharing.md § Report capture → The post's mark-as-spam verb; ruled 2026-11-07; IDs user-approved 2026-11-07); gated !is_own; sits BESIDE the report verb, never replacing it
     used_in: [feed (inside post-card)]
 
   post-tip-list:
@@ -5691,7 +5739,7 @@ components:
       - dm-message-delete-button          # delete this message; gated supports_message_delete && is_own
       - dm-message-delete-confirm-button  # destructive-action confirm step for delete
       - dm-message-mark-as-spam-button    # indexed — mark a received message as spam; gated !is_own. The live Insert consumer (mail-spam.md § Wire shapes put_spam_model history_op): trains the per-user spam model client-side (sealed, self-servicing tier-1) AND writes a sealed training-history row via train_spam_model_client_mail → apply_spam_model_write(Train, Some(HistoryWrite::Insert)). On a mail-disabled actor (no spam-model-sealed-at-rest advert) the gesture is a silent no-op — a conversation message is client-only encrypted content the nest cannot read, so there is NO server-train (fauna.moderation.train) fallback (unlike the moderation-queue server-row correction). NOT the muted-keyword collapse (that's dm-message-muted).
-      - dm-message-report-button          # indexed — report this received message to your nest admins (opens the shared report-sheet with subject message {channel, record_cid}); gated !is_own. Sits BESIDE mark-as-spam, never replacing it: spam trains the reporter's own sealed model and reaches no human, report is evidence to an admin (moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; unbuilt on every app — tui leads)
+      - dm-message-report-button          # indexed — report this received message to your nest admins (opens the shared report-sheet with subject message {channel, record_cid}); gated !is_own. Sits BESIDE mark-as-spam, never replacing it: spam trains the reporter's own sealed model and reaches no human, report is evidence to an admin (moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; built on all 7 apps by 2026-10-08)
     used_in: [conversations.conversation_detail]
     notes:
       web: "MenuFlyout-equivalent; built emoji-grid flyout for the 'more' picker (no native web emoji UI)."
@@ -6477,7 +6525,7 @@ components:
       linux: "Standalone Moderation page: one row per merged QueueRow — the union of server ObligationActions (content-label-badge + action + confidence) and the client's post-decrypt local detections (content-label-badge + confidence, BLANK action column) — each with a train-correction-button (views/moderation.rs)."
 
   report-sheet:
-    description: "The shared report sheet (moderation.md § User-initiated reporting → App surface; IDs user-approved 2026-09-25) — opened by feed-post-report-button, dm-message-report-button or profile-report-button, present only while open. Every decision inside it is shared Rust (fauna_client_moderation::report — the takedown console's twin): the reason list as LocalizedText, the note/excerpt bounds, the sealed-subject rule for the include-text checkbox, the acknowledgement naming the destination(s). Submit → fauna.moderation.abuse_report.submit {subject, reason, note?, excerpt?, block_author}; failures go to the page's error-message. Unbuilt on every app — tui leads."
+    description: "The shared report sheet (moderation.md § User-initiated reporting → App surface; IDs user-approved 2026-09-25) — opened by feed-post-report-button, dm-message-report-button or profile-report-button, present only while open. Every decision inside it is shared Rust (fauna_client_moderation::report — the takedown console's twin): the reason list as LocalizedText, the note/excerpt bounds, the sealed-subject rule for the include-text checkbox, the acknowledgement naming the destination(s). Submit → fauna.moderation.abuse_report.submit {subject, reason, note?, excerpt?, block_author}; failures go to the page's error-message. Built on all 7 apps 2026-09-27 to 2026-10-08."
     elements:
       - report-reason-select          # select — one of the eight report reasons (spam · harassment · hate · violence · sexual · illegal · impersonation · other): a report-reason vocabulary, deliberately not the canonical-5 label categories
       - report-note-input             # text_input — bounded free text for the admins (the bound is a shared-Rust constant)
@@ -6496,6 +6544,7 @@ components:
   bridge-card:
     description: "Bridge: name, identity, link status, settings rows, follows list"
     elements:
+      - bridge-card-name            # text — the card's painted title from the shared bridge_card_title: a consented bridge app's declared glyph + its name ("🌐 Matrix"), the bare name on a first-party card (bridges.md § Coverage contract, outcome 11); owner-approved 2026-11-08
       - bridge-action-button
       - bridge-link-blocked-reason
       - bridge-identity             # text — LINKED only: "<label>: <display>" from BridgeStatus.identity (bridges.md § Link modes); user-approved 2026-10-16
@@ -7264,6 +7313,7 @@ components:
       - subscription-provider-form-kind               # select — provider kind
       - subscription-provider-form-secret              # text_input — webhook-verification secret
       - subscription-provider-form-tier-map            # select — provider product/plan → tier mapping (first cut: one mapping)
+      - subscription-provider-form-product             # text_input — optional: the product the tier is sold as (Stripe: the Payment Link id); empty = every verified payment maps
       - subscription-provider-form-webhook-url         # text — the nest webhook URL to register at the provider dashboard (read-only, recomputes with the kind select)
       - subscription-provider-form-webhook-url-copy-button  # button — copy the webhook URL to the clipboard
       - subscription-provider-form-return-url         # text — the paywall return URL to paste into the provider's post-checkout redirect (read-only, recomputes with the kind select)
@@ -8165,6 +8215,9 @@ elements:
   launch-status:
     description: "macOS + iOS 'Signing in…' status text shown on the launch progress spinner while the launch verdict is pending, before any retry state is known (distinct from launch_retry, which models the failure case). User-approved 2026-08-11 under rule A for macOS; widened to iOS (the shared FaunaKit view) user-approved 2026-11-01."
     type: text
+  launch-identity-label:
+    description: "The bound account's cached identity on the launch_progress and launch_retry surfaces, 'handle@domain · tier', from the account registry's server-data cache, composed once in shared Rust — so a person whose nest is unreachable sees which account and nest the app is trying (onboarding.md § App-launch routing → The cached identity on the launch surfaces). Absent, not empty, when the cache holds no handle. User-approved 2026-11-08 under rule A."
+    type: text
   # (security.md § Transport trust): the nest-identity-changed
   # launch surface (page launch_identity_changed). ALL-APP since 2026-07-13 —
   # these were `web_only: true` while only web could detect a changed pin; the
@@ -8628,7 +8681,10 @@ elements:
     description: "Toolbar control returning a navigated More sub-view to the More hub's root list (iOS). Row 23, user-approved 2026-08-11 under rule A."
     type: button
   settings-handle-label:
-    description: "Label showing user's handle on settings page"
+    description: "The identity cell's handle on the Settings Status sub-page: the account's own address, 'handle@domain', undecorated — the shared fauna_client_accounts::self_address::display_handle string — painted from the account registry's server-data cache, never the quota reply (settings.md § Layout & flow item 1). Optional from 2026-08-15; required on all 7 apps, user-approved 2026-11-08 under rule A."
+    type: text
+  settings-tier-label:
+    description: "The identity cell's tier on the Settings Status sub-page: the account's tier name, bare, with the shared common.tier label beside it and never inside the element's text — painted from the account registry's server-data cache, never the quota reply, so it is on the first frame and stays while the nest is unreachable (settings.md § Layout & flow item 1). User-approved 2026-11-08 under rule A."
     type: text
   # --- Feed ---
   feed-view:
@@ -8723,7 +8779,7 @@ elements:
     type: text
     indexed: true
   gated-post-payment-link:
-    description: "Open the sold-post offer's external payment_url (off-platform checkout). Mirrors subscription-offer-payment-link."
+    description: "Subscribe to the sold post's unlock tier first, then open the offer's external payment_url (off-platform checkout). Mirrors subscription-offer-payment-link."
     type: button
     indexed: true
   gated-post-buy-button:
@@ -9620,6 +9676,9 @@ elements:
     description: "One bridge row (indexed): name, identity, link status, settings rows, follows list."
     type: view
     indexed: true
+  bridge-card-name:
+    description: "A bridge card's title, scoped inside bridge-card[i]: the shared bridge_card_title — a consented bridge app's declared glyph emoji then its name ('🌐 Matrix'), the bare name on a first-party provider's or a plugin's card. Owner-approved 2026-11-08."
+    type: text
   bridge-action-button:
     description: "Link/Unlink button on a bridge item"
     type: button
@@ -10009,6 +10068,10 @@ elements:
     type: button
   feed-post-report-button:
     description: "Report this post to your nest admins (in the feed-post-actions-menu overflow; gated !is_own). Opens the shared report-sheet with subject post {cid}. moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; painted on all 7 apps."
+    type: button
+    indexed: true
+  feed-post-mark-as-spam-button:
+    description: "Mark someone else's post as spam, or un-mark it (a toggle in the feed-post-actions-menu overflow, beside feed-post-report-button; gated !is_own) — the post twin of dm-message-mark-as-spam-button. One press runs MailSettingsMachine::train_moderation_correction(post_id, true): the sealed per-user model half when mail is on, then fauna.moderation.train {spam} (the opt-in report:spam capture, nothing else) — and collapses the post in the marker's own view through a spam label at 1000‰ folded off the spam_marked list on the sealed account-state record fauna.state.moderation; a second press runs the ham verdict and lifts the mark. Sits BESIDE the report verb, never replacing it. report-sharing.md § Report capture → The post's mark-as-spam verb; ruled 2026-11-07; IDs user-approved 2026-11-07; unbuilt (tui leads)."
     type: button
     indexed: true
   feed-post-publish-web-button:
@@ -11151,6 +11214,14 @@ elements:
   wizard-name-input:
     type: text_input
     description: "File set wizard name input"
+    indexed: false
+  wizard-audience-select:
+    type: select
+    description: "Who can see the new folder, chosen on the wizard's Name step beside wizard-name-input: Private | Public, the option set fauna_folders_machine::audience_options(false, current) (a new folder is unbound, so exactly those two), default Private; never a step and never a type — the retired wizard-mode-* stay retired. On Public, wizard-create-button arms the owner row's own folder-audience-public-confirm (with its names and re-seal warning lines, reused on the same page) in place of creating, and confirming is the gesture that creates: the folder is public from its first row and the owner attestation is signed over the nest-minted id. Shared Rust FolderWizardMachine::set_audience. User-approved 2026-11-08. Behavior authority docs/goal/ui/folders.md § Audience and website serving → Born public"
+    indexed: false
+  wizard-audience-hint:
+    type: text
+    description: "The hint beside wizard-audience-select on the wizard's Name step: the text fauna_folders_machine::audience_hint(false, current) resolves to, the same line the owner row shows beside folder-audience-select, where the user learns that a public folder's name is its URL segment before typing more. One i18n string per state, all apps. User-approved 2026-11-08. Behavior authority docs/goal/ui/folders.md § Audience and website serving → Born public"
     indexed: false
   wizard-device-check:
     type: checkbox
@@ -13528,6 +13599,10 @@ elements:
     type: button
     description: "Reveal affordance beside a content-policy-blocked-notice in state `collapsed` — one tap shows the post/bubble for this session; the floor itself persists. A `blocked` notice has none. Twin of region-collapsed-reveal-button. User-approved 2026-10-16 under rule A."
     indexed: true
+  content-policy-show-again-button:
+    type: button
+    description: "The show-again control beside a content-policy-blocked-notice with `source=\"reported\"` — and only there. One activation un-hides, through the shared `unhide_reported` delta, every hidden id that matched the item (its own id, its author's, or both), so the item paints again on all the user's devices; the label names the scope (`moderation.report.show_again_item` / `show_again_account`), picked by the shared `obligation::show_again_for_item`. A persisted write, never the session-local content-policy-collapsed-reveal-button; showing again does not withdraw the report (moderation.md § Corollary — the reporter's hide is theirs to undo). Scoped with the notice (post-card[i] on the feed, the conversation bubble). User-approved 2026-11-08 under rule A; tui first."
+    indexed: true
   content-policy-blocked-reason:
     type: text
     description: "The guardian's own reason text beside a content-policy-blocked-notice, rendered VERBATIM beside the app's frame (never inside the notice's text, never an i18n string, never paraphrased). Present only when a rule of the guardian's document, written in the shared rule editor, drove the verdict — a floor, an unreadable document or the viewer's own threshold paints the frame alone. Block and collapse arms alike, scoped with the notice (post-card[i] on the feed, the post detail dialog, the conversation bubble). Twin of nest-blocked-reason / region-blocked-reason (nest-rules.md § The shared rule editor → The reason is the member's to read). User-approved 2026-10-20 under rule A."
@@ -13626,7 +13701,7 @@ elements:
     description: "The joining nest's rules heading, directly above the by-continuing terms notice — on invite_request, and on handle_entry while its Continue signs in (nest-rules.md § Acceptance at joining); it carries the not-applied sentence when none of the document applies on this device, whether or not any rule is listed. Absent for a nest with no rules."
   onboarding-nest-rules-item:
     type: text
-    description: "One rule at joining: its verdict, level and the nest's reason, from the shared NestRulesSummary."
+    description: "One rule at joining: its verdict, level and the nest's reason, from the shared NestRulesSummary — and, for a rule not applied on this device (NestRuleLine::inert), the crate's not-applied note under the line."
     indexed: true
   onboarding-terms-notice:
     type: text
@@ -15332,7 +15407,7 @@ elements:
     type: button
     indexed: true
   profile-follow-button:
-    description: "Follow this creator — i.e. subscribe to the free 'followers' tier (OTHER view only). feed.md § Encryption at rest: followers is the always-present free default tier."
+    description: "Follow ⇄ Following toggle (OTHER view only): Follow subscribes to the free 'followers' tier; Following pressed unfollows (leaves it), confirm-gated when the viewer holds a paid tier at this creator (subscriptions.md § The free followers tier — follow and unfollow; the unfollow half is not built yet). feed.md § Encryption at rest: followers is the always-present free default tier."
     type: button
   profile-start-dm-button:
     description: "Start a DM with this user — opens Conversations compose with the recipient pre-filled (OTHER view only). Nav shortcut, no new persistence. profile.md § Where logic lives → Start DM action; conversations.md."
@@ -15541,7 +15616,7 @@ elements:
     type: text
     indexed: true
   subscription-offer-payment-link:
-    description: "Open the tier's external payment_url (off-platform checkout)."
+    description: "Subscribe to the tier first (the pending request the payment completes), then open its external payment_url (off-platform checkout), carrying the buyer's actor id as client_reference_id for a host the shared rule names."
     type: button
     indexed: true
   subscription-offer-subscribe-button:
@@ -15589,6 +15664,9 @@ elements:
   subscription-provider-form-tier-map:
     description: "Provider product/plan → tier mapping (first cut: one mapping)."
     type: select
+  subscription-provider-form-product:
+    description: "Optional — the one product the tier is sold as, in the provider's own reference (Stripe: the Payment Link id, plink_…). Set, only a verified payment naming that product (or a purchase it recorded) grants the tier — a tip link on the same account mints nothing; empty keeps today's behaviour (every verified payment maps). Not a secret: pre-filled from the listed provider when its kind is picked, sent as shown on save (an emptied field clears the mapping). ID approved 2026-11-07. monetization.md § Pillar 3 → Configuration."
+    type: text_input
   subscription-provider-form-save:
     description: "Save the provider add/edit form."
     type: button

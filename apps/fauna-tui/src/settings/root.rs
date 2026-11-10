@@ -137,6 +137,17 @@ pub(super) fn root_page(
         Element::label(ids::ACCOUNT_ACTOR_ID, state.account_actor_id.clone()),
         actor_id_copy_button(state),
     ];
+    // The identity cell (`settings.md` § Layout & flow item 1): from the
+    // registry's cache, on the first frame, absent while it holds no handle.
+    // The tier's `common.tier` label rides beside it, never inside the text.
+    if let Some(handle) = &state.identity.handle {
+        els.push(
+            Element::label(ids::SETTINGS_HANDLE_LABEL, handle.clone()).labelled(common::HANDLE),
+        );
+        if let Some(tier) = &state.identity.tier {
+            els.push(Element::label(ids::SETTINGS_TIER_LABEL, tier.clone()).labelled(common::TIER));
+        }
+    }
     // quota-section registers ONLY after the fetch resolves — so the driver's
     // `wait_for("quota-section")` waits for real data (linux's `{#if quota}`).
     if let Some(quota) = &state.quota {
@@ -979,6 +990,43 @@ mod tests {
             !by_id("account-actor-id-copy-btn"),
             "Copy acts now — it must keep the brackets"
         );
+    }
+
+    /// The identity cell (`settings.md` § Layout & flow item 1): handle and
+    /// tier paint right after the actor id's copy button from the cached
+    /// values, the tier's `common.tier` label beside the bare tier, and both
+    /// are absent — not empty — while the cache holds no handle.
+    #[test]
+    fn the_identity_cell_paints_after_the_actor_id_and_is_absent_without_a_handle() {
+        let ids_of = |state: &SettingsState| {
+            root_elements(state)
+                .into_iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>()
+        };
+        let empty = SettingsState::default();
+        let ids = ids_of(&empty);
+        assert!(!ids.iter().any(|i| i == "settings-handle-label"));
+        assert!(!ids.iter().any(|i| i == "settings-tier-label"));
+
+        let state = SettingsState {
+            identity: super::super::IdentityCell {
+                handle: Some("alice@fauna.test".into()),
+                tier: Some("plus".into()),
+            },
+            ..SettingsState::default()
+        };
+        let els = root_elements(&state);
+        let pos = |id: &str| els.iter().position(|e| e.id == id).unwrap();
+        assert_eq!(
+            pos("settings-handle-label"),
+            pos("account-actor-id-copy-btn") + 1
+        );
+        assert_eq!(pos("settings-tier-label"), pos("settings-handle-label") + 1);
+        let tier = &els[pos("settings-tier-label")];
+        assert_eq!(tier.text, "plus");
+        assert_eq!(tier.label.as_deref(), Some(common::TIER));
+        assert_eq!(els[pos("settings-handle-label")].text, "alice@fauna.test");
     }
 
     /// The copy confirms on the button and reports what it copied — the id,

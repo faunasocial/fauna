@@ -20,6 +20,7 @@ const { heading, lead, rest } = takeOpening(fill(await compiledContent()));
 // The public column labels. The catalog's app keys are internal spellings; a visitor
 // reads platform names. Keyed off matrix.apps so a new column appears here the day it
 // appears there — an unknown key falls back to its own name rather than vanishing.
+// public-text: site-features
 const APP_LABELS: Record<string, string> = {
   web: 'Web',
   linux: 'Linux',
@@ -28,7 +29,10 @@ const APP_LABELS: Record<string, string> = {
   ios: 'iOS',
   android: 'Android',
   tui: 'Terminal',
+  'android-kids': 'Fauna Kids (Android)',
+  'ios-kids': 'Fauna Kids (iOS)',
 };
+// public-text-end: site-features
 
 // What each state MEANS, as a cell tooltip — the legend in the copy says it once in
 // prose, and this repeats it where the reader's cursor already is.

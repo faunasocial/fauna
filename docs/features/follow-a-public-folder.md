@@ -4,6 +4,9 @@ title: Follow someone's public folder
 section: your data and devices
 goal: docs/goal/ui/folders.md § Following a public folder
 guide: docs/guides/who-can-see-what.md § Folders you make public
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -14,7 +17,7 @@ they take it private again, your copy stops updating.
 
 ## Coverage contract
 
-Stamped 2026-09-22 at 963ffb408a.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] Following a public folder lists it, and Media browses it read-only — `docs/goal/ui/folders.md` § Following a public folder
    - `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_follow_a_public_folder_and_browse_it_in_media`
@@ -39,19 +42,23 @@ Stamped 2026-09-22 at 963ffb408a.
 10. [app] A file in a folder you follow can be downloaded from the browse, with no account on the owner's nest — `docs/goal/ui/media.md` § Followed public folders
    - `tests/e2e-unified/tests/test_tui_media_external_open.py::test_a_followed_folders_file_on_another_nest_opens_with_no_account_there`
    - `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_a_followed_folders_file_on_another_nest_downloads_with_no_account_there`
+11. [app] The folders you follow are the same on all your devices, and stopping on one stops on the others — `docs/goal/architecture/config-dissolution.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_follows_are_the_same_on_another_of_your_devices_and_an_unfollow_reaches_both`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| linux | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+2b0759a1 standalone |
+| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -68,4 +75,5 @@ Stamped 2026-09-22 at 963ffb408a.
 | 9 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_followed_row_says_whose_folder_it_is` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_tui_media_external_open.py::test_a_followed_folders_file_on_another_nest_opens_with_no_account_there` | tui (linux): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_a_followed_folders_file_on_another_nest_downloads_with_no_account_there` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_follows_are_the_same_on_another_of_your_devices_and_an_unfollow_reaches_both` | tui (linux): passed |
 <!-- features-render:end -->

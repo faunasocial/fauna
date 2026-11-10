@@ -4,6 +4,9 @@ title: Several identities in one app
 section: your data and devices
 goal: docs/goal/architecture/long-term-store.md § Multi-account evolution (target state)
 guide: docs/guides/identity-and-devices.md § Several identities on one device
+absences:
+  android (outcome 14): "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
+  ios (outcome 14): "docs/goal/architecture/apps/account-scoping.md § Concurrent instances"
 ---
 
 ## What a user gets
@@ -16,7 +19,7 @@ identity you had.
 
 ## Coverage contract
 
-Stamped 2026-09-25 at efcea449ea.
+Stamped 2026-11-07 at b844c771f6.
 
 1. [app] The switcher lists your identities, switches between them, and reveals the admin one — `docs/goal/architecture/long-term-store.md` § Multi-account evolution (target state)
    - `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_account_switcher_lists_switches_and_reveals_admin`
@@ -126,19 +129,31 @@ Stamped 2026-09-25 at efcea449ea.
    - `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_removing_an_identity_deletes_its_data_and_leaves_the_others`
    - `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_removing_an_identity_deletes_its_data_and_leaves_the_others`
    - `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_removing_an_identity_deletes_its_data_and_leaves_the_others`
+16. [app] When Add account finishes, you are signed in as the new identity in a working session — `docs/goal/architecture/long-term-store.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_account_switcher_tui.py::test_tui_add_account_appends_second_identity_to_registry`
+   - `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_add_account_appends_second_identity_to_registry`
+   - `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_add_account_appends_second_identity_to_registry`
+   - `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_add_account_appends_second_identity_to_registry`
+   - `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_add_account_appends_second_identity_to_registry`
+   - `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_add_account_appends_second_identity_to_registry`
+17. [app] Switching identity, removing one or starting over while the app is still checking an earlier launch never throws you out of the session you just started — `docs/goal/behavior/onboarding.md` § A verdict renders only while its own launch is still the current one
+   - `tests/e2e-unified/tests/test_launch_superseded_verdict.py::test_a_superseded_launch_verdict_never_tears_down_the_newer_session`
+   - `tests/e2e-unified/tests/test_launch_superseded_verdict.py::test_a_superseded_launch_verdict_never_tears_down_the_newer_session_web`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+646e0070 standalone |
+| web | ⚠ partial | 0.1.5-dev+646e0070 standalone |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.2-dev+a3582c8b.dirty standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+859d84e8 standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -212,7 +227,7 @@ Stamped 2026-09-25 at efcea449ea.
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_switching_identity_keeps_device_settings_and_moves_drafts` | macos (macos): passed, ios (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_switching_identity_keeps_device_settings_and_moves_drafts` | windows (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_switching_identity_keeps_device_settings_and_moves_drafts` | web (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_switching_identity_saves_the_draft_inside_its_autosave_window` | web (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_switching_identity_saves_the_draft_inside_its_autosave_window` | web (linux): failed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_switching_identity_keeps_device_settings_and_moves_drafts` | — |
 | 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_push_settings.py::test_windows_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | windows (windows): passed |
@@ -230,9 +245,18 @@ Stamped 2026-09-25 at efcea449ea.
 | 14 | app | `tests/e2e-unified/tests/test_account_registry_mutation_lock_relaunch_web.py::test_the_aftermath_drains_clear_waits_for_a_sibling_tabs_registry_lock` | web (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_a_registry_write_queues_behind_a_sibling_instances_mutation_lock` | macos (macos): passed |
 | 14 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_a_registry_write_queues_behind_a_sibling_instances_mutation_lock` | windows (windows): passed |
+| 14 | app | absent by design on ios, android, android-kids, ios-kids | — |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_tui.py::test_tui_removing_an_identity_retires_this_machine_from_it` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_removing_an_identity_deletes_its_data_and_leaves_the_others` | linux (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_removing_an_identity_deletes_its_data_and_leaves_the_others` | web (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_removing_an_identity_deletes_its_data_and_leaves_the_others` | — |
 | 15 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_removing_an_identity_deletes_its_data_and_leaves_the_others` | macos (macos): passed, ios (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_account_switcher_tui.py::test_tui_add_account_appends_second_identity_to_registry` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_account_switcher_linux.py::test_linux_add_account_appends_second_identity_to_registry` | linux (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_account_switcher_web.py::test_web_add_account_appends_second_identity_to_registry` | web (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_add_account_appends_second_identity_to_registry` | macos (macos): passed, ios (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_account_switcher_windows.py::test_windows_add_account_appends_second_identity_to_registry` | windows (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_account_switcher_android.py::test_android_add_account_appends_second_identity_to_registry` | — |
+| 17 | app | `tests/e2e-unified/tests/test_launch_superseded_verdict.py::test_a_superseded_launch_verdict_never_tears_down_the_newer_session` | linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_launch_superseded_verdict.py::test_a_superseded_launch_verdict_never_tears_down_the_newer_session_web` | web (linux): passed |
 <!-- features-render:end -->

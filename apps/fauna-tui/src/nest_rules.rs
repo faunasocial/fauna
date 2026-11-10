@@ -378,7 +378,8 @@ pub fn settings_elements(app: &App) -> Vec<Element> {
 /// machine read before sign-in (`OnboardingMachine::joining_nest_rules`, which
 /// already decided whether this page shows it): the heading naming the nest,
 /// the not-applied sentence under it when none of the document applies here,
-/// then one `onboarding-nest-rules-item` per rule. Painted directly above the
+/// then one `onboarding-nest-rules-item` per rule, a rule not applied on this
+/// device carrying its note. Painted directly above the
 /// terms notice.
 pub fn joining_elements(summary: &NestRulesSummary) -> Vec<Element> {
     let heading = t::joining_heading(&summary.domain);
@@ -393,9 +394,21 @@ pub fn joining_elements(summary: &NestRulesSummary) -> Vec<Element> {
             .rules
             .iter()
             .enumerate()
-            .map(|(i, rule)| Element::label(item, rule_line(rule)).within(item, i)),
+            .map(|(i, rule)| Element::label(item, joining_rule_line(rule)).within(item, i)),
     );
     els
+}
+
+/// One rule as the joining surface lists it: the rules surfaces' line, and
+/// under it, for a rule this build cannot enforce (a `prompt` rule, a labeler
+/// rule on a store-safe build), the crate's not-applied note — joining is
+/// acceptance, so the member reads which rules this device will not apply
+/// before accepting them (`nest-rules.md` § Acceptance at joining).
+fn joining_rule_line(rule: &NestRuleLine) -> String {
+    match &rule.inert {
+        Some(inert) => format!("{}\n{}", rule_line(rule), resolve(inert)),
+        None => rule_line(rule),
+    }
 }
 
 fn resolve(text: &fauna_core::localized::LocalizedText) -> String {
@@ -416,8 +429,8 @@ fn rule_line(rule: &NestRuleLine) -> String {
 mod tests {
     use fauna_client_policy::NestRulesNotApplied;
     use fauna_core::content_policy::{
-        ContentPolicyDocument, ContentRule, ContentVerdict, GRAMMAR_VERSION, REASON_DEFAULT_KEY,
-        encode_document, sign_nest_policy,
+        BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, GRAMMAR_VERSION,
+        REASON_DEFAULT_KEY, ScorerKind, encode_document, sign_nest_policy,
     };
     use fauna_core::identity::ActorKeypair;
 
@@ -481,6 +494,43 @@ mod tests {
         assert_eq!(els[0].text, t::joining_heading(DOMAIN));
         assert_eq!(count(&els, ids::ONBOARDING_NEST_RULES_ITEM), 1);
         assert!(els[1].text.contains("No spam"), "{}", els[1].text);
+    }
+
+    /// A `prompt` rule beside an applied one: no runtime runs it on this
+    /// device, so joining lists it with its not-applied note under its line
+    /// while the applied rule carries none (`nest-rules.md` decision 1).
+    #[test]
+    fn joining_marks_a_rule_this_device_cannot_apply() {
+        let mut doc = one_rule();
+        doc.rules.push(ContentRule {
+            factor: format!("nest:{DOMAIN}/ask"),
+            min_permille: 500,
+            verdict: ContentVerdict::Collapse,
+            reason_code: "rule-2".to_string(),
+            reason: [(REASON_DEFAULT_KEY.to_string(), "No scams".to_string())].into(),
+            extra: Default::default(),
+        });
+        doc.scorers.push(BundledScorer {
+            name: "ask".into(),
+            kind: ScorerKind::Prompt,
+            bytes: b"Is this a scam?".to_vec(),
+            extra: Default::default(),
+        });
+        let summary = summary_of(&bound(&doc));
+        assert_eq!(summary.not_applied, None);
+        let items: Vec<_> = joining_elements(&summary)
+            .into_iter()
+            .filter(|e| e.id == ids::ONBOARDING_NEST_RULES_ITEM)
+            .collect();
+        assert_eq!(items.len(), 2);
+        let note = fauna_i18n::strings::rule_editor::PROMPT_NOT_APPLIED;
+        assert!(!items[0].text.contains(note), "{}", items[0].text);
+        assert!(items[1].text.contains("No scams"), "{}", items[1].text);
+        assert!(
+            items[1].text.ends_with(&format!("\n{note}")),
+            "{}",
+            items[1].text
+        );
     }
 
     /// A newer grammar's document decodes to no rules here; joining still

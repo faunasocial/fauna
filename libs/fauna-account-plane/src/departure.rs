@@ -35,9 +35,12 @@
 //!    answer's affirmativeness down and this module refuses without it.
 //!    Deliberately per-pass, not sticky-since-startup: a source that answered
 //!    once and then went unavailable is unavailable *now*.
-//! 2. **No membership source at all → drop nothing.** Every host wires one
-//!    today (`fauna-ffi`, `fauna-wasm`, `apps/fauna-linux`, `apps/fauna-tui`),
-//!    but a runtime started without one derives no `conv` scope at all.
+//! 2. **No membership source at all → drop nothing.** Every app host wires
+//!    its engine (`fauna-ffi`, `fauna-wasm`, `apps/fauna-linux`,
+//!    `apps/fauna-tui`), and the seedless sync agent, which links none, wires
+//!    the membership record the seed-leg holder beside it writes
+//!    ([`crate::membership_record`]; a stale or absent record is no answer).
+//!    A runtime started with neither derives no `conv` scope at all.
 //!    Treating that as authoritative would mean such a runtime deleted every
 //!    channel's content — the refusal above covers it by construction, since a
 //!    source that does not exist cannot answer affirmatively.
@@ -118,12 +121,12 @@ fn is_class2_rail(scope: &str) -> bool {
 /// Local, deliberately: each device derives its own memberships from its own
 /// MLS state, and each drops its own copy when that state says it left. A
 /// synced marker would let one device's stale view delete another's data.
-const META_SUBSCRIBED: &str = "subscribed_content_scopes";
+pub(crate) const META_SUBSCRIBED: &str = "subscribed_content_scopes";
 
 /// `store_meta` key holding the member scopes this replica has concluded it
 /// left and no affirmative answer has named since — the departed list (module
 /// docs). Local for the subscription marker's reason.
-const META_DEPARTED: &str = "departed_member_scopes";
+pub(crate) const META_DEPARTED: &str = "departed_member_scopes";
 
 /// `store_meta` key set once the departed list's one-time seed has run.
 const META_DEPARTED_SEEDED: &str = "departed_member_scopes_seeded";

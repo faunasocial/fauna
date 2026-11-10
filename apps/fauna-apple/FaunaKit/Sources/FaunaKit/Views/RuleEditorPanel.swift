@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// Which write a rule editor's host sends — the offline gate greys Save from it
@@ -332,3 +335,5 @@ public struct RuleEditorPanel: View {
             .automationField(id, text: text, isEnabled: { enabled })
     }
 }
+
+#endif // !FAUNA_KIDS

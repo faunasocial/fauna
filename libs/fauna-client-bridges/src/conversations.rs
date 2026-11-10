@@ -1,5 +1,7 @@
-//! The user side of the bridged-conversation family — the four caller-scoped
-//! `fauna.bridges.conversation.*` kinds and the push's wire kind
+//! The user side of the bridged-conversation family — the caller-scoped
+//! `fauna.bridges.conversation.*` kinds (the four, and the two local removes of
+//! `docs/goal/behavior/bridged-adapter.md` § Removing bridged rows) and the
+//! push's wire kind
 //! (`docs/goal/architecture/apps/bridges.md` § Bridge-kind catalogue → Phase G;
 //! payload semantics `docs/goal/ui/conversations.md` § Where logic lives →
 //! *The `Bridged` adapter*).
@@ -14,8 +16,9 @@ use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::bridged_conversations::{
     BridgedMessageInfo, BridgedRoomInfo, InboxFetchReply, InboxFetchRequest, KIND_INBOX_FETCH,
-    KIND_ROOMS_LIST, KIND_ROOMS_OPEN, KIND_SEND, PUSH_CONVERSATION_CHANGED, RoomsListReply,
-    RoomsListRequest, RoomsOpenReply, RoomsOpenRequest, SendReply, SendRequest,
+    KIND_MESSAGES_REMOVE, KIND_ROOMS_LIST, KIND_ROOMS_OPEN, KIND_ROOMS_REMOVE, KIND_SEND,
+    MessagesRemoveRequest, PUSH_CONVERSATION_CHANGED, RemoveReply, RoomsListReply,
+    RoomsListRequest, RoomsOpenReply, RoomsOpenRequest, RoomsRemoveRequest, SendReply, SendRequest,
 };
 
 /// The push wire kind the bridged poll subscribes to — a room changed.
@@ -30,7 +33,7 @@ pub struct BridgedInboxPage {
     pub guardian_state: Option<String>,
 }
 
-/// The four user-side calls.
+/// The user-side calls.
 pub struct BridgedConversationClient<R: RpcRequester> {
     nest: R,
 }
@@ -123,6 +126,41 @@ impl<R: RpcRequester> BridgedConversationClient<R> {
             )
             .await
     }
+
+    /// `conversation.messages.remove` — tombstone the nest's copy of the rows
+    /// `ids` of `room_id` (at most `BRIDGED_PAGE_MAX`). The far side sees
+    /// nothing. Answers how many live rows were tombstoned; a repeat answers 0.
+    pub async fn messages_remove(&self, room_id: Vec<u8>, ids: Vec<i64>) -> Result<u32, R::Error> {
+        let reply: RemoveReply = self
+            .nest
+            .request(
+                KIND_MESSAGES_REMOVE,
+                MessagesRemoveRequest {
+                    room_id,
+                    ids,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(reply.removed)
+    }
+
+    /// `conversation.rooms.remove` — tombstone every row of `room_id` and hide
+    /// the room from `rooms.list` until a new live row reopens it. Answers as
+    /// [`Self::messages_remove`].
+    pub async fn rooms_remove(&self, room_id: Vec<u8>) -> Result<u32, R::Error> {
+        let reply: RemoveReply = self
+            .nest
+            .request(
+                KIND_ROOMS_REMOVE,
+                RoomsRemoveRequest {
+                    room_id,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(reply.removed)
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +176,12 @@ mod tests {
                 guardian_state: Some("held".into()),
                 ..Default::default()
             }),
+            KIND_MESSAGES_REMOVE | KIND_ROOMS_REMOVE => {
+                fauna_protocol::encode_canonical(&RemoveReply {
+                    removed: 2,
+                    ..Default::default()
+                })
+            }
             KIND_SEND => fauna_protocol::encode_canonical(&SendReply {
                 id: 7,
                 self_address: "@me:example.org".into(),
@@ -189,5 +233,20 @@ mod tests {
 
         assert!(block_on(client.rooms_list()).expect("mock").is_empty());
         assert_eq!(rec.recorded().0, KIND_ROOMS_LIST);
+
+        assert_eq!(
+            block_on(client.messages_remove(vec![3; 32], vec![4, 5])).expect("mock"),
+            2
+        );
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, KIND_MESSAGES_REMOVE);
+        let req: MessagesRemoveRequest = fauna_protocol::decode_strict(&payload).unwrap();
+        assert_eq!((req.room_id, req.ids), (vec![3; 32], vec![4, 5]));
+
+        assert_eq!(block_on(client.rooms_remove(vec![6; 32])).expect("mock"), 2);
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, KIND_ROOMS_REMOVE);
+        let req: RoomsRemoveRequest = fauna_protocol::decode_strict(&payload).unwrap();
+        assert_eq!(req.room_id, vec![6; 32]);
     }
 }

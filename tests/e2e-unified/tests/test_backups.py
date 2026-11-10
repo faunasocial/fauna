@@ -1559,10 +1559,40 @@ def test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it(
     _reclaim_the_orphaned_store(app)
 
 
+@pytest.fixture
+def custodian_seat(request, logged_in_app, nest_instance, test_user):
+    """The device that HOSTS the custodian replica in a store-rot witness:
+    the app under test itself, except on web, which is never a custodian
+    (`client-device-custodian.md` § Implementation status today) — there it is
+    a second, native seat of the same account (`helpers.fleet.SiblingSeats`,
+    always tui), which enrolls ITSELF through its own Backups page, as every
+    custodian does, while web stays the owner reading its own row."""
+    if not logged_in_app.driver.is_web():
+        yield logged_in_app
+        return
+    from helpers.fleet import SiblingSeats
+
+    seats = SiblingSeats(request, nest_instance)
+    try:
+        yield seats.launch(user=test_user)
+    finally:
+        seats.teardown()
+
+
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.macos
+# macos: the app spawns its external agent only under this marker, and the agent
+# is what takes the pass's clock offset (`CustodianPullTestCommand`'s `.agent`
+# side); without it the pass falls to the in-app host, which refuses a non-zero
+# offset by name. Inert for every other app — the env it sets is read only in the
+# macos/windows launch branches. ios joins with the shared in-app host's clock.
+@pytest.mark.real_sync_agent
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
-    logged_in_app, nest_instance, test_user, request
+    logged_in_app, custodian_seat, nest_instance, test_user, request
 ):
     """A custodian whose local store fails its **self-audit** raises
     `backup-audit-alert` on the OWNER's device — the second pin
@@ -1601,6 +1631,11 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
                              frozen at pass 1 (a failure never advances it).
         nest projection   -> fauna.backup.status passes the verdict through
         render            -> backup-audit-alert appears, naming this destination
+        the heal          -> pass 2's pull re-entered the flagged paths and
+                             rewrote their bytes (`put_repair`); pass 3 at +50 h
+                             re-samples them, reports audit_state=ok, the nest
+                             projects ok and the banner leaves the page
+                             (`backup-destinations-and-restore` outcome 29)
 
     **Why the corruption is an overwrite and not a delete.** Deleting a blob
     would fail a mere `stat` too; overwriting one fails only if the store really
@@ -1625,16 +1660,31 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
     as the same `now` the scheduler supplies, never a sleep. Remove the offset
     and the audit is debounced, no verdict changes, and no banner appears: the
     jump is load-bearing but it manufactures nothing.
+
+    **Two parts, one seat on every app but web.** ``app`` is the OWNER, whose
+    Backups row the banner rises and clears on; ``custodian`` is the device that
+    enrolls itself, hosts the replica, is rotted and is pumped. On tui, linux and
+    android they are one app (tui/linux host in the app's own agent, android in
+    the app process — its pass takes the offset through the test-only
+    `FfiCustodianHost::run_all_kinds_at_offset`, and its store is rotted inside
+    the emulator sandbox over adb ``run-as``; macos hosts in its external agent,
+    which takes the offset, and its driver answers ``sync_agent_state_base``
+    where the store is rotted). Web is never a custodian, so there
+    the custodian is a native tui seat of the same account (`custodian_seat`)
+    and web drives only its own page — it never adds that device, because
+    enrolment runs on the device being enrolled (`ui/backups.md`, web's declared
+    no-enrolment absence).
     """
     from helpers.sync_agent_config import (
-        custodian_store_blobs,
-        custodian_store_roots,
-        describe_custodian_store,
+        custodian_blobs_still_rotten,
+        rot_custodian_store,
+        visible_custodian_blobs,
     )
     from actions.backups import AUDIT_DEBOUNCE_JUMP_S
 
     logged_in_app.backups.require_destination_management_supported()
     app = logged_in_app
+    custodian = custodian_seat
 
     # Precondition only (convention 8 exempts fixture setup): without a real
     # segment the store holds nothing, and "every blob corrupted" would corrupt
@@ -1642,14 +1692,14 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
     # store forever.
     _seed_one_mail_segment(app, nest_instance, test_user)
 
-    app.backups.navigate()
-    dest = DestinationEnrollment(app, nest_instance, test_user)
-    request.addfinalizer(lambda: _leave_no_custodian_behind(app, dest))
+    custodian.backups.navigate()
+    dest = DestinationEnrollment(custodian, nest_instance, test_user)
+    request.addfinalizer(lambda: _leave_no_custodian_behind(custodian, dest))
     DESTINATION_NAME = dest.add_custodian_destination("Rotting device", capacity="50 GB")
 
     # Pass 1 — the healthy baseline. Every poll runs a pass the moment the agent
     # has found its assignment, so this is a deadline poll, never a wait.
-    first = app.backups.wait_for_custodian_hosting()
+    first = custodian.backups.wait_for_custodian_hosting()
     assert first["held_bytes"] > 0, (
         f"pass 1 pulled nothing ({first!r}), so there is nothing in the store to "
         f"rot and the audit below would pass vacuously. This assert is what keeps "
@@ -1672,34 +1722,27 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
         f"{app.driver.count('backup-audit-alert')}. error={app.error_text()!r}"
     )
 
-    # Rot the store. The agent keeps it under its own per-actor state root, which
-    # this launch isolated — `sync_agent_state_base` is the driver's answer for a
-    # launch that pinned one explicitly (windows), `config_home` derives it
-    # otherwise (unix).
-    roots = custodian_store_roots(
-        app.driver.config_home, getattr(app.driver, "sync_agent_state_base", None)
-    )
-    assert roots, (
-        f"the agent reported hosting a custodian replica ({first!r}) but created no "
-        f"store under its own state root. Either the store moved out of "
+    # Rot the store, wherever the custodian keeps it: under the agent's own
+    # per-actor state root this launch isolated (a host path on tui/linux), or
+    # inside the emulator's app sandbox (android) — `rot_custodian_store` hides
+    # which (convention 7's platform check in the helper, not the body).
+    located, _, where = visible_custodian_blobs(custodian.driver)
+    assert located, (
+        f"the custodian reported hosting a replica ({first!r}) but no store is "
+        f"found where it hosts: {where}. Either the store moved out of "
         f"`custodian_store_root`'s layout (<base>/<actor-hex>/backup-custodian) or "
-        f"the agent is writing outside this launch's isolation, which convention 10 "
+        f"the host is writing outside this launch's isolation, which convention 10 "
         f"forbids."
     )
-    corrupted = 0
-    for root in roots:
-        for blob in custodian_store_blobs(root):
-            blob.write_bytes(b"rot")
-            corrupted += 1
+    corrupted, where = rot_custodian_store(custodian.driver)
     assert corrupted, (
         f"nothing was corrupted, so the audit below has no reason to fail and a "
-        f"green result would prove nothing. "
-        + "; ".join(describe_custodian_store(r) for r in roots)
+        f"green result would prove nothing. {where}"
     )
 
     # Pass 2, a day and an hour later — the first pass whose audit is not
     # debounced, and the first that can therefore see the rot.
-    second = app.backups.custodian_pull_run_now(now_offset_secs=AUDIT_DEBOUNCE_JUMP_S)
+    second = custodian.backups.custodian_pull_run_now(now_offset_secs=AUDIT_DEBOUNCE_JUMP_S)
     assert second["hosting"], (
         f"the agent stopped hosting between the two passes ({second!r}) — the "
         f"stint died rather than the audit failing."
@@ -1771,6 +1814,54 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
         f"destinations cannot act on an unattributed alarm. Got {banner!r}."
     )
 
+    # ── The heal (outcome 29) ────────────────────────────────────────────────
+    # Pass 2's audit flagged every rotted path, and the same pass's pull re-entered
+    # them into its diff and rewrote their bytes (`CustodianStore::put_repair`):
+    # the store can produce them again. The VERDICT is still the audit's to change
+    # (`client-device-custodian.md` § Implementation status today, *The
+    # custodian's local copy now HEALS*), so the row stays failing until the next
+    # audit re-samples the flags — pass 3, another debounce later.
+    still_rotten = custodian_blobs_still_rotten(custodian.driver)
+    assert still_rotten < corrupted, (
+        f"pass 2 flagged the rotted paths but rewrote none of them: {still_rotten} "
+        f"of {corrupted} blob(s) still hold the rot, so the repair re-fetch "
+        f"(`AuditRecord::failed_paths` -> the pull's diff -> `put_repair`) did not "
+        f"run. {visible_custodian_blobs(custodian.driver)[2]}"
+    )
+    third = custodian.backups.custodian_pull_run_now(now_offset_secs=2 * AUDIT_DEBOUNCE_JUMP_S)
+    assert third["audit_state"] == "ok", (
+        f"the store was repaired in pass 2 ({corrupted - still_rotten} of "
+        f"{corrupted} blob(s) rewritten), yet the re-sampling audit of pass 3 "
+        f"reports audit_state={third['audit_state']!r} ({third!r}). `failed` means "
+        f"a standing flag still cannot be opened — the repair wrote the wrong "
+        f"bytes or never wrote them; `None` means the audit was debounced."
+    )
+    assert third["checked_in"], f"the healing pass must check in: {third!r}"
+    with WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=test_user["actor_id_bytes"],
+        signing_key=bytes(test_user["signing_key"]),
+    ) as healed_client:
+        projection = healed_client.call("fauna.backup.status", {})
+    reporting = [
+        r for r in projection.get("destinations", [])
+        if r.get("audit_state") is not None
+    ]
+    assert reporting and reporting[0].get("audit_state") == "ok", (
+        f"NEST-SIDE failure: the device checked in audit_state=ok after its heal, "
+        f"but the nest still projects {projection!r}"
+    )
+    app.driver.navigate_to("feed")
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(1)
+    wait_until(
+        lambda: app.driver.count("backup-audit-alert") == 0, ALERT_RENDER_BUDGET_S,
+        diagnose=lambda: f"CLIENT-SIDE failure: the nest projects audit_state=ok "
+                         f"for the healed custodian, but the page still shows "
+                         f"{app.driver.get_text('backup-audit-alert')!r}; "
+                         f"error={app.error_text()!r}",
+    )
+
     # `nest_instance`/`test_user` are session-scoped and a sibling test asserts a
     # zero destination count, so leave the surface as we found it — including the
     # agent's custodian stint. A plain remove KEEPS the copy (the product
@@ -1779,7 +1870,9 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
     # stale replica's (hosting, zero kinds run, check-in refused).
     app.backups.remove_destination(0)
     app.backups.wait_for_destination_count(0)
-    _reclaim_the_orphaned_store(app)
+    # The orphaned copy is the CUSTODIAN's to reclaim, on its own page.
+    custodian.backups.navigate()
+    _reclaim_the_orphaned_store(custodian)
 
 
 def _reclaim_the_orphaned_store(app, budget_s: float = 30.0) -> None:
@@ -1930,10 +2023,11 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
       `now_offset_secs` by name, so a test that needs the agent's `checked_in` /
       `audit_state` or a shifted clock cannot yet widen to it.
     * **android** — hosts in-app like ios: its test agent answers
-      `custodian_pull_run_now` with ios's in-app reply shape (`via: "in-app"`,
-      `hosting`, `held_bytes`, `stored_segments`, `tombstoned_segments`,
-      `cap_reached`, `checked_in`) and refuses a non-zero `now_offset_secs` by
-      name. The store sits inside the emulator's app sandbox, so the disk half
+      `custodian_pull_run_now` with the agent's six fields (`hosting`,
+      `kinds_run`, `held_bytes`, `cap_state`, `audit_state`, `checked_in`, plus
+      `via: "in-app"`) through the test-only
+      `FfiCustodianHost::run_all_kinds_at_offset`, which honours
+      `now_offset_secs`. The store sits inside the emulator's app sandbox, so the disk half
       reads it through `visible_custodian_blobs` (adb `run-as` listing), not a
       local path. Its emulator RUN is gated on the emulator
       venue being installed on the host, so the ledger record follows that run.
@@ -2260,62 +2354,12 @@ def _seed_one_mail_segment(app, nest_instance, owner) -> None:
 
 
 def _import_one_mail(nest_instance, owner) -> None:
-    """Import one unique INBOX message for ``owner`` through the import surface —
-    `_seed_one_mail_segment`'s write, for a caller whose owner's mailbox is
-    already enabled. Precondition-only (convention 8 exempts fixture setup)."""
-    from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from helpers.mail_envelope_key import envelope_key
+    """Import one unique INBOX message for ``owner`` — `_seed_one_mail_segment`'s
+    write, for a caller whose owner's mailbox is already enabled
+    (``helpers.backup_seed.import_one_mail``)."""
+    from helpers.backup_seed import import_one_mail
 
-    nonce = secrets.token_hex(6)
-    message_id = f"backup-upload-proof-{nonce}@example.org"
-    body = (
-        f"Message-ID: <{message_id}>\r\n"
-        "From: alice@example.org\r\n"
-        "To: bob@example.net\r\n"
-        "Subject: segment for the backup upload proof\r\n"
-        "Date: Thu, 24 Jul 2026 12:00:00 +0000\r\n"
-        "\r\n"
-        "one message is all the sweep needs to have something to upload\r\n"
-    ).encode()
-
-    client = WsRpcAdminClient(
-        nest_instance["url"],
-        actor_id=owner["actor_id_bytes"],
-        signing_key=bytes(owner["signing_key"]),
-    )
-    with client:
-        session_id = client.call(
-            "fauna.bridges.start_import_session",
-            {"source_descriptor": f"imap://imap.example.org/backup-proof-{nonce}",
-             "total_count": 1},
-        )["session_id"]
-        reply = client.call(
-            "fauna.bridges.import_message",
-            {
-                "session_id": session_id,
-                "message": {
-                    "mailbox": "INBOX",
-                    "flags": ["\\Seen"],
-                    "body": body,
-                    "timestamp": 1_783_000_000,
-                    "body_size": len(body),
-                    "sender_domain": "example.org",
-                    "source_uid": 1,
-                    "source_uid_validity": 42,
-                    "dedup_key": f"msgid:v1:<{message_id}>",
-                    "envelope_key": envelope_key(body),
-                },
-                "skip_dedup": False,
-            },
-        )
-        # Release the source lock so a second parametrized client can seed too.
-        client.call("fauna.bridges.finalize_import_session", {"session_id": session_id})
-
-    outcome = reply["outcome"]["outcome"]
-    assert outcome == "imported", (
-        f"seeding a mail segment failed: outcome={reply['outcome']!r}. Without a segment "
-        f"the owner's backlog stays empty and nothing can be uploaded."
-    )
+    import_one_mail(nest_instance, owner)
 
 
 @pytest.mark.feature("backup-destinations-and-restore")
@@ -3308,30 +3352,21 @@ def test_snapshot_restore_writes_the_whole_tree_byte_identically(
         shutil.rmtree(os.path.dirname(destination), ignore_errors=True)
 
 def _inbox_count(nest, owner) -> int:
-    """How many INBOX messages `owner` has on `nest`, read over the owner's own
-    authenticated WS-RPC (convention 5: the nest-side half of a restore verdict,
-    independent of what any page renders)."""
-    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    """How many INBOX messages `owner` has on `nest` (``helpers.backup_seed``)."""
+    from helpers.backup_seed import inbox_count
 
-    client = WsRpcAdminClient(
-        nest["url"],
-        actor_id=owner["actor_id_bytes"],
-        signing_key=bytes(owner["signing_key"]),
-    )
-    with client:
-        reply = client.call("fauna.email.inbox.fetch", {"after_uid": 0, "limit": 50})
-    return len(reply.get("messages", []))
+    return inbox_count(nest, owner)
 
 
-def _cover_a_folder_on_this_device(app, nest, owner, mail_only) -> tuple[str, dict]:
-    """One ordinary folder holding one signed file, attached to this device's
-    custodian destination through the folder's own row, and held by it: a pass
-    is poked until the device holds more than ``mail_only`` (its mail-only
-    report). Returns the folder's display name and that pass's report.
+def _attach_a_new_folder_to_the_destination(app, nest, owner) -> str:
+    """One ordinary folder holding one signed file, attached to the owner's one
+    backup destination through the folder's own row. Returns the folder's
+    display name; the caller makes the destination hold it.
 
     The file is the harness's signed writer (`helpers.harness_writer`), not a
-    bound location: this journey also runs on ios, which binds no local folder.
-    The attach is the user's gesture, so it goes through the app (convention 8)."""
+    bound location: these journeys also run on ios and web, which bind no local
+    folder. The attach is the user's gesture, so it goes through the app
+    (convention 8)."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
     secret_key = bytes(owner["signing_key"]).hex()
@@ -3352,7 +3387,7 @@ def _cover_a_folder_on_this_device(app, nest, owner, mail_only) -> tuple[str, di
         signing_key=bytes(owner["signing_key"]),
     ) as client:
         listed = client.call("fauna.backup.destination.list", {})["destinations"]
-    assert len(listed) == 1, f"one destination, this device's: {listed!r}"
+    assert len(listed) == 1, f"one destination, the journey's own: {listed!r}"
     destination_id = listed[0]["destination_id"]
 
     b = app.backups
@@ -3362,6 +3397,16 @@ def _cover_a_folder_on_this_device(app, nest, owner, mail_only) -> tuple[str, di
     app.driver.select("folder-destination-attach-select", destination_id)
     app.driver.click("folder-destination-attach-button")
     app.driver.wait_for("folder-destination-row", timeout=15.0)
+    return name
+
+
+def _cover_a_folder_on_this_device(app, nest, owner, mail_only) -> tuple[str, dict]:
+    """A new folder attached to this device's custodian destination
+    (:func:`_attach_a_new_folder_to_the_destination`) and held by it: a pass is
+    poked until the device holds more than ``mail_only`` (its mail-only report).
+    Returns the folder's display name and that pass's report."""
+    name = _attach_a_new_folder_to_the_destination(app, nest, owner)
+    b = app.backups
 
     # The folder axis runs before the kinds' check-ins, so a pass that mirrored
     # the folder reports its bytes in `held_bytes` (`custodian_pull.rs`
@@ -3439,6 +3484,23 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
     until its shell lands. web is a declared absence (a browser cannot hold the
     sealed store).
     """
+    _lose_the_nest_and_restore_from_this_device(
+        app, request, nest_mode, tmp_path_factory, with_folder=with_folder)
+
+
+def _lose_the_nest_and_restore_from_this_device(
+    app, request, nest_mode, tmp_path_factory, *, with_folder, seal=None
+):
+    """The after-loss re-seed journey both tests above and below run: box A
+    holds the owner's mail (and, with ``with_folder``, a covered folder), this
+    device holds a copy, A is lost, B is rebuilt under the same seed, and the
+    owner restores from the app.
+
+    ``seal`` (the ``run_seal_helper`` fixture) adds every other backed-up kind
+    to box A before the device takes its copy — a calendar event, a contact
+    card and a post — and makes the journey read each one back through its
+    ordinary door on B after the restore (`nest/box-recovery.md` § Goal, item 2).
+    """
     from common.auth import claim_admin
     from conftest import _login_app_as, _start_dedicated_nest
 
@@ -3455,6 +3517,7 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
     app.backups.require_reseed_supported()
     _seed_one_mail_segment(app, box_a, owner)
     assert _inbox_count(box_a, owner) == 1
+    others = _seed_every_other_kind(box_a, owner, seal) if seal is not None else None
 
     app.backups.navigate()
     app.backups.wait_for_destination_count(0)
@@ -3528,25 +3591,15 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
     )
     result = app.backups.reseed_result_text()
     # The folder's own line first, so a device that never learned the name fails
-    # here, on the cause, rather than on the whole verdict it also spoils: the
-    # line names the folder by its display name (`reseed.rs` `set_label`), never
-    # the `folder_unnamed` refusal (`segment-backup-protocol.md` § *Where a
-    # restored folder's name comes from*).
+    # here, on the cause, rather than on the whole verdict it also spoils.
     if folder is not None:
-        before_count, after_count = S.backups.reseed_set_restored(
-            set=folder, count="\0").split("\0")
-        assert S.backups.reseed_refused_folder_unnamed not in result, (
-            f"the device restored the folder without its name: result={result!r}"
-        )
-        assert re.search(
-            re.escape(before_count) + r"\d+" + re.escape(after_count), result), (
-            f"the result view must name the restored folder {folder!r}: "
-            f"result={result!r} error={app.error_text()!r}"
-        )
+        _assert_the_folder_named_restored(app, result, folder)
     assert result.startswith(S.backups.reseed_result_whole), (
         f"the restore must report the corpus whole: result={result!r} "
         f"error={app.error_text()!r}"
     )
+    if others is not None:
+        _assert_every_other_kind_named_restored(app, result)
 
     # Nest-side, independent of the page (convention 5): the owner's mail scope
     # on the rebuilt box now holds live records, which is exactly what makes a
@@ -3568,23 +3621,11 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         f"scope does not read as live: {refused.value!r}"
     )
 
-    # The covered folder is back under its name, its file live on the rebuilt
-    # box (`writer-signed-change-records.md` ruling (7)(a)): the app created the
-    # target set, the device signed every re-homed row, and the nest minted only
-    # rows whose signatures verified — so a reader that admits no unsigned row
-    # lists it. Nest-side first (convention 5), then the app's own list.
     if folder is not None:
-        snap = create_folder_snapshot(
-            box_b["port"], folder, secret_key=bytes(owner["signing_key"]).hex(),
-            base_url=box_b["url"],
-        )
-        assert snap is not None and snap.get("file_count", 0) >= 1, (
-            f"NEST-SIDE failure: the page says {result!r}, but the restored folder "
-            f"{folder!r} holds no live file on the rebuilt box: {snap!r}"
-        )
-        app.backups.navigate_folders()
-        app.backups.wait_for_folder_row(folder)
-        app.backups.navigate()
+        _assert_the_folder_is_back(app, box_b, owner, folder, result)
+
+    if others is not None:
+        _read_every_other_kind_back(box_b, owner, others, result)
 
     # The post-ceremony duty: this device is the rebuilt box's custodian again.
     app.backups.wait_for_destination_count(1)
@@ -3608,6 +3649,214 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         f"box; INBOX holds {restored} message(s). A live record in no mailbox "
         f"means the placement journal was not restored with the content."
     )
+
+
+def _assert_every_other_kind_named_restored(app, result: str) -> None:
+    """Each of the calendar's, the address book's and the posts' own result
+    lines names the kind as restored, never refused: the shared driver delivers
+    and materializes every backed-up kind it holds."""
+    for label in (S.backups.reseed_set_calendar, S.backups.reseed_set_card,
+                  S.backups.reseed_set_post):
+        line = S.backups.reseed_set_restored(set=label, count="\0").split("\0")
+        assert re.search(re.escape(line[0]) + r"[1-9]\d*" + re.escape(line[1]), result), (
+            f"the result view must name {label!r} as restored: "
+            f"result={result!r} error={app.error_text()!r}"
+        )
+
+
+def _assert_the_folder_named_restored(app, result: str, folder: str) -> None:
+    """The folder's own result line names it by its display name (`reseed.rs`
+    `set_label`), never the `folder_unnamed` refusal (`segment-backup-protocol.md`
+    § *Where a restored folder's name comes from*)."""
+    before_count, after_count = S.backups.reseed_set_restored(
+        set=folder, count="\0").split("\0")
+    assert S.backups.reseed_refused_folder_unnamed not in result, (
+        f"the app restored the folder without its name: result={result!r}"
+    )
+    assert re.search(
+        re.escape(before_count) + r"\d+" + re.escape(after_count), result), (
+        f"the result view must name the restored folder {folder!r}: "
+        f"result={result!r} error={app.error_text()!r}"
+    )
+
+
+def _assert_the_folder_is_back(app, nest, owner, folder: str, result: str) -> None:
+    """The covered folder is back under its name, its file live on the rebuilt
+    box (`writer-signed-change-records.md` ruling (7)(a)): the app created the
+    target set, the restoring app signed every re-homed row, and the nest minted
+    only rows whose signatures verified — so a reader that admits no unsigned row
+    lists it. Nest-side first (convention 5), then the app's own folder list."""
+    snap = create_folder_snapshot(
+        nest["port"], folder, secret_key=bytes(owner["signing_key"]).hex(),
+        base_url=nest["url"],
+    )
+    assert snap is not None and snap.get("file_count", 0) >= 1, (
+        f"NEST-SIDE failure: the page says {result!r}, but the restored folder "
+        f"{folder!r} holds no live file on the rebuilt box: {snap!r}"
+    )
+    app.backups.navigate_folders()
+    app.backups.wait_for_folder_row(folder)
+    app.backups.navigate()
+
+
+def _seal_fixture(seal, kind: str, plaintext: bytes) -> bytes:
+    """A genuine sealed record envelope of ``kind`` — the shared
+    ``helpers.backup_seed.seal_fixture`` the api-tier backup witnesses seal
+    with too."""
+    from helpers.backup_seed import seal_fixture
+
+    return seal_fixture(seal, kind, plaintext)
+
+
+def _seed_every_other_kind(nest, owner, seal) -> dict:
+    """Give the owner one calendar event, one contact card and one post on
+    ``nest``, each through the production door that kind's data arrives by
+    (the ``fauna.bridges.*`` calendar and address-book doors a calendar or
+    contacts app reaches, ``fauna.posts.create``), and return what each read
+    door must serve back after the restore.
+
+    Precondition-only, like ``_seed_one_mail_segment`` (convention 8 exempts
+    fixture setup): the gestures under test are the enroll and the restore.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from tests.api.bare import sign_and_encode_post
+
+    actor = owner["actor_id_bytes"]
+    calendar_id, event_uid = secrets.token_bytes(32), secrets.token_bytes(32)
+    book_id, card_uid = secrets.token_bytes(32), secrets.token_bytes(32)
+    event = _seal_fixture(seal, "calendar", b"BEGIN:VEVENT\r\nSUMMARY:kept\r\nEND:VEVENT\r\n")
+    card = _seal_fixture(seal, "card", b"BEGIN:VCARD\r\nFN:Kept\r\nEND:VCARD\r\n")
+    post = sign_and_encode_post(
+        owner["signing_key"], int(time.time() * 1_000_000),
+        f"restored with the box {secrets.token_hex(8)}", tags=[])
+
+    with WsRpcAdminClient(
+        nest["url"], actor_id=actor, signing_key=bytes(owner["signing_key"]),
+    ) as client:
+        made = client.call("fauna.bridges.provision_calendar", {
+            "actor_id": actor, "calendar_id": calendar_id,
+            "encrypted_metadata": _seal_fixture(seal, "calendar", b"Personal"),
+            "update_metadata": False,
+        })
+        assert made["outcome"] == "created", f"provision the calendar: {made!r}"
+        put = client.call("fauna.bridges.put_event_ciphertext", {
+            "actor_id": actor, "calendar_id": calendar_id, "uid_hash": event_uid,
+            "encrypted_body": event,
+            "encrypted_index_hint": _seal_fixture(seal, "mail", b"hint-event"),
+            "timestamp": int(time.time()), "ciphertext_size": len(event),
+            "if_match": None,
+        })
+        assert put["outcome"] == "created", f"put the event: {put!r}"
+
+        made = client.call("fauna.bridges.provision_addressbook", {
+            "actor_id": actor, "addressbook_id": book_id,
+            "encrypted_metadata": _seal_fixture(seal, "card", b"Contacts"),
+            "update_metadata": False,
+        })
+        assert made["outcome"] == "created", f"provision the address book: {made!r}"
+        put = client.call("fauna.bridges.put_card_ciphertext", {
+            "actor_id": actor, "addressbook_id": book_id, "uid_hash": card_uid,
+            "encrypted_body": card,
+            "encrypted_index_hint": _seal_fixture(seal, "mail", b"hint-card"),
+            "timestamp": int(time.time()), "ciphertext_size": len(card),
+            "if_match": None,
+        })
+        assert put["outcome"] == "created", f"put the card: {put!r}"
+
+        post_id = client.call("fauna.posts.create", {"body": bytes(post)})["post_id"]
+
+    return {
+        "calendar": (calendar_id, event_uid, event),
+        "card": (book_id, card_uid, card),
+        "post": (post_id, post),
+    }
+
+
+def _read_every_other_kind_back(nest, owner, seeded: dict, result: str) -> None:
+    """Every kind ``_seed_every_other_kind`` gave box A reads back on the
+    rebuilt ``nest`` through its ordinary read door, as the owner: the
+    calendar's and the address book's query doors (what CalDAV and CardDAV
+    serve from), the by-id post door and the author feed.
+
+    A door that refuses the owner here is a real gap, never routed around:
+    the call raises with the door's own code, and the failure carries it."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    actor = owner["actor_id_bytes"]
+    calendar_id, event_uid, event = seeded["calendar"]
+    book_id, card_uid, card = seeded["card"]
+    post_id, post = seeded["post"]
+
+    with WsRpcAdminClient(
+        nest["url"], actor_id=actor, signing_key=bytes(owner["signing_key"]),
+    ) as client:
+        events = client.call("fauna.bridges.query_events", {
+            "actor_id": actor, "calendar_id": calendar_id,
+            "since_modseq": None, "after_event_id": None, "limit": 50,
+        })
+        cards = client.call("fauna.bridges.query_cards", {
+            "actor_id": actor, "addressbook_id": book_id,
+            "since_modseq": None, "after_card_id": None, "limit": 50,
+        })
+        got_post = bytes(client.call("fauna.posts.get", {"post_id": post_id})["body"])
+        feed = client.call("fauna.feed.author.posts", {"author": actor.hex()})["posts"]
+
+    served = {bytes(e["uid_hash"]): bytes(e["encrypted_body"])
+              for e in events.get("events", [])}
+    assert served.get(event_uid) == event, (
+        f"NEST-SIDE failure: the page says {result!r}, but the rebuilt box's "
+        f"calendar does not serve the event under its uid: {events!r}"
+    )
+    served = {bytes(c["uid_hash"]): bytes(c["encrypted_body"])
+              for c in cards.get("cards", [])}
+    assert served.get(card_uid) == card, (
+        f"NEST-SIDE failure: the page says {result!r}, but the rebuilt box's "
+        f"address book does not serve the card under its uid: {cards!r}"
+    )
+    assert got_post == bytes(post), (
+        f"NEST-SIDE failure: the page says {result!r}, but the post {post_id} "
+        f"reads back {len(got_post)} bytes, not the {len(post)} it was"
+    )
+    assert post_id in {p["post_id"] for p in feed}, (
+        f"NEST-SIDE failure: the post {post_id} reads by id but the owner's "
+        f"author feed does not list it: {[p['post_id'] for p in feed]!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+# web is never a custodian, as in the mail journey above; it witnesses this
+# outcome through the nest-held pull-back below, which it runs itself.
+@pytest.mark.real_sync_agent
+@pytest.mark.isolated_sync_agent
+@pytest.mark.feature("recover-a-lost-nest")
+def test_after_losing_the_nest_every_kind_comes_back_onto_the_rebuilt_one(
+    app, request, nest_mode, tmp_path_factory, run_seal_helper
+):
+    """**Once the new nest is up, the owner's posts, mail, calendar, files and
+    contacts come back from their backup destinations** (`recover-a-lost-nest`
+    outcome 4; `nest/box-recovery.md` § Goal, item 2; the ceremony
+    `behavior/backup-destinations.md` § Re-seed).
+
+    The mail journey above with every backed-up kind on box A: mail, a covered
+    folder with a file, a calendar event, a contact card and a post. This
+    device takes one copy of them all, A is lost, B is rebuilt under the same
+    deployment seed, and the owner restores from the app. Then each kind reads
+    back on B through its ordinary door: the INBOX, the folder listing, the
+    calendar and address-book query doors, the post by id and the author feed.
+
+    The restored copy lands under ``__landing/<kind>`` and the materialize
+    files it where it was (`reserved-folders.md` § __mail Sync → *The landing
+    set*); a door refusing the owner afterwards is a gap of its own, never
+    routed around here.
+    """
+    _lose_the_nest_and_restore_from_this_device(
+        app, request, nest_mode, tmp_path_factory, with_folder=True,
+        seal=run_seal_helper)
 
 
 @pytest.mark.tui
@@ -3662,6 +3911,21 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
     D needs none: the pull-back dials D's WebSocket and its CORS-open byte
     routes directly, as the audit and the recovery do.
     """
+    _lose_the_nest_and_pull_back_from_a_surviving_nest(
+        app, request, nest_mode, tmp_path_factory)
+
+
+def _lose_the_nest_and_pull_back_from_a_surviving_nest(
+    app, request, nest_mode, tmp_path_factory, *, seal=None
+):
+    """The after-loss nest-held pull-back journey the tests above and below
+    run: box A holds the owner's mail, nest D holds A's backup, A is lost, A′ is
+    rebuilt under the same seed, and the owner restores from D in the app.
+
+    ``seal`` (the ``run_seal_helper`` fixture) adds every other backed-up kind
+    to box A before D takes its copy — a covered folder with a file, a calendar
+    event, a contact card and a post — and makes the journey read each one back
+    on A′ after the restore (`nest/box-recovery.md` § Goal, item 2)."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
     from common.auth import claim_admin
     from conftest import _login_app_as, _start_dedicated_nest
@@ -3683,11 +3947,18 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
     app.backups.require_destination_management_supported()
     _seed_one_mail_segment(app, box_a, owner)
     assert _inbox_count(box_a, owner) == 1
+    others = _seed_every_other_kind(box_a, owner, seal) if seal is not None else None
 
     app.backups.navigate()
     app.backups.wait_for_destination_count(0)
     app.backups.add_destination(box_d["url"], name="Off-site")
     app.backups.wait_for_destination_count(1)
+    folder = (
+        _attach_a_new_folder_to_the_destination(app, box_a, owner)
+        if others is not None else None
+    )
+    if folder is not None:
+        app.backups.navigate()
     _push_backup(box_a)
 
     def held_at_d() -> list:
@@ -3699,9 +3970,20 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
             return client.call("fauna.backup.custody.list", {}).get("items", [])
 
     held = held_at_d()
-    assert any(i.get("folder_name") == "__mail" for i in held), (
+    held_sets = {i.get("folder_name") for i in held}
+    assert "__mail" in held_sets, (
         f"NEST-SIDE precondition: D must hold A's mail before A is lost: {held!r}"
     )
+    if others is not None:
+        # D holds every kind and the covered folder's mirror before A is lost,
+        # or a short restore below would be D's gap, not the pull-back's.
+        missing = [s for s in ("__post", "__calendar", "__card") if s not in held_sets]
+        if not any(str(s).startswith("__folder/") for s in held_sets):
+            missing.append(f"__folder/… (the covered folder {folder!r})")
+        assert not missing, (
+            f"NEST-SIDE precondition: D must hold every backed-up kind before A "
+            f"is lost; missing {missing!r}, held sets {sorted(map(str, held_sets))!r}"
+        )
 
     # ── Total loss, and the rebuild ──────────────────────────────────────────
     box_a["proc"].kill()
@@ -3740,6 +4022,8 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
                          f"error={app.error_text()!r}",
     )
     result = app.backups.reseed_result_text()
+    if folder is not None:
+        _assert_the_folder_named_restored(app, result, folder)
     assert result.startswith(S.backups.reseed_result_whole), (
         f"the restore must report the corpus whole: result={result!r} "
         f"error={app.error_text()!r}"
@@ -3748,6 +4032,13 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
         f"a whole restore re-enrolls D; the page reports it did not: "
         f"{app.error_text()!r}"
     )
+    if others is not None:
+        _assert_every_other_kind_named_restored(app, result)
+
+    if folder is not None:
+        _assert_the_folder_is_back(app, box_a2, owner, folder, result)
+    if others is not None:
+        _read_every_other_kind_back(box_a2, owner, others, result)
 
     # The post-ceremony duty, nest-side (convention 5): D accepts the restored
     # box's own pass, which a destination whose seat or registration were left
@@ -3761,6 +4052,40 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
         f"the restored mail must land back in the owner's INBOX on the rebuilt "
         f"box; INBOX holds {restored} message(s)."
     )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.feature("recover-a-lost-nest")
+def test_after_losing_the_nest_every_kind_comes_back_from_a_surviving_nest(
+    app, request, nest_mode, tmp_path_factory, run_seal_helper
+):
+    """**Once the new nest is up, the owner's posts, mail, calendar, files and
+    contacts come back from their backup destinations** (`recover-a-lost-nest`
+    outcome 4; `nest/box-recovery.md` § Goal, item 2) — from a surviving NEST
+    destination this time, the restore every app can run, a browser included.
+
+    The nest-held pull-back journey above with every backed-up kind on box A:
+    mail, a folder covered on D through its own row (a signed harness file, so
+    no bound location is needed — web and ios bind none), a calendar event, a
+    contact card and a post. D holds them all, A is lost, A′ is rebuilt under the
+    same seed, and the owner restores from D's row in the app. The result view
+    names each kind and the folder restored; then each reads back on A′ through
+    its ordinary door — the INBOX, the folder's live file and its row in the
+    app's folder list, the calendar and address-book query doors, the post by id
+    and the author feed.
+
+    Its device-custodian twin (above) cannot run on web, which is never a
+    custodian; this one holds the outcome there, and on every other app beside
+    that twin.
+    """
+    _lose_the_nest_and_pull_back_from_a_surviving_nest(
+        app, request, nest_mode, tmp_path_factory, seal=run_seal_helper)
 
 
 def _spa_proxy_for(app, request, nest):
@@ -3777,17 +4102,13 @@ def _spa_proxy_for(app, request, nest):
 
 
 def _push_backup(nest) -> dict:
-    """One synchronous nest-side backup sweep (the test-hooks run-now barrier
+    """One synchronous nest-side backup sweep (``helpers.backup_seed``; the
+    test-hooks run-now barrier
     `test_backup_destination_last_upload_time_reflects_a_nest_side_pass`
-    documents): when it returns, the pass has happened or definitively failed."""
-    resp = requests.post(f"{nest['url']}/api/v1/test/backup/run-now", json={}, timeout=120)
-    assert resp.status_code == 200, f"backup run-now returned {resp.status_code}: {resp.text}"
-    payload = resp.json()
-    assert payload.get("ok") is True and payload.get("owners_run", 0) >= 1, (
-        f"the sweep ran no owner ({payload!r}): the enroll did not leave the owner "
-        f"with a granted key and a registered destination"
-    )
-    return payload
+    documents)."""
+    from helpers.backup_seed import push_backup
+
+    return push_backup(nest)
 
 
 def _mail_segments(nest, owner) -> dict:
@@ -4210,3 +4531,173 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices
         f"pass {after!r} error={app.error_text()!r}"
     )
     assert _inbox_count(box_a, owner) == 3, "a later pass recovers nothing twice"
+
+
+def _writer_seat_probe(box_d, owner, writer_nest_id: str, *, succeeds: str | None = None):
+    """`fauna.backup.writer_grant.register` at destination ``box_d``, as the
+    owner: ``None`` when it seats ``writer_nest_id``, else the refusal's
+    ``RpcCallError``. A plain registration over a seat another box holds is
+    refused and changes nothing, so it doubles as a read of who holds it."""
+    from clients._ws_rpc_core import RpcCallError
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    payload = {"writer_nest_id": writer_nest_id}
+    if succeeds is not None:
+        payload["succeeds"] = succeeds
+    with WsRpcAdminClient(
+        box_d["url"],
+        actor_id=owner["actor_id_bytes"],
+        signing_key=bytes(owner["signing_key"]),
+    ) as client:
+        try:
+            client.call("fauna.backup.writer_grant.register", payload)
+        except RpcCallError as refused:
+            return refused
+    return None
+
+
+def _assert_seat_held_by(box_d, owner, writer_nest_id: str, holder: str, when: str) -> None:
+    """D's seat is still ``holder``'s: a plain registration of ``writer_nest_id``
+    is refused ``writer_seat_held`` (and, being refused, changes nothing)."""
+    refused = _writer_seat_probe(box_d, owner, writer_nest_id)
+    assert refused is not None and refused.code == "fauna.backup.writer_seat_held", (
+        f"NEST-SIDE failure ({when}): D's writer seat must still be the other box's "
+        f"{holder[:12]}…, so registering {writer_nest_id[:12]}… must be refused "
+        f"writer_seat_held; got {refused!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_a_destination_another_box_holds_is_refused_by_name_on_restore_and_on_add(
+    app, request, nest_mode, tmp_path_factory
+):
+    """**A destination already holding another nest of yours is refused by name
+    when you add it, and a restore onto a fresh nest refuses it the same way and
+    writes nothing there** (`backup-destinations-and-restore` outcome 30;
+    `segment-backup-protocol.md` § Cross-location backup protocol → *The writer
+    seat*: a destination keeps one nest-writer per owner, and a registration
+    naming any other box over a seat with live custody is refused
+    `fauna.backup.writer_seat_held`, `EnrollError::WriterSeatHeld` in the app).
+
+    Flow under test::
+
+        box A claimed by the owner -> one mail message
+        enroll nest D (UI)         -> D is A's destination; A's sweep -> D holds A's mail
+        the owner moves D's seat   -> to another box Z of theirs (`succeeds: A`;
+                                      precondition, as Z's own carry would)
+        kill A; rebuild A'         -> same seed, same identity, empty /data
+        restore from D's row (UI)  -> the data comes back; the re-enroll is
+                                      refused by name, and D's seat is still Z's
+        remove D, add D again (UI) -> refused by name; A' registers no
+                                      destination and D's seat is still Z's
+
+    The fresh-nest half runs first because it needs D's row, which survives the
+    loss on the rebuilt box's list. Both halves read the shared
+    `error.backup.writer_seat_held` text the typed refusal displays.
+
+    Every box here runs standalone: the refusal lives in the destination's
+    writer-grant store and the shared enroll, not in the nest image's plumbing,
+    so this does not re-exercise ``--nest docker``.
+    """
+    from common.auth import claim_admin
+    from conftest import _login_app_as, _start_dedicated_nest
+
+    box_a, cleanup_a = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "seatheld-box-a")
+    request.addfinalizer(cleanup_a)
+    box_d, cleanup_d = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "seatheld-dest")
+    request.addfinalizer(cleanup_d)
+    owner = box_a["admin"]
+    seed_hex = owner["deployment_seed"]
+    assert seed_hex, "the claim reply must carry the deployment seed the rebuild needs"
+    register_user(
+        box_d["port"], owner["actor_id_hex"], admin_signing_key=box_d["admin"]["signing_key"]
+    )
+
+    _login_app_as(app, request, box_a, owner, spa_url=_spa_proxy_for(app, request, box_a))
+    app.backups.require_destination_management_supported()
+    _seed_one_mail_segment(app, box_a, owner)
+
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(0)
+    app.backups.add_destination(box_d["url"], name="Off-site")
+    app.backups.wait_for_destination_count(1)
+    _push_backup(box_a)
+
+    # The owner's other box takes D's seat — the handover a live box's seat
+    # carry makes (precondition: Z need not run for D to record it).
+    box_z = secrets.token_hex(32)
+    moved = _writer_seat_probe(box_d, owner, box_z, succeeds=box_a["nest_id"])
+    assert moved is None, f"precondition: moving D's seat to Z must succeed: {moved!r}"
+    _assert_seat_held_by(box_d, owner, box_a["nest_id"], box_z, "after the move")
+
+    # ── Total loss, and the rebuild under the same identity ──────────────────
+    box_a["proc"].kill()
+    box_a["proc"].wait()
+    box_a2, cleanup_a2 = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "seatheld-box-a2", unclaimed=True,
+        extra_env={"FAUNA_DEPLOYMENT_SEED": seed_hex})
+    request.addfinalizer(cleanup_a2)
+    assert box_a2["nest_id"] == box_a["nest_id"], "the rebuild re-presents the same identity"
+    with open(os.path.join(box_a2["tmp_dir"], "claim-code")) as f:
+        claim_code = f.read().strip()
+    claim_admin(box_a2["port"], claim_code, base_url=box_a2["url"],
+                handle=owner.get("handle") or "admin", signing_key=owner["signing_key"])
+    assert app.driver.preserve_state_across_relaunch()
+    _login_app_as(app, request, box_a2, owner, spa_url=_spa_proxy_for(app, request, box_a2))
+
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(1)
+    wait_until(lambda: app.backups.reseed_button_on_row_visible(0), 60.0,
+               diagnose=lambda: f"D's row must carry the restore gesture on the "
+                                f"rebuilt box; error={app.error_text()!r}")
+
+    # ── Half 1: the restore's re-enroll is refused by name ───────────────────
+    app.backups.reseed_from_nest_row(0)
+    wait_until(
+        lambda: app.backups.reseed_result_text() not in ("", S.backups.backup_reseed_running)
+        or bool(app.error_text()),
+        300.0,
+        diagnose=lambda: f"the pull-back never reached a verdict; "
+                         f"result={app.backups.reseed_result_text()!r} "
+                         f"error={app.error_text()!r}",
+    )
+    result = app.backups.reseed_result_text()
+    assert result.startswith(S.backups.reseed_result_whole), (
+        f"the pull-back reads D's custody as the owner whoever holds the seat, so "
+        f"the data must come back whole: result={result!r} error={app.error_text()!r}"
+    )
+    expected = S.backups.backup_reseed_pull_back_reenroll_failed(
+        name="Off-site", reason=S.error.backup.writer_seat_held)
+    wait_until(lambda: app.error_text() == expected, 30.0,
+               diagnose=lambda: f"the re-enroll onto a destination another box holds "
+                                f"must be refused by name: expected {expected!r}, "
+                                f"page says {app.error_text()!r}")
+    _assert_seat_held_by(box_d, owner, box_a2["nest_id"], box_z, "after the restore")
+
+    # ── Half 2: adding it again is refused by name, and nothing is added ─────
+    app.backups.remove_destination(0)
+    app.backups.wait_for_destination_count(0)
+    dest = DestinationEnrollment(app, box_a2, owner)
+    registered_before = dest.registered_ids()
+    app.backups.add_destination(box_d["url"], name="Off-site again")
+    wait_until(lambda: app.error_text() == S.error.backup.writer_seat_held, 60.0,
+               diagnose=lambda: f"adding a destination another box holds must be "
+                                f"refused by name: expected "
+                                f"{S.error.backup.writer_seat_held!r}, page says "
+                                f"{app.error_text()!r}")
+    # The refusal is step (2) of the enroll, before the source-side register:
+    # nothing new is registered on A', and D's seat is untouched.
+    assert dest.registered_ids() == registered_before, (
+        f"NEST-SIDE failure: the refused add registered a destination on the "
+        f"rebuilt box: before {sorted(registered_before)!r}, now "
+        f"{sorted(dest.registered_ids())!r}"
+    )
+    _assert_seat_held_by(box_d, owner, box_a2["nest_id"], box_z, "after the refused add")

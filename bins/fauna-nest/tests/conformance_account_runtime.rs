@@ -83,8 +83,8 @@ use fauna_protocol::{
 };
 use fauna_sync_engine::account_runtime::{
     AccountRuntimeParams, AccountStoreHandle, AccountStoreRuntime, AgentPresenceLock,
-    AgentPresenceLockOutcome, CRED_NAMESPACE, EnrollmentPass, PeerLegBinding, PeerLegPass,
-    PeerTransportFactory, RefusedChangeWrite, RuntimePrincipal, StoreRoot,
+    AgentPresenceLockOutcome, CRED_NAMESPACE, EnrollmentPass, MembershipSource, PeerLegBinding,
+    PeerLegPass, PeerTransportFactory, RefusedChangeWrite, RuntimePrincipal, StoreRoot,
     resolve_writer_key_serialized,
 };
 use fauna_sync_engine::device_endpoints_writer::{EndpointFacts, EndpointsPass};
@@ -1202,7 +1202,9 @@ fn params_in_channel(
             fauna_sync_engine::account_runtime::CloudBackupExclusion::NotApplicable {
                 platform: "test".into(),
             },
-        memberships: Some(Arc::new(|| Some(vec![V6_CHANNEL]))),
+        memberships: Some(MembershipSource::Engine(Arc::new(|| {
+            Some(vec![V6_CHANNEL])
+        }))),
         ..params(base, device, rpc)
     }
 }
@@ -1318,7 +1320,9 @@ async fn a_left_conversations_rows_leave_the_nest_and_a_re_join_writes_them_back
         Arc::new(std::sync::Mutex::new(vec![V6_CHANNEL]));
     let source = Arc::clone(&joined);
     let a = AccountStoreRuntime::start(AccountRuntimeParams {
-        memberships: Some(Arc::new(move || Some(source.lock().unwrap().clone()))),
+        memberships: Some(MembershipSource::Engine(Arc::new(move || {
+            Some(source.lock().unwrap().clone())
+        }))),
         ..params_in_channel(tmp.path(), "a", &rpc)
     })
     .await
@@ -1471,7 +1475,9 @@ fn params_in_channels(
     channels: Vec<[u8; 32]>,
 ) -> AccountRuntimeParams<Arc<RouterRequester>> {
     AccountRuntimeParams {
-        memberships: Some(Arc::new(move || Some(channels.clone()))),
+        memberships: Some(MembershipSource::Engine(Arc::new(move || {
+            Some(channels.clone())
+        }))),
         ..params_trusting_deployment(base, device, rpc)
     }
 }
@@ -3826,6 +3832,53 @@ fn epoch_secs() -> u64 {
     fauna_core::data::Timestamp::now_secs_or_zero() as u64
 }
 
+/// Stage `dialer`'s verified enrollment into `device`'s store before its
+/// runtime starts (pre-minting the writer key with the sanctioned pre-assembly
+/// resolver, so the staging never races an assembly): the admission seam
+/// admits only a verified member of the serving replica's own fleet view
+/// (`account-sync-plane.md` § The admission seam → *Validity and
+/// severance*), and production replicas hold every sibling's enrollment row.
+async fn v12_stage_sibling_enrollment(base: &Path, device: &str, dialer: &SigningKey) {
+    let store_root = StoreRoot::at(base.join(device).join("state"));
+    let creds = CredentialStore::with_file_backend(CRED_NAMESPACE, base.join(device).join("creds"));
+    let writer_key = resolve_writer_key_serialized(&store_root, &account().actor_id_hex(), &creds)
+        .expect("pre-mint writer key");
+    let store = fauna_account_store::store::AccountStore::open(
+        fauna_account_store::sqlite::SqliteBackend::open(
+            store_root
+                .store_dir(&account().actor_id_hex())
+                .expect("store dir"),
+        )
+        .expect("backend"),
+        &account().actor_id_hex(),
+        WriterId(writer_key.verifying_key().to_bytes()),
+    )
+    .await
+    .expect("store opens");
+    let device_key = dialer.verifying_key().to_bytes();
+    let authorization = canonical_encode(&dial_witness(&account(), device_key)).expect("witness");
+    let kind = fauna_protocol::merge_policy::KIND_DEVICE_SET;
+    store
+        .put_state(fauna_account_store::types::StateEntry {
+            kind: kind.into(),
+            key: fauna_core::hex32::encode(&device_key),
+            scope: fauna_protocol::merge_policy::home_scope_for_kind(kind)
+                .unwrap()
+                .into(),
+            value: canonical_encode(&fauna_core::generation::sign_device_enrollment(
+                dialer,
+                authorization,
+                5_000,
+            ))
+            .expect("enrollment"),
+            merge_meta: None,
+            entry_version: 0,
+            tombstone: false,
+        })
+        .await
+        .expect("the sibling's enrollment lands");
+}
+
 /// **W5.7, the positive half**: with a transport
 /// factory installed, an enrolled principal in the slot, and the REAL nest
 /// advertising the always-on `peer-sync` brake token, the elected runtime
@@ -3843,6 +3896,10 @@ async fn v12_the_elected_runtime_binds_the_peer_listener_and_a_sibling_walks_it(
     let base: PathBuf = tmp.path().to_path_buf();
     let listeners = fauna_transport::testing::listeners();
     let invocations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // The sibling that dials in below is a verified member of A's fleet view.
+    let dialer_sk = SigningKey::from_bytes(&[0x77; 32]);
+    let dialer_pub = dialer_sk.verifying_key().to_bytes();
+    v12_stage_sibling_enrollment(&base, "a", &dialer_sk).await;
 
     let a = AccountStoreRuntime::start(v12_params(
         &base,
@@ -3897,8 +3954,6 @@ async fn v12_the_elected_runtime_binds_the_peer_listener_and_a_sibling_walks_it(
 
     // Admitting: a sibling device (root-signed witness) dials in, admits
     // mutually, and walks A's relay plane pull-only into its own store.
-    let dialer_sk = SigningKey::from_bytes(&[0x77; 32]);
-    let dialer_pub = dialer_sk.verifying_key().to_bytes();
     use fauna_transport::PeerTransport as _;
     let dial_transport = fauna_transport::testing::MemTransport {
         me: fauna_transport::EndpointKey::from_bytes(dialer_pub),

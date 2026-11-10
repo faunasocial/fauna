@@ -242,6 +242,10 @@ pub fn install(
                             ledger_tx,
                         ));
                     }
+                    // The MLS sends queued while the runtime was not up
+                    // (or by an earlier run) drain now that its outbox door
+                    // answers (`devices.md` § Offline compose → *Drain*).
+                    crate::offline_outbox::spawn_mls_drain();
                     // The conversations seams that rest on the store (a
                     // community room's wrap keypairs, the native rail's read
                     // positions) — the earliest honest moment, for the share
@@ -372,7 +376,7 @@ pub fn ledger_store() -> Result<AccountStoreHandle, String> {
 /// quit does NOT come here — see the module docs.
 ///
 /// **The stop is spawned; the continuation waits for it.** The erase that
-/// follows a sign-out (`account_scope::erase_all_known_accounts`) is fully
+/// follows a sign-out (`account_scope::finish`) is fully
 /// synchronous, so a stop spawned with nothing sequenced behind it is a race
 /// the erase wins: the sweep runs before the task has reached the assembly at
 /// all (`apps/account-scoping.md` § Erasure follows scope: *a host must be able
@@ -590,10 +594,10 @@ fn stop_then(
 ///    that is what makes a join or a leave take effect with no notification
 ///    path, no `register_content_scope` call and no nudge.
 fn membership_source() -> fauna_sync_engine::account_runtime::MembershipSource {
-    Arc::new(|| {
+    fauna_sync_engine::account_runtime::MembershipSource::Engine(Arc::new(|| {
         crate::conversations::conv_backend::active_session()
             .map(|session| session.joined_conv_channels())
-    })
+    }))
 }
 
 fn hex_encode(bytes: [u8; 32]) -> String {
@@ -614,9 +618,13 @@ mod tests {
     /// simply stops and the rows go.
     #[test]
     fn no_session_cannot_tell_rather_than_answering_empty() {
-        let source = membership_source();
+        let fauna_sync_engine::account_runtime::MembershipSource::Engine(engine) =
+            membership_source()
+        else {
+            panic!("an app host wires its engine, never the record");
+        };
         assert_eq!(
-            source(),
+            engine(),
             None,
             "an app with no session must answer `cannot tell`, never `left every channel`"
         );

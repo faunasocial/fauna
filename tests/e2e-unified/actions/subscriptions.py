@@ -115,9 +115,13 @@ class SubscriptionsActions:
         price_hint: str | None = None,
         description: str | None = None,
         payment_url: str | None = None,
+        asking_price: str | None = None,
         auto_approve: bool = False,
     ) -> None:
         """Open the create form, fill it, and save (`tiers.create`).
+        ``asking_price`` is the machine-comparable sats figure
+        (`subscription-tier-form-asking-price`, `monetization.md` § The asking
+        price), independent of the display ``price_hint``.
 
         On an app that hosts an account runtime, first waits for it to
         assemble: the tier's period key is custody on the account plane
@@ -139,6 +143,8 @@ class SubscriptionsActions:
             self.driver.clear_and_type("subscription-tier-form-price-hint", price_hint)
         if payment_url is not None:
             self.driver.clear_and_type("subscription-tier-form-payment-url", payment_url)
+        if asking_price is not None:
+            self.driver.clear_and_type("subscription-tier-form-asking-price", asking_price)
         if auto_approve:
             self.driver.click("subscription-tier-form-auto-approve")
         self.driver.click("subscription-tier-form-save")
@@ -146,6 +152,11 @@ class SubscriptionsActions:
     def tier_names(self) -> list[str]:
         n = self.driver.count("subscription-tier-row")
         return [self.driver.get_text("subscription-tier-name", index=i) for i in range(n)]
+
+    def cancel_tier_form(self) -> None:
+        """Close an open create/edit form without saving (``subscription-tier-form-cancel``)."""
+        if self.driver.is_visible("subscription-tier-form"):
+            self.driver.click("subscription-tier-form-cancel")
 
     def wait_for_tier(self, name: str, timeout: float = 10.0) -> bool:
         deadline = time.time() + timeout
@@ -343,6 +354,20 @@ class SubscriptionsActions:
             "subscription-request-paid-badge", scope=f"subscription-request-row[{index}]"
         )
 
+    def hold_author_drain(self) -> None:
+        """Hold this app's author drain: every subscribe request enqueued after
+        this returns stays in §2 until :meth:`release_author_drain` — the one
+        way to read a payment-backed row, which the pump otherwise grants on its
+        next tick (convention 14). A test-agent command, never user-facing;
+        gate the caller on the `author-drain-hold` surface."""
+        reply = self.driver.call_command("subscriptions_hold_author_drain", {})
+        assert not (isinstance(reply, dict) and reply.get("error")), reply
+
+    def release_author_drain(self) -> None:
+        """Release :meth:`hold_author_drain`; the next pump tick drains as usual.
+        A no-op when nothing is held."""
+        self.driver.call_command("subscriptions_release_author_drain", {})
+
     # --- §3 Subscribers roster ---
 
     def subscriber_count(self) -> int:
@@ -410,15 +435,29 @@ class SubscriptionsActions:
     def close_provider_form(self) -> None:
         self.driver.click("subscription-provider-form-cancel")
 
-    def add_provider(self, kind: str, webhook_secret: str, tier: str) -> None:
+    def add_provider(
+        self, kind: str, webhook_secret: str, tier: str, product: str | None = None,
+    ) -> None:
         """Open the §4 provider form, fill it, and save
-        (`fauna.payments.providers.set`). ``kind`` and ``tier`` are display
+        (`fauna.payments.providers.set`). ``product`` (optional) is the one
+        product the tier is sold as — `subscription-provider-form-product`,
+        the provider's own reference (Stripe: the Payment Link id); left
+        ``None`` the field is not touched, so a fresh provider maps every
+        verified payment (monetization.md § Pillar 3 → *Configuration*).
+        ``kind`` and ``tier`` are display
         strings in the two selects (the kind select enumerates the shared
         `fauna-payments` registry; the tier select the author's own tiers)."""
         self.open_provider_form(kind)
         self.driver.clear_and_type("subscription-provider-form-secret", webhook_secret)
         self.driver.select("subscription-provider-form-tier-map", tier)
+        if product is not None:
+            self.driver.clear_and_type("subscription-provider-form-product", product)
         self.driver.click("subscription-provider-form-save")
+
+    def provider_form_product(self) -> str:
+        """The §4 form's product field as it reads right now — pre-filled from
+        the listed provider when its kind is picked (not a secret)."""
+        return self.driver.get_text("subscription-provider-form-product")
 
     def provider_kinds(self) -> list[str]:
         n = self.driver.count("subscription-provider-row")

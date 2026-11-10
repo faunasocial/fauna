@@ -53,6 +53,23 @@ def test_build_launch_env_applies_config_environment(tmp_path):
     assert env["FAUNA_TEST_FLAG"] == "1"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX; windows ignores the opt-in")
+def test_build_launch_env_sets_the_own_group_pgid_file_only_when_opted_in(tmp_path, monkeypatch):
+    monkeypatch.delenv("FAUNA_E2E_SYNC_AGENT_PGID_FILE", raising=False)
+    assert "FAUNA_E2E_SYNC_AGENT_PGID_FILE" not in build_launch_env({}, 1, str(tmp_path))
+    env = build_launch_env({"sync_agent_own_group": True}, 1, str(tmp_path))
+    assert env["FAUNA_E2E_SYNC_AGENT_PGID_FILE"] == str(tmp_path / "sync-agent.pgid")
+
+
+@pytest.mark.host_platform("linux", "macos")  # process groups are POSIX
+def test_kill_group_never_signals_the_runs_own_group():
+    from drivers.port_util import _group_is_ours, kill_group
+
+    assert not _group_is_ours(os.getpgrp(), "python")
+    # An unrecorded pgid is never signalled, whatever it is.
+    assert not kill_group(os.getpgrp())
+
+
 def test_build_launch_env_keeps_an_exported_rust_log_beside_the_configured_one(
     tmp_path, monkeypatch
 ):
@@ -152,6 +169,26 @@ def test_build_launch_env_lets_a_caller_pin_the_macos_home(tmp_path):
     assert env["HOME"] == str(chosen)
     assert env["CFFIXED_USER_HOME"] == str(chosen)
     assert os.path.isdir(env["HOME"])
+
+
+def test_darwin_device_home_shares_the_socket_dir_but_not_the_install(tmp_path):
+    """A second install on one device (the door journey's second seat): ``HOME`` is
+    the shared device home — the agent socket and the conversations door derive
+    from it — while ``CFFIXED_USER_HOME`` stays the launch's own, which the
+    account store follows in a debug/e2e build
+    (``fauna_core::platform_ids::macos_install_home``)."""
+    from drivers.tui import _account_store_root
+
+    device, own = tmp_path / "device", tmp_path / "own"
+    env = build_launch_env(
+        {"home": str(own), "device_home": str(device)}, 14, str(tmp_path),
+        sys_platform="darwin",
+    )
+    assert env["HOME"] == str(device)
+    assert env["CFFIXED_USER_HOME"] == str(own)
+    assert _account_store_root(env, "darwin") == os.path.join(
+        str(own), "Library", "Application Support", "Fauna", "sync"
+    )
 
 
 def test_build_launch_env_rejects_an_unbindable_macos_home(tmp_path):

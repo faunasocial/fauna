@@ -11,7 +11,7 @@
 // loading wasm/`$app/paths` — see `family-approvals.ts`'s doc comment on why
 // `raw` has no default.
 
-import { approvalText } from './family-approvals.ts';
+import { approvalText, decideApproval, type DecideVerbs } from './family-approvals.ts';
 import { t } from './i18n/strings.ts';
 import type { FamilyApprovalEntry } from './rpc.ts';
 
@@ -135,4 +135,47 @@ Deno.test('a held mail reads sender · time; no stamp or another kind reads as b
   );
   const contact = entry({ kind: 'contact', summary: 'hi from bob', created_at: 1_700_000_000 });
   eq(approvalText(contact, fakeRaw, when), 'hi from bob', 'contact row');
+});
+
+// ── The family composer (account-offline-mutation.md § Implementation status
+// today): `decideApproval`'s routing — the composer's send-or-queue and the
+// shared fold are faked here; both are pinned Rust-side
+// (`fauna-client-family`'s `a_decision_with_no_nest_is_queued_scoped_to_its_item`
+// and `a_queued_decision_drops_only_its_own_item`).
+
+function recorder(queued: boolean) {
+  const calls: string[] = [];
+  const verbs: DecideVerbs = {
+    decideOrQueue: (e, approve) => {
+      calls.push(`decide:${e.kind}:${approve}`);
+      return Promise.resolve(queued);
+    },
+    afterQueued: (list, decided) => {
+      calls.push('fold');
+      return list.filter((e) => e !== decided);
+    },
+    reread: () => {
+      calls.push('reread');
+      return Promise.resolve();
+    },
+  };
+  return { calls, verbs };
+}
+
+Deno.test('a decision with no nest is queued and leaves the local list, nothing re-read', async () => {
+  const held = entry({ kind: 'mail_hold', message_id: new Uint8Array(32).fill(9) });
+  const other = entry({ kind: 'contact' });
+  const { calls, verbs } = recorder(true);
+  const out = await decideApproval(verbs, [held, other], held, true);
+  eq(out?.length, 1, 'the decided item left the list');
+  eq(out?.[0], other, 'the other item stays');
+  eq(calls.join(','), 'decide:mail_hold:true,fold', 'queued: folded, never re-read');
+});
+
+Deno.test('a decision with the nest connected is sent and the page re-reads', async () => {
+  const held = entry({ kind: 'mail_hold' });
+  const { calls, verbs } = recorder(false);
+  const out = await decideApproval(verbs, [held], held, false);
+  eq(out, null, 'the re-read sets the list');
+  eq(calls.join(','), 'decide:mail_hold:false,reread', 'sent: re-read, never folded');
 });

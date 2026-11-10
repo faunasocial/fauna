@@ -252,7 +252,7 @@ async fn a_provisional_create_materializes_without_the_dehydration_proof() {
     let engine = ingest_engine(watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     let bytes = holiday_bytes();
@@ -343,7 +343,7 @@ async fn a_provisional_delete_leaves_the_local_file_on_disk() {
     let engine = ingest_engine(watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     // Materialize a create first, so there is something to "delete".
@@ -399,7 +399,7 @@ async fn local_novelty_is_never_overwritten() {
     let engine = ingest_engine(watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     let rel = "docs/draft.txt";
@@ -451,7 +451,7 @@ async fn the_nests_sequenced_row_confirms_and_stamps_the_withheld_proof() {
     let engine = ingest_engine_at(&server.uri(), watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     let bytes = holiday_bytes();
@@ -521,7 +521,7 @@ async fn the_nests_different_winner_supersedes_without_forking() {
     let engine = ingest_engine_at(&server.uri(), watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     let provisional_bytes = holiday_bytes();
@@ -592,7 +592,7 @@ async fn a_nest_confirmed_delete_removes_bytes_and_retires_the_overlay() {
     let engine = ingest_engine_at(&server.uri(), watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     let bytes = holiday_bytes();
@@ -668,7 +668,7 @@ async fn a_row_whose_bytes_did_not_arrive_holds_the_pull_cursor_below_it() {
     let engine = ingest_engine(watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     let first = sealed_blob(b"the first letter, which arrived");
@@ -740,7 +740,7 @@ async fn a_row_refused_for_good_does_not_hold_the_pull_cursor() {
     let engine = ingest_engine(watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
 
     let blob = sealed_blob(b"a body the path guard never lets land");
@@ -770,7 +770,7 @@ async fn a_peer_served_seq_at_the_extremes_is_refused_without_a_panic() {
     let engine = ingest_engine(watch.path().to_path_buf());
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
     engine
         .advance_share_pull_cursor(&PEER_ACTOR_HEX, 5)
@@ -839,7 +839,7 @@ async fn a_permanent_fetch_failure_does_not_hold_the_pull_cursor_but_a_transient
         let engine = ingest_engine(watch.path().to_path_buf());
         engine
             .db()
-            .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+            .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
             .unwrap();
         let rows = [peer_row(
             6,
@@ -933,6 +933,7 @@ async fn a_third_writers_signed_row_relays_across_two_hops() {
             ],
             &[],
             None,
+            &[],
         )
         .unwrap();
     let report = a
@@ -978,7 +979,7 @@ async fn a_third_writers_signed_row_relays_across_two_hops() {
         SyncDb::open_in_memory().unwrap(),
     );
     c.db()
-        .cache_share_writer_roster(&[(writer_hex.clone(), true)], &[], None)
+        .cache_share_writer_roster(&[(writer_hex.clone(), true)], &[], None, &[])
         .unwrap();
     let hop2 = fauna_protocol::peer_row::PeerChangeRow {
         change: served[0].change.clone(),
@@ -1016,6 +1017,7 @@ async fn unsigned_relays_fabrications_and_foreign_set_rows_are_refused_at_the_en
             ],
             &[],
             None,
+            &[],
         )
         .unwrap();
     let blob = sealed_blob(&holiday_bytes());
@@ -1065,7 +1067,7 @@ async fn an_own_unsigned_row_is_refused_at_the_engine_door() {
     );
     engine
         .db()
-        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
         .unwrap();
     let report = engine
         .ingest_peer_share_rows(std::slice::from_ref(&row), &PEER_ACTOR_HEX, &fetcher)
@@ -1326,7 +1328,7 @@ async fn one_page_under_each_origin_lands_the_same_overlay_and_keys_its_own_curs
         let engine = ingest_engine(watch.path().to_path_buf());
         engine
             .db()
-            .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+            .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None, &[])
             .unwrap();
         let (report, cursor) = ingest_peer_page_landing(
             &engine,

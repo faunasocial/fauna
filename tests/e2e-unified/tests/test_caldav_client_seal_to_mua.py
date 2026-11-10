@@ -225,7 +225,7 @@ def test_client_sealed_event_visible_to_mua(app, dedicated_mail_nest, request):
         "enabling mail must mint the default credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"mail must report enabled; status={app.mail_settings.status_text()!r}"
     )
 
@@ -301,8 +301,9 @@ def _enable_mail_and_mua(app, handle, request):
         "enabling mail must mint the default credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
-        f"mail must report enabled; status={app.mail_settings.status_text()!r}"
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
+        f"mail must report enabled; status={app.mail_settings.status_text()!r} "
+        f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
     handle.rebind_after_enable()
     admin_addr = rt._alias_admin_to_address(nest, handle.domain)
@@ -583,4 +584,84 @@ def test_a_reply_by_mail_shows_on_the_organizers_event_in_the_calendar_app(
         f"a reply no door authenticated must be refused, leaving that attendee "
         f"unanswered; roster {after!r}"
     )
+    assert not app.has_error(), f"the journey surfaced an error: {app.error_text()!r}"
+
+
+def _organizer(ics: str) -> str | None:
+    """The ORGANIZER address of an iCalendar body, or None when it names none."""
+    unfolded = re.sub(r"\r?\n[ \t]", "", ics)
+    for line in unfolded.splitlines():
+        if not line.upper().startswith("ORGANIZER"):
+            continue
+        value = line.partition(":")[2].strip()
+        if value.lower().startswith("mailto:"):
+            value = value[len("mailto:"):]
+        return value.lower()
+    return None
+
+
+# Web carries a marker the module does not: the calendar-app reader here is this
+# module's own Python `CalDAVClient`, not the app under test, so the witness speaks
+# for every app that runs the import wizard and the mail-enable preamble — web
+# among them, as the two web-marked tests above already show for the preamble.
+@pytest.mark.web
+@pytest.mark.feature("import-your-social-archive")
+def test_an_imported_event_names_the_owner_organizer_only_when_they_hosted_it(
+    app, dedicated_mail_nest, request, tmp_path
+):
+    """`archive-import.md` § What each category becomes, the events row:
+    `ORGANIZER` is written only for an event the owner hosted, and names the
+    owner; the archive never carries another host's address, so a joined,
+    declined or interested event has no organizer at all — never a false one.
+
+    No app page shows an event's organizer, and the event rests sealed in the
+    encrypted CalDAV store, so the observer is a calendar app reading the
+    imported events over CalDAV through the MDA — this module's reader. The
+    owner's own `ATTENDEE` on every event is read too: it proves the owner's
+    address resolved at import time, so an organizer absent from the three is
+    the rule at work, not a missing address."""
+    # The archive module first: importing it puts the fakes directory on the path.
+    from actions.archive_import import ArchiveImportActions
+
+    from . import test_archive_import as ai
+    from fake_facebook_archive import REPLY_EVENTS, FakeFacebookArchive
+
+    handle = dedicated_mail_nest
+    handle.assert_mta_running()
+    # Enabling mail and the calendar app's first look make the Personal
+    # calendar — the first calendar, which the import writes into.
+    mua, cal_href, admin_addr = _enable_mail_and_mua(app, handle, request)
+
+    zip_path = FakeFacebookArchive(
+        tag=" " + ai._unique("#organizer"), reply_events=True,
+    ).write(tmp_path / "facebook.zip")
+    wizard = ArchiveImportActions(app.driver)
+    done, _folder = ai._import_to_done(wizard, zip_path)
+    assert done.startswith(f"{ai.IMPORTED_CARDS + len(ai.OWN_REPLIES)} imported"), (
+        f"the events land with the posts: {done!r}; skips {ai._skips_on_done(wizard)!r}"
+    )
+
+    hosted = REPLY_EVENTS["hosted"][0]
+    titles = set(ai.OWN_REPLIES)
+    events: dict[str, str] = {}
+
+    def _all_listed() -> bool:
+        nonlocal events
+        events = {e.summary: e.ics for e in mua.list_events(cal_href) if e.summary in titles}
+        return set(events) == titles
+
+    _settles(_all_listed, _PROP_TIMEOUT, interval=2.0)
+    assert set(events) == titles, (
+        f"every imported event must reach the calendar app; saw {sorted(events)!r}\n"
+        f"MDA log (tail):\n{_tail_mda_log(handle)}"
+    )
+    for title, ics in events.items():
+        assert admin_addr.lower() in _attendee_partstats(ics), (
+            f"{title!r}: the owner's own reply must be on the roster; ics:\n{ics}"
+        )
+    assert _organizer(events[hosted]) == admin_addr.lower(), (
+        f"the event the owner hosted names them its organizer; ics:\n{events[hosted]}"
+    )
+    invented = {t: _organizer(ics) for t, ics in events.items() if t != hosted and _organizer(ics)}
+    assert not invented, f"an event the owner did not host must name no organizer: {invented!r}"
     assert not app.has_error(), f"the journey surfaced an error: {app.error_text()!r}"

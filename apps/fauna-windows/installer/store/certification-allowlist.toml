@@ -1,0 +1,34 @@
+# Windows App Certification Kit tests a Store package may fail without failing its
+# build: read by scripts/grade-store-certification.py, the grade the public
+# release-store-windows.yml workflow runs on each package's certification report
+# (docs/goal/architecture/installers/windows.md § Store distribution (MSIX) →
+# Build & packaging shape).
+#
+# An entry is for a test that cannot apply on a hosted runner, or to a package the
+# Store signs at certification and this build only test-signs — never for a
+# defect: a real failure is fixed in the package. Each entry names the test as the
+# report spells it, the verdict it accepts, the arches it covers (both when
+# omitted) and why:
+#
+#   [[allow]]
+#   test = "<the report's TEST NAME>"
+#   result = "FAIL"
+#   arch = ["arm64"]
+#   why = "<why this test cannot judge this package here>"
+#
+# First certified 2026-11-08 (the 0.1.6 attempt-2 dry run, run 42451772992): the kit's
+# overall verdict was PASS on both arches, with one optional test failed (below).
+
+[[allow]]
+test = "Blocked executables"
+result = "FAIL"
+why = """An optional test (the kit marks it so and rates the run PASS overall) that flags
+every reference to a process-launch API or to a name like reg, cmd or MSBuild in any
+file of the package. On this package it finds the .NET runtime and Windows App SDK
+framework files, which carry those references in every desktop app, and Fauna's own
+launches, each of Fauna itself: the Explorer menu opening a URI with ShellExecuteW
+(shell-ext context_menu.rs), the app starting another instance of its own
+executable for a second account (Process.Start, InstanceSpawner.cs), and the
+restart agent relaunching the app (CreateProcessW). A static name match cannot tell
+those from launching a blocked system tool, so it cannot judge this package; none of
+the package's code runs reg, cmd or another blocked executable."""

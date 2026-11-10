@@ -4,6 +4,9 @@ title: Community labelers
 section: family and personalization
 goal: docs/goal/architecture/content-moderation-and-ranking.md § Tier-3 community models & background re-processing
 guide: docs/guides/app-tour.md § Personalization
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -16,7 +19,7 @@ to.
 
 ## Coverage contract
 
-Stamped 2026-10-09 at 0ddfae47dc.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] The catalog lists published labelers, inspect shows one before subscribing, and subscribing surfaces it on Personalization — `docs/goal/architecture/content-moderation-and-ranking.md` § Tier-3 community models & background re-processing
    - `tests/e2e-unified/tests/test_labeler_catalog.py::test_labeler_catalog_browse_inspect_subscribe_unsubscribe`
@@ -63,19 +66,28 @@ Stamped 2026-10-09 at 0ddfae47dc.
    - `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_labeler_drain_scores_mail_via_subscription_and_user_minted_capability`
 21. [app] A labeler that needs a newer app than yours says so when you inspect it, and cannot be subscribed to — `docs/goal/architecture/content-moderation-and-ranking.md` § Tier-3 community models & background re-processing
    - `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_labeler_newer_than_this_app_reads_inert_and_cannot_be_subscribed`
+22. [app] A room's labeler also labels attachment-only messages and the media of room posts, and its inspect panel says which attachments it reads — `docs/goal/architecture/content-moderation-and-ranking.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_conversation_room_labelers.py::test_a_rooms_labeler_that_reads_attachments_labels_an_attachment_only_message`
+   - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_rooms_labeler_that_reads_attachments_labels_a_room_posts_media`
+23. [app] A labeler you subscribe to that cannot be loaded says so on the feed — `docs/goal/architecture/content-moderation-and-ranking.md` § Implementation status today
+   - `tests/e2e-unified/tests/test_labeler_feed_scoring.py::test_a_subscribed_labeler_that_cannot_be_loaded_says_so_on_the_feed`
+24. [nest] A code labeler for public posts runs only on your device, and your nest keeps nothing of it but the subscription — `docs/goal/architecture/content-moderation-and-ranking.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_a_post_kind_wasm_subscription_leaves_the_nest_nothing_to_score_with`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+8755c14e standalone |
-| linux | ✅ full | 0.1.5-dev+8755c14e standalone |
-| windows | ✅ full | 0.1.5-dev+8755c14e standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+8755c14e standalone |
+| web | ⚠ partial | 0.1.5-dev+8755c14e standalone |
+| linux | ⚠ partial | 0.1.5-dev+8755c14e standalone |
+| windows | ⚠ partial | 0.1.5-dev+8755c14e standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+8755c14e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -103,4 +115,8 @@ Stamped 2026-10-09 at 0ddfae47dc.
 | 19 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_labeler_catalog_browse_inspect_subscribe_unsubscribe` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 20 | nest | `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_labeler_drain_scores_mail_via_subscription_and_user_minted_capability` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 21 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_labeler_newer_than_this_app_reads_inert_and_cannot_be_subscribed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 22 | app | `tests/e2e-unified/tests/test_conversation_room_labelers.py::test_a_rooms_labeler_that_reads_attachments_labels_an_attachment_only_message` | tui (linux): passed, tui (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_rooms_labeler_that_reads_attachments_labels_a_room_posts_media` | tui (linux): passed, tui (macos): passed |
+| 23 | app | `tests/e2e-unified/tests/test_labeler_feed_scoring.py::test_a_subscribed_labeler_that_cannot_be_loaded_says_so_on_the_feed` | tui (linux): passed |
+| 24 | nest | `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_a_post_kind_wasm_subscription_leaves_the_nest_nothing_to_score_with` | nest (linux): passed |
 <!-- features-render:end -->

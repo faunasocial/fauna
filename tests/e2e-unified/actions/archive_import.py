@@ -208,6 +208,15 @@ class ArchiveImportActions:
         reply = self.driver.call_command("archive_import_hold_after", {"records": records})
         assert not (isinstance(reply, dict) and reply.get("error")), reply
 
+    def arm_stop_before_raw_copy(self) -> None:
+        """Arm the machine's one-shot stop between the marker learning the
+        zip's length + hash and the raw copy being written — the crash window
+        that leaves a folder a resume cannot read the archive from, so the
+        user must hand it back. A test-agent command, never user-facing; its
+        surface is `archive-import-resume-handback` (surfaces.toml)."""
+        reply = self.driver.call_command("archive_import_stop_before_raw_copy", {})
+        assert not (isinstance(reply, dict) and reply.get("error")), reply
+
     # ── step 6 — done ────────────────────────────────────────────────────
 
     def done_summary(self) -> str:

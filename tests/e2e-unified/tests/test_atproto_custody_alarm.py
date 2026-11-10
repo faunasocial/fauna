@@ -548,6 +548,139 @@ def test_recovery_fork_contest_end_to_end(
 
 @pytest.mark.parametrize("custody_app", _apps(*CONTEST_APPS))
 @pytest.mark.feature("atproto")
+def test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds(
+    custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
+):
+    """The custody banner names the undo and where to find it, and a contest
+    happens only on the user's confirm: a press that fails keeps the card open
+    with the error and can be retried, and the alarm clears only once the
+    directory shows the fix (`atproto-identity-custody.md` § The 72 h
+    recovery-fork contest, the ceremony surface's points (2) and (3), and
+    § The custody alarm names the remedy).
+
+    The happy path — confirm, fork accepted, alarm down — is
+    `test_recovery_fork_contest_end_to_end` above; this test is the arms it
+    leaves out. A cancelled ceremony submits nothing. The directory then
+    refuses the first submission (`FakePlcDirectory.refuse_next_submissions`,
+    a 503 that changes nothing): the press must report, not go quiet — the
+    confirm card stays open, the page's `error-message` carries the failure,
+    and the alarm stays up, because the directory still shows the seizure. The
+    second press on the same card then lands exactly one fork, and the alarm
+    comes down off the directory's evidence.
+
+    No navigation between the failed press and the retry, on purpose: a
+    re-opened page runs the ambient convergence, which may finish a contest
+    whose consent is already recorded (the sibling-device path), and the
+    property under test is the press the user retries.
+    """
+
+    with _minted_identity(
+        custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
+    ) as (
+        app,
+        directory,
+        did,
+        user_key,
+        _tail,
+        seize,
+        _status,
+    ):
+        bs = app.atproto_settings
+
+        hostile_cid = seize(EVIL_SENIOR)
+        assert _poll_alarm_state(app, want_visible=True), (
+            "a seized identity must raise the custody alarm; log:\n" + _tail()
+        )
+
+        # ── The banner names the undo AND where it lives — the page the user
+        # must find, not only that a remedy exists (copy owned by
+        # i18n/strings/en.yaml critical_alerts.atproto_custody_mismatch). ──
+        alarm_text = app.driver.get_text(CRITICAL_ALERT, 0)
+        assert "undo" in alarm_text.lower(), (
+            f"the custody alarm must name the undo: {alarm_text!r}"
+        )
+        assert "AT Protocol" in alarm_text and "Settings" in alarm_text, (
+            f"the custody alarm must say where the undo lives: {alarm_text!r}"
+        )
+
+        assert _poll_contest_card_visible(app, bs), (
+            "the contest card must render on a standing custody violation; "
+            f"page error={bs.page_error_text()!r}"
+        )
+        assert bs.contest_state() == "contestable", (
+            f"precondition: the seizure is contestable; state={bs.contest_state()!r}"
+        )
+
+        # ── Only a confirm contests: opening and cancelling signs nothing. ──
+        bs.open_contest()
+        assert bs.is_contest_confirm_visible(), "the contest button opens the confirm card"
+        bs.cancel_contest()
+        assert app.driver.is_absent("atproto-contest-confirm-card"), (
+            "cancel closes the confirm card"
+        )
+        assert not directory.forks and not directory.refused_submissions, (
+            "a cancelled ceremony must submit nothing to the directory; "
+            f"forks={directory.forks!r} refused={directory.refused_submissions!r}"
+        )
+
+        # ── The press fails: the directory refuses the first submission. ──
+        directory.refuse_next_submissions(1)
+        bs.open_contest()
+        assert bs.is_contest_confirm_visible(), "the contest button opens the confirm card"
+        bs.confirm_contest()
+
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not directory.refused_submissions:
+            time.sleep(0.5)  # sleep-ok: pacing between poll iterations
+        assert directory.refused_submissions == [did], (
+            "the confirm must reach the directory (which refuses it); "
+            f"refused={directory.refused_submissions!r} forks={directory.forks!r} "
+            f"page error={bs.page_error_text()!r}\nbridge log:\n{_tail()}"
+        )
+        error = ""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not error:
+            error = bs.page_error_text(timeout=1.0)
+        assert error, "a press that fails must say so in the page's error-message"
+        assert bs.is_contest_confirm_visible(), (
+            f"a failed press keeps the confirm card open for a retry; error={error!r}"
+        )
+        assert not directory.forks, f"a refused submission is no fork: {directory.forks!r}"
+        assert directory.standing_rotation_keys(did)[0] == EVIL_SENIOR, (
+            "precondition intact: the directory still shows the seizure"
+        )
+        assert app.driver.is_visible(CRITICAL_ALERTS), (
+            "the alarm stays up while the directory still shows the seizure — "
+            "a failed press is not a fix"
+        )
+
+        # ── The retry, on the same card, is safe: exactly one fork lands. ──
+        bs.confirm_contest()
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not directory.forks:
+            time.sleep(0.5)  # sleep-ok: pacing between poll iterations
+        assert len(directory.forks) == 1, (
+            "the retry must land exactly one recovery fork; "
+            f"forks={directory.forks!r} page error={bs.page_error_text()!r}"
+            f"\nbridge log:\n{_tail()}"
+        )
+        assert hostile_cid in directory.forks[0][2], (
+            f"the fork must nullify the seizure: {directory.forks[0]!r}"
+        )
+        assert directory.standing_rotation_keys(did)[0] == user_key, (
+            "after the retried contest the user's own key is senior again"
+        )
+        assert _poll_alarm_state(app, want_visible=False), (
+            "once the directory shows the fix the custody alarm clears; "
+            f"page error={bs.page_error_text()!r}"
+        )
+        assert len(directory.forks) == 1, (
+            f"no second fork from the convergence after the retry: {directory.forks!r}"
+        )
+
+
+@pytest.mark.parametrize("custody_app", _apps(*CONTEST_APPS))
+@pytest.mark.feature("atproto")
 def test_a_seizure_past_its_window_says_so_and_offers_no_button(
     custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
 ):

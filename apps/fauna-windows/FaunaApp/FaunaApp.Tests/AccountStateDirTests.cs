@@ -122,18 +122,10 @@ public class AccountStateDirTests : IDisposable
             "no first-adopter marker is ever written");
     }
 
-    [Fact]
-    public void Erase_DropsTheAccountsScope_AndNoOther()
-    {
-        SeedScope(ActorA);
-        var dbB = SeedScope(ActorB);
-
-        AccountStateDir.Erase(ActorA);
-
-        Assert.False(Directory.Exists(Path.Combine(_base, ActorA)),
-            "the removed account's scoped stores must be gone");
-        Assert.True(File.Exists(dbB), "another account's scope must survive a single-account erase");
-    }
+    // The single-account erase is the shared remove-account gesture's last step
+    // (`remove_account_gesture`, under this seat's one base and the store root —
+    // AccountStateDir.RemoveAccountGestureAsync), tested in `fauna-ffi` and
+    // witnessed by the windows remove e2e's scope-gone assertion.
 
     [Fact]
     public void EraseAll_DropsEveryScope()

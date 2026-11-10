@@ -267,3 +267,32 @@ func TestWsrpcReplyFixtureCoverage(t *testing.T) {
 		}
 	}
 }
+
+// TestJunkMailboxPinnedToRustFixture pins JunkMailbox to its Rust owner,
+// fauna_protocol::email::JUNK_MAILBOX: the Rust generator emits one
+// reply-list-mailboxes.cbor entry per standard mailbox with the nest's
+// special_use_attrs, so exactly one entry carries `\Junk` and its name must
+// be JunkMailbox. A Rust-side rename (or a re-assigned attribute) reds here.
+func TestJunkMailboxPinnedToRustFixture(t *testing.T) {
+	t.Parallel()
+	b, err := os.ReadFile(filepath.Join("testdata", "reply-list-mailboxes.cbor"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	reply, err := dagcbor.Unmarshal[listMailboxesReply](b)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	var junk []string
+	for _, m := range reply.Mailboxes {
+		for _, a := range m.Attrs {
+			if a == `\Junk` {
+				junk = append(junk, m.Name)
+			}
+		}
+	}
+	if len(junk) != 1 || junk[0] != JunkMailbox {
+		t.Fatalf("mailboxes carrying \\Junk in the Rust fixture = %v, want [%q]; "+
+			"update JunkMailbox to fauna_protocol::email::JUNK_MAILBOX", junk, JunkMailbox)
+	}
+}

@@ -1202,6 +1202,18 @@ impl CacheDb {
         Ok(id)
     }
 
+    /// The slug `author` published `post_id` under, or `None` when it is not
+    /// web-published by them — the same author-keyed projection the feed rows
+    /// carry ([`super::feeds::project_web_slug`]).
+    pub async fn web_published_slug(
+        &self,
+        author: &[u8; 32],
+        post_id: &[u8; 32],
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().await;
+        super::feeds::project_web_slug(&conn, post_id.as_slice(), author.as_slice())
+    }
+
     /// Unpublish a post: delete the `web_published` content_links row for
     /// the given actor and post. A link that was really removed leaves the
     /// rendered site owing a render, recorded in the same transaction

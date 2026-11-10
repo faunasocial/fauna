@@ -69,7 +69,9 @@ from common import get_repo_root
 from helpers import ios_store_driver as store
 from helpers.ios_store_driver import run_test
 from helpers.app_surface import skip_environment
-from helpers.store_install_account import APP_STORE_ACCOUNT, StoreAccount, witness_account
+from helpers.staging_box import SEEDING_ACCOUNT
+from helpers.store_install_account import APP_STORE_ACCOUNT, STORE_BOX, StoreAccount, witness_account
+from i18n.strings import S
 
 # tier_4: the subject is a shipped client artifact as its channel delivered it
 # (`testing.md` § The four-tier taxonomy, point 4's shipped-client-artifact arm).
@@ -188,3 +190,93 @@ def test_the_testflight_installed_app_signs_in_to_the_feed(store_install, device
     outcome = run_test(repo, device, store.SIGN_IN_TEST, _runner_env(account),
                        secrets=(account.secret_hex,))
     _environment_or_fail(outcome)
+
+
+# ── store-install: the store flavor's absences ────────────────────────────
+#
+# ``docs/features/store-install.md``: the App Store takes the ``store-safe``
+# flavor, so the TestFlight delivery carries neither the money plane nor the
+# in-person share (``dynamic-features.md`` § The store flavors). Each node runs
+# one runner method that reaches the screen a full build would put the control
+# on, proves it is there by an id the store flavor keeps, and asserts the excised
+# ids absent. Which ids, and the pin that none of them is an id nothing ever
+# drew: the ``store-absent`` block of ``StoreDriverTests.swift`` and
+# ``test_ios_store_driver_pins.py``. Every method signs in through the app's UI
+# when the install opens on onboarding, so a narrowed run of one node stands
+# alone. The buyer halves of outcomes 2 and 3 (a priced tier or a sold post shown
+# without its price) need content the store build cannot make: they read the
+# box's seeding account, which the provisioning drive seeds from a full build
+# with a priced tier and a sold post, opened through Find User as any reader
+# opens an author.
+
+#: The author the buyer halves read (``staging_box.SEEDING_ACCOUNT`` on the box).
+SELLER_HANDLE = f"{SEEDING_ACCOUNT}@{STORE_BOX}"
+
+
+def _run_store_outcome(test: str, store_install, device, repo) -> None:
+    """Re-assert the subject, then run one store-install method signed in as
+    this machine's tester."""
+    _assert_the_subject(store_install)
+    account = witness_account(APP_STORE_ACCOUNT)
+    env = _runner_env(account)
+    # The compose audience picker's answers carry no id; the runner reads them by
+    # the app's own strings (outcome 3).
+    env["FAUNA_STORE_GATE_PUBLIC_LABEL"] = S.feed.post.gate_public
+    env["FAUNA_STORE_GATE_SELL_LABEL"] = S.feed.post.gate_sell
+    # The buyer halves of outcomes 2 and 3 read this author's seeded content.
+    env["FAUNA_STORE_SELLER_HANDLE"] = SELLER_HANDLE
+    outcome = run_test(repo, device, test, env, secrets=(account.secret_hex,))
+    _environment_or_fail(outcome)
+
+
+@pytest.mark.feature("store-install")
+def test_the_testflight_install_offers_no_payment_provider_or_code(store_install, device, repo):
+    """``store-install`` outcome 1, the iPhone arm: no payment provider to
+    connect (own profile → Tiers), no code to hand out, none to redeem
+    (Settings → Subscriptions)."""
+    _run_store_outcome(store.STORE_NO_PROVIDER_NO_CODE_TEST, store_install, device, repo)
+
+
+@pytest.mark.feature("store-install")
+def test_the_testflight_install_tier_editor_has_no_price(store_install, device, repo):
+    """``store-install`` outcome 2, the author half: the tier editor has no
+    price, price hint or payment link (opened and cancelled, nothing saved)."""
+    _run_store_outcome(store.STORE_TIER_EDITOR_NO_PRICE_TEST, store_install, device, repo)
+
+
+@pytest.mark.feature("store-install")
+def test_the_testflight_install_never_offers_to_sell_a_post(store_install, device, repo):
+    """``store-install`` outcome 3, the author half: the compose audience picker
+    has no "Sell this post…" answer and no sale control is painted (nothing
+    posted)."""
+    _run_store_outcome(store.STORE_COMPOSE_NO_SALE_TEST, store_install, device, repo)
+
+
+@pytest.mark.feature("store-install")
+def test_the_testflight_install_shows_a_priced_tier_without_its_price(store_install, device, repo):
+    """``store-install`` outcome 2, the buyer half: the seeded author's priced
+    tier shows on their profile's Tiers tab as an ordinary tier, with no price
+    or payment link (nothing subscribed to)."""
+    _run_store_outcome(store.STORE_PRICED_TIER_NO_PRICE_TEST, store_install, device, repo)
+
+
+@pytest.mark.feature("store-install")
+def test_the_testflight_install_shows_a_sold_post_without_its_price(store_install, device, repo):
+    """``store-install`` outcome 3, the buyer half: the seeded author's sold post
+    shows on their Posts tab as a gated post with its badge, and no price,
+    payment link or buy button (nothing bought)."""
+    _run_store_outcome(store.STORE_SOLD_POST_NO_PRICE_TEST, store_install, device, repo)
+
+
+@pytest.mark.feature("store-install")
+def test_the_testflight_install_shows_no_tips_or_zap_signer(store_install, device, repo):
+    """``store-install`` outcome 4: no tip surface on the feed's post cards, no
+    zap signer on Settings → Nostr."""
+    _run_store_outcome(store.STORE_NO_TIPS_NO_ZAP_SIGNER_TEST, store_install, device, repo)
+
+
+@pytest.mark.feature("store-install")
+def test_the_testflight_install_leaves_out_the_in_person_share(store_install, device, repo):
+    """``store-install`` outcome 5, the App Store half: Settings → Folders paints
+    neither the offline-share panel nor the peer-transfer readings."""
+    _run_store_outcome(store.STORE_NO_IN_PERSON_SHARE_TEST, store_install, device, repo)

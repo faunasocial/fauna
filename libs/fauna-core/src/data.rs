@@ -544,7 +544,22 @@ pub fn proxied_media_origin(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod shared_media_proxy_url_tests {
-    use super::{proxied_media_origin, shared_media_proxy_url};
+    use super::{is_proxied_media_path, proxied_media_origin, shared_media_proxy_url};
+
+    #[test]
+    fn is_proxied_media_path_accepts_only_the_two_forms() {
+        assert!(is_proxied_media_path(
+            "/api/v1/bluesky/media?url=https%3A%2F%2Fa"
+        ));
+        assert!(is_proxied_media_path(
+            "/api/v1/media/proxy?url=https%3A%2F%2Fa"
+        ));
+        assert!(!is_proxied_media_path("/api/v1/media/proxy?url="));
+        assert!(!is_proxied_media_path("/api/v1/account/anything"));
+        assert!(!is_proxied_media_path("/\\evil"));
+        assert!(!is_proxied_media_path("//evil"));
+        assert!(!is_proxied_media_path("/api/v1/media/proxy?url=a\\b"));
+    }
 
     #[test]
     fn proxied_media_origin_inverts_both_proxy_forms() {
@@ -1270,6 +1285,21 @@ pub fn shared_media_proxy_url(remote: &str) -> Option<String> {
         "/api/v1/media/proxy?url={}",
         urlencoding::encode(remote)
     ))
+}
+
+/// Whether `path` is one of the two nest-relative proxied media forms a bridged item's
+/// `remote_url` may carry (bridges.md § Unified feed ingestion ruling 4):
+/// `/api/v1/bluesky/media?url=…` or `/api/v1/media/proxy?url=…`. Anything else — another
+/// route, a `//host` or `/\host` form, a backslash anywhere — is not, so a native post's
+/// author-chosen path cannot make a reader's app send its session token to an arbitrary
+/// route on its own nest. The one home of the predicate, for the feed fold and any
+/// nest-side check.
+pub fn is_proxied_media_path(path: &str) -> bool {
+    const FORMS: [&str; 2] = ["/api/v1/bluesky/media?url=", "/api/v1/media/proxy?url="];
+    !path.contains('\\')
+        && FORMS
+            .iter()
+            .any(|form| path.strip_prefix(form).is_some_and(|rest| !rest.is_empty()))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4735,6 +4765,18 @@ pub struct ModerationConfig {
     /// the nest never learns what a user hid.
     #[serde(default)]
     pub hidden_content: Vec<String>,
+    /// What the user **marked as spam** from a post's actions menu
+    /// (`report-sharing.md` § Report capture → *The post's mark-as-spam
+    /// verb*): each entry is a post's cid, lowercase hex. The shared
+    /// `FeedManager` folds a `spam` label at 1000‰ into a marked post's
+    /// labels, so the render verdict collapses it at the marker's own slider —
+    /// the sibling of [`Self::hidden_content`], kept apart because a mark is
+    /// undone from the post's own menu and a hidden card has none. Normalized
+    /// on write by `fauna_client_config::preference_records::
+    /// mark_spam_content`; each id is its own sealed `spam/` row, so the nest
+    /// never learns what a user marked.
+    #[serde(default)]
+    pub spam_marked: Vec<String>,
 }
 
 // ── Personalization sub-record (trained topic factors) ──
@@ -7124,6 +7166,17 @@ pub struct FoldersConfig {
     /// written before Phase 2.
     #[serde(default)]
     pub foreign_sets: Vec<ForeignFolder>,
+    /// The **forked same-nest** seats this holder keeps a row for — one
+    /// [`ForkedFolderSeat`] per same-nest shared set whose seat the folder
+    /// rail marked forked, written just before the seat's self-unlist drops
+    /// the roster row the nest's list named the set by
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*, part (b)), so the member's Folders row survives a relaunch.
+    /// Merge **unions** by `channel_id` (see [`Self::merge`]). A cross-nest
+    /// set never records one (its [`ForeignFolder`] keeps its row).
+    #[serde(default)]
+    pub forked_seats: Vec<ForkedFolderSeat>,
 }
 
 /// One set's custody entry — the owner's from the set's creation, a member's
@@ -7602,6 +7655,63 @@ impl ForeignFolder {
     }
 }
 
+/// A forked SAME-nest shared-folder seat's member-side record — the durable
+/// twin of the row the nest's folder list stops returning once the seat's
+/// self-unlist drops this member's roster row (`federation-shared-folders.md`
+/// § Cross-nest shared folders + channel append → *A forked seat is final,
+/// says so, and heals only by a fresh Welcome*, parts (a) and (b)). Written by
+/// the custody sink just before that unlist, from the row the list last named
+/// the set by; read by the Folders page, which paints it forked while this
+/// device's engine reads the seat joined and forked. A fresh Welcome replacing
+/// the seat (part (c)) or a leave clears it ([`Self::cleared_at`]); it is never
+/// removed — a removed record returns from any stale device, as a left
+/// [`ForeignFolder`] would.
+///
+/// Display data only, never an authorization input: the access is the grant
+/// the list last showed, and the name and owner what it last rendered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkedFolderSeat {
+    /// The derived 32-byte `ChannelId` (`ChannelId::from_group_id`) — the
+    /// record's identity.
+    #[serde(with = "serde_bytes")]
+    pub channel_id: [u8; 32],
+    /// The raw MLS group id the Folders row is addressed by.
+    #[serde(with = "serde_bytes")]
+    pub mls_group_id: Vec<u8>,
+    /// The set's name as the list last rendered it; `None` when the list
+    /// could not be read or no longer named the set (clients render their
+    /// unknown-set label).
+    #[serde(default)]
+    pub set_name: Option<String>,
+    /// The owner's handle as the list last carried it.
+    #[serde(default)]
+    pub owner_handle: Option<String>,
+    /// The owner's actor id (hex) as the list last carried it — the badge's
+    /// fallback label when no handle resolved.
+    #[serde(default)]
+    pub owner_actor_id: Option<String>,
+    /// The member's grant as the list last showed it (`"writer"`, else
+    /// reader). Advisory, as the list row's own field is.
+    #[serde(default)]
+    pub access: Option<String>,
+    /// Micros, when the record was written — each fork writes it anew.
+    pub forked_at: u64,
+    /// Micros, when a fresh Welcome or a leave cleared it. With
+    /// [`Self::forked_at`] it is the record's liveness ([`Self::is_live`]).
+    #[serde(default)]
+    pub cleared_at: Option<u64>,
+}
+
+impl ForkedFolderSeat {
+    /// Whether the record stands: never cleared, or written again after the
+    /// latest clear.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.cleared_at
+            .is_none_or(|cleared| cleared < self.forked_at)
+    }
+}
+
 impl FoldersConfig {
     /// Merge two devices' shared-folder custody **without losing any content
     /// key** — the `fauna.state.folder-keys` CRDT merge. Like
@@ -7781,10 +7891,49 @@ impl FoldersConfig {
         // is total by construction and stays total as either record grows
         // fields.
         pending_removals.sort_by_cached_key(crate::encoding::canonical_tiebreak_key);
+        // `forked_seats` union per set by `channel_id`. The display fields
+        // (group id, name, owner pair, access) land whole from the later
+        // `forked_at` — each fork re-writes them from the list it read; a tie
+        // folds each field `None` ∨ `Some` → `Some`, two `Some`s to the
+        // smaller. `forked_at` and `cleared_at` (the liveness) join to the
+        // maximum. Deterministic + commutative + idempotent.
+        let min = |a: Option<String>, b: &Option<String>| match (a, b.clone()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let mut forked_by_channel: BTreeMap<[u8; 32], ForkedFolderSeat> = BTreeMap::new();
+        for f in self.forked_seats.iter().chain(other.forked_seats.iter()) {
+            let Some(acc) = forked_by_channel.get_mut(&f.channel_id) else {
+                forked_by_channel.insert(f.channel_id, f.clone());
+                continue;
+            };
+            match f.forked_at.cmp(&acc.forked_at) {
+                std::cmp::Ordering::Greater => {
+                    acc.mls_group_id = f.mls_group_id.clone();
+                    acc.set_name = f.set_name.clone();
+                    acc.owner_handle = f.owner_handle.clone();
+                    acc.owner_actor_id = f.owner_actor_id.clone();
+                    acc.access = f.access.clone();
+                    acc.forked_at = f.forked_at;
+                }
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => {
+                    if f.mls_group_id < acc.mls_group_id {
+                        acc.mls_group_id = f.mls_group_id.clone();
+                    }
+                    acc.set_name = min(acc.set_name.take(), &f.set_name);
+                    acc.owner_handle = min(acc.owner_handle.take(), &f.owner_handle);
+                    acc.owner_actor_id = min(acc.owner_actor_id.take(), &f.owner_actor_id);
+                    acc.access = min(acc.access.take(), &f.access);
+                }
+            }
+            acc.cleared_at = acc.cleared_at.max(f.cleared_at);
+        }
         Self {
             sets: by_identity.into_values().collect(),
             pending_removals,
             foreign_sets: foreign_by_channel.into_values().collect(),
+            forked_seats: forked_by_channel.into_values().collect(),
         }
     }
 }

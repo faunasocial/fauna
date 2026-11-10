@@ -33,6 +33,7 @@ use common::connected_client;
 use std::sync::Arc;
 
 use fauna_client::NestClient;
+use fauna_client_recovery::alerts::CriticalAlerts;
 use fauna_client_recovery::chain_reconcile::fetch_replacement_status;
 use fauna_client_recovery::linked_fanout::native::NativeLinkedNestDial;
 use fauna_client_recovery::linked_fanout::{
@@ -241,6 +242,8 @@ async fn the_veto_clears_the_window_at_the_bound_and_the_linked_nest() {
         rig.identity.actor_id(),
         &held_kit(),
         &rig.dial(),
+        &CriticalAlerts::new(),
+        0,
     )
     .await
     .expect("the bound nest accepts the veto");
@@ -276,6 +279,8 @@ async fn a_window_held_only_at_the_linked_nest_is_cleared_by_the_veto_at_the_bou
         rig.identity.actor_id(),
         &held_kit(),
         &rig.dial(),
+        &CriticalAlerts::new(),
+        0,
     )
     .await
     .expect("the bound nest accepts the veto");

@@ -60,6 +60,10 @@ fauna-core = { path = "../fauna-core" }
 # wasm-capable crate since 2026-09-29, because web registers the same seams and
 # this crate is native-only by construction.
 fauna-account-seams = { workspace = true }
+# The e2e custody reader (`folder_set_custody_json`): the set selector and the
+# one-way generation fingerprint (`custody::held_generations_for`). Already in
+# the graph through `fauna-account-seams`.
+fauna-client-folders = { path = "../fauna-client-folders" }
 # The `P2pParticipation` door (`p2p_participation`): a seam the devices
 # machine declares and cannot implement itself (it stays wasm-clean, so it may
 # not name `fauna-sync-engine`). Its sibling `FleetRemoval` door moved to

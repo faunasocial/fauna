@@ -320,13 +320,17 @@ impl CacheDb {
     /// **Five boundary rules, each load-bearing** (`monetization.md:126`
     /// (a)–(e) — keep the numbering in step with that list):
     ///
-    /// 1. **Designated→designated is the only blocked edge.** A grant of an
-    ///    undesignated tier fans out to everything at rank ≤ R (that is the
+    /// 1. **A designated grant fans out to nothing** (`monetization.md` §
+    ///    Per-post pay-to-unlock, rule (a), re-ruled 2026-11-07). A grant of
+    ///    an undesignated tier fans out to everything at rank ≤ R (that is the
     ///    ratified cascade: "a rank-R subscriber is enrolled in every tier
-    ///    ≤ R"); a grant of an `unlocks_post`-designated tier fans out only to
-    ///    *undesignated* tiers, so a buyer of a sold post becomes a follower
-    ///    (`:126`) while one cheap post still never unlocks every sold post.
-    ///    This was formerly an early return on any designated grant, which made `:126`'s rank-0 cascade sentence false at code level.
+    ///    ≤ R", designated tiers included — subscribers get a sold post free);
+    ///    a grant of an `unlocks_post`-designated tier returns before the
+    ///    query. A purchase is a good, not a relationship: the buyer becomes
+    ///    neither a follower nor a member of any paid tier. From 2026-07-30
+    ///    the edge reached every undesignated tier ≤ R, which let a pure
+    ///    pay-per-view tier — minted above the author's highest regular tier
+    ///    — enroll its buyer in every paid tier, perpetually.
     /// 2. **The granted tier is excluded.** Its own grant belongs to the
     ///    caller, which has already written the row carrying the real paid
     ///    window; re-selecting it here would drive the `ON CONFLICT` arm below
@@ -371,7 +375,9 @@ impl CacheDb {
         author_id: &[u8; 32],
         subscriber_id: &[u8; 32],
         granted_tier: &str,
+        home: Option<crate::subscription_handlers::SubscriberHome<'_>>,
     ) -> Result<usize> {
+        let (home_id, home_url) = request_home_columns(home);
         let now = now_epoch_secs();
         let conn = self.conn.lock().await;
         let granted: Option<(i64, Option<String>)> = conn
@@ -386,9 +392,11 @@ impl CacheDb {
         let Some((rank, designation)) = granted else {
             return Ok(0);
         };
-        // Rule 1: a designated grant may only reach undesignated targets.
-        let undesignated_targets_only = i64::from(designation.is_some());
-        // Rules 1-2 + the rank bound are pure SQL; `holds_unexpired` carries
+        // Rule 1: a designated grant fans out to nothing.
+        if designation.is_some() {
+            return Ok(0);
+        }
+        // Rule 2 + the rank bound are pure SQL; `holds_unexpired` carries
         // the entitlement half of the suppression, and readability — which SQL
         // cannot see (see `wrapped_subscribers`) — is applied below.
         let mut stmt = conn
@@ -404,8 +412,7 @@ impl CacheDb {
                   WHERE d.author_id = ?1
                     AND d.rank <= ?3
                     AND d.name <> ?5
-                    AND d.hidden = 0
-                    AND (?6 = 0 OR d.unlocks_post IS NULL)",
+                    AND d.hidden = 0",
             )
             .context("prepare unlock fan-out candidates")?;
         let candidates: Vec<(String, bool)> = stmt
@@ -415,8 +422,7 @@ impl CacheDb {
                     subscriber_id.as_slice(),
                     rank,
                     now,
-                    granted_tier,
-                    undesignated_targets_only
+                    granted_tier
                 ],
                 |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
             )
@@ -439,12 +445,21 @@ impl CacheDb {
                 .execute(
                     "INSERT INTO subscribe_requests
                          (author_id, subscriber_id, tier_name, created_at, kind,
-                          payment_entitled, valid_until)
-                     VALUES (?1, ?2, ?3, ?4, 'subscribe', 1, NULL)
+                          payment_entitled, valid_until, home_nest_id, home_nest_url)
+                     VALUES (?1, ?2, ?3, ?4, 'subscribe', 1, NULL, ?5, ?6)
                      ON CONFLICT(author_id, subscriber_id, tier_name, kind) DO UPDATE SET
                          payment_entitled = 1,
-                         valid_until = NULL",
-                    rusqlite::params![author_id.as_slice(), subscriber_id.as_slice(), name, now],
+                         valid_until = NULL,
+                         home_nest_id = COALESCE(excluded.home_nest_id, subscribe_requests.home_nest_id),
+                         home_nest_url = COALESCE(excluded.home_nest_url, subscribe_requests.home_nest_url)",
+                    rusqlite::params![
+                        author_id.as_slice(),
+                        subscriber_id.as_slice(),
+                        name,
+                        now,
+                        home_id,
+                        home_url
+                    ],
                 )
                 .context("enqueue unlock fan-out")?;
         }
@@ -948,11 +963,12 @@ impl CacheDb {
     ) -> Result<Vec<SubscribeRequestRow>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
-            .prepare(
-                "SELECT id, subscriber_id, tier_name, created_at, kind, mlkem_encaps_key,
-                    payment_entitled, valid_until, home_nest_url
-             FROM subscribe_requests WHERE author_id = ?1 ORDER BY created_at ASC",
-            )
+            .prepare(&format!(
+                "SELECT r.id, r.subscriber_id, r.tier_name, r.created_at, r.kind,
+                    r.mlkem_encaps_key, r.payment_entitled, r.valid_until, r.home_nest_url,
+                    {REQUEST_COMPLETE_SQL}
+                 FROM subscribe_requests r WHERE r.author_id = ?1 ORDER BY r.created_at ASC"
+            ))
             .context("prepare list subscribe requests")?;
         let rows = stmt
             .query_map(rusqlite::params![author_id.as_slice()], |row| {
@@ -966,6 +982,7 @@ impl CacheDb {
                     payment_entitled: row.get::<_, i64>(6)? != 0,
                     valid_until: row.get(7)?,
                     home_nest_url: row.get(8)?,
+                    complete: row.get::<_, i64>(9)? != 0,
                 })
             })
             .context("list subscribe requests")?;
@@ -996,6 +1013,20 @@ impl CacheDb {
             .optional()
             .context("get subscribe request")?;
         Ok(result)
+    }
+
+    /// Whether request `request_id` is complete ([`REQUEST_COMPLETE_SQL`]);
+    /// `None` = no such row. Read by `requests.approve`, which refuses a
+    /// half-row before any roster write.
+    pub async fn subscribe_request_is_complete(&self, request_id: i64) -> Result<Option<bool>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            &format!("SELECT {REQUEST_COMPLETE_SQL} FROM subscribe_requests r WHERE r.id = ?1"),
+            rusqlite::params![request_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )
+        .optional()
+        .context("read subscribe request completeness")
     }
 
     pub async fn delete_subscribe_request(&self, request_id: i64) -> Result<bool> {
@@ -1061,35 +1092,101 @@ impl CacheDb {
         Ok(count > 0)
     }
 
+    /// Whether a removal of `subscriber` from `author`'s `tier_name` is queued
+    /// for the author's client (a `kind='unsubscribe'` row) — a leave, or the
+    /// end of a paid window (`monetization.md` § Pillar 3 → *Expiry &
+    /// revocation*). A renewal re-stamps a standing roster row only while this
+    /// is false.
+    pub async fn has_pending_unsubscribe_request(
+        &self,
+        author_id: &[u8; 32],
+        subscriber_id: &[u8; 32],
+        tier_name: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subscribe_requests \
+             WHERE author_id = ?1 AND subscriber_id = ?2 AND tier_name = ?3 AND kind = 'unsubscribe'",
+                rusqlite::params![author_id.as_slice(), subscriber_id.as_slice(), tier_name],
+                |row| row.get(0),
+            )
+            .context("has pending unsubscribe request")?;
+        Ok(count > 0)
+    }
+
+    /// The lapse half of the entitlement-lapse sweep (`monetization.md`
+    /// § Pillar 3 → *Expiry & revocation*): queue the leave's `unsubscribe`
+    /// row for every content-tier roster row whose paid window ended before
+    /// `cutoff` (the sweep passes `now − grace`), copying the roster row's home
+    /// so the drain's committed removal reaches a remote buyer's nest. One
+    /// statement; a row whose removal is already queued is left alone by the
+    /// `(author, subscriber, tier, kind)` key. A membership-designated tier is
+    /// never in the set — its lapse is Rail C's downgrade, not a removal.
+    /// Returns how many removals were queued.
+    pub async fn queue_lapsed_paid_window_removals(&self, cutoff: i64) -> Result<u64> {
+        let now = now_epoch_secs();
+        let conn = self.conn.lock().await;
+        let queued = conn
+            .execute(
+                "INSERT INTO subscribe_requests
+                    (author_id, subscriber_id, tier_name, created_at, kind,
+                     home_nest_id, home_nest_url)
+                 SELECT s.author_id, s.subscriber_id, s.tier_name, ?2, 'unsubscribe',
+                        s.home_nest_id, s.home_nest_url
+                   FROM subscribers s
+                  WHERE s.valid_until IS NOT NULL AND s.valid_until < ?1
+                    AND NOT EXISTS (
+                        SELECT 1 FROM membership_tiers m
+                         WHERE m.admin_id = s.author_id AND m.tier_name = s.tier_name)
+                 ON CONFLICT(author_id, subscriber_id, tier_name, kind) DO NOTHING",
+                rusqlite::params![cutoff, now],
+            )
+            .context("queue lapsed paid window removals")?;
+        Ok(queued as u64)
+    }
+
     /// Enqueue (or mark) a payment-entitled subscribe request — the verified-
     /// payment grant source (monetization.md § Pillar 3). If the buyer already
     /// has a pending `subscribe` row for this tier, it is upgraded in place
     /// (`payment_entitled = 1`, window refreshed); otherwise a new row is
     /// inserted, exactly like a subscriber-initiated enqueue (the author's
     /// drain pump approves it on next pass). Returns the request row id.
+    ///
+    /// `home` is the buyer's home nest when the buyer lives on another nest —
+    /// a claim redeemed across nests (`federated-follow.md` § Decision 2 →
+    /// *The redeem twin*): written in the same statement as the row, so the
+    /// approval always finds it to copy onto the roster. `None` = a local
+    /// buyer, which never clears a home an earlier relayed request stamped.
     pub async fn upsert_payment_entitled_request(
         &self,
         author_id: &[u8; 32],
         subscriber_id: &[u8; 32],
         tier_name: &str,
         valid_until: Option<i64>,
+        home: Option<crate::subscription_handlers::SubscriberHome<'_>>,
     ) -> Result<i64> {
         let now = now_epoch_secs();
+        let (home_id, home_url) = request_home_columns(home);
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO subscribe_requests
              (author_id, subscriber_id, tier_name, created_at, kind,
-              payment_entitled, valid_until)
-             VALUES (?1, ?2, ?3, ?4, 'subscribe', 1, ?5)
+              payment_entitled, valid_until, home_nest_id, home_nest_url)
+             VALUES (?1, ?2, ?3, ?4, 'subscribe', 1, ?5, ?6, ?7)
              ON CONFLICT(author_id, subscriber_id, tier_name, kind) DO UPDATE SET
                  payment_entitled = 1,
-                 valid_until = excluded.valid_until",
+                 valid_until = excluded.valid_until,
+                 home_nest_id = COALESCE(excluded.home_nest_id, subscribe_requests.home_nest_id),
+                 home_nest_url = COALESCE(excluded.home_nest_url, subscribe_requests.home_nest_url)",
             rusqlite::params![
                 author_id.as_slice(),
                 subscriber_id.as_slice(),
                 tier_name,
                 now,
-                valid_until
+                valid_until,
+                home_id,
+                home_url
             ],
         )
         .context("upsert payment entitled request")?;
@@ -1287,5 +1384,33 @@ impl CacheDb {
             .optional()
             .context("get device authorization")?;
         Ok(result)
+    }
+}
+
+/// Whether a `subscribe_requests` row (aliased `r`) is a request at all — the
+/// Q13 ruling's rule (3) (`monetization.md` § Pillar 3 → *A checkout-bound
+/// buyer homed on another nest*): a payment-entitled `subscribe` row is
+/// complete only when its subscriber is hosted here (a `users` row) or the row
+/// carries the subscriber's home (`home_nest_id`, stamped by the relayed
+/// subscribe or a cross-nest redeem). A webhook naming a buyer homed elsewhere
+/// opens the row with neither; until the buyer's relayed intent stamps the
+/// home it is a half-row, withheld from `requests.list` and refused by
+/// `requests.approve`, because an approval would mint a roster row no nest can
+/// deliver to. Every other row is complete: a subscriber-initiated row is
+/// either local or relayed with its home, and an `unsubscribe` row is the
+/// pump's to commit. The ONE spelling of the predicate; both doors read it.
+pub(crate) const REQUEST_COMPLETE_SQL: &str = "(NOT (r.kind = 'subscribe' \
+     AND r.payment_entitled = 1 \
+     AND r.home_nest_id IS NULL \
+     AND NOT EXISTS (SELECT 1 FROM users u WHERE u.actor_id = r.subscriber_id)))";
+
+/// A remote buyer's home as the two `subscribe_requests` home columns bind it
+/// (NULL, NULL for a local one).
+fn request_home_columns(
+    home: Option<crate::subscription_handlers::SubscriberHome<'_>>,
+) -> (Option<Vec<u8>>, Option<String>) {
+    match home {
+        Some(h) => (Some(h.nest_id.to_vec()), h.url.map(str::to_string)),
+        None => (None, None),
     }
 }

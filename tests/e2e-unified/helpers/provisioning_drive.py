@@ -132,6 +132,21 @@ def seed_standard_path_run(
         "seed_identity", json.dumps(app.onboarding._IMPORT_KEY_FOR_HANDLE_TESTS)
     )
     drv.call_machine_method("set_current_handle", json.dumps(f"alice@{handle_domain}"))
+    seed_provider_choices_and_open_run(app, server_type_id=server_type_id)
+
+
+def seed_provider_choices_and_open_run(app, *, server_type_id: str = "cx23") -> None:
+    """The provider half of `seed_standard_path_run`: the DNS credential and the
+    VPS choices the config pages would have captured, then land on
+    `NestProvisioning` with `provisioning-start-button` clickable.
+
+    On its own for a run whose identity and domain are NOT the wizard's
+    handle's — the box-recovery cloud re-provision, whose identity is the one
+    imported on the recovery path and whose domain is the lost box's own,
+    resolved from custody (`box-recovery.md` § Recovery UI (step 4)); seeding a
+    handle there would overwrite exactly the state under test.
+    """
+    drv = app.driver
     # Credential keys are kebab-case: a snake_case key makes the dispatch return
     # None, which surfaces as "doesn't support VPS" rather than as a bad key.
     drv.call_machine_method(
@@ -179,6 +194,26 @@ def step_status(app, kind: str) -> str | None:
         if step.get("kind") == kind:
             return step.get("status")
     return None
+
+
+def assert_one_server_order(fake_cloud, *, after: str) -> None:
+    """The provider was asked for exactly ONE box — the one-box resume.
+
+    `onboarding-provisioning.md` § 6: the Server step's pre-flight is
+    name-only, so a Retry, a "start over" onto the same domain and a relaunch
+    onto the "Almost ready" surface all find the box the first run ordered and
+    skip `create_server`. A second order is a second box billing at the
+    provider that no client will ever claim, so the count is the user-facing
+    property, not an implementation detail. The fake remembers every order and
+    answers the pre-flight with it, as the real account would
+    (`fakes/fake_cloud.py`, `HetznerCloudHandlers.server_orders`).
+    """
+    orders = [o["name"] for o in fake_cloud.hetzner_cloud.server_orders]
+    assert len(orders) == 1, (
+        f"{after} the provider saw {len(orders)} server order(s) {orders!r} — "
+        "the resume must carry on with the box the first run ordered, never "
+        "rent a second one (onboarding-provisioning.md § 6, the one-box resume)"
+    )
 
 
 def require_durable_client_store(app) -> None:

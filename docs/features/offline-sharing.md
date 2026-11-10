@@ -51,11 +51,13 @@ Stamped 2026-10-21 at 77c610862e.
 |---|---|---|
 | web | — absent | |
 | linux | ✅ full | 0.1.5-dev+0cfdd6c6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+2a213a2d.dirty standalone |
+| windows | ✅ full | 0.1.6-dev+00ef95a1 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+2e009c0f standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+d739a57d standalone |
+| android-kids |  no run recorded | |
+| ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -66,9 +68,9 @@ Stamped 2026-10-21 at 77c610862e.
 | 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_declined_invitation_lists_nothing_and_stops_knocking` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_stranger_cannot_start_a_ceremony_nobody_asked_for` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_the_two_seats_never_show_each_other_their_own_code` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped` — requires `group-set-feed` (not built: web, ios, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped` — requires `group-set-feed` (not built: web, ios, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_co_present_ceremony_completes_while_the_nest_is_unreachable` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_connection_dropped_part_way_picks_the_same_share_up_again` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_receive_window_that_lapsed_refuses_the_initiator_like_a_stranger` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 7 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restored` — requires `group-set-feed` (not built: web, ios, android) | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restored` — requires `group-set-feed` (not built: web, ios, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

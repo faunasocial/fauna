@@ -112,10 +112,10 @@ REGISTRY: dict[str, HelperBin] = {
             "mls-group-gen", "fauna-mls", "bin", features=("test-helpers",),
             modules=_MLS_CALLERS, fixtures=_MLS_FIXTURES,
         ),
-        # The hello plugin's component (`test_plugin_install.py::_hello_component`).
+        # The hello plugin's component (`helpers/plugin_publisher.py::hello_component`).
         HelperBin(
             "plugin-fixture-gen", "fauna-plugin-host", "bin", features=("test-helpers",),
-            modules=("tests.test_plugin_install",),
+            modules=("helpers.plugin_publisher",),
         ),
         # Succession statements and recovery kits (`helpers/succession.py`). It
         # signs client-side with the keys it is handed, so every nest mode that

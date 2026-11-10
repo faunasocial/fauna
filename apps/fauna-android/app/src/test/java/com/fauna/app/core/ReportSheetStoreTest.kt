@@ -22,7 +22,7 @@ import uniffi.fauna_core.LocalizedText
  * [ReportSheetStore]'s sequencing (`moderation.md` § User-initiated reporting →
  * *App surface*): submit → `knocks_block(author)` when ticked → `hide_reported(id)`
  * → the stored list into the render inputs. Every wording and gate decision is
- * shared Rust's (`reportSheetView`, `abuseReportSubmit`), so the store is tested
+ * shared Rust's (`reportSheetView`, `abuseReportSubmitOrQueue`), so the store is tested
  * FFI-free against a mocked [ApiClient] — the same shape as web's
  * `ReportHost.svelte` and apple's `ReportSheetStoreTests`.
  */
@@ -32,6 +32,8 @@ class ReportSheetStoreTest {
 
     private val author = "ab".repeat(32)
     private val ack = LocalizedText("moderation.report.sent_local", mapOf("nest" to "home"))
+    private val queued = LocalizedText("moderation.report.queued", emptyMap())
+    private val blockNotSent = LocalizedText("moderation.report.block_not_sent", emptyMap())
 
     private fun post(cid: String = "bafycid") = FfiReportTarget(
         subject = FfiReportSubject.Post(cid = cid),
@@ -47,7 +49,11 @@ class ReportSheetStoreTest {
     private fun harness(): Harness {
         val api = mock(ApiClient::class.java)
         val hidden = mutableListOf<List<String>>()
-        return Harness(api, hidden, ReportSheetStore(api) { hidden += it })
+        return Harness(
+            api,
+            hidden,
+            ReportSheetStore(api, { hidden += it }, { queued }, { blockNotSent }),
+        )
     }
 
     @Test
@@ -72,7 +78,7 @@ class ReportSheetStoreTest {
         h.store.open(target)
         h.store.edit { it.copy(reason = "spam") }
         val form = h.store.state.value.form
-        whenever(h.api.abuseReportSubmit(target, form)).thenReturn(sent())
+        whenever(h.api.abuseReportSubmitOrQueue(target, form)).thenReturn(sent())
         whenever(h.api.hideReported("bafycid")).thenReturn(listOf("bafycid"))
 
         h.store.submit()
@@ -93,7 +99,7 @@ class ReportSheetStoreTest {
         h.store.open(target)
         h.store.edit { it.copy(reason = "harassment", blockAuthor = true) }
         val form = h.store.state.value.form
-        whenever(h.api.abuseReportSubmit(target, form)).thenReturn(sent())
+        whenever(h.api.abuseReportSubmitOrQueue(target, form)).thenReturn(sent())
         whenever(h.api.hideReported("bafycid")).thenReturn(listOf("bafycid"))
 
         h.store.submit()
@@ -109,7 +115,7 @@ class ReportSheetStoreTest {
         h.store.open(target)
         h.store.edit { it.copy(reason = "spam", blockAuthor = true) }
         val form = h.store.state.value.form
-        whenever(h.api.abuseReportSubmit(target, form)).thenReturn(sent())
+        whenever(h.api.abuseReportSubmitOrQueue(target, form)).thenReturn(sent())
         whenever(h.api.blockKnock("", author)).thenThrow(RuntimeException("nest unreachable"))
         whenever(h.api.hideReported("bafycid")).thenReturn(listOf("bafycid"))
 
@@ -123,6 +129,44 @@ class ReportSheetStoreTest {
     }
 
     @Test
+    fun `a report with no nest is queued, says so, still hides and does not try the block`() = runBlocking {
+        val h = harness()
+        val target = post()
+        h.store.open(target)
+        h.store.edit { it.copy(reason = "spam", blockAuthor = true) }
+        val form = h.store.state.value.form
+        // `null` is the composer's QUEUED answer (no nest).
+        whenever(h.api.abuseReportSubmitOrQueue(target, form)).thenReturn(null)
+        whenever(h.api.hideReported("bafycid")).thenReturn(listOf("bafycid"))
+
+        h.store.submit()
+
+        val s = h.store.state.value
+        assertNull("the sheet closes on a queued report", s.target)
+        assertEquals(queued, s.status)
+        assertEquals("the block needs the nest", blockNotSent, s.followupNotice)
+        assertEquals("the hide still lands", listOf(listOf("bafycid")), h.hidden)
+        verify(h.api, never()).blockKnock("", author)
+    }
+
+    @Test
+    fun `a report with the nest connected is sent, not queued`() = runBlocking {
+        val h = harness()
+        val target = post()
+        h.store.open(target)
+        h.store.edit { it.copy(reason = "spam") }
+        val form = h.store.state.value.form
+        whenever(h.api.abuseReportSubmitOrQueue(target, form)).thenReturn(sent())
+        whenever(h.api.hideReported("bafycid")).thenReturn(listOf("bafycid"))
+
+        h.store.submit()
+
+        val s = h.store.state.value
+        assertEquals(ack, s.status)
+        assertNull(s.followupNotice)
+    }
+
+    @Test
     fun `an unknown subject kind is not hidden`() = runBlocking {
         val h = harness()
         val target = FfiReportTarget(
@@ -133,7 +177,7 @@ class ReportSheetStoreTest {
         )
         h.store.open(target)
         val form = h.store.state.value.form
-        whenever(h.api.abuseReportSubmit(target, form)).thenReturn(sent())
+        whenever(h.api.abuseReportSubmitOrQueue(target, form)).thenReturn(sent())
 
         h.store.submit()
 
@@ -153,7 +197,7 @@ class ReportSheetStoreTest {
         assertEquals("a cancel keeps the draft's form", "spam", h.store.state.value.form.reason)
 
         h.store.reset()
-        assertEquals(ReportSheetStore(h.api) {}.state.value, h.store.state.value)
+        assertEquals(ReportSheetStore(h.api, {}, { queued }, { blockNotSent }).state.value, h.store.state.value)
         assertNotNull(h.store.state.value.form)
     }
 
@@ -164,6 +208,31 @@ class ReportSheetStoreTest {
         assertEquals("digest", ReportSheetStore.subjectId(FfiReportSubject.Message("chan", "digest")))
         assertEquals("actor", ReportSheetStore.subjectId(FfiReportSubject.Actor("actor")))
         assertNull(ReportSheetStore.subjectId(FfiReportSubject.Unknown(byteArrayOf())))
+    }
+
+    @Test
+    fun `show-again un-hides every matched id and hands back the last stored list`() = runBlocking {
+        val h = harness()
+        whenever(h.api.unhideReported("bafycid")).thenReturn(listOf("actor"))
+        whenever(h.api.unhideReported("actor")).thenReturn(emptyList())
+
+        h.store.showAgain(listOf("bafycid", "actor"))
+
+        verify(h.api).unhideReported("bafycid")
+        verify(h.api).unhideReported("actor")
+        assertEquals(listOf(emptyList<String>()), h.hidden)
+        assertNull(h.store.state.value.showAgainError)
+    }
+
+    @Test
+    fun `a failed show-again lands on the error and leaves the hide list alone`() = runBlocking {
+        val h = harness()
+        whenever(h.api.unhideReported("bafycid")).thenThrow(RuntimeException("plane down"))
+
+        h.store.showAgain(listOf("bafycid"))
+
+        assertEquals(emptyList<List<String>>(), h.hidden)
+        assertEquals("show again: plane down", h.store.state.value.showAgainError)
     }
 
     @Test

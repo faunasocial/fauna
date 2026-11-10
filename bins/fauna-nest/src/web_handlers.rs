@@ -143,6 +143,11 @@ fn publish_set_handler() -> RpcHandler {
             {
                 tracing::warn!("web render after publish.set failed: {e}");
             }
+            // An advertised post's Nostr note carries this page's URL as its `r`
+            // tag (`monetization.md` § The Nostr advertisement of a sold post →
+            // *Lifecycle* (6)).
+            #[cfg(feature = "nostr")]
+            crate::nostr::advertise::on_web_publish_changed(&state, &actor_id).await;
             // The effective slug, mirroring the twin's
             // `req.slug.unwrap_or_else(|| hex::encode(post_id))`.
             let slug = match req.slug {
@@ -182,6 +187,9 @@ fn publish_unset_handler() -> RpcHandler {
             {
                 tracing::warn!("web render after publish.unset: {e:#}");
             }
+            // The note drops its `r` tag (*Lifecycle* (6), as above).
+            #[cfg(feature = "nostr")]
+            crate::nostr::advertise::on_web_publish_changed(&state, &actor_id).await;
             encode_reply(&WebPublishUnsetReply {
                 ok: true,
                 extra: Default::default(),

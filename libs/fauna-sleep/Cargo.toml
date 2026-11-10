@@ -26,6 +26,12 @@ tokio = { workspace = true }
 # that impossibility is what every one of the seven hand-written copies existed
 # to work around.
 gloo-timers = { version = "0.4", features = ["futures"] }
+# `spawn_background`'s browser leg: `fauna_core::spawn_local`, the one wrapper of
+# `wasm-bindgen-futures`' spawn fauna-core's `js` feature already carries — a
+# path-crate edge, so no third-party manifest entry is added here.
+# `default-features = false` keeps fauna-core's `network` default (redb, tokio)
+# out of the wasm graph.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

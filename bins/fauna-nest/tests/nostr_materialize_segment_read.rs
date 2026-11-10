@@ -131,9 +131,12 @@ async fn materialize_reads_a_real_created_post_segment_first() {
         &state.post_segments,
         &hex::encode(author),
         &nostr_kp,
+        store::MaterializeClasses::PublicAndAdvertised,
+        "",
     )
     .await
-    .expect("materialize ok");
+    .expect("materialize ok")
+    .count;
     assert_eq!(
         n, 1,
         "the real created post materializes into the relay store"
@@ -160,9 +163,12 @@ async fn materialize_reads_a_real_created_post_segment_first() {
         &state.post_segments,
         &hex::encode(author),
         &nostr_kp,
+        store::MaterializeClasses::PublicAndAdvertised,
+        "",
     )
     .await
-    .expect("materialize ok");
+    .expect("materialize ok")
+    .count;
     assert_eq!(n_again, 0, "a second run is a no-op");
 }
 

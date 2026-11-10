@@ -961,9 +961,10 @@ class EventsActions:
         out). Same grid, same ruler — only the two markers it is read off move.
 
         ``viewport`` names the scroller (windows' ``calendar-day-body``). There
-        "wholly" is decided here, not by the bridge's visible-fraction scroll:
-        that fraction is computed on the already-clipped rect, so a sliver reads
-        as 100 %. A block edge lying on a viewport edge while the grid runs on
+        "wholly" is also checked here, from the frames this layer reads: the
+        windows driver's ``scroll_to`` brings the block in whole
+        (``Actions.MakeWhole``), and this check is the layer's own proof of
+        that before it measures. A block edge lying on a viewport edge while the grid runs on
         past it is clipped; the view is stepped past that edge by scrolling the
         slot marker half an hour beyond it into view, and re-read. ``None``
         (android, whose scroller carries no id) trusts the bridge's scroll:

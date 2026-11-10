@@ -58,6 +58,7 @@ fn record(mailbox: MailFeed, uid: u32, from: &str, to: &str) -> InboundMailRecor
         internal_date_ms: 1,
         rfc5322: raw.into_bytes(),
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: true,
         warmup_hold: None,
     }

@@ -27,6 +27,8 @@ each has a documented failure mode the axis exists to avoid:
 """
 
 import contextlib
+import functools
+import os
 import pathlib
 import re
 import ssl
@@ -802,6 +804,15 @@ _COMPOSED_AUTHORITY_IS_NOT_A_NEST = {
         "the mail bridge's own CalDAV listener (`handle.caldav_port`, the "
         "MDA's self-signed HTTPS endpoint a stock calendar client dials) — a "
         "bridge authority, never the nest's API listener",
+    "tests/api/test_bluesky_takedown_and_media_proxy.py":
+        "the test's own fake Bluesky CDN (`cdn.port`), spelled as a loopback "
+        "URL the media proxy must REFUSE before any dial — a remote-picture "
+        "authority under test, never the nest's API listener",
+    "tests/api/test_succession_repoint_planes.py":
+        "the mail bridge's own CalDAV/CardDAV listener (`bridge.caldav_port`, "
+        "the MDA's self-signed HTTPS endpoint a stock calendar or contacts "
+        "app dials with its app password) — a bridge authority, never the "
+        "nest's API listener",
     "tests/test_mail_abuse_refused.py":
         "the mail bridge's `clamd_addr` / `rspamd_url` scanner addresses on "
         "free loopback ports nothing listens on — the deployment shape of a "
@@ -1083,16 +1094,17 @@ def _derive_start_options(source, options, imported_helpers=frozenset()):
         a = node.args
         return {p.arg for p in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
 
-    roots = {"_make_nest", "_start_dedicated_nest"}
-    reaches = {
-        n for n, f in funcs.items()
-        if called_names(f) & (roots | set(imported_helpers))
-    }
+    roots = set(_NEST_START_ROOTS)
+    # Each function's calls are read once: the closure below re-asks them on
+    # every pass, and a fresh `ast.walk` per ask was most of a tree walk's cost.
+    calls = {n: called_names(f) for n, f in funcs.items()}
+    targets = roots | set(imported_helpers)
+    reaches = {n for n in funcs if calls[n] & targets}
     grew = True
     while grew:
         grew = False
-        for name, node in funcs.items():
-            if name not in reaches and called_names(node) & reaches:
+        for name in funcs:
+            if name not in reaches and calls[name] & reaches:
                 reaches.add(name)
                 grew = True
 
@@ -1134,7 +1146,7 @@ def _derive_start_options(source, options, imported_helpers=frozenset()):
         if name in seen:
             return set()
         out = set(asked_here(funcs[name]))
-        for callee in called_names(funcs[name]):
+        for callee in calls[name]:
             if callee in reaches and callee != name:
                 out |= needs(callee, seen + (name,))
         memo[name] = out
@@ -1161,13 +1173,14 @@ def _nest_starting_helpers(source):
             and isinstance(sub.func, (ast.Name, ast.Attribute))
         }
 
-    roots = {"_make_nest", "_start_dedicated_nest"}
-    reaching = {n for n, f in funcs.items() if called(f) & roots}
+    roots = set(_NEST_START_ROOTS)
+    calls = {n: called(f) for n, f in funcs.items()}  # read once, as above
+    reaching = {n for n in funcs if calls[n] & roots}
     grew = True
     while grew:
         grew = False
-        for name, node in funcs.items():
-            if name not in reaching and called(node) & reaching:
+        for name in funcs:
+            if name not in reaching and calls[name] & reaching:
                 reaching.add(name)
                 grew = True
     # `_start_dedicated_nest` itself lives in the root conftest; naming it here
@@ -1175,54 +1188,90 @@ def _nest_starting_helpers(source):
     return reaching - roots
 
 
+#: Directories no tree walk below descends into: never test sources, and a
+#: `node_modules` or `.venv` can hold more files than the tree itself.
+_UNWALKED_DIRS = frozenset({".venv", "__pycache__", "node_modules"})
+
+#: The two nest-start entry points every start-option derivation is rooted at.
+_NEST_START_ROOTS = frozenset({"_make_nest", "_start_dedicated_nest"})
+
+
+def _names_any(source, names):
+    """Whether `source`'s text holds any of `names` — the test a file must pass
+    before it is parsed. A function can only call a name its file spells, so a
+    file spelling none of a closure's roots adds nothing to it, and skipping its
+    parse changes no answer. It changes the cost: one parse of the whole tree is
+    30–80 s on a loaded Windows (34 MB of source, measured 2026-11-09), and the
+    files that spell a nest-start name are a small share of it."""
+    return _name_pattern(frozenset(names)).search(source) is not None
+
+
+@functools.cache
+def _name_pattern(names):
+    return re.compile("|".join(re.escape(n) for n in sorted(names)))
+
+
+@functools.cache
 def _walkable_sources(root):
-    """`{path: source}` for every `.py` under the e2e tree worth parsing."""
+    """`{path: source}` for every `.py` under the e2e tree worth parsing,
+    read-only.
+
+    Read ONCE per process (cached on `root`): several tests walk the tree, and
+    the collision pin used to walk it again for every repeated fixture name, so
+    on a loaded Windows one test ran past the 900 s timeout — whose thread method
+    ends the whole run there, hiding every test after it. The skipped
+    directories are pruned as the walk meets them, not filtered after
+    `rglob` has listed everything under them."""
+    paths = []
+    for here, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in _UNWALKED_DIRS]
+        paths.extend(pathlib.Path(here, f) for f in files if f.endswith(".py"))
     sources = {}
-    for path in sorted(root.rglob("*.py")):
-        if any(part in {".venv", "__pycache__", "node_modules"}
-               for part in path.parts):
-            continue
+    for path in sorted(paths):
         try:
             sources[path] = path.read_text()
         except OSError:
             continue
-    return sources
+    return types.MappingProxyType(sources)
 
 
+@functools.cache
 def _tree_nest_starting_helpers(root):
     """Every nest-starting helper NAME the tree defines, for the cross-file
-    closure. Computed once and passed to `_derive_start_options`, so a per-file
-    call made anywhere else grades the same way this one does — the two used to
-    differ, and a fixture reaching the provider through an imported helper then
-    existed for the tree walk and not for the collision pin."""
+    closure. Computed once per process and passed to `_derive_start_options`,
+    so a per-file call made anywhere else grades the same way this one does —
+    the two used to differ, and a fixture reaching the provider through an
+    imported helper then existed for the tree walk and not for the collision
+    pin."""
     helpers = set()
     for source in _walkable_sources(root).values():
+        if not _names_any(source, _NEST_START_ROOTS):
+            continue
         try:
             helpers |= _nest_starting_helpers(source)
         except SyntaxError:
             continue
-    return helpers
+    return frozenset(helpers)
 
 
-def _derive_start_options_tree():
-    """`{fixture: (options, [where it is defined])}` over the WHOLE tree.
+def _e2e_root():
+    return pathlib.Path(__file__).resolve().parents[1]
 
-    Every `.py` under `tests/e2e-unified` is walked, not just the root conftest,
-    and that widening is the whole point rather than thoroughness for its own
-    sake — see the pin below. A first pass collects the nest-starting helper
-    NAMES each file defines, so the second pass can follow a fixture into a
-    helper it imported from a sibling module.
-    """
-    from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1]
-    options = _start_option_vocabulary((root / "conftest.py").read_text())
+@functools.cache
+def _tree_start_options(root):
+    """The vocabulary `_make_nest` understands, read off the root conftest."""
+    return _start_option_vocabulary((root / "conftest.py").read_text())
 
-    sources = _walkable_sources(root)
-    helpers = _tree_nest_starting_helpers(root)
 
+@functools.cache
+def _derived_start_options_tree(root):
     derived = {}
-    for path, source in sources.items():
+    options = _tree_start_options(root)
+    helpers = _tree_nest_starting_helpers(root)
+    for path, source in _walkable_sources(root).items():
+        if not _names_any(source, _NEST_START_ROOTS | helpers):
+            continue  # no fixture here reaches a start: it asks for nothing
         try:
             found = _derive_start_options(source, options, helpers)
         except SyntaxError:
@@ -1231,7 +1280,22 @@ def _derive_start_options_tree():
             slot = derived.setdefault(name, (asked, []))
             derived[name] = (slot[0] | asked, slot[1])
             derived[name][1].append(str(path.relative_to(root)))
-    return derived
+    return types.MappingProxyType(
+        {name: (asked, tuple(where)) for name, (asked, where) in derived.items()}
+    )
+
+
+def _derive_start_options_tree():
+    """`{fixture: (options, (where it is defined, …))}` over the WHOLE tree.
+
+    Every `.py` under `tests/e2e-unified` is walked, not just the root conftest,
+    and that widening is the whole point rather than thoroughness for its own
+    sake — see the pin below. A first pass collects the nest-starting helper
+    NAMES each file defines, so the second pass can follow a fixture into a
+    helper it imported from a sibling module. Derived once per process
+    (`_derived_start_options_tree`), however many tests ask.
+    """
+    return _derived_start_options_tree(_e2e_root())
 
 
 def test_the_fixture_start_options_table_matches_the_tree():
@@ -1319,17 +1383,14 @@ def test_no_two_nest_fixtures_share_a_name_while_asking_for_different_options():
         for name, (_, where) in _derive_start_options_tree().items()
         if len(where) > 1
     }
+    root = _e2e_root()
+    options = _tree_start_options(root)
+    helpers = _tree_nest_starting_helpers(root)
+    sources = _walkable_sources(root)
     conflicting = {}
     for name, where in collisions.items():
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[1]
-        options = _start_option_vocabulary((root / "conftest.py").read_text())
-        helpers = _tree_nest_starting_helpers(root)
         per_file = {
-            rel: _derive_start_options(
-                (root / rel).read_text(), options, helpers
-            )[name]
+            rel: _derive_start_options(sources[root / rel], options, helpers)[name]
             for rel in where
         }
         if len(set(per_file.values())) > 1:
@@ -1345,6 +1406,31 @@ def test_no_two_nest_fixtures_share_a_name_while_asking_for_different_options():
         )
         + "\nRename one of them, or give the classifier a qualified key."
     )
+
+
+def test_the_tree_is_walked_and_derived_once_per_process():
+    """The whole-tree reads are cached on their root. Several tests ask the same
+    question of the same tree, and on Windows the per-test timeout's thread method
+    ends the WHOLE run, so a second walk under load hid every test after it
+    (the collision pin used to re-walk for every repeated fixture name). A
+    `functools.cache` dropped from any of them puts that back."""
+    root = _e2e_root()
+    assert _walkable_sources(root) is _walkable_sources(root)
+    assert _tree_nest_starting_helpers(root) is _tree_nest_starting_helpers(root)
+    assert _derive_start_options_tree() is _derive_start_options_tree()
+
+
+def test_the_tree_walk_prunes_venv_node_modules_and_pycache(tmp_path):
+    """`_walkable_sources` reads the tree's own `.py` files only, and skips the
+    directories that are never test sources at any depth."""
+    for rel in ("conftest.py", "tests/test_a.py", "node_modules/pkg/x.py",
+                "web/node_modules/y.py", "tools/.venv/lib/z.py",
+                "tests/__pycache__/w.py", "notes.txt"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x = 1\n")
+    assert list(_walkable_sources(tmp_path)) == [
+        tmp_path / "conftest.py", tmp_path / "tests" / "test_a.py"]
 
 
 def test_the_option_table_covers_every_local_nest_fixture():
@@ -2044,6 +2130,7 @@ def test_the_global_admin_fixtures_live_only_exclusion_is_accounted_for():
         "caldav_cross_nest_peer",
         "cross_nest_foreign",
         "cross_nest_foreign_ephemeral",
+        "cross_nest_member_nest",
         "dav_toggle_venue",
         "dedicated_caldav_mailbox_less_nest",
         "dedicated_caldav_only_nest",
@@ -2215,7 +2302,7 @@ def _kinds_test_user_sends(monkeypatch, mode: str, tiers: tuple) -> list:
     monkeypatch.setattr(auth, "_coerce_admin_signing_key", lambda sk: sk)
     monkeypatch.setattr(
         conftest, "_make_user",
-        lambda nest: {"actor_id_hex": "ab", "signing_key": b"\x00" * 32},
+        lambda nest, **_kw: {"actor_id_hex": "ab", "signing_key": b"\x00" * 32},
     )
     monkeypatch.setattr(
         shared_identity, "remember_shared_actor", lambda _a, **_kw: None
@@ -4763,6 +4850,7 @@ _OWN_AUTHORITY_FIXTURES = (
 #: Each is a fixture in its own right and must declare `handle_domain_seed`.
 _OWN_AUTHORITY_VIA_HELPER_FIXTURES = (
     "cross_nest_foreign",
+    "cross_nest_member_nest",
     "report_origin_nest",
 )
 
@@ -7589,6 +7677,45 @@ def test_kind_reach_stops_at_the_mail_venue_seam():
             "cut has widened past the standalone-only bodies")
 
 
+def test_kind_reach_parses_the_tree_once_for_every_selector(tmp_path, monkeypatch):
+    """The reach graph is parsed once per process, whatever vocabularies,
+    prefixes and key sets are asked of it — only the per-node selection and the
+    fixpoint are per selector. A whole-tree parse was measured at 30–80 s on a
+    loaded Windows (34 MB of source), and one parse per selector put the module's
+    first docker/live classification at 828 s of the 900 s timeout that ends
+    the whole run. Pinned over a scratch tree standing in for the default
+    roots, so the pin pays no real-tree parse; the answers are pinned too, each
+    selector filtering the one shared summary."""
+    from helpers import kind_reach
+
+    (tmp_path / "helper.py").write_text(
+        "HOOKS = ('/api/v1/test/rpc-hold/arm',)\n"
+        "def arm(nest):\n    post(nest, HOOKS[0])\n"
+        "def rotate(client):\n    client.call('fauna.admin.rotate')\n"
+        "def peer(handle):\n    return handle['peer_url']\n"
+    )
+    (tmp_path / "test_a.py").write_text(
+        "def test_everything(nest):\n    arm(nest)\n    rotate(nest)\n    peer(nest)\n"
+    )
+    monkeypatch.setattr(kind_reach, "_ROOTS", (tmp_path,))
+
+    before = kind_reach.graph_parse_count()
+    kinds = kind_reach.build_reach(frozenset({"fauna.admin.rotate"}))
+    assert kind_reach.graph_parse_count() - before == 2, "the first build parses each file once"
+    routes = kind_reach.build_reach(prefix="/api/v1/test/")
+    keyed = kind_reach.build_reach(prefix="/api/v1/test/", keyed=True)
+    keys = kind_reach.build_reach(keys=frozenset({"peer_url"}))
+    other = kind_reach.build_reach(frozenset({"fauna.admin.other"}))
+    assert kind_reach.graph_parse_count() - before == 2, (
+        "a later selector re-parsed the tree instead of filtering the shared graph")
+
+    assert kinds["test_everything"] == {"fauna.admin.rotate"}
+    assert routes["test_everything"] == {"/api/v1/test/rpc-hold/arm"}
+    assert keyed["test_everything"] == {"/api/v1/test/rpc-hold/arm"}
+    assert keys["test_everything"] == {"peer_url"}
+    assert not other["test_everything"]
+
+
 def test_kind_reach_follows_a_module_alias_to_the_function_it_names(tmp_path):
     """A call through a module-level alias reaches what the aliased function
     reaches: `_advance_mail_clock = advance_mail_clock` and
@@ -8011,6 +8138,45 @@ _NEST_BINARY_DISPOSITIONS = {
     "test_a_user_connects_a_plugin_from_its_settings_card_and_disconnects_it":
         "PREMISE: same `plugin_nest` and the same host-loopback publisher as "
         "its file-mate above.",
+    # ---- the plugin and Bluesky-takedown additions — triaged 2026-11-07 ----
+    "tests/test_plugin_install.py::"
+    "test_a_bound_plugins_card_keeps_a_setting_edit":
+        "PREMISE: same `plugin_nest` and the same host-loopback publisher as "
+        "its file-mates above.",
+    "tests/test_plugin_install.py::"
+    "test_a_faulted_plugin_shows_its_fault_count_and_last_fault":
+        "PREMISE: `faulting_nest` is the same shape as `plugin_nest` — a nest "
+        "whose guarded fetcher reaches the faulting publisher on the HOST's "
+        "loopback, which a container cannot dial.",
+    "tests/test_plugin_install.py::"
+    "test_a_plugin_that_refused_to_start_is_listed_stopped_with_its_reason":
+        "PREMISE: `refusing_nest`, the same host-loopback publisher shape as "
+        "`faulting_nest` above.",
+    # ---- the bridges-glyph addition — triaged 2026-11-09 ----
+    "tests/test_plugin_install.py::"
+    "test_a_connected_bridge_app_is_listed_as_a_network_row_with_its_glyph":
+        "PREMISE: `bridge_nest` is `plugin_nest`'s bridge-block twin — a nest "
+        "whose guarded fetcher reaches the bridge publisher on the HOST's "
+        "loopback, which a container cannot dial.",
+    "tests/api/test_plugin_ingress.py::"
+    "test_a_plugins_declared_path_and_sub_name_answer_and_the_nests_own_stay_put":
+        "PREMISE: `ingress_nest` fetches the plugin from the publisher on the "
+        "HOST's loopback (the loopback-fetch override), as `plugin_nest` does.",
+    "tests/api/test_bluesky_takedown_and_media_proxy.py::"
+    "test_a_takedown_deletes_the_bluesky_cross_post_retrying_and_a_restore_reposts_nothing":
+        "PREMISE: the nest's Bluesky client is redirected to the in-test "
+        "`FakeAtprotoFarEnd` by `FAUNA_TEST_ATPROTO_FAR_END`, a seam compiled "
+        "under `test-hooks` alone, on the `bluesky`-feature build — a release "
+        "image would publish to the real network.",
+    "tests/api/test_bluesky_takedown_and_media_proxy.py::"
+    "test_bluesky_pictures_are_fetched_only_over_public_https_without_redirects_and_served_inert":
+        "PREMISE: same `bluesky_nest` far-end redirect, plus the media proxy's "
+        "CDN host redirected to the in-test CDN on the host's loopback.",
+    "tests/api/test_legal_takedown_off_box_retraction.py::"
+    "test_a_legal_takedown_withdraws_the_post_from_bluesky_and_nostr":
+        "PREMISE: `takedown_nest` is the same `bluesky`-feature, test-hooks "
+        "far-end redirect as `bluesky_nest`; the retraction it witnesses is "
+        "read off the fake far end.",
 
     # ---- tests/platform/linux/ — 2026-09-02 ------------------------------
     # Two tests, one shape: installing the nest's binary, the verdict's own
@@ -10135,6 +10301,19 @@ def test_the_capability_helper_table_is_shared_functions_only():
     assert "proc" in table["stop_nest"]
     assert "db_path" in table["segment_dir"]
     assert not {"stop", "close", "launch", "read"} & table.keys()
+
+
+def test_a_file_write_inside_a_helper_does_not_taint_it_with_a_capability_read():
+    """`f.write(...)` in `_write_private` is an attribute call whose bare name
+    several modules define as public functions (`write`, `observe`); one of
+    those reads `db_path`, and the merged name used to taint every helper that
+    writes a file — `load_or_create_account` among them — so the store reviewer
+    journey was deselected live as "reads db_path" (2026-11-06)."""
+    from helpers import kind_reach
+
+    table = kind_reach.capability_helpers(frozenset(nm.CAPABILITY_KEYS))
+    assert "load_or_create_account" not in table
+    assert "write" not in table
 
 
 def test_a_start_option_the_tests_own_code_passes_is_class_four(tmp_path):

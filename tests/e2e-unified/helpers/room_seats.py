@@ -84,6 +84,14 @@ class Seat:
 
     app: object
     actor: dict
+    port: int | None = None
+    """The port of the nest this seat signed in to — the room's home nest
+    for a seat that founds one."""
+    origin: str | None = None
+    """The browser origin a web seat's page is served from (its SPA proxy's
+    ``scheme://host:port``) — ``None`` on a native seat, which sees no CORS.
+    A nest this seat's browser dials RAW must allow it
+    (``admit_web_seat_origins``)."""
 
     @property
     def actor_hex(self) -> str:
@@ -121,7 +129,15 @@ def _next_seat_ordinal(request) -> int:
     return ordinal
 
 
-def launch_seat(nest: dict, app_path, app_name: str, request, *, actor: dict | None = None) -> Seat:
+def launch_seat(
+    nest: dict,
+    app_path,
+    app_name: str,
+    request,
+    *,
+    actor: dict | None = None,
+    launch_config: dict | None = None,
+) -> Seat:
     """Register a fresh actor, launch ``app_name`` on it, and wait for the real
     FaunaMls backend to be live on that seat.
 
@@ -148,11 +164,13 @@ def launch_seat(nest: dict, app_path, app_name: str, request, *, actor: dict | N
     # and `_build_app_config`'s web branch make exactly these two choices for
     # the `app` fixture's single seat.
     node_url = nest["url"]
+    origin = None
     if app_name == "web":
         spa = _seat_spa_url(nest, request)
+        origin = _origin_of(spa)
         config["url"] = spa + "/app/"
         node_url = spa
-    if app_name == "ios":
+    if app_name in ("ios", "ios-kids"):  # ios-kids: the kids build on ios's venue
         ordinal = _next_seat_ordinal(request)
         udid = _get_ios_seat_udid(ordinal)
         if udid is None:
@@ -210,7 +228,15 @@ def launch_seat(nest: dict, app_path, app_name: str, request, *, actor: dict | N
     # assert, which is why `scripts/actuation-sweep-report.py` lists that
     # marker as DELIBERATE rather than as an offender.
     _apply_actuation_mode_env(environment, request)
+    # `launch_config` is the caller's say over the launch: its `environment`
+    # merges over the seat's own (a second seat of one account sharing the
+    # first's `XDG_RUNTIME_DIR` — the same device — names it here;
+    # `drivers/tui.py` lets a caller-passed runtime dir win), and any other
+    # key lands on the driver config as given.
+    extra = dict(launch_config or {})
+    environment.update(extra.pop("environment", {}))
     config["environment"] = environment
+    config.update(extra)
     driver.launch(config)
     driver.set_state(
         {
@@ -258,7 +284,7 @@ def launch_seat(nest: dict, app_path, app_name: str, request, *, actor: dict | N
         bool,
         MESSAGE_BUDGET_S,
     )
-    return Seat(app=app, actor=actor)
+    return Seat(app=app, actor=actor, port=nest["port"], origin=origin)
 
 
 def _seat_spa_url(nest: dict, request) -> str:
@@ -274,6 +300,45 @@ def _seat_spa_url(nest: dict, request) -> str:
     url, server = _serve_spa_proxy(request.getfixturevalue("static_dir"), nest["url"])
     request.addfinalizer(server.shutdown)
     return url
+
+
+def _origin_of(url: str) -> str:
+    from urllib.parse import urlparse
+
+    parts = urlparse(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def admit_web_seat_origins(nests: list[dict], seats: list[Seat], request) -> None:
+    """Admit every web seat's origin on every nest in ``nests``, through the
+    admin's own live allow-list (``fauna.admin.set_cors_origins``).
+
+    A seat on a nest other than ``nest_instance`` is served by an SPA proxy of
+    its own (``_seat_spa_url``), so its page origin is born after a
+    session-scoped nest was seeded with ``browser_origins_to_allow`` — which
+    names only the session ``spa_url``. A cross-nest room's member uploads its
+    attachment from that page straight to the room's HOME
+    (``https://<home>/api/v1/blob``, a preflighted cross-origin POST), and the
+    home answered the preflight with no ``Access-Control-Allow-Origin``
+    (measured 2026-11-09, web leg of
+    ``test_conversation_room_community_cross_nest_attachments.py``). The list
+    keeps the session origin the boot seed carried and adds each seat's, so a
+    real exact-match CORS decision still happens against a real allow-list. A
+    no-op on a run with no web seat."""
+    from common.auth import set_cors_origins
+
+    origins = [s.origin for s in seats if s.origin]
+    if not origins:
+        return
+    allowed = [_origin_of(request.getfixturevalue("spa_url"))]
+    allowed += [o for o in origins if o not in allowed]
+    for nest in nests:
+        set_cors_origins(
+            nest["port"],
+            admin_signing_key=nest["admin"]["signing_key"],
+            origins=allowed,
+            base_url=nest["url"],
+        )
 
 
 def teardown_seats(seats: list[Seat]) -> None:
@@ -468,10 +533,122 @@ def found_community_room(
         "an accepted invitation stops standing"
     )
 
+    # The key-in barrier is read off the HOME NEST: the member's floor entry
+    # covered by the tip's wraps. The member's own `awaiting_key` cannot be
+    # the barrier — it is set only once the member's walk has stopped at a
+    # missing key, so it reads false in the window between the accept and that
+    # first stop, and a member who sent in that window had no key yet: the
+    # send failed (measured 2026-11-07, `test_conversation_room_delete_relaunch.py`).
+    # The founder's key-in waits on the member's device supplying its wrap
+    # target, then on the founder's floor cadence, so it is a deadline poll.
+    port = founder.port
+    assert port is not None, "a founder seat launched by launch_seat knows its nest's port"
     wait_for(
-        "the member's seat being keyed in by the founder's device",
+        "the member's seat being keyed in by the founder's device (the tip wrapped to it)",
+        lambda: _tip_wrapped(port, founder.actor, room_id, member.actor_hex),
+        lambda wrapped: wrapped is True,
+        WELCOME_BUDGET_S,
+        diagnose=lambda: (
+            f"{seat_story(member)}\n{seat_story(founder)}\n"
+            f"{seat_log(founder, 'key-in', 'key_in', 'tend', 'mint')}"
+        ),
+    )
+    return room_id, room.thread_id, joined.thread_id
+
+
+def _tip_wrapped(port: int, reader: dict, room: str, member_hex: str) -> bool | None:
+    """Whether the home nest reads ``member_hex``'s floor entry as covered by
+    the room's tip wraps (``room.list_roster``'s ``tip_wrapped``), as
+    ``reader`` reads it; ``None`` on a refusal or while unanswered."""
+    try:
+        roster = conv_api.room_list_roster(port, reader, room)
+    except Exception:
+        return None
+    for m in roster.get("members", []):
+        if m.get("principal") == member_hex:
+            return m.get("tip_wrapped")
+    return None
+
+
+def found_cross_nest_community_room(
+    founder: Seat, member: Seat, home: dict, away: dict, first_text: str
+) -> tuple[str, str, str]:
+    """:func:`found_community_room` across a nest boundary — the founder on
+    ``home``, the member a handled actor on ``away``, both nests serving TLS
+    (``cross_nest_foreign`` / ``cross_nest_foreign_ephemeral``). Every step a
+    user gesture (convention 8): the founder addresses the member as
+    ``handle@authority``, takes the home-nest choice and sends; the knock
+    crosses and the member accepts it from their own list. Returns ``(room_id,
+    founder's thread id, member's thread id)`` with the foreign seat keyed.
+
+    Its own helper, never :func:`found_community_room` with an ``address``:
+    the key-in barrier is the HOME's floor read over https (``scheme=``
+    pinned, since the home is a foreign TLS port), and the seat's own
+    ``awaiting_key`` is no barrier (that helper's note says why)."""
+    conv = founder.app.conversations
+    conv.navigate()
+    founder.app.driver.click("new-conversation-button")
+    conv.add_recipient(f"{member.handle}@{away['authority']}")
+    conv.toggle_home_nest()
+    assert conv.home_nest_included(), seat_element(founder, "recipient-picker-home-nest-toggle")
+    assert conv.prospective_room_class() == "community", (
+        f"the class statement follows the choice: {seat_element(founder, 'recipient-picker-class')}"
+    )
+    founder.app.driver.type_text("dm-text-field", first_text)
+    founder.app.driver.click("dm-send-button")
+
+    def founded():
+        for t in founder.app.conversations.list_threads():
+            room = t.room or {}
+            if t.rail == "FaunaMls" and room.get("class") == "Community" and t.channel_id_hex:
+                return t
+        return None
+
+    room = wait_for(
+        "the founder's community room binding to its room id",
+        founded,
+        lambda t: t is not None,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: f"{seat_story(founder)}\n{seat_log(founder, 'found', 'room', 'invite')}",
+    )
+    room_id = room.channel_id_hex
+    assert not founder.app.has_error(), founder.app.error_text()
+    wait_for(
+        "the founder's invitation crossing to the member's nest",
+        lambda: member.app.conversations.room_invitation_count(),
+        lambda n: n >= 1,
+        WELCOME_BUDGET_S,
+        diagnose=lambda: (
+            f"{seat_story(member)}\n{seat_log(member, 'invitation', 'room')}\n"
+            f"{seat_log(founder, 'invite', 'federation')}"
+        ),
+    )
+    member.app.conversations.accept_room_invitation(0)
+    joined = wait_for(
+        "the accepted room opening on the member's seat",
         lambda: thread_by_channel(member.app, room_id),
-        lambda t: t is not None and (t.room or {}).get("awaiting_key") is False,
+        lambda t: t is not None,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"{seat_story(member)}\n{seat_log(member, 'accept', 'room', 'relay')}",
+    )
+    assert not member.app.has_error(), (
+        f"accepting through the member's own nest must not refuse: {member.app.error_text()!r}"
+    )
+
+    def tip_wrapped():
+        try:
+            roster = conv_api.room_list_roster(home["port"], founder.actor, room_id, scheme="https")
+        except Exception:
+            return None
+        for m in roster.get("members", []):
+            if m.get("principal") == member.actor_hex:
+                return m.get("tip_wrapped")
+        return None
+
+    wait_for(
+        "the foreign seat keyed in on the home's floor (the tip wrapped to it)",
+        tip_wrapped,
+        lambda wrapped: wrapped is True,
         WELCOME_BUDGET_S,
         diagnose=lambda: (
             f"{seat_story(member)}\n{seat_story(founder)}\n"

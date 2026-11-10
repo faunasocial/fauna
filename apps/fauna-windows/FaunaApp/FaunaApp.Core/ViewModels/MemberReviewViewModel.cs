@@ -14,9 +14,10 @@ namespace FaunaApp.Core.ViewModels;
 /// The permanent Settings → **Members To Review** sub-page
 /// (<c>docs/goal/behavior/succession-aftermath.md</c> § Propagation → *Removing
 /// a flagged member*). windows was the
-/// last of 7 apps still owing this permanent page (the ephemeral kit-side pass
-/// is a SEPARATE arm, gated behind windows' identity-stolen ceremony legs —
-/// not built here).
+/// last of 7 apps still owing this permanent page. The ephemeral kit-side pass on
+/// the Recovery Kit section reuses this view model over the same roster
+/// (<see cref="RefreshQuietAsync"/>); its gates live on
+/// <c>RecoveryKitViewModel.MemberReviewPassOpen</c>, never here.
 ///
 /// <para><b>There is no sweep gate here, and that is the entire point</b> (tui's
 /// own doc on <c>member_review_elements</c>): the ephemeral pass renders only
@@ -74,6 +75,46 @@ public partial class MemberReviewViewModel : ViewModelBase
             _opsInFlight--;
             IsLoading = false;
         }
+    }
+
+    /// <summary>
+    /// One quiet read: what the ephemeral kit-side pass hydrates with (apple's
+    /// <c>MemberReviewVM.refresh</c>). That surface sits on the Recovery Kit section,
+    /// which has its own business while the successor's store may still be sealed,
+    /// so a failed read keeps the rows and raises NO banner — the section's error
+    /// slot is not this read's to fill; the store-change and aftermath-settled
+    /// re-reads take the next one.
+    /// </summary>
+    internal async Task RefreshQuietAsync(ConversationsManager? manager)
+    {
+        _opsInFlight++;
+        try
+        {
+            // Built whole before anything is replaced, so a failure part-way
+            // through the rows (not only the read) still keeps what is painted.
+            var roster = await _rpc.MemberReviewsListAsync();
+            var fresh = roster
+                .Select(r => MemberReviewRow.From(r, manager?.HandleForPerson(r.person)))
+                .ToList();
+            Reviews.Clear();
+            foreach (var row in fresh) Reviews.Add(row);
+        }
+        catch (Exception ex)
+        {
+            FaunaApp.Core.Logs.ShellLog.Warn(
+                nameof(MemberReviewViewModel), $"quiet roster read failed: {ex.Message}");
+        }
+        finally
+        {
+            _opsInFlight--;
+        }
+    }
+
+    /// <summary>Drop the previous identity's roster at an identity change.</summary>
+    internal void Reset()
+    {
+        Reviews.Clear();
+        SetError(null);
     }
 
     private async Task RefreshAsync(ConversationsManager? manager)

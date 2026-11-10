@@ -29,7 +29,7 @@
 //! folder's row). Do not reintroduce any of the seven.
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -76,6 +76,11 @@ pub struct FolderWizardView {
     back_btn: gtk::Button,
     next_btn: gtk::Button,
     create_btn: gtk::Button,
+    /// Whether the declassify dialog is presented for the machine's current
+    /// arm — the dialog is presented once per arm, never per render tick. The
+    /// ARM itself is the machine's (`ReviewSnapshot.declassify_armed`); this
+    /// only remembers that the modal answering it is already up.
+    declassify_presented: Rc<Cell<bool>>,
 }
 
 impl FolderWizardView {
@@ -198,6 +203,7 @@ impl FolderWizardView {
             back_btn,
             next_btn,
             create_btn,
+            declassify_presented: Rc::new(Cell::new(false)),
         };
         view.render(&wiz);
         view.dialog.present(Some(parent));
@@ -233,9 +239,48 @@ impl FolderWizardView {
         let on_review = step == FolderWizardStep::Review;
         self.create_btn.set_visible(on_review);
         if on_review {
+            let review = wiz.review_snapshot();
+            // While the declassify confirm asks, Create stays painted but dim:
+            // answering the dialog is the gesture that creates.
             self.create_btn
-                .set_sensitive(wiz.review_snapshot().create_enabled);
+                .set_sensitive(review.create_enabled && !review.declassify_armed);
+            self.present_declassify_if_armed(wiz, review.declassify_armed);
+        } else {
+            self.declassify_presented.set(false);
         }
+    }
+
+    /// A Public wizard's Create armed the owner row's SAME declassify dialog
+    /// (`ui/folders.md` § Audience and website serving → *Born public*,
+    /// ruling 2; the builder is shared with the row,
+    /// [`super::folders::present_declassify_confirm`]). The confirm answers
+    /// `confirm_public_create()`, which creates the folder public and attests
+    /// it; cancel / Escape / close answers `cancel_public_create()`, which
+    /// sends nothing and stays on Review.
+    fn present_declassify_if_armed(&self, wiz: &Arc<FolderWizardMachine>, armed: bool) {
+        if !armed {
+            self.declassify_presented.set(false);
+            return;
+        }
+        if self.declassify_presented.replace(true) {
+            return;
+        }
+        let confirm_wiz = wiz.clone();
+        let decline_wiz = wiz.clone();
+        super::folders::present_declassify_confirm(
+            &self.create_btn,
+            move || {
+                let wiz = confirm_wiz.clone();
+                // Ticks `on_changed()` (Submitting → Failed/Done) through the
+                // page observer, exactly as `submit()` does.
+                async_helper::run_on_tokio(
+                    async move { wiz.confirm_public_create().await },
+                    |_step| {},
+                );
+            },
+            Some(Box::new(move || decline_wiz.cancel_public_create())),
+            "fauna.folders.create",
+        );
     }
 
     /// Close the dialog. Idempotent — safe to call after a user dismiss.
@@ -286,6 +331,68 @@ fn build_name(m: &Arc<FolderWizardMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
         .build();
     root.append(&name_required);
 
+    // Who can see the new folder — a field of this step, never a step of its
+    // own (`ui/folders.md` § Audience and website serving → *Born public*,
+    // ruling 1). Absent on a seam that cannot attest a born-public create (a
+    // control that cannot work must not paint); `audience_offered` is read once
+    // at the machine's construction, so it is read once here too. A new folder
+    // is unbound, so the shared option set is exactly Private | Public. The
+    // value/label DropDown split of the owner row's `folder-audience-select`:
+    // the MODEL strings are the wire values the cross-app `select(id, value)` /
+    // `get_text` contract drives. The select paints the user's choice —
+    // nothing exists yet, so there is no current audience to snap back to.
+    let audience_widgets = m.name_snapshot().audience_offered.then(|| {
+        let opts = fauna_folders_machine::audience_options(false, &m.name_snapshot().audience);
+        let values: Vec<String> = opts.iter().map(|o| o.value.clone()).collect();
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let dropdown = gtk::DropDown::builder()
+            .model(&gtk::StringList::new(&refs))
+            .build();
+        let label_expr = gtk::ClosureExpression::new::<String>(
+            &[] as &[gtk::Expression],
+            gtk::glib::closure!(|item: gtk::StringObject| {
+                fauna_folders_machine::audience_label(item.string().as_str())
+                    .resolve(strings::lookup)
+            }),
+        );
+        dropdown.set_expression(Some(&label_expr));
+        set_test_id(&dropdown, ids::WIZARD_AUDIENCE_SELECT);
+        let current = m.name_snapshot().audience;
+        if let Some(idx) = values.iter().position(|v| *v == current) {
+            dropdown.set_selected(idx as u32);
+        }
+        {
+            let m = m.clone();
+            let values = values.clone();
+            dropdown.connect_selected_notify(move |dd| {
+                if let Some(value) = values.get(dd.selected() as usize)
+                    && *value != m.name_snapshot().audience
+                {
+                    m.set_audience(value.clone());
+                }
+            });
+        }
+        let field = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        let caption = gtk::Label::builder()
+            .label(strings::devices::FOLDER_AUDIENCE)
+            .xalign(0.0)
+            .build();
+        field.append(&caption);
+        field.append(&dropdown);
+        root.append(&field);
+        let hint = gtk::Label::builder()
+            .wrap(true)
+            .xalign(0.0)
+            .css_classes(["fauna-muted"])
+            .build();
+        set_test_id(&hint, ids::WIZARD_AUDIENCE_HINT);
+        root.append(&hint);
+        (dropdown, values, hint)
+    });
+
     let refresh: Rc<dyn Fn()> = Rc::new({
         let m = m.clone();
         let name_entry = name_entry.clone();
@@ -296,6 +403,17 @@ fn build_name(m: &Arc<FolderWizardMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
                 name_entry.set_text(&snap.name);
             }
             name_required.set_visible(!snap.continue_enabled);
+            if let Some((dropdown, values, hint)) = &audience_widgets {
+                if let Some(idx) = values.iter().position(|v| *v == snap.audience)
+                    && dropdown.selected() != idx as u32
+                {
+                    dropdown.set_selected(idx as u32);
+                }
+                hint.set_label(
+                    &fauna_folders_machine::audience_hint(false, &snap.audience)
+                        .resolve(strings::lookup),
+                );
+            }
         }
     });
 
@@ -523,6 +641,13 @@ fn build_review(m: &Arc<FolderWizardMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             }
             let snap = m.review_snapshot();
             append_review_row(&summary, strings::devices::wizard::REVIEW_NAME, &snap.name);
+            // Who can see it — the Name step's choice, read-only like the name
+            // (Born public, ruling 1).
+            append_review_row(
+                &summary,
+                strings::devices::wizard::REVIEW_AUDIENCE,
+                &fauna_folders_machine::audience_label(&snap.audience).resolve(strings::lookup),
+            );
             // No mode line, no retention line, no cadence line: a folder has
             // no type (phase 2 slice e), retention is the nest place's policy
             // edited on the row rather than chosen at create, and the scan

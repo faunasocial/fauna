@@ -203,6 +203,24 @@ def _owner_resends(owner, host, *, counted: str, what: str) -> tuple[dict, dict]
     )
 
 
+#: The handle domain of ``domainless_nest``: it claims no domain, so a member's
+#: handle reads ``<name>@localhost`` there (conftest's ``domainless_nest``;
+#: the nest's placeholder, ``bins/fauna-nest/src/state.rs::handle_domain``).
+_DOMAINLESS_HANDLE_DOMAIN = "localhost"
+
+
+def _peer_thread_labels(peer: dict, domain: str = "fauna.test") -> tuple[str, str]:
+    """The labels the opener's 1:1 thread with ``peer`` may paint under in
+    the mint host select: the full hex where the roster knows no handle, the
+    peer's handle (``e2e-<12 hex>@<domain>``) where it seats one — tui,
+    apple and windows name the member by handle. ``domain`` is the handle
+    domain of the nest the seats are on: the shared nest's by default,
+    ``_DOMAINLESS_HANDLE_DOMAIN`` on ``domainless_nest``. ``mint_offer`` tries
+    them in order."""
+    hex_id = peer["actor_id_hex"]
+    return hex_id, f"e2e-{hex_id[:12]}@{domain}"
+
+
 def _poll_ui(app, predicate, *, what: str, receive: bool = False, budget_s: float = _UI_LEG_S):
     """Deadline-poll a UI predicate, re-hydrating the Devices page each try
     (the facet folds on the nav edge) and optionally poking a receive cycle
@@ -255,7 +273,7 @@ def test_custody_ceremony_two_accounts(
     # the sole mint candidate; a wrong label fails loudly listing the painted
     # options (the select refuses unoffered values, convention 11).
     alice.backups.navigate_devices()
-    alice.custody.mint_offer(bob["actor_id_hex"])
+    alice.custody.mint_offer(*_peer_thread_labels(bob))
 
     # The confirm records the offer and the drive posts it; alice's own row
     # family shows the pending ceremony at once (fold of her own config).
@@ -623,7 +641,7 @@ def test_a_removed_custody_stays_gone_when_its_owner_sends_again(
     # no receipt leg — nothing here reads it).
     _open_carrier(alice, bob_app, bob, nest_instance["port"])
     alice.backups.navigate_devices()
-    alice.custody.mint_offer(bob["actor_id_hex"])
+    alice.custody.mint_offer(*_peer_thread_labels(bob))
     _poll_ui(
         bob_app,
         lambda: bob_app.custody.offer_count() >= 1,
@@ -869,7 +887,7 @@ def test_a_custody_minted_on_another_device_renders_and_revokes_here(
     # the receipt/budget legs it already owns).
     _open_carrier(owner_tui, bob_app, bob, port)
     owner_tui.backups.navigate_devices()
-    owner_tui.custody.mint_offer(bob["actor_id_hex"])
+    owner_tui.custody.mint_offer(*_peer_thread_labels(bob))
     _poll_ui(
         bob_app,
         lambda: bob_app.custody.offer_count() >= 1,
@@ -999,9 +1017,10 @@ def test_custody_ceremony_nest_anchored(
 
     # ── Offer (owner side, through the UI). The production mint advertises
     # the nest binding and carries alice's nest URL — the select's two
-    # offer-side preconditions.
+    # offer-side preconditions. Bob's handle paints under the domainless nest's
+    # `localhost`, never `fauna.test`.
     alice.backups.navigate_devices()
-    alice.custody.mint_offer(bob["actor_id_hex"])
+    alice.custody.mint_offer(*_peer_thread_labels(bob, _DOMAINLESS_HANDLE_DOMAIN))
     _poll_ui(
         alice,
         lambda: alice.custody.holder_count() >= 1,
@@ -1365,10 +1384,11 @@ def test_a_custodian_nests_receipt_reads_never_fresh_then_stale_on_web(
         owner_tui.conversations.enable_real_faunamls()
         bob_app.conversations.enable_real_faunamls()
 
-        # ── The ceremony, tui ↔ tui, bob choosing his nest.
+        # ── The ceremony, tui ↔ tui, bob choosing his nest (the domainless
+        # nest: bob's handle paints under `localhost`).
         _open_carrier(owner_tui, bob_app, bob, port)
         owner_tui.backups.navigate_devices()
-        owner_tui.custody.mint_offer(bob["actor_id_hex"])
+        owner_tui.custody.mint_offer(*_peer_thread_labels(bob, _DOMAINLESS_HANDLE_DOMAIN))
         _poll_ui(
             bob_app,
             lambda: bob_app.custody.offer_count() >= 1

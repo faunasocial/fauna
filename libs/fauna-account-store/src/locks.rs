@@ -450,6 +450,32 @@ mod tests {
         let _reacquired = held(EngineLock::try_acquire(&store_dir));
     }
 
+    /// Two seats of ONE account on one OS user that share a home but not an
+    /// install home (the macOS e2e door journey's second seat —
+    /// `fauna_core::platform_ids::macos_install_home`) resolve two store roots,
+    /// so each seat's engine election is its own: both hold at once, where two
+    /// seats sharing one store root would refuse the second.
+    #[test]
+    fn two_seats_with_their_own_install_homes_each_hold_the_engine_lock() {
+        use fauna_core::platform_ids::{macos_install_home, macos_sync_state_base};
+        let actor = "ab".repeat(32);
+        let tmp = tempfile::tempdir().unwrap();
+        let shared_home = Some(tmp.path().join("seat-1"));
+        let root_of = |install: &str| {
+            let home = macos_install_home(Some(tmp.path().join(install)), shared_home.clone());
+            crate::root::StoreRoot::at(macos_sync_state_base(home).unwrap())
+        };
+        let first = root_of("seat-1").store_dir(&actor).unwrap();
+        let second = root_of("seat-2").store_dir(&actor).unwrap();
+
+        let _first = held(EngineLock::try_acquire(&first));
+        let _second = held(EngineLock::try_acquire(&second));
+        assert!(
+            matches!(EngineLock::try_acquire(&first), EngineLockOutcome::Refused),
+            "one store root still elects one engine"
+        );
+    }
+
     /// The election contends on the reserved name beside the store DB —
     /// `engine.lock`, the file `store.rs` reserves — and never deletes it:
     /// release leaves the zero-byte file for the next acquirer to lock.

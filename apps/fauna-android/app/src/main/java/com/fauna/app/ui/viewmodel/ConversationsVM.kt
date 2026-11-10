@@ -81,6 +81,12 @@ class ConversationsVM @Inject constructor(
      *  (moderation.md § User-initiated reporting; the shell's ReportHost paints it). */
     fun openReport(target: com.fauna.ffi.FfiReportTarget) = contentPolicyStore.report.open(target)
 
+    /** `content-policy-show-again-button` — un-hide what the viewer's own report
+     *  hid (moderation.md § Corollary — the reporter's hide is theirs to undo). */
+    fun showAgain(ids: List<String>) {
+        viewModelScope.launch { contentPolicyStore.report.showAgain(ids) }
+    }
+
     /** Count a rendered message's guardian-rule enforcement for **Guardian
      *  Notify** (family-safety.md § Guardian Notify) — a no-op unless the
      *  ward's `content_notify` knob is on and the guardian rules bite. */

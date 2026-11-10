@@ -138,7 +138,7 @@ def test_a_stale_sibling_reconnecting_after_a_rotation_keeps_imap_working(
     recipient = alias_admin_to_address(nest, domain)
     app.mail_settings.navigate()
     app.mail_settings.enable_mail_plain(_MUA_PASSWORD)
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must flip the page to enabled; "
         f"status={app.mail_settings.status_text()!r}, "
         f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"

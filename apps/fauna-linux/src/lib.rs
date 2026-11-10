@@ -42,6 +42,7 @@ mod feed;
 mod file_manager_share;
 mod i18n;
 mod instance_remote;
+mod launch_currency;
 mod launcher_badge;
 mod logs_view;
 mod mail_glue;
@@ -51,6 +52,7 @@ mod mls;
 mod nest_rules;
 mod notifications;
 mod offline_gate;
+mod offline_outbox;
 /// The co-present offline share-initiation ceremony (`docs/goal/behavior/p2p.md`
 /// § Offline share initiation — tui leads the affordance; linux is the second
 /// app).
@@ -185,6 +187,19 @@ pub fn run(build_commit: Option<&'static str>) {
     // so `instance_remote` can still reach it to raise or to forward an
     // add-account intent. The probe is display-only — arbitration stays at
     // `become_session_instance`'s acquire.
+    //
+    // Before even that probe — the launch law's first read of the registry —
+    // whatever a sign-out cut short owes is finished: the agent dismissed, the
+    // wipe, each recorded account's erase, the residue re-sweep — so this
+    // launch never offers the chooser for an account being signed out, never
+    // routes `Online` over it and never takes an instance lock for it
+    // (`account-scoping.md` § Erasure follows scope → *The sign-out record is
+    // on all 7 apps*, decision 3). A refused finish whose record still owes
+    // its wipe FAILS CLOSED: no collision probe, and `build_ui` lands on the
+    // fresh wizard painting the retry's refusal line (decision 4).
+    if account_scope::finish_at_launch() {
+        LAUNCH_FAILED_CLOSED.store(true, Ordering::SeqCst);
+    }
     let collided = launch_collision_detected();
     // HANDLES_OPEN: a `fauna://` route the desktop entry's `%u` passes arrives
     // on the `open` signal below — forwarded to the primary instance like any
@@ -408,7 +423,7 @@ pub fn run(build_commit: Option<&'static str>) {
     application.run_with_args(&autostart::strip_autostart_flag(std::env::args()));
 }
 
-fn load_css() {
+pub(crate) fn load_css() {
     let css = gtk::CssProvider::new();
     css.load_from_string(include_str!("style.css"));
 
@@ -567,6 +582,15 @@ where
 /// `build_ui` (which GApplication calls, so it takes no arguments of ours).
 static LAUNCH_COLLIDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Did this launch's sign-out finish refuse while its record still owes the
+/// wipe (`account_scope::finish_at_launch`)? Then the launch must not route
+/// over the registry: no collision chooser, and `build_ui` lands on the fresh
+/// wizard, whose `identity_choice` paints the refusal line and whose Remove
+/// Again re-runs the finish (`account-scoping.md` § Erasure follows scope →
+/// *The sign-out record is on all 7 apps*, decision 4).
+static LAUNCH_FAILED_CLOSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// The collision test (`account-scoping.md` § Concurrent instances). Three
 /// conditions, all required:
 ///
@@ -588,7 +612,9 @@ static LAUNCH_COLLIDED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// A `true` result is remembered in [`LAUNCH_COLLIDED`]; the acquire in
 /// `app.rs` remains the arbiter for every launch that gets past here.
 fn launch_collision_detected() -> bool {
-    if fauna_client_accounts::requested_bound_account().is_some() {
+    if fauna_client_accounts::requested_bound_account().is_some()
+        || LAUNCH_FAILED_CLOSED.load(Ordering::SeqCst)
+    {
         return false;
     }
     let (Some(base), Some(active)) = (
@@ -804,8 +830,13 @@ fn build_ui(application: &adw::Application) {
     // account switch's rebuild (which must land a target on the SAME surface a
     // relaunch would show). A cold start owns the drain, so its surface starts
     // it, and Case 1 runs the full silent-challenge flow.
-    let route =
-        stored_launch_route(launch_credentials().map(|(url, secret, _device)| (url, secret)));
+    // A sign-out finish that failed closed (`LAUNCH_FAILED_CLOSED`) routes
+    // nothing over the registry: the fresh wizard, painting the refusal.
+    let route = if LAUNCH_FAILED_CLOSED.load(Ordering::SeqCst) {
+        LaunchRoute::Fresh
+    } else {
+        stored_launch_route(launch_credentials().map(|(url, secret, _device)| (url, secret)))
+    };
     present_launch_route(
         application,
         route,
@@ -983,11 +1014,10 @@ fn present_launch_route(
         }
         LaunchRoute::Fresh => {
             fauna_client_accounts::refuse_if_bound_from_onboarding("the fresh onboarding wizard");
-            // A residue an earlier sign-out recorded is re-swept silently,
-            // and painted on `identity_choice` only if something is still
-            // left (`account-scoping.md` § Erasure follows scope → *the
-            // residue surface*).
-            account_scope::recheck_residue_at_launch();
+            // A residue an earlier sign-out recorded was re-swept before
+            // routing, by the launch's finish (`run`), and what is left paints
+            // on `identity_choice` (`account-scoping.md` § Erasure follows
+            // scope → *The sign-out record is on all 7 apps*, decision 3).
             let onboarding = views::onboarding::build_onboarding_window(application);
             show_launch_wizard(application, onboarding, wiring);
         }
@@ -1106,6 +1136,13 @@ fn quiesce_for_teardown(app: &adw::Application) {
 fn register_sign_out_handler(application: &adw::Application) {
     let app_for_sign_out = application.clone();
     settings::set_sign_out_handler(move || {
+        // The decision first, durably, before anything else — the serving
+        // question already passed at the confirm (`sign_out_blocked`): the
+        // sign-out record names every account this erase reaches and owes the
+        // wipe, so a process killed anywhere after this line is finished by
+        // the next launch (`account-scoping.md` § Erasure follows scope → *The
+        // sign-out record is on all 7 apps*, decisions 1 and 7).
+        let recorded = account_scope::record_sign_out();
         // A sign-out is a session teardown — counted synchronously here, before
         // the deferral, for the same reason the account switch is
         // (`automation::link::record_session_teardown`). Gated: the `automation`
@@ -1141,7 +1178,7 @@ fn register_sign_out_handler(application: &adw::Application) {
             quiesce_for_teardown(&app);
             crate::actor_scope::reset_actor_scoped_state(
                 fauna_client_account_runtime::StopReason::SignOut,
-                move || sign_out_after_stop(&app),
+                move || sign_out_after_stop(&app, recorded),
             );
         });
     });
@@ -1150,7 +1187,7 @@ fn register_sign_out_handler(application: &adw::Application) {
 /// The half of a sign-out that must follow the account runtime's stop — every
 /// line of it: the writers go down, then the erase, then the onboarding window
 /// (`actor_scope::reset_actor_scoped_state`'s `then`).
-fn sign_out_after_stop(app: &adw::Application) {
+fn sign_out_after_stop(app: &adw::Application, recorded: fauna_client_accounts::SignOutRecord) {
     // The external sync agent is already un-provisioned (it deleted its
     // persisted capability and stopped engines): its reply is part of the stop
     // this continuation waited for (`account_runtime::teardown`). A plain app
@@ -1185,24 +1222,25 @@ fn sign_out_after_stop(app: &adw::Application) {
     // Erase before building the onboarding window, which constructs a
     // fresh registry.
     //
-    // Account-scoped local state erases too — the sign-out "all
-    // accounts" half of account-scoping.md's "Erasure follows scope"
-    // corollary — and MUST run before `delete_credentials` wipes the
-    // registry this reads to know which actors existed.
-    // The erase is best-effort BY DESIGN — a sign-out completes even
-    // when a scope or a credential will not go — but proceeding must not
-    // look identical to succeeding: what survived goes to the log by
-    // path and key name, and to the user as one line, on the onboarding
-    // window this hands them (`account-scoping.md` § Erasure follows
-    // scope; `principles.md` § The user always controls their data puts
-    // the delete affordance in the app, and a log is not one).
+    // The one routine every caller runs (`account_scope::finish`, the shared
+    // `fauna_client_accounts::finish_sign_out_with`), over the sign-out record
+    // the handler wrote before its first await: the serving question, then the
+    // wipe — linux's own credential namespace, `before_wipe` naming every
+    // account the registry lists first — then each recorded account's erase
+    // (its scopes under the three erase bases and its slots in the shared
+    // `fauna-account-store` namespace), the residual sweep, and the handover
+    // of anything left to the residue record before the record is cleared
+    // (`account-scoping.md` § Erasure follows scope → *The sign-out record is
+    // on all 7 apps*, decisions 2 to 6). The sync agent was dismissed by the
+    // stop this follows.
     //
-    // ⚠ The line is built after BOTH halves. It used to be built from
-    // the filesystem erase alone, one line above a `let _ =` on the
-    // credential wipe — so a keyring that refused the wipe painted a
-    // clean "Signed out" over the identity seed it still held.
-    let survivors = account_scope::erase_all_known_accounts();
-    let credentials = client::delete_credentials();
+    // Best-effort BY DESIGN — a sign-out completes even when a scope or a
+    // credential will not go — but proceeding must not look identical to
+    // succeeding: what survived goes to the log by path and key name, and to
+    // the user as one line, on the onboarding window this hands them
+    // (`principles.md` § The user always controls their data puts the delete
+    // affordance in the app, and a log is not one).
+    let outcome = account_scope::finish(false, Some(recorded));
     // The window serves no account now: put down the process holder's
     // instance lock and its shared-root serving lock, AFTER the erase. A
     // holder kept past here made this signed-out window a "sibling" to every
@@ -1210,11 +1248,10 @@ fn sign_out_after_stop(app: &adw::Application) {
     // § Concurrent instances → *An erase refuses while a sibling serves the
     // account*). The account-index reset reaches this handler too.
     fauna_client_accounts::release_process_session_instance();
-    // Recorded (install-scoped, so it outlives this process) BEFORE the
-    // wizard is built: `identity_choice` paints its `sign-out-residue` view
-    // from that state on every tick, never from a line written once onto a
-    // banner the wizard's own render then wipes.
-    account_scope::record_residue(&survivors, &credentials);
+    // Painted BEFORE the wizard is built: `identity_choice` paints its
+    // `sign-out-residue` view from that cell on every tick, never from a line
+    // written once onto a banner the wizard's own render then wipes.
+    account_scope::paint_finish(&outcome);
 
     let onboarding = views::onboarding::build_onboarding_window(app);
     // Hand the automation surface the window the USER is now looking at.
@@ -1841,12 +1878,17 @@ fn launch_silent_challenge_flow(
                 let secret_hex = secret_hex.clone();
                 let view_holder = view_holder.clone();
                 let machine_holder = machine_holder.clone();
+                launch_currency::begin(&machine);
                 crate::async_helper::run_on_tokio(
                     async move {
                         machine.trust_nest_identity().await;
                         (machine.snapshot(), machine)
                     },
                     move |(snapshot, machine)| {
+                        if !launch_currency::deliver(&machine) {
+                            retire_superseded_launch_window(&view_holder);
+                            return;
+                        }
                         *machine_holder.borrow_mut() = Some(std::sync::Arc::clone(&machine));
                         handle_launch_phase(
                             app,
@@ -2209,6 +2251,9 @@ fn run_silent_challenge_async(
         });
     }
 
+    // This launch is now the one in flight; a verdict renders only while it
+    // still is (`launch_currency`).
+    launch_currency::begin(&machine);
     crate::async_helper::spawn_with_snapshot(
         &launch_runtime(),
         move || async move {
@@ -2216,6 +2261,10 @@ fn run_silent_challenge_async(
             machine.snapshot()
         },
         move |snapshot| {
+            if !launch_currency::deliver(&machine_for_callback) {
+                retire_superseded_launch_window(&view_holder);
+                return;
+            }
             *machine_holder.borrow_mut() = Some(Arc::clone(&machine_for_callback));
             handle_launch_phase(
                 app,
@@ -2228,6 +2277,25 @@ fn run_silent_challenge_async(
             );
         },
     );
+}
+
+/// A superseded launch's verdict was dropped (`launch_currency::deliver`):
+/// whatever superseded it owns the routing, so the launch window left showing
+/// `Launching` for it is closed rather than left as a spinner beside the newer
+/// session (`onboarding.md` § App-launch routing → *A verdict renders only
+/// while its own launch is still the current one*, the launch-gate clause). A
+/// window the superseding path already destroyed is no longer visible and is
+/// only released.
+fn retire_superseded_launch_window(
+    view_holder: &Rc<std::cell::RefCell<Option<views::launch::LaunchView>>>,
+) {
+    if let Some(v) = view_holder.borrow_mut().take()
+        && v.window.is_visible()
+    {
+        // destroy() bypasses connect_close_request — close() would fire the
+        // user-X-clicks handler that calls app.quit().
+        v.window.destroy();
+    }
 }
 
 /// The process-lifetime runtime the launch machine's `start()` runs on, so a
@@ -2818,19 +2886,22 @@ fn launch_authenticated(
     let result = app::build_main_window(application, &fauna_client);
     result.widgets.status_node_url_row.set_subtitle(node_url);
 
-    // Pre-populate the status bar from the libsecret cache so the user
-    // sees their handle immediately on relaunch — without this the row
-    // shows blank until /api/v1/account returns. The main flow's
-    // `AccountLoaded` handler in `app.rs` will overwrite this with the
-    // freshly-fetched value (and re-cache it) once auth completes.
+    // Pre-populate from the server-data cache so the user sees their
+    // identity immediately on relaunch; `IdentityRefreshed` (the verify
+    // reply, the cache's one writer) repaints it.
     let (cached_handle, _cached_domain, _cached_tier) = client::load_account_cache();
     if let Some(h) = cached_handle.as_deref()
         && !h.is_empty()
     {
         result.state.borrow_mut().handle = h.to_string();
-        result.widgets.status_handle_row.set_subtitle(h);
         settings::set_handle(Some(h.to_string()));
     }
+    // The identity cell (handle + tier) from the same cache, on the first
+    // frame with no fetch (`settings.md` § Layout & flow item 1).
+    views::status::paint_identity_cell(
+        &result.widgets.status_handle_row,
+        &result.widgets.status_tier_row,
+    );
 
     // Focus tracking for notification suppression.
     result.window.connect_is_active_notify(|win| {
@@ -3534,17 +3605,17 @@ fn reset_after_stop(
         // surface failing, nothing on screen saying why.
         // Measured 2026-08-18: every reset in
         // the suite was producing a state production never produces.
-        // Ordering matches the production path — the registry this reads
-        // to know which actors existed is what `delete_credentials`
-        // wipes, so it runs first.
+        // The production path's own record and routine
+        // (`account_scope::record_sign_out` + `finish`), so an agent reset
+        // also clears any sign-out record a killed run left — one left
+        // standing would wipe the next test's sign-in at its next launch.
         // Dropped deliberately, and this is the one place it is right
         // to: an agent reset has no user in front of it, and painting a
         // residue line here would make every test's own between-test
         // reset look like a failed sign-out. The production path above
         // is where a survivor owes the user a say; the sweeps still log
         // their paths either way.
-        let _ = account_scope::erase_all_known_accounts();
-        let _ = client::delete_credentials();
+        let _ = account_scope::finish(false, Some(account_scope::record_sign_out()));
         // Signed out, so serving nothing — as the production sign-out.
         fauna_client_accounts::release_process_session_instance();
         let onboarding = views::onboarding::build_onboarding_window(application);
@@ -3560,8 +3631,7 @@ fn reset_after_stop(
         // as the authenticated arm above).
         // Dropped for the same reason as the arm above — no user, no
         // line.
-        let _ = account_scope::erase_all_known_accounts();
-        let _ = client::delete_credentials();
+        let _ = account_scope::finish(false, Some(account_scope::record_sign_out()));
         fauna_client_accounts::release_process_session_instance();
         if let Some(m) = current_onboarding_machine.borrow().as_ref() {
             // Already in the onboarding wizard — rewind the
@@ -3741,6 +3811,14 @@ fn handle_test_command(
 
             // --- Session patch ---
             if let Some(session) = state.get("session") {
+                // An authenticated patch IS the session now, so a launch still in
+                // flight is superseded: retire it, and its verdict is dropped when
+                // it lands rather than rendered over the session built below
+                // (`launch_currency`; tui's `apply_session_patch` retires at the
+                // same point).
+                if session.get("authenticated").and_then(|v| v.as_bool()) == Some(true) {
+                    launch_currency::retire_in_flight();
+                }
                 // Update session overrides so state serialization reflects
                 // what the test set, even before credentials are in the keyring.
                 {
@@ -3792,7 +3870,7 @@ fn handle_test_command(
                 // to onboarding, so the build branch's guard is true and the
                 // whole shell is rebuilt). Same teardown as the "reset" arm
                 // above, with two deliberate differences: no
-                // `delete_credentials()` (the new actor's are stored just below,
+                // sign-out finish (the new actor's are stored just below,
                 // and `launch_authenticated` is handed them explicitly), and no
                 // onboarding window (the build branch takes over immediately).
                 // Gated on `authenticated == true` so we only ever tear down
@@ -4118,7 +4196,7 @@ fn handle_test_command(
                         c.run_deployment_seed_custody_leg();
                         c.refresh_mail_epoch_schedule();
                         c.publish_subscriber_encaps_key();
-                        c.run_critical_alert_sweep_once();
+                        c.run_critical_alert_sweep();
                         c.load_muted_keywords();
                         crate::report::load_hidden_content(c);
                     }
@@ -4460,7 +4538,7 @@ fn handle_test_command(
                         // Per view, like the real nav edge (`app.rs`).
                         "notifications" => client.fetch_notifications_for_view(),
                         "events" => client.fetch_calendars(),
-                        "bridges" => crate::views::bridges::plugins::refresh(client),
+                        "bridges" => crate::views::bridges::refresh(client),
                         // The Devices/Peers page refreshes off the shared
                         // `DevicesMachine` when it becomes visible (wired on
                         // the stack in app.rs), so no per-nav fetch here.
@@ -4696,6 +4774,49 @@ fn handle_test_command(
                 );
             }
         }
+        // e2e-only: linux twin of tui's `folder_set_custody` arm — which
+        // content-key generations THIS seat's folder custody holds for one
+        // set, each a version and a one-way key fingerprint, the succession
+        // journeys' cross-seat comparison (`succession-aftermath.md` § Re-key
+        // scope). The shared reader is
+        // `fauna_client_account_runtime::folder_set_custody_json`; the
+        // `device_set_state` reader shape above (one local read blocked on the
+        // GTK thread, the value riding `machine_method_result`), and a missing
+        // or malformed selector is a loud refusal with the slot cleared.
+        "folder_set_custody" => {
+            let set_name = cmd
+                .payload
+                .get("set_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let channel = cmd
+                .payload
+                .get("channel_id_hex")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let handle = crate::account_runtime::handle();
+            let value = crate::async_helper::block_on_tokio(async move {
+                fauna_client_account_runtime::folder_set_custody_json(
+                    handle,
+                    set_name.as_deref(),
+                    channel.as_deref(),
+                )
+                .await
+            });
+            match value {
+                Ok(value) => {
+                    if let Ok(mut s) = shared.lock() {
+                        s.machine_method_result = Some(value.to_string());
+                    }
+                }
+                Err(why) => {
+                    if let Ok(mut s) = shared.lock() {
+                        s.machine_method_result = None;
+                    }
+                    report_refused_agent_command(shared, "folder_set_custody", why);
+                }
+            }
+        }
         // e2e-only: linux twin of tui's `read_marker_state` arm — this app's own
         // account store's read marker for `channel_id_hex`, the read-state
         // relaunch witness's durability barrier
@@ -4896,12 +5017,22 @@ fn handle_test_command(
                 .get("minutes")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            crate::screen_lock::advance_test_clock(minutes * 60);
+            // `focused` (additive, default true): `false` advances the clock
+            // with the app out of front or the device locked — the minutes a
+            // ward did not spend, which the billing witness drives to prove
+            // they are never billed (`family-client-enforcement.md` §
+            // Implementation status today, decision (b)); tui's arm is the
+            // twin. The default keeps the poke asserting what a ward actively
+            // using the app accrues — real focus is a window-manager fact a
+            // headless Xvfb run cannot be trusted to report.
+            let focused = cmd
+                .payload
+                .get("focused")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            crate::screen_lock::advance_test_clock_focused(minutes * 60, focused);
             if let Some(c) = current_client.borrow().as_ref() {
-                // `focused = true`: the poke asserts what a ward actively using
-                // the app accrues. Real focus is a window-manager fact that a
-                // headless Xvfb run cannot be trusted to report.
-                c.flush_usage_report(true);
+                c.flush_usage_report(focused);
             }
         }
         // Feed page — inject a snapshot post list straight onto the shared
@@ -5046,6 +5177,36 @@ fn handle_test_command(
             }
             return;
         }
+        // Write `count` tagged `info` lines through the app's own tracing
+        // subscriber — ring, rolling file and stderr alike — each padded to
+        // about `bytes` bytes: the volume app-log's size-cap witness needs to
+        // push the on-device file past its lowered cap. The shared body
+        // (`fauna_log::rolling::emit_burst_for_test`), twin of tui's arm; a
+        // refusal is a loud `{"error"}` result (convention 11).
+        "app_log_emit" => {
+            let tag = cmd
+                .payload
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let count = cmd
+                .payload
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            let bytes = cmd
+                .payload
+                .get("bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let value = match fauna_log::rolling::emit_burst_for_test(tag, count, bytes) {
+                Ok(emitted) => serde_json::json!({ "emitted": emitted }),
+                Err(e) => serde_json::json!({ "error": e }),
+            };
+            if let Ok(mut s) = shared.lock() {
+                s.machine_method_result = Some(value.to_string());
+            }
+        }
         "feed_cue_clock_freeze" | "feed_cue_clock_thaw" | "feed_cue_clock_advance" => {
             use crate::feed::viewport::test_clock;
             let outcome = match cmd.action.as_str() {
@@ -5064,6 +5225,19 @@ fn handle_test_command(
             if let Ok(mut s) = shared.lock() {
                 s.machine_method_result = Some(value.to_string());
             }
+        }
+        // Hold / release this process's author drain, so a payment-backed
+        // subscribe request stands in the author's §2 requests while the test
+        // reads its paid badge (`monetization.md` § Pillar 3) — the tui arm's
+        // twin. The hold is the shared process-wide flag
+        // (`fauna_client_subscriptions::orchestration::hold_author_drain_for_test`)
+        // the author pump's `drain_auto_approvals` reads after its queue read;
+        // pre-auth is fine.
+        "subscriptions_hold_author_drain" => {
+            fauna_client_subscriptions::orchestration::hold_author_drain_for_test();
+        }
+        "subscriptions_release_author_drain" => {
+            fauna_client_subscriptions::orchestration::release_author_drain_for_test();
         }
         "feed_hold_next_reload" | "feed_release_held_reload" => {
             let Some(manager) = crate::feed::host::manager() else {
@@ -6616,6 +6790,19 @@ fn update_shared_state(
                             // card text is only its folded embed, so a test
                             // finds it by the post it quotes. tui's key.
                             "quoted_post_id": p.quoted_post_id,
+                            // The labels the render verdict reads — the served
+                            // ones with the reader's own spam mark folded in
+                            // (`FeedManager::snapshot`, report-sharing.md
+                            // § Report capture → *The post's mark-as-spam
+                            // verb*). tui's key.
+                            "labels": p
+                                .labels
+                                .iter()
+                                .map(|l| serde_json::json!({
+                                    "category": l.category,
+                                    "confidence_per_mille": l.confidence_per_mille,
+                                }))
+                                .collect::<Vec<_>>(),
                             // Every link preview in the body with its state,
                             // in body order (`RenderDocument::link_previews` —
                             // render-model.md § D4). A card is absent while a
@@ -7053,8 +7240,17 @@ fn update_shared_state(
         },
         "messages": {
             "error": error_text,
+            // An injected warning wins; else a mapped `warning-message`
+            // banner the app itself painted (the custody leg's warning), so
+            // `messages.warning` reflects what is on screen, as `error` does.
             "warning": shared.lock().ok()
                 .and_then(|s| s.warning_text.clone())
+                .or_else(|| {
+                    crate::automation::find::find("warning-message")
+                        .filter(|w| w.is_mapped())
+                        .map(|w| crate::automation::find::text_of(&w))
+                        .filter(|t| !t.is_empty())
+                })
                 .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null),
             "info": shared.lock().ok()
@@ -7068,6 +7264,16 @@ fn update_shared_state(
         "machine_method_result": machine_method_result,
     });
     // Set after the literal, which sits at `json!`'s macro recursion limit.
+    //
+    // Delivered launch verdicts rendered vs. dropped as superseded — the tui
+    // twin (`fauna_e2e_agent::LAUNCH_VERDICTS_KEY` owns the contract).
+    state_json[fauna_e2e_agent::LAUNCH_VERDICTS_KEY] = launch_currency::verdicts_json();
+    //
+    // The knock toasts this process raised — the witness for `notifications`
+    // outcome 15 (`fauna_e2e_agent::KNOCK_NOTICES_KEY`, which owns the
+    // contract); the shared `KnockNotices` log, fed at the `PushEvent::Knock`
+    // arm (`notifications::raise_knock_toast`).
+    state_json[fauna_e2e_agent::KNOCK_NOTICES_KEY] = crate::notifications::knock_notices_json();
     //
     // Every chat channel this device has bound a thread to — the tui
     // `mls_bound_channels` twin (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`).

@@ -15,15 +15,19 @@ from a sending container on the Docker network, not here.
 Most tests share the session's `mail_bridge_mta`. Two boot a bridge of their
 own (`disposable_mta_bridge_factory`): the default connection rate, which must
 be read from a bridge's boot snapshot with nothing chosen, and the scanner
-outage, which needs a bridge whose scanners are unreachable.
+outage, which needs a bridge whose scanners are unreachable. The pre-auth
+deadline tests boot an MTA and an MDA from the e2e flavor of the bridge
+(`mail_bridge_e2e_binary`), whose harness seam shortens the 60 s deadline to a
+few seconds — the shipped bridge compiles that seam out (convention 15).
 """
 
 import socket
 import time
+import uuid
 
 import pytest
 
-from conftest import MTA_FIXTURE_SPAM_POSTURE
+from conftest import MTA_FIXTURE_SPAM_POSTURE, _spawn_mda_bridge, _spawn_mta_bridge
 from helpers.mail_wire import (
     _connect_smtp_starttls,
     _connect_submission_tls,
@@ -428,6 +432,183 @@ def test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unsca
     )
 
 
+# ── Outcome 26: a connection that never signs in is closed at a fixed bound ──
+
+# The e2e flavor's pre-auth deadline. Short beside every idle bound that could
+# also close a quiet connection (port 25's 30 s read timeout; the submission
+# listeners' 5 min), so a close inside `_PREAUTH_BUDGET_S` can only be the bound
+# fixed at accept.
+_PREAUTH_DEADLINE_S = 4.0
+_PREAUTH_ENV = {"FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS": str(int(_PREAUTH_DEADLINE_S * 1000))}
+_PREAUTH_BUDGET_S = 25.0
+
+
+@pytest.fixture(scope="module")
+def preauth_bridges(
+    mail_bridge_mta, mail_bridge_mda, mail_bridge_e2e_binary, seal_helper_binary,
+    nest_instance, tmp_path_factory,
+):
+    """An MTA and an MDA from the e2e flavor with the short pre-auth deadline,
+    beside the session bridges (whose nest-global state they reuse read-only).
+    Yields `{port_label: port}` for 465, 587, 993 and 143."""
+    mta = _spawn_mta_bridge(
+        mail_bridge_binary=mail_bridge_e2e_binary,
+        seal_helper_binary=seal_helper_binary,
+        nest_instance=nest_instance,
+        tmp=tmp_path_factory.mktemp("mail-bridge-mta-preauth"),
+        bridge_id=f"test-mta-preauth-{uuid.uuid4().hex[:12]}",
+        domain=mail_bridge_mta.domain,
+        extra_env=_PREAUTH_ENV,
+    )
+    try:
+        mda = _spawn_mda_bridge(
+            mail_bridge_binary=mail_bridge_e2e_binary,
+            nest_instance=nest_instance,
+            tmp=tmp_path_factory.mktemp("mail-bridge-mda-preauth"),
+            bridge_id=f"test-mda-preauth-{uuid.uuid4().hex[:12]}",
+            domain=mail_bridge_mda.domain,
+            extra_env=_PREAUTH_ENV,
+        )
+        try:
+            yield {
+                "465": mta.submission_port_465,
+                "587": mta.submission_port_587,
+                "993": mda.imaps_port,
+                "143": mda.imap_starttls_port,
+                "logs": f"MTA log {mta.log_file_path}, MDA log {mda.log_file_path}",
+            }
+        finally:
+            mda.cleanup()
+    finally:
+        mta.cleanup()
+
+
+def _seconds_until_closed(port: int, *, trickle: bytes | None = None) -> tuple[float, bytes]:
+    """Connect to `port` and wait for the server to close the connection,
+    returning (seconds from before the connect, bytes received).
+
+    Silent unless `trickle` is given, which is sent every half second — a
+    client that keeps talking, so no idle timeout can be what closes it. The
+    clock starts before the connect, so the bound (fixed at the server's accept)
+    can never read as early. Fails if the connection outlives the budget.
+    """
+    started = time.monotonic()
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10.0)
+    received = b""
+    next_send = started
+    try:
+        sock.settimeout(0.25)
+        while True:
+            now = time.monotonic()
+            assert now - started < _PREAUTH_BUDGET_S, (
+                f"port {port}: an unauthenticated connection was still open after "
+                f"{_PREAUTH_BUDGET_S:.0f}s with a {_PREAUTH_DEADLINE_S:.0f}s pre-auth "
+                f"deadline (received {received[-300:]!r})"
+            )
+            if trickle is not None and now >= next_send:
+                try:
+                    sock.sendall(trickle)
+                except OSError:
+                    break  # closed under us
+                next_send = now + 0.5
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break  # reset
+            if not chunk:
+                break
+            received += chunk
+    finally:
+        sock.close()
+    return time.monotonic() - started, received
+
+
+def _assert_closed_at_the_bound(port_label: str, closed_after: float, received: bytes, logs: str):
+    assert closed_after >= _PREAUTH_DEADLINE_S * 0.95, (
+        f"port {port_label}: closed after {closed_after:.2f}s — before the "
+        f"{_PREAUTH_DEADLINE_S:.0f}s pre-auth deadline, so something else closed it "
+        f"(received {received[-300:]!r}; {logs})"
+    )
+
+
+@pytest.mark.feature("mail-abuse-refused")
+@pytest.mark.parametrize("port_label", ["465", "587", "993", "143"])
+def test_a_silent_connection_that_never_signs_in_is_closed_at_the_pre_auth_deadline(
+    preauth_bridges, port_label,
+):
+    """On the submission ports (465, 587) and the mail-reading ports (993, 143),
+    a connection that never signs in — here one that never says anything, not
+    even a TLS hello on 465 and 993 — is closed once the pre-auth deadline
+    passes: not before it, and well inside a budget no idle timeout fits.
+
+    Lower bound and budget (convention 14): the deadline is a floor the server
+    cannot close before; the budget is generous, and still shorter than every
+    idle timeout that could also close a quiet connection.
+    """
+    closed_after, received = _seconds_until_closed(preauth_bridges[port_label])
+    _assert_closed_at_the_bound(port_label, closed_after, received, preauth_bridges["logs"])
+
+
+@pytest.mark.feature("mail-abuse-refused")
+@pytest.mark.parametrize("port_label, trickle", [
+    ("587", b"NOOP\r\n"),
+    ("143", b"a1 NOOP\r\n"),
+])
+def test_a_talkative_connection_that_never_signs_in_is_still_closed_at_the_bound_fixed_at_accept(
+    preauth_bridges, port_label, trickle,
+):
+    """A connection that keeps sending harmless commands but never signs in is
+    closed at the same bound: the deadline runs from accept and no command
+    moves it, so a stranger cannot hold a connection open by trickling bytes
+    (every per-command idle timeout restarts on each line and never fires here).
+    """
+    closed_after, received = _seconds_until_closed(preauth_bridges[port_label], trickle=trickle)
+    _assert_closed_at_the_bound(port_label, closed_after, received, preauth_bridges["logs"])
+    # The commands were answered while the connection lived — it was open and
+    # talking, not stuck, when the bound closed it.
+    assert received.count(b"\r\n") >= 2, (
+        f"port {port_label}: expected a greeting and answered commands before the "
+        f"close; received {received[-300:]!r} ({preauth_bridges['logs']})"
+    )
+
+
+# ── Outcome 27: ten unknown recipients end the session ──────────────────
+
+
+@pytest.mark.feature("mail-abuse-refused")
+def test_ten_unknown_recipients_in_one_session_end_it_with_421(mail_bridge_mta):
+    """A sender walking local parts that do not exist is refused each one, and
+    after the tenth refusal the next command is answered `421 4.7.0` and the
+    session ends — a brake on harvesting the directory.
+
+    No timing assertion; the budget covers the tarpit, which waits a quarter
+    second longer before each refusal (about 14 s over ten).
+    """
+    handle = mail_bridge_mta
+    deadline = time.monotonic() + 120.0
+    refusals = []
+    with _connect_smtp_starttls(handle.mx_port, handle.domain, deadline) as conn:
+        conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+        for n in range(1, 11):
+            conn.send_raw(f"RCPT TO:<nobody-{uuid.uuid4().hex[:10]}@{handle.domain}>\r\n".encode())
+            reply = _read_final_reply(conn, deadline)
+            refusals.append(reply)
+            assert reply.startswith("5"), (
+                f"unknown recipient {n} must be refused; got {reply!r} (all: {refusals!r})"
+            )
+        conn.send_raw(f"RCPT TO:<{_rcpt(handle)}>\r\n".encode())
+        try:
+            capped = _read_final_reply(conn, deadline)
+        except AssertionError as e:  # closed before a full line
+            capped = f"closed: {e}"
+    assert capped.startswith("421") and "4.7.0" in capped, (
+        f"after ten unknown recipients the next command — even one naming a real "
+        f"recipient — must be answered 421 4.7.0; got {capped!r} (refusals {refusals!r})"
+    )
+
+
 # ── The in-flight DATA byte budget (smtp-server.md § Connection-time limits) ──
 
 # Bytes each holder streams: under any size cap the fixture runs with (the
@@ -477,3 +658,97 @@ def test_messages_past_the_servers_memory_budget_are_put_off_not_accepted(mail_b
     finally:
         for conn in conns:
             conn.__exit__(None, None, None)
+
+
+# ── Outcome 29: a sender check past its deadline is put off, not read in unchecked ──
+
+# The e2e cdylib's verification deadline (`FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS`,
+# fauna-mail's `test-helpers` seam in place of the 30 s `VERIFY_DEADLINE`). Short
+# beside port 25's 30 s read timeout, so a reply to `.` inside the budget can
+# only be the verification's own deadline.
+_VERIFY_DEADLINE_S = 3.0
+_VERIFY_BUDGET_S = 25.0
+
+
+@pytest.fixture(scope="module")
+def silent_resolver_mta(
+    mail_bridge_mta, mail_bridge_e2e_binary, seal_helper_binary, nest_instance,
+    tmp_path_factory,
+):
+    """An MTA from the e2e flavor whose sender-authentication lookups go to a
+    loopback UDP socket this fixture binds and never answers — the shape of a
+    sender's DNS that is deliberately silent — under a short verification
+    deadline. Reuses the session bridge's nest state (domain, recipient)
+    read-only. Yields `(spawned bridge, recipient address)`."""
+    silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    silent.bind(("127.0.0.1", 0))
+    try:
+        spawned = _spawn_mta_bridge(
+            mail_bridge_binary=mail_bridge_e2e_binary,
+            seal_helper_binary=seal_helper_binary,
+            nest_instance=nest_instance,
+            tmp=tmp_path_factory.mktemp("mail-bridge-mta-silent-dns"),
+            bridge_id=f"test-mta-silent-dns-{uuid.uuid4().hex[:12]}",
+            domain=mail_bridge_mta.domain,
+            extra_env={
+                "FAUNA_MAIL_E2E_RESOLVER": f"127.0.0.1:{silent.getsockname()[1]}",
+                "FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS": str(int(_VERIFY_DEADLINE_S * 1000)),
+            },
+        )
+        try:
+            yield spawned, _rcpt(mail_bridge_mta)
+        finally:
+            spawned.cleanup()
+    finally:
+        silent.close()
+
+
+@pytest.mark.feature("mail-abuse-refused")
+# The e2e cdylib flavor exists on Linux and macOS; on Windows the shipped and the
+# e2e bridge stage beside one `fauna_ffi.dll`, so there is no seam-carrying
+# library for this bridge to load yet.
+@pytest.mark.host_platform("linux", "macos")
+def test_a_message_whose_sender_cannot_be_checked_in_time_is_put_off_with_451(
+    silent_resolver_mta,
+):
+    """When the sender checks (SPF, DKIM, DMARC, ARC) cannot finish inside the
+    verification deadline — here because every lookup goes to a DNS server that
+    never answers — a benign message is answered `451 4.7.0`: the sender keeps it
+    and retries, and nothing is accepted unchecked.
+
+    Lower bound and budget (convention 14): the reply cannot come before the
+    deadline (an instant `451` would be some other transient failure, such as a
+    resolver that could not be built), and comes well inside a budget shorter
+    than port 25's read timeout. The bridge log names the deadline as the cause
+    (`AuthError: Timeout`, not a resolver-init failure).
+    """
+    spawned, rcpt = silent_resolver_mta
+    deadline = time.monotonic() + 120.0
+    with _connect_smtp_starttls(spawned.mx_port, rcpt.split("@", 1)[1], deadline) as conn:
+        conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+        conn.cmd(f"RCPT TO:<{rcpt}>", "250", deadline)
+        conn.cmd("DATA", "354", deadline)
+        conn.send_raw(_message(rcpt))
+        sent_at = time.monotonic()
+        conn.send_raw(b".\r\n")
+        reply = _read_final_reply(conn, deadline)
+        answered_after = time.monotonic() - sent_at
+    with open(spawned.log_file_path, encoding="utf-8", errors="replace") as fh:
+        log_tail = fh.read()[-4000:]
+    assert reply.startswith("451") and "4.7.0" in reply, (
+        f"a message whose sender checks outran the deadline must be put off 451 4.7.0; "
+        f"got {reply!r} after {answered_after:.2f}s (bridge log {spawned.log_file_path})"
+    )
+    assert answered_after >= _VERIFY_DEADLINE_S * 0.95, (
+        f"451 came {answered_after:.2f}s after the message — before the "
+        f"{_VERIFY_DEADLINE_S:.0f}s verification deadline, so it was not the deadline "
+        f"(log tail: {log_tail[-1500:]!r})"
+    )
+    assert answered_after < _VERIFY_BUDGET_S, (
+        f"451 came {answered_after:.2f}s after the message, past the {_VERIFY_BUDGET_S:.0f}s "
+        f"budget a {_VERIFY_DEADLINE_S:.0f}s deadline allows (log tail: {log_tail[-1500:]!r})"
+    )
+    assert "AuthError: Timeout" in log_tail, (
+        f"the bridge log does not name the verification deadline as the cause of the 451 "
+        f"(log tail: {log_tail[-1500:]!r})"
+    )

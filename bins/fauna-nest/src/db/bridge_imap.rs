@@ -30,13 +30,10 @@ pub(super) fn cid_from_col(blob: Vec<u8>, col: usize) -> rusqlite::Result<Cid> {
 
 // ── Private connection-level helpers ─────────────────────────────────────────
 
-/// The six standard IMAP mailboxes from `docs/goal/behavior/imap-server.md`
-/// § Standard mailboxes. Seeded on first AUTH (idempotent), reserved
-/// against CREATE/DELETE/RENAME — the names map to RFC 6154 SPECIAL-USE
-/// attributes `\Inbox` / `\Archive` / `\Drafts` / `\Sent` / `\Trash` /
-/// `\Junk`. INBOX is renamable per RFC 9051 §6.3.6's special-case; the
-/// other five are immovable.
-pub const STANDARD_MAILBOXES: &[&str] = &["INBOX", "Archive", "Drafts", "Sent", "Trash", "Junk"];
+// The six standard IMAP mailboxes and their attributes
+// (`imap-server.md` § Standard mailboxes) live in `fauna_protocol::email`, the
+// one home the Go MDA's LIST and Junk trigger read from over the wire.
+pub use fauna_protocol::email::{STANDARD_MAILBOXES, standard_mailbox_attrs};
 
 // The ward's held mailbox (`family-safety.md` § The mail gate) — never `Junk`,
 // never a seventh standard mailbox; the constant carries the full rationale. It
@@ -61,24 +58,6 @@ pub fn is_reserved_mailbox(name: &str) -> bool {
 /// before a first hold auto-creates it (`family-safety.md` § The mail gate).
 pub fn is_protected_mailbox(name: &str) -> bool {
     is_reserved_mailbox(name) || name == GUARDIAN_HELD_MAILBOX
-}
-
-/// Return the RFC 6154 SPECIAL-USE attribute(s) for a standard mailbox
-/// name, or an empty Vec for user-created mailboxes. Used to populate
-/// `MailPlacementRecord::Create::attrs` when emitting placement events
-/// for the six bootstrap mailboxes seeded by
-/// `ensure_bridge_imap_mailboxes` (per goal-doc `imap-server.md` §
-/// Standard mailboxes table).
-pub fn standard_mailbox_attrs(name: &str) -> Vec<String> {
-    match name {
-        "INBOX" => vec!["\\Inbox".to_string()],
-        "Archive" => vec!["\\Archive".to_string()],
-        "Drafts" => vec!["\\Drafts".to_string()],
-        "Sent" => vec!["\\Sent".to_string()],
-        "Trash" => vec!["\\Trash".to_string()],
-        "Junk" => vec!["\\Junk".to_string()],
-        _ => Vec::new(),
-    }
 }
 
 /// One mailbox row newly inserted by `ensure_bridge_imap_mailboxes` in
@@ -195,6 +174,75 @@ pub(crate) fn allocate_uid(
         rusqlite::params![uid_next + 1, new_modseq, &actor[..], mailbox],
     )?;
     Ok((new_uid, new_modseq))
+}
+
+/// One row of [`CacheDb::list_bridge_imap_flag_changes`]:
+/// `(uid, flags, modseq, message_id)`.
+pub type FlagChangeRow = (u32, String, i64, [u8; 32]);
+
+/// Re-open scoring on `actor`'s `INBOX` copies `uids`, on the caller's
+/// connection (the aggregate writer's own lock) — `report-sharing.md`
+/// § Applying the aggregate → *The re-open is a metadata change, not a flag
+/// change*. A rise in a copy's `report:spam` row is a metadata change (RFC
+/// 7162 § 3.1), so every listed row is stamped with ONE shared new modseq
+/// whether or not a flag moves, losing its `$FaunaSpamScored` watermark where
+/// it carries one, and the mailbox's `highestmodseq` is bumped once.
+///
+/// Deliberately NOT [`CacheDb::apply_store_flags`]: that path's no-op
+/// idempotency is load-bearing for `fauna.bridges.store_flags` replay and must
+/// never learn to bump. Like the watermark itself, the re-open appends no
+/// placement record and wakes no IDLE subscriber (a mail client has nothing to
+/// redraw); the caller decides which copies qualify (the upward transition and
+/// the `$NotJunk` veto). Returns whether any row was stamped.
+pub(crate) fn reopen_inbox_copies_locked(
+    conn: &Connection,
+    actor: &[u8; 32],
+    uids: &[u32],
+) -> Result<bool> {
+    let hms: Option<i64> = conn
+        .query_row(
+            "SELECT highestmodseq FROM bridge_imap_mailbox_state \
+             WHERE actor_id = ?1 AND mailbox = 'INBOX'",
+            rusqlite::params![&actor[..]],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reopen_inbox_copies_locked: read mailbox state")?;
+    let Some(hms) = hms else { return Ok(false) };
+    let new_modseq = hms + 1;
+    let mut stamped = false;
+    for uid in uids {
+        let flags: Option<String> = conn
+            .query_row(
+                "SELECT flags FROM bridge_imap_messages \
+                 WHERE actor_id = ?1 AND mailbox = 'INBOX' AND uid = ?2",
+                rusqlite::params![&actor[..], *uid as i64],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("reopen_inbox_copies_locked: read message flags")?;
+        let Some(flags) = flags else { continue };
+        let kept: Vec<&str> = flags
+            .split_whitespace()
+            .filter(|f| *f != fauna_protocol::email::SPAM_SCORED_KEYWORD)
+            .collect();
+        conn.execute(
+            "UPDATE bridge_imap_messages SET flags = ?1, modseq = ?2 \
+             WHERE actor_id = ?3 AND mailbox = 'INBOX' AND uid = ?4",
+            rusqlite::params![kept.join(" "), new_modseq, &actor[..], *uid as i64],
+        )
+        .context("reopen_inbox_copies_locked: stamp message row")?;
+        stamped = true;
+    }
+    if stamped {
+        conn.execute(
+            "UPDATE bridge_imap_mailbox_state SET highestmodseq = ?1 \
+             WHERE actor_id = ?2 AND mailbox = 'INBOX'",
+            rusqlite::params![new_modseq, &actor[..]],
+        )
+        .context("reopen_inbox_copies_locked: bump mailbox state")?;
+    }
+    Ok(stamped)
 }
 
 /// File one message into `mailbox` under a fresh UID — the arrival's own
@@ -2085,7 +2133,8 @@ impl CacheDb {
     /// The flag delta of one `(actor, mailbox)` past a `(since_modseq,
     /// after_uid)` cursor — the app-facing `fauna.email.inbox.flag_changes`
     /// read (`mail-app-surface.md` § Read state). Returns up to `limit` rows
-    /// `(uid, flags, modseq)` ordered by `(modseq, uid)`, whether more remain,
+    /// `(uid, flags, modseq, message_id)` ordered by `(modseq, uid)` — the
+    /// `message_id` so the handler can attach the copy's scores — whether more remain,
     /// and the mailbox `highestmodseq` (0 when the mailbox has no state row).
     ///
     /// `after_uid == 0` selects every row with `modseq > since_modseq`; a
@@ -2103,7 +2152,7 @@ impl CacheDb {
         since_modseq: i64,
         after_uid: u32,
         limit: u32,
-    ) -> Result<(Vec<(u32, String, i64)>, bool, i64)> {
+    ) -> Result<(Vec<FlagChangeRow>, bool, i64)> {
         let actor = *actor;
         let conn = self.conn.lock().await;
         let highestmodseq: i64 = conn
@@ -2122,7 +2171,7 @@ impl CacheDb {
             "(modseq > ?3 OR (modseq = ?3 AND uid > ?4))"
         };
         let sql = format!(
-            "SELECT uid, flags, modseq FROM bridge_imap_messages \
+            "SELECT uid, flags, modseq, message_id FROM bridge_imap_messages \
              WHERE actor_id = ?1 AND mailbox = ?2 AND {cursor} \
              ORDER BY modseq ASC, uid ASC LIMIT ?5"
         );
@@ -2139,14 +2188,54 @@ impl CacheDb {
                     after_uid as i64,
                     limit as i64 + 1
                 ],
-                |row| Ok((row.get::<_, i64>(0)? as u32, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u32,
+                        row.get(1)?,
+                        row.get(2)?,
+                        blob_col_to_array(row.get::<_, Vec<u8>>(3)?, 3, "message_id")?,
+                    ))
+                },
             )
             .context("list_bridge_imap_flag_changes: query")?
-            .collect::<rusqlite::Result<Vec<(u32, String, i64)>>>()
+            .collect::<rusqlite::Result<Vec<FlagChangeRow>>>()
             .context("list_bridge_imap_flag_changes: collect")?;
         let more = rows.len() > limit as usize;
         rows.truncate(limit as usize);
         Ok((rows, more, highestmodseq))
+    }
+
+    /// Stamp the RFC 5788 `$NotJunk` veto on every placement of `actor`'s copy
+    /// `message_id`, whichever mailbox holds it — a ham lesson may land before
+    /// or after the client's move out of Junk, and a keyword carries on MOVE
+    /// either way (`report-sharing.md` § Applying the aggregate, *`$NotJunk` —
+    /// the per-message veto*). Rides [`Self::apply_store_flags`] (modseq bump,
+    /// idempotent on a copy already stamped). Returns the rows stamped.
+    pub async fn stamp_not_junk(&self, actor: &[u8; 32], message_id: &[u8; 32]) -> Result<usize> {
+        let placements: Vec<(String, u32)> = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT mailbox, uid FROM bridge_imap_messages \
+                     WHERE actor_id = ?1 AND message_id = ?2",
+                )
+                .context("stamp_not_junk: prepare placement read")?;
+            stmt.query_map(rusqlite::params![&actor[..], &message_id[..]], |row| {
+                Ok((row.get(0)?, row.get::<_, i64>(1)? as u32))
+            })
+            .context("stamp_not_junk: read placements")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("stamp_not_junk: collect placements")?
+        };
+        let veto = [fauna_protocol::email::NOT_JUNK_KEYWORD.to_string()];
+        let mut stamped = 0;
+        for (mailbox, uid) in placements {
+            let outcome = self
+                .apply_store_flags(actor, &mailbox, &[uid], StoreFlagsDbOp::Add, &veto, None)
+                .await?;
+            stamped += outcome.updated.len();
+        }
+        Ok(stamped)
     }
 
     /// Apply an IMAP STORE FLAGS mutation to `(actor, mailbox)` for the given `uids`.

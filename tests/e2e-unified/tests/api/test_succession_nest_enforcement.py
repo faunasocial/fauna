@@ -38,6 +38,7 @@ framework's dedicated-nest seam and torn down by this module's fixture.
 from __future__ import annotations
 
 import secrets
+import time
 
 import pytest
 import requests
@@ -602,4 +603,140 @@ def test_the_subscription_tier_plane_moves_with_the_account(succession_nest):
     assert successor_id in str(refused.value), (
         f"the refusal must name the successor, which is what makes it a "
         f"redirection rather than a dead end: {refused.value!r}"
+    )
+
+
+#: The doors nest's claimed identity domain — what a registration signs over.
+DOORS_DOMAIN = "doors.example"
+
+
+@pytest.fixture()
+def door_succession_nest(request, nest_mode, tmp_path_factory):
+    """A nest of its own for outcome 33: the test opens registration and
+    deletes an account, neither of which the module's shared nest may carry
+    into its other tests. Claimed under a domain, because a registration is
+    signed over the nest's identity domain and a domainless box has none to
+    name."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "succession-doors-nest",
+        claim_domain=DOORS_DOMAIN,
+    )
+    yield nest
+    cleanup()
+
+
+#: `RpcError::CODE_SUPERSEDED` (`libs/fauna-protocol/src/error.rs`).
+SUPERSEDED_CODE = "fauna.auth.superseded"
+
+
+@pytest.mark.feature("take-your-account-back")
+def test_a_retired_key_is_refused_at_every_registration_door_after_its_successor_is_deleted(
+    door_succession_nest,
+):
+    """`docs/features/take-your-account-back.md` outcome 33
+    (`account-data-plane.md` § Implementation status today): take the account
+    back, delete the account you took back, then present the stolen key at
+    the three doors a key can join a nest by — open registration, an invite
+    request and the admin claim. Each answers the typed
+    `fauna.auth.superseded`, naming the successor: the refusal rests on the
+    nest's succession record, which outlives both deleted accounts, not on a
+    `users` row that went with them."""
+    from common.auth import open_registration
+    from common.sig_domain import (
+        claim_admin_signed_message,
+        invite_submit_signed_message,
+        register_signed_message,
+    )
+    from tests.api import ws_api
+
+    nest = door_succession_nest
+    open_registration(nest)
+    domain = ws_api.nest_info(nest["port"])["domain"]
+    assert domain == DOORS_DOMAIN, f"the claim must give the nest its domain: {domain!r}"
+
+    victim = _fresh_actor(nest)
+    old_sk = victim["signing_key"]
+    old_id = victim["actor_id_bytes"]
+    seed_hex = bytes(old_sk).hex()
+    kit_secret = register_recovery_kit(
+        nest["url"], actor_id_hex=victim["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    successor_seed = secrets.token_bytes(32).hex()
+    successor_id = succeed_identity(
+        nest["url"],
+        old_actor_id_hex=victim["actor_id_hex"],
+        recovery_secret_hex=kit_secret,
+        successor_seed_hex=successor_seed,
+        old_seed_hex=seed_hex,
+    )
+
+    # The account you took back is deleted — through its own door, then the
+    # deferred finalization the nest runs when it falls due.
+    with _successor_client(nest, successor_id, successor_seed) as heir_ws:
+        heir_ws.call("fauna.account.delete", {})
+    _run_due(nest)
+    with pytest.raises(RpcCallError) as gone:
+        with _successor_client(nest, successor_id, successor_seed) as heir_ws:
+            heir_ws.call("fauna.subscriptions.tiers.list", {})
+    assert gone.value.code != SUPERSEDED_CODE, (
+        f"the successor's own account must be gone after the deletion ran: {gone.value!r}"
+    )
+
+    def knock(kind: str, payload: dict) -> RpcCallError:
+        with pytest.raises(RpcCallError) as refused:
+            with WsRpcAnonClient(nest["url"]) as anon:
+                anon.call(kind, payload)
+        err = refused.value
+        assert err.code == SUPERSEDED_CODE, (
+            f"{kind} must refuse the retired key as superseded; got {err!r}"
+        )
+        assert successor_id in str(err), (
+            f"{kind}'s refusal must name the successor: {err!r}"
+        )
+        return err
+
+    # Door 1: open self-service registration, signed exactly as an app signs it.
+    ts_ms = int(time.time() * 1000)
+    knock(
+        "fauna.account.register",
+        {
+            "actor_id": victim["actor_id_hex"],
+            "handle": "taken-back-again",
+            "timestamp": ts_ms,
+            "signature": old_sk.sign(
+                register_signed_message(old_id, "taken-back-again", domain, ts_ms)
+            ).signature.hex(),
+        },
+    )
+
+    # Door 2: an invite request.
+    ts_ms = int(time.time() * 1000)
+    knock(
+        "fauna.account.invite_request.submit",
+        {
+            "actor_id": victim["actor_id_hex"],
+            "handle": "taken-back-again",
+            "message": "let me back in",
+            "timestamp": ts_ms,
+            "signature": old_sk.sign(
+                invite_submit_signed_message(old_id, "taken-back-again", "let me back in", ts_ms)
+            ).signature.hex(),
+        },
+    )
+
+    # Door 3: the admin claim — refused before the claim code is even read.
+    ts_s = int(time.time())
+    knock(
+        "fauna.auth.claim_admin",
+        {
+            "claim_code": "not-the-code",
+            "actor_id": victim["actor_id_hex"],
+            "handle": "taken-back-again",
+            "timestamp": ts_s,
+            "signature": old_sk.sign(
+                claim_admin_signed_message(old_id, ts_s)
+            ).signature.hex(),
+        },
     )

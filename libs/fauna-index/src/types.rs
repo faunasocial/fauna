@@ -181,6 +181,44 @@ pub struct IndexedDoc {
     pub fields: Vec<IndexedField>,
 }
 
+impl IndexedDoc {
+    /// A sender-less doc of a title and a body — the shape of the user's own
+    /// entries (a draft, a card, an event): the title a [`FieldKind::Title`]
+    /// field and the body a [`FieldKind::Body`] field, each left out when
+    /// empty. The one constructor a device's own index builder and the nest's
+    /// materialized view share, so their docs for one entry are the same.
+    #[must_use]
+    pub fn titled(
+        kind: ContentKind,
+        content_id: Vec<u8>,
+        title: Option<&str>,
+        body: &str,
+        timestamp_ns: i64,
+    ) -> Self {
+        let mut fields = Vec::with_capacity(2);
+        if let Some(title) = title.filter(|t| !t.is_empty()) {
+            fields.push(IndexedField {
+                kind: FieldKind::Title,
+                text: title.to_string(),
+            });
+        }
+        if !body.is_empty() {
+            fields.push(IndexedField {
+                kind: FieldKind::Body,
+                text: body.to_string(),
+            });
+        }
+        Self {
+            kind,
+            content_id: ContentId(content_id),
+            timestamp_ns,
+            sender_actor_id: None,
+            secondary_id: None,
+            fields,
+        }
+    }
+}
+
 /// One live document's identities — the content id every guard and upsert keys
 /// on, plus the optional secondary spelling ([`IndexedDoc::secondary_id`]).
 ///

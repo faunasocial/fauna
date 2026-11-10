@@ -1100,6 +1100,37 @@ async fn a_replaces_list_is_refused_on_the_fleet_scope_over_its_bound_and_malfor
     );
 }
 
+/// A carry's wire shape : the put of one item names the live row of
+/// ANOTHER item (the predecessor schedule's key, which the nest cannot tell
+/// from any other — keys are blinded). It is accepted, covers the named row in
+/// its own transaction (`delegable-scope-reclamation.md` part (2)), and the
+/// listing no longer serves it.
+#[tokio::test]
+async fn a_put_may_name_the_live_row_of_another_item_the_carry_shape() {
+    let (router, state) = router_and_state().await;
+    put(&router, &state, ACTOR, &put_req(ITEM, WRITER_A, 1, b"a1"))
+        .await
+        .unwrap();
+
+    let carried = put(
+        &router,
+        &state,
+        ACTOR,
+        &AccountStatePutRequest {
+            replaces: vec![naming(ITEM, WRITER_A, 1)],
+            ..put_req(ITEM2, WRITER_B, 1, b"b1")
+        },
+    )
+    .await
+    .expect("a carry's put naming another item's row is accepted");
+    assert_eq!(carried.replaced, Some(1));
+    assert_eq!(
+        served_entries(&list_state(&router, &state, ACTOR, 0, None).await),
+        vec![Some(b"b1".to_vec())],
+        "the named row of the other item is no longer served"
+    );
+}
+
 /// The retire handler's own half of the fleet-only guard (`no_rows_sealed_under`
 /// and `delete_escrow_wraps` with it are valid only on `state-fleet`):
 /// driven through the real dispatch, so reverting only the handler's check —
@@ -1153,4 +1184,80 @@ async fn a_belted_retire_on_the_state_scope_is_refused_invalid_request_by_the_ha
         vec![Some(b"a1".to_vec())],
         "no refused retire touched the row"
     );
+}
+
+/// An `__ext:<kind>` rail is an open family — any kind a principal declares —
+/// so the create by hash cannot enumerate its address, and the account's own
+/// set created by that hash alone is accepted. The rail's mint then meets it
+/// on the scope's first put, which answers the coded, recoverable
+/// `fauna.folders.reserved_address_taken` naming the recovery, never an
+/// internal error; deleting the squatter by its hash lets the same put land
+/// (`reserved-folders.md` § The management surface refuses the namespace —
+/// whole, *the address*). Another account's rail of the same scope is never
+/// reached: the address is unique per actor.
+#[tokio::test]
+async fn a_squatted_ext_rail_address_is_a_coded_refusal_the_account_recovers_from() {
+    use fauna_protocol::folders::FolderDeleteRequest;
+    let (router, state) = router_and_state().await;
+    let kind = "ext.example.com.notes";
+    let scope = format!("ext:{kind}");
+    // Both accounts hold a principal declaring the kind, so the nest serves
+    // the scope to each.
+    {
+        let conn = state.db.conn().await;
+        for actor in [ACTOR, OTHER_ACTOR] {
+            conn.execute(
+                "INSERT INTO third_party_principals
+                   (actor_id, principal_id, client_id, execution_form, declared_kinds,
+                    granted_scopes, created_at)
+                 VALUES (?1, ?2, 'notes', 'remote', ?3, '[]', 0)",
+                rusqlite::params![&id(actor)[..], &id(0x50)[..], format!("[\"{kind}\"]")],
+            )
+            .unwrap();
+        }
+    }
+    let hash = fauna_core::path_crypto::set_name_hash(&format!("__{scope}"));
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        id(ACTOR),
+        "fauna.folders.create",
+        encode(&FolderCreateRequest {
+            name: String::new(),
+            name_hash: Some(ByteBuf::from(hash.to_vec())),
+            name_sealed: Some(ByteBuf::from(vec![0xa1u8; 24])),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("an open family's address is not enumerable at the create");
+
+    let ext_put = |writer_seq| AccountStatePutRequest {
+        scope: scope.clone(),
+        ..put_req(ITEM, WRITER_A, writer_seq, b"e")
+    };
+    let refused = put(&router, &state, ACTOR, &ext_put(1))
+        .await
+        .expect_err("the squatted rail refuses its mint");
+    assert_eq!(refused.code, "fauna.folders.reserved_address_taken");
+
+    put(&router, &state, OTHER_ACTOR, &ext_put(1))
+        .await
+        .expect("another account's rail of the same scope is untouched");
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        id(ACTOR),
+        "fauna.folders.delete",
+        encode(&FolderDeleteRequest {
+            name_hash: Some(ByteBuf::from(hash.to_vec())),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("the squatter is the account's own set, deletable by its hash");
+    put(&router, &state, ACTOR, &ext_put(1))
+        .await
+        .expect("with the squatter gone the rail mints and the put lands");
 }

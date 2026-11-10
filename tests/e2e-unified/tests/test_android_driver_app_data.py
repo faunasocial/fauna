@@ -143,3 +143,60 @@ def test_notification_grant_applies_from_api_33_only(recorded, sdk, granted):
     driver.grant_notifications()
     driver._apply_permission_grants()
     assert [c[-1] for c in calls if "grant" in c] == granted
+
+
+# ── the custodian store's rot and heal, inside the sandbox ─────────────────────
+
+
+_REAL_RUN = subprocess.run  # the `recorded` fixture patches the shared module
+
+
+def _device_shell(argv: list[str], cwd: Path) -> bytes:
+    """Run the device command line `argv[4]` the way the device does — one shell
+    parses the line `exec-out` hands it, then `run-as` starts `sh -c` on what it
+    got — with a local `sh` standing in for both and `cwd` standing in for the
+    app's data directory. What it proves is the QUOTING across the two shells:
+    a `$f` the outer shell expanded would write nowhere."""
+    prefix = "run-as social.fauna.fauna "
+    assert argv[4].startswith(prefix), argv
+    return _REAL_RUN(
+        ["sh", "-c", argv[4][len(prefix):]], cwd=cwd, capture_output=True, check=True,
+    ).stdout
+
+
+def _custodian_store(tmp_path: Path) -> list[Path]:
+    blobs = tmp_path / "files" / ACTOR / "backup-custodian" / "blobs" / "ab"
+    blobs.mkdir(parents=True)
+    paths = [blobs / ("ab" + "0" * 62), blobs / ("ab" + "1" * 62)]
+    for p in paths:
+        p.write_bytes(b"sealed bytes that are not rot")
+    (tmp_path / "files" / ACTOR / "backup-custodian" / "index.db").write_bytes(b"index")
+    return paths
+
+
+def test_the_store_rot_overwrites_every_blob_in_place_and_counts_them(recorded, tmp_path):
+    driver, calls, answers = recorded
+    blobs = _custodian_store(tmp_path)
+    answers["FAUNA_ROTTED"] = b"FAUNA_ROTTED\nFAUNA_ROTTED\n"
+    assert driver.overwrite_custodian_store_blobs() == 2
+    argv = calls[-1]
+    assert argv[:4] == ["adb", "-s", "emulator-5554", "exec-out"]
+    assert "rm " not in argv[4], "an overwrite, never a delete"
+
+    out = _device_shell(argv, tmp_path)
+    assert out.count(b"FAUNA_ROTTED") == 2
+    assert [p.read_bytes() for p in blobs] == [b"rot", b"rot"], "every blob, in place"
+    assert (tmp_path / "files" / ACTOR / "backup-custodian" / "index.db").read_bytes() == b"index", (
+        "only blobs are rotted — the index keeps claiming them"
+    )
+
+
+def test_the_heal_count_reads_only_blobs_holding_exactly_the_rot(recorded, tmp_path):
+    driver, calls, answers = recorded
+    blobs = _custodian_store(tmp_path)
+    blobs[0].write_bytes(b"rot")
+    blobs[1].write_bytes(b"rotten but repaired")  # starts with the rot, is not it
+    answers["FAUNA_STILL_ROT"] = b"FAUNA_STILL_ROT\n"
+    assert driver.custodian_store_blobs_holding_rot() == 1
+
+    assert _device_shell(calls[-1], tmp_path).count(b"FAUNA_STILL_ROT") == 1

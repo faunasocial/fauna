@@ -143,6 +143,15 @@ pub struct ForeignSetRow {
     /// `Some(true)` metadata-only, `Some(false)` full, `None` unknown.
     /// Surfaced as [`FolderSummary::residency`] only when stated.
     pub metadata_only_residency: Option<bool>,
+    /// The owner's handle as the **home** nest stamped it on the member's
+    /// custody record (`ForeignFolder::owner_handle`, seeded on the Welcome
+    /// relay, refreshed from every federated content-key read). Written with
+    /// [`Self::owner_domain`] as one unit; joined at the machine into
+    /// [`FolderSummary::owner_display`] (`federation-shared-folders.md`
+    /// § Cross-nest shared folders + channel append → *The cross-nest owner label*).
+    pub owner_handle: Option<String>,
+    /// The handle domain [`Self::owner_handle`] is joined with.
+    pub owner_domain: Option<String>,
 }
 
 /// Reads the member's foreign-set records for [`DevicesMachine::refresh`]'s
@@ -157,6 +166,37 @@ pub struct ForeignSetRow {
 pub trait ForeignSetsSource: fauna_core::MaybeSendSync {
     /// The current foreign-set records, best-effort.
     async fn foreign_sets(&self) -> Vec<ForeignSetRow>;
+
+    /// The member's live forked SAME-nest seat records
+    /// (`fauna_core::data::ForkedFolderSeat`, written just before a forked
+    /// seat's self-unlist), best-effort — read from the same custody as
+    /// [`Self::foreign_sets`], so the row a forked seat keeps survives a
+    /// relaunch ([`DevicesMachine::keep_forked_member_rows`]). Default none.
+    async fn forked_seats(&self) -> Vec<ForkedSeatRow> {
+        Vec::new()
+    }
+}
+
+/// One forked same-nest seat's durable row, as [`ForeignSetsSource::forked_seats`]
+/// reads it — the name, owner and access the nest's list last showed for the
+/// set before the seat's self-unlist dropped it from that list
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+/// append → *A forked seat is final, says so, and heals only by a fresh
+/// Welcome*, parts (a) and (b)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForkedSeatRow {
+    /// Hex-encoded raw MLS group id — the row's identity, as
+    /// [`FolderSummary::mls_group_id`].
+    pub mls_group_id_hex: String,
+    /// The set name the list last rendered; `None` renders the client's
+    /// unknown-set fallback.
+    pub set_name: Option<String>,
+    /// The owner's handle, as the list row carried it.
+    pub owner_handle: Option<String>,
+    /// The owner's actor id (hex), the label's fallback.
+    pub owner_actor_id: Option<String>,
+    /// The member's grant the list last showed (advisory, UI only).
+    pub access: Option<String>,
 }
 
 /// Reads the user's followed public folders for [`DevicesMachine::refresh`]
@@ -375,6 +415,11 @@ pub struct DevicesMachine {
     /// post-construction like [`Self::mls_query`]; `None` until then ⇒ no
     /// foreign rows in the list (web today).
     foreign_sets: Mutex<Option<Arc<dyn ForeignSetsSource>>>,
+    /// The last same-nest member row seen per MLS group id (hex), so a
+    /// forked seat keeps its row after its self-unlist drops the roster row the
+    /// nest's list returned it by ([`Self::keep_forked_member_rows`]).
+    /// In memory, refreshed from every list read.
+    last_member_rows: Mutex<std::collections::HashMap<String, FolderSummary>>,
     /// The followed-public-folders reader ([`FollowedFoldersSource`]), wired
     /// post-construction like [`Self::foreign_sets`]; `None` until then ⇒ no
     /// followed rows, which is every app today (no app has built the follow
@@ -448,6 +493,7 @@ impl DevicesMachine {
             wizard_factory,
             mls_query: Mutex::new(None),
             foreign_sets: Mutex::new(None),
+            last_member_rows: Mutex::new(std::collections::HashMap::new()),
             followed_source: Mutex::new(None),
             label_custody: Mutex::new(LabelCustody::default()),
             audience_attestor: Mutex::new(None),
@@ -924,9 +970,11 @@ impl DevicesMachine {
     /// record whose group this client has not MLS-joined — or with no
     /// [`MlsQuery`] wired — never surfaces). A foreign set has no nest row, so
     /// the synthetic summary carries `id == -1`, empty caps/paths, and the
-    /// record's `home_nest_url`; `owner_display` stays empty until the
-    /// cross-nest sharer stamp lands (clients render their unknown-sharer
-    /// label). Skips any group id the same-nest list already carries (belt and
+    /// record's `home_nest_url`; `owner_display` is the home nest's stamped
+    /// owner label joined as `handle@domain` (`fauna_core::format::
+    /// qualified_handle`, the same join the pending-share knock and
+    /// `held_sets` use), empty only for a record carrying no stamp (clients
+    /// render their unknown-sharer label). Skips any group id the same-nest list already carries (belt and
     /// braces — a foreign set should never be in the own-nest reply).
     fn foreign_rows(
         &self,
@@ -947,76 +995,89 @@ impl DevicesMachine {
                     .iter()
                     .any(|fs| fs.mls_group_id.as_deref() == Some(r.mls_group_id_hex.as_str()))
             })
-            .map(|r| FolderSummary {
-                id: -1,
-                name: r.set_name.unwrap_or_default(),
-                retention_policy: None,
-                cached_snapshot_count: 0,
-                cached_total_bytes: 0,
-                cached_last_snapshot_at: None,
-                include_paths: None,
-                exclude_paths: None,
-                include_paths_unreadable: false,
-                exclude_paths_unreadable: false,
-                mls_group_id: Some(r.mls_group_id_hex),
-                role: Some("member".to_string()),
-                // The grant the set's HOME nest resolved, carried in the member's
-                // own `fauna.state.folder-keys` foreign-set row (seeded on the Welcome relay,
-                // refreshed by the `caller_access` stamp federated read replies
-                // carry). Same axis as a same-nest member row, whose `access` the
-                // own nest projects onto the summary — so a client's row split
-                // (writer ⇒ folder-binding UI, reader ⇒ read-only) is ONE rule
-                // across both planes.
-                //
-                // Advisory-for-UI only, never an authz input: enforcement is the
-                // home nest's `require_foreign_writer` gate on the write kinds,
-                // and the bind gesture verifies with an eager `write_token.get`.
-                // `None` (a record carrying no access stamp) ⇒ reader ⇒ unbindable, the fail-safe direction.
-                access: r.access,
-                owner_handle: None,
-                owner_display: String::new(),
-                webdav_enabled: false,
-                conflict_policy: None,
-                web_paywall_tier: None,
-                home_nest_url: Some(r.home_nest_url),
-                // A foreign row is synthesized from the member's own foreign-set
-                // row, which carries no policy — and the nest place is the
-                // OWNER's to set anyway, on the set's home nest. Unset, not
-                // false.
-                nest_snapshots: None,
-                // Same statement for the version-retention pair: the owner's
-                // policy, on the set's home nest — a foreign row rests (0, 0).
-                version_retention_max_versions: 0,
-                version_retention_max_age_days: 0,
-                nest_snapshot_quiet_secs: None,
-                // A foreign row is a bound membership; the foreign-set row
-                // carries no audience (a cross-nest public-folder projection is
-                // the home nest's, unreached here), so the
-                // bound ⇒ shared derivation is the honest, fail-sealed
-                // value. The website toggle is the owner's, on the home nest.
-                audience: "shared".to_string(),
-                website_enabled: false,
-                // The residency the HOME nest stamped on the member's custody
-                // record, projected only when it states metadata-only — the
-                // same projection a same-nest row carries (empty = full). An
-                // unknown reading stays empty, which
-                // `FolderSummary::is_metadata_only` reads as full: nothing
-                // unparseable stops bytes resting (`file-sync.md` § Relay
-                // serving → *A member on another nest*, step (1)).
-                residency: if r.metadata_only_residency == Some(true) {
-                    fauna_protocol::folders::RESIDENCY_METADATA_ONLY.to_string()
-                } else {
-                    String::new()
-                },
-                // Exclusive editing and its lease are the HOME nest's facts,
-                // not carried on the foreign-set row: un-governed, the
-                // fail-open reading (`file-sync.md` § Exclusive editing).
-                exclusive_editing: false,
-                lease: None,
-                // The attestation is a home-nest projection field, not carried
-                // on the foreign-set row — and the row claims `shared`, so
-                // nothing would read it.
-                audience_attestation: None,
+            .map(|r| {
+                let owner_display = fauna_core::format::qualified_handle(
+                    r.owner_handle.as_deref(),
+                    r.owner_domain.as_deref(),
+                )
+                .unwrap_or_default();
+                let seat_forked = fauna_protocol::member_rows::seat_forked(
+                    mls_query.as_deref(),
+                    true,
+                    Some(&r.mls_group_id_hex),
+                );
+                FolderSummary {
+                    seat_forked,
+                    id: -1,
+                    name: r.set_name.unwrap_or_default(),
+                    retention_policy: None,
+                    cached_snapshot_count: 0,
+                    cached_total_bytes: 0,
+                    cached_last_snapshot_at: None,
+                    include_paths: None,
+                    exclude_paths: None,
+                    include_paths_unreadable: false,
+                    exclude_paths_unreadable: false,
+                    mls_group_id: Some(r.mls_group_id_hex),
+                    role: Some("member".to_string()),
+                    // The grant the set's HOME nest resolved, carried in the member's
+                    // own `fauna.state.folder-keys` foreign-set row (seeded on the Welcome relay,
+                    // refreshed by the `caller_access` stamp federated read replies
+                    // carry). Same axis as a same-nest member row, whose `access` the
+                    // own nest projects onto the summary — so a client's row split
+                    // (writer ⇒ folder-binding UI, reader ⇒ read-only) is ONE rule
+                    // across both planes.
+                    //
+                    // Advisory-for-UI only, never an authz input: enforcement is the
+                    // home nest's `require_foreign_writer` gate on the write kinds,
+                    // and the bind gesture verifies with an eager `write_token.get`.
+                    // `None` (a record carrying no access stamp) ⇒ reader ⇒ unbindable, the fail-safe direction.
+                    access: r.access,
+                    owner_handle: None,
+                    owner_display,
+                    webdav_enabled: false,
+                    conflict_policy: None,
+                    web_paywall_tier: None,
+                    home_nest_url: Some(r.home_nest_url),
+                    // A foreign row is synthesized from the member's own foreign-set
+                    // row, which carries no policy — and the nest place is the
+                    // OWNER's to set anyway, on the set's home nest. Unset, not
+                    // false.
+                    nest_snapshots: None,
+                    // Same statement for the version-retention pair: the owner's
+                    // policy, on the set's home nest — a foreign row rests (0, 0).
+                    version_retention_max_versions: 0,
+                    version_retention_max_age_days: 0,
+                    nest_snapshot_quiet_secs: None,
+                    // A foreign row is a bound membership; the foreign-set row
+                    // carries no audience (a cross-nest public-folder projection is
+                    // the home nest's, unreached here), so the
+                    // bound ⇒ shared derivation is the honest, fail-sealed
+                    // value. The website toggle is the owner's, on the home nest.
+                    audience: "shared".to_string(),
+                    website_enabled: false,
+                    // The residency the HOME nest stamped on the member's custody
+                    // record, projected only when it states metadata-only — the
+                    // same projection a same-nest row carries (empty = full). An
+                    // unknown reading stays empty, which
+                    // `FolderSummary::is_metadata_only` reads as full: nothing
+                    // unparseable stops bytes resting (`file-sync.md` § Relay
+                    // serving → *A member on another nest*, step (1)).
+                    residency: if r.metadata_only_residency == Some(true) {
+                        fauna_protocol::folders::RESIDENCY_METADATA_ONLY.to_string()
+                    } else {
+                        String::new()
+                    },
+                    // Exclusive editing and its lease are the HOME nest's facts,
+                    // not carried on the foreign-set row: un-governed, the
+                    // fail-open reading (`file-sync.md` § Exclusive editing).
+                    exclusive_editing: false,
+                    lease: None,
+                    // The attestation is a home-nest projection field, not carried
+                    // on the foreign-set row — and the row claims `shared`, so
+                    // nothing would read it.
+                    audience_attestation: None,
+                }
             })
             .collect()
     }
@@ -1176,6 +1237,114 @@ impl DevicesMachine {
         kept
     }
 
+    /// Part (b) of the forked-seat rule drops the member's own roster row on
+    /// the set's home nest, so a SAME-nest set leaves the nest's folder list
+    /// the moment its seat forks — while the ruling keeps the member's bound
+    /// folder and files, and its part (a) paints the badge's third reading on
+    /// that very row (`federation-shared-folders.md` § Cross-nest shared
+    /// folders + channel append → *A forked seat is final, says so, and heals
+    /// only by a fresh Welcome*; `ui/folders.md` § Sharing). So every member
+    /// row the list returns is remembered, and a remembered row the list
+    /// stopped naming is appended back, painted forked, while the engine reads
+    /// its seat joined AND forked. A leave (no longer joined) or a fresh
+    /// Welcome (no longer forked) forgets it; the re-invited roster row then
+    /// lists it from the nest again. A cross-nest set needs none of this: its
+    /// row comes from the member's own record ([`Self::foreign_rows`]).
+    ///
+    /// This memory is the in-process fast path; the durable twin is the
+    /// member's forked-seat record, written by the custody sink just before
+    /// the unlist and unioned by [`Self::forked_seat_rows`], so the row
+    /// survives a relaunch between the fork and the owner's re-share.
+    fn keep_forked_member_rows(&self, mut kept: Vec<FolderSummary>) -> Vec<FolderSummary> {
+        let mls_query = self.mls_query.lock().unwrap().clone();
+        let mut last = self.last_member_rows.lock().unwrap();
+        for row in &kept {
+            if row.role.as_deref() == Some("member")
+                && let Some(gid) = row.mls_group_id.as_deref()
+            {
+                last.insert(gid.to_string(), row.clone());
+            }
+        }
+        let mut gone: Vec<String> = Vec::new();
+        let mut kept_back: Vec<FolderSummary> = Vec::new();
+        for (gid, row) in last.iter() {
+            if kept
+                .iter()
+                .any(|fs| fs.mls_group_id.as_deref() == Some(gid.as_str()))
+            {
+                continue;
+            }
+            let joined = fauna_protocol::member_rows::admits(mls_query.as_deref(), true, Some(gid));
+            let forked =
+                fauna_protocol::member_rows::seat_forked(mls_query.as_deref(), true, Some(gid));
+            if joined && forked {
+                let mut row = row.clone();
+                row.seat_forked = true;
+                kept_back.push(row);
+            } else {
+                gone.push(gid.clone());
+            }
+        }
+        for gid in gone {
+            last.remove(&gid);
+        }
+        // HashMap order is arbitrary: the list's rows first, then the
+        // kept-back rows by name.
+        kept_back.sort_by(|a, b| a.name.cmp(&b.name));
+        kept.extend(kept_back);
+        kept
+    }
+
+    /// The durable half of [`Self::keep_forked_member_rows`]: every forked
+    /// same-nest seat record ([`ForeignSetsSource::forked_seats`]) the rows
+    /// so far do not already carry becomes a member row painted
+    /// `seat_forked`, while the engine reads its seat joined AND forked — a
+    /// leave (not joined) or a fresh Welcome (not forked) leaves the record
+    /// inert even before its clear lands. The row is transcribed from a wire
+    /// row built from the record, so its owner label is the one
+    /// `account_display_label` rule every member row uses; like a foreign
+    /// row it has no nest row (`id == -1`).
+    fn forked_seat_rows(
+        &self,
+        records: Vec<ForkedSeatRow>,
+        so_far: &[FolderSummary],
+    ) -> Vec<FolderSummary> {
+        let mls_query = self.mls_query.lock().unwrap().clone();
+        let mut out: Vec<FolderSummary> = Vec::new();
+        for r in records {
+            let gid = r.mls_group_id_hex.to_ascii_lowercase();
+            let held = |fs: &FolderSummary| {
+                fs.mls_group_id
+                    .as_deref()
+                    .is_some_and(|g| g.eq_ignore_ascii_case(&gid))
+            };
+            if so_far.iter().any(held) || out.iter().any(held) {
+                continue;
+            }
+            let joined =
+                fauna_protocol::member_rows::admits(mls_query.as_deref(), true, Some(&gid));
+            let forked =
+                fauna_protocol::member_rows::seat_forked(mls_query.as_deref(), true, Some(&gid));
+            if !(joined && forked) {
+                continue;
+            }
+            let mut row = FolderSummary::from(WireFolderSummary {
+                id: -1,
+                name: r.set_name.unwrap_or_default(),
+                mls_group_id: Some(gid),
+                role: Some("member".to_string()),
+                access: r.access,
+                owner_handle: r.owner_handle,
+                owner_actor_id: r.owner_actor_id,
+                ..Default::default()
+            });
+            row.seat_forked = true;
+            out.push(row);
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     fn filter_member_rows(&self, folders: Vec<FolderSummary>) -> Vec<FolderSummary> {
         let mls_query = self.mls_query.lock().unwrap().clone();
         folders
@@ -1186,6 +1355,16 @@ impl DevicesMachine {
                     fs.role.as_deref() == Some("member"),
                     fs.mls_group_id.as_deref(),
                 )
+            })
+            .map(|mut fs| {
+                // The forked-seat reading, painted where the join-filter reads
+                // the same engine (the foreign twin is `foreign_rows`).
+                fs.seat_forked = fauna_protocol::member_rows::seat_forked(
+                    mls_query.as_deref(),
+                    fs.role.as_deref() == Some("member"),
+                    fs.mls_group_id.as_deref(),
+                );
+                fs
             })
             .collect()
     }
@@ -1414,7 +1593,8 @@ impl DevicesMachine {
                 // conflicts below — this is what turns the wire rows into snapshot
                 // rows, so the set names and selective-sync lists are opened while
                 // custody is still in reach.
-                let kept = self.filter_member_rows(self.render_folders(f).await);
+                let kept = self
+                    .keep_forked_member_rows(self.filter_member_rows(self.render_folders(f).await));
                 tracing::debug!(
                     target: "fauna_devices",
                     raw,
@@ -1436,8 +1616,8 @@ impl DevicesMachine {
                 let source = self.foreign_sets.lock().unwrap().clone();
                 if let Some(source) = source {
                     // Bracketed because this read is a SECOND network round trip
-                    // inside the same refresh, on a source only some clients wire
-                    // (apple does, tui does not) — a stall here strands the whole
+                    // inside the same refresh, on a source each app wires post-construction
+                    // — a stall here strands the whole
                     // refresh before any assignment happens.
                     tracing::debug!(target: "fauna_devices", "refresh: reading foreign (cross-nest) sets");
                     let foreign = self.foreign_rows(source.foreign_sets().await, &rows);
@@ -1447,6 +1627,8 @@ impl DevicesMachine {
                         "refresh: foreign sets read returned"
                     );
                     rows.extend(foreign);
+                    let forked = self.forked_seat_rows(source.forked_seats().await, &rows);
+                    rows.extend(forked);
                 }
                 Ok(rows)
             }
@@ -1589,6 +1771,16 @@ impl DevicesMachine {
     /// for `fauna_e2e_agent::DEVICES_REFRESHES_KEY`, so no app re-derives it.
     pub fn refreshes_json(&self) -> String {
         devices_refreshes_json(Some(self.refresh_counts())).to_string()
+    }
+
+    /// The name of this actor's folder whose id is `id`, off the snapshot's
+    /// folder roster ([`DevicesSnapshot::folder_name`], label custody applied)
+    /// — the one lookup the wasm and UniFFI faces make for the Settings
+    /// pending-actions row, which names the folder an automatic prune targets
+    /// (`ui/settings.md` § Pending actions). `None` before the first refresh,
+    /// or for a folder the roster cannot name.
+    pub fn folder_name(&self, id: String) -> Option<String> {
+        self.snapshot().folder_name(&id)
     }
 
     /// Open a fresh folder creation wizard, seeded with the current device

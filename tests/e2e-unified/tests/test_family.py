@@ -112,9 +112,11 @@ from helpers.family_wire import (
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.rpc_hold import (
     arm_rpc_hold,
+    refuse_rpc,
     release_rpc_hold,
     rpc_hold_status,
     wait_for_held_rpc,
+    wait_for_refused_rpc,
 )
 from helpers.waiting import (
     await_device_removal_ready,
@@ -4209,4 +4211,91 @@ def test_family_screen_time_budget_starts_over_at_the_wards_local_midnight(
     assert not app.family.screen_lock_visible(), (
         f"the whole {budget}-minute budget was used in ANOTHER local day; today's "
         f"{used} minutes must not lock the ward: {app.driver.diagnose('screen-time-lock')}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_screen_time_bills_only_time_in_front_and_a_failed_report_is_not_lost(
+    admin_app, request, nest_instance, family_pair
+):
+    """Family-safety outcome 67's billing half: the budget counts only time the
+    app is in front and unlocked, and a report that fails is not forgiven —
+    `family-client-enforcement.md` § Implementation status today, decisions (b)
+    "time on the lock screen is not use" and (d) "a failed report re-credits its
+    minutes", over the shared `fauna_core::screen_time::UsageHeartbeat`.
+
+    1. An hour passes with the app out of front, then six minutes in front:
+       both readouts rise by the six minutes only. A client that billed the
+       hour would show it — the upper bound is the poked minutes plus the real
+       foreground time the run itself took, which the test checks is far under
+       the hour, so the two cannot be confused.
+    2. The nest turns one report away (`refuse_rpc` on the real
+       `fauna.family.usage_report`), then lets the next one through: the
+       refused report's minutes arrive with it, so both readouts carry them.
+
+    Clock movement is the `screen_time_heartbeat` poke (convention 14's fake
+    clock over the real wire), as in
+    `test_family_screen_time_budget_and_usage_readouts`; its `focused: false`
+    face is the `screen-time-heartbeat-unfocused` surface.
+    """
+    app = admin_app
+    require_surface(app.driver, "screen-time-heartbeat-unfocused")
+    guardian_identity, ward_identity, _guardian_handle, _ward_handle = family_pair
+    port = nest_instance["port"]
+    kind = "fauna.family.usage_report"
+    started = time.monotonic()
+
+    UNFOCUSED_MINUTES = 60
+    FOCUSED_MINUTES = 6  # past the 5-minute report cadence, so a report is due
+    REFUSED_MINUTES = 7
+    AFTER_MINUTES = 6
+    budget, used_before = _budget_above_todays_use(
+        nest_instance, guardian_identity, ward_identity, 300
+    )
+
+    # ── 1. An hour out of front bills nothing; the minutes in front bill ──
+    _ward_signs_in_under_the_budget(app, request, nest_instance, ward_identity, budget, used_before)
+    app.family.heartbeat(UNFOCUSED_MINUTES, focused=False)
+    app.family.heartbeat(FOCUSED_MINUTES)
+    floor = used_before + FOCUSED_MINUTES
+    slack = _real_minutes_since(started)
+    assert slack < UNFOCUSED_MINUTES, (
+        f"the run took {slack} real minutes, so its own foreground time could hide "
+        f"a billed {UNFOCUSED_MINUTES}-minute absence — the step proves nothing"
+    )
+    used = _both_readouts_show(
+        app, request, nest_instance, family_pair, budget, at_least=floor, at_most=floor + slack
+    )
+
+    # ── 2. A refused report's minutes arrive with the next one ──
+    # The ward signs back in; their figure is at least step 1's (a tick that
+    # fell due while the readouts were read may have added a minute), and the
+    # figure the summary shows is this step's baseline.
+    used = _minutes_used(
+        _ward_summary(
+            app,
+            request,
+            nest_instance,
+            ward_identity,
+            lambda text: (_minutes_used(text or "", budget) or -1) >= used,
+        ),
+        budget,
+    )
+    refused_before = int(rpc_hold_status(port, kind).get("refused", 0))
+    refuse_rpc(port, kind)
+    try:
+        app.family.heartbeat(REFUSED_MINUTES)
+        wait_for_refused_rpc(port, kind, count=refused_before + 1)
+    finally:
+        release_rpc_hold(port, kind)
+    app.family.heartbeat(AFTER_MINUTES)
+    floor = used + REFUSED_MINUTES + AFTER_MINUTES
+    _both_readouts_show(
+        app,
+        request,
+        nest_instance,
+        family_pair,
+        budget,
+        at_least=floor,
+        at_most=floor + _real_minutes_since(started),
     )

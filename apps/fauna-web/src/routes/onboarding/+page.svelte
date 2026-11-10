@@ -1,7 +1,9 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { identity, deliverWithheldActorChange } from '#lib/store';
+  import * as launchCurrency from '#lib/launch-currency';
   // The launch-path error classes (`TransientAuthError` / `NestOutdatedError` /
   // `NestIdentityChangedError`) and `forgetNestIdentityPin` are no longer imported
   // here: the shared `LaunchMachine` classifies the launch row and owns the
@@ -76,6 +78,8 @@
   } from '#lib/wasm-launch';
   import {
     accountsActiveSessionMaterial,
+    accountsActiveActorId,
+    accountsClearNestBinding,
     signOutReconciled,
     signOutResidue,
     signOutFinish,
@@ -83,6 +87,7 @@
     accountsPersistLoggedIn,
     accountsPersistRestoredPredecessors,
     accountsSwitch,
+    accountIdentityLine,
   } from '#lib/accounts';
   import { localizedRejectionText } from '#lib/rejection';
   import { PROVIDERS, type ProviderMeta } from '#lib/generated/providers';
@@ -389,6 +394,10 @@
   });
   function updateChannelCopy(id: (typeof UPDATE_CHANNEL_IDS)[number]): { label: string; desc: string } {
     const v = t.onboarding.vps_config;
+    // The machine's channel-availability reading moves the key (a channel with
+    // no build says so), so the row re-reads it on every machine tick, as the
+    // row's `data-state` does.
+    void machineTick.value;
     // The shared getter picks the description key (the compat-line wording for
     // Test / Dev while the product major is 0); the page only resolves it.
     const descKey = m?.updateChannelDescriptionKey(id) ?? '';
@@ -672,6 +681,16 @@
   // keeps no timer of its own — the machine's one refresh at the unlock time
   // is what signs the tab back in.
   let lockedShownUntil: number | null = $state(null);
+  // `launch-identity-label` on `launch_progress` (in flight) and `launch_retry`
+  // (transient error): the bound account's cached `handle@domain · tier` from
+  // the registry's server-data cache ($identity), absent while it holds no
+  // handle (onboarding.md § App-launch routing → *The cached identity on the
+  // launch surfaces*).
+  const launchIdentityLine = $derived(
+    $identity?.handle
+      ? accountIdentityLine($identity.handle, $identity.domain, $identity.tier)
+      : undefined,
+  );
   let stolenPhrase = $state('');
   let stolenConfirmWord = $state('');
   let stolenBusy = $state(false);
@@ -712,6 +731,9 @@
       launchWatchdog = null;
       if (m !== null || appendMode || retireEntry !== null) return; // something rendered — not stuck
       if (launchState !== 'idle' && launchState !== 'in_flight') return; // a launch surface is up
+      // A launch a newer session has retired is not stuck — it is superseded,
+      // and the defensive surface must not paint over that session either.
+      if (launchMachine !== null && !launchCurrency.holds(launchMachine)) return;
       console.error('[launch] watchdog: launch sequence never settled');
       void surfaceLaunchFailure(new Error(`launch did not settle within ${LAUNCH_WATCHDOG_MS / 1000}s`));
     }, LAUNCH_WATCHDOG_MS);
@@ -914,7 +936,13 @@
         console.debug('[launch] identity inputs unavailable:', e);
       }
       console.debug('[launch] machine.start()');
-      await launchMachine.start();
+      const machine = launchMachine;
+      launchCurrency.begin(machine);
+      await machine.start();
+      if (!launchCurrency.deliver(machine)) {
+        dropSupersededVerdict();
+        return;
+      }
       console.debug('[launch] applyLaunchPhase');
       await applyLaunchPhase();
       console.debug('[launch] settled');
@@ -1028,7 +1056,27 @@
   // An ASYNC onMount cannot register cleanup (Svelte only honors a
   // synchronously-returned function), so the watchdog disarm on unmount —
   // e.g. the Online path's goto('/app/feed') — needs its own onDestroy.
-  onDestroy(disarmLaunchWatchdog);
+  let pageDestroyed = false;
+  onDestroy(() => {
+    pageDestroyed = true;
+    disarmLaunchWatchdog();
+  });
+
+  /**
+   * A launch verdict the currency check dropped (`#lib/launch-currency`;
+   * `onboarding.md` § App-launch routing → *A verdict renders only while its
+   * own launch is still the current one*): nothing of it renders — dropped
+   * whole — and whatever superseded it owns the routing. A newer mount of this
+   * page has already destroyed this one, so there is nothing to resolve; a
+   * session built without a launch (the e2e session patch) leaves this page up
+   * on its launch loader with that session behind it, so the launch gate is
+   * resolved the way `Online` resolves it — onto the main app.
+   */
+  function dropSupersededVerdict() {
+    disarmLaunchWatchdog();
+    if (pageDestroyed) return;
+    if (get(identity)?.registered) goto('/app/feed', { replaceState: true });
+  }
 
   /**
    * Render the machine's settled phase onto the right surface. Called after the
@@ -1513,9 +1561,15 @@
    *  phase really is `Offline{transient:true}`, so the terminal outdated-nest and
    *  identity-changed surfaces cannot be retried into even if a CTA leaked. */
   async function retrySilentChallenge() {
-    if (!launchMachine) return;
+    const machine = launchMachine;
+    if (!machine) return;
     launchState = 'in_flight';
-    await launchMachine.retrySilentChallenge();
+    launchCurrency.begin(machine);
+    await machine.retrySilentChallenge();
+    if (!launchCurrency.deliver(machine)) {
+      dropSupersededVerdict();
+      return;
+    }
     await applyLaunchPhase();
   }
 
@@ -1529,9 +1583,15 @@
    *  the same `LocalStoragePinStore` the check consulted; the pin can never be
    *  forgotten by any other path (no silent re-pin, ever). */
   async function trustChangedNestIdentity() {
-    if (!launchMachine) return;
+    const machine = launchMachine;
+    if (!machine) return;
     launchState = 'in_flight';
-    await launchMachine.trustNestIdentity();
+    launchCurrency.begin(machine);
+    await machine.trustNestIdentity();
+    if (!launchCurrency.deliver(machine)) {
+      dropSupersededVerdict();
+      return;
+    }
     await applyLaunchPhase();
   }
 
@@ -1568,6 +1628,16 @@
     pendingSilentChallenge = null;
     launchMachine = null;
     launchState = 'idle';
+    // Walk the active account away from its nest through the registry
+    // (account-scoping.md: `clear_nest_binding`), best-effort, BEFORE seeding —
+    // else the stale binding survives an abandoned re-onboard and the next
+    // launch retries the same nest. Same account the seed reads.
+    try {
+      const actorId = await accountsActiveActorId();
+      if (actorId) await accountsClearNestBinding(actorId);
+    } catch (e) {
+      console.warn('use-a-different-nest: clearing the nest binding failed', e);
+    }
     m = await initOnboardingMachine();
     if (pending) m.seedIdentity(pending.secret);
   }
@@ -1796,8 +1866,9 @@
   });
 
   /** `recover-selfhosted-copy-button` — copy the resolved installer command
-   * (the real `FAUNA_DEPLOYMENT_SEED=…` line once the getter resolves, else the
-   * pending placeholder). */
+   * (the real `FAUNA_DEPLOYMENT_SEED=…` line). Disabled until the getter
+   * resolves, so the pending placeholder is never what lands on the clipboard
+   * (box-recovery.md § Recovery UI (step 4)). */
   let recoverSelfhostedCopied = $state(false);
   async function copyRecoverSelfhostedCommand() {
     await navigator.clipboard.writeText(recoverSelfhostedCommandDisplay);
@@ -2773,6 +2844,9 @@
         <!-- Silent-challenge transient retry per target-state §"App-launch routing":
              Network failure → show retry indicator on launch screen;
              user can wait+retry, or fall back to wizard at handle_entry. -->
+        {#if launchIdentityLine}
+          <p data-testid={IDS.LAUNCH_IDENTITY_LABEL} class="muted">{launchIdentityLine}</p>
+        {/if}
         <p data-testid={IDS.LAUNCH_TRANSIENT_ERROR} class="muted">
           {t.onboarding.launch.transient_error}
         </p>
@@ -2986,6 +3060,9 @@
           >{t.onboarding.launch.use_different_nest}</button>
         </div>
       {:else}
+        {#if launchState === 'in_flight' && launchIdentityLine}
+          <p data-testid={IDS.LAUNCH_IDENTITY_LABEL} class="muted">{launchIdentityLine}</p>
+        {/if}
         <p class="muted">{t.common.loading}</p>
       {/if}
     </div>
@@ -3662,6 +3739,34 @@
               }}
             >{isLoadingValue ? t.common.loading : t.common.verify}</button>
 
+            <!-- vps-location-picker: the verified locations, the machine's
+                 pre-selection shown. The cross-app contract reads and selects
+                 by the location's DISPLAY NAME (the tui and apple pickers
+                 do the same), so each option's value is its name and the
+                 change maps it back to the id. The setter re-lists the
+                 server types for the new location (registry.md § Server
+                 offers follow the location); the radio below follows it. -->
+            {#if vpsConfigValue && vpsConfigValue.locations.length > 0}
+              <label class="location-picker">
+                {t.onboarding.vps_config.location_heading}
+                <select
+                  data-testid={IDS.VPS_LOCATION_PICKER}
+                  value={vpsConfigValue.locations.find(
+                    (l) => l.id === vpsConfigValue?.selected_location_id,
+                  )?.name ?? ''}
+                  onchange={(e) => {
+                    const name = (e.currentTarget as HTMLSelectElement).value;
+                    const loc = vpsConfigValue?.locations.find((l) => l.name === name);
+                    if (loc) m?.selectVpsLocation(loc.id);
+                  }}
+                >
+                  {#each vpsConfigValue.locations as loc (loc.id)}
+                    <option value={loc.name}>{loc.name}</option>
+                  {/each}
+                </select>
+              </label>
+            {/if}
+
             <label class="checkbox-row">
               <input
                 type="checkbox"
@@ -4292,6 +4397,7 @@
         <button
           class="btn-copy"
           data-testid={IDS.RECOVER_SELFHOSTED_COPY_BUTTON}
+          disabled={recoverSelfhostedCommandValue === null}
           onclick={() => { void copyRecoverSelfhostedCommand(); }}
         >{recoverSelfhostedCopied ? t.common.copied : t.common.copy}</button>
       </div>

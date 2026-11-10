@@ -500,6 +500,7 @@ pub async fn verify_and_record_from_home(
                 seq = verified.seq,
                 foreign_memberships = applied.foreign_memberships,
                 member_grants = applied.member_grants,
+                former_writers = applied.former_writers,
                 contact_edges = applied.contact_edges,
                 remote_follows = applied.remote_follows,
                 reader_entitlements = applied.reader_entitlements,

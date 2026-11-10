@@ -4,47 +4,143 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // M5 (deployment-threat-model.md § Concern 1a): N parallel wrong-password
 // Argon2id runs hold at most kdfMaxInFlight slots at once. Real Argon2id, so the
-// peak is the actual concurrency the FFI saw. RED without the gate (peak = N).
+// peak is the actual concurrency the FFI saw: the gate sits around the real FFI
+// call. RED without the gate (peak = N, and nothing is ever refused).
+//
+// Every assertion here holds under any machine load. How long a 64 MiB Argon2id
+// takes is the machine's, so whether a late wave outlives the wait bound is too:
+// an attempt the gate refused as busy is the gate working, not a dropped run. So
+// the test asserts only that each attempt was admitted or refused busy, never
+// both and never anything else (runs + busy == n), and that the peak stayed under
+// the cap. The bound is widened only to keep the real run meaningful (most
+// attempts run); the deterministic cap and admit-on-release checks are
+// TestKDFGateAdmitsOnReleaseNeverPastTheCap.
 func TestKDFGateCapsInFlightArgon2id(t *testing.T) {
+	old := kdfWait
+	kdfWait = time.Minute
+	defer func() { kdfWait = old }()
+
 	PrewarmDummyKDF()
 	kdfPeak.Store(0)
 	before := KDFRunCount()
 
 	const n = 4 * kdfMaxInFlight
 	var wg sync.WaitGroup
+	var busy atomic.Uint64
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := DummyCredentialKDF([]byte("wrong"), KdfKindArgon2id, "198.51.100.1"); err != nil {
-				t.Errorf("dummy KDF inside the wait bound: %v", err)
+			err := DummyCredentialKDF([]byte("wrong"), KdfKindArgon2id, "198.51.100.1")
+			switch {
+			case err == nil:
+			case errors.Is(err, ErrKDFBusy):
+				busy.Add(1)
+			default:
+				t.Errorf("dummy KDF: %v, want success or ErrKDFBusy", err)
 			}
 		}()
 	}
 	wg.Wait()
 
-	if got := KDFRunCount() - before; got != n {
-		t.Fatalf("ran %d Argon2id, want %d (none may be dropped inside the wait bound)", got, n)
+	runs := KDFRunCount() - before
+	if runs+busy.Load() != n {
+		t.Fatalf("%d Argon2id ran and %d were refused busy, want the two to add up to %d", runs, busy.Load(), n)
+	}
+	if busy.Load() > 0 {
+		t.Logf("%d of %d attempts outlived the wait bound on this machine's load and were refused busy", busy.Load(), n)
 	}
 	if peak := kdfPeak.Load(); peak > kdfMaxInFlight {
 		t.Fatalf("peak in-flight Argon2id = %d, want <= %d", peak, kdfMaxInFlight)
 	}
 }
 
+// The cap and admit-on-release, deterministically: the gate's own slots, held and
+// released by the test, no KDF run and no clock. With every slot held, a further
+// attempt queues rather than runs; a release admits it at once, and the in-flight
+// count never passes the cap. RED with a larger cap (the extra attempt is granted
+// without queueing) or with a release that does not hand its slot on (the waiter
+// is never admitted).
+func TestKDFGateAdmitsOnReleaseNeverPastTheCap(t *testing.T) {
+	old := kdfWait
+	kdfWait = time.Minute
+	defer func() { kdfWait = old }()
+	kdfPeak.Store(kdfInFlight.Load())
+
+	const src = "198.51.100.3"
+	var held []func()
+	for i := 0; i < kdfMaxInFlight; i++ {
+		rel, err := acquireKDF(KdfKindArgon2id, src)
+		if err != nil {
+			t.Fatalf("slot %d: %v", i, err)
+		}
+		held = append(held, rel)
+	}
+
+	granted := make(chan func(), 1)
+	go func() {
+		rel, err := acquireKDF(KdfKindArgon2id, src)
+		if err != nil {
+			t.Errorf("waiter inside the bound: %v", err)
+			close(granted)
+			return
+		}
+		granted <- rel
+	}()
+	waitQueued(t, 1)
+	select {
+	case <-granted:
+		t.Fatalf("an attempt past the %d held slots was admitted without a release", kdfMaxInFlight)
+	default:
+	}
+
+	held[0]()
+	rel, ok := <-granted
+	if !ok {
+		t.FailNow()
+	}
+	if peak := kdfPeak.Load(); peak > kdfMaxInFlight {
+		t.Fatalf("peak in-flight Argon2id = %d, want <= %d", peak, kdfMaxInFlight)
+	}
+	kdfGate.mu.Lock()
+	free := kdfGate.free
+	kdfGate.mu.Unlock()
+	if free != 0 {
+		t.Fatalf("after handing the freed slot on, %d slots read free, want 0", free)
+	}
+	rel()
+	for _, r := range held[1:] {
+		r()
+	}
+	kdfGate.mu.Lock()
+	free = kdfGate.free
+	kdfGate.mu.Unlock()
+	if free != kdfMaxInFlight {
+		t.Fatalf("after every release %d slots read free, want %d", free, kdfMaxInFlight)
+	}
+}
+
 // A request that cannot get a slot within the wait bound fails with ErrKDFBusy
-// rather than queueing forever.
+// rather than queueing forever — and only once the bound has elapsed, never at
+// once (a timer never fires early, so the lower bound holds under any load).
 func TestKDFGateTimesOutWhenSaturated(t *testing.T) {
-	restore := SaturateKDFGateForTest(20 * time.Millisecond)
+	const bound = 20 * time.Millisecond
+	restore := SaturateKDFGateForTest(bound)
 	defer restore()
 
+	start := time.Now()
 	if _, err := acquireKDF(KdfKindArgon2id, "198.51.100.2"); !errors.Is(err, ErrKDFBusy) {
 		t.Fatalf("saturated acquire: got %v, want ErrKDFBusy", err)
+	}
+	if waited := time.Since(start); waited < bound {
+		t.Fatalf("saturated acquire refused after %v, before the %v wait bound", waited, bound)
 	}
 	// HKDF is never throttled.
 	rel, err := acquireKDF(KdfKindHkdf, "198.51.100.2")
@@ -117,10 +213,12 @@ func TestKDFGateIsFairAcrossSources(t *testing.T) {
 	}
 }
 
-// waitQueued blocks until n attempts are queued at the gate.
+// waitQueued blocks until n attempts are queued at the gate. The deadline only
+// bounds a failing run: a passing one returns as soon as the goroutines queue,
+// however loaded the machine, so it is generous.
 func waitQueued(t *testing.T, n int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		kdfGate.mu.Lock()
 		got := 0

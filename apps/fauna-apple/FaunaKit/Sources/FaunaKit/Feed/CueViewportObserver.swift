@@ -20,16 +20,43 @@ import SwiftUI
 // *samples*, never verdicts: `recordObservation` derives the verdict inside
 // shared Rust and discards it here.
 
-/// Card frames, `postId` → frame in the **global** coordinate space. Merged
-/// across every `cueCard`-tagged row in the scroll view.
+/// What one post's card publishes to the capture: its frame (from
+/// `cueCard(postId:)`, in the **global** coordinate space) and whether the card
+/// shows the post itself (from `cueSubject(postId:)`). The two halves are
+/// written by different views of the same row and merged by
+/// `CueFramePreferenceKey.reduce`.
+struct CueCardMark: Equatable {
+    var frame: CGRect?
+    /// Set by `cueSubject(postId:)`, which only `PostCardBody`'s post-body arm
+    /// applies. A muted, blocked, collapsed, region- or nest-withheld
+    /// placeholder sits in the same `cueCard` row but never marks its post, so
+    /// the observer measures no row for it: a placeholder is no exposure
+    /// (`engagement-cues.md` § Cue vocabulary & derivation). Twin of linux's
+    /// `cue-subject` class, android's `CueSubjectMark`, web's `data-cue-post`
+    /// and tui's subject-less `card_rows`.
+    var subject = false
+
+    static func merged(_ old: CueCardMark, _ new: CueCardMark) -> CueCardMark {
+        CueCardMark(frame: new.frame ?? old.frame, subject: old.subject || new.subject)
+    }
+}
+
+/// Card marks, `postId` → frame + subject flag, merged across every
+/// `cueCard`-tagged row in the scroll view.
+///
+/// ONE key for both halves, so the observer receives a frame and its subject
+/// mark in the same delivery. With a key each, the two `onPreferenceChange`
+/// callbacks could land in different passes, and a sample taken between them
+/// measured a card as the post while it already painted a placeholder (the
+/// muted-placeholder arm of outcome 18, one run in four).
 ///
 /// Global (not `.named(...)`) because the viewport rect is read the same way,
 /// and only their *relative* geometry matters — this sidesteps having to thread
 /// a coordinate-space name through two per-platform feed views.
 struct CueFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGRect] { [:] }
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue()) { _, new in new }
+    static var defaultValue: [String: CueCardMark] { [:] }
+    static func reduce(value: inout [String: CueCardMark], nextValue: () -> [String: CueCardMark]) {
+        value.merge(nextValue(), uniquingKeysWith: CueCardMark.merged)
     }
 }
 
@@ -89,16 +116,23 @@ public final class CueViewportObserver {
     /// reports to) — held so the lifecycle flush below can reach them without
     /// a `FeedVM`.
     private var calls: CueCaptureCalls?
-    private var frames: [String: CGRect] = [:]
+    private var marks: [String: CueCardMark] = [:]
     private var viewport: CGRect = .zero
 
     public init() {}
 
     // MARK: - Geometry intake (called from the SwiftUI preference plumbing)
 
-    func updateFrames(_ frames: [String: CGRect]) {
-        self.frames = frames
+    func updateMarks(_ marks: [String: CueCardMark]) {
+        self.marks = marks
         framesDelivered &+= 1
+    }
+
+    /// The posts the last delivery marked as cue subjects, sorted — for the
+    /// `feed_cue_probe` reply, so a failing step shows what the capture
+    /// believed each card painted.
+    var subjectsForTest: [String] {
+        marks.filter { $0.value.subject }.keys.sorted()
     }
     func updateViewport(_ rect: CGRect) { self.viewport = rect }
 
@@ -139,6 +173,7 @@ public final class CueViewportObserver {
              onError: @escaping (Int, String) -> Void) async {
         let generation = feedVM.managerGeneration
         self.calls = calls
+        self.lastSelection = nil
         Self.current = self
         self.sampleNow = { [weak self, weak feedVM] in
             guard let self, let feedVM else { return [] }
@@ -199,18 +234,54 @@ public final class CueViewportObserver {
     /// The geometry read of one sample, handed to the shared tracker; returns
     /// the exposures it says have finished.
     private func sample(feedVM: FeedVM, calls: CueCaptureCalls) -> [CueObservation] {
-        guard viewport.height > 0 else { return [] }   // not laid out yet — measure nothing
+        // A feed switch ends every exposure (`engagement-cues.md` § Cue
+        // vocabulary & derivation: a feed switch is no scroll). The other
+        // shells see it as the list's leave edge while the new feed loads;
+        // here the scroll view can stay mounted across a switch, and a post
+        // both feeds hold keeps its card in place, so the sampler drains on
+        // the selection's own change instead — before measuring the new feed.
+        let selection = Self.selectionKey(
+            feedId: feedVM.selectedFeedId, trending: feedVM.trendingSelected,
+            imported: feedVM.importedSelected)
+        var ended: [CueObservation] = []
+        if Self.feedSwitched(from: lastSelection, to: selection) {
+            ended = calls.drainAll(Self.wallNowMs())
+        }
+        lastSelection = selection
+
+        guard viewport.height > 0 else { return ended }   // not laid out yet — measure nothing
 
         // The FULL loaded window (not just arranged rows) — it resolves is-media
         // at first sighting AND answers "did this post leave the feed entirely",
         // which is the only reason an UNMEASURED card is ever treated as gone.
         let postsWindow = Self.postsWindow(feedVM.posts)
-        let rows = Self.buildRows(frames: frames, postsWindow: postsWindow)
+        let rows = Self.buildRows(marks: marks, postsWindow: postsWindow)
 
-        return calls.sample(
+        return ended + calls.sample(
             rows, Array(postsWindow.keys),
             Double(viewport.minY), Double(viewport.maxY),
             Self.monoNowMs(), Self.wallNowMs())
+    }
+
+    /// The feed selection the last sample measured — `nil` before a run's
+    /// first sample, so a mount never drains on its own start.
+    private var lastSelection: String?
+
+    /// One string per feed selection: a saved feed by id, the built-in
+    /// Trending feed, an imported-posts selection, or Local (none of those).
+    nonisolated static func selectionKey(feedId: String?, trending: Bool,
+                                         imported: String?) -> String {
+        if trending { return "trending" }
+        if let imported { return "imported:\(imported)" }
+        if let feedId { return "feed:\(feedId)" }
+        return "local"
+    }
+
+    /// Whether the selection changed since the last sample — never on a
+    /// run's first sample.
+    nonisolated static func feedSwitched(from previous: String?, to current: String) -> Bool {
+        guard let previous else { return false }
+        return previous != current
     }
 
     /// The last record in flight — every `record` chains behind it, so the
@@ -264,9 +335,26 @@ public final class CueViewportObserver {
     /// simplifications the shared contract allows, `cue_tracker.rs`'s own doc
     /// comment). `nonisolated` — pure arithmetic over primitives, touching no
     /// actor state, so the headless tests can call it directly.
-    nonisolated static func buildRows(frames: [String: CGRect],
+    ///
+    /// Only a **cue subject** is measured: a row whose post is absent from
+    /// `subjects` (its card shows a placeholder, not the post) produces no row
+    /// — see `CueCardMark.subject`.
+    nonisolated static func buildRows(marks: [String: CueCardMark],
                                       postsWindow: [String: Bool]) -> [CueRow] {
-        frames.map { postId, frame in
+        var frames: [String: CGRect] = [:]
+        var subjects: Set<String> = []
+        for (postId, mark) in marks {
+            if let frame = mark.frame { frames[postId] = frame }
+            if mark.subject { subjects.insert(postId) }
+        }
+        return buildRows(frames: frames, postsWindow: postsWindow, subjects: subjects)
+    }
+
+    /// `buildRows(marks:postsWindow:)` over the two halves already split.
+    nonisolated static func buildRows(frames: [String: CGRect],
+                                      postsWindow: [String: Bool],
+                                      subjects: Set<String>) -> [CueRow] {
+        frames.filter { subjects.contains($0.key) }.map { postId, frame in
             CueRow(postId: postId, top: Double(frame.minY), height: Double(frame.height),
                    isMedia: postsWindow[postId] ?? false,
                    // The tracker holds the player's peak itself — see `emit`'s comment.
@@ -294,8 +382,28 @@ public final class CueViewportObserver {
                                 hydrated: CueHydrationLedger,
                                 onError: @escaping (Int, String) -> Void) async {
         let generation = feedVM.managerGeneration
+        // A re-mount (a feed switch rebuilds the scroll view, and SwiftUI
+        // re-runs `.task`) while this generation's first hydrate is still in
+        // flight waits for it: the capture samples only once the feed has
+        // hydrated, on every mount alike — web's `hydrateCuesOnce` form.
+        if let pending = hydrated.inFlight[generation] {
+            await pending.value
+            return
+        }
         guard !hydrated.generations.contains(generation) else { return }
         hydrated.generations.insert(generation)
+        // Unstructured, so a re-mount can await the same hydrate.
+        let work = Task { @MainActor in
+            await hydrate(generation: generation, calls: calls, hydrated: hydrated, onError: onError)
+        }
+        hydrated.inFlight[generation] = work
+        await work.value
+        hydrated.inFlight[generation] = nil
+    }
+
+    private static func hydrate(generation: Int, calls: CueCaptureCalls,
+                                hydrated: CueHydrationLedger,
+                                onError: @escaping (Int, String) -> Void) async {
         // The Layer-B producer (`FeedManager::record_observation`) contributes
         // only once the manager's cached opt-in is filled, so a persisted opt-in
         // (set before a restart, or on another device) must be hydrated at feed
@@ -433,6 +541,9 @@ struct CueCaptureCalls {
 @MainActor
 final class CueHydrationLedger {
     var generations: Set<Int> = []
+    /// The hydrate a generation's first mount started, while it is in flight —
+    /// a re-mount awaits it rather than reading the generation as done.
+    var inFlight: [Int: Task<Void, Never>] = [:]
 }
 
 // MARK: - SwiftUI wiring
@@ -451,9 +562,18 @@ public extension View {
         background(
             GeometryReader { geometry in
                 Color.clear.preference(key: CueFramePreferenceKey.self,
-                                       value: [postId: geometry.frame(in: .global)])
+                                       value: [postId: CueCardMark(frame: geometry.frame(in: .global))])
             }
         )
+    }
+
+    /// Marks this view as showing post `postId` itself — the cue subject.
+    /// Applied by `PostCardBody`'s post-body arm alone, never by a placeholder
+    /// arm, so the observer measures a `cueCard` row only while its card shows
+    /// the post (`CueCardMark.subject`). It writes the same key as the row's
+    /// frame, so the mark and the frame reach the observer together.
+    func cueSubject(postId: String) -> some View {
+        preference(key: CueFramePreferenceKey.self, value: [postId: CueCardMark(subject: true)])
     }
 
     /// Wires engagement-cue capture to a feed scroll view whose rows are tagged
@@ -490,8 +610,8 @@ struct CueCaptureModifier: ViewModifier {
             .onPreferenceChange(CueViewportPreferenceKey.self) { rect in
                 MainActor.assumeIsolated { observer.updateViewport(rect) }
             }
-            .onPreferenceChange(CueFramePreferenceKey.self) { frames in
-                MainActor.assumeIsolated { observer.updateFrames(frames) }
+            .onPreferenceChange(CueFramePreferenceKey.self) { marks in
+                MainActor.assumeIsolated { observer.updateMarks(marks) }
             }
             // Keyed on the manager generation so a re-auth restarts capture
             // against the new actor's manager rather than reporting this

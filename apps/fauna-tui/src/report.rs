@@ -28,12 +28,23 @@
 //! Steps 2–3 failing does not un-send the report: the acknowledgement still
 //! paints (the report DID go), and the follow-up failure rides
 //! `error-message` beside it.
+//!
+//! **Showing it again** (`moderation.md` § Corollary — the reporter's hide is
+//! theirs to undo): the placeholder's `content-policy-show-again-button`
+//! ([`crate::content_policy::reported_placeholder`]) dispatches
+//! [`Action::ShowAgain`] carrying the hidden ids the shared
+//! `obligation::show_again_for_item` matched to the item; [`Op::Unhide`] runs
+//! `preference_surfaces::unhide_reported` for each and hands the stored list
+//! back to the render engine, so the item paints on the next frame — here and,
+//! through the `hidden/<id>` tombstones, on the user's other devices. The
+//! report itself is untouched: showing again never withdraws.
 
 use std::sync::Arc;
 
 use fauna_client::NestClient;
 use fauna_client_moderation::{ModerationClient, ReportForm, ReportTarget, report};
 use fauna_protocol::moderation::{AbuseReportReason, AbuseReportSubmitRequest};
+use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 use fauna_sync_engine::account_runtime::SeatAccountStore;
 use fauna_ui_ids as ids;
 
@@ -127,10 +138,15 @@ pub enum Action {
     Submit,
     /// `report-cancel-button` — close without sending.
     Cancel,
+    /// `content-policy-show-again-button` on a reported placeholder: un-hide
+    /// every id in `ids` (the shared `show_again_for_item`'s matches for the
+    /// item) on the account plane; `page` is where a failure lands.
+    ShowAgain { page: Page, ids: Vec<String> },
 }
 
 impl Action {
-    /// The offline gate's input: only the submit reaches the nest.
+    /// The offline gate's input: only the submit reaches the nest (the
+    /// show-again is a plane write, never a nest call).
     pub fn wire_kind(&self) -> Option<&'static str> {
         match self {
             Action::Submit => Some("fauna.moderation.abuse_report.submit"),
@@ -138,7 +154,8 @@ impl Action {
             | Action::SetReason(_)
             | Action::ToggleIncludeText
             | Action::ToggleBlockAuthor
-            | Action::Cancel => None,
+            | Action::Cancel
+            | Action::ShowAgain { .. } => None,
         }
     }
 }
@@ -186,6 +203,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::Submit => {
             let nest = app.report.nest.clone()?;
             let store = app.settings.preference_store();
+            // The device's outbox: with no nest the report rests there and is
+            // sent on reconnect (`None` before the account store is ready).
+            let queue = app
+                .account_outbox
+                .clone()
+                .map(|outbox| outbox as Arc<dyn OfflineIntentQueue>);
             let sheet = app.report.sheet.as_mut()?;
             if sheet.sending {
                 return None;
@@ -206,6 +229,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 page: sheet.page,
                 request: Box::new(request),
                 block,
+                queue,
+            })
+        }
+        Action::ShowAgain { page, ids } => {
+            // Nothing matched (a stale frame): nothing to write.
+            if ids.is_empty() {
+                return None;
+            }
+            Some(Op::Unhide {
+                store: app.settings.preference_store(),
+                page,
+                ids,
             })
         }
     }
@@ -222,9 +257,21 @@ pub enum Op {
         request: Box<AbuseReportSubmitRequest>,
         /// The author to block, when the reporter ticked the checkbox.
         block: Option<String>,
+        /// The device's outbox ([`App::account_outbox`]).
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
     },
-    /// The login-time (and store-change) read of the hide list.
+    /// The login-time (and store-change) read of the hide list — and of its
+    /// sibling on the same record, the post spam marks (`report-sharing.md`
+    /// § Report capture → *The post's mark-as-spam verb*), handed to the feed
+    /// manager where the hide list reaches the render verdict.
     LoadHidden { store: SeatAccountStore },
+    /// The show-again: one `unhide_reported` tombstone per matched id, the
+    /// stored list after the last handed back to the render engine.
+    Unhide {
+        store: SeatAccountStore,
+        page: Page,
+        ids: Vec<String>,
+    },
 }
 
 /// What an [`Op`] resolved to.
@@ -239,15 +286,31 @@ pub enum Outcome {
         hidden: Option<Vec<String>>,
         followup_error: Option<String>,
     },
-    /// The submit itself failed.
-    Failed {
+    /// No nest: the report rests in the device's outbox and is sent on
+    /// reconnect (`account-offline-mutation.md` § The offline-mutation
+    /// contract). The sheet closes on `report_queued`'s line — no nest has
+    /// answered, so none is named; the reporter-side hide still lands
+    /// (`hidden`), and `followup_error` says when a ticked block was not sent.
+    Queued {
         page: Page,
-        error: String,
+        hidden: Option<Vec<String>>,
+        followup_error: Option<String>,
     },
-    HiddenLoaded(Vec<String>),
+    /// The submit itself failed.
+    Failed { page: Page, error: String },
+    /// The hide list and the spam marks, both off `fauna.state.moderation`.
+    HiddenLoaded {
+        hidden: Vec<String>,
+        spam_marked: Vec<String>,
+    },
     /// A hide-list read failed — logged, not surfaced (the user did not ask
     /// for this read; the render simply lacks the reporter-side hide).
     HiddenFailed(String),
+    /// The show-again landed: `hidden` is the stored list after the writes.
+    Unhidden { page: Page, hidden: Vec<String> },
+    /// The show-again failed — the user asked for this write, so it is
+    /// surfaced on the page's `error-message`; the placeholder stays.
+    UnhideFailed { page: Page, error: String },
 }
 
 impl std::fmt::Debug for Outcome {
@@ -262,9 +325,27 @@ impl std::fmt::Debug for Outcome {
                 .field("routed_to", routed_to)
                 .field("followup_error", followup_error)
                 .finish(),
+            Outcome::Queued { followup_error, .. } => f
+                .debug_struct("Queued")
+                .field("followup_error", followup_error)
+                .finish(),
             Outcome::Failed { error, .. } => f.debug_tuple("Failed").field(error).finish(),
-            Outcome::HiddenLoaded(ids) => f.debug_tuple("HiddenLoaded").field(&ids.len()).finish(),
+            Outcome::HiddenLoaded {
+                hidden,
+                spam_marked,
+            } => f
+                .debug_struct("HiddenLoaded")
+                .field("hidden", &hidden.len())
+                .field("spam_marked", &spam_marked.len())
+                .finish(),
             Outcome::HiddenFailed(e) => f.debug_tuple("HiddenFailed").field(e).finish(),
+            Outcome::Unhidden { hidden, .. } => f
+                .debug_struct("Unhidden")
+                .field("hidden", &hidden.len())
+                .finish(),
+            Outcome::UnhideFailed { error, .. } => {
+                f.debug_tuple("UnhideFailed").field(error).finish()
+            }
         }
     }
 }
@@ -278,13 +359,38 @@ impl Op {
                 page,
                 request,
                 block,
+                queue,
             } => {
                 let hide_id = request.subject.id().to_string();
                 let reply = match ModerationClient::new(Arc::clone(&nest))
-                    .abuse_report_submit(*request)
+                    .abuse_report_submit_or_queue(queue.as_deref(), *request)
                     .await
                 {
-                    Ok(reply) => reply,
+                    Ok(Composed::Sent(reply)) => reply,
+                    // No nest: the report rests in the outbox. The block needs
+                    // the nest, so it is not tried; the reporter-side hide is
+                    // local and lands now.
+                    Ok(Composed::Queued(_)) => {
+                        let mut followup_error = block
+                            .is_some()
+                            .then(|| localized(&report::report_block_not_sent()));
+                        let hidden = match fauna_sync_engine::preference_surfaces::hide_reported(
+                            &store, &hide_id,
+                        )
+                        .await
+                        {
+                            Ok(list) => Some(list),
+                            Err(e) => {
+                                followup_error.get_or_insert(format!("hide: {e}"));
+                                None
+                            }
+                        };
+                        return Outcome::Queued {
+                            page,
+                            hidden,
+                            followup_error,
+                        };
+                    }
                     Err(e) => {
                         return Outcome::Failed {
                             page,
@@ -324,11 +430,35 @@ impl Op {
                 }
             }
             Op::LoadHidden { store } => {
-                match fauna_sync_engine::preference_surfaces::load_hidden_content(&store).await {
-                    Ok(list) => Outcome::HiddenLoaded(list),
-                    Err(e) => Outcome::HiddenFailed(
-                        fauna_sync_engine::preference_surfaces::plane_failure(e),
-                    ),
+                use fauna_sync_engine::preference_surfaces as surfaces;
+                let read = async {
+                    let hidden = surfaces::load_hidden_content(&store).await?;
+                    let spam_marked = surfaces::load_spam_marked(&store).await?;
+                    anyhow::Ok(Outcome::HiddenLoaded {
+                        hidden,
+                        spam_marked,
+                    })
+                };
+                match read.await {
+                    Ok(outcome) => outcome,
+                    Err(e) => Outcome::HiddenFailed(surfaces::plane_failure(e)),
+                }
+            }
+            Op::Unhide { store, page, ids } => {
+                use fauna_sync_engine::preference_surfaces as surfaces;
+                let write = async {
+                    let mut hidden = Vec::new();
+                    for id in &ids {
+                        hidden = surfaces::unhide_reported(&store, id).await?;
+                    }
+                    anyhow::Ok(hidden)
+                };
+                match write.await {
+                    Ok(hidden) => Outcome::Unhidden { page, hidden },
+                    Err(e) => Outcome::UnhideFailed {
+                        page,
+                        error: surfaces::plane_failure(e),
+                    },
                 }
             }
         }
@@ -363,15 +493,49 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 }
             }
         }
+        Outcome::Queued {
+            page,
+            hidden,
+            followup_error,
+        } => {
+            app.report.sheet = None;
+            app.report.status = Some((page, localized(&report::report_queued())));
+            if let Some(list) = hidden {
+                app.content_policy.set_hidden_content(list);
+            }
+            match followup_error {
+                Some(e) => {
+                    app.errors.insert(page, e);
+                }
+                None => {
+                    app.errors.remove(&page);
+                }
+            }
+        }
         Outcome::Failed { page, error } => {
             if let Some(sheet) = app.report.sheet.as_mut() {
                 sheet.sending = false;
             }
             app.errors.insert(page, error);
         }
-        Outcome::HiddenLoaded(list) => app.content_policy.set_hidden_content(list),
+        Outcome::HiddenLoaded {
+            hidden,
+            spam_marked,
+        } => {
+            app.content_policy.set_hidden_content(hidden);
+            if let Some(manager) = app.feed.manager.as_ref() {
+                manager.set_spam_marked(spam_marked);
+            }
+        }
         Outcome::HiddenFailed(e) => {
             tracing::warn!("hidden_content read failed; the reporter-side hide is inactive: {e}");
+        }
+        Outcome::Unhidden { page, hidden } => {
+            app.content_policy.set_hidden_content(hidden);
+            app.errors.remove(&page);
+        }
+        Outcome::UnhideFailed { page, error } => {
+            app.errors.insert(page, error);
         }
     }
 }
@@ -691,6 +855,95 @@ mod tests {
         );
     }
 
+    fn dummy_nest() -> Arc<NestClient> {
+        NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+        )
+    }
+
+    fn queued_submit(
+        word: &'static str,
+        block: bool,
+    ) -> (Outcome, Arc<fauna_client_testkit::RecordingQueue>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let form = ReportForm {
+            reason: Some(AbuseReportReason::Spam),
+            note: String::new(),
+            include_text: false,
+            block_author: block,
+        };
+        let request = report::report_request(&message(), &form).expect("sendable");
+        let op = Op::Submit {
+            nest: dummy_nest(),
+            // No runtime: the reporter-side hide waits out its bound (virtual
+            // time, below) and fails — the follow-up line says so.
+            store: SeatAccountStore::new(Arc::new(|| None)),
+            page: Page::Feed,
+            request: Box::new(request),
+            block: block.then(|| "ef".repeat(32)),
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+        };
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+            .block_on(op.run());
+        (outcome, queue)
+    }
+
+    /// With no nest, the report rests in the outbox (not sent into the dead
+    /// connection); the sheet closes on the queued line, which names no nest,
+    /// and a ticked block is said not to have been sent.
+    #[test]
+    fn a_report_with_no_nest_is_queued_and_says_so() {
+        let (outcome, queue) = queued_submit("disconnected", true);
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, "fauna.moderation.abuse_report.submit");
+        let Outcome::Queued {
+            page,
+            followup_error,
+            ..
+        } = &outcome
+        else {
+            panic!("expected Queued, got {outcome:?}");
+        };
+        assert_eq!(*page, Page::Feed);
+        assert_eq!(
+            followup_error.as_deref(),
+            Some(localized(&report::report_block_not_sent()).as_str()),
+            "the block is reported first; the hide failure does not overwrite it"
+        );
+
+        let mut app = app_on(Page::Feed);
+        open(&mut app, message());
+        apply_outcome(&mut app, outcome);
+        assert!(
+            app.report.sheet.is_none(),
+            "a queued report closes the sheet"
+        );
+        let status = elements(&app)
+            .into_iter()
+            .find(|e| e.id == "report-status")
+            .expect("the queued line paints");
+        assert_eq!(status.text, localized(&report::report_queued()));
+        assert!(app.errors.contains_key(&Page::Feed));
+    }
+
+    /// Connected, the report is sent as before (to this dummy nest it fails on
+    /// the transport) and nothing is queued.
+    #[test]
+    fn a_report_with_the_nest_connected_is_sent_not_queued() {
+        let (outcome, queue) = queued_submit("connected", false);
+        assert!(
+            matches!(outcome, Outcome::Failed { .. }),
+            "the send was attempted: {outcome:?}"
+        );
+        assert!(queue.queued().is_empty());
+    }
+
     /// Only the submit reaches the nest — the offline gate greys nothing else.
     #[test]
     fn only_submit_carries_a_wire_kind() {
@@ -700,5 +953,85 @@ mod tests {
         );
         assert_eq!(Action::Cancel.wire_kind(), None);
         assert_eq!(Action::Open(Box::new(message())).wire_kind(), None);
+        assert_eq!(
+            Action::ShowAgain {
+                page: Page::Feed,
+                ids: vec!["0e".repeat(32)],
+            }
+            .wire_kind(),
+            None,
+            "the show-again is a plane write, never a nest call"
+        );
+    }
+
+    /// The show-again (`moderation.md` § Corollary — the reporter's hide is
+    /// theirs to undo): the gesture dispatches one un-hide op carrying exactly
+    /// the matched ids, a stale frame's empty match dispatches nothing, the
+    /// landed write hands the stored list to the render engine (so the item is
+    /// reported no more) and clears the page's error, and a failed one is
+    /// surfaced on the page — the user asked for this write.
+    #[test]
+    fn show_again_dispatches_the_unhide_and_its_result_repaints() {
+        let mut app = app_on(Page::Feed);
+        let id = "0e".repeat(32);
+        app.content_policy.set_hidden_content(vec![id.clone()]);
+        assert!(
+            app.content_policy
+                .verdict_for_item(&id, None, &[])
+                .reported()
+        );
+
+        assert!(
+            apply_local(
+                &mut app,
+                Action::ShowAgain {
+                    page: Page::Feed,
+                    ids: Vec::new(),
+                },
+            )
+            .is_none(),
+            "nothing matched, nothing written"
+        );
+        match apply_local(
+            &mut app,
+            Action::ShowAgain {
+                page: Page::Feed,
+                ids: vec![id.clone()],
+            },
+        ) {
+            Some(Op::Unhide { page, ids, .. }) => {
+                assert_eq!(page, Page::Feed);
+                assert_eq!(ids, vec![id.clone()]);
+            }
+            _ => panic!("the show-again dispatches the un-hide"),
+        }
+
+        app.errors.insert(Page::Feed, "stale".into());
+        apply_outcome(
+            &mut app,
+            Outcome::Unhidden {
+                page: Page::Feed,
+                hidden: Vec::new(),
+            },
+        );
+        assert!(
+            !app.content_policy
+                .verdict_for_item(&id, None, &[])
+                .reported(),
+            "the stored list after the write is the engine's list"
+        );
+        assert!(!app.errors.contains_key(&Page::Feed));
+
+        apply_outcome(
+            &mut app,
+            Outcome::UnhideFailed {
+                page: Page::Feed,
+                error: "plane down".into(),
+            },
+        );
+        assert_eq!(
+            app.errors.get(&Page::Feed).map(String::as_str),
+            Some("plane down")
+        );
     }
 }

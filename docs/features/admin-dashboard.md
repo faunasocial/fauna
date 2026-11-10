@@ -4,6 +4,9 @@ title: The admin area
 section: admin area
 goal: docs/goal/behavior/admin.md § 1. Dashboard
 guide: docs/guides/admin-tour.md § Getting in — and back out
+absences:
+  android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
@@ -15,7 +18,7 @@ happened on.
 
 ## Coverage contract
 
-Stamped 2026-10-13 at ab51f8d2bd.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] The admin sees the entry, a non-admin does not, and the back affordance returns to the app — `docs/goal/behavior/admin.md` § Navigation model
    - `tests/e2e-unified/tests/test_admin_nav.py::test_admin_tab_visible_for_admin`
@@ -43,6 +46,8 @@ Stamped 2026-10-13 at ab51f8d2bd.
    - `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_shows_the_one_card_set`
 9. [app] A dashboard read that fails shows the error and drops only its own cards, leaving the rest of the dashboard in place — `docs/goal/behavior/admin.md` § 1. Dashboard
    - `tests/e2e-unified/tests/test_admin.py::test_a_failed_dashboard_read_drops_only_its_own_cards`
+10. [nest] How many members and posts the nest holds is told to its admins only; no surface a stranger reaches without signing in answers those counts — `docs/goal/architecture/nest/network-exposure.md` § Target posture, per surface
+   - `tests/e2e-unified/tests/api/test_anonymous_discovery_counts.py::test_no_anonymous_surface_answers_how_many_members_and_posts`
 
 ## Status
 
@@ -56,6 +61,8 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| android-kids | — absent | |
+| ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -76,4 +83,5 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | 7 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_shows_the_storage_the_nest_holds` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_shows_the_one_card_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_admin.py::test_a_failed_dashboard_read_drops_only_its_own_cards` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_anonymous_discovery_counts.py::test_no_anonymous_surface_answers_how_many_members_and_posts` | nest (linux): passed |
 <!-- features-render:end -->

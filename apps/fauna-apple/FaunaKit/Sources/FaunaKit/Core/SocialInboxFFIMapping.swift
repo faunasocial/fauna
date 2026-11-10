@@ -77,8 +77,15 @@ extension NotificationItem {
 /// own function so the resolution is testable without a notification host
 /// (`notificationsAvailable` is always false in a unit-test binary).
 func knockToastBody(for knock: FfiKnock) -> String {
+    knockToastText(for: knock).body
+}
+
+/// ``knockToastBody(for:)`` plus the catalog key the text resolved from (`nil`
+/// for a verbatim text) — the pair the fired-knock log records
+/// (`fauna_e2e_agent::KNOCK_NOTICES_KEY`).
+func knockToastText(for knock: FfiKnock) -> (key: String?, body: String) {
     switch knockTextFor(knock: knock) {
-    case let .localized(localizedText): return renderLocalizedText(localizedText)
-    case let .verbatim(verbatimText): return verbatimText
+    case let .localized(localizedText): return (localizedText.key, renderLocalizedText(localizedText))
+    case let .verbatim(verbatimText): return (nil, verbatimText)
     }
 }

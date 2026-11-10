@@ -186,6 +186,53 @@ pub fn fauna_post_to_nostr(
     })
 }
 
+/// The **advertisement** form of [`fauna_post_to_nostr`]: a sold post's teaser
+/// published as an ordinary kind-1 note plus the two tags that make it an
+/// offer (`docs/goal/behavior/monetization.md` § The Nostr advertisement of a
+/// sold post → *The event*).
+///
+/// - **`["price", "<value>", "<unit>"]`** — NIP-99's tag name and shape, the
+///   tier's asking price verbatim (`["price", "21000", "msat"]`): the event
+///   names a denomination, never a mechanism. The price tag IS the marker — a
+///   client that understands it shows the offer and sizes the zap.
+/// - **`["r", "<public web URL>"]`** — when the post is web-published, the
+///   Pillar 2 teaser page where the offer is explained and a claim code is
+///   redeemed.
+///
+/// `content` stays the teaser: nothing is added in the author's voice. Only a
+/// post the ordinary translation renders as a **kind-1** note may be
+/// advertised (kind 1 is what every client renders and zaps, and its event id
+/// resolves through the outbound map unchanged) — a reaction, repost or
+/// article is refused rather than advertised as something it is not.
+pub fn fauna_advertisement_to_nostr(
+    post: &Post,
+    nostr_pubkey: &[u8; 32],
+    resolved: &[ResolvedReference],
+    price_value: u64,
+    price_unit: &str,
+    web_url: Option<&str>,
+) -> anyhow::Result<UnsignedEvent> {
+    if post.gated.is_none() {
+        anyhow::bail!("only a sold (gated) post's teaser is advertised");
+    }
+    let mut event = fauna_post_to_nostr(post, nostr_pubkey, resolved)?;
+    if event.kind != kind::TEXT_NOTE {
+        anyhow::bail!(
+            "an advertisement is a kind-1 note; this post translates to kind {}",
+            event.kind
+        );
+    }
+    event.tags.push(Tag::new(vec![
+        "price".into(),
+        price_value.to_string(),
+        price_unit.to_string(),
+    ]));
+    if let Some(url) = web_url {
+        event.tags.push(Tag::new(vec!["r".into(), url.to_string()]));
+    }
+    Ok(event)
+}
+
 /// Convert a Nostr event to a Fauna Post.
 ///
 /// Kind 1 → PostBody::Text (or TextWithMedia if image URLs detected).
@@ -547,6 +594,67 @@ mod tests {
         assert_eq!(event.kind, kind::TEXT_NOTE);
         assert_eq!(event.content, "hello world");
         assert_eq!(event.created_at, 1_000_000); // truncated from microseconds
+    }
+
+    fn sold(mut post: Post) -> Post {
+        use fauna_core::subscription::types::{GatedInfo, KeyAccess};
+        post.gated = Some(GatedInfo {
+            encrypted_ref: fauna_cbor::Cid::from_digest_dag_cbor([0x33u8; 32]),
+            key_access: KeyAccess::Broadcast {
+                key_blob_ref: fauna_cbor::Cid::from_digest_dag_cbor([0x44u8; 32]),
+            },
+            tier: "post-unlock".into(),
+            tier_rank: 2,
+            seal_id: fauna_core::data::ContentHash::from_digest_raw([0x5e; 32]),
+            attachment_refs: vec![],
+        });
+        post
+    }
+
+    /// The advertisement is the ordinary kind-1 teaser plus the price tag,
+    /// verbatim, and the `r` tag only when there is a web page to point at —
+    /// and the teaser content is untouched (no nest-authored trailer).
+    #[test]
+    fn an_advertisement_is_the_kind_1_teaser_plus_the_price_tag() {
+        let post = sold(make_fauna_post("the public teaser", vec![]));
+        let ad =
+            fauna_advertisement_to_nostr(&post, &[2u8; 32], &[], 21_000, "msat", None).unwrap();
+        assert_eq!(ad.kind, kind::TEXT_NOTE);
+        assert_eq!(ad.content, "the public teaser");
+        assert_eq!(tag_rows(&ad), vec![vec!["price", "21000", "msat"]]);
+
+        let with_page = fauna_advertisement_to_nostr(
+            &post,
+            &[2u8; 32],
+            &[],
+            21_000,
+            "msat",
+            Some("https://alice.example/post/teaser.html"),
+        )
+        .unwrap();
+        assert_eq!(
+            tag_rows(&with_page),
+            vec![
+                vec!["price", "21000", "msat"],
+                vec!["r", "https://alice.example/post/teaser.html"],
+            ]
+        );
+    }
+
+    /// Only a sold post is advertised, and only as a kind 1: a public post has
+    /// nothing to sell, and a repost or reaction is not a note anyone zaps to
+    /// buy.
+    #[test]
+    fn an_advertisement_refuses_a_public_post_and_a_non_note() {
+        let public = make_fauna_post("free", vec![]);
+        assert!(fauna_advertisement_to_nostr(&public, &[2u8; 32], &[], 1, "msat", None).is_err());
+        let repost = sold(make_fauna_post(
+            "",
+            vec![Reference::Repost {
+                post_id: synthetic_cid([3u8; 32]),
+            }],
+        ));
+        assert!(fauna_advertisement_to_nostr(&repost, &[2u8; 32], &[], 1, "msat", None).is_err());
     }
 
     #[test]

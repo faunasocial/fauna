@@ -30,10 +30,10 @@ namespace FaunaApp.Tests;
 /// (<c>ConversationsManagerHost</c>, <c>AppDataSnapshot</c>) live in the app project
 /// this test project cannot reference, and are dropped by
 /// <c>App.DropActorScopedState()</c>, reached through the e2e actor-switch journey
-/// rather than from here. The cadence itself has no e2e pin either and cannot get
-/// one — it is skipped entirely under the E2E bridge (<c>App.xaml.cs</c>, the
-/// <c>E2eEnv.Bridge</c> guard at its spawn site), so tier_1 is the whole story for
-/// it.</para>
+/// rather than from here. The accumulation's pin is tier_1 alone: the cadence runs
+/// under the E2E bridge too (one per client and actor generation), and the tick
+/// witness <c>test_admin_dns_cert_auto_renew_tick.py</c> exercises its loop, but no
+/// e2e test counts live cadences.</para>
 ///
 /// <para>Every wait below is on a cancellation that has already happened, bounded
 /// by a generous ceiling — never a settle-sleep (<c>testing.md</c> convention 14).

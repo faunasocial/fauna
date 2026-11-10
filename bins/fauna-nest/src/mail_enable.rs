@@ -225,17 +225,14 @@ pub fn read_dav_direct_listener(data_dir: &Path) -> Option<bool> {
 }
 
 /// Whether a `host:port` listen address names a loopback interface
-/// (`127.0.0.0/8`, `[::1]`, `localhost`).
+/// (`127.0.0.0/8`, `[::1]`, a localhost name — the shared
+/// `fauna_core::resolve::is_loopback_host`).
 fn is_loopback_listen_addr(addr: &str) -> bool {
     if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
         return sock.ip().is_loopback();
     }
     let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    fauna_core::resolve::is_loopback_host(host)
 }
 
 /// [`read_dav_direct_listener`] over the data dir [`data_dir_from_db_path`]

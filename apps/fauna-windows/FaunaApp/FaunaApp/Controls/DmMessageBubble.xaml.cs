@@ -266,8 +266,12 @@ public sealed partial class DmMessageBubble : UserControl
     /// the badge's <c>ContentId</c>, where the queue row's own appeal opens.</summary>
     public Action<DmMessageView>? WithheldAppealRequested;
 
-    /// <summary>Raised when user taps an attachment image.</summary>
-    public Action<BitmapImage>? ImageClicked;
+    /// <summary>Raised when the user activates a <c>dm-attachment-image</c>: the decoded
+    /// picture, or <c>null</c> when the picture shows its declared placeholder (bytes
+    /// absent or undecodable), with the declared <c>{filename} ({size})</c> label. The
+    /// page opens <c>image-lightbox</c> on it either way — a placeholder opens as the
+    /// placeholder, never a dropped click (conversations.md § User actions).</summary>
+    public Action<BitmapImage?, string>? ImageClicked;
 
     /// <summary>The message's structured body document
     /// (<c>MessageSnapshot.document</c>, produced once by the manager — render-model.md
@@ -1092,15 +1096,34 @@ public sealed partial class DmMessageBubble : UserControl
     /// set, or <c>placeholder</c>. Residency needs no separate change key here: a reused
     /// bubble re-binds on every observer tick and this panel is cleared and rebuilt on
     /// each bind, so an evict's or a refill's <c>notify</c> repaints it. Mirrors linux's
-    /// <c>document.rs::build_attachment</c>.</summary>
+    /// <c>document.rs::build_attachment</c>.
+    ///
+    /// <para>The id rides a transparent <c>Button</c> wrapping the picture or its
+    /// placeholder — the feed <c>post-image</c>'s shape (PostCardTemplates.xaml), so UIA
+    /// Invoke reaches it and a keyboard user can too — whose Click raises
+    /// <see cref="ImageClicked"/>: the page opens <c>image-lightbox</c> on the painted
+    /// bitmap, or as the placeholder when there is none (conversations.md § User
+    /// actions).</para></summary>
     private FrameworkElement BuildImageAttachment(RenderBlock.Attachment att)
     {
         var grid = new Grid { HorizontalAlignment = HorizontalAlignment.Left };
         var declared = DeclaredAttachmentLabel(att);
         var bytes = AttachmentBytesResolver?.Invoke(att.blobHash);
+        var button = new Button
+        {
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(button, Ids.DmAttachmentImage);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, declared);
+        button.Click += (_, _) =>
+            ImageClicked?.Invoke(button.Content is Image { Source: BitmapImage bmp } ? bmp : null, declared);
         if (bytes is null || bytes.Length == 0)
         {
-            grid.Children.Add(BuildImagePlaceholder(declared));
+            ShowImagePlaceholder(button, declared);
         }
         else
         {
@@ -1111,15 +1134,10 @@ public sealed partial class DmMessageBubble : UserControl
                 MinWidth = 48,
                 Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform,
             };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(image, Ids.DmAttachmentImage);
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(image, declared);
-            image.Tapped += (_, _) =>
-            {
-                if (image.Source is BitmapImage bmp) ImageClicked?.Invoke(bmp);
-            };
-            grid.Children.Add(image);
-            _ = DecodeImageAsync(grid, image, bytes, declared);
+            button.Content = image;
+            _ = DecodeImageAsync(button, image, bytes, declared);
         }
+        grid.Children.Add(button);
 
         if (att.c2pa)
         {
@@ -1128,41 +1146,36 @@ public sealed partial class DmMessageBubble : UserControl
         return grid;
     }
 
-    /// <summary>Decode <paramref name="bytes"/> into the image's source and mark it
-    /// <c>painted</c>; bytes that do not decode swap the image for its declared
+    /// <summary>Decode <paramref name="bytes"/> into the image's source and mark the
+    /// picture <c>painted</c>; bytes that do not decode swap the image for its declared
     /// placeholder, the same as bytes that are absent.</summary>
     private static async System.Threading.Tasks.Task DecodeImageAsync(
-        Grid grid, Image image, byte[] bytes, string declared)
+        Button button, Image image, byte[] bytes, string declared)
     {
         var bmp = await BlobImageLoader.BitmapFromBytesAsync(bytes);
+        if (!ReferenceEquals(button.Content, image)) return;
         if (bmp is not null)
         {
             image.Source = bmp;
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(image, "painted");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(button, "painted");
             return;
         }
-        var at = grid.Children.IndexOf(image);
-        if (at < 0) return;
-        grid.Children.RemoveAt(at);
-        grid.Children.Insert(at, BuildImagePlaceholder(declared));
+        ShowImagePlaceholder(button, declared);
     }
 
     /// <summary>The declared placeholder a picture shows without its bytes: its
-    /// filename and size as text, under the <c>dm-attachment-image</c> id, answering
-    /// <c>state</c> = <c>placeholder</c>. AutomationId only — a TextBlock's UIA Name is
-    /// its text.</summary>
-    private static TextBlock BuildImagePlaceholder(string declared)
+    /// filename and size as text inside the <c>dm-attachment-image</c> button, which
+    /// answers <c>state</c> = <c>placeholder</c>.</summary>
+    private static void ShowImagePlaceholder(Button button, string declared)
     {
-        var placeholder = new TextBlock
+        button.Content = new TextBlock
         {
             Text = declared,
             FontSize = 12,
             Opacity = 0.7,
             TextWrapping = TextWrapping.Wrap,
         };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(placeholder, Ids.DmAttachmentImage);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(placeholder, "placeholder");
-        return placeholder;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(button, "placeholder");
     }
 
     /// <summary>"{filename} ({size})" — what every attachment declares whether or not its

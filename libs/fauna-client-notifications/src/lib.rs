@@ -29,6 +29,24 @@ pub use text::{
     notification_text_naming,
 };
 
+/// The one notification id every knock toast an app raises carries, on every
+/// platform arm that has a replace id (`behavior/notifications.md` § Localized
+/// body, the knock toast: "one notification id per app, never one per sender,
+/// so a flood of fresh keys replaces one toast instead of stacking"). One
+/// constant so the apps cannot drift to per-app values.
+pub const KNOCK_TOAST_REPLACE_ID: u32 = 1003;
+
+/// The knock toast an app raises for this push — `None` when a muted word
+/// withholds it (§ Muted words rule 6: the toast paints the row's relayed text
+/// and cannot be revealed), else the shared [`knock_push_text`]. The two
+/// questions every app's knock arm asks, in the order rule 6 fixes, as one.
+pub fn knock_toast(
+    muted: &[fauna_core::data::MutedKeyword],
+    push: &fauna_protocol::push_events::KnockPayload,
+) -> Option<NotificationText> {
+    (!knock_push_muted(muted, push)).then(|| knock_push_text(push))
+}
+
 /// Whether this row's dismiss is greyed at `now_micros` — a `security.notice`
 /// inside its retention window (`behavior/notifications.md` § Retention rule
 /// 2). The row-shaped twin of
@@ -158,6 +176,29 @@ mod tests {
     #[test]
     fn constructor_builds_over_generic_requester() {
         let _c = NotificationsClient::new(MockRequester);
+    }
+
+    /// Rule 6 then the shared text: a knock whose message carries a muted word
+    /// raises no toast; any other raises exactly the row's own sentence.
+    #[test]
+    fn a_knock_toast_is_withheld_by_a_muted_word_and_otherwise_says_the_row() {
+        use fauna_core::data::MutedKeyword;
+        use fauna_protocol::push_events::KnockPayload;
+
+        let push = |message: &str| KnockPayload {
+            sender_id: "ab".repeat(32),
+            summary: message.into(),
+            body: Some(
+                fauna_protocol::LocalizedText::new("notifications.row_knock")
+                    .with_arg("sender", "abababab")
+                    .with_arg("message", message),
+            ),
+            ..Default::default()
+        };
+        let muted = [MutedKeyword::new("crypto")];
+        assert_eq!(knock_toast(&muted, &push("free crypto here")), None);
+        let plain = push("hello there");
+        assert_eq!(knock_toast(&muted, &plain), Some(knock_push_text(&plain)));
     }
 
     // ── Wire-contract tests ─────────────────────────────────────────────────

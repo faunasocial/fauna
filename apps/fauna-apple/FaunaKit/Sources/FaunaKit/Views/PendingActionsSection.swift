@@ -48,18 +48,29 @@ public struct PendingActionsSection: View {
         }
     }
 
+    /// The row's sentence: the shared describer, handed the name the session's
+    /// folder roster (``FolderRoster``) gives the action's target — an automatic
+    /// prune's folder id; any other target simply names no folder, and no
+    /// roster yet paints the neutral sentence. Never a resolver of this app's
+    /// own (`settings.md` § Pending actions); android's `describeWithFolder`
+    /// twin.
+    static func describe(_ action: FfiPendingActionSummary) -> String {
+        describePendingActionWithFolder(
+            actionType: action.actionType,
+            target: action.target,
+            folderName: action.target.flatMap { FolderRoster.folderName(id: $0) }
+        )
+    }
+
     @ViewBuilder
     private func row(_ action: FfiPendingActionSummary, index: Int) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
-                // `describePendingAction` is the shared verb+target sentence
-                // renderer (`fauna_protocol::pending_actions`) — the target is
-                // only ever DESCRIBED here, never cached (the section's own
-                // iron-clad: the change has not applied yet).
-                automationText(
-                    Ids.pendingActionDescription,
-                    describePendingAction(actionType: action.actionType, target: action.target)
-                )
+                // `describe(_:)` is the shared verb+target sentence renderer
+                // (`fauna_protocol::pending_actions`) — the target is only ever
+                // DESCRIBED here, never cached (the section's own iron-clad:
+                // the change has not applied yet).
+                automationText(Ids.pendingActionDescription, Self.describe(action))
                 automationText(
                     Ids.pendingActionExecuteAfter,
                     L.settings.pendingActions.applies(time: formatUnixLocal(secs: action.executeAfter))
@@ -81,9 +92,7 @@ public struct PendingActionsSection: View {
         // alongside the row's own id (apple container-a11y rule).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.pendingActionItem)
-        .automationValue(Ids.pendingActionItem, text: {
-            describePendingAction(actionType: action.actionType, target: action.target)
-        })
+        .automationValue(Ids.pendingActionItem, text: { Self.describe(action) })
         .automationScope(Ids.pendingActionItem, index: index)
     }
 }

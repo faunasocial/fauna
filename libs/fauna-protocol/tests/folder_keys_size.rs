@@ -104,9 +104,19 @@ fn folder_keys_rows_seal_under_half_the_entry_cap() {
             left_at: Some(u64::MAX),
             updated_at: u64::MAX,
         }],
+        forked_seats: vec![fauna_core::data::ForkedFolderSeat {
+            channel_id: [0x79; 32],
+            mls_group_id: vec![0x7A; 256],
+            set_name: Some(long.clone()),
+            owner_handle: Some(long.clone()),
+            owner_actor_id: Some("a".repeat(64)),
+            access: Some("writer".into()),
+            forked_at: u64::MAX,
+            cleared_at: Some(u64::MAX),
+        }],
     };
     let rows = custody.rows().expect("rows");
-    assert_eq!(rows.len(), 1 + 1_000 + 1 + 1, "one row per generation");
+    assert_eq!(rows.len(), 1 + 1_000 + 1 + 1 + 1, "one row per generation");
     let mut widest_generation = 0;
     for (key, record) in &rows {
         let what = match record {
@@ -114,6 +124,7 @@ fn folder_keys_rows_seal_under_half_the_entry_cap() {
             FolderKeyRecord::Generation(_) => "generation",
             FolderKeyRecord::Removal(_) => "staging (4 KiB name, 16 KiB commit)",
             FolderKeyRecord::Foreign(_) => "foreign set (4 KiB url and name)",
+            FolderKeyRecord::Forked(_) => "forked seat (4 KiB name and owner)",
         };
         let sealed = assert_row_fits(what, key, record);
         if let FolderKeyRecord::Generation(_) = record {

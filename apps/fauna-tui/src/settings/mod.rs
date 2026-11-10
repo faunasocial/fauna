@@ -134,6 +134,7 @@ use fauna_i18n::strings::settings::recovery_kit as recovery_strings;
 use fauna_i18n::strings::tui_settings as tui_settings_strings;
 use fauna_nest_http::NestContentApi;
 use fauna_protocol::handle::validate_handle;
+use fauna_protocol::offline_intent::{Composed, OfflineIntentQueue};
 use fauna_protocol::web::PublishedPost;
 use fauna_sync_engine::preference_surfaces::refused_as_not_ready;
 use serde::{Deserialize, Serialize};
@@ -602,6 +603,16 @@ pub(crate) struct PendingActionRow {
     pub execute_after: i64,
 }
 
+/// The Settings Status sub-page's identity cell (`settings.md` § Layout & flow
+/// item 1): `handle` is the display twin's `handle@domain`, `tier` the bare
+/// cached tier name. Both from the account registry's server-data cache; both
+/// `None` while it holds no handle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdentityCell {
+    pub handle: Option<String>,
+    pub tier: Option<String>,
+}
+
 pub struct SettingsState {
     pub sub: SubPage,
     pub prefs: TuiPrefs,
@@ -692,6 +703,11 @@ pub struct SettingsState {
     /// The identity's actor-id hex — `account-actor-id` and what
     /// `account-actor-id-copy-btn` copies (from the session, no fetch).
     account_actor_id: String,
+    /// The identity cell beside `account-actor-id` — `settings-handle-label` +
+    /// `settings-tier-label` from the account registry's server-data cache
+    /// (`crate::session::session_identity_cell`); empty while the cache holds
+    /// no handle.
+    identity: IdentityCell,
     /// The user's current handle — rides in the identity-export QR payload so a
     /// scanned import pre-fills the handle step (`settings.md` § Identity export).
     handle: String,
@@ -1072,6 +1088,7 @@ impl Default for SettingsState {
             #[cfg(feature = "p2p-share")]
             share_plane: None,
             account_actor_id: String::new(),
+            identity: IdentityCell::default(),
             handle: String::new(),
             node_url: String::new(),
             secret_hex: SecretString::default(),
@@ -1862,9 +1879,17 @@ impl SettingsState {
     /// from memory** (`settings.md` § User actions: sign out "clears local
     /// credentials + state"). The client-local prefs survive (they are a
     /// rendering pref, not identity state). Called by `App::reset`.
+    /// Land the identity cell's values (`settings-handle-label` +
+    /// `settings-tier-label`) — seeded at session attach and re-read on every
+    /// `SelfAddressRefreshed`.
+    pub fn set_identity_cell(&mut self, identity: IdentityCell) {
+        self.identity = identity;
+    }
+
     pub fn clear_session(&mut self) {
         self.nest = None;
         self.account_actor_id.clear();
+        self.identity = IdentityCell::default();
         self.handle.clear();
         // Replace (not `.clear()`, which `SecretString` has no method for
         // anyway) — dropping the old `SecretString` here is what actually
@@ -3993,8 +4018,17 @@ pub enum Action {
     /// `wizard-back-button`, synchronous.
     WizardBack,
     /// `wizard-create-button` — `FolderWizardMachine::submit()` (network →
-    /// [`apply_local`]).
+    /// [`apply_local`]). On a Public wizard it only arms the declassify
+    /// confirm and sends nothing (`ReviewSnapshot.declassify_armed`).
     WizardCreate,
+    /// `wizard-audience-select` — `FolderWizardMachine::set_audience`,
+    /// synchronous (`private` | `public`; `ui/folders.md` § Audience and
+    /// website serving → *Born public*).
+    WizardSetAudience(String),
+    /// `folder-audience-public-confirm` painted by a Public wizard —
+    /// `FolderWizardMachine::confirm_public_create()`, the gesture that
+    /// creates the folder born public (network → [`apply_local`]).
+    WizardConfirmPublic,
     /// `folder-conflict-policy-select[row]` committed a new policy value
     /// (network → [`apply_local`]).
     SetFolderConflictPolicy { row: usize, policy: String },
@@ -4837,7 +4871,7 @@ impl Action {
             Action::CustodyMintOpen | Action::CustodyMintCancel => None,
             Action::CustodyMintSelectHost(_) => None,
             Action::CustodyOfferSelectTarget { .. } => None,
-            Action::WizardCreate => Some("fauna.folders.create"),
+            Action::WizardCreate | Action::WizardConfirmPublic => Some("fauna.folders.create"),
             Action::SaveFolderPaths
             | Action::SetFolderConflictPolicy { .. }
             | Action::SaveFolderNestPlace(_) => Some("fauna.folders.update"),
@@ -5054,6 +5088,7 @@ impl Action {
             | Action::SetFolderDestinationAttach { .. }
             | Action::WizardNext
             | Action::WizardBack
+            | Action::WizardSetAudience(_)
             | Action::OpenFolderShareForm
             | Action::OpenFolderFollowForm
             | Action::SetFolderShareAccess(_)
@@ -5503,8 +5538,16 @@ pub fn apply(state: &mut SettingsState, action: Action) {
             }
         }
         Action::WizardBack => {
+            // While the declassify confirm is armed, Back is its dismissal and
+            // stays on Review — the machine's rule (`FolderWizardMachine::back`).
             if let Some(wizard) = wizard_of(state) {
                 wizard.back();
+                resync_devices_snapshot(state);
+            }
+        }
+        Action::WizardSetAudience(audience) => {
+            if let Some(wizard) = wizard_of(state) {
+                wizard.set_audience(audience);
                 resync_devices_snapshot(state);
             }
         }
@@ -5626,6 +5669,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::ConfirmRenameDevice
         | Action::OpenFolders
         | Action::WizardCreate
+        | Action::WizardConfirmPublic
         | Action::SetFolderConflictPolicy { .. }
         | Action::SetFolderDefaultConflictPolicy(_)
         | Action::ToggleFolderWebdav(_)
@@ -6413,6 +6457,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 nest,
                 secret_hex,
                 phrase,
+                alerts: Arc::clone(&app.alerts),
             })
         }
         // The succession ceremony: re-point the account to a freshly minted
@@ -7438,12 +7483,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         // `wizard-create-button` — the only async wizard gesture; `Op::run`
         // closes the wizard + refreshes the list once `submit()` reaches `Done`.
-        Action::WizardCreate => {
+        Action::WizardCreate | Action::WizardConfirmPublic => {
             let wizard = wizard_of(&app.settings)?;
             let devices_machine = app.settings.devices.machine.clone()?;
             Some(Op::WizardCreate {
                 devices_machine,
                 wizard,
+                confirm_public: matches!(action, Action::WizardConfirmPublic),
             })
         }
         // `conflict-resolve-button[i]` — the review list's one-tap re-point,
@@ -8894,7 +8940,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::CreateFilter => {
             let form = encode_filter_form(app)?;
             let nest = app.settings.nest.clone()?;
-            Some(Op::CreateFilter { nest, form })
+            // The device's outbox: with no nest the create rests there and
+            // drains when the nest is back (`OfflineQueued`,
+            // account-offline-mutation.md § The offline-mutation contract).
+            let queue = app
+                .account_outbox
+                .clone()
+                .map(|outbox| outbox as Arc<dyn OfflineIntentQueue>);
+            Some(Op::CreateFilter { nest, queue, form })
         }
         Action::DeleteFilter(id) => {
             let nest = app.settings.nest.clone()?;
@@ -9730,6 +9783,10 @@ pub enum Op {
         nest: Arc<NestClient>,
         secret_hex: String,
         phrase: String,
+        /// The app-wide critical-alerts registry: the gesture settles the
+        /// pending-replacement banner from the nests' answers in the same
+        /// call (`critical-alerts.md` § Feeders, feeder #2).
+        alerts: Arc<fauna_client_alerts::CriticalAlerts>,
     },
     /// The review pass's *Keep* — one succession-ledger write, no wire op of its own.
     MemberReviewKeep {
@@ -9932,8 +9989,13 @@ pub enum Op {
     /// stale nav-edge fetch clobbering a fresher mutation is exactly the class
     /// of race we hit for events; refetching
     /// after every mutation instead of racing a background one sidesteps it).
+    ///
+    /// `queue` is the device's outbox ([`App::account_outbox`]): with no nest
+    /// the create is queued instead of sent into a dead connection
+    /// ([`Outcome::FilterQueued`]), and nothing is re-read.
     CreateFilter {
         nest: Arc<NestClient>,
+        queue: Option<Arc<dyn OfflineIntentQueue>>,
         form: FilterForm,
     },
     /// `fauna.email.filters.delete`, then `fauna.email.filters.list` — same
@@ -10363,6 +10425,9 @@ pub enum Op {
     WizardCreate {
         devices_machine: Arc<DevicesMachine>,
         wizard: Arc<FolderWizardMachine>,
+        /// The declassify confirm's answer (`confirm_public_create()`) rather
+        /// than Create (`submit()`, which on a Public wizard only arms it).
+        confirm_public: bool,
     },
     /// `DevicesMachine::delete_folder`, then re-snapshot — `folder-delete-confirm`.
     DeleteFolder {
@@ -11455,6 +11520,11 @@ pub enum Outcome {
     /// A filter create succeeded — the refreshed list, plus the add-form
     /// collapses and resets (linux's "reset + collapse for the next entry").
     FilterCreated(Vec<EmailFilter>),
+    /// A filter create was queued — no nest; it rests in the device's outbox
+    /// and drains when the nest is back. The form resets like a create, but
+    /// the list is left as it was: the rule has no server id until the drain,
+    /// and the nest's list after it is the word.
+    FilterQueued,
     /// A filter delete succeeded — the refreshed list (the add-form is left
     /// alone; deleting a row shouldn't collapse an in-progress create).
     ///
@@ -12033,18 +12103,22 @@ impl Op {
                 nest,
                 secret_hex,
                 phrase,
+                alerts,
             } => match recovery_identity(&secret_hex) {
                 Ok(identity) => {
                     let client = RecoveryClient::new(nest);
                     // The shared composition contests the window at the bound
-                    // nest and every linked nest, folds the status re-read into
-                    // this SAME outcome (testing.md convention 14) and passes
-                    // the account explicitly — a bare 64-hex phrase names none.
+                    // nest and every linked nest, settles the banner from the
+                    // answers, folds the status re-read into this SAME outcome
+                    // (testing.md convention 14) and passes the account
+                    // explicitly — a bare 64-hex phrase names none.
                     let folded = fauna_client_recovery::veto_with_status(
                         &client,
                         identity.actor_id(),
                         &phrase,
                         &NativeLinkedNestDial::new(&identity),
+                        &alerts,
+                        fauna_core::data::Timestamp::now_secs(),
                     )
                     .await
                     .map(|(cancelled, status)| (cancelled, Box::new(status)));
@@ -12453,10 +12527,11 @@ impl Op {
                     Err(e) => Outcome::SpamPrefsFailed(format!("{e}")),
                 }
             }
-            Op::CreateFilter { nest, form } => {
+            Op::CreateFilter { nest, queue, form } => {
                 let email = EmailClient::new(nest);
                 match email
-                    .filters_create(
+                    .filters_create_or_queue(
+                        queue.as_deref(),
                         form.name,
                         vec![form.rule],
                         "all",
@@ -12466,7 +12541,8 @@ impl Op {
                     )
                     .await
                 {
-                    Ok(_id) => match email.filters_list().await {
+                    Ok(Composed::Queued(_)) => Outcome::FilterQueued,
+                    Ok(Composed::Sent(_id)) => match email.filters_list().await {
                         Ok(filters) => Outcome::FilterCreated(filters),
                         Err(e) => Outcome::FilterMutationFailed(format!(
                             "filter created but list refresh failed: {e}"
@@ -13197,8 +13273,13 @@ impl Op {
             Op::WizardCreate {
                 devices_machine,
                 wizard,
+                confirm_public,
             } => {
-                let step = wizard.submit().await;
+                let step = if confirm_public {
+                    wizard.confirm_public_create().await
+                } else {
+                    wizard.submit().await
+                };
                 if step == FolderWizardStep::Done {
                     devices_machine.close_wizard();
                     devices_machine.refresh().await;
@@ -15634,6 +15715,10 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         }
         Outcome::FilterCreated(filters) => {
             app.settings.privacy.filters = filters;
+            app.settings.privacy.reset_form();
+            app.errors.remove(&Page::Settings);
+        }
+        Outcome::FilterQueued => {
             app.settings.privacy.reset_form();
             app.errors.remove(&Page::Settings);
         }
@@ -22442,6 +22527,63 @@ mod tests {
         assert!(app.errors.contains_key(&Page::Settings));
     }
 
+    // ── The `OfflineQueued` composer (account-offline-mutation.md) ──────────
+
+    fn run_filter_create(word: &'static str) -> (Outcome, Vec<&'static str>) {
+        let queue = Arc::new(fauna_client_testkit::RecordingQueue::new(word));
+        let op = Op::CreateFilter {
+            nest: nest_for_test(),
+            queue: Some(queue.clone() as Arc<dyn OfflineIntentQueue>),
+            form: FilterForm {
+                name: "Move newsletters".into(),
+                rule: EmailFilterRule::SenderDomain {
+                    domain: "news.example".into(),
+                },
+                action: EmailFilterAction::Allow,
+                priority: 0,
+                continue_on_match: false,
+            },
+        };
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(op.run());
+        let kinds = queue.queued().into_iter().map(|q| q.0).collect();
+        (outcome, kinds)
+    }
+
+    /// With no nest, a filter create rests in the outbox (not sent into the
+    /// dead connection); the form resets and the list is left as it was — the
+    /// rule has no server id until the drain.
+    #[test]
+    fn a_filter_create_with_no_nest_is_queued_and_lists_nothing() {
+        let (outcome, kinds) = run_filter_create("disconnected");
+        assert!(matches!(outcome, Outcome::FilterQueued));
+        assert_eq!(kinds, vec!["fauna.email.filters.create"]);
+
+        let mut app = crate::app::tests::authed_app();
+        app.settings.privacy.filters =
+            vec![sample_filter(11, "Block spam", EmailFilterAction::Discard)];
+        app.settings.privacy.show_add_form = true;
+        app.settings.privacy.filter_name_input = "Move newsletters".into();
+        app.errors.insert(Page::Settings, "stale".into());
+        apply_outcome(&mut app, outcome);
+        assert_eq!(app.settings.privacy.filters.len(), 1, "nothing listed");
+        assert!(!app.settings.privacy.show_add_form, "the form resets");
+        assert!(app.settings.privacy.filter_name_input.is_empty());
+        assert!(!app.errors.contains_key(&Page::Settings));
+    }
+
+    /// Connected, the create is sent as before (to this dummy nest it fails on
+    /// the transport) and nothing is queued.
+    #[test]
+    fn a_filter_create_with_the_nest_connected_is_sent_not_queued() {
+        let (outcome, kinds) = run_filter_create("connected");
+        assert!(matches!(outcome, Outcome::FilterMutationFailed(_)));
+        assert!(kinds.is_empty());
+    }
+
     #[test]
     fn create_filter_surfaces_an_encode_error_and_makes_no_call() {
         let mut app = crate::app::tests::authed_app();
@@ -24975,6 +25117,8 @@ mod tests {
             Action::WizardNext,
             Action::WizardBack,
             Action::WizardCreate,
+            Action::WizardSetAudience(s()),
+            Action::WizardConfirmPublic,
             Action::SetFolderConflictPolicy {
                 row: 0,
                 policy: s(),
@@ -25492,7 +25636,10 @@ mod tests {
     // the same commit.
     // 277 → 278 on 2026-11-01: `UseRetainedVersion` (a group set's review row),
     // already in every_action() since 2026-10-31 without this count moving.
-    const ACTION_COUNT: usize = 278;
+    // 278 → 280 on 2026-11-08: `WizardSetAudience` (`wizard-audience-select`)
+    // and `WizardConfirmPublic` (the wizard's `folder-audience-public-confirm`),
+    // added to every_action() in the same commit.
+    const ACTION_COUNT: usize = 280;
 
     #[test]
     fn every_settings_action_is_in_the_corpus() {
@@ -25809,6 +25956,7 @@ mod tests {
             "SetFolderNestSnapshots",
             "WizardNext",
             "WizardBack",
+            "WizardSetAudience",
             "OpenFolderShareForm",
             // Arms the page-level follow form — local state, like its share
             // sibling above; the network call is ConfirmFolderFollow.

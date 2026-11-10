@@ -209,7 +209,7 @@ def test_client_enabled_mail_round_trips_through_a_normal_mua(
     # `snap.enabled` stays false, the status indicator never leaves "Mail is
     # disabled", and a page error surfaces. A healthy enable flips the status to
     # "All up to date" with no error.
-    assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (
+    assert app.mail_settings.wait_for_enabled_status(timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "the mail-settings status indicator must report mail enabled after the "
         f"toggle; got status={app.mail_settings.status_text()!r}, "
         f"error={app.mail_settings.page_error_text(timeout=2.0)!r}"

@@ -47,6 +47,7 @@ import pytest
 from helpers.budgets import APP_RELAUNCH_S, ORCHESTRATION_STEP_S, UI_SETTLE_S
 from helpers.provisioning_drive import (
     HANDLE_DOMAIN,
+    assert_one_server_order,
     assert_records_less_almost_ready,
     overall,
     point_providers_at,
@@ -111,6 +112,11 @@ def test_a_crash_during_online_resumes_on_the_records_less_surface(
 
     assert_records_less_almost_ready(app, after="after a crash during Online,")
 
+    # The relaunch carries on with the box the crashed run ordered — the
+    # surface polls and claims it at the slot's address — and never orders
+    # another (onboarding-provisioning.md § 6, the one-box resume).
+    assert_one_server_order(fake_cloud, after="after a crash during Online and a relaunch,")
+
     # The surface is actionable, not merely painted: recheck is what will claim
     # the box once it answers, and it must be live at rest.
     #
@@ -171,6 +177,11 @@ def test_create_server_failing_after_the_slot_write_still_resumes(app, fake_clou
 
     assert_records_less_almost_ready(
         app, after="after `create_server` failed with the slot already written,"
+    )
+    assert fake_cloud.hetzner_cloud.server_orders == [], (
+        "the provider failed every order, so no box exists — the resumed "
+        "surface describes a machine that was ordered and never came: "
+        f"{fake_cloud.hetzner_cloud.server_orders!r}"
     )
 
 

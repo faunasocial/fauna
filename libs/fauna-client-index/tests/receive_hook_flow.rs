@@ -99,6 +99,7 @@ fn record(uid: u32, message_id: &str, subject: &str, body: &str) -> InboundMailR
         rfc5322: raw.into_bytes(),
         mailbox: fauna_conversations::backend::MailFeed::Inbox,
         suppress_from_view: false,
+        spam: Default::default(),
         has_seen_flag: false,
         warmup_hold: None,
     }

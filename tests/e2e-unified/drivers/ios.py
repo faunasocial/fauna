@@ -24,6 +24,10 @@ from .local_launch import (
 from .port_util import find_free_port
 
 BUNDLE_ID = "social.fauna.fauna"
+#: The Fauna Kids app's own record (the `Fauna-Kids-iOS` target; a Kids-Category
+#: listing cannot share the main app's identifier). `--app ios-kids` installs and
+#: launches the kids simulator build under it (`IosKidsInProcessDriver`).
+KIDS_BUNDLE_ID = "social.fauna.faunakids"
 
 # Every `xcrun simctl` call in the launch path is BOUNDED — e2e-conventions.md
 # convention 9's "bounded always, unbounded never". These were unbounded until
@@ -199,6 +203,12 @@ class IosInProcessDriver(InProcessAgentDriver):
     """
 
     BUNDLE_ID = BUNDLE_ID
+    #: The app-axis value this driver launches, and the `just` recipe that stages
+    #: its FFI — named in the artifact-missing hint. The kids subclass overrides
+    #: both with the bundle id; everything else (the venue, the simulator, the
+    #: executable name) is ios's.
+    APP_NAME = "ios"
+    FFI_RECIPE = "apple-ffi-test-sim"
 
     # Same real POST /element/scroll-into-view as macOS — the route lives in the
     # SHARED FaunaKit automation server, so both apple apps gained it in one
@@ -845,9 +855,9 @@ class IosInProcessDriver(InProcessAgentDriver):
             )
         if not Path(app_path).exists():
             raise AppArtifactMissing(
-                "ios",
+                self.APP_NAME,
                 f"iOS app bundle not found at {app_path}.\n"
-                f"Run 'just apple-ffi-test-sim' then rebuild via the iOS e2e setup."
+                f"Run 'just {self.FFI_RECIPE}' then rebuild via the iOS e2e setup."
             )
 
         port = find_free_port()
@@ -1128,3 +1138,17 @@ class IosInProcessDriver(InProcessAgentDriver):
     def dismiss_system_dialog(self) -> None:
         """No system dialogs under the in-process driver (no XCUITest)."""
         pass
+
+
+class IosKidsInProcessDriver(IosInProcessDriver):
+    """`--app ios-kids`: the ios driver launching the Fauna Kids build on ios's
+    venue (`feature-catalog.md` § Cell semantics). The one difference is the
+    identity — the bundle id every `simctl` call, the TCC row and the launch
+    report name, and the artifact conftest built (`_build_ios_app(kids=True)`:
+    the SPM app compiled `-D FAUNA_KIDS` over `just apple-ffi-kids-test-sim`).
+    The executable keeps ios's name (`FaunaiOS`), so the crash-report prefix and
+    `ps`'s comm are unchanged."""
+
+    BUNDLE_ID = KIDS_BUNDLE_ID
+    APP_NAME = "ios-kids"
+    FFI_RECIPE = "apple-ffi-kids-test-sim"

@@ -18,7 +18,7 @@ to expect always follow the one actually served.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at dc4b94e0f1.
+Stamped 2026-11-07 at 6a0ded1015.
 
 1. [nest] A nest with a real name that cannot yet get a public certificate still serves encrypted connections at once — `docs/goal/architecture/nest/tls-certificates.md` § A. The self-signed floor
    - `tests/e2e-unified/tests/platform/docker/test_nest.py::test_real_hostname_serves_floor_https_under_acme`
@@ -54,6 +54,8 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/platform/docker/test_acme_http01_pebble_issuance.py::test_plain_http_on_each_served_name_redirects_to_https_on_that_name`
 14. [nest] A nest with no name at all also serves an encrypted connection from its first second, on a certificate it made itself — `docs/goal/architecture/nest/tls-certificates.md` § A. The self-signed floor
    - `tests/e2e-unified/tests/platform/docker/test_domainless_floor_tls.py::test_domainless_nest_serves_tls_on_its_own_certificate`
+15. [nest] Once the domain's trusted certificate is live, the certificate for the nest's bare address keeps being served until it expires, so opening the nest by its address keeps working while the name spreads — `docs/goal/architecture/nest/tls-certificates.md` § B-IP. The IP bridge cert
+   - `tests/e2e-unified/tests/platform/docker/test_acme_ip_bridge_host_published.py::test_the_ip_bridge_keeps_serving_once_the_domain_certificate_is_live_and_across_a_restart`
 
 ## Status
 
@@ -67,6 +69,8 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | ios | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | android | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android-kids | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| ios-kids | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -90,4 +94,5 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 12 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_add_domain_acme_serves_mail.py::test_a_self_signed_stopgap_heals_to_trusted_and_reaches_mail_and_calendar_without_restart` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/platform/docker/test_acme_http01_pebble_issuance.py::test_plain_http_on_each_served_name_redirects_to_https_on_that_name` | nest (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_floor_tls.py::test_domainless_nest_serves_tls_on_its_own_certificate` | nest (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/platform/docker/test_acme_ip_bridge_host_published.py::test_the_ip_bridge_keeps_serving_once_the_domain_certificate_is_live_and_across_a_restart` | nest (linux): passed |
 <!-- features-render:end -->

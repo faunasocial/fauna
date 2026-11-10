@@ -354,7 +354,53 @@ bridge yet"). Six rulings:
   resolve behind the Devices page's remove button would park behind them.
   That removal is the remedy the refusal names. So the pass returns right
   after the enrollment step, and the next pass retries the register first
-  (`account_runtime::tests::a_device_cap_refusal_ends_the_pass_so_a_removal_is_served_at_once`). **The
+  (`account_runtime::tests::a_device_cap_refusal_ends_the_pass_so_a_removal_is_served_at_once`).
+  **A cap-refused pass lists the fleet scope over the app session before it
+  returns (ruled 2026-11-09; unbuilt — § Implementation
+  status today).** Measured on dev.fauna.build on 2026-11-09: the admin
+  account's three slots were all dead instances' rows, two carrying a
+  principal, and the fresh machine's remove button refused each of those on
+  every click (`NotAMember`) — the removal's facts live in the fleet scope,
+  which a machine that never enrolled has never listed, so its fleet view
+  verifies no member and `fleet_removal::resolve_removal_targets` can accept
+  no claim; only the one principal-less row let it in. An account whose cap
+  is filled by principal-carrying rows of dead devices was recoverable
+  off-box alone, which `nest/common.md` § Client-state recoverability names a
+  bug. The rule: right after the enrollment step answers
+  `DeviceLimitExceeded`, in the full pass and in the seed pass alike, the
+  pass runs one full listing of `state-fleet` through a pull-only plane over
+  the app-session requester (`FleetWriter::session_rpc`) against the bound
+  nest — the rows applied as any walk's are, opened and verified, the unkeyed
+  set and the `listed` fact recorded as any full listing records them, the
+  runtime's `FirstListings` told, so a gated read waiting at the Devices page
+  wakes at once; no watermark banked, no serve coordinate stamped, no walker
+  mark, nothing published — and only then returns. Why that connection: the
+  nest's state feed authorizes on the connection actor alone
+  (`sync_handlers::serve_account_state_feed`), the linked-nest leg already
+  lists a nest this way with no device principal
+  ([`account-sync-plane.md`](account-sync-plane.md) § The bind leg, ruling
+  4), and the session is the one connection a cap-refused machine has — the
+  one that listed the roster and deleted the row. The fleet scope only: the
+  removal's facts live there, and nothing a machine that cannot publish may
+  do needs the delegable rows; the data path's own first listing, after
+  enrollment, walks both scopes and marks the gate as before. What it
+  serves: the row gesture now resolves by clause (4)'s rule unchanged, and
+  the member door reads the same facts and is reachable too
+  ([`fleet-scope-reclamation.md`](fleet-scope-reclamation.md) § *Fleet-scope
+  reclamation*, clause (4) → *A removal from a cap-refused device* owns what
+  resolves and the bounds). The `Removed` row and its closures are journaled
+  locally at the settle and ship on the first full pass after the slot frees
+  and the register lands, as every fleet write ships. Refused: a
+  nest-row-only deletion that writes no `Removed` row — it frees the cap and
+  leaves the dead device a verified member and wrap target for ever, the
+  leak clause (4) exists to forbid — and a publish over the session, which
+  would put a second publisher on one ordered journal. **The unkeyed hold
+  never held the removal:** `removal_facts` reads merged device-set rows and
+  crosses no read gate, which is why clause (5) could name the removal from
+  the held device as the hold's remedy; the 2026-11-09 drive never clicked
+  after its machine enrolled, so "refused under the hold too" was an
+  inference, and the build pins the enrolled case green beside the cap case
+  red-first. **The
   barrier.** `start()` returns at assembly and the prologue runs after it,
   and a local command's round trip proves nothing about that pass; a
   caller that must sequence behind the prologue awaits
@@ -457,6 +503,8 @@ bridge yet"). Six rulings:
   (§ Workstreams carries the same correction).
 
 ## Implementation status today
+
+**RULED 2026-11-09 — BUILT 2026-11-09 — § The client-side lifecycle → the pump bullet, *A cap-refused pass lists the fleet scope over the app session*.** Both `DeviceLimitExceeded` returns of `account_driver/pass.rs` (the full pass and the seed pass) now run `cap_refused_fleet_listing` first: one full reconcile of `state-fleet` through `AccountStatePlane::new_session_listing` over `FleetWriter::session_rpc`, handed the generation custody and the runtime's `FirstListings` — a pull-only plane whose reconcile alone of the pull-only planes records the scope listed and its unkeyed set (`listing_ran`), with no watermark, serve coordinate, walker mark or publish — reported as `PumpReport::cap_refused_fleet_listing`. Measured before it on dev.fauna.build 2026-11-09: `AccountStoreHandle::resolve_fleet_removal` answered `NotAMember` for every principal-carrying roster row, and only a principal-less row let the machine in. Pins in `fauna-sync-engine`'s `account_runtime::tests`: `a_cap_refused_machine_removes_a_dead_devices_principal_carrying_row` (red before the listing; a sibling enrolled over the fake nest and stopped without a sign-out, the cap then set: the fresh device's cap-refused pass lists `state-fleet` once and no other scope, resolves the dead row to the sibling, settles it, and the `Removed` row publishes on the pass after the slot frees), `a_device_cap_refusal_ends_the_pass_so_a_removal_is_served_at_once` (re-shaped: its stall holds the delegable walk, which never runs on a cap-refused pass) and `a_device_under_the_unkeyed_hold_removes_the_sibling_whose_rows_it_cannot_open` (clause (5)'s remedy, green). The tui journey is `test_device_cap_refusal.py::test_a_capped_account_removes_a_dead_enrolled_seat_holding_its_slot`, its slot held by a real enrolled seat stopped without a sign-out. The nest changes nothing: `serve_account_state_feed` already admits the account's session.
 
 **RULED 2026-11-02 — BUILT 2026-11-02 — § The client-side lifecycle → the pump bullet's *Commands and passes*, the awaited publish's bound.** A `Cmd::PublishOwn` arriving while a pass is driven is parked in `drive_measured`'s own lot as `Parked::Publish` (`account_driver/drive.rs`), beside the tip-sealed puts: the bound arm (`DriverConfig::tip_wait`, `FIRST_PASS_WAIT` on every host; tests shrink it) arms for it, breaths are not surfaced for it (nothing to re-ask), and at the bound `refuse_at_bound` answers it `ScopeNotReady { reason: NotReadyReason::PublishPending }` (`needs_nest()` true, Display `LEDGER_NOT_READY`) through `Cmd::refuse`'s `PublishOwn` arm — the reply is a string, and the mail seam's `StoreError::Save` of it is the not-ready class `is_not_ready` recognises — and logs the refusal; the park is logged as a put's is. A publish parked when the run ends joins `Drive::parked` and is served after the pass as before. On the mail side, `rotation::first_enable` puts the credential row before the publish it awaits, and both it and `start_rotation` set the page snapshot from the rows before awaiting it, so a refused publish ends the dispatch with the banner showing at once; `enable_mail` asks the sentinel before the email flag, so a first enable's own standing sentinel gets the resume hint. **Proofs (tier_1):** `fauna-sync-engine` `account_runtime::tests::an_awaited_publish_parked_past_the_bound_is_refused_not_ready` — a pass held at its first walk, bound shrunk to 300 ms: `publish_mail` answers `LEDGER_NOT_READY` while the pass is still held, nothing sent, and is served between passes once it ends (red before: it waited on the held pass); `fauna-client-mail-settings`'s `rotation_resume.rs::a_first_enable_whose_publish_is_refused_reads_pending_and_resumes` — the fake store refuses the publish: the pending enable stands with its credential, nothing on the nest, the banner and "rotation in progress" at once, a second Enable refused with the resume hint, Resume to a working mailbox (red before: the stop at the publish left no credential row in custody, so the resume had nothing to finish, and the second Enable answered "already enabled").
 

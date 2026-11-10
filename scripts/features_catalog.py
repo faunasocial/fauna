@@ -27,9 +27,28 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 FEATURES = REPO / "docs" / "features"
 
-#: Column order, fixed here so the matrix, the JSON and every page's status block
-#: agree. It is the order the seed matrix used.
-APPS = ("web", "linux", "windows", "macos", "ios", "android", "tui")
+#: The seven app columns — the apps, each its own column and its own ledger file, in
+#: the order the seed matrix used. Also the only app MARKERS a test may carry: a kids
+#: column is never a mark (`applicable`).
+APP_COLUMNS = ("web", "linux", "windows", "macos", "ios", "android", "tui")
+
+#: The kids channels and the app each is a store identity of (§ Cell semantics, *A
+#: second store identity of an app … is a COLUMN*): the android and ios apps built
+#: under the `kids` flavor, each a column of its own with its own ledger file and
+#: app-axis value (`--app android-kids`). A kids column's applicable set is its
+#: parent's marked witnesses plus the unmarked ones, and it runs where its parent runs.
+COLUMN_PARENT = {"android-kids": "android", "ios-kids": "ios"}
+
+#: Every column, fixed here so the matrix, the JSON and every page's status block
+#: agree: the seven, then the kids channels (`matrix.json` names each one's parent,
+#: so a reader can group them).
+APPS = APP_COLUMNS + tuple(COLUMN_PARENT)
+
+
+def parent_app(column: str) -> str:
+    """The app a column is a build of — itself for the seven, the parent for a kids
+    channel. What a column's app marks, platforms and source tree are read as."""
+    return COLUMN_PARENT.get(column, column)
 
 #: `nest.json` is a ledger file like an app's, but never a column (§ The two surfaces).
 NEST = "nest"
@@ -44,9 +63,14 @@ def applicable(node_id: str, app: str, app_marks: dict | None = None) -> bool:
     whichever apps the run selected, so it can speak for any column. An ABSENT entry
     is the unmarked case, not a special one: a caller with no marker knowledge asks
     the same question the tree answers for an unmarked test, and gets the same yes.
+
+    A kids column is read through its parent (`parent_app`): a test marked for the
+    parent can drive the kids build, which is that app's UI with planes removed, and a
+    witness of an excised plane is kept off the kids column by the page's absence,
+    never by a mark.
     """
     marks = (app_marks or {}).get(node_id)
-    return not marks or app in marks
+    return not marks or parent_app(app) in marks
 
 
 def scan_app_marks(repo: Path = REPO) -> dict:
@@ -225,6 +249,11 @@ class Page:
     #: `ui-pages`, optional): what lets a ui.yaml edit name the pages it touches
     #: (the touched-set selector, delayed-testing.md § What a session runs).
     ui_pages: tuple = ()
+    #: The kids-column absences carried from the parent (`_inherit_kids_absences`) —
+    #: `android-kids` for a page-level one, `android-kids (outcome N)` per outcome.
+    #: Present in `absences` / `outcome_absences` like any other; kept apart so the
+    #: contract gate asks no second record for what the parent's move already carries.
+    inherited_absences: frozenset = frozenset()
 
     def absent_from(self, app: str, outcome: Outcome) -> bool:
         """Is `app` excused from this one outcome by a per-outcome absence?"""
@@ -261,8 +290,8 @@ class Page:
 
         A blocked `[app]` outcome is one no test that can speak for this column
         witnesses — a literal `(none)`, or citations every one of which is marked for
-        other apps. A blocked `[nest]` outcome is `(none)`, and blocks all seven
-        columns alike, because a nest record is never narrowed. An outcome this
+        other apps. A blocked `[nest]` outcome is `(none)`, and blocks every column
+        alike, because a nest record is never narrowed. An outcome this
         column is declared absent from never blocks it: it is not the column's to owe.
         """
         return [o for o in self.outcomes
@@ -340,7 +369,7 @@ class Blocker:
 
         A `[nest]` outcome is never `owed_here`: a nest record counts for every column
         (§ The two surfaces), so it is never narrowed and never lifted from one column
-        to another — an unwitnessed one blocks all seven alike and belongs to whoever
+        to another — an unwitnessed one blocks every column alike and belongs to whoever
         owns the feature, exactly as a literal `(none)` does.
         """
         return bool(self.witnesses)
@@ -624,13 +653,72 @@ def parse_page(path: Path) -> Page:
     if numbers != list(range(1, len(numbers) + 1)):
         raise CatalogError(f"{path.name}: contract outcomes are not numbered 1..n: {numbers}")
 
+    outcome_absences = _check_outcome_absences(scoped, absences, outcomes, path)
+    inherited = _inherit_kids_absences(
+        absences, outcome_absences, path, _parse_kids_owed(front.get("kids-owed"), path))
     return Page(
         path=path, slug=slug, title=front["title"], section=front["section"].lower(),
         goal=front["goal"], guide=front["guide"], absences=absences,
         what="\n".join(sections["What a user gets"][1]).strip(),
         stamp_date=stamp_date, stamp_commit=stamp_commit, outcomes=outcomes,
-        outcome_absences=_check_outcome_absences(scoped, absences, outcomes, path),
-        ui_pages=_parse_ui_pages(front.get("ui-pages"), path))
+        outcome_absences=outcome_absences,
+        ui_pages=_parse_ui_pages(front.get("ui-pages"), path),
+        inherited_absences=inherited)
+
+
+def _parse_kids_owed(raw, path: Path) -> frozenset:
+    """Front-matter `kids-owed: android-kids, ios-kids` -> the kids columns the page is
+    OWED on although the parent column is absent (§ Cell semantics: the `kids-app` page,
+    whose outcomes are false on every main build by design and true on the kids build)."""
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, str):
+        raise CatalogError(f"{path.name}: `kids-owed` is a comma-separated list of kids "
+                           "columns, not a map")
+    owed = frozenset(k.strip() for k in raw.split(","))
+    bad = sorted(owed - set(COLUMN_PARENT))
+    if bad:
+        raise CatalogError(f"{path.name}: `kids-owed` names {bad}, which are not kids "
+                           f"columns ({', '.join(COLUMN_PARENT)})")
+    return owed
+
+
+def _inherit_kids_absences(absences: dict, outcome_absences: dict, path: Path,
+                           owed: frozenset = frozenset()) -> frozenset:
+    """Carry each parent's absences onto its kids column, IN PLACE, and return the kids
+    keys that came by inheritance (§ Cell semantics, *A second store identity …*: the
+    kids build is its parent's UI with planes removed, so what the parent lacks by
+    design the kids build lacks too, under the parent's citation and approval). A
+    page-level parent absence makes the kids column absent from the page; a parent's
+    per-outcome absence excuses the kids column from that outcome. A kids column's own
+    entries stand beside them (its own D-K5 absences); a kids per-outcome entry on a
+    page its parent is absent from is refused — the column is absent with it."""
+    inherited = set()
+    for kids, parent in COLUMN_PARENT.items():
+        if kids in owed:
+            if kids in absences or kids in outcome_absences:
+                raise CatalogError(
+                    f"{path.name}: `kids-owed` names {kids}, which `absences` also excuses")
+            continue
+        if parent in absences and kids not in absences:
+            if kids in outcome_absences:
+                raise CatalogError(
+                    f"{path.name}: `absences` excuses {kids} from some outcomes, but its "
+                    f"parent {parent} is absent from the whole page, and {kids} with it "
+                    "(feature-catalog.md § Cell semantics)")
+            absences[kids] = absences[parent]
+            inherited.add(kids)
+            continue
+        if kids in absences:
+            continue
+        for number, citation in (outcome_absences.get(parent) or {}).items():
+            own = outcome_absences.setdefault(kids, {})
+            if number not in own:
+                own[number] = citation
+                inherited.add(f"{kids} (outcome {number})")
+        if kids in outcome_absences:
+            outcome_absences[kids] = dict(sorted(outcome_absences[kids].items()))
+    return frozenset(inherited)
 
 
 def _parse_ui_pages(raw, path: Path) -> tuple:
@@ -679,7 +767,7 @@ def ui_page_ranges(text: str) -> dict:
 
 #: A per-outcome `absences` key: `web (outcome 4)`, `ios (outcomes 4, 5)`.
 _OUTCOME_ABSENCE_RE = re.compile(
-    r"^(?P<app>[a-z]+)\s+\(outcomes?\s+(?P<nums>\d+(?:\s*,\s*\d+)*)\)$")
+    r"^(?P<app>[a-z]+(?:-[a-z]+)*)\s+\(outcomes?\s+(?P<nums>\d+(?:\s*,\s*\d+)*)\)$")
 
 
 def _split_absences(raw: dict, path: Path) -> tuple:
@@ -698,7 +786,7 @@ def _split_absences(raw: dict, path: Path) -> tuple:
             continue
         match = _OUTCOME_ABSENCE_RE.match(key)
         if match is None:
-            if re.fullmatch(r"[a-z]+", key):
+            if re.fullmatch(r"[a-z]+(?:-[a-z]+)*", key):
                 raise CatalogError(f"{path.name}: `absences` names unknown app(s): {key}")
             raise CatalogError(
                 f"{path.name}: unreadable `absences` key {key!r} — an entry is `<app>` "
@@ -880,6 +968,13 @@ def load_surface_registry(path: Path = SURFACES) -> dict:
         for text in ("detail", "tracked"):
             if not isinstance(entry.get(text, ""), str):
                 raise CatalogError(f"{where}: {text} is a string")
+        if kind == "harness":
+            # A harness surface is the e2e DRIVER's, and a kids column is driven by its
+            # parent's driver under the kids identity (§ Cell semantics), so it has
+            # what the parent's driver has. A product surface is the app's, which the
+            # kids build may excise: listed for a kids column by hand, or not at all.
+            built = list(built) + [kids for kids, parent in COLUMN_PARENT.items()
+                                   if parent in built and kids not in built]
         registry[key] = Surface(key=key, kind=kind, built=frozenset(built),
                                 detail=entry.get("detail", ""),
                                 tracked=entry.get("tracked", ""))
@@ -1048,9 +1143,11 @@ _APP_DIRS = {"macos": "apps/fauna-apple/", "ios": "apps/fauna-apple/"}
 
 
 def app_tree(app: str | None) -> str | None:
-    """`apps/<its dir>/` for an app column, `None` for the nest or no app."""
+    """`apps/<its dir>/` for an app column, `None` for the nest or no app. A kids
+    column's tree is its parent's: the flavor is built from the same project."""
     if not app or app == NEST:
         return None
+    app = parent_app(app)
     return _APP_DIRS.get(app, f"apps/fauna-{app}/")
 
 
@@ -1155,6 +1252,23 @@ def seat_key_apps(modes: tuple, platform: str | None) -> frozenset:
     return frozenset(table.apps_for_seat_set(list(modes), sys_platform, under_test=True))
 
 
+def token_columns(tokens: tuple) -> set:
+    """The columns a directory key's parametrization names. The key's tokens are its
+    ids split on `-`, so a kids channel arrives as two (`android`, `kids`): that pair
+    names the kids column and never its parent's, whose own record it is not."""
+    out, i = set(), 0
+    while i < len(tokens):
+        pair = "-".join(tokens[i:i + 2])
+        if pair in COLUMN_PARENT:
+            out.add(pair)
+            i += 2
+            continue
+        if tokens[i] in APP_COLUMNS:
+            out.add(tokens[i])
+        i += 1
+    return out
+
+
 def directory_records_for(candidates: list, app: str, nest_mode: str | None,
                           platform: str | None = None) -> list:
     """The directory records answering ONE ledger record of `app` (or the nest file)
@@ -1171,15 +1285,13 @@ def directory_records_for(candidates: list, app: str, nest_mode: str | None,
     keys stamped with the record's own mode (the default mode is unstamped); a
     `docker` record with none is answered by a lone unstamped key, since an
     own-artifact test records `docker` under any key — never the reverse."""
-    apps = set(APPS)
-
     def key_apps(tokens: tuple) -> set:
         modes = _seat_modes_of(tokens)
-        return set(tokens) & apps if modes is None else set(seat_key_apps(modes, platform))
+        return token_columns(tokens) if modes is None else set(seat_key_apps(modes, platform))
 
     if app == NEST:
         named = [(t, r) for t, r in candidates
-                 if _seat_modes_of(t) is None and not set(t) & apps]
+                 if _seat_modes_of(t) is None and not token_columns(t)]
     else:
         named = [(t, r) for t, r in candidates if app in key_apps(t)]
         if not named and not any(key_apps(t) or _seat_modes_of(t) is not None
@@ -1491,6 +1603,8 @@ COLUMN_PLATFORMS = {
     "ios": frozenset({"macos"}),
     "windows": frozenset({"windows"}),
 }
+#: A kids channel runs where its parent runs — the parent's driver, on its venue.
+COLUMN_PLATFORMS.update({kids: COLUMN_PLATFORMS[parent] for kids, parent in COLUMN_PARENT.items()})
 
 #: Every platform a run records (`helpers/feature_ledger.host_platform`).
 PLATFORMS = frozenset({"linux", "macos", "windows"})
@@ -1611,7 +1725,7 @@ def scope_by_platform(page: Page | None, app: str = NEST, app_marks: dict | None
 
 def legs_by_slug(features: Path = FEATURES, marks: tuple | None = None) -> dict:
     """`{(file, slug): legs(page, file, …)}` for every page under `features` and every
-    ledger file (the seven columns and `nest`) — what a re-folder that holds no `Page`
+    ledger file (every column and `nest`) — what a re-folder that holds no `Page`
     objects (the merge-gate harvest, the rebase resolver) passes to
     `fold_platform_cells` (rulings (h) and (i)). `marks` is `scan_marks`' answer; by
     default the tree beside `features` is scanned (~2 s)."""
@@ -2145,6 +2259,9 @@ def _matrix_json(pages: list, ledger: dict, releases: list, app_marks: dict | No
     return {
         "schema": 1,
         "apps": list(APPS),
+        # Additive: the kids channels' parents, so the site can group a kids column
+        # with the app it is a build of (§ Cell semantics).
+        "parents": dict(COLUMN_PARENT),
         "marks": dict(MARKS),
         "sections": sections,
         "releases": releases,

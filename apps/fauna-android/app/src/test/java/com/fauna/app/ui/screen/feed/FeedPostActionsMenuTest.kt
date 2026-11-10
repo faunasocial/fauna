@@ -2,6 +2,7 @@ package com.fauna.app.ui.screen.feed
 
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.semantics.SemanticsProperties
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Rule
@@ -55,6 +56,8 @@ class FeedPostActionsMenuTest {
         onUnpublishWeb: () -> Unit = {},
         onCopyWebLink: () -> Unit = {},
         onCopyPaywallLink: () -> Unit = {},
+        spamMarked: Boolean = false,
+        onMarkSpam: (() -> Unit)? = null,
     ) {
         composeTestRule.setContent {
             PostActionsMenu(
@@ -70,6 +73,8 @@ class FeedPostActionsMenuTest {
                 onUnpublishWeb = onUnpublishWeb,
                 onCopyWebLink = onCopyWebLink,
                 onCopyPaywallLink = onCopyPaywallLink,
+                spamMarked = spamMarked,
+                onMarkSpam = onMarkSpam,
             )
         }
     }
@@ -253,5 +258,55 @@ class FeedPostActionsMenuTest {
         composeTestRule.onNodeWithTag("feed-post-actions-button").performClick()
         composeTestRule.onNodeWithText("https://alice.example.com/post/my-page.html", substring = true)
             .assertExists()
+    }
+
+    // ── The post's mark-as-spam verb (`report-sharing.md` § Report capture →
+    // *The post's mark-as-spam verb*): beside report, gated `!isOwn`, a toggle
+    // whose `state` (stateDescription) reads on/off. ──
+
+    private fun spamVerbState(want: String) = SemanticsMatcher.expectValue(
+        SemanticsProperties.StateDescription,
+        want,
+    )
+
+    @Test
+    fun markAsSpamPaintsOnAnotherAuthorsPostReadingOff() {
+        render(isOwn = false, onMarkSpam = {})
+        composeTestRule.onNodeWithTag("feed-post-actions-button").performClick()
+        composeTestRule.onNodeWithTag("feed-post-mark-as-spam-button")
+            .assertExists()
+            .assert(spamVerbState("off"))
+    }
+
+    @Test
+    fun aMarkedPostsVerbReadsOn() {
+        render(isOwn = false, spamMarked = true, onMarkSpam = {})
+        composeTestRule.onNodeWithTag("feed-post-actions-button").performClick()
+        composeTestRule.onNodeWithTag("feed-post-mark-as-spam-button").assert(spamVerbState("on"))
+    }
+
+    @Test
+    fun markAsSpamIsAbsentOnAnOwnPost() {
+        render(isOwn = true, onMarkSpam = {})
+        composeTestRule.onNodeWithTag("feed-post-actions-button").performClick()
+        composeTestRule.onNodeWithTag("feed-post-mark-as-spam-button").assertDoesNotExist()
+    }
+
+    @Test
+    fun markAsSpamIsAbsentWithoutACallback() {
+        render(isOwn = false)
+        composeTestRule.onNodeWithTag("feed-post-actions-button").performClick()
+        composeTestRule.onNodeWithTag("feed-post-mark-as-spam-button").assertDoesNotExist()
+    }
+
+    @Test
+    fun tappingMarkAsSpamInvokesTheVerbOnce() {
+        var pressed = 0
+        render(isOwn = false, onMarkSpam = { pressed++ })
+        composeTestRule.onNodeWithTag("feed-post-actions-button").performClick()
+        composeTestRule.onNodeWithTag("feed-post-mark-as-spam-button").performClick()
+        assertEquals("one press is one toggle", 1, pressed)
+        // The press closes the menu, the report verb's shape.
+        composeTestRule.onNodeWithTag("feed-post-mark-as-spam-button").assertDoesNotExist()
     }
 }

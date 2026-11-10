@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 from helpers.budgets import RPC_ROUNDTRIP_S
-from helpers.labeler_publish import FIXTURES, publish_wasm_labeler
+from helpers.labeler_publish import FIXTURES, marked_png, publish_wasm_labeler
 from helpers.room_seats import (  # noqa: F401 — `room_app`/`room_seats`/`room_seat_pair` are fixtures
     MEMBERSHIP_BUDGET_S,
     MESSAGE_BUDGET_S,
@@ -438,7 +438,7 @@ def test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock(
             ROOM_POST_TIER,
             "the outsider's repost card carrying the reserved-tier badge",
         )
-        card = outsider.app.feed.post_index_by_id(row["post_id"])
+        card = outsider.app.feed.card_index_by_id(row["post_id"])
         # The repost row's own body is empty; its words are the folded embed,
         # which some apps paint as `feed-post-text` and web as the `quoted-post`
         # embed, resolved lazily after the card first paints.
@@ -939,7 +939,7 @@ def test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only(
         body = _open_and_read_detail(outsider, preview)
         assert marker not in body, "the outsider's detail stays the teaser"
         outsider.app.feed.close_post_detail()
-        card = outsider.app.feed.post_index_by_id(outsider_post)
+        card = outsider.app.feed.card_index_by_id(outsider_post)
         assert card >= 0, f"the post is still listed\n{seat_story(outsider)}"
         assert outsider.app.driver.count("content-label-badge", scope=f"post-card[{card}]") == 0, (
             "the room's verdicts are served to its members only: "
@@ -1026,4 +1026,103 @@ def test_a_room_post_is_never_a_message_in_the_room_and_reaches_a_member_like_an
         lambda body: marker in body,
         MESSAGE_BUDGET_S,
         diagnose=lambda: f"error-message={member.app.error_text()!r}\n{seat_story(member)}",
+    )
+
+
+@pytest.mark.feature("community-labelers")
+def test_a_rooms_labeler_that_reads_attachments_labels_a_room_posts_media(
+    room_seat_pair, nest_instance, room_app, request, run_seal_helper, tmp_path
+):
+    """`community-labelers` outcome 22, the post half
+    (`content-moderation-and-ranking.md` § Tier-3 → *The attachment facet*,
+    rule 3): when a room's home nest indexes a room-restricted post it opens
+    the post's media under the post's own key and hands the bytes to every
+    named labeler that declares `needs_attachment_bytes`; the verdict reaches
+    a member's card through the floor-gated `fauna.posts.room_labels` read.
+
+    The fixture (``room_attachment_labeler.wat``) says ``commercial`` about any
+    input carrying the bytes "meow"; they ride only in a private chunk of the
+    post's PNG — never in its words or teaser — so the badge on the member's
+    card is a verdict on the picture's bytes."""
+    founder, member = room_seat_pair
+    labeler = publish_wasm_labeler(
+        run_seal_helper, nest_instance, FIXTURES / "room_attachment_labeler.wat",
+        needs_attachment_bytes=True,
+    ).hex()
+    picture = marked_png(tmp_path)
+    marker = f"whiskers{uuid.uuid4().hex[:8]}"
+    preview = f"A picture for the room — {uuid.uuid4().hex[:6]}"
+    full_body = f"Only the room sees this picture: {marker}"
+
+    room_id, founder_thread, member_thread = found_community_room(
+        founder, member, f"hello {uuid.uuid4().hex[:8]}"
+    )
+
+    # ── The owner names the labeler in the room's settings. ─────────────────
+    conv = founder.app.conversations
+    conv.open_thread_by_id(founder_thread)
+    conv.open_room_settings()
+    row = conv.room_labeler_index(labeler)
+    assert row is not None, seat_element(founder, "room-labeler-toggle")
+    conv.toggle_room_labeler(row)
+    conv.save_room_settings(timeout_s=MEMBERSHIP_BUDGET_S)
+    assert not founder.app.has_error(), founder.app.error_text()
+    wait_for(
+        "the room's verified labeler set naming the attachment fixture",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None and (t.room or {}).get("labelers") == [labeler],
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"{seat_story(founder)}\n{seat_log(founder, 'labeler')}",
+    )
+
+    # ── The owner addresses a post with a picture to the room. ──────────────
+    option = S.feed.post.gate_room(room=thread_by_id(founder.app, founder_thread).label)
+    founder.app.feed.navigate()
+    assert founder.app.feed.wait_for_audience_option(option, MESSAGE_BUDGET_S), (
+        f"error-message={founder.app.error_text()!r}\n{seat_story(founder)}"
+    )
+    founder.app.feed.create_gated_post(full_body, preview, option, image_path=str(picture))
+
+    # ── A member opens it, steps back, and its card carries the label. ──────
+    at = _read_post(member, preview)
+    _wait_badge(
+        member,
+        at,
+        S.feed.post.gate_room(room=thread_by_id(member.app, member_thread).label),
+        "the member's card naming the room",
+    )
+    post_id = member.app.feed.wait_for_post_state_by_text(preview)["post_id"]
+    member.app.feed.open_post_detail(at)
+    member.app.driver.wait_for("feed-post-detail-body")
+    wait_for(
+        "the member's detail unsealing the room post",
+        member.app.feed.post_detail_body,
+        lambda body: marker in body,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: f"error-message={member.app.error_text()!r}\n{seat_story(member)}",
+    )
+    member.app.feed.close_post_detail()
+
+    def member_card_badge():
+        card = member.app.feed.post_index_by_id(post_id)
+        if card < 0:
+            return None
+        scope = f"post-card[{card}]"
+        if member.app.driver.count("content-label-badge", scope=scope) == 0:
+            return None
+        return member.app.driver.get_text("content-label-badge", scope=scope)
+
+    badge = wait_for(
+        "the room's verdict on the picture's bytes painting a label on the card",
+        member_card_badge,
+        lambda text: text is not None,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"error-message={member.app.error_text()!r}\n{seat_story(member)}\n"
+            f"{seat_log(member, 'room_labels', 'label')}"
+        ),
+    )
+    assert S.moderation.category.commercial in badge, (
+        f"the card names the room labeler's verdict on the media "
+        f"({S.moderation.category.commercial!r}); got {badge!r}"
     )

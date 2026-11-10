@@ -837,6 +837,54 @@ pub fn validate_label(label: &str) -> Result<(), InvalidLabel> {
     Ok(())
 }
 
+// ── Standard IMAP mailboxes ────────────────────────────────────────
+
+/// The six standard IMAP mailboxes (`imap-server.md` § Standard mailboxes):
+/// seeded for every actor on first AUTH, reserved against CREATE/DELETE/RENAME.
+/// INBOX is renamable per RFC 9051 §6.3.6's special case; the other five are
+/// immovable. This is the one home of the set and of its attributes
+/// ([`standard_mailbox_attrs`]): the nest seeds and guards from it, and the Go
+/// MDA reads the attributes off `bridge_routing::MailboxEntry::attrs` rather
+/// than keeping a table of its own.
+pub const STANDARD_MAILBOXES: &[&str] = &["INBOX", "Archive", "Drafts", "Sent", "Trash", "Junk"];
+
+/// The standard `\Junk` mailbox — the spam-training mailbox of `mail-spam.md`
+/// § Training signal sources. The Go MDA's COPY/MOVE training trigger mirrors
+/// this name as `wsrpc.JunkMailbox`, pinned to it by the
+/// `reply-list-mailboxes.cbor` cross-language fixture.
+pub const JUNK_MAILBOX: &str = "Junk";
+
+/// The placement-record role of INBOX. Not an RFC 6154 attribute (RFC 6154
+/// defines none for INBOX, which IMAP identifies by name), so
+/// [`special_use_attrs`] leaves it off the LIST wire.
+pub const INBOX_ROLE_ATTR: &str = "\\Inbox";
+
+/// The attribute(s) a standard mailbox carries in `MailPlacementRecord::Create`
+/// — the RFC 6154 SPECIAL-USE attribute, or [`INBOX_ROLE_ATTR`] for INBOX — or
+/// an empty Vec for any other name (user-created mailboxes and the guardian
+/// held mailbox carry none).
+pub fn standard_mailbox_attrs(name: &str) -> Vec<String> {
+    let attr = match name {
+        "INBOX" => INBOX_ROLE_ATTR,
+        "Archive" => "\\Archive",
+        "Drafts" => "\\Drafts",
+        "Sent" => "\\Sent",
+        "Trash" => "\\Trash",
+        JUNK_MAILBOX => "\\Junk",
+        _ => return Vec::new(),
+    };
+    vec![attr.to_string()]
+}
+
+/// The RFC 6154 SPECIAL-USE attributes IMAP LIST shows for `name`: the
+/// [`standard_mailbox_attrs`] minus INBOX's role marker. The nest fills
+/// `bridge_routing::MailboxEntry::attrs` from this; the MDA writes it verbatim.
+pub fn special_use_attrs(name: &str) -> Vec<String> {
+    let mut attrs = standard_mailbox_attrs(name);
+    attrs.retain(|a| a != INBOX_ROLE_ATTR);
+    attrs
+}
+
 // ── FileInto target validation ─────────────────────────────────────
 
 /// The ward's **held mailbox** (`family-safety.md` § The mail gate): where cold
@@ -1400,6 +1448,14 @@ pub struct InboxMessage {
     /// a message nothing holds encodes with no `warmup_hold` key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warmup_hold: Option<WarmupHold>,
+    /// The copy's live `content_scores` rows — every factor, the uniform bus
+    /// shape (`content-scoring.md` § The scoring-metadata bus). The app's
+    /// on-device spam scorer reads the `report:spam` entry as one more term on
+    /// top of the classifier combination (`report-sharing.md` § Applying the
+    /// aggregate). Additive (`#[serde(default, skip_serializing_if =
+    /// "Vec::is_empty")]`): an unscored copy encodes with no `scores` key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scores: Vec<fauna_core::scoring::ScoreEntry>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -1439,6 +1495,14 @@ pub struct WarmupHold {
 /// imap/spam_score.go`). Internal/invisible-migratable per `mail-spam.md`
 /// § Re-file timing.
 pub const SPAM_SCORED_KEYWORD: &str = "$FaunaSpamScored";
+
+/// The per-message ham veto (RFC 5788 `$NotJunk`): stamped on a copy by a ham
+/// lesson, honoured on a copy a third-party client stamped. A copy carrying
+/// it is never re-filed by a scoring position and never un-watermarked by the
+/// report aggregate's re-open (`report-sharing.md` § Applying the aggregate).
+/// MUST match the Go MDA's `notJunkKeyword`
+/// (`bins/fauna-bridges/internal/mda/imap/spam_score.go`).
+pub const NOT_JUNK_KEYWORD: &str = "$NotJunk";
 
 /// The most UIDs one `fauna.email.inbox.mark_seen` request, or one list of a
 /// `fauna.email.apply_spam_disposition` request (`scored_uids`, `junk_uids`),
@@ -1554,6 +1618,15 @@ pub struct FlagChange {
     /// The row's whole current flag/keyword set.
     pub flags: Vec<String>,
     pub modseq: u64,
+    /// The copy's live `content_scores` rows, the same additive shape as
+    /// [`InboxMessage::scores`]: a re-open advances a copy's modseq when its
+    /// `report:spam` row rises, and the app reads that row here to decide
+    /// whether a held un-watermarked copy is owed a scoring pass
+    /// (`report-sharing.md` § Applying the aggregate → *The re-open is a
+    /// metadata change, not a flag change*). Additive (`#[serde(default,
+    /// skip_serializing_if = "Vec::is_empty")]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scores: Vec<fauna_core::scoring::ScoreEntry>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -1582,6 +1655,23 @@ pub struct FlagChangesReply {
 mod tests {
     use super::*;
     use crate::codec::{decode_strict as decode, encode_canonical};
+
+    #[test]
+    fn standard_mailboxes_each_have_one_attr_and_list_drops_only_inbox_role() {
+        assert!(STANDARD_MAILBOXES.contains(&JUNK_MAILBOX));
+        for name in STANDARD_MAILBOXES {
+            assert_eq!(standard_mailbox_attrs(name).len(), 1, "{name}");
+            let want: Vec<String> = if *name == "INBOX" {
+                vec![]
+            } else {
+                standard_mailbox_attrs(name)
+            };
+            assert_eq!(special_use_attrs(name), want, "{name}");
+        }
+        assert_eq!(special_use_attrs(JUNK_MAILBOX), vec!["\\Junk".to_string()]);
+        assert!(standard_mailbox_attrs(GUARDIAN_HELD_MAILBOX).is_empty());
+        assert!(special_use_attrs("Projects").is_empty());
+    }
 
     fn sample_filter() -> EmailFilter {
         EmailFilter {
@@ -2126,6 +2216,7 @@ mod tests {
                     flags: vec!["\\Seen".to_string(), "$FaunaSpamScored".to_string()],
                     body_ref: None,
                     warmup_hold: None,
+                    scores: vec![],
                     extra: Default::default(),
                 },
                 // An over-frame message: empty inline envelope, a `body_ref`
@@ -2145,6 +2236,7 @@ mod tests {
                         total_bytes: 6_000_000,
                     }),
                     warmup_hold: None,
+                    scores: vec![],
                     extra: Default::default(),
                 },
             ],
@@ -2169,6 +2261,7 @@ mod tests {
                 flags: vec!["$FaunaSpamScored".to_string()],
                 body_ref: None,
                 warmup_hold: None,
+                scores: vec![],
                 extra: Default::default(),
             }],
             more: false,
@@ -2196,6 +2289,7 @@ mod tests {
             flags: vec!["\\Seen".to_string()],
             body_ref: None,
             warmup_hold: None,
+            scores: vec![],
             extra: Default::default(),
         };
         let encoded = encode_canonical(&inline).unwrap();
@@ -2248,6 +2342,38 @@ mod tests {
         assert_eq!(decode::<InboxMessage>(&encoded).unwrap(), free);
     }
 
+    /// The copy's bus rows ride the wire as `scores` (`report-sharing.md`
+    /// § Applying the aggregate); an unscored copy encodes no `scores` key,
+    /// so an older peer reads it byte-identically.
+    #[test]
+    fn inbox_message_scores_round_trip_and_are_absent_when_empty() {
+        let scored = InboxMessage {
+            uid: 5,
+            message_id: vec![0xCD; 32],
+            sealed_envelope: b"envelope".to_vec(),
+            scores: vec![fauna_core::scoring::ScoreEntry {
+                factor: "report:spam".into(),
+                score: 200,
+                tier: 3,
+                scorer_version: 1,
+            }],
+            ..Default::default()
+        };
+        let encoded = encode_canonical(&scored).unwrap();
+        assert_eq!(decode::<InboxMessage>(&encoded).unwrap(), scored);
+
+        let unscored = InboxMessage {
+            scores: vec![],
+            ..scored
+        };
+        let encoded = encode_canonical(&unscored).unwrap();
+        assert!(
+            !encoded.windows(b"scores".len()).any(|w| w == b"scores"),
+            "an empty scores list must not appear on the wire at all"
+        );
+        assert_eq!(decode::<InboxMessage>(&encoded).unwrap(), unscored);
+    }
+
     /// `stored_at` (the content-sealing-epochs seal instant) is always on the
     /// wire — the unknown `0` included, so a reader never mistakes an absent
     /// key for a value — and a message without it is refused rather than
@@ -2263,6 +2389,7 @@ mod tests {
             flags: vec![],
             body_ref: None,
             warmup_hold: None,
+            scores: vec![],
             extra: Default::default(),
         };
         let encoded = encode_canonical(&msg).unwrap();

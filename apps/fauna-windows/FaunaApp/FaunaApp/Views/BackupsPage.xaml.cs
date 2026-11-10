@@ -577,11 +577,11 @@ public sealed partial class BackupsPage : Page
     }
 
     /// <summary>Re-point the folder picker at the machine's list and selection,
-    /// REBUILDING THE OPTIONS ONLY WHEN THE OPTION SET ITSELF CHANGED.
-    /// <para>Each item's <c>AutomationProperties.Name</c> is the WIRE set name, not
-    /// the display label: the shared e2e's <c>driver.select</c> matches a
-    /// ComboBoxItem by Name exactly on windows. Same value/label split as
-    /// FoldersPage's conflict/paywall pickers.</para>
+    /// REBUILDING THE OPTIONS ONLY WHEN THE OPTION SET ITSELF CHANGED
+    /// (<see cref="PickerOption.Reconcile"/>, lifted from here).
+    /// <para>Each option paints its label and is keyed by the WIRE set name
+    /// (<see cref="PickerOption"/>): the shared e2e's <c>driver.select</c> matches an
+    /// item's AutomationId first.</para>
     /// <para>The whole reconcile runs under the re-entry guard — both clearing the
     /// items and assigning <c>SelectedItem</c> raise SelectionChanged, and letting
     /// either through would dispatch a <c>select_folder</c> for the selection the
@@ -615,67 +615,17 @@ public sealed partial class BackupsPage : Page
         _suppressFolderSelection = true;
         try
         {
-            if (!FolderOptionsMatchViewModel())
-            {
-                FolderSelector.Items.Clear();
-                foreach (var option in _viewModel.FolderOptions)
-                    FolderSelector.Items.Add(FolderOption(option));
-            }
-            SelectFolderOption(_viewModel.SelectedFolder);
+            // Each option paints its label — a kind entry lists as "Mail", never
+            // `backups.reseed_set_mail` (§ Snapshot-list shape → *Kind entries*) —
+            // and is keyed by the row's `name`, what the machine is handed back.
+            PickerOption.Reconcile(FolderSelector,
+                _viewModel.FolderOptions.Select(o => (o.Label, o.Name)).ToList(),
+                _viewModel.SelectedFolder);
         }
         finally
         {
             _suppressFolderSelection = false;
         }
-    }
-
-    /// <summary>One <c>backup-folder-selector</c> option. Its Name is the label it
-    /// paints — what a screen reader reads, and what the bridge's <c>options</c>
-    /// attribute answers, so a kind entry lists as "Mail", never
-    /// <c>backups.reseed_set_mail</c> (§ Snapshot-list shape → *Kind entries*). The
-    /// row's <c>name</c> is its Tag (what the machine is handed back) and its
-    /// AutomationId, which the bridge's <c>Select</c> matches as well as the Name,
-    /// so <c>driver.select</c> names the locale-stable key exactly as on every other
-    /// app (the <c>feed-factor-select</c> shape, <c>FeedPage.FactorOption</c>).</summary>
-    private static ComboBoxItem FolderOption(BackupFolderOption option)
-    {
-        var item = new ComboBoxItem { Content = option.Label, Tag = option.Name };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.Label);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(item, option.Name);
-        return item;
-    }
-
-    /// <summary>True when the picker already offers exactly the VM's options, in
-    /// order — the predicate that decides whether a teardown is owed at all.</summary>
-    private bool FolderOptionsMatchViewModel()
-    {
-        var want = _viewModel!.FolderOptions;
-        if (FolderSelector.Items.Count != want.Count) return false;
-        for (int i = 0; i < want.Count; i++)
-        {
-            if (FolderSelector.Items[i] is not ComboBoxItem { Tag: string tag, Content: string label }
-                || tag != want[i].Name || label != want[i].Label)
-                return false;
-        }
-        return true;
-    }
-
-    /// <summary>Move the picker's selection without touching the option set.
-    /// Selecting nothing when the wanted folder is absent matches what a rebuild
-    /// used to leave behind (a cleared picker selects nothing), so the visible
-    /// end state is unchanged.</summary>
-    private void SelectFolderOption(string? wanted)
-    {
-        foreach (var candidate in FolderSelector.Items)
-        {
-            if (candidate is ComboBoxItem { Tag: string tag } item && tag == wanted)
-            {
-                if (!ReferenceEquals(FolderSelector.SelectedItem, item))
-                    FolderSelector.SelectedItem = item;
-                return;
-            }
-        }
-        if (FolderSelector.SelectedItem is not null) FolderSelector.SelectedItem = null;
     }
 
     /// Set while PopulateFolderSelector seeds the picker: assigning SelectedItem
@@ -882,8 +832,8 @@ public sealed partial class BackupsPage : Page
 
     /// <summary>True when the rendered rows already carry exactly the VM's
     /// destination ids, in order — the predicate that decides whether
-    /// <see cref="RenderDestinations"/> owes a teardown at all (mirrors
-    /// <c>PopulateFolderSelector.FolderOptionsMatchViewModel</c>).</summary>
+    /// <see cref="RenderDestinations"/> owes a teardown at all (mirrors the
+    /// option-set predicate of <see cref="PickerOption.Reconcile"/>).</summary>
     private bool DestinationIdsMatch(IReadOnlyList<BackupDestinationRow> wanted)
     {
         if (wanted.Count != _destinationRowIds.Count) return false;
@@ -1244,23 +1194,15 @@ public sealed partial class BackupsPage : Page
 
     /// <summary>Build <c>backup-destination-kind-select</c>'s items from the shared
     /// catalog (<c>BackupsViewModel.KindOptions()</c>) — Content = the localized
-    /// label (also what the row's kind-badge renders, so they cannot drift), Tag +
-    /// AutomationProperties.Name = the WIRE value. Name carries the wire value
-    /// (never the label) because the shared e2e's <c>driver.select</c> matches a
-    /// ComboBoxItem by Name EXACTLY on windows — the same value/label split as
-    /// <see cref="PopulateFolderSelector"/>'s conflict/paywall pickers.
-    /// Pure catalog, no state — built once, not repopulated per dialog open.</summary>
+    /// label (also what the row's kind-badge renders, so they cannot drift), keyed
+    /// by the WIRE value (<see cref="PickerOption"/>).
+    /// Pure catalog, no state — built once, from the constructor, not repopulated per
+    /// dialog open; nothing is selected until <see cref="SelectDestinationKind"/>.</summary>
     private void PopulateDestinationKindSelect()
-    {
-        DestinationKindSelect.Items.Clear();
-        foreach (var opt in BackupsViewModel.KindOptions())
-        {
-            var label = S.Resolve(opt.label);
-            var item = new ComboBoxItem { Content = label, Tag = opt.value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
-            DestinationKindSelect.Items.Add(item);
-        }
-    }
+        => PickerOption.Reconcile(
+            DestinationKindSelect,
+            BackupsViewModel.KindOptions().Select(opt => (S.Resolve(opt.label), opt.value)).ToList(),
+            selectedKey: null);
 
     /// The wire discriminator currently selected. No selection (dialog not yet
     /// populated, or a stale reference) falls back to the empty string, which is

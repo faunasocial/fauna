@@ -14,7 +14,7 @@
 //! Receiving into the conversations view.
 
 use async_trait::async_trait;
-use fauna_client_mail_settings::{InboxSpamScorer, judge_inbox_copy};
+use fauna_client_mail_settings::{InboxSpamScorer, judge_held_inbox_copy, judge_inbox_copy};
 use fauna_client_moderation::LocalDetectionStore;
 use fauna_conversations::backend::{
     InboundMailRecord, MailFeed, OutboundMailSink, RoomSeams, SelfAddress,
@@ -261,7 +261,11 @@ struct WebSchedulingSink {
 /// through the same call mapping the native `INBOX` source uses
 /// (`fauna_client_conversations::{inbox_mark_seen_call, inbox_flag_changes_call}`).
 /// The mailbox itself is still drained by the JS loop, so `fetch` is never
-/// asked and answers an empty page.
+/// asked and answers an empty page; the catch-up on held un-watermarked copies
+/// likewise runs from the JS loop ([`WasmConversationsManager::take_mail_rescore`]
+/// → [`WasmConversationsManager::rescore_held_inbound`]), so `rescore_held`,
+/// `scorer_state` and `record_vetoed` keep the trait defaults and the sync
+/// never asks them.
 #[cfg(target_arch = "wasm32")]
 struct WebInboxReadState {
     email: fauna_client_email::EmailClient<fauna_rpc_wasm::WsRpcClient>,
@@ -906,6 +910,14 @@ struct SpamDispositionJs {
     junk_uids: Vec<u32>,
 }
 
+/// One held copy the catch-up owes a score, as [`WasmConversationsManager::take_mail_rescore`]
+/// hands it to the JS loop: `vetoed` (`$NotJunk`) is recorded without a fetch.
+#[derive(Serialize)]
+struct RescoreCandidateJs {
+    uid: u32,
+    vetoed: bool,
+}
+
 /// Build this session's moderation [`LocalDetectionStore`] and hand the manager its
 /// handle — the wasm twin of what `ConversationsSession::from_manager` does for the
 /// native apps (`libs/fauna-conversations/src/session.rs`). **Both** constructors
@@ -1314,6 +1326,12 @@ impl WasmConversationsManager {
     /// seed), and `now_secs` from JS under the wasm-time discipline — `f64`, not
     /// `i64`, so the JS side passes a plain number.
     ///
+    /// `scores` is the record's own `InboxMessage.scores` as the JS fetch
+    /// decoded it (`[{factor, score, tier, scorer_version}]`,
+    /// `null`/`undefined` for none): the scorer reads its community
+    /// `report:spam` entry as one more term (`report-sharing.md` § Applying
+    /// the aggregate).
+    ///
     /// `warmup_hold` is the record's own `InboxMessage.warmup_hold` as the JS
     /// fetch decoded it (`{release_at, messages_ahead}`, `null`/`undefined` when
     /// nothing holds it — always so on INBOX): it rides into the shared ingest,
@@ -1335,10 +1353,12 @@ impl WasmConversationsManager {
         secret_hex: String,
         now_secs: f64,
         warmup_hold: JsValue,
+        scores: JsValue,
     ) -> Result<bool, JsValue> {
         if self.seen.borrow().contains(&message_id) {
             return Ok(false);
         }
+        let scores = score_entries_from_js(scores)?;
         let mailbox = mail_feed_from_js(&mailbox)?;
         let warmup_hold = if warmup_hold.is_null() || warmup_hold.is_undefined() {
             None
@@ -1390,6 +1410,7 @@ impl WasmConversationsManager {
                 true,
                 uid,
                 &flags,
+                &scores,
                 &text,
             )
         };
@@ -1428,6 +1449,7 @@ impl WasmConversationsManager {
             has_seen_flag: fauna_conversations::carries_seen_flag(&flags),
             warmup_hold,
             mailbox,
+            spam: fauna_client_conversations::mail_spam_facts(&flags, &scores),
         };
         let ingested = ingest_inbound_record(&self.manager, &record)
             .map_err(|e| JsValue::from_str(&format!("ingest inbound (uid {uid}): {e}")))?;
@@ -1566,6 +1588,11 @@ impl WasmConversationsManager {
     /// and the `fauna.mail.flags_changed` push wakes that pass. Never rejects:
     /// a failure stays owed or un-drained for the next pass, and an
     /// `Unsupported` source (a non-INBOX or default one) ends syncing silently. Resolves at once with no wired client.
+    ///
+    /// The driver's third leg, the held-copy re-score, is left to the JS loop
+    /// (`sync_mail_seen_and_flags`): the held un-watermarked set the ingest and
+    /// the flag drain feed is taken through [`Self::take_mail_rescore`] →
+    /// [`Self::rescore_held_inbound`].
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = syncMailReadState)]
     pub fn sync_mail_read_state(&self) -> js_sys::Promise {
@@ -1576,7 +1603,8 @@ impl WasmConversationsManager {
                 let source = WebInboxReadState {
                     email: fauna_client_email::EmailClient::new(client),
                 };
-                fauna_conversations::backends::smtp::sync_mail_read_state(&source, &manager).await;
+                fauna_conversations::backends::smtp::sync_mail_seen_and_flags(&source, &manager)
+                    .await;
             }
             Ok(JsValue::UNDEFINED)
         })
@@ -1631,6 +1659,101 @@ impl WasmConversationsManager {
         Ok(())
     }
 
+    /// The catch-up's take (`mail-spam.md` § Scoring placement → *The app's
+    /// catch-up*): what this pass's scorer can score from the held
+    /// un-watermarked set — every copy with a trained model, a reported one
+    /// with the report-only scorer, nothing with none — newest first, at most
+    /// the MDA's per-pass cap, as `[{uid, vetoed}]`. The JS loop records a
+    /// `vetoed` (`$NotJunk`) copy through [`Self::record_vetoed_held_inbound`]
+    /// without fetching it, re-reads each other one by uid and hands it to
+    /// [`Self::rescore_held_inbound`]. The set keeps every copy until the flush
+    /// watermarks it ([`Self::take_spam_disposition`]), so a copy a pass could
+    /// not re-read is owed the next. The web twin of the shared driver's
+    /// `rescore_held_inbox_copies`, whose fetch cannot run here.
+    #[wasm_bindgen(js_name = takeMailRescore)]
+    pub fn take_mail_rescore(&self) -> Result<JsValue, JsValue> {
+        let state = self.spam_scorer.borrow().as_ref().map_or(
+            fauna_conversations::SpamScorerState::Absent,
+            InboxSpamScorer::state,
+        );
+        let taken: Vec<RescoreCandidateJs> = self
+            .manager
+            .take_mail_rescore(state)
+            .into_iter()
+            .map(|c| RescoreCandidateJs {
+                uid: c.uid,
+                vetoed: c.vetoed,
+            })
+            .collect();
+        crate::rpc::to_js(&taken)
+    }
+
+    /// Record a held `$NotJunk` copy the catch-up took: scored, never junk,
+    /// on this pass's scorer, so the coming flush watermarks it without the
+    /// copy ever being fetched (`InboxSpamScorer::record_vetoed`, the MDA's
+    /// `vetoedUIDs`). A no-op with scoring disabled.
+    #[wasm_bindgen(js_name = recordVetoedHeldInbound)]
+    pub fn record_vetoed_held_inbound(&self, uid: u32) {
+        if let Some(scorer) = self.spam_scorer.borrow_mut().as_mut() {
+            scorer.record_vetoed(uid);
+        }
+    }
+
+    /// The mailbox no longer holds the held copy at `uid` (its re-read came
+    /// back empty): it leaves the held un-watermarked set.
+    #[wasm_bindgen(js_name = forgetUnscoredHeldInbound)]
+    pub fn forget_unscored_held_inbound(&self, uid: u32) {
+        self.manager.forget_unscored_mail(uid);
+    }
+
+    /// Score again one held `INBOX` copy the nest re-opened — the web twin of
+    /// the native source's `rescore_held`. Opens the re-read record exactly as
+    /// [`Self::ingest_sealed_inbound`] does, then judges it whole with this
+    /// pass's scorer (the shared `judge_held_inbox_copy`: the copy's current
+    /// `flags` and its `scores`, whose community `report:spam` entry is the
+    /// term that re-opened it), never the `REPLY` merge. A copy the scorer
+    /// files Junk leaves the view at once
+    /// (`ConversationsManager::withdraw_filed_inbox_copy`), and its UID rides
+    /// out with the rest of the pass's disposition through
+    /// [`Self::take_spam_disposition`], so the JS loop's `flushSpamScoring`
+    /// after the re-score watermarks it and moves it INBOX→Junk. Returns
+    /// whether it was filed. A record that does not open is a fact about the
+    /// record (skipped, `false`), as at ingest; no key set rejects (a caller-order
+    /// fault). With scoring disabled nothing is filed.
+    #[wasm_bindgen(js_name = rescoreHeldInbound)]
+    pub fn rescore_held_inbound(
+        &self,
+        uid: u32,
+        stored_at_secs: f64,
+        sealed_envelope: Vec<u8>,
+        flags: Vec<String>,
+        scores: JsValue,
+    ) -> Result<bool, JsValue> {
+        let scores = score_entries_from_js(scores)?;
+        let rfc5322 = match open_sealed_mail_record(self, uid, stored_at_secs, &sealed_envelope) {
+            Ok(rfc5322) => rfc5322,
+            Err(OpenMiss::Unopenable(reason)) => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "held mail copy could not be opened for its re-score; skipped (uid {uid}): {reason}"
+                )));
+                #[cfg(not(target_arch = "wasm32"))]
+                let _ = reason;
+                return Ok(false);
+            }
+            Err(miss @ OpenMiss::NoKeys) => return Err(miss.into()),
+        };
+        let filed = {
+            let text = String::from_utf8_lossy(&rfc5322);
+            let mut scorer = self.spam_scorer.borrow_mut();
+            judge_held_inbox_copy(scorer.as_mut(), uid, &flags, &scores, &text)
+        };
+        if filed {
+            self.manager.withdraw_filed_inbox_copy(uid);
+        }
+        Ok(filed)
+    }
+
     /// Enable on-device INBOX spam scoring for this actor's coming drain pass(es).
     ///
     /// `sealed_model` is the still-sealed per-user model from
@@ -1641,9 +1764,9 @@ impl WasmConversationsManager {
     /// admin-effective `spam_folder` threshold + Bayesian knobs from
     /// `fauna.bridges.get_spam_scoring_policy` (so the client's Junk line matches
     /// the MDA/nest — `mail-spam.md` § Architectural rules). The JS loop calls
-    /// this only when `fetch_spam_model` returned a model (a *trained* actor); an
-    /// untrained actor calls [`Self::disable_spam_scoring`] instead, so no
-    /// un-based watermarking happens.
+    /// this when `fetch_spam_model` returned a model (a *trained* actor); an
+    /// untrained actor calls [`Self::enable_report_only_spam_scoring`] instead,
+    /// which watermarks nothing it has no basis to score.
     #[wasm_bindgen(js_name = enableSpamScoring)]
     pub fn enable_spam_scoring(
         &self,
@@ -1691,8 +1814,19 @@ impl WasmConversationsManager {
         Ok(())
     }
 
-    /// Disable on-device spam scoring — cold start (no trained model) or mail
-    /// disabled — so [`Self::ingest_sealed_inbound`] scores nothing. Idempotent.
+    /// Enable report-only scoring for an actor with no trained model: the
+    /// copies carrying a community `report:spam` row are scored by the report
+    /// term alone against the admin-effective `spam_folder` threshold (the
+    /// fallback for a message without a delivery stamp), every other copy is
+    /// left un-watermarked ([`InboxSpamScorer::report_only`]; the MDA's
+    /// `scoreSelectedInbox` step 2).
+    #[wasm_bindgen(js_name = enableReportOnlySpamScoring)]
+    pub fn enable_report_only_spam_scoring(&self, spam_folder_threshold: u32) {
+        *self.spam_scorer.borrow_mut() = Some(InboxSpamScorer::report_only(spam_folder_threshold));
+    }
+
+    /// Disable on-device spam scoring — mail disabled, or a failed prepare — so
+    /// [`Self::ingest_sealed_inbound`] scores nothing. Idempotent.
     #[wasm_bindgen(js_name = disableSpamScoring)]
     pub fn disable_spam_scoring(&self) {
         *self.spam_scorer.borrow_mut() = None;
@@ -1709,6 +1843,12 @@ impl WasmConversationsManager {
             Some(scorer) => scorer.take(),
             None => (Vec::new(), Vec::new()),
         };
+        // What this disposition watermarks leaves the held un-watermarked set
+        // (`mail-spam.md` § Scoring placement → *The app's catch-up*) — taken
+        // here, where the manager is held; a flush that then fails leaves the
+        // copies un-watermarked on the nest until the next launch's drain
+        // re-reads them.
+        self.manager.note_spam_disposition(&scored_uids);
         crate::rpc::to_js(&SpamDispositionJs {
             scored_uids,
             junk_uids,
@@ -1938,12 +2078,8 @@ impl WasmConversationsManager {
     /// value rather than silently defaulting.
     #[wasm_bindgen(js_name = setSort)]
     pub fn set_sort(&self, order: String) -> Result<(), JsValue> {
-        let sort = match order.as_str() {
-            "LatestActivity" => SortOrder::LatestActivity,
-            "OldestFirst" => SortOrder::OldestFirst,
-            "Unread" => SortOrder::Unread,
-            other => return Err(JsValue::from_str(&format!("unknown sort order: {other}"))),
-        };
+        let sort = SortOrder::parse(&order)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown sort order: {order}")))?;
         self.manager.set_sort(sort);
         Ok(())
     }
@@ -2740,6 +2876,47 @@ impl WasmConversationsManager {
         })
     }
 
+    /// Re-read which of this tab's queued MLS sends the outbox parked
+    /// (`account-offline-mutation.md` § The unsent-changes surface, point 2);
+    /// the next snapshot carries each queued own copy's `queued_send`
+    /// (`{state: "queued"}` or `{state: "unsent", reason_code, reason}`).
+    /// Call it when a thread opens and on reconnect. Resolves once read.
+    #[wasm_bindgen(js_name = refreshUnsentSends)]
+    pub fn refresh_unsent_sends(&self) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.refresh_unsent_sends().await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Retry the not-sent own copy `messageId` (`dm-message-retry-button`).
+    /// Resolves `false` when it is no queued copy or its intent is not parked.
+    #[wasm_bindgen(js_name = retryQueuedSend, unchecked_return_type = "Promise<boolean>")]
+    pub fn retry_queued_send(&self, message_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            Ok(JsValue::from_bool(
+                mgr.retry_queued_send(fauna_conversations::MessageId(message_id))
+                    .await,
+            ))
+        })
+    }
+
+    /// Discard the not-sent own copy `messageId`
+    /// (`dm-message-discard-confirm-button`, behind its confirm). Resolves
+    /// `false` when it is no queued copy or its intent is not parked.
+    #[wasm_bindgen(js_name = discardQueuedSend, unchecked_return_type = "Promise<boolean>")]
+    pub fn discard_queued_send(&self, message_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            Ok(JsValue::from_bool(
+                mgr.discard_queued_send(fauna_conversations::MessageId(message_id))
+                    .await,
+            ))
+        })
+    }
+
     /// Resolve link-preview metadata (render-model.md § D4) for a bare-url `LinkPreview`
     /// block in a conversation bubble — the conversations twin of
     /// `WasmFeedManager.resolveLinkPreview`. Fire-once per URL (idempotent in the manager);
@@ -2769,6 +2946,35 @@ impl WasmConversationsManager {
                 Err(e) => Err(JsValue::from_str(&format!("{e}"))),
             }
         })
+    }
+
+    /// The SPA's connection word — `"connected"`, `"connecting"`,
+    /// `"disconnected"`, `"unreachable"`, the word its offline gate reads.
+    /// Call once when this manager is built and again on every change; the
+    /// twin of `WasmFeedManager::setConnectionState`, feeding the same tab
+    /// outbox (`crate::offline_outbox`).
+    ///
+    /// The first call on a manager with the MLS engine lends that outbox to
+    /// it, so a send on a bound MLS group made with no nest is queued as a
+    /// plaintext intent in this tab's account store, and registers this
+    /// manager's sealing send, which drains the queue now, at the store's
+    /// ready edge and on every reconnect (`devices.md` § Offline compose).
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = setConnectionState)]
+    pub fn set_connection_state(&self, connection_state: String) {
+        let outbox = crate::offline_outbox::set_connection_state(&connection_state);
+        let Some(backend) = self.fauna_mls.borrow().clone() else {
+            return;
+        };
+        crate::offline_outbox::lend_to_conversations(
+            &outbox,
+            crate::offline_outbox::WebMlsIntentSender {
+                actor_id_hex: backend.engine().identity_actor_id().to_hex(),
+                manager: Arc::downgrade(&self.manager),
+                fauna_mls: Arc::downgrade(&backend),
+                cursors: Rc::downgrade(&self.conv_cursors),
+            },
+        );
     }
 
     /// Send the composed body on an **existing** thread (`dm-send-button`):
@@ -3756,6 +3962,34 @@ impl WasmConversationsManager {
         })
     }
 
+    /// Remove the nest's copy of `message_id` in `thread_id`
+    /// (`dm-message-remove-button` — bridged-adapter.md § Removing bridged
+    /// rows): refused unless the message's snapshot says `can_remove`; the
+    /// message leaves the snapshot once the nest answers, and a refusal
+    /// surfaces on the page error. Resolves to `undefined`.
+    #[wasm_bindgen(js_name = removeMessage)]
+    pub fn remove_message(&self, thread_id: String, message_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.remove_message(ThreadId(thread_id), MessageId(message_id))
+                .await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Remove the nest's copy of the whole of `thread_id` and hide it until a
+    /// new row reopens it (`room-remove-button` — bridged-adapter.md
+    /// § Removing bridged rows): refused unless the thread's capabilities say
+    /// `supports_local_remove`. Resolves to `undefined`.
+    #[wasm_bindgen(js_name = removeThread)]
+    pub fn remove_thread(&self, thread_id: String) -> js_sys::Promise {
+        let mgr = self.manager.clone();
+        future_to_promise(async move {
+            mgr.remove_thread(ThreadId(thread_id)).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     // ── Shared-folder Sharing (owner side) ──────────────────────────────────
     // The web twin of fauna-ffi's `folders_*` free fns (priority #2;
     // folders.md § Sharing). These reuse THIS manager's WS-RPC transport
@@ -3889,6 +4123,27 @@ impl WasmConversationsManager {
             .ok()
             .filter(|b| !b.is_empty())
             .is_some_and(|raw| backend.engine().has_group(&ChannelId::from_group_id(&raw)))
+    }
+
+    /// Whether this client's seat in the MLS group behind `group_id_hex` is
+    /// marked forked (final until a fresh Welcome; `federation-shared-folders.md`
+    /// § *A forked seat is final*) — the web half of the folders page's
+    /// `is_forked_shared_set` query. Same fail-safe as [`Self::folders_is_joined`]:
+    /// malformed hex or no backend answers `false`.
+    #[wasm_bindgen(js_name = foldersIsForked)]
+    pub fn folders_is_forked(&self, group_id_hex: String) -> bool {
+        let Some(backend) = self.fauna_mls.borrow().clone() else {
+            return false;
+        };
+        hex::decode(group_id_hex.trim())
+            .ok()
+            .filter(|b| !b.is_empty())
+            .is_some_and(|raw| {
+                backend
+                    .engine()
+                    .folder_seat_forked(&ChannelId::from_group_id(&raw))
+                    .is_some()
+            })
     }
 
     /// The MLS-recorded folder owner of the channel with this 32-byte id (the
@@ -4864,6 +5119,16 @@ fn open_sealed_mail_record(
         &retirements,
     )
     .map_err(|e| OpenMiss::Unopenable(format!("open inbound record (uid {uid}): {e}")))
+}
+
+/// A feed message's `scores` as the JS fetch decoded them
+/// (`[{factor, score, tier, scorer_version}]`), `null`/`undefined` for none.
+fn score_entries_from_js(scores: JsValue) -> Result<Vec<fauna_core::scoring::ScoreEntry>, JsValue> {
+    if scores.is_null() || scores.is_undefined() {
+        Ok(Vec::new())
+    } else {
+        serde_wasm_bindgen::from_value(scores).map_err(crate::rpc::err_to_js)
+    }
 }
 
 /// Why [`open_sealed_mail_record`] returned no plaintext.

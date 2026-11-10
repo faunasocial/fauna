@@ -25,6 +25,7 @@ use fauna_protocol::family::{
     FamilyTransferDeclineRequest, FamilyTransferRequest, FamilyUsageReportReply,
     FamilyUsageReportRequest, ReachPolicy,
 };
+use fauna_protocol::offline_intent::{ComposeError, Composed, OfflineIntentQueue, send_or_queue};
 
 // Re-exported so a client reads/builds the family wire shapes through this
 // wrapper crate's typed surface without depending on `fauna-protocol`
@@ -192,6 +193,37 @@ impl<R: RpcRequester> FamilyClient<R> {
         Ok(())
     }
 
+    /// [`approvals_decide`](Self::approvals_decide) through the
+    /// `OfflineQueued` composer (`fauna_protocol::offline_intent::send_or_queue`,
+    /// `account-offline-mutation.md` § The offline-mutation contract): sent now
+    /// while the app has a nest, or — when `queue` is wired and reports no nest
+    /// — appended to the device's outbox and drained once the nest is back,
+    /// the intent id its idempotency key. Takes the queue entry's own request
+    /// (every item key it carries, [`FamilyApprovalDecideRequest`]) plus the
+    /// verdict, so no app re-derives which key a kind names its item by.
+    ///
+    /// The drain FIFO scope is the ONE queue item ([`approval_item_scope`]): a
+    /// rejected decision (the item already decided on another device, say)
+    /// parks only itself, never a later decision on another item.
+    pub async fn approvals_decide_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        mut request: FamilyApprovalDecideRequest,
+        approve: bool,
+    ) -> Result<Composed<()>, ComposeError<R::Error>> {
+        request.approve = approve;
+        let scope = approval_item_scope(&request);
+        let composed: Composed<FamilyOkReply> = send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.family.approvals.decide",
+            &scope,
+            request,
+        )
+        .await?;
+        Ok(ok_unit(composed))
+    }
+
     /// The guardian's **un-deny** of one bridge-DM peer — the one-click flip
     /// back for a row of `FamilyWardInfo::blocked_dm_peers`
     /// (`family-safety.md` § The bridge-DM gate → *The un-deny surface*).
@@ -222,6 +254,26 @@ impl<R: RpcRequester> FamilyClient<R> {
         .await
     }
 
+    /// [`allow_blocked_dm_peer`](Self::allow_blocked_dm_peer) through the
+    /// `OfflineQueued` composer — the same approving `dm_hold` decide, queued
+    /// under its item's scope ([`approval_item_scope`]) while there is no nest.
+    pub async fn allow_blocked_dm_peer_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        supervised_actor_id: Vec<u8>,
+        bridge_id: impl Into<String>,
+        peer_id: impl Into<String>,
+    ) -> Result<Composed<()>, ComposeError<R::Error>> {
+        let request = FamilyApprovalDecideRequest {
+            supervised_actor_id: ByteBuf::from(supervised_actor_id),
+            kind: "dm_hold".into(),
+            bridge_id: bridge_id.into(),
+            peer_address: peer_id.into(),
+            ..Default::default()
+        };
+        self.approvals_decide_or_queue(queue, request, true).await
+    }
+
     /// `fauna.family.contact.add` — pre-approve a contact on the ward's
     /// behalf (the outbound complement of contact-approval mode).
     pub async fn contact_add(
@@ -241,6 +293,37 @@ impl<R: RpcRequester> FamilyClient<R> {
             )
             .await?;
         Ok(())
+    }
+
+    /// [`contact_add`](Self::contact_add) through the `OfflineQueued` composer
+    /// — the shape of [`approvals_decide_or_queue`](Self::approvals_decide_or_queue).
+    /// The drain FIFO scope is the (ward, peer) pair
+    /// (`family.contact.add:<ward hex>:<peer hex>`), so a refused pre-approval
+    /// of one peer never holds another's.
+    pub async fn contact_add_or_queue(
+        &self,
+        queue: Option<&dyn OfflineIntentQueue>,
+        supervised_actor_id: Vec<u8>,
+        peer_actor_id: Vec<u8>,
+    ) -> Result<Composed<()>, ComposeError<R::Error>> {
+        let scope = format!(
+            "family.contact.add:{}:{}",
+            hex(&supervised_actor_id),
+            hex(&peer_actor_id)
+        );
+        let composed: Composed<FamilyOkReply> = send_or_queue(
+            &self.nest,
+            queue,
+            "fauna.family.contact.add",
+            &scope,
+            FamilyContactAddRequest {
+                supervised_actor_id: ByteBuf::from(supervised_actor_id),
+                peer_actor_id: ByteBuf::from(peer_actor_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(ok_unit(composed))
     }
 
     /// `fauna.family.contact.request` — the **supervised** caller's in-app ask
@@ -432,6 +515,83 @@ pub use supervision_snapshot::{SnapshotGuardian, SupervisionSnapshot};
 pub use ward_asks::{
     FeedRequestState, contact_ask_pending, feed_request_state, knocks_await_guardian,
 };
+
+/// The outbox FIFO scope of one approvals-queue item: the ward plus every key
+/// a [`FamilyApprovalDecideRequest`] can name its item by (the peer actor, the
+/// held message, the bridge operation, the external peer). Each kind fills a
+/// different subset and leaves the rest empty, so the joined form is distinct
+/// per item without this crate knowing the kind → key map. The verdict is NOT
+/// part of it: an approve and a later deny of the same item drain in order.
+pub fn approval_item_scope(request: &FamilyApprovalDecideRequest) -> String {
+    format!(
+        "family.approvals.decide:{}:{}:{}:{}:{}:{}:{}:{}",
+        hex(&request.supervised_actor_id),
+        request.kind,
+        hex(&request.peer_actor_id),
+        hex(&request.message_id),
+        request.bridge_id,
+        request.operation,
+        request.target,
+        request.peer_address,
+    )
+}
+
+/// The decide request for one approvals-queue entry: every item key the entry
+/// carries, verbatim, with the verdict left for the composer's argument — so
+/// no app re-derives which key a kind names its item by.
+pub fn decide_request_for(entry: &FamilyApprovalEntry) -> FamilyApprovalDecideRequest {
+    FamilyApprovalDecideRequest {
+        supervised_actor_id: entry.supervised_actor_id.clone(),
+        kind: entry.kind.clone(),
+        peer_actor_id: entry.peer_actor_id.clone(),
+        message_id: entry.message_id.clone(),
+        bridge_id: entry.bridge_id.clone(),
+        operation: entry.operation.clone(),
+        target: entry.target.clone(),
+        peer_address: entry.peer_address.clone(),
+        ..Default::default()
+    }
+}
+
+/// One approvals-queue entry's item identity — [`approval_item_scope`] over
+/// [`decide_request_for`]: what a page keys the entry's row by (a keyed list
+/// render), so two items one ward holds never share a key. A display field
+/// or `peer_actor_id` alone is not that: every `dm_hold` and `feed_source`
+/// row carries an empty peer actor, so two held bridge peers of one ward
+/// would collide.
+pub fn approval_item_key(entry: &FamilyApprovalEntry) -> String {
+    approval_item_scope(&decide_request_for(entry))
+}
+
+/// The page's fold of a QUEUED approvals decision
+/// (`account-offline-mutation.md` § Implementation status today, the family
+/// composer): the decided item leaves the local approvals queue — the
+/// guardian's verdict is recorded and the read after the drain is the nest's
+/// word — matched by its item key ([`approval_item_scope`]), never by display
+/// fields, so every other item stays. A queued pre-approval or un-deny folds
+/// nothing, and nothing is re-read while there is no nest.
+pub fn approvals_after_queued_decision(
+    approvals: Vec<FamilyApprovalEntry>,
+    decided: &FamilyApprovalEntry,
+) -> Vec<FamilyApprovalEntry> {
+    let scope = approval_item_scope(&decide_request_for(decided));
+    approvals
+        .into_iter()
+        .filter(|e| approval_item_scope(&decide_request_for(e)) != scope)
+        .collect()
+}
+
+/// `{ ok }` folded away: a sent `FamilyOkReply` carries nothing the caller reads.
+fn ok_unit(composed: Composed<FamilyOkReply>) -> Composed<()> {
+    match composed {
+        Composed::Sent(_) => Composed::Sent(()),
+        Composed::Queued(id) => Composed::Queued(id),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    fauna_core::format::hex_full(bytes)
+}
 
 #[cfg(test)]
 mod tests {
@@ -678,5 +838,150 @@ mod tests {
             err
         );
         assert_eq!(block_on(c.usage_report(5, 120)).unwrap_err(), err);
+    }
+
+    // ── The `OfflineQueued` composer (`account-offline-mutation.md`) ────────
+
+    fn decide_request() -> FamilyApprovalDecideRequest {
+        FamilyApprovalDecideRequest {
+            supervised_actor_id: ByteBuf::from(vec![2u8; 32]),
+            kind: "mail_hold".into(),
+            message_id: ByteBuf::from(vec![9u8; 16]),
+            ..Default::default()
+        }
+    }
+
+    /// A decision made with no nest rests in the outbox — kind, the one item's
+    /// scope, the canonical request with the verdict folded in — and nothing is
+    /// sent.
+    #[test]
+    fn a_decision_with_no_nest_is_queued_scoped_to_its_item() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let queue = fauna_client_testkit::RecordingQueue::new("disconnected");
+        let c = FamilyClient::new(rec.clone());
+        let out = block_on(c.approvals_decide_or_queue(Some(&queue), decide_request(), false));
+        assert_eq!(out.unwrap(), Composed::Queued([7; 16]));
+        assert!(rec.last().is_none(), "no nest: nothing may be sent");
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        let (kind, scope, payload) = &queued[0];
+        assert_eq!(*kind, "fauna.family.approvals.decide");
+        assert_eq!(
+            *scope,
+            format!(
+                "family.approvals.decide:{}:mail_hold::{}::::",
+                "02".repeat(32),
+                "09".repeat(16)
+            )
+        );
+        let d: FamilyApprovalDecideRequest = fauna_protocol::decode_strict(payload).unwrap();
+        assert!(!d.approve, "the verdict rides the queued request");
+        assert_eq!(d.message_id.as_slice(), [9u8; 16]);
+    }
+
+    /// Connected, the same call is the old send exactly; the outbox stays empty.
+    #[test]
+    fn a_decision_with_the_nest_connected_is_sent_not_queued() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let queue = fauna_client_testkit::RecordingQueue::new("connected");
+        let c = FamilyClient::new(rec.clone());
+        let out = block_on(c.approvals_decide_or_queue(Some(&queue), decide_request(), true));
+        assert_eq!(out.unwrap(), Composed::Sent(()));
+        let d: FamilyApprovalDecideRequest = decode_last(&rec, "fauna.family.approvals.decide");
+        assert!(d.approve);
+        assert!(queue.queued().is_empty());
+    }
+
+    /// Two items of one ward, and an approve vs. a deny of one item: the scope
+    /// tells items apart and never the verdict (the deny drains after the
+    /// approve, in order).
+    #[test]
+    fn the_decision_scope_is_per_item_not_per_verdict() {
+        let a = decide_request();
+        let mut b = decide_request();
+        b.message_id = ByteBuf::from(vec![8u8; 16]);
+        assert_ne!(approval_item_scope(&a), approval_item_scope(&b));
+        let mut approved = decide_request();
+        approved.approve = true;
+        assert_eq!(approval_item_scope(&a), approval_item_scope(&approved));
+    }
+
+    #[test]
+    fn a_contact_pre_approval_with_no_nest_is_queued_per_peer() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let queue = fauna_client_testkit::RecordingQueue::new("unreachable");
+        let c = FamilyClient::new(rec.clone());
+        let out = block_on(c.contact_add_or_queue(Some(&queue), vec![2u8; 32], vec![3u8; 32]));
+        assert_eq!(out.unwrap(), Composed::Queued([7; 16]));
+        assert!(rec.last().is_none(), "no nest: nothing may be sent");
+        let queued = queue.queued();
+        assert_eq!(queued.len(), 1);
+        let (kind, scope, payload) = &queued[0];
+        assert_eq!(*kind, "fauna.family.contact.add");
+        assert_eq!(
+            *scope,
+            format!("family.contact.add:{}:{}", "02".repeat(32), "03".repeat(32))
+        );
+        let a: FamilyContactAddRequest = fauna_protocol::decode_strict(payload).unwrap();
+        assert_eq!(a.peer_actor_id.as_slice(), [3u8; 32]);
+    }
+
+    /// The queued-decision fold drops exactly the decided item, by its key:
+    /// a display field that drifted since the read still matches, and another
+    /// item of the same ward stays.
+    #[test]
+    fn a_queued_decision_drops_only_its_own_item() {
+        let held = |id: u8, summary: &str| FamilyApprovalEntry {
+            supervised_actor_id: ByteBuf::from(vec![2u8; 32]),
+            kind: "mail_hold".into(),
+            message_id: ByteBuf::from(vec![id; 16]),
+            summary: summary.into(),
+            ..Default::default()
+        };
+        let out = approvals_after_queued_decision(
+            vec![held(9, "old"), held(8, "")],
+            &held(9, "renamed since the read"),
+        );
+        assert_eq!(out, vec![held(8, "")]);
+        let req = decide_request_for(&held(9, "x"));
+        assert_eq!(req.message_id.as_slice(), [9u8; 16]);
+        assert!(!req.approve, "the verdict is the composer's argument");
+    }
+
+    /// Two `dm_hold` rows of one ward — two cold bridge peers, both with an
+    /// empty peer actor — carry distinct item keys, and a display field does
+    /// not move one: the key a keyed list render needs (the web Family page
+    /// failed to paint on a duplicate key with two held peers).
+    #[test]
+    fn two_held_bridge_peers_of_one_ward_have_distinct_item_keys() {
+        let dm = |peer: &str| FamilyApprovalEntry {
+            supervised_actor_id: ByteBuf::from(vec![2u8; 32]),
+            kind: "dm_hold".into(),
+            peer_address: peer.into(),
+            bridge_id: "matrix".into(),
+            ..Default::default()
+        };
+        assert_ne!(
+            approval_item_key(&dm("@a:example.org")),
+            approval_item_key(&dm("@b:example.org"))
+        );
+        let mut drifted = dm("@a:example.org");
+        drifted.summary = "renamed".into();
+        assert_eq!(
+            approval_item_key(&drifted),
+            approval_item_key(&dm("@a:example.org"))
+        );
+    }
+
+    #[test]
+    fn a_contact_pre_approval_with_the_nest_connected_is_sent_not_queued() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let queue = fauna_client_testkit::RecordingQueue::new("connected");
+        let c = FamilyClient::new(rec.clone());
+        let out = block_on(c.contact_add_or_queue(Some(&queue), vec![2u8; 32], vec![3u8; 32]));
+        assert_eq!(out.unwrap(), Composed::Sent(()));
+        let a: FamilyContactAddRequest = decode_last(&rec, "fauna.family.contact.add");
+        assert_eq!(a.supervised_actor_id.as_slice(), [2u8; 32]);
+        assert!(queue.queued().is_empty());
     }
 }

@@ -346,8 +346,8 @@ class FamilyActions:
     def require_content_hint(self) -> None:
         """Skip unless this app paints the editor's content-category honest
         bound (``family-policy-content-hint``, user-approved 2026-10-16). tui
-        leads (2026-10-21), macos/ios (shared FaunaKit) 2026-10-24, web 2026-10-24, linux 2026-10-30; the other
-        apps lift the id with their family batch."""
+        leads (2026-10-21), macos/ios (shared FaunaKit) 2026-10-24, web 2026-10-24, linux 2026-10-30,
+        windows 2026-11-08; android lifts the id with its family batch."""
         from helpers.app_surface import require_surface
 
         require_surface(self.driver, "family-policy-content-hint")
@@ -468,7 +468,7 @@ class FamilyActions:
     # element): rendered on every page EXCEPT the family page, which stays
     # reachable read-only so the ward can always read their own policy.
 
-    def heartbeat(self, minutes: int) -> None:
+    def heartbeat(self, minutes: int, *, focused: bool = True) -> None:
         """Advance the ward client's screen-time clock by `minutes` of foreground
         use and run one production heartbeat step (`screen_time_heartbeat` —
         linux `main.rs`, web `#lib/screen-time-e2e.ts`).
@@ -480,8 +480,18 @@ class FamilyActions:
         is faked — the cadence, the accrual cap and the failure re-credit all
         live in shared Rust and are proven at tier_1 in
         `fauna_core::screen_time::tests`; this drives the real
-        `fauna.family.usage_report` wire path."""
-        self.driver.call_command("screen_time_heartbeat", {"minutes": minutes}, timeout=20)
+        `fauna.family.usage_report` wire path.
+
+        ``focused=False`` advances the clock with the app out of front or the
+        device locked — minutes the ward did not spend, which must bill nothing
+        (`family-client-enforcement.md` § Implementation status today, decision
+        (b)). It is sent only when false, so an agent that predates the field
+        sees the payload it always did; whether an app's agent honours it is the
+        ``screen-time-heartbeat-unfocused`` surface (`surfaces.toml`)."""
+        payload: dict = {"minutes": minutes}
+        if not focused:
+            payload["focused"] = False
+        self.driver.call_command("screen_time_heartbeat", payload, timeout=20)
 
     def screen_lock_visible(self) -> bool:
         return not self.driver.is_absent("screen-time-lock")

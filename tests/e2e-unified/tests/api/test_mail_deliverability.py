@@ -109,6 +109,7 @@ def test_admin_runs_diagnostics_over_wire(nest_instance):
         "TLSRPT record present",
         "Reverse-DNS for outbound IP",
         "Outbound TLS to gmail.com",
+        "DNSSEC resolver path",
     ):
         assert expected in names, f"missing check {expected!r}; got {sorted(names)}"
 

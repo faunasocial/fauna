@@ -119,6 +119,12 @@ pub use accounts::*;
 // lifecycle → The trigger fired, ruling (4).
 #[cfg(target_arch = "wasm32")]
 pub mod account_runtime;
+// This tab's offline outbox, shared by the feed's interactions and the
+// conversations manager's MLS sends, and the MLS drain's three edges
+// (account-offline-mutation.md § The offline-mutation contract; devices.md
+// § Offline compose).
+#[cfg(target_arch = "wasm32")]
+mod offline_outbox;
 
 // The private contact overlay's face — the projection's reads, the private
 // section's staging and its Save (contacts.md § The private overlay).
@@ -1771,6 +1777,25 @@ pub fn content_render_for_item_with_nest(
     ))
 }
 
+/// `obligation::show_again_for_item` — the show-again control on a reported
+/// placeholder (`moderation.md` § Corollary — the reporter's hide is theirs to
+/// undo): `{ ids, label }` — the hidden ids one press of
+/// `content-policy-show-again-button` removes (each one `unhideReported` call)
+/// and the button's label naming the scope — or `null` when no hidden id
+/// matched the item. The UniFFI `reported_show_again` twin.
+#[wasm_bindgen(js_name = reportedShowAgain)]
+pub fn reported_show_again(
+    hidden_content: Vec<String>,
+    item_id: String,
+    author_id: Option<String>,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::obligation::show_again_for_item(
+        &hidden_content,
+        &item_id,
+        author_id.as_deref(),
+    ))
+}
+
 /// The nest rule sets a `...WithNest` face folds; absent → none.
 fn nest_rule_sets(
     nest_policies: JsValue,
@@ -2341,12 +2366,29 @@ pub fn contact_toggle_block_label(is_blocked: bool) -> Result<JsValue, JsValue> 
 /// `fauna_core::format::follow_toggle_label` → a `LocalizedText` `{ key, args }` the SPA
 /// resolves through `resolveLocalized` — the `profile-follow-button` label
 /// (`profile.following` when the viewer already follows, else `profile.follow`), so web
-/// shares the toggle wording instead of its own `isFollowing` ternary. The `isFollowing`
-/// derivation (subscription status / optimistic flip) stays web-local by ratified
-/// decision. See `docs/goal/ui/profile.md` § Element table → `profile-follow-button`.
+/// shares the toggle wording instead of its own `isFollowing` ternary. The bool comes
+/// from [`is_following`]; the optimistic post-press flip stays web-local. See
+/// `docs/goal/ui/profile.md` § Element table → `profile-follow-button`.
 #[wasm_bindgen(js_name = followToggleLabel)]
 pub fn follow_toggle_label(is_following: bool) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_core::format::follow_toggle_label(is_following))
+}
+
+/// `fauna_core::format::is_following` → whether the viewer follows the author, from
+/// the `status.get` reply's `tier` and `follow_pending` (following ⇔ a tier is named
+/// or a follow is pending; `subscriptions.md` § The free followers tier — follow and
+/// unfollow, rule 4). Feeds [`follow_toggle_label`].
+#[wasm_bindgen(js_name = isFollowing)]
+pub fn is_following(tier: Option<String>, follow_pending: bool) -> bool {
+    fauna_core::format::is_following(tier.as_deref(), follow_pending)
+}
+
+/// `fauna_core::format::unfollow_ends_paid_tier` → whether a press on *Following* is
+/// confirm-gated: the status names a paid tier, which the unfollow ends too
+/// (`subscriptions.md` § The free followers tier — follow and unfollow, rule 4).
+#[wasm_bindgen(js_name = unfollowEndsPaidTier)]
+pub fn unfollow_ends_paid_tier(tier: Option<String>) -> bool {
+    fauna_core::format::unfollow_ends_paid_tier(tier.as_deref())
 }
 
 /// `fauna_conversations::compose::recipient_resolve_status_from_variant` → a
@@ -2653,6 +2695,16 @@ pub fn bridge_setting_control(setting_type: &str) -> String {
 #[wasm_bindgen(js_name = bridgeModeApplies)]
 pub fn bridge_mode_applies(mode_platform: Option<String>, platform: String) -> bool {
     fauna_client_bridges::mode_applies(mode_platform.as_deref(), &platform)
+}
+
+/// `fauna_client_bridges::bridge_card_title` — a Bridges page network row's
+/// title: `"<emoji> <name>"` when the row declares a glyph (a consented bridge
+/// app's), the bare name otherwise (`bridges.md` § Coverage contract, outcome
+/// 11). Field-shaped like [`bridge_link_block`]: the SPA passes the row's
+/// `name` and `glyph` and keeps no emoji map of its own.
+#[wasm_bindgen(js_name = bridgeCardTitle)]
+pub fn bridge_card_title(name: String, glyph: Option<String>) -> String {
+    fauna_client_bridges::bridge_card_title_of(&name, glyph.as_deref())
 }
 
 /// `fauna_client_bridges::link_block` — why a bridge's Link control is not
@@ -3065,6 +3117,33 @@ pub fn notification_muted(row: JsValue, muted_keywords: JsValue) -> Result<bool,
     ))
 }
 
+/// The knock toast to raise for one `fauna.knock` push, or `null` when a muted
+/// word withholds it — `fauna_client_notifications::knock_toast` over wasm
+/// (`docs/goal/behavior/notifications.md` § Localized body, *The knock toast*,
+/// and § Muted words rule 6), the twin of the natives' knock arms.
+///
+/// `payload` is the push's payload object as `onPushEvent` hands it over;
+/// `muted_keywords` is the session-held muted list (`#lib/muted-words.ts`).
+/// Answers in [`notification_text_js`]'s shape, which the SPA resolves through
+/// its own catalog.
+#[wasm_bindgen(js_name = knockToast)]
+pub fn knock_toast(payload: JsValue, muted_keywords: JsValue) -> Result<JsValue, JsValue> {
+    let push: fauna_protocol::push_events::KnockPayload = crate::rpc::from_js(payload)?;
+    let muted: Vec<fauna_core::data::MutedKeyword> = crate::rpc::from_js(muted_keywords)?;
+    match fauna_client_notifications::knock_toast(&muted, &push) {
+        Some(text) => notification_text_js(text),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// `fauna_client_notifications::KNOCK_TOAST_REPLACE_ID` — the one id every
+/// knock toast is raised under; web derives its `Notification` tag from it, so
+/// a flood of fresh senders replaces one notice instead of stacking.
+#[wasm_bindgen(js_name = knockToastReplaceId)]
+pub fn knock_toast_replace_id() -> u32 {
+    fauna_client_notifications::KNOCK_TOAST_REPLACE_ID
+}
+
 /// The conversations rail / feed badge source icon: glyph **id** (the lowercase
 /// serde string web reads off `thread.glyph` / `badge.glyph`) → display emoji.
 /// `fauna_core::source_glyph::source_glyph_emoji` over wasm — the shared map
@@ -3363,6 +3442,24 @@ pub fn relay_url_error(url: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = describePendingAction)]
 pub fn describe_pending_action(action_type: &str, target: Option<String>) -> String {
     fauna_protocol::pending_actions::describe_pending_action(action_type, target.as_deref())
+}
+
+/// `fauna_protocol::pending_actions::describe_pending_action_with_folder` —
+/// [`describe_pending_action`] naming the folder an automatic prune targets,
+/// by the name the app's folder roster gave (`DevicesMachine.folderName`);
+/// `undefined` paints the neutral sentence. See `docs/goal/ui/settings.md`
+/// § Pending actions.
+#[wasm_bindgen(js_name = describePendingActionWithFolder)]
+pub fn describe_pending_action_with_folder(
+    action_type: &str,
+    target: Option<String>,
+    folder_name: Option<String>,
+) -> String {
+    fauna_protocol::pending_actions::describe_pending_action_with_folder(
+        action_type,
+        target.as_deref(),
+        folder_name.as_deref(),
+    )
 }
 
 /// `fauna_protocol::nostr_relay::trimmed_relay_input` → the trimmed relay
@@ -3858,6 +3955,20 @@ pub fn short_nest_id(id: &str) -> String {
 #[wasm_bindgen(js_name = accountDisplayLabel)]
 pub fn account_display_label(handle: Option<String>, actor_id: &str) -> String {
     fauna_core::format::account_display_label(handle.as_deref(), actor_id)
+}
+
+/// `fauna_core::format::qualified_handle` → the canonical `handle@domain` a
+/// principal is named by, or `undefined` when no handle was served. An absent
+/// or empty domain leaves the handle bare (one of the viewer's own nest's
+/// users); a handle with a domain beside it is a foreign user the viewer's nest
+/// bound to that domain's key. The browser twin of the shared formatter, so
+/// web's folder roster joins a cross-nest member's announced pair exactly as
+/// tui and linux do (`federation-shared-folders.md` § Cross-nest shared folders
+/// + channel append, the id→handle bullet → *The folder roster*). See
+/// `docs/goal/behavior/value-formatting.md` § Account display label.
+#[wasm_bindgen(js_name = qualifiedHandle)]
+pub fn qualified_handle(handle: Option<String>, domain: Option<String>) -> Option<String> {
+    fauna_core::format::qualified_handle(handle.as_deref(), domain.as_deref())
 }
 
 /// `fauna_core::format::hex_short` → the short display hex for a **byte** id: the
@@ -5375,6 +5486,21 @@ pub fn report_sheet_view(target: JsValue, form: JsValue) -> Result<JsValue, JsVa
 #[wasm_bindgen(js_name = reportFailed)]
 pub fn report_failed(error: String) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_moderation::report::report_failed(error))
+}
+
+/// `report::report_queued` — the `report-status` line after a report was
+/// queued with no nest (account-offline-mutation.md § The offline-mutation
+/// contract).
+#[wasm_bindgen(js_name = reportQueued)]
+pub fn report_queued() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::report::report_queued())
+}
+
+/// `report::report_block_not_sent` — the `error-message` line when a queued
+/// report asked to block its author: the block needs the nest.
+#[wasm_bindgen(js_name = reportBlockNotSent)]
+pub fn report_block_not_sent() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::report::report_block_not_sent())
 }
 
 /// `report::ledger_title` / `ledger_empty` — the ledger's header and empty

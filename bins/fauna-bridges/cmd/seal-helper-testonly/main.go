@@ -527,6 +527,9 @@ type publishLabelerParams struct {
 	NeedsHashtags      bool   `json:"needs_hashtags"`
 	NeedsMediaMetadata bool   `json:"needs_media_metadata"`
 	NeedsAuthor        bool   `json:"needs_author"`
+	// The community-room attachment facet (`input_schema.needs_attachment_bytes`):
+	// absent reads false, the flagless module every mail-drain fixture publishes.
+	NeedsAttachmentBytes bool `json:"needs_attachment_bytes"`
 	// The signed output revision (`LabelerOutput::label_abi`). Absent/0 reads
 	// as 1, the only revision a build reads today; the tier_3 "newer than this
 	// app" inspect journey passes a later one.
@@ -555,7 +558,7 @@ func runPublishLabeler(raw []byte) ([]byte, error) {
 	}
 	return publishLabeler(
 		seed, wasmBytes, p.Version,
-		p.NeedsText, p.NeedsHashtags, p.NeedsMediaMetadata, p.NeedsAuthor,
+		p.NeedsText, p.NeedsHashtags, p.NeedsMediaMetadata, p.NeedsAuthor, p.NeedsAttachmentBytes,
 		labelAbi,
 		p.MaxMemoryBytes, p.MaxCpuMicroseconds, p.UpdatedAt,
 	)

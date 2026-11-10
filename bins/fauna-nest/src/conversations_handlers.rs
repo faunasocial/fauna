@@ -41,17 +41,18 @@ use fauna_protocol::{
         KeypackageAddressableRequest, KeypackageCountReply, KeypackageCountRequest,
         KeypackageFetchReply, KeypackageFetchRequest, KeypackageUploadReply,
         KeypackageUploadRequest, RoomAcceptInviteRemoteRequest, RoomAcceptInviteReply,
-        RoomAcceptInviteRequest, RoomBackfillGenerationsReply, RoomBackfillGenerationsRequest,
-        RoomCreateReply, RoomCreateRequest, RoomGenerationWire, RoomGenerationsRemoteRequest,
-        RoomGenerationsReply, RoomGenerationsRequest, RoomInviteRemoteRequest, RoomInviteReply,
-        RoomInviteRequest, RoomLeaveRemoteRequest, RoomLeaveReply, RoomLeaveRequest,
-        RoomListInvitesReply, RoomListInvitesRequest, RoomListRosterRemoteRequest,
-        RoomListRosterReply, RoomListRosterRequest, RoomPendingInviteWire,
-        RoomPublishGenerationReply, RoomPublishGenerationRequest, RoomRemoveReply,
-        RoomRemoveRequest, RoomRevokeInviteReply, RoomRevokeInviteRequest, RoomRosterEntryWire,
-        RoomRosterMemberWire, RoomRosterReportRemoteRequest, RoomRosterReportReply,
-        RoomRosterReportRequest, RoomSearchRequest, RoomSetLabelersReply, RoomSetLabelersRequest,
-        RoomSetPolicyReply, RoomSetPolicyRequest, RoomSetReceptionKeyReply,
+        RoomAcceptInviteRequest, RoomBackfillGenerationsRemoteRequest,
+        RoomBackfillGenerationsReply, RoomBackfillGenerationsRequest, RoomCreateReply,
+        RoomCreateRequest, RoomGenerationWire, RoomGenerationsRemoteRequest, RoomGenerationsReply,
+        RoomGenerationsRequest, RoomInviteRemoteRequest, RoomInviteReply, RoomInviteRequest,
+        RoomLeaveRemoteRequest, RoomLeaveReply, RoomLeaveRequest, RoomListInvitesReply,
+        RoomListInvitesRequest, RoomListRosterRemoteRequest, RoomListRosterReply,
+        RoomListRosterRequest, RoomPendingInviteWire, RoomPublishGenerationRemoteRequest,
+        RoomPublishGenerationReply, RoomPublishGenerationRequest, RoomRemoveRemoteRequest,
+        RoomRemoveReply, RoomRemoveRequest, RoomRevokeInviteReply, RoomRevokeInviteRequest,
+        RoomRosterEntryWire, RoomRosterMemberWire, RoomRosterReportRemoteRequest,
+        RoomRosterReportReply, RoomRosterReportRequest, RoomSearchRequest, RoomSetLabelersReply,
+        RoomSetLabelersRequest, RoomSetPolicyReply, RoomSetPolicyRequest, RoomSetReceptionKeyReply,
         RoomSetReceptionKeyRequest, RoomTransferOwnershipReply, RoomTransferOwnershipRequest,
         WelcomeDeliverReply, WelcomeDeliverRequest, WelcomeKind,
     },
@@ -392,7 +393,21 @@ fn is_the_claimant(claim: FolderChannelClaim, actor: &[u8; 32]) -> bool {
 /// best-effort on these auto-register paths; a gate rejection (a non-claimant
 /// on a claimed folder channel, or an unresolvable claim state) is silent, as
 /// it is the expected close.
-async fn register_actor_channel_gated_with_claim(
+///
+/// **On a claimed folder channel the claimant's register is the one that ends
+/// a retired seat** (`writer-signed-change-records.md` ruling (8)(j)(2)):
+/// whether the claimant seats a member's successor through `welcome.deliver`
+/// or seats ITSELF — the owner's successor joining its own set through the
+/// recovery sweep's in-process join, whose first `channel.send` is this
+/// register — any local predecessor of the seated actor that still holds a
+/// row here is retired and its grant carried
+/// ([`crate::db::CacheDb::register_successor_carrying_seat`]). Without the
+/// self-seat arm the owner's retired identity kept its row on its own set and
+/// the "Shared with" list counted it as a member for good
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+/// append → *A forked seat is final*, part (b)). Unclaimed channels keep the
+/// plain register: they hold no grant and no owner-managed roster.
+pub(crate) async fn register_actor_channel_gated_with_claim(
     db: &crate::db::CacheDb,
     channel_id: &[u8; 32],
     claim: FolderChannelClaim,
@@ -401,6 +416,20 @@ async fn register_actor_channel_gated_with_claim(
     ctx: &str,
 ) {
     if !claim_permits(claim, caller) {
+        return;
+    }
+    if is_the_claimant(claim, caller) {
+        match db.register_successor_carrying_seat(actor, channel_id).await {
+            Ok(carried) if carried.seats_retired > 0 => tracing::info!(
+                target: "recovery",
+                channel = %hex::encode(channel_id),
+                seats_retired = carried.seats_retired,
+                grants_carried = carried.grants,
+                "the successor's seat retired its predecessor's seat"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("{ctx}: {e}"),
+        }
         return;
     }
     if let Err(e) = db.register_actor_channel(actor, channel_id).await {
@@ -1681,7 +1710,13 @@ fn keypackage_fetch_handler() -> RpcHandler {
             // same-nest. KP-fetch is destructive (`take_key_package`), so a
             // mid-call channel disconnect surfaces an error to the client (which
             // retries the user action) rather than re-fetching a second KP (§4.D).
-            let key_package = match req.nest_url.as_deref().filter(|u| !u.is_empty()) {
+            // A node naming this nest's own domain is same-nest: a nest never
+            // dials itself (`node_names_this_nest`).
+            let relay_to = req
+                .nest_url
+                .as_deref()
+                .filter(|u| !u.trim().is_empty() && !node_names_this_nest(&state, u));
+            let key_package = match relay_to {
                 Some(peer_url) => crate::federation_pool::originate_keypackage_fetch(
                     &state.federation_pool,
                     &state,
@@ -1690,7 +1725,7 @@ fn keypackage_fetch_handler() -> RpcHandler {
                 )
                 .await
                 .map_err(|e| {
-                    tracing::error!("federation keypackage fetch (channel): {e}");
+                    tracing::error!(peer_url = %peer_url, "federation keypackage fetch (channel): {e}");
                     internal("federation fetch failed")
                 })?,
                 None => state.db.take_key_package(&target).await.map_err(|e| {
@@ -1869,6 +1904,13 @@ pub(crate) async fn welcome_deliver_core(
 ) -> Result<WelcomeDeliverReply, RpcError> {
     let recipient = parse_actor_id(&req.recipient_actor_id)?;
     let channel_id = parse_channel_id(&req.channel_id)?;
+    // The foreign nest this Welcome is relayed to, if any. A node naming this
+    // nest's own domain is the same-nest arm: a nest never dials itself
+    // (`node_names_this_nest`).
+    let relay_to = req
+        .nest_url
+        .as_deref()
+        .filter(|u| !u.trim().is_empty() && !node_names_this_nest(state, u));
 
     // ── The reach floor (`family-safety.md` § Guardian policy pillar 1) ──
     //
@@ -1962,7 +2004,7 @@ pub(crate) async fn welcome_deliver_core(
             state,
             &recipient,
             caller_id,
-            req.nest_url.is_none() && !mode_exempt,
+            relay_to.is_none() && !mode_exempt,
             ArrivalOrigin::Local,
         )
         .await?;
@@ -2145,7 +2187,7 @@ pub(crate) async fn welcome_deliver_core(
         // exists on the originating side, so the reply carries `inbox_id = 0`
         // (the peer's own inbox id is its local detail). Welcome delivery is
         // idempotent (inbox dedup), so a dropped channel is re-dialed + resent.
-        if let Some(peer_url) = req.nest_url.as_deref().filter(|u| !u.is_empty()) {
+        if let Some(peer_url) = relay_to {
             // Claim-refreshed identity domain, not the `node.domain` boot seed:
             // a provisioned box boots domainless and would hand the peer no
             // origin nest URL at all until a restart.
@@ -2157,11 +2199,11 @@ pub(crate) async fn welcome_deliver_core(
             // owner's handle + its own domain, joined from its own rows —
             // never client-asserted. Folder shares only, like `access`.
             let (owner_handle, owner_domain) = if shared_by.is_some() {
-                crate::federation_handlers::owner_label_stamp(state, caller_id).await
+                crate::federation_handlers::local_name_stamp(state, caller_id).await
             } else {
                 (None, None)
             };
-            crate::federation_pool::originate_welcome_deliver(
+            let relayed = crate::federation_pool::originate_welcome_deliver(
                 &state.federation_pool,
                 state,
                 peer_url,
@@ -2232,7 +2274,7 @@ pub(crate) async fn welcome_deliver_core(
                     may_rebind_foreign_member(state, folder_claim, &channel_id, caller_id).await;
                 match state.federation_pool.resolve_peer_nest_id(peer_url).await {
                     Ok(home_nest_id) => {
-                        if let Err(e) = state
+                        match state
                             .db
                             .register_foreign_channel_member(
                                 &channel_id,
@@ -2243,7 +2285,29 @@ pub(crate) async fn welcome_deliver_core(
                             )
                             .await
                         {
-                            tracing::warn!("register_foreign_channel_member: {e}");
+                            // The member's own nest named them on its reply
+                            // (the folder plane's one-shot id→handle carrier,
+                            // `federation-shared-folders.md` § Cross-nest shared
+                            // folders + channel append, the id→handle bullet →
+                            // *The folder roster*): believed only once its
+                            // domain binds to the identity this binding names,
+                            // awaited here so the roster row the share just
+                            // created is named when the owner's client reads
+                            // it back. Best-effort like the register itself;
+                            // the standing announce on the member's drains
+                            // heals a miss.
+                            Ok(()) => {
+                                crate::federation_handlers::record_welcomed_member_name(
+                                    state,
+                                    &channel_id,
+                                    &recipient,
+                                    &home_nest_id,
+                                    relayed.recipient_handle.as_deref(),
+                                    relayed.recipient_domain.as_deref(),
+                                )
+                                .await;
+                            }
+                            Err(e) => tracing::warn!("register_foreign_channel_member: {e}"),
                         }
                     }
                     Err(e) => {
@@ -2416,33 +2480,15 @@ pub(crate) async fn welcome_deliver_core(
         // non-claimant's Welcome registers nobody there and so carries
         // nothing; an unclaimed channel holds no grant and keeps the plain
         // register.
-        if is_the_claimant(folder_claim, caller_id) {
-            match state
-                .db
-                .register_successor_carrying_seat(&recipient, &channel_id)
-                .await
-            {
-                Ok(carried) if carried.seats_retired > 0 => tracing::info!(
-                    target: "recovery",
-                    channel = %hex::encode(channel_id),
-                    seats_retired = carried.seats_retired,
-                    grants_carried = carried.grants,
-                    "the successor's Welcome retired its predecessor's seat"
-                ),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("welcome register_actor_channel: {e}"),
-            }
-        } else {
-            register_actor_channel_gated_with_claim(
-                &state.db,
-                &channel_id,
-                folder_claim,
-                caller_id,
-                &recipient,
-                "welcome register_actor_channel",
-            )
-            .await;
-        }
+        register_actor_channel_gated_with_claim(
+            &state.db,
+            &channel_id,
+            folder_claim,
+            caller_id,
+            &recipient,
+            "welcome register_actor_channel",
+        )
+        .await;
 
         Ok(WelcomeDeliverReply {
             inbox_id,
@@ -3107,12 +3153,15 @@ pub(crate) fn verify_room_invite_act(
     Ok((signed, room_id))
 }
 
-/// Whether a base URL an inviter derived from a handle's domain names THIS
+/// Whether a base URL a client derived from a handle's domain names THIS
 /// nest — its claimed identity domain, spelled as the client's `peer_nest_url`
 /// derivation spells a node (`https://<domain>`), compared host-wise and
 /// case-insensitively. A domainless box names nothing: it cannot be reached
-/// by name, so no inviter could have derived it.
-fn invitee_node_names_this_nest(state: &AppState, node: &str) -> bool {
+/// by name, so no client could have derived it. Every relay door that takes a
+/// client-named node asks this first, because a nest never dials itself: a
+/// node naming this nest is the same-nest arm (the room-invite door, the key
+/// package fetch, the Welcome delivery).
+fn node_names_this_nest(state: &AppState, node: &str) -> bool {
     let Some(domain) = state.handle_domain_if_set() else {
         return false;
     };
@@ -3207,7 +3256,7 @@ pub(crate) async fn room_invite_apply(
     // the invitee's own nest, which runs the invitee's reach policy
     // itself (§ Join rules and invites → *A cross-nest invitation*).
     let invitee_node = invitee_node.trim().trim_end_matches('/');
-    if !invitee_node.is_empty() && !invitee_node_names_this_nest(state, invitee_node) {
+    if !invitee_node.is_empty() && !node_names_this_nest(state, invitee_node) {
         room_invite_deliver_abroad(
             state,
             room_id,
@@ -3242,6 +3291,7 @@ pub(crate) async fn room_invite_apply(
         &fauna_protocol::inbox::RoomInviteInbox {
             signed_invite: signed_bytes.to_vec(),
             room_node: None,
+            home_nest_actor_id: None,
             extra: std::collections::BTreeMap::new(),
         },
     )
@@ -3263,7 +3313,17 @@ pub(crate) async fn room_invite_apply(
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("exceeds invitee's inbox quota") {
-                return forbidden(&format!("invitee's inbox is full: {msg}"));
+                // One code for every failed check at this door (unregistered,
+                // suspended, over blob size, over quota) — `community-rooms.md`
+                // § Implementation status today, the invitations entry.
+                let mut err = RpcError::new(
+                    RpcError::CODE_CONVERSATIONS_INVITEE_INBOX_FULL,
+                    "error.conversations.invitee_inbox_full",
+                );
+                err.details = Some(Box::new(Value::String(format!(
+                    "invitee's inbox is full: {msg}"
+                ))));
+                return err;
             }
             tracing::error!("record_room_invite_and_deliver: {e}");
             internal("storage error")
@@ -3867,129 +3927,221 @@ fn room_revoke_invite_handler() -> RpcHandler {
 fn room_remove_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
-            use fauna_mls::room_policy::RoomRole;
             require_permission(&state, &actor_id, "fauna.conversations.room.remove").await?;
             let req: RoomRemoveRequest = decode(&payload).map_err(malformed)?;
             let room_id = parse_room_id(&req.room_id)?;
             let target = parse_actor_id(&req.principal)?;
-            floor_authoritative_room(&state, &room_id).await?;
+            let reply = room_remove_apply(
+                &state,
+                &room_id,
+                &actor_id,
+                &target,
+                RoomRemoveRepeat::Refuse,
+            )
+            .await?;
+            encode_reply(&reply)
+        })
+    })
+}
 
-            if target == actor_id {
-                return Err(invalid_params(
-                    "leaving is its own door — fauna.conversations.room.leave",
-                ));
-            }
+/// How [`room_remove_apply`] answers a target that holds no live seat.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomRemoveRepeat {
+    /// Refuse it — the same-nest door, where nothing re-sends a removal.
+    Refuse,
+    /// Answer a target the floor positively stamped removed with the live
+    /// count — the relayed door, which a §4.D re-send of a removal that
+    /// landed arrives at (`../architecture/federation.md` § Federation residue
+    /// surface, the *Conversation room remove* row). A target the floor never
+    /// seated is still refused.
+    Converge,
+}
 
-            let role = floor_role(&state, &room_id, &actor_id).await?;
-            if !role.is_admin_or_owner() {
-                return Err(permission_denied("only an owner or admin removes a member"));
-            }
+/// A member's removal from a room homed **here** — the one body both removal
+/// doors run: the same-nest [`room_remove_handler`] and its relayed twin's far
+/// end (`federation_handlers::room_remove_handler`), so a foreign admin removes
+/// exactly whom an admin homed here removes and is refused exactly the same.
+pub(crate) async fn room_remove_apply(
+    state: &Arc<AppState>,
+    room_id: &[u8; 32],
+    actor_id: &[u8; 32],
+    target: &[u8; 32],
+    repeat: RoomRemoveRepeat,
+) -> Result<RoomRemoveReply, RpcError> {
+    use fauna_mls::room_policy::RoomRole;
+    let (state, room_id, actor_id, target) = (state, *room_id, *actor_id, *target);
+    floor_authoritative_room(state, &room_id).await?;
 
-            // The TARGET's role — read through the same helper, but its
-            // "not a member" refusal is about the target, not the caller, so
-            // it is re-worded rather than passed through: a remover told
-            // "not a member of this room" would read it as a verdict on
-            // itself and go looking for the wrong problem.
-            let target_role = floor_role(&state, &room_id, &target)
-                .await
-                .map_err(|_| invalid_params("that principal is not a live member"))?;
-            if target_role == RoomRole::Owner {
-                return Err(permission_denied(
-                    "the owner's membership is not removable until ownership is transferred",
-                ));
-            }
+    if target == actor_id {
+        return Err(invalid_params(
+            "leaving is its own door — fauna.conversations.room.leave",
+        ));
+    }
 
-            // The home nest is a member too, and the materialization grant's
-            // REVOKE is "revocable by **rotating it out**" (§ The three
-            // classes, the community key model, reason 1) — which is a
-            // generation mint whose wrap set omits the nest's roster entry,
-            // not a roster removal. That door is
-            // `fauna.conversations.room.publish_generation`, and it deletes
-            // the derived views in the same act.
-            //
-            // Removal stays refused here, and now for a sharper reason than
-            // "unbuilt" (ruled at the sealing build, 2026-09-09): a room's
-            // class is a function of its member set (§ Architectural rules,
-            // rule 1), so unseating the home nest would derive the room back
-            // to `end_to_end` while its log stays sealed under the
-            // recipient-set scheme rather than MLS — a room whose stored
-            // class names a key model it does not use. Rotation revokes the
-            // read without touching the member set, which is exactly what
-            // the grant language asks for and leaves nothing incoherent.
-            let target_row = state
+    let role = floor_role(state, &room_id, &actor_id).await?;
+    if !role.is_admin_or_owner() {
+        return Err(permission_denied("only an owner or admin removes a member"));
+    }
+
+    // The TARGET's role. Its "not a member" refusal is about the
+    // target, not the caller, so it is worded for the target: a
+    // remover told "not a member of this room" would read it as a
+    // verdict on itself and go looking for the wrong problem.
+    let Some(target_role) = optional_floor_role(state, &room_id, &target).await? else {
+        if repeat == RoomRemoveRepeat::Converge
+            && state
                 .db
-                .list_floor_roster(&room_id)
+                .room_member_removed(&room_id, &target)
                 .await
                 .map_err(|e| internal(format!("floor roster: {e}")))?
-                .into_iter()
-                .find(|m| m.principal_id == target);
-            if target_row.is_some_and(|m| m.principal_kind != "user") {
-                return Err(permission_denied(
-                    "the home nest's read is revoked by rotating the room generation without its \
+        {
+            return Ok(RoomRemoveReply {
+                members: live_floor_count(state, &room_id).await?,
+                extra: std::collections::BTreeMap::new(),
+            });
+        }
+        return Err(invalid_params("that principal is not a live member"));
+    };
+    if target_role == RoomRole::Owner {
+        return Err(permission_denied(
+            "the owner's membership is not removable until ownership is transferred",
+        ));
+    }
+
+    // The home nest is a member too, and the materialization grant's
+    // REVOKE is "revocable by **rotating it out**" (§ The three
+    // classes, the community key model, reason 1) — which is a
+    // generation mint whose wrap set omits the nest's roster entry,
+    // not a roster removal. That door is
+    // `fauna.conversations.room.publish_generation`, and it deletes
+    // the derived views in the same act.
+    //
+    // Removal stays refused here, and now for a sharper reason than
+    // "unbuilt" (ruled at the sealing build, 2026-09-09): a room's
+    // class is a function of its member set (§ Architectural rules,
+    // rule 1), so unseating the home nest would derive the room back
+    // to `end_to_end` while its log stays sealed under the
+    // recipient-set scheme rather than MLS — a room whose stored
+    // class names a key model it does not use. Rotation revokes the
+    // read without touching the member set, which is exactly what
+    // the grant language asks for and leaves nothing incoherent.
+    let target_row = state
+        .db
+        .list_floor_roster(&room_id)
+        .await
+        .map_err(|e| internal(format!("floor roster: {e}")))?
+        .into_iter()
+        .find(|m| m.principal_id == target);
+    if target_row.is_some_and(|m| m.principal_kind != "user") {
+        return Err(permission_denied(
+            "the home nest's read is revoked by rotating the room generation without its \
                      wrap, not by removing it from the floor",
+        ));
+    }
+
+    // S8, the shape the folder plane already holds: **the fetch
+    // authorization must die with the membership**
+    // (`../architecture/federation.md` § Federation residue surface —
+    // `members.evict` purges the foreign row). A foreign member's
+    // admission to this room IS its `channel_foreign_members` row, and
+    // the relayed doors gated on that row *alone* — the roster read,
+    // the attachment write-token mint, `channel.actors` — would
+    // otherwise outlive the seat: a removed member's home nest would
+    // keep passing `require_foreign_member` and keep being served the
+    // room's LIVE floor, every later join's `handle@domain`, roles, the
+    // signed policy and each member's reception key, which is exactly
+    // the read the same-nest twin refuses as "membership is not
+    // public". Their binding-only gate is ratified and correct
+    // (federation.md, the `conversation.roster.fetch` row: stacking
+    // `is_room_member` on it would deny the read to the newest-seated
+    // member, and "nothing is disclosed by that choice: an ADMITTED
+    // channel member already reads every member's actor id off the MLS
+    // ratchet tree") — the load-bearing word being *admitted*, so it is
+    // admission a removal has to end, not the gate to re-shape.
+    //
+    // The rotation the client performs after this door covers the
+    // CIPHERTEXT residue (§ The three classes -> *Community*, reason
+    // 4); it covers no plaintext door, so the binding is what has to go.
+    //
+    // **Before the unseat, deliberately** — the inverse of the client's
+    // unseat-then-mint order, and for the inverse reason. The mint must
+    // follow because coverage is judged against the floor as it stands;
+    // this purge reads no floor, so ordering it first makes every
+    // failure mode fail CLOSED: a purge that fails changes nothing and
+    // the caller retries cleanly, and a purge that lands over a failed
+    // unseat leaves a seat with no relayed reach — tighter than it was,
+    // never leakier — which the same retry converges (both halves are
+    // idempotent). Unseat-first would leave the one residue this fix
+    // exists to remove: off the floor, still reading the live roster.
+    // A local target holds no row, so this is a no-op for one.
+    state
+        .db
+        .remove_foreign_channel_member(&room_id, &target)
+        .await
+        .map_err(|e| {
+            tracing::error!("remove_foreign_channel_member: {e}");
+            internal("storage error")
+        })?;
+
+    let removed = state
+        .db
+        .unseat_room_member(&room_id, &target)
+        .await
+        .map_err(|e| {
+            tracing::error!("unseat_room_member: {e}");
+            internal("storage error")
+        })?;
+    if !removed {
+        return Err(invalid_params("that principal is not a live member"));
+    }
+
+    Ok(RoomRemoveReply {
+        members: live_floor_count(state, &room_id).await?,
+        extra: std::collections::BTreeMap::new(),
+    })
+}
+
+// ── fauna.conversations.room.remove_remote ─────────────────────
+
+/// A removal by an owner or admin **homed here**, of a member of a room homed
+/// on another nest — the rank-scoped twin of [`room_leave_remote_handler`].
+///
+/// **This nest keeps nothing and decides nothing.** It forwards the room
+/// home's ack; the home reads the caller's rank off its own floor, from the
+/// actor id this nest is authenticated for, behind `require_foreign_member`.
+fn room_remove_remote_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.conversations.room.remove_remote").await?;
+            let req: RoomRemoveRemoteRequest = decode(&payload).map_err(malformed)?;
+            parse_room_id(&req.room_id)?;
+            parse_actor_id(&req.principal)?;
+            let peer_url = req.nest_url.trim();
+            if peer_url.is_empty() {
+                return Err(invalid_params(
+                    "nest_url must name the room's home nest (same-nest removals use room.remove)",
                 ));
             }
-
-            // S8, the shape the folder plane already holds: **the fetch
-            // authorization must die with the membership**
-            // (`../architecture/federation.md` § Federation residue surface —
-            // `members.evict` purges the foreign row). A foreign member's
-            // admission to this room IS its `channel_foreign_members` row, and
-            // the relayed doors gated on that row *alone* — the roster read,
-            // the attachment write-token mint, `channel.actors` — would
-            // otherwise outlive the seat: a removed member's home nest would
-            // keep passing `require_foreign_member` and keep being served the
-            // room's LIVE floor, every later join's `handle@domain`, roles, the
-            // signed policy and each member's reception key, which is exactly
-            // the read the same-nest twin refuses as "membership is not
-            // public". Their binding-only gate is ratified and correct
-            // (federation.md, the `conversation.roster.fetch` row: stacking
-            // `is_room_member` on it would deny the read to the newest-seated
-            // member, and "nothing is disclosed by that choice: an ADMITTED
-            // channel member already reads every member's actor id off the MLS
-            // ratchet tree") — the load-bearing word being *admitted*, so it is
-            // admission a removal has to end, not the gate to re-shape.
-            //
-            // The rotation the client performs after this door covers the
-            // CIPHERTEXT residue (§ The three classes -> *Community*, reason
-            // 4); it covers no plaintext door, so the binding is what has to go.
-            //
-            // **Before the unseat, deliberately** — the inverse of the client's
-            // unseat-then-mint order, and for the inverse reason. The mint must
-            // follow because coverage is judged against the floor as it stands;
-            // this purge reads no floor, so ordering it first makes every
-            // failure mode fail CLOSED: a purge that fails changes nothing and
-            // the caller retries cleanly, and a purge that lands over a failed
-            // unseat leaves a seat with no relayed reach — tighter than it was,
-            // never leakier — which the same retry converges (both halves are
-            // idempotent). Unseat-first would leave the one residue this fix
-            // exists to remove: off the floor, still reading the live roster.
-            // A local target holds no row, so this is a no-op for one.
-            state
-                .db
-                .remove_foreign_channel_member(&room_id, &target)
-                .await
-                .map_err(|e| {
-                    tracing::error!("remove_foreign_channel_member: {e}");
-                    internal("storage error")
-                })?;
-
-            let removed = state
-                .db
-                .unseat_room_member(&room_id, &target)
-                .await
-                .map_err(|e| {
-                    tracing::error!("unseat_room_member: {e}");
-                    internal("storage error")
-                })?;
-            if !removed {
-                return Err(invalid_params("that principal is not a live member"));
+            match crate::federation_pool::originate_room_remove(
+                &state.federation_pool,
+                &state,
+                peer_url,
+                &hex::encode(actor_id),
+                &req.room_id,
+                &req.principal,
+            )
+            .await
+            {
+                Ok(Ok(ack)) => encode_reply(&ack),
+                Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
+                    peer_err,
+                    "the cross-nest room remove relay",
+                )),
+                Err(pool_err) => {
+                    tracing::error!("federation room remove (remove_remote): {pool_err}");
+                    Err(internal("federation room remove failed"))
+                }
             }
-
-            encode_reply(&RoomRemoveReply {
-                members: live_floor_count(&state, &room_id).await?,
-                extra: std::collections::BTreeMap::new(),
-            })
         })
     })
 }
@@ -5549,6 +5701,53 @@ pub(crate) async fn nest_room_tip_key(
 
 // ── fauna.conversations.room.publish_generation ────────────────
 
+/// The signed act's binding of a room generation mint, checked before
+/// anything else reads it: the record decodes as a `Minted` mint, its minter
+/// is `caller`, and its minter signature verifies. Run by the home's admission
+/// body ([`room_publish_generation_apply`]) AND by the relaying nest before it
+/// forwards a mint ([`room_publish_generation_remote_handler`],
+/// `verify_room_invite_act`'s posture), so a nest never forwards a keying act
+/// under its member's name. Returns the decoded record and its generation id.
+pub(crate) fn verify_room_generation_mint(
+    mint: &[u8],
+    caller: &[u8; 32],
+) -> Result<
+    (
+        fauna_core::group_generation::GroupGenerationMintRecord,
+        [u8; 32],
+    ),
+    RpcError,
+> {
+    let record: fauna_core::group_generation::GroupGenerationMintRecord =
+        fauna_protocol::codec::decode_strict(mint)
+            .map_err(|e| invalid_params(&format!("malformed generation mint: {e}")))?;
+    let fauna_core::group_generation::GroupGenerationMintRecord::Minted {
+        core, minter_sig, ..
+    } = &record
+    else {
+        return Err(invalid_params(
+            "a room generation is published as a Minted record",
+        ));
+    };
+    // The minter is bound to the authenticated caller, the same way
+    // `room.invite` binds an invitation's signer: the floor knows actors, so
+    // an actor-signed mint is what its ranks can judge.
+    if &core.minter != caller {
+        return Err(permission_denied(
+            "a room generation's minter must be the calling principal",
+        ));
+    }
+    let generation_id = fauna_core::group_generation::group_generation_id(core)
+        .map_err(|e| invalid_params(&format!("mint core does not encode: {e}")))?;
+    fauna_core::group_generation::verify_group_mint_minter_sig(
+        &core.minter,
+        &generation_id,
+        minter_sig,
+    )
+    .map_err(|e| permission_denied(&format!("the mint's minter signature does not verify: {e}")))?;
+    Ok((record, generation_id))
+}
+
 fn room_publish_generation_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
@@ -5560,202 +5759,244 @@ fn room_publish_generation_handler() -> RpcHandler {
             .await?;
             let req: RoomPublishGenerationRequest = decode(&payload).map_err(malformed)?;
             let room_id = parse_room_id(&req.room_id)?;
-            floor_authoritative_room(&state, &room_id).await?;
+            let reply =
+                room_publish_generation_apply(&state, &room_id, &actor_id, &req.mint).await?;
+            encode_reply(&reply)
+        })
+    })
+}
 
-            // Key authority is the room's owner and admins, never the nest
-            // (§ Don't do these). This is the room plane's fill of the
-            // scheme's declared authority seam — the floor's ranks stand in
-            // for "the initiator's device fleet", exactly as T19 stands the
-            // box's admin set in.
-            let role = floor_role(&state, &room_id, &actor_id).await?;
-            if !role.is_admin_or_owner() {
-                return Err(permission_denied(
-                    "only an owner or admin mints a room generation",
-                ));
+/// A room generation mint's admission on a room homed **here** — the one body
+/// both mint doors run: the same-nest [`room_publish_generation_handler`] and
+/// its relayed twin's far end
+/// (`federation_handlers::room_publish_generation_handler`), so the two cannot
+/// drift on what a mint is. Coverage is judged against THIS floor as it
+/// stands, wherever the minter is homed.
+pub(crate) async fn room_publish_generation_apply(
+    state: &Arc<AppState>,
+    room_id: &[u8; 32],
+    actor_id: &[u8; 32],
+    mint: &[u8],
+) -> Result<RoomPublishGenerationReply, RpcError> {
+    let (room_id, actor_id) = (*room_id, *actor_id);
+    floor_authoritative_room(state, &room_id).await?;
+
+    // Key authority is the room's owner and admins, never the nest
+    // (§ Don't do these). This is the room plane's fill of the
+    // scheme's declared authority seam — the floor's ranks stand in
+    // for "the initiator's device fleet", exactly as T19 stands the
+    // box's admin set in.
+    let role = floor_role(state, &room_id, &actor_id).await?;
+    if !role.is_admin_or_owner() {
+        return Err(permission_denied(
+            "only an owner or admin mints a room generation",
+        ));
+    }
+
+    let (record, generation_id) = verify_room_generation_mint(mint, &actor_id)?;
+    let fauna_core::group_generation::GroupGenerationMintRecord::Minted { core, wraps, .. } =
+        &record
+    else {
+        unreachable!("verify_room_generation_mint admits only a Minted record");
+    };
+
+    // The chain is a strict ratchet on the room's tip: a mint must
+    // name the generation it replaces, so two concurrent rotations
+    // cannot both land and leave the room with a fork the nest would
+    // have to resolve — the arbiter this plane deliberately has not
+    // got. A room's first mint names no parent.
+    let tip = state
+        .db
+        .room_generation_tip(&room_id)
+        .await
+        .map_err(|e| internal(format!("generation tip: {e}")))?;
+    let expected_parent = tip.as_ref().map(|t| t.generation_id);
+    let named_parent = match core.parents.as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        _ => {
+            return Err(invalid_params(
+                "a room generation names exactly one parent — its predecessor",
+            ));
+        }
+    };
+    if named_parent != expected_parent {
+        return Err(invalid_params(
+            "this mint does not name the room's current generation as its parent",
+        ));
+    }
+
+    // **Roster coverage** — the scheme's admissibility rule with the
+    // escrow arm replaced (`account-data-taxonomy.md` § The
+    // recipient-set scheme, delta (ii)): every live floor principal
+    // that has a wrap target must have a wrap, or somebody the room
+    // says is a member holds ciphertext they cannot open. A member
+    // with no reception key yet is not coverable and is skipped —
+    // the state the scheme's member top-up heals.
+    //
+    // ⚠ **The home nest is deliberately outside the coverage
+    // requirement** (ruled at the sealing build, 2026-09-09, after the
+    // conformance suite caught the two rules contradicting each
+    // other). Coverage and revoke are otherwise mutually exclusive:
+    // the nest is a live floor member, so requiring a wrap for it
+    // would make "revocable by rotating it out" — the ratified shape
+    // of the nest's readable position (`conversation-rooms.md` § The
+    // three classes → *Community*, reason 1) — unexpressible, and the
+    // grant would be irrevocable in practice.
+    //
+    // The asymmetry is the class's own: coverage exists so that
+    // nobody the room says is a MEMBER holds ciphertext they cannot
+    // open, and a member who cannot read is broken. The home nest is
+    // a **reader recipient, never in the authority set** (§ Don't do
+    // these), so a nest that cannot read is not broken — it is the
+    // members having withdrawn a grant that was theirs to give. The
+    // withdrawal is never silent: the reply says `nest_read_revoked`
+    // and the views go with it.
+    let roster = state
+        .db
+        .list_floor_roster(&room_id)
+        .await
+        .map_err(|e| internal(format!("floor roster: {e}")))?;
+    let wrapped: std::collections::BTreeSet<[u8; 32]> = wraps.iter().map(|w| w.entry_id).collect();
+    let mut covered = 0u64;
+    let mut nest_covered = false;
+    let nest_principal = state.nest_identity.public_key_bytes();
+    for m in &roster {
+        let (Some(entry), Some(recv)) = (m.entry_id.as_ref(), m.reception_pubkey.as_ref()) else {
+            continue;
+        };
+        // A stored key that fails validation is exactly as
+        // uncoverable as no key at all — never a coverage
+        // failure that freezes the mint, because no writer can put a
+        // fresh invalid key here going forward and this member's own
+        // door heals an old one the moment it is asked to.
+        if !usable_reception_key(recv) {
+            continue;
+        }
+        let Ok(entry) = <[u8; 32]>::try_from(entry.as_slice()) else {
+            continue;
+        };
+        let is_home_nest = m.principal_id == nest_principal;
+        if !wrapped.contains(&entry) {
+            if is_home_nest {
+                // The revoke. Not a coverage failure — see above.
+                continue;
             }
+            return Err(invalid_params(
+                "this mint does not wrap to every live member of the room's floor",
+            ));
+        }
+        covered += 1;
+        if is_home_nest {
+            nest_covered = true;
+        }
+    }
 
-            let record: fauna_core::group_generation::GroupGenerationMintRecord =
-                fauna_protocol::codec::decode_strict(&req.mint)
-                    .map_err(|e| invalid_params(&format!("malformed generation mint: {e}")))?;
-            let fauna_core::group_generation::GroupGenerationMintRecord::Minted {
-                core,
-                minter_sig,
-                wraps,
-                ..
-            } = &record
-            else {
-                return Err(invalid_params(
-                    "a room generation is published as a Minted record",
-                ));
-            };
+    let row = crate::db::rooms::RoomGenerationRow {
+        generation_id,
+        parent_id: named_parent.map(|p| p.to_vec()),
+        key_commitment: core.key_commitment.to_vec(),
+        minted_by: actor_id.to_vec(),
+        mint_blob: mint.to_vec(),
+        minted_at_ms: core.minted_at_ms,
+    };
+    let wrap_rows: Vec<([u8; 32], Vec<u8>)> =
+        wraps.iter().map(|w| (w.entry_id, w.wrap.clone())).collect();
+    // The insert re-checks the ratchet under its own lock, closing the
+    // window between the tip read above and this write: a concurrent
+    // rotation that landed in between makes this mint a second child
+    // of the old tip, so it is refused exactly as a stale mint is.
+    match state
+        .db
+        .insert_room_generation(&room_id, &row, &wrap_rows)
+        .await
+        .map_err(|e| {
+            tracing::error!("insert_room_generation: {e}");
+            internal("storage error")
+        })? {
+        crate::db::rooms::RoomGenerationInsert::Stored => {}
+        crate::db::rooms::RoomGenerationInsert::NotTheTip => {
+            return Err(invalid_params(
+                "this mint does not name the room's current generation as its parent",
+            ));
+        }
+    }
 
-            // The minter is bound to the authenticated caller, the same way
-            // `room.invite` binds an invitation's signer: the floor knows
-            // actors, so an actor-signed mint is what its ranks can judge.
-            if core.minter != actor_id {
-                return Err(permission_denied(
-                    "a room generation's minter must be the calling principal",
-                ));
-            }
-            let generation_id = fauna_core::group_generation::group_generation_id(core)
-                .map_err(|e| invalid_params(&format!("mint core does not encode: {e}")))?;
-            fauna_core::group_generation::verify_group_mint_minter_sig(
-                &core.minter,
-                &generation_id,
-                minter_sig,
+    // The REVOKE arm. A mint that leaves the home nest's entry out of
+    // its wrap set is the members withdrawing the materialization
+    // grant (`principles.md` § The user always controls their data —
+    // "revoke deletes the views"), so the views go in the same act
+    // rather than at some later sweep the user cannot observe.
+    let nest_seated = nest_room_entry(state, &room_id).await?.is_some();
+    let revoked = nest_seated && !nest_covered;
+    if revoked {
+        let gone = state
+            .db
+            .purge_room_derived_views(&room_id)
+            .await
+            .map_err(|e| internal(format!("purge derived views: {e}")))?;
+        tracing::info!("room read grant revoked by rotation — {gone} derived view row(s) deleted");
+    }
+
+    Ok(RoomPublishGenerationReply {
+        generation_id: hex::encode(generation_id),
+        covered,
+        nest_read_revoked: revoked,
+        extra: std::collections::BTreeMap::new(),
+    })
+}
+
+// ── fauna.conversations.room.publish_generation_remote ─────────
+
+/// A mint by an owner or admin **homed here**, for a room homed on another
+/// nest — the keying twin of [`room_remove_remote_handler`], and the removal's
+/// second act when the room is foreign-homed.
+///
+/// The signed act's binding ([`verify_room_generation_mint`]) is checked HERE
+/// before anything is forwarded, so this nest never relays a keying act under
+/// its member's name; the room's home checks it again and judges everything
+/// else — rank, ratchet, coverage — against its own floor. Nothing is stored.
+fn room_publish_generation_remote_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(
+                &state,
+                &actor_id,
+                "fauna.conversations.room.publish_generation_remote",
             )
-            .map_err(|e| {
-                permission_denied(&format!("the mint's minter signature does not verify: {e}"))
-            })?;
-
-            // The chain is a strict ratchet on the room's tip: a mint must
-            // name the generation it replaces, so two concurrent rotations
-            // cannot both land and leave the room with a fork the nest would
-            // have to resolve — the arbiter this plane deliberately has not
-            // got. A room's first mint names no parent.
-            let tip = state
-                .db
-                .room_generation_tip(&room_id)
-                .await
-                .map_err(|e| internal(format!("generation tip: {e}")))?;
-            let expected_parent = tip.as_ref().map(|t| t.generation_id);
-            let named_parent = match core.parents.as_slice() {
-                [] => None,
-                [one] => Some(*one),
-                _ => {
-                    return Err(invalid_params(
-                        "a room generation names exactly one parent — its predecessor",
-                    ));
-                }
-            };
-            if named_parent != expected_parent {
+            .await?;
+            let req: RoomPublishGenerationRemoteRequest = decode(&payload).map_err(malformed)?;
+            parse_room_id(&req.room_id)?;
+            let peer_url = req.nest_url.trim();
+            if peer_url.is_empty() {
                 return Err(invalid_params(
-                    "this mint does not name the room's current generation as its parent",
+                    "nest_url must name the room's home nest (same-nest mints use \
+                     room.publish_generation)",
                 ));
             }
-
-            // **Roster coverage** — the scheme's admissibility rule with the
-            // escrow arm replaced (`account-data-taxonomy.md` § The
-            // recipient-set scheme, delta (ii)): every live floor principal
-            // that has a wrap target must have a wrap, or somebody the room
-            // says is a member holds ciphertext they cannot open. A member
-            // with no reception key yet is not coverable and is skipped —
-            // the state the scheme's member top-up heals.
-            //
-            // ⚠ **The home nest is deliberately outside the coverage
-            // requirement** (ruled at the sealing build, 2026-09-09, after the
-            // conformance suite caught the two rules contradicting each
-            // other). Coverage and revoke are otherwise mutually exclusive:
-            // the nest is a live floor member, so requiring a wrap for it
-            // would make "revocable by rotating it out" — the ratified shape
-            // of the nest's readable position (`conversation-rooms.md` § The
-            // three classes → *Community*, reason 1) — unexpressible, and the
-            // grant would be irrevocable in practice.
-            //
-            // The asymmetry is the class's own: coverage exists so that
-            // nobody the room says is a MEMBER holds ciphertext they cannot
-            // open, and a member who cannot read is broken. The home nest is
-            // a **reader recipient, never in the authority set** (§ Don't do
-            // these), so a nest that cannot read is not broken — it is the
-            // members having withdrawn a grant that was theirs to give. The
-            // withdrawal is never silent: the reply says `nest_read_revoked`
-            // and the views go with it.
-            let roster = state
-                .db
-                .list_floor_roster(&room_id)
-                .await
-                .map_err(|e| internal(format!("floor roster: {e}")))?;
-            let wrapped: std::collections::BTreeSet<[u8; 32]> =
-                wraps.iter().map(|w| w.entry_id).collect();
-            let mut covered = 0u64;
-            let mut nest_covered = false;
-            let nest_principal = state.nest_identity.public_key_bytes();
-            for m in &roster {
-                let (Some(entry), Some(recv)) = (m.entry_id.as_ref(), m.reception_pubkey.as_ref())
-                else {
-                    continue;
-                };
-                // A stored key that fails validation is exactly as
-                // uncoverable as no key at all — never a coverage
-                // failure that freezes the mint, because no writer can put a
-                // fresh invalid key here going forward and this member's own
-                // door heals an old one the moment it is asked to.
-                if !usable_reception_key(recv) {
-                    continue;
-                }
-                let Ok(entry) = <[u8; 32]>::try_from(entry.as_slice()) else {
-                    continue;
-                };
-                let is_home_nest = m.principal_id == nest_principal;
-                if !wrapped.contains(&entry) {
-                    if is_home_nest {
-                        // The revoke. Not a coverage failure — see above.
-                        continue;
-                    }
-                    return Err(invalid_params(
-                        "this mint does not wrap to every live member of the room's floor",
-                    ));
-                }
-                covered += 1;
-                if is_home_nest {
-                    nest_covered = true;
+            verify_room_generation_mint(&req.mint, &actor_id)?;
+            match crate::federation_pool::originate_room_publish_generation(
+                &state.federation_pool,
+                &state,
+                peer_url,
+                &hex::encode(actor_id),
+                &req.room_id,
+                req.mint,
+            )
+            .await
+            {
+                Ok(Ok(ack)) => encode_reply(&ack),
+                Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
+                    peer_err,
+                    "the cross-nest room generation publish relay",
+                )),
+                Err(pool_err) => {
+                    tracing::error!(
+                        "federation room generation publish (publish_generation_remote): {pool_err}"
+                    );
+                    Err(internal("federation room generation publish failed"))
                 }
             }
-
-            let row = crate::db::rooms::RoomGenerationRow {
-                generation_id,
-                parent_id: named_parent.map(|p| p.to_vec()),
-                key_commitment: core.key_commitment.to_vec(),
-                minted_by: actor_id.to_vec(),
-                mint_blob: req.mint.clone(),
-                minted_at_ms: core.minted_at_ms,
-            };
-            let wrap_rows: Vec<([u8; 32], Vec<u8>)> =
-                wraps.iter().map(|w| (w.entry_id, w.wrap.clone())).collect();
-            // The insert re-checks the ratchet under its own lock, closing the
-            // window between the tip read above and this write: a concurrent
-            // rotation that landed in between makes this mint a second child
-            // of the old tip, so it is refused exactly as a stale mint is.
-            match state
-                .db
-                .insert_room_generation(&room_id, &row, &wrap_rows)
-                .await
-                .map_err(|e| {
-                    tracing::error!("insert_room_generation: {e}");
-                    internal("storage error")
-                })? {
-                crate::db::rooms::RoomGenerationInsert::Stored => {}
-                crate::db::rooms::RoomGenerationInsert::NotTheTip => {
-                    return Err(invalid_params(
-                        "this mint does not name the room's current generation as its parent",
-                    ));
-                }
-            }
-
-            // The REVOKE arm. A mint that leaves the home nest's entry out of
-            // its wrap set is the members withdrawing the materialization
-            // grant (`principles.md` § The user always controls their data —
-            // "revoke deletes the views"), so the views go in the same act
-            // rather than at some later sweep the user cannot observe.
-            let nest_seated = nest_room_entry(&state, &room_id).await?.is_some();
-            let revoked = nest_seated && !nest_covered;
-            if revoked {
-                let gone = state
-                    .db
-                    .purge_room_derived_views(&room_id)
-                    .await
-                    .map_err(|e| internal(format!("purge derived views: {e}")))?;
-                tracing::info!(
-                    "room read grant revoked by rotation — {gone} derived view row(s) deleted"
-                );
-            }
-
-            encode_reply(&RoomPublishGenerationReply {
-                generation_id: hex::encode(generation_id),
-                covered,
-                nest_read_revoked: revoked,
-                extra: std::collections::BTreeMap::new(),
-            })
         })
     })
 }
@@ -5848,138 +6089,212 @@ fn room_backfill_generations_handler() -> RpcHandler {
             .await?;
             let req: RoomBackfillGenerationsRequest = decode(&payload).map_err(malformed)?;
             let room_id = parse_room_id(&req.room_id)?;
-            floor_authoritative_room(&state, &room_id).await?;
+            let reply = room_backfill_generations_apply(
+                &state,
+                &room_id,
+                &actor_id,
+                &req.target_actor_id,
+                &req.wraps,
+            )
+            .await?;
+            encode_reply(&reply)
+        })
+    })
+}
 
-            // (2) Key authority — the mint's rank, for the same reason.
-            let role = floor_role(&state, &room_id, &actor_id).await?;
-            if !role.is_admin_or_owner() {
-                return Err(permission_denied(
-                    "only an owner or admin backfills a room generation",
-                ));
-            }
+/// A backfill on a room homed **here** — the one body both backfill doors run:
+/// the same-nest [`room_backfill_generations_handler`] and its relayed twin's
+/// far end (`federation_handlers::room_backfill_generations_handler`). The five
+/// checks are [`room_backfill_generations_handler`]'s.
+pub(crate) async fn room_backfill_generations_apply(
+    state: &Arc<AppState>,
+    room_id: &[u8; 32],
+    actor_id: &[u8; 32],
+    target_actor_id: &str,
+    wraps: &[Vec<u8>],
+) -> Result<RoomBackfillGenerationsReply, RpcError> {
+    let (room_id, actor_id) = (*room_id, *actor_id);
+    floor_authoritative_room(state, &room_id).await?;
 
-            let target = parse_room_id(&req.target_actor_id)
-                .map_err(|_| invalid_params("target_actor_id must be a 32-byte hex actor id"))?;
+    // (2) Key authority — the mint's rank, for the same reason.
+    let role = floor_role(state, &room_id, &actor_id).await?;
+    if !role.is_admin_or_owner() {
+        return Err(permission_denied(
+            "only an owner or admin backfills a room generation",
+        ));
+    }
 
-            // (3) A live floor member with a wrap target — and never the
-            // home nest, whose read is a mint-time grant.
-            let roster = state
-                .db
-                .list_floor_roster(&room_id)
-                .await
-                .map_err(|e| internal(format!("floor roster: {e}")))?;
-            let Some(row) = roster.iter().find(|m| m.principal_id == target) else {
-                return Err(permission_denied(
-                    "the backfill target is not a live member of this room's floor",
-                ));
-            };
-            if row.principal_kind == "nest" {
-                return Err(permission_denied(
-                    "the home nest's read is a grant the members make at a mint and revoke by \
+    let target = parse_room_id(target_actor_id)
+        .map_err(|_| invalid_params("target_actor_id must be a 32-byte hex actor id"))?;
+
+    // (3) A live floor member with a wrap target — and never the
+    // home nest, whose read is a mint-time grant.
+    let roster = state
+        .db
+        .list_floor_roster(&room_id)
+        .await
+        .map_err(|e| internal(format!("floor roster: {e}")))?;
+    let Some(row) = roster.iter().find(|m| m.principal_id == target) else {
+        return Err(permission_denied(
+            "the backfill target is not a live member of this room's floor",
+        ));
+    };
+    if row.principal_kind == "nest" {
+        return Err(permission_denied(
+            "the home nest's read is a grant the members make at a mint and revoke by \
                      rotating it out — it is never restored by a backfill",
-                ));
-            }
-            let (Some(entry), Some(recv)) = (row.entry_id.as_ref(), row.reception_pubkey.as_ref())
-            else {
-                return Err(invalid_params(
-                    "the backfill target holds no wrap target — it cannot be covered yet",
-                ));
-            };
-            // An invalid stored key is exactly as uncoverable as no key at
-            // all — the same predicate the coverage rule and the
-            // roster read apply to this column.
-            if !usable_reception_key(recv) {
-                return Err(invalid_params(
-                    "the backfill target holds no wrap target — it cannot be covered yet",
-                ));
-            }
-            let entry_id = <[u8; 32]>::try_from(entry.as_slice())
-                .map_err(|_| internal("a stored roster entry id is not 32 bytes"))?;
+        ));
+    }
+    let (Some(entry), Some(recv)) = (row.entry_id.as_ref(), row.reception_pubkey.as_ref()) else {
+        return Err(invalid_params(
+            "the backfill target holds no wrap target — it cannot be covered yet",
+        ));
+    };
+    // An invalid stored key is exactly as uncoverable as no key at
+    // all — the same predicate the coverage rule and the
+    // roster read apply to this column.
+    if !usable_reception_key(recv) {
+        return Err(invalid_params(
+            "the backfill target holds no wrap target — it cannot be covered yet",
+        ));
+    }
+    let entry_id = <[u8; 32]>::try_from(entry.as_slice())
+        .map_err(|_| internal("a stored roster entry id is not 32 bytes"))?;
 
-            // (5)'s input: what the room retains, and what the policy lets
-            // this newcomer see of it.
-            let generations = state
-                .db
-                .list_room_generations(&room_id)
-                .await
-                .map_err(|e| internal(format!("generation list: {e}")))?;
-            let policy = stored_room_policy(&state, &room_id).await?;
-            let authorized = authorized_backfill_set(&policy.policy, &generations);
+    // (5)'s input: what the room retains, and what the policy lets
+    // this newcomer see of it.
+    let generations = state
+        .db
+        .list_room_generations(&room_id)
+        .await
+        .map_err(|e| internal(format!("generation list: {e}")))?;
+    let policy = stored_room_policy(state, &room_id).await?;
+    let authorized = authorized_backfill_set(&policy.policy, &generations);
 
-            if req.wraps.is_empty() {
-                return Err(invalid_params("a backfill carries at least one wrap"));
-            }
+    if wraps.is_empty() {
+        return Err(invalid_params("a backfill carries at least one wrap"));
+    }
 
-            // Verify the WHOLE batch before storing any of it: a partial
-            // bundle would be a history slice nobody authorized, left behind
-            // by a refusal.
-            let mut rows: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(req.wraps.len());
-            for bytes in &req.wraps {
-                let record: fauna_core::group_generation::GroupTopupRecord =
-                    fauna_protocol::codec::decode_strict(bytes)
-                        .map_err(|e| invalid_params(&format!("malformed top-up wrap: {e}")))?;
-                let fauna_core::group_generation::GroupTopupRecord::Wrap {
-                    generation_id,
-                    target_entry,
-                    healer,
-                    wrap,
-                    ..
-                } = &record;
+    // Verify the WHOLE batch before storing any of it: a partial
+    // bundle would be a history slice nobody authorized, left behind
+    // by a refusal.
+    let mut rows: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(wraps.len());
+    for bytes in wraps {
+        let record: fauna_core::group_generation::GroupTopupRecord =
+            fauna_protocol::codec::decode_strict(bytes)
+                .map_err(|e| invalid_params(&format!("malformed top-up wrap: {e}")))?;
+        let fauna_core::group_generation::GroupTopupRecord::Wrap {
+            generation_id,
+            target_entry,
+            healer,
+            wrap,
+            ..
+        } = &record;
 
-                // (4) The healer is the authenticated caller — the same
-                // binding the mint puts on its minter, so the floor's ranks
-                // judge the principal that actually signed.
-                if healer != &actor_id {
-                    return Err(permission_denied(
-                        "a top-up wrap's healer must be the calling principal",
-                    ));
-                }
-                // (4) …and the wrap is bound to the target's CURRENT entry.
-                if target_entry != &entry_id {
-                    return Err(invalid_params(
-                        "a top-up wrap names a roster entry the target no longer holds",
-                    ));
-                }
-                if !record.verifies_at(generation_id, &entry_id, &actor_id) {
-                    return Err(permission_denied(
-                        "the top-up wrap's healer signature does not verify",
-                    ));
-                }
-                // The generation must exist — a wrap for one the room never
-                // had is unreadable noise, and storing it would make the
-                // read door answer with a generation the log never used.
-                if !generations
-                    .iter()
-                    .any(|g| &g.generation_id == generation_id)
-                {
-                    return Err(invalid_params(
-                        "a top-up wrap names a generation this room does not retain",
-                    ));
-                }
-                // (5) The history policy.
-                if !authorized.contains(generation_id) {
-                    return Err(permission_denied(
-                        "this room's history policy does not authorize backfilling that \
+        // (4) The healer is the authenticated caller — the same
+        // binding the mint puts on its minter, so the floor's ranks
+        // judge the principal that actually signed.
+        if healer != &actor_id {
+            return Err(permission_denied(
+                "a top-up wrap's healer must be the calling principal",
+            ));
+        }
+        // (4) …and the wrap is bound to the target's CURRENT entry.
+        if target_entry != &entry_id {
+            return Err(invalid_params(
+                "a top-up wrap names a roster entry the target no longer holds",
+            ));
+        }
+        if !record.verifies_at(generation_id, &entry_id, &actor_id) {
+            return Err(permission_denied(
+                "the top-up wrap's healer signature does not verify",
+            ));
+        }
+        // The generation must exist — a wrap for one the room never
+        // had is unreadable noise, and storing it would make the
+        // read door answer with a generation the log never used.
+        if !generations
+            .iter()
+            .any(|g| &g.generation_id == generation_id)
+        {
+            return Err(invalid_params(
+                "a top-up wrap names a generation this room does not retain",
+            ));
+        }
+        // (5) The history policy.
+        if !authorized.contains(generation_id) {
+            return Err(permission_denied(
+                "this room's history policy does not authorize backfilling that \
                          generation — under `none` a newcomer sees the room from its admission",
-                    ));
-                }
-                rows.push((*generation_id, wrap.clone()));
+            ));
+        }
+        rows.push((*generation_id, wrap.clone()));
+    }
+
+    let stored = state
+        .db
+        .backfill_room_generation_wraps(&room_id, &entry_id, &rows)
+        .await
+        .map_err(|e| {
+            tracing::error!("backfill_room_generation_wraps: {e}");
+            internal("storage error")
+        })?;
+
+    Ok(RoomBackfillGenerationsReply {
+        stored: stored as u64,
+        retained: generations.len() as u64,
+        extra: std::collections::BTreeMap::new(),
+    })
+}
+
+// ── fauna.conversations.room.backfill_generations_remote ───────
+
+/// A backfill by an owner or admin **homed here**, for a room homed on another
+/// nest — how a foreign admin's tend pass keys a newcomer in. Forwarded to the
+/// room's home, which runs [`room_backfill_generations_apply`] behind
+/// `require_foreign_member`; nothing is stored here (a wrap is sealed to a
+/// seat's reception key and opaque to this nest).
+fn room_backfill_generations_remote_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(
+                &state,
+                &actor_id,
+                "fauna.conversations.room.backfill_generations_remote",
+            )
+            .await?;
+            let req: RoomBackfillGenerationsRemoteRequest = decode(&payload).map_err(malformed)?;
+            parse_room_id(&req.room_id)?;
+            let peer_url = req.nest_url.trim();
+            if peer_url.is_empty() {
+                return Err(invalid_params(
+                    "nest_url must name the room's home nest (same-nest backfills use \
+                     room.backfill_generations)",
+                ));
             }
-
-            let stored = state
-                .db
-                .backfill_room_generation_wraps(&room_id, &entry_id, &rows)
-                .await
-                .map_err(|e| {
-                    tracing::error!("backfill_room_generation_wraps: {e}");
-                    internal("storage error")
-                })?;
-
-            encode_reply(&RoomBackfillGenerationsReply {
-                stored: stored as u64,
-                retained: generations.len() as u64,
-                extra: std::collections::BTreeMap::new(),
-            })
+            match crate::federation_pool::originate_room_backfill_generations(
+                &state.federation_pool,
+                &state,
+                peer_url,
+                &hex::encode(actor_id),
+                &req.room_id,
+                &req.target_actor_id,
+                req.wraps,
+            )
+            .await
+            {
+                Ok(Ok(ack)) => encode_reply(&ack),
+                Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
+                    peer_err,
+                    "the cross-nest room generation backfill relay",
+                )),
+                Err(pool_err) => {
+                    tracing::error!(
+                        "federation room backfill (backfill_generations_remote): {pool_err}"
+                    );
+                    Err(internal("federation room backfill failed"))
+                }
+            }
         })
     })
 }
@@ -6656,6 +6971,16 @@ pub(crate) async fn room_roster_reply(
         .room_tip_wrapped_entries(room_id)
         .await
         .map_err(|e| internal(format!("tip wraps: {e}")))?;
+    // Whether a removal's mint is still owed: the tip still wraps to an entry
+    // the floor has unseated. The tend pass of whichever owner's or admin's
+    // device reads this next completes the removal (`community-rooms.md`
+    // § Implementation status today → *A removal severs*, the retry
+    // paragraph). Entry facts only, the `tip_wrapped` posture.
+    let severance_owed = state
+        .db
+        .room_severance_owed(room_id)
+        .await
+        .map_err(|e| internal(format!("severance owed: {e}")))?;
     // Which labelers read the room — the signed set, verbatim, for the reason
     // the policy rides here: members verify and render it, and the next change
     // is authored from it.
@@ -6726,6 +7051,7 @@ pub(crate) async fn room_roster_reply(
         birth_salt: at_policy_version
             .and(room.birth_salt)
             .map(serde_bytes::ByteBuf::from),
+        severance_owed,
         extra: std::collections::BTreeMap::new(),
     })
 }
@@ -7558,6 +7884,18 @@ pub fn register_conversations_handlers(b: &mut RpcRouterBuilder) {
         },
     );
     b.add(
+        "fauna.conversations.room.remove_remote",
+        RpcKindMeta {
+            // `leave_remote`'s posture and for its reason: the room home's
+            // federated remove answers a target it already unseated with the
+            // live count, so the §4.D re-send reports the unseat that landed
+            // and the client's severance mint follows (`RoomRemoveRemoteRequest`).
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(30),
+            handler: room_remove_remote_handler(),
+        },
+    );
+    b.add(
         "fauna.conversations.room.accept_invite_remote",
         RpcKindMeta {
             // `leave_remote`'s posture for the same reason: the room home's
@@ -7627,6 +7965,16 @@ pub fn register_conversations_handlers(b: &mut RpcRouterBuilder) {
         },
     );
     b.add(
+        "fauna.conversations.room.publish_generation_remote",
+        RpcKindMeta {
+            // Inherits the door's flag (`invite_remote`'s precedent): a mint
+            // claims no idempotence; the retry is a fresh mint.
+            forbid_replay: true,
+            default_deadline: Duration::from_secs(30),
+            handler: room_publish_generation_remote_handler(),
+        },
+    );
+    b.add(
         "fauna.conversations.room.generations",
         RpcKindMeta {
             forbid_replay: false,
@@ -7643,6 +7991,15 @@ pub fn register_conversations_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: true,
             default_deadline: Duration::from_secs(30),
             handler: room_backfill_generations_handler(),
+        },
+    );
+    b.add(
+        "fauna.conversations.room.backfill_generations_remote",
+        RpcKindMeta {
+            // Inherits the door's flag: the act hands out key material.
+            forbid_replay: true,
+            default_deadline: Duration::from_secs(30),
+            handler: room_backfill_generations_remote_handler(),
         },
     );
     // A seat's own wrap target, after seating: a successor's keyless seat and a

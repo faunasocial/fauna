@@ -472,20 +472,20 @@ public struct ProfileView: View {
                 // Not composed in the Fauna Kids build: following is subscribing,
                 // and a kid's contacts are the guardian's to approve.
                 #if !FAUNA_KIDS
-                // Label flips "Follow" ⇄ "Following" off the shared
-                // `followToggleLabel` (profile.md § Where logic lives → Follow /
-                // unfollow), resolved the same way the block toggle resolves
-                // `contactToggleBlockLabel`. `isFollowing` flips optimistically on a
-                // successful follow.
-                Button(renderLocalizedText(followToggleLabel(isFollowing: offersVM.isFollowing))) {
-                    follow()
+                // The Follow ⇄ Following toggle (profile.md § Where logic lives →
+                // Follow / unfollow / follow-status): the label is the shared
+                // `followToggleLabel` over the shared `is_following` (or the
+                // optimistic post-press flip), and `profile.unfollow_confirm` while a
+                // paid holder's unfollow is armed.
+                Button(offersVM.followButtonLabel) {
+                    toggleFollow()
                 }
                 .accessibilityIdentifier(Ids.profileFollowButton)
                 .automationActivate(
                     Ids.profileFollowButton,
-                    value: { renderLocalizedText(followToggleLabel(isFollowing: offersVM.isFollowing)) }
+                    value: { offersVM.followButtonLabel }
                 ) {
-                    follow()
+                    toggleFollow()
                 }
                 #endif
             }
@@ -494,12 +494,13 @@ public struct ProfileView: View {
     }
 
     #if !FAUNA_KIDS
-    /// `profile-follow-button` — the follow carries the page's actor-home slot (the
-    /// home the opener carried, replaced after the header read), so an author homed
-    /// on another nest is followed across nests; `nil` = today's local follow.
-    private func follow() {
+    /// `profile-follow-button` — the follow and the unfollow carry the page's
+    /// actor-home slot (the home the opener carried, replaced after the header
+    /// read), so an author homed on another nest is followed and left across nests;
+    /// `nil` = the local arm.
+    private func toggleFollow() {
         let home = knockVM.home(peer: viewedActorId)
-        Task { await offersVM.follow(home: home) }
+        Task { await offersVM.toggleFollow(home: home) }
     }
     #endif
 
@@ -1187,6 +1188,27 @@ private struct SubscriptionTiersTab: View {
                                   value: { vm.formProviderTier }) { newValue in
                     vm.formProviderTier = newValue
                 }
+            }
+
+            // The optional product the tier is sold as (`monetization.md` §
+            // Pillar 3 → *Configuration*; on Stripe the Payment Link id):
+            // pre-filled from the listed provider of the picked kind, sent as
+            // shown on save (tui's `ProviderForm::product`).
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(L.subscriptions.productLabel).foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    TextField("", text: $vm.formProviderProduct)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 240)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier(Ids.subscriptionProviderFormProduct)
+                        .automationField(Ids.subscriptionProviderFormProduct,
+                                         text: $vm.formProviderProduct)
+                }
+                Text(L.subscriptions.productHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             HStack {

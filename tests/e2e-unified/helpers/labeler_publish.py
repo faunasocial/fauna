@@ -54,6 +54,7 @@ def publish_labeler_version(
     content_kind: str,
     artifact_kind: str,
     label_abi: int = 1,
+    needs_attachment_bytes: bool = False,
 ) -> None:
     """Sign and publish one ``version`` of the labeler ``labeler_id`` over
     ``artifact`` — a WASM/WAT module for ``wasm``, the canonical dag-cbor
@@ -70,6 +71,11 @@ def publish_labeler_version(
             "needs_hashtags": False,
             "needs_media_metadata": False,
             "needs_author": False,
+            # The community-room attachment facet: a module declaring it is
+            # handed each message's (or room post's) attachment bytes after
+            # the post-shaped input (``content-moderation-and-ranking.md``
+            # § Tier-3 → *The attachment facet*).
+            "needs_attachment_bytes": needs_attachment_bytes,
             # The signed output revision (``LabelerOutput::label_abi``): 1 is
             # the only one a build reads today; a later one mints a module
             # newer than this app.
@@ -98,7 +104,7 @@ def publish_labeler_version(
 
 def publish_wasm_labeler(
     run_seal_helper, nest_instance, wat_path: Path, *, content_kind: str = "post",
-    label_abi: int = 1,
+    label_abi: int = 1, needs_attachment_bytes: bool = False,
 ) -> bytes:
     """Publish ``wat_path``'s module as version 1 of a new ``wasm`` labeler
     scoring ``content_kind`` (``post`` is public: subscribing or naming it needs
@@ -109,6 +115,37 @@ def publish_wasm_labeler(
         run_seal_helper, nest_instance["url"], labeler_id, pub_seed,
         Path(wat_path).read_bytes(),
         version=1, content_kind=content_kind, artifact_kind="wasm",
-        label_abi=label_abi,
+        label_abi=label_abi, needs_attachment_bytes=needs_attachment_bytes,
     )
     return labeler_id
+
+
+# The four bytes `fixtures/labeler/room_attachment_labeler.wat` scans for. A
+# journey puts them only inside an attachment's bytes, never in the words, so
+# that labeler's verdict is a verdict on the bytes.
+ATTACHMENT_MARKER = b"meow"
+
+_TEST_IMAGE = Path(__file__).resolve().parent.parent / "fixtures" / "test-image.png"
+
+
+def marked_png(dest_dir: Path) -> Path:
+    """Write a copy of the committed test PNG carrying :data:`ATTACHMENT_MARKER`
+    in a private ancillary chunk (``fiXt``: ancillary, private, safe-to-copy)
+    just before ``IEND``, and return its path. The ingress metadata strip
+    (``fauna_media::process``) removes only ``eXIf``/``tEXt``/``iTXt``/``zTXt``
+    from a PNG, so the marker survives into the sealed bytes a room's home nest
+    opens; decoders skip an unknown ancillary chunk, so the picture still
+    paints."""
+    import struct
+    import zlib
+
+    png = _TEST_IMAGE.read_bytes()
+    iend = png.rindex(b"IEND") - 4  # the IEND chunk's length field
+    kind, data = b"fiXt", b"fixture:" + ATTACHMENT_MARKER
+    chunk = (
+        struct.pack(">I", len(data)) + kind + data
+        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    )
+    out = Path(dest_dir) / "marked-attachment.png"
+    out.write_bytes(png[:iend] + chunk + png[iend:])
+    return out

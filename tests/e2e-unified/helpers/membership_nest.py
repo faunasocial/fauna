@@ -149,16 +149,22 @@ def handle(prefix: str) -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 
 
-def pay_membership(member_nest, buyer_hex: str, valid_until: int) -> tuple[int, dict]:
-    """POST a signed fake-provider `payment` event for the membership, naming
+def pay_membership(
+    member_nest, buyer_hex: str, valid_until: int | None, *, event: str = "payment",
+    purchase: str | None = None,
+) -> tuple[int, dict]:
+    """POST a signed fake-provider event for the membership, naming
     ``buyer_hex`` as the buyer and ``valid_until`` (epoch seconds) as the end
-    of the paid window. Returns ``(status, reply)``."""
-    body = json.dumps({
-        "id": f"pay_{uuid.uuid4().hex[:10]}",
-        "event": "payment",
-        "reference": buyer_hex,
-        "valid_until": valid_until,
-    }).encode()
+    of the paid window — a ``payment`` by default; ``event="refund"`` with the
+    payment's ``purchase`` reference is that purchase's refund (a delivery of
+    its own, naming the purchase as a provider's refund does). Returns
+    ``(status, reply)``."""
+    fields = {"id": f"pay_{uuid.uuid4().hex[:10]}", "event": event, "reference": buyer_hex}
+    if valid_until is not None:
+        fields["valid_until"] = valid_until
+    if purchase is not None:
+        fields["purchase"] = purchase
+    body = json.dumps(fields).encode()
     url = (f"{member_nest['url']}/api/v1/payments/webhook/"
            f"{member_nest['admin_id'].hex()}/fake")
     req = urllib.request.Request(url, data=body, method="POST")

@@ -281,9 +281,7 @@ where
 {
     let actor_id = identity.actor_id();
     if kit.actor_id.is_some_and(|named| named != actor_id) {
-        return Err(RecoveryError::Malformed(
-            "this recovery kit names a different account".into(),
-        ));
+        return Err(RecoveryError::KitForAnotherAccount);
     }
     let head = client
         .chain_head(&actor_id)

@@ -287,7 +287,7 @@ KIDS_EXCISED_ID_PREFIXES = (
     "feed-", "search-", "atproto-", "personalization-", "nostr-", "labeler-catalog",
     "connected-app", "mail-settings-", "web-settings-", "admin-mail-", "admin-dns-",
     "bridge-", "profile-follow-button", "profile-tiers-tab", "link-preview-card",
-    "folder-paywall-tier-select",
+    "folder-paywall-tier-select", "contact-actor-id-open-profile-button",
 )
 # Nest retirement's ids, gated on the Swift table ONLY (not in the list above, which
 # `android-kids-check` mirrors): android hand-gates its two retire renders and R8 strips
@@ -297,7 +297,11 @@ KIDS_EXCISED_ID_PREFIXES = (
 # (4)'s *Kept* set, android hand-gates `PhotoBackupSection` under `BuildConfig.KIDS`, and
 # the kids iOS Info.plist carries no photo-library usage key, so a photo-backup render
 # reaching the kids build would be a PhotoKit request the OS terminates the app for.
-SWIFT_KIDS_ONLY_ID_PREFIXES = ("admin-nest-retire-", "launch-retire-button", "photo-backup-")
+# Subscriptions' ids too (monetization, D-K5 *Excised*): the iOS kids build compiles
+# out Settings → Subscriptions and the profile's tiers/offers tabs, so a kept render
+# naming one is a compile error; android's kids dex has not been measured against
+# the prefix, so it stays off the shared list until `android-kids-check` greps it.
+SWIFT_KIDS_ONLY_ID_PREFIXES = ("admin-nest-retire-", "launch-retire-button", "photo-backup-", "subscription-")
 # Apple's kids condition — POSITIVE, added only by the kids target and absent
 # everywhere else (family-safety.md § The account age band, the kids-app bullet,
 # item (5)), so the table's gate reads `#if !FAUNA_KIDS`.

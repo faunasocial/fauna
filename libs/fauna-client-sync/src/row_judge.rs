@@ -444,7 +444,9 @@ where
             let (Some(reader), Some(row)) = (readers.get(set), projected.row.as_ref()) else {
                 continue;
             };
-            if !reader.is_writer(&own) {
+            // STANDING, not admission (ruling (12)(d)): a former writer's
+            // seat walks for nothing.
+            if !reader.is_current_writer(&own) {
                 continue;
             }
             if let Some(signed_as) = reader.signed_actor(row)
@@ -598,7 +600,7 @@ where
             )
             .await;
         match reply {
-            Ok(reply) => Some(writer_roster(&reply.members)),
+            Ok(reply) => Some(writer_roster(&reply.members, &reply.former_writers)),
             Err(e)
                 if e.as_rpc_error()
                     .is_some_and(|r| r.code == ROSTER_NOT_SHARED) =>
@@ -660,6 +662,180 @@ where
     let (items, tally) = retain_admitted(std::mem::take(&mut listing.items), &verdicts, what);
     listing.items = items;
     Ok((listing, tally))
+}
+
+/// A set homed on **another nest** that the reader is a member of, as its
+/// rows are judged: the derived `ChannelId` its custody and the federated
+/// kinds are keyed by, and its home nest's base URL (`ui/media.md` § Cross-nest
+/// shared sets — the foreign browse scope).
+#[derive(Debug, Clone, Copy)]
+pub struct ForeignSet<'a> {
+    pub channel: [u8; 32],
+    pub home_nest_url: &'a str,
+}
+
+/// Judge a **foreign set's** change rows — the heads its change log folds to
+/// (`fauna_protocol::sync::head_rows`), fetched through the member's own nest
+/// (`fauna.sync.changes.list { nest_url, channel_id }`) — under the scope's
+/// custody, one verdict per row in order. `certs` is the reply's relayed
+/// `signer_certs` side table (every page's).
+///
+/// [`ProjectionJudge`] cannot judge these: it keys sets by name hash and own-nest
+/// row and reads each owner off the OWN nest's `fauna.folders.list`, which never
+/// lists a foreign set. The binding here is the cross-nest member's — the
+/// engine's for the same set (`refresh_reader_roster`'s foreign arm):
+///
+/// - owner `None`: a member holds no marker, so the judge takes the owner off
+///   the roster's owner row (`writer-signed-change-records.md` ruling (11)(c));
+/// - account the seat's own, with its proven predecessors;
+/// - lineage from the seat's nonce source by `FolderRef::Foreign(channel)`
+///   ALONE — never the by-name fallback, which beside an own set of the same
+///   name would answer that set's lineage;
+/// - roster from `fauna.folders.members.list_actors_remote`, read only when a
+///   row is held for want of one;
+/// - the relayed certs ingested.
+///
+/// No error: a roster that cannot be read leaves its rows held (absent from
+/// this listing, judged again on the next), and a lineage that cannot be read
+/// verifies nothing, exactly as the projection judge degrades.
+pub async fn judge_foreign_rows<R>(
+    nest: &R,
+    seat: &ReaderSeat,
+    set: ForeignSet<'_>,
+    rows: &[&SyncChange],
+    certs: &[EmbedAsBytes],
+) -> Vec<RowVerdict>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + core::fmt::Display,
+{
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let folder_ref = fauna_core::folder_keys::FolderRef::Foreign(set.channel);
+    let lineage = foreign_lineage(seat.nonces.as_ref(), &folder_ref).await;
+    let mut binding = ReaderBinding {
+        owner: None,
+        account: seat.own,
+        account_predecessors: seat.learned.chain_with(&seat.predecessors),
+        webdav_served: lineage.webdav_served(),
+        ..Default::default()
+    };
+    if rows.iter().any(|r| r.signature.is_some()) {
+        binding.set_nonce = lineage.live;
+        binding.live_minted_by = lineage.live_minted_by.map(|a| a.0);
+        binding.retired_set_nonces = lineage
+            .retired
+            .iter()
+            .map(|r| (r.nonce, r.minted_by.map(|a| a.0)))
+            .collect();
+    }
+    let mut reader = RowReader::new();
+    reader.install_binding(binding);
+    reader.ingest_certs(certs);
+    let judge_all = |reader: &RowReader| -> Vec<RowVerdict> {
+        rows.iter().map(|row| reader.judge(row)).collect()
+    };
+    let mut verdicts = judge_all(&reader);
+    if verdicts.iter().any(|v| {
+        matches!(
+            v,
+            RowVerdict::Held(Held::RosterUnread | Held::MinterUnplaced)
+        )
+    }) && let Some(writers) = foreign_roster(nest, set).await
+    {
+        reader.install_roster(writers);
+        verdicts = judge_all(&reader);
+    }
+    // Ruling (8)(b), source (ii), the linkless half — the projection judge's
+    // `learn_own_links`, over this one set: a row signed as an identity of
+    // this account the seat has not proven yet, on a set this seat may write.
+    if let Some(own) = seat.own
+        && reader.is_current_writer(&own)
+    {
+        let mut unplaced: Vec<[u8; 32]> = Vec::new();
+        for (row, verdict) in rows.iter().zip(&verdicts) {
+            if verdict.unattributed()
+                && let Some(signed_as) = reader.signed_actor(row)
+                && !unplaced.contains(&signed_as)
+            {
+                unplaced.push(signed_as);
+            }
+        }
+        if !unplaced.is_empty() && seat.learned.prove_links(nest, own, unplaced).await {
+            let binding = ReaderBinding {
+                account_predecessors: seat.learned.chain_with(&seat.predecessors),
+                ..reader.binding().clone()
+            };
+            reader.install_binding(binding);
+            verdicts = judge_all(&reader);
+        }
+    }
+    verdicts
+}
+
+/// A foreign set's nonce lineage, asked by its ref alone. A resolver answers
+/// by the ref (`FolderKeyResolver::set_lineage_ref` — custody's foreign record);
+/// a fixed source is one set's nonce whatever the set; a by-name snapshot
+/// holds no foreign set. A failed read verifies nothing.
+async fn foreign_lineage(
+    nonces: Option<&SetNonceSource>,
+    folder_ref: &fauna_core::folder_keys::FolderRef,
+) -> fauna_core::folder_keys::SetNonceLineage {
+    let read = match nonces {
+        Some(SetNonceSource::Resolver(resolver)) => resolver.set_lineage_ref(folder_ref).await,
+        Some(SetNonceSource::Fixed(nonce)) => Ok(Some(fauna_core::folder_keys::SetNonceLineage {
+            live: Some(*nonce),
+            ..Default::default()
+        })),
+        Some(SetNonceSource::ByFolder(_)) | None => Ok(None),
+    };
+    match read {
+        Ok(lineage) => lineage.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                "foreign set nonce: lookup failed; the set's signed rows cannot verify: {e}"
+            );
+            Default::default()
+        }
+    }
+}
+
+/// A foreign set's writers, relayed to its home nest
+/// (`fauna.folders.members.list_actors_remote`), or `None` when the read
+/// failed — its member rows stay held. `not_shared` is an owner-only set's
+/// successful read, as on the same-nest roster.
+async fn foreign_roster<R>(nest: &R, set: ForeignSet<'_>) -> Option<WriterRoster>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + core::fmt::Display,
+{
+    let reply: Result<ActorMembersListReply, R::Error> = nest
+        .request(
+            fauna_protocol::folders::KIND_FOLDERS_MEMBERS_LIST_ACTORS_REMOTE,
+            fauna_protocol::folders::ActorMembersListRemoteRequest {
+                channel_id: hex::encode(set.channel),
+                nest_url: set.home_nest_url.to_string(),
+                extra: Default::default(),
+            },
+        )
+        .await;
+    match reply {
+        Ok(reply) => Some(writer_roster(&reply.members, &reply.former_writers)),
+        Err(e)
+            if e.as_rpc_error()
+                .is_some_and(|r| r.code == ROSTER_NOT_SHARED) =>
+        {
+            Some(WriterRoster::default())
+        }
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "foreign writer roster: read failed; a member's rows stay held"
+            );
+            None
+        }
+    }
 }
 
 /// The identity a verified row was signed as — what a projection stamps for
@@ -1769,5 +1945,266 @@ mod tests {
         let (items, tally) = retain_admitted(vec!["item"], &[history], "media");
         assert!(items.is_empty());
         assert_eq!(tally.history, 1);
+    }
+
+    // ── The foreign set's judge (`judge_foreign_rows`) ──────────────────────
+
+    const CHANNEL: [u8; 32] = [0xAB; 32];
+    const HOME: &str = "https://away.example";
+
+    /// Custody that knows the foreign set by its ref alone — and answers a
+    /// DIFFERENT lineage by name, so a judge that fell back to the name would
+    /// verify nothing.
+    struct ForeignCustody {
+        live: [u8; 32],
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::folder_keys::FolderKeyResolver for ForeignCustody {
+        async fn resolve(
+            &self,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn set_lineage(
+            &self,
+            _folder: &str,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::SetNonceLineage> {
+            Ok(fauna_core::folder_keys::SetNonceLineage {
+                live: Some(OTHER_NONCE),
+                ..Default::default()
+            })
+        }
+
+        async fn set_lineage_ref(
+            &self,
+            folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
+            Ok(
+                (*folder_ref == fauna_core::folder_keys::FolderRef::Foreign(CHANNEL)).then(|| {
+                    fauna_core::folder_keys::SetNonceLineage {
+                        live: Some(self.live),
+                        ..Default::default()
+                    }
+                }),
+            )
+        }
+    }
+
+    fn foreign_seat(own: &ActorKeypair) -> ReaderSeat {
+        ReaderSeat {
+            own: Some(own.actor_id().0),
+            nonces: Some(SetNonceSource::Resolver(std::sync::Arc::new(
+                ForeignCustody { live: NONCE },
+            ))),
+            ..Default::default()
+        }
+    }
+
+    fn away() -> ForeignSet<'static> {
+        ForeignSet {
+            channel: CHANNEL,
+            home_nest_url: HOME,
+        }
+    }
+
+    /// A cross-nest member judges the set's heads under the set's own
+    /// lineage, asked by its ref, with the owner off the relayed roster's
+    /// owner row: the owner's and a writer's signed rows verify, a stranger's
+    /// is refused — and the roster is read from the HOME nest by channel.
+    #[test]
+    fn a_foreign_sets_rows_verify_under_its_ref_lineage_and_relayed_roster() {
+        let (owner, me, writer, stranger) = (kp(1), kp(2), kp(3), kp(4));
+        let nest = RejectingRequester::new().reply(
+            fauna_protocol::folders::KIND_FOLDERS_MEMBERS_LIST_ACTORS_REMOTE,
+            &roster(&[
+                (&owner, "owner", None),
+                (&me, "member", Some("reader")),
+                (&writer, "member", Some("writer")),
+            ]),
+        );
+        let (a, b, c) = (
+            signed(&owner, NONCE),
+            signed(&writer, NONCE),
+            signed(&stranger, NONCE),
+        );
+        let verdicts = block_on(judge_foreign_rows(
+            &nest,
+            &foreign_seat(&me),
+            away(),
+            &[&a, &b, &c],
+            &[],
+        ));
+        assert!(
+            matches!(verdicts[0], RowVerdict::Verified { writer: w, .. } if w == owner.actor_id().0),
+            "{:?}",
+            verdicts[0]
+        );
+        assert!(
+            matches!(verdicts[1], RowVerdict::Verified { writer: w, .. } if w == writer.actor_id().0),
+            "{:?}",
+            verdicts[1]
+        );
+        assert!(!verdicts[2].admits(), "{:?}", verdicts[2]);
+        assert_eq!(
+            nest.kinds(),
+            vec![fauna_protocol::folders::KIND_FOLDERS_MEMBERS_LIST_ACTORS_REMOTE],
+            "the own nest's folder list never names a foreign set"
+        );
+        let (_, payload) = &nest.payloads()[0];
+        assert_eq!(payload["channel_id"], hex::encode(CHANNEL));
+        assert_eq!(payload["nest_url"], HOME);
+    }
+
+    /// A signed change row as a version-history reply carries it.
+    fn as_version(r: &SyncChange) -> fauna_protocol::files::FileVersionInfo {
+        let bytes = |h: &str| fauna_protocol::ByteBuf::from(hex::decode(h).unwrap());
+        fauna_protocol::files::FileVersionInfo {
+            path_hash: bytes(&r.path_hash),
+            version_num: r.seq,
+            manifest_hash: bytes(r.manifest_hash.as_deref().unwrap()),
+            size_bytes: r.size_bytes,
+            created_at: r.created_at,
+            device_id: r.device_id.as_deref().map(bytes),
+            change_type: Some(r.change_type.clone()),
+            author_actor_id: r.author_actor_id.clone().unwrap_or_default(),
+            signature: r.signature.clone(),
+            signer_key: r.signer_key.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// The cross-nest version history (`SyncClient::versions_list_judged_foreign`,
+    /// `ui/media.md` § Cross-nest shared sets): the read goes to the member's
+    /// own nest as the relayed form — `nest_url` + `channel_id`, no set name —
+    /// and EVERY version comes back judged under the foreign set's ref
+    /// lineage and relayed roster: the owner's and a writer's versions verify
+    /// and are attributed, a stranger's and a statement-less row are refused.
+    #[test]
+    fn versions_list_foreign_judges_every_version_under_the_scope() {
+        let (owner, me, writer, stranger) = (kp(1), kp(2), kp(3), kp(4));
+        let (a, b, c) = (
+            signed(&owner, NONCE),
+            SyncChange {
+                seq: 4,
+                ..signed(&writer, NONCE)
+            },
+            signed(&stranger, NONCE),
+        );
+        let b = {
+            // Re-sign after the seq change so the statement covers it.
+            let mut r = SyncChange {
+                signature: None,
+                signer_key: None,
+                ..b
+            };
+            ChangeSigner::direct(&writer)
+                .sign_row(&mut r, NONCE)
+                .unwrap();
+            r
+        };
+        let bare = fauna_protocol::files::FileVersionInfo {
+            device_id: None,
+            ..as_version(&a)
+        };
+        let nest = RejectingRequester::new()
+            .reply(
+                fauna_protocol::folders::KIND_FOLDERS_MEMBERS_LIST_ACTORS_REMOTE,
+                &roster(&[
+                    (&owner, "owner", None),
+                    (&me, "member", Some("reader")),
+                    (&writer, "member", Some("writer")),
+                ]),
+            )
+            .reply(
+                "fauna.files.versions.list",
+                &fauna_protocol::files::FilesVersionsListReply {
+                    versions: vec![as_version(&a), bare, as_version(&b), as_version(&c)],
+                    ..Default::default()
+                },
+            );
+        let client = crate::SyncClient::new(&nest);
+        let path = fauna_core::sync::path_hash("a.jpg");
+        let judged =
+            block_on(client.versions_list_judged_foreign(path, away(), &foreign_seat(&me)))
+                .expect("the relayed read answers");
+        assert_eq!(judged.len(), 4, "every version is returned with a verdict");
+        assert!(
+            matches!(judged[0].1, RowVerdict::Verified { writer: w, .. } if w == owner.actor_id().0),
+            "{:?}",
+            judged[0].1
+        );
+        assert_eq!(
+            judged[1].1,
+            RowVerdict::Refused(ChangeVerifyError::Unsigned),
+            "a version with no statement is refused unsigned"
+        );
+        assert!(
+            matches!(judged[2].1, RowVerdict::Verified { writer: w, .. } if w == writer.actor_id().0),
+            "{:?}",
+            judged[2].1
+        );
+        assert_eq!(judged[2].0.author_actor_id, writer.actor_id().to_hex());
+        assert!(!judged[3].1.admits(), "{:?}", judged[3].1);
+        let (kind, payload) = &nest.payloads()[0];
+        assert_eq!(*kind, "fauna.files.versions.list");
+        assert_eq!(payload["nest_url"], HOME);
+        assert_eq!(payload["channel_id"], hex::encode(CHANNEL));
+        assert!(
+            payload.get("folder").is_none_or(|f| f.is_null()),
+            "a foreign set is addressed by channel, never by name: {payload}"
+        );
+    }
+
+    /// A roster that cannot be read leaves every member row held — absent from
+    /// this listing, never refused and never admitted.
+    #[test]
+    fn an_unread_foreign_roster_holds_the_rows() {
+        let (owner, me) = (kp(1), kp(2));
+        let nest = RejectingRequester::new();
+        let row = signed(&owner, NONCE);
+        let verdicts = block_on(judge_foreign_rows(
+            &nest,
+            &foreign_seat(&me),
+            away(),
+            &[&row],
+            &[],
+        ));
+        assert!(
+            matches!(verdicts[0], RowVerdict::Held(_)),
+            "{:?}",
+            verdicts[0]
+        );
+    }
+
+    /// The lineage is asked by the ref alone: a row signed under the nonce the
+    /// by-NAME answer would give never verifies here.
+    #[test]
+    fn a_foreign_lineage_never_falls_back_to_the_name() {
+        let (owner, me) = (kp(1), kp(2));
+        let nest = RejectingRequester::new().reply(
+            fauna_protocol::folders::KIND_FOLDERS_MEMBERS_LIST_ACTORS_REMOTE,
+            &roster(&[(&owner, "owner", None), (&me, "member", Some("reader"))]),
+        );
+        let row = signed(&owner, OTHER_NONCE);
+        let verdicts = block_on(judge_foreign_rows(
+            &nest,
+            &foreign_seat(&me),
+            away(),
+            &[&row],
+            &[],
+        ));
+        assert!(!verdicts[0].admits(), "{:?}", verdicts[0]);
     }
 }

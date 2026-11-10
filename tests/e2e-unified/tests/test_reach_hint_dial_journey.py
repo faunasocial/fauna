@@ -185,6 +185,10 @@ def _read_reach(driver):
 
 
 @pytest.mark.feature("connect-and-sign-in")
+# Also set-up-a-nest-from-the-app's outcome 16: the reach address a provisioning
+# run persisted opens the box while its domain is dark, and the domain's first
+# answer drops it (onboarding-provisioning.md § Reach hint).
+@pytest.mark.feature("set-up-a-nest-from-the-app")
 # The hint it captures is 127.0.0.1 and the dark domain keeps the harness nest's
 # own explicit port: the journey needs a nest on this machine's loopback.
 @pytest.mark.harness_box

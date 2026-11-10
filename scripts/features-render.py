@@ -215,13 +215,13 @@ def _column_summary(features: Path) -> int:
     reach_of = {k: g.reach for k, g in gaps.items()}
 
     print("feature catalog — per-column backlog and its reach (parse only, no run)\n")
-    print(f"{'column':<9}{'short pages':>12}{'owed':>7}{'straggler':>11}{'wide':>7}"
+    print(f"{'column':<13}{'short pages':>12}{'owed':>7}{'straggler':>11}{'wide':>7}"
           f"{'nobody':>8}{'absent':>8}")
     for app in fc.APPS:
         blockers = fc.column_backlog(pages, app, app_marks)
         owed = [b for b in blockers if b.owed_here]
         reaches = [reach_of[(b.page.slug, b.outcome.number)] for b in owed]
-        print(f"{app:<9}{len({b.page.slug for b in blockers}):>12}{len(owed):>7}"
+        print(f"{app:<13}{len({b.page.slug for b in blockers}):>12}{len(owed):>7}"
               f"{sum(1 for r in reaches if r <= 2):>11}"
               f"{sum(1 for r in reaches if r >= 5):>7}"
               f"{len(blockers) - len(owed):>8}"

@@ -1070,6 +1070,126 @@ def test_the_sign_out_residue_outlives_the_app(logged_in_app, test_user):
     )
 
 
+#: The native sign-out record's file, directly under the app's install base
+#: (`fauna_client_accounts::SIGN_OUT_RECORD_FILE`) — and the residue record's
+#: beside it (`SIGN_OUT_RESIDUE_FILE`).
+_SIGN_OUT_RECORD_FILE = "sign-out-record.json"
+_SIGN_OUT_RESIDUE_FILE = "sign-out-residue.json"
+
+#: How long the gesture may take to write its record after the confirm. The
+#: record is written before the gesture's first await, so this is the UI
+#: loop's turn — a budget far above any non-pathological delay, polled
+#: (convention 14).
+_RECORD_WRITTEN_BUDGET_S = 15.0
+
+
+def _install_base(driver):
+    """The install base a native seat keeps its records under — its flat erase
+    base: tui's `<XDG_CONFIG_HOME>/fauna-tui`, linux's `<XDG_CONFIG_HOME>/fauna`
+    (`_serving_locks`)."""
+    return attach_scope_store(app_surface.app_name(driver), driver).scope_roots()[0]
+
+
+@pytest.mark.feature("account")
+@pytest.mark.requires_surface("sign-out-record")
+def test_a_launch_after_the_app_died_mid_sign_out_finishes_the_sign_out(
+    app, request, stoppable_nest
+):
+    """A sign-out cut short by the app dying finishes at the next launch
+    (account outcome 17; `account-scoping.md` § Erasure follows scope → *The
+    sign-out record is on all 7 apps*, decision 7).
+
+    The sign-out records its decision before its first await, then waits for
+    the account runtime's stop before it wipes and erases anything. The nest is
+    stopped first, so that stop waits out its whole budget
+    (`ACCOUNT_RUNTIME_STOP_BUDGET`) asking a nest that is gone to retire the
+    enrollment — the window the app is killed inside. Ordering, not timing,
+    makes the kill land there: the record is on disk (the gesture began) and
+    the account's secret is still stored after the kill (the wipe never ran),
+    both read once the process is dead.
+
+    The relaunch over the same world must then land on `identity_choice` with
+    nothing of the account left: no registry entry, no credential, no actor
+    scope under any of the three erase bases, no record and no residue. Before
+    the record existed, the relaunch came up signed in to the account the user
+    had just confirmed signing out of.
+    """
+    from conftest import _make_user
+
+    from helpers import enrollment
+    from helpers.waiting import wait_until
+
+    driver = app.driver
+    client = app_surface.app_name(driver)
+    user = _make_user(stoppable_nest)
+    actor = user["actor_id_hex"]
+    enrollment.sign_in(app, request, stoppable_nest, user)
+    pin_store_across_relaunch(driver)
+
+    creds = attach_cred_store(client, driver)
+    secret_slot = f"fauna/{actor}/secret"
+    assert secret_slot in creds.stored_accounts(), (
+        f"precondition: the signed-in account's secret must be stored — that is what "
+        f"the sign-out has to erase (slots: {sorted(creds.stored_accounts())}, "
+        f"error={app.error_text()!r})"
+    )
+    base = _install_base(driver)
+    record = base / _SIGN_OUT_RECORD_FILE
+
+    stoppable_nest["stop"]()
+    app.settings.press_sign_out()
+    wait_until(
+        record.exists,
+        _RECORD_WRITTEN_BUDGET_S,
+        interval=0.05,
+        diagnose=lambda: (
+            f"the sign-out never wrote its record at {record} — the decision must land "
+            f"before the gesture's first await (error={app.error_text()!r})\n"
+            f"{_sign_out_trace(app)}"
+        ),
+    )
+    driver.kill_uncleanly()
+
+    assert record.exists(), "precondition: the dead process left its sign-out record"
+    assert secret_slot in creds.stored_accounts(), (
+        "precondition: the kill must land inside the sign-out's stop, before the "
+        "wipe — the secret was already gone, so this run would prove nothing about "
+        f"a launch finishing an interrupted sign-out\n{_sign_out_trace(app)}"
+    )
+
+    assert driver.recover(), "relaunch after the mid-sign-out kill failed"
+    driver.wait_for("create-identity-button", timeout=60.0)
+
+    roots = attach_scope_store(client, driver).scope_roots()
+    shared = attach_account_store(client, driver)
+    last: dict = {}
+
+    def finished():
+        last.clear()
+        last.update(
+            slots=sorted(creds.stored_accounts() - {"signed-out/v1"}),
+            shared_slots=sorted(k for k in shared.stored_accounts() if actor in k),
+            scopes=[str(r / actor) for r in roots if (r / actor).exists()],
+            record=record.exists(),
+            residue=(base / _SIGN_OUT_RESIDUE_FILE).exists(),
+        )
+        return not any(last.values())
+
+    wait_until(
+        finished,
+        _RECORD_WRITTEN_BUDGET_S,
+        interval=0.25,
+        diagnose=lambda: (
+            "a launch that finds an unfinished sign-out must finish it — no registry "
+            f"entry or credential, no actor scope, no record, no residue — but it reads "
+            f"{last} (error={app.error_text()!r})\n{_sign_out_trace(app)}"
+        ),
+    )
+    assert not driver.get_state("session.authenticated"), (
+        "identity_choice is showing, yet the session reads authenticated"
+    )
+
+
 def _describe_survivors(survivors: list) -> str:
     """Each surviving directory with what is still INSIDE it — the diagnosis, not
     just the symptom.

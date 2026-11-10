@@ -126,6 +126,30 @@ pub fn unhide_reported_content(moderation: &mut ModerationConfig, id: &str) {
     }
 }
 
+/// Mark a post as spam, for the user (`report-sharing.md` § Report capture →
+/// *The post's mark-as-spam verb*): append the post's id to `spam_marked`,
+/// normalized as a hidden id is. The [`hide_reported_content`] delta reasoning
+/// — a mark another device stored meanwhile survives; re-marking is a no-op.
+/// No count cap: each id is its own plane row, and the nest's train rate limit
+/// bounds the gesture.
+pub fn mark_spam_content(moderation: &mut ModerationConfig, id: &str) {
+    let Some(id) = fauna_core::moderation_rows::normalize_hidden_id(id) else {
+        return;
+    };
+    if moderation.spam_marked.contains(&id) {
+        return;
+    }
+    moderation.spam_marked.push(id);
+}
+
+/// Un-mark a post — the inverse of [`mark_spam_content`], same delta
+/// reasoning. Unknown ids are a no-op.
+pub fn unmark_spam_content(moderation: &mut ModerationConfig, id: &str) {
+    if let Some(id) = fauna_core::moderation_rows::normalize_hidden_id(id) {
+        moderation.spam_marked.retain(|h| *h != id);
+    }
+}
+
 // ── sync prefs ──
 
 /// Set (or clear, with `None`) the default conflict policy stamped onto newly
@@ -361,5 +385,23 @@ mod tests {
         unhide_reported_content(&mut m, "ABCD");
         unhide_reported_content(&mut m, "never-hidden");
         assert!(m.hidden_content.is_empty());
+    }
+
+    /// A post is marked as spam once, case-insensitively, and never lands in
+    /// the hidden list beside it; un-marking removes only the mark.
+    #[test]
+    fn spam_marked_is_a_case_insensitive_delta_pair_apart_from_hidden() {
+        let mut m = ModerationConfig {
+            hidden_content: vec!["abcd".into()],
+            ..Default::default()
+        };
+        mark_spam_content(&mut m, " ABCD ");
+        mark_spam_content(&mut m, "abcd");
+        mark_spam_content(&mut m, "  ");
+        assert_eq!(m.spam_marked, vec!["abcd".to_string()]);
+        unmark_spam_content(&mut m, "ABCD");
+        unmark_spam_content(&mut m, "never-marked");
+        assert!(m.spam_marked.is_empty());
+        assert_eq!(m.hidden_content, vec!["abcd".to_string()]);
     }
 }

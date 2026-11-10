@@ -42,6 +42,32 @@ internal static class SuccessionHandoff
 
     private static string? _sweepOwedTo;
 
+    private static bool _memberReviewDeferred;
+
+    /// <summary>
+    /// The user pressed <i>Review The Rest Later</i> on the ephemeral member-review
+    /// pass this app run (<c>settings.md</c> § Recovery kit → <i>The ephemeral
+    /// member-review pass</i>). It hides the pass and decides nothing: no verdict is
+    /// written, so the open items are exactly what the permanent page inherits.
+    ///
+    /// <para>Lifetime mirrors <see cref="Sweep"/> deliberately, because it is a
+    /// decision <i>about</i> that sweep: it survives the account switch (the pass
+    /// renders in the successor's session, and a defer taken there must stick across
+    /// the per-visit page rebuild) and only the credential-namespace wipe clears it —
+    /// a fresh identity on a reset box must not start with the pass already
+    /// dismissed by someone who no longer exists. Process-scoped by design: a
+    /// relaunch is a new chance to work the backlog. apple's
+    /// <c>SuccessionHandoff.memberReviewDeferred</c> and tui's
+    /// <c>App::succession_review_deferred</c> are the twins.</para>
+    /// </summary>
+    internal static bool MemberReviewDeferred { get { lock (Gate) return _memberReviewDeferred; } }
+
+    /// <summary>Record the defer — see <see cref="MemberReviewDeferred"/>.</summary>
+    internal static void DeferMemberReview()
+    {
+        lock (Gate) _memberReviewDeferred = true;
+    }
+
     /// <summary>
     /// The successor a <b>relaunch adoption</b> owes the group sweep to — null when
     /// nothing is owed (<c>succession-propagation.md</c> § Propagation → <i>Own
@@ -264,6 +290,8 @@ internal static class SuccessionHandoff
 #endif
             _sweep = null;
             _sweepOwedTo = null;
+            // The defer is a decision about the sweep, so it clears with it.
+            _memberReviewDeferred = false;
         }
     }
 }

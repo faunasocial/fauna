@@ -108,6 +108,11 @@ const PAGE_LIMIT: i64 = 50;
 /// missing; nothing to write means nothing to fail. See [`crate::personalization`].
 const MUTED_KEYWORDS_IMPLICIT_WEIGHT: i64 = 1000;
 
+/// How often [`FeedManager::hydrate_cues`] re-reads the e2e cue-hydration hold
+/// while it is held, and how many reads it waits at most: 3000 × 200 ms = 600 s.
+const CUE_HYDRATION_HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+const CUE_HYDRATION_HOLD_MAX_POLLS: u32 = 3000;
+
 /// One fetched page: the mapped posts plus whichever cursor the query's ordering
 /// mode advances on. Exactly one of the two is `Some` for a non-final page —
 /// chronological queries advance `next_cursor`, score-ordered ones advance the
@@ -196,6 +201,16 @@ enum Selection {
     Imported(String),
 }
 
+/// Whether a no-nest `fauna.posts.interact` may go to the offline outbox
+/// (`FeedManager::interact_folding_counts`).
+#[derive(Clone, Copy)]
+enum Queueing {
+    /// A user's own act: queued while the app has no nest.
+    Allowed,
+    /// A request whose answer gates what follows: always sent.
+    SendOnly,
+}
+
 /// The shared feed manager. Construct over an authed transport + the local
 /// actor's signing secret (needed to build + sign posts on `submit_post`).
 pub struct FeedManager<R> {
@@ -268,6 +283,10 @@ pub struct FeedManager<R> {
     /// [`hold_next_reload_for_test`](Self::hold_next_reload_for_test).
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     reload_hold: ReloadHold,
+    /// The test-only in-memory cue-hydration hold — see
+    /// [`set_cue_hydration_hold_for_test`](Self::set_cue_hydration_hold_for_test).
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    cue_hydration_hold: std::sync::atomic::AtomicBool,
     observers: RwLock<Vec<Arc<dyn FeedSnapshotObserver>>>,
     /// Resolved quoted-post views, keyed by the **quoted** post's hex id — the
     /// store that lets [`resolve_media`](Self::resolve_media)'s document rebuild
@@ -295,6 +314,20 @@ pub struct FeedManager<R> {
     /// was torn down and remounted idle mid-tap (render-model.md § D6c → *Inline
     /// playback*). In-memory only.
     resolved_media: RwLock<HashMap<String, ResolvedMedia>>,
+    /// The viewer's own acts folded into the loaded window — a like's or
+    /// repost's post-act counters, the per-viewer pair, a reaction's carrier, a
+    /// post taken out of the window — keyed by the post's hex id, each stamped
+    /// with the [`reload_gen`](Self::reload_gen) current when it folded.
+    /// [`reapply_acted`](Self::reapply_acted) re-folds them onto every page a
+    /// reload or `load_more` lands, because a reload that BEGAN before the act
+    /// may have fetched before it, and committing that page bare undoes the act
+    /// on screen with no error and no later reload to put it right
+    /// (`ui/feed.md` § Interaction bar → *A reload already fetching does not
+    /// undo the act*). An act stamped below a committing reload's generation is
+    /// dropped: that reload began after the nest had answered the act, so its
+    /// page carries it. Written in the same `state` write as the fold it
+    /// records (lock order state → acted), so no commit falls between the two.
+    acted: RwLock<HashMap<String, ActedFold>>,
     /// Per-post remote-image reveal set (render-model.md § D3) — the feed twin of
     /// `ConversationsManager`'s set, keyed by the post's hex id. The single source
     /// of truth for "the user opted into loading this post's remote images";
@@ -348,6 +381,13 @@ pub struct FeedManager<R> {
     /// under — projected onto `PostSummary::archive_comments` at every
     /// [`snapshot`](Self::snapshot). Identity-stable, never cleared on reload.
     archive_comments: RwLock<HashMap<String, Vec<crate::ArchiveCommentView>>>,
+    /// The like and unlike intents resting in the device's outbox, keyed by
+    /// the post (hex id) — the last read of
+    /// [`refresh_unsent_likes`](Self::refresh_unsent_likes), projected onto
+    /// `PostSummary::like_state` at every [`snapshot`](Self::snapshot)
+    /// (`account-offline-mutation.md` § The offline-mutation contract →
+    /// *The unsent-changes surface*, point 2).
+    like_outbox: RwLock<HashMap<String, LikeOutbox>>,
     /// A remote author's signed face, keyed `(author, home)` — the memo behind
     /// [`resolve_author_face`](Self::resolve_author_face) (`feed.md` § The read
     /// model → *The remote author's byline*). The in-flight slot folds the N
@@ -445,6 +485,17 @@ pub struct FeedManager<R> {
     /// [`unlocked_bodies`](Self::unlocked_bodies) — a fresh page always
     /// arrives with the envelope's labels alone.
     room_post_labels: RwLock<HashMap<String, Vec<fauna_core::content_category::ContentLabelEntry>>>,
+    /// The post ids this reader marked as spam — the `spam_marked` list of the
+    /// sealed `fauna.state.moderation` record, handed in by the app through
+    /// [`set_spam_marked`](Self::set_spam_marked) (`report-sharing.md`
+    /// § Report capture → *The post's mark-as-spam verb*). Every
+    /// [`snapshot`](Self::snapshot) folds a `spam` entry at
+    /// [`SPAM_MARK_CONFIDENCE_PER_MILLE`] into a marked post's labels, so the
+    /// render verdict every app runs collapses it at the marker's own slider;
+    /// projected on the snapshot rather than written into the stored list, so
+    /// an un-mark restores the served labels with no bookkeeping. Normalized
+    /// lowercase.
+    spam_marked: RwLock<HashSet<String>>,
     /// The per-post seal key for every media blob of a gated post this reader
     /// has unsealed, keyed by the blob's 64-hex content hash.
     ///
@@ -500,6 +551,14 @@ pub struct FeedManager<R> {
     /// that build (`NestMailIndexLauncher::own_post_observer`); never set on
     /// wasm — web is a querier by ratified design.
     post_index_observer: RwLock<Option<Arc<dyn fauna_client_search::OwnPostIndexObserver>>>,
+    /// The device's offline outbox door — where an `OfflineQueued` interaction
+    /// (`fauna.posts.interact`) goes while the app has no nest
+    /// (`account-offline-mutation.md` § The offline-mutation contract; the
+    /// decision is `fauna_protocol::offline_intent::send_or_queue`'s). Set by
+    /// glue once the account store is ready
+    /// ([`set_offline_intent_queue`](Self::set_offline_intent_queue)). Unset ⇒
+    /// every interaction is sent and fails with no nest, the pre-composer shape.
+    intent_queue: RwLock<Option<Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>>>,
     /// Where a **room-restricted** post's base key comes from
     /// (`ui/feed.md` § Encryption at rest → *Room-restricted*): the room's keys
     /// live in the conversations plane — an end-to-end room's MLS group, a
@@ -653,6 +712,18 @@ pub fn feed_posts_json(
                     // The post a quote embeds (`null` when it quotes none) —
                     // what the legal-takedown witness finds the quoting post by.
                     "quoted_post_id": p.quoted_post_id,
+                    // The labels the render verdict reads — the served ones
+                    // with the reader's own spam mark folded in
+                    // (`FeedManager::snapshot`, report-sharing.md § Report
+                    // capture → *The post's mark-as-spam verb*). tui's key.
+                    "labels": p
+                        .labels
+                        .iter()
+                        .map(|l| serde_json::json!({
+                            "category": l.category,
+                            "confidence_per_mille": l.confidence_per_mille,
+                        }))
+                        .collect::<Vec<_>>(),
                     // Every link preview in the body with its state, in body
                     // order (`RenderDocument::link_previews`, render-model.md
                     // § D4): a card is absent while a preview is still
@@ -784,6 +855,55 @@ struct ResolvedMedia {
     authoring_origin: AuthoringOriginStatus,
 }
 
+/// One post's entry in [`FeedManager::acted`]: what the viewer's own acts
+/// folded into its row since the reload generation `stamp`, each field `None`
+/// (or empty) when no act touched it.
+#[derive(Clone, Default)]
+struct ActedFold {
+    /// The `reload_gen` current when the newest of these acts folded.
+    stamp: u64,
+    /// The nest's post-act counters and reaction tally ([`fold_counts`]).
+    counts: Option<fauna_protocol::posts::PostEngagementCounts>,
+    viewer_liked: Option<bool>,
+    viewer_repost_id: Option<Option<String>>,
+    /// Per emoji, the viewer's own reaction post id (`None` = taken back).
+    viewer_react: Vec<(String, Option<String>)>,
+    /// The post left the window (deleted, or the viewer's own repost row
+    /// `unrepost` dropped).
+    removed: bool,
+}
+
+impl ActedFold {
+    fn fold_onto(&self, p: &mut PostSummary) {
+        if let Some(counts) = &self.counts {
+            fold_counts(p, counts);
+        }
+        if let Some(liked) = self.viewer_liked {
+            p.viewer_liked = liked;
+        }
+        if let Some(repost_id) = &self.viewer_repost_id {
+            p.viewer_repost_id = repost_id.clone();
+        }
+        for (emoji, react_id) in &self.viewer_react {
+            for g in p.reactions.iter_mut().filter(|g| &g.emoji == emoji) {
+                g.viewer_react_id = react_id.clone();
+            }
+        }
+    }
+}
+
+/// Fold the nest's post-act counters into one row — the four counts and the
+/// per-emoji tally beside them, the nest's own projection for the caller
+/// (ruling 5). Shared by [`FeedManager::interact`]'s fold and the re-fold of
+/// [`ActedFold`], so the two cannot drift.
+fn fold_counts(p: &mut PostSummary, counts: &fauna_protocol::posts::PostEngagementCounts) {
+    p.like_count = counts.like_count;
+    p.reply_count = counts.reply_count;
+    p.repost_count = counts.repost_count;
+    p.quote_count = counts.quote_count;
+    p.reactions = counts.reactions.iter().cloned().map(Into::into).collect();
+}
+
 impl<R: RpcRequester + Clone> FeedManager<R> {
     /// Construct over the WS-RPC transport `nest` and the local actor's 32-byte
     /// signing secret. The snapshot starts empty + `Loading`.
@@ -799,14 +919,18 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             loaded_query: RwLock::new(None),
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             reload_hold: ReloadHold::default(),
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            cue_hydration_hold: std::sync::atomic::AtomicBool::new(false),
             observers: RwLock::new(Vec::new()),
             resolved_quotes: RwLock::new(HashMap::new()),
             resolved_media: RwLock::new(HashMap::new()),
+            acted: RwLock::new(HashMap::new()),
             revealed_remote: RwLock::new(HashSet::new()),
             unlock_purchase_requested: RwLock::new(HashSet::new()),
             resolved_previews: RwLock::new(HashMap::new()),
             archive_comment_source: RwLock::new(None),
             archive_comments: RwLock::new(HashMap::new()),
+            like_outbox: RwLock::new(HashMap::new()),
             resolved_faces: RwLock::new(HashMap::new()),
             base_scores: RwLock::new(HashMap::new()),
             sealed: RwLock::new(SealedScorers::default()),
@@ -818,11 +942,13 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             resolved_gated: RwLock::new(HashMap::new()),
             unlocked_bodies: RwLock::new(HashMap::new()),
             room_post_labels: RwLock::new(HashMap::new()),
+            spam_marked: RwLock::new(HashSet::new()),
             sealed_media_keys: RwLock::new(HashMap::new()),
             cue: RwLock::new(CueState::default()),
             engagement_factors: RwLock::new(Vec::new()),
             share_signals: AtomicBool::new(false),
             post_index_observer: RwLock::new(None),
+            intent_queue: RwLock::new(None),
             room_post_keys: RwLock::new(None),
             period_keys: RwLock::new(None),
             preferences: RwLock::new(None),
@@ -848,6 +974,11 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         *window.room_post_keys.write().unwrap() = self.room_post_keys.read().unwrap().clone();
         *window.period_keys.write().unwrap() = self.period_keys.read().unwrap().clone();
         *window.preferences.write().unwrap() = self.preferences.read().unwrap().clone();
+        *window.spam_marked.write().unwrap() = self.spam_marked.read().unwrap().clone();
+        // A like tapped on the profile's Posts tab with no nest queues like
+        // one tapped on the feed: the window shares the device's outbox.
+        *window.intent_queue.write().unwrap() = self.intent_queue.read().unwrap().clone();
+        *window.like_outbox.write().unwrap() = self.like_outbox.read().unwrap().clone();
         window.state.write().unwrap().author_selected = Some(actor_id);
         window
     }
@@ -933,6 +1064,15 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         *self.post_index_observer.write().unwrap() = Some(observer);
     }
 
+    /// Wire the device's offline outbox (see the field's docs). One slot,
+    /// last-set-wins — one account store per login.
+    pub fn set_offline_intent_queue(
+        &self,
+        queue: Arc<dyn fauna_core::offline_intent::OfflineIntentQueue>,
+    ) {
+        *self.intent_queue.write().unwrap() = Some(queue);
+    }
+
     /// Hand a nest-confirmed create to the index trickle, deriving the text
     /// from the **bytes that were sent** — never the composer state — so the
     /// staged text is the same `Post::body_text` extraction the nest's own
@@ -996,13 +1136,27 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             }
         }
         label_room_posts(&mut snap);
+        // The reader's own spam marks (`spam_marked`' field doc): a no-op walk
+        // when nothing is marked (the common case).
+        let marked = self.spam_marked.read().unwrap();
+        if !marked.is_empty() {
+            for p in rendered_posts_mut(&mut snap) {
+                if marked.contains(&p.post_id.to_ascii_lowercase()) {
+                    fold_spam_mark(&mut p.labels);
+                }
+            }
+        }
+        drop(marked);
         let folded = self.archive_comments.read().unwrap();
+        let likes = self.like_outbox.read().unwrap();
         for p in rendered_posts_mut(&mut snap) {
             p.plays_media = p.derive_plays_media();
             if let Some(comments) = folded.get(&p.post_id) {
                 p.archive_comments = comments.clone();
             }
+            p.like_state = derive_like_state(p.viewer_liked, likes.get(&p.post_id));
         }
+        drop(likes);
         drop(folded);
         let me_hex = hex::encode(ActorKeypair::from_secret(self.actor_secret).actor_id().0);
         state_reply_audiences(&mut snap, &me_hex);
@@ -1066,6 +1220,31 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             let mut held = self.archive_comments.write().unwrap();
             let changed = *held != by_post;
             *held = by_post;
+            changed
+        };
+        if changed {
+            self.notify();
+        }
+        Ok(())
+    }
+
+    // ── Unsent likes (account-offline-mutation.md § The unsent-changes surface) ──
+
+    /// Re-read the like and unlike intents resting in the device's outbox into
+    /// the projection [`snapshot`](Self::snapshot) folds as each post's
+    /// `like_state`, and notify when it moved. Run after a like queues, after
+    /// a retry, and by the app wherever its outbox may have drained (a
+    /// reconnect, the feed opening). No outbox lent is a no-op; a failed read
+    /// keeps what the last read left and reports the reason.
+    pub async fn refresh_unsent_likes(&self) -> Result<(), String> {
+        let Some(queue) = self.intent_queue.read().unwrap().clone() else {
+            return Ok(());
+        };
+        let next = like_outbox_of(&queue.unsent_changes().await?);
+        let changed = {
+            let mut held = self.like_outbox.write().unwrap();
+            let changed = *held != next;
+            *held = next;
             changed
         };
         if changed {
@@ -1594,6 +1773,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     // Newly-paged posts arrive sealed; re-fold this reader's open
                     // unlocks so scrolling never reverts a post to its teaser.
                     self.reapply_unlocked(&mut s.posts);
+                    // A page fetched before a delete would re-append the post.
+                    self.reapply_acted(generation, &mut s.posts);
                     s.has_more = has_more;
                 }
                 {
@@ -1733,6 +1914,9 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     // freshly-fetched list arrives sealed and would otherwise revert
                     // an open unlock to the teaser (the iOS reload-revert).
                     self.reapply_unlocked(&mut s.posts);
+                    // And the viewer's own acts since this reload began — its
+                    // page may have been fetched before them (`acted`).
+                    self.reapply_acted(generation, &mut s.posts);
                     s.has_more = has_more;
                     s.status = FeedStatus::Loaded;
                     // A sealed scorer that failed to load is a *non-fatal*
@@ -2410,7 +2594,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         action: String,
         body: Option<String>,
     ) -> Result<(), String> {
-        self.interact_folding_counts(post_id, action, body)
+        self.interact_folding_counts(post_id, action, body, Queueing::Allowed)
             .await
             .map(|_| ())
     }
@@ -2418,17 +2602,37 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// [`interact`](Self::interact), answering whether the nest spoke for the
     /// target's counters (`counts` present) — the signal a referencing compose
     /// reads to know a post-act refresh means something.
+    ///
+    /// `queueing` says whether a no-nest act may go to the outbox: a user's
+    /// own act may ([`Queueing::Allowed`]); the referencing compose's
+    /// eligibility ack may not ([`Queueing::SendOnly`]) — its answer gates the
+    /// compose that follows, so queueing it would report an eligibility nobody
+    /// checked.
     async fn interact_folding_counts(
         &self,
         post_id: String,
         action: String,
         body: Option<String>,
+        queueing: Queueing,
     ) -> Result<bool, String> {
         let posts = PostsClient::new(self.nest.clone());
-        let reply = posts
-            .posts_interact(post_id.clone(), action, body)
+        let queue = match queueing {
+            Queueing::Allowed => self.intent_queue.read().unwrap().clone(),
+            Queueing::SendOnly => None,
+        };
+        let reply = match posts
+            .posts_interact_or_queue(queue.as_deref(), post_id.clone(), action, body)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+        {
+            fauna_protocol::offline_intent::Composed::Sent(reply) => reply,
+            // No nest: the act rests in the outbox and drains when the nest is
+            // back. The counters are the nest's to assign, so none is folded —
+            // a local guess would be wrong on a repeat tap (the like counter is
+            // idempotent per actor). The caller's own local half (a toggle's
+            // `viewer_liked`) still applies: the act WILL be recorded.
+            fauna_protocol::offline_intent::Composed::Queued(_) => return Ok(false),
+        };
         let Some(counts) = reply.counts else {
             return Ok(false);
         };
@@ -2445,15 +2649,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 .chain(deep_linked_post.iter_mut())
                 .filter(|p| p.post_id == post_id)
             {
-                p.like_count = counts.like_count;
-                p.reply_count = counts.reply_count;
-                p.repost_count = counts.repost_count;
-                p.quote_count = counts.quote_count;
-                // The per-emoji tally rides beside the four, the nest's own
-                // post-act projection for the caller (ruling 5).
-                p.reactions = counts.reactions.iter().cloned().map(Into::into).collect();
+                fold_counts(p, &counts);
                 changed = true;
             }
+            self.record_act(&post_id, |a| a.counts = Some(counts));
         }
         // A post the window does not hold needs no repaint — and `notify` is not
         // free on every app (it walks observers and re-renders a frame).
@@ -2662,6 +2861,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     {
                         s.deep_linked_post = None;
                     }
+                    self.record_act(&repost_id, |a| a.removed = true);
                 }
                 self.set_viewer_repost(&post_id, None);
                 // Ruling 3 (`archive-import.md` § Compatibility → *Slice-3
@@ -2688,6 +2888,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 p.viewer_repost_id = repost_id.clone();
                 changed = true;
             }
+            self.record_act(post_id, |a| a.viewer_repost_id = Some(repost_id));
         }
         if changed {
             self.notify();
@@ -2789,6 +2990,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 g.viewer_react_id = react_id.clone();
                 changed = true;
             }
+            self.record_act(post_id, |a| {
+                a.viewer_react.retain(|(e, _)| e != emoji);
+                a.viewer_react.push((emoji.to_string(), react_id));
+            });
         }
         if changed {
             self.notify();
@@ -2833,6 +3038,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// loaded window cannot answer for falls back the same way — the safe
     /// direction, since it is exactly today's behaviour.
     pub async fn like(&self, post_id: String) -> Result<(), String> {
+        // An `unsent` heart RETRIES its parked intent — an off heart's gesture
+        // is the intent itself, and a fresh like would queue behind the
+        // parked one, never sent (`account-offline-mutation.md` § The
+        // unsent-changes surface, point 2). Discard lives in the list.
+        let parked = match self.like_outbox.read().unwrap().get(&post_id) {
+            Some(LikeOutbox::Unsent { intent_id }) => Some(*intent_id),
+            _ => None,
+        };
+        if let Some(intent_id) = parked {
+            return self.retry_unsent_like(intent_id).await;
+        }
         let (toggles, liked) = {
             let s = self.state.read().unwrap();
             match s.find_post(&post_id) {
@@ -2853,7 +3069,23 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         self.interact(post_id.clone(), action.to_string(), None)
             .await?;
         self.set_viewer_liked(&post_id, !liked);
+        // The toggle may have queued (no nest) — re-read the outbox so the
+        // heart reads `queued`. A local read; one that fails leaves the last
+        // reading and never fails the recorded toggle.
+        if let Err(why) = self.refresh_unsent_likes().await {
+            tracing::debug!("unsent likes not re-read after a toggle: {why}");
+        }
         Ok(())
+    }
+
+    /// Retry a parked like through the outbox (which starts the drain), then
+    /// re-read the outbox so the heart leaves `unsent`.
+    async fn retry_unsent_like(&self, intent_id: [u8; 16]) -> Result<(), String> {
+        let Some(queue) = self.intent_queue.read().unwrap().clone() else {
+            return Err("no outbox is lent".to_string());
+        };
+        queue.retry_intent(intent_id).await?;
+        self.refresh_unsent_likes().await
     }
 
     /// Fold a new viewer-like state into every rendered row for `post_id` and
@@ -2868,6 +3100,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 p.viewer_liked = liked;
                 changed = true;
             }
+            self.record_act(post_id, |a| a.viewer_liked = Some(liked));
         }
         if changed {
             self.notify();
@@ -2956,7 +3189,12 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             // the rendered numbers alone when it does not (a bluesky target —
             // its counters live at the origin). Those counts are PRE-act.
             nest_holds_counts = self
-                .interact_folding_counts(post_id.clone(), kind.action().to_string(), None)
+                .interact_folding_counts(
+                    post_id.clone(),
+                    kind.action().to_string(),
+                    None,
+                    Queueing::SendOnly,
+                )
                 .await?;
         }
 
@@ -3045,6 +3283,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             {
                 s.deep_linked_post = None;
             }
+            // Nor come back on a page fetched before the delete.
+            self.record_act(&post_id, |a| a.removed = true);
         }
         self.notify();
         Ok(())
@@ -4609,6 +4849,48 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         }
     }
 
+    /// Record one of the viewer's own acts on `post_id` in
+    /// [`acted`](Self::acted), stamped with the current reload generation. An
+    /// entry stamped below it is reset first: the reload that claimed the
+    /// newer generation began after those acts were answered, so its page
+    /// carries them. Call it inside the `state` write that folds the act (lock
+    /// order state → acted), never after it.
+    fn record_act(&self, post_id: &str, act: impl FnOnce(&mut ActedFold)) {
+        use std::sync::atomic::Ordering;
+        let stamp = self.reload_gen.load(Ordering::SeqCst);
+        let mut acted = self.acted.write().unwrap();
+        let entry = acted.entry(post_id.to_string()).or_default();
+        if entry.stamp < stamp {
+            *entry = ActedFold {
+                stamp,
+                ..ActedFold::default()
+            };
+        }
+        act(entry);
+    }
+
+    /// Re-fold the viewer's own acts ([`acted`](Self::acted)) onto a landed
+    /// page — `reload`'s, committing under `generation`, or `load_more`'s
+    /// under the generation it pages — so a page fetched before an act does
+    /// not undo it: the counters and ♥ stay, a repost keeps its carrier, a
+    /// deleted post stays gone. First drops every act stamped below
+    /// `generation` (that reload began after the act was answered). A no-op,
+    /// one map read, when the viewer has acted on nothing since. Caller holds
+    /// the `state` write lock.
+    fn reapply_acted(&self, generation: u64, posts: &mut Vec<PostSummary>) {
+        let mut acted = self.acted.write().unwrap();
+        acted.retain(|_, a| a.stamp >= generation);
+        if acted.is_empty() {
+            return;
+        }
+        posts.retain(|p| !acted.get(&p.post_id).is_some_and(|a| a.removed));
+        for p in posts.iter_mut() {
+            if let Some(a) = acted.get(&p.post_id) {
+                a.fold_onto(p);
+            }
+        }
+    }
+
     /// Re-fold the media [`resolve_media`](Self::resolve_media) already decoded
     /// ([`resolved_media`](Self::resolved_media)) onto every still-unresolved post
     /// of a landed page — the same fold, from the same decode, so a refresh keeps
@@ -5780,6 +6062,52 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         Some(result)
     }
 
+    /// The sold post's external checkout (`gated-post-payment-link`) — the
+    /// feed door of `SubscriptionsClient::subscribe_and_checkout`
+    /// (`monetization.md` § Pillar 3 → *Buyer↔actor binding (Q4)* → *A
+    /// checkout-bound buyer homed on another nest*, the Q13 rules (1) and
+    /// (2)): the subscribe to the offer's `tier_name` goes first — the local
+    /// door, or the follow twin at the post's
+    /// [`home_nest_url`](PostSummary::home_nest_url) when another nest is its
+    /// home — and only then does the composed checkout URL come back for the
+    /// shell to hand to the OS. `None` when the post isn't loaded, its offer
+    /// hasn't resolved or carries no link, the post is the caller's own (the
+    /// [`Self::buy_unlock_offer`] refusal), or the link fails the safety guard
+    /// (nothing subscribed then); `Some(Err)` for a refused subscribe, which
+    /// opens nothing.
+    ///
+    /// Unlike the buy, the offer is NOT cleared: the payment itself happens
+    /// off-app, and a buyer who closed the checkout before paying must be able
+    /// to tap the link again (the subscribe is idempotent — `Queued` again, or
+    /// `Approved` as a renewal).
+    pub async fn pay_unlock_offer(&self, post_id: String) -> Option<Result<String, String>> {
+        let (author_hex, tier, payment_url, home) = {
+            let s = self.state.read().unwrap();
+            let p = s.rendered_posts().find(|p| p.post_id == post_id)?;
+            let offer = p.unlock_offer.as_ref()?;
+            (
+                p.author.clone(),
+                offer.tier_name.clone(),
+                offer.payment_url.clone().filter(|u| !u.is_empty())?,
+                p.home_nest_url.clone().filter(|h| !h.trim().is_empty()),
+            )
+        };
+        if self.is_local_actor(&author_hex) {
+            return None;
+        }
+        let author_id = fauna_core::identity::ActorId::from_hex(&author_hex).ok()?;
+        let kp = ActorKeypair::from_secret(self.actor_secret);
+        let subs = fauna_client_subscriptions::SubscriptionsClient::new(self.nest.clone());
+        match subs
+            .subscribe_and_checkout(author_id, tier, &payment_url, &kp, home)
+            .await
+        {
+            Ok(Some(open)) => Some(Ok(open.url)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e.to_string())),
+        }
+    }
+
     // ── Remote-image reveal (D3) ─────────────────────────────────
 
     /// Opt this post into loading its remote images (render-model.md § D3) — the
@@ -5792,6 +6120,28 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     pub fn reveal_remote_images(&self, post_id: String) {
         self.revealed_remote.write().unwrap().insert(post_id);
         self.notify();
+    }
+
+    /// Hand the manager this reader's spam marks — the `spam_marked` list of
+    /// `fauna.state.moderation`, called wherever the app hands the render
+    /// verdict `hidden_content` (`report-sharing.md` § Report capture → *The
+    /// post's mark-as-spam verb*). Replaces the earlier list and re-emits, so
+    /// the next [`snapshot`](Self::snapshot) collapses a newly marked post and
+    /// paints an un-marked one again.
+    pub fn set_spam_marked(&self, ids: Vec<String>) {
+        let ids: HashSet<String> = ids
+            .iter()
+            .filter_map(|id| fauna_core::moderation_rows::normalize_hidden_id(id))
+            .collect();
+        *self.spam_marked.write().unwrap() = ids;
+        self.notify();
+    }
+
+    /// Whether this reader marked `post_id` as spam — the mark-as-spam verb's
+    /// `state` (on/off).
+    pub fn is_spam_marked(&self, post_id: &str) -> bool {
+        fauna_core::moderation_rows::normalize_hidden_id(post_id)
+            .is_some_and(|id| self.spam_marked.read().unwrap().contains(&id))
     }
 
     // ── Trained topic factors: the per-post gesture ──────────────
@@ -6158,6 +6508,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// suppresses puts until this runs, and a verdict folded before hydration is
     /// discarded when the fetched rollup is installed here.
     pub async fn hydrate_cues(&self) -> Result<(), String> {
+        // The e2e hydration hold, honoured here so every shell that hydrates —
+        // tui and linux natively, windows/apple/android over FFI — gets it
+        // alike. Inert in a release build (`cue_hydration_held` reads `false`).
+        // Bounded, so a test that never releases cannot leave the seat waiting
+        // for ever; a retried call finds the file already gone. Counted in
+        // polls, not `Instant`s: `Instant::now` panics on wasm32.
+        let mut polls = 0u32;
+        while polls < CUE_HYDRATION_HOLD_MAX_POLLS && self.cue_hydration_held() {
+            fauna_sleep::sleep(CUE_HYDRATION_HOLD_POLL).await;
+            polls += 1;
+        }
         let reply = PersonalizationClient::new(self.nest.clone())
             .model_fetch(CUES_ROLLUP_FACTOR_V1)
             .await
@@ -6176,6 +6537,55 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         // The installed rollup is authoritative; nothing local is unsaved.
         c.dirty = false;
         Ok(())
+    }
+
+    /// The e2e cue-hydration hold: `true` while this manager's in-memory hold
+    /// is set ([`set_cue_hydration_hold_for_test`](Self::set_cue_hydration_hold_for_test))
+    /// or the file the environment variable `FAUNA_E2E_CUE_HYDRATION_HOLD_FILE`
+    /// names exists. [`hydrate_cues`](Self::hydrate_cues) itself waits on it
+    /// (bounded) before its fetch, so every shell honours it, and a test can
+    /// drive a second device *before* its rollup fetch — the window in which a
+    /// put would overwrite the other device's save (`engagement-cues.md` § At
+    /// rest), which a live fetch closes in one round trip, too fast to assert
+    /// on. Two levers, one predicate: the file reaches a native process the
+    /// harness launches (tui, linux); the in-memory hold reaches a process no
+    /// environment variable can (web — `std::env` is empty on wasm32 — and a
+    /// phone app), set by the app's own e2e command before its feed hydrates.
+    /// Compile-gated outer, env inner (testing.md convention 15): a release
+    /// build without the test-helper feature reads neither. The harness never
+    /// sets either by default.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub fn cue_hydration_held_for_test(&self) -> bool {
+        self.cue_hydration_hold
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || std::env::var_os("FAUNA_E2E_CUE_HYDRATION_HOLD_FILE")
+                .is_some_and(|path| !path.is_empty() && std::path::Path::new(&path).exists())
+    }
+
+    /// What [`hydrate_cues`](Self::hydrate_cues) reads in every build: the
+    /// gated hold where it is compiled in, never held where it is not. Private
+    /// and named for no test, so no `*_for_test` symbol ships ungated
+    /// (convention 15 rule (a)).
+    fn cue_hydration_held(&self) -> bool {
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        {
+            self.cue_hydration_held_for_test()
+        }
+        #[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+        {
+            false
+        }
+    }
+
+    /// Test-only: set or clear this manager's in-memory cue-hydration hold,
+    /// the lever [`cue_hydration_held_for_test`](Self::cue_hydration_held_for_test)
+    /// reads beside the env file. Set before the feed first hydrates, it parks
+    /// [`hydrate_cues`](Self::hydrate_cues) before its fetch; cleared, a parked
+    /// hydrate goes on at its next poll.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub fn set_cue_hydration_hold_for_test(&self, held: bool) {
+        self.cue_hydration_hold
+            .store(held, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Feed one shell-derived [`CueObservation`] to the live engine (owner doc
@@ -6681,6 +7091,8 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         reposted_post_id: p.reposted_post_id,
         viewer_repost_id: p.viewer_repost_id,
         viewer_liked: p.viewer_liked,
+        // Derived at every snapshot from the outbox (`FeedManager::like_outbox`).
+        like_state: crate::LikeState::Off,
         // A `FeedPostItem` is the home nest's trusted index projection with no
         // envelope to verify, so neither the verification nor the D10 origin
         // question has a client-authoritative answer yet — both default, and
@@ -6818,6 +7230,7 @@ fn map_fetched_post(
         // counters/labels below — `feed.md` § The read model).
         viewer_repost_id: None,
         viewer_liked: false,
+        like_state: crate::LikeState::Off,
         authoring_origin,
         media_hash,
         verification,
@@ -7050,12 +7463,14 @@ fn has_blob(item: &fauna_core::data::MediaItem) -> bool {
 }
 
 /// The nest-relative path a bridged item's `remote_url` is fetched at (bridges.md § Unified
-/// feed ingestion ruling 4): already nest-relative → as-is; absolute `https://` → the shared
-/// proxy form; anything else → `None`.
+/// feed ingestion ruling 4): already one of the two proxied forms
+/// ([`is_proxied_media_path`](fauna_core::data::is_proxied_media_path)) → as-is; absolute
+/// `https://` → the shared proxy form; anything else — any other root-relative path included,
+/// which an author could choose on a native post — → `None`.
 fn proxied_media_path(remote_url: &str) -> Option<String> {
     let url = remote_url.trim();
-    if url.starts_with('/') && !url.starts_with("//") {
-        Some(url.to_string())
+    if url.starts_with('/') {
+        fauna_core::data::is_proxied_media_path(url).then(|| url.to_string())
     } else {
         fauna_core::data::shared_media_proxy_url(url)
     }
@@ -7091,8 +7506,84 @@ fn first_media_hash(body: &fauna_core::data::PostBody) -> Option<String> {
 /// Ranking paths deliberately do **not** use it (the scored window, exemplar
 /// picking, `rerank_loaded_window`): those are about the ordered list, and a post
 /// reached by deep link holds no position in it.
+/// What the outbox holds of one post's like toggle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LikeOutbox {
+    /// A like or unlike waits (or is held) to be sent.
+    Queued,
+    /// A like or unlike was parked; `intent_id` is the parked one a retry
+    /// re-arms (the scope's first parked like, in compose order).
+    Unsent { intent_id: [u8; 16] },
+}
+
+/// Fold the outbox's unsent changes into one [`LikeOutbox`] per post: a post
+/// with a parked like or unlike is `Unsent` (it outranks a queued one — the
+/// parked head holds every intent behind it), one with only pending ones is
+/// `Queued`. Only `like`/`unlike` count: a repost queued on the same scope is
+/// not the heart's.
+fn like_outbox_of(
+    changes: &[fauna_core::offline_intent::UnsentChange],
+) -> HashMap<String, LikeOutbox> {
+    use fauna_core::offline_intent::{IntentTarget, UnsentState};
+    let mut out: HashMap<String, LikeOutbox> = HashMap::new();
+    for c in changes {
+        let Some(IntentTarget::Post { post_id, action }) = &c.description.target else {
+            continue;
+        };
+        if !matches!(action.as_str(), "like" | "unlike") {
+            continue;
+        }
+        match (&c.state, c.intent_id_bytes()) {
+            (UnsentState::Unsent { .. }, Some(intent_id)) => {
+                if !matches!(out.get(post_id), Some(LikeOutbox::Unsent { .. })) {
+                    out.insert(post_id.clone(), LikeOutbox::Unsent { intent_id });
+                }
+            }
+            _ => {
+                out.entry(post_id.clone()).or_insert(LikeOutbox::Queued);
+            }
+        }
+    }
+    out
+}
+
+/// The like control's state word from the viewer's like and what the outbox
+/// holds of it (point 2 of the unsent-changes ruling).
+fn derive_like_state(viewer_liked: bool, outbox: Option<&LikeOutbox>) -> crate::LikeState {
+    match outbox {
+        Some(LikeOutbox::Unsent { .. }) => crate::LikeState::Unsent,
+        Some(LikeOutbox::Queued) => crate::LikeState::Queued,
+        None if viewer_liked => crate::LikeState::On,
+        None => crate::LikeState::Off,
+    }
+}
+
 fn rendered_posts_mut(s: &mut FeedSnapshot) -> impl Iterator<Item = &mut PostSummary> {
     s.posts.iter_mut().chain(s.deep_linked_post.iter_mut())
+}
+
+/// The confidence of the `spam` entry a reader's own mark folds into the post
+/// it marked (`report-sharing.md` § Report capture → *The post's mark-as-spam
+/// verb*): the top of the per-mille scale, so the render verdict collapses the
+/// post at any spam slider the reader can set.
+pub const SPAM_MARK_CONFIDENCE_PER_MILLE: u16 = 1000;
+
+/// Fold a reader's own spam mark into a post's labels: the `spam` entry at
+/// [`SPAM_MARK_CONFIDENCE_PER_MILLE`], the highest `spam` confidence winning as
+/// between two labelers — a served `spam` entry is raised, never doubled.
+/// Idempotent.
+fn fold_spam_mark(labels: &mut Vec<fauna_core::content_category::ContentLabelEntry>) {
+    match labels.iter_mut().find(|l| l.category == "spam") {
+        Some(entry) => {
+            entry.confidence_per_mille = entry
+                .confidence_per_mille
+                .max(SPAM_MARK_CONFIDENCE_PER_MILLE);
+        }
+        None => labels.push(fauna_core::content_category::ContentLabelEntry {
+            category: "spam".into(),
+            confidence_per_mille: SPAM_MARK_CONFIDENCE_PER_MILLE,
+        }),
+    }
 }
 
 /// The audience class a reply / quote / repost states to
@@ -8677,6 +9168,62 @@ mod tests {
     }
 
     #[test]
+    fn a_spam_mark_folds_a_top_spam_label_into_the_marked_post_and_unmarks_cleanly() {
+        // report-sharing.md § Report capture → *The post's mark-as-spam verb*:
+        // the reader's own mark folds `spam`@1000 into the marked post's
+        // labels on every snapshot — raising a served `spam` entry, never
+        // doubling it — and an un-mark restores the served labels.
+        use fauna_core::content_category::ContentLabelEntry;
+        let nest = MockNest::arc();
+        let mut a = post("AA", 3);
+        a.labels = vec![ContentLabelEntry {
+            category: "spam".into(),
+            confidence_per_mille: 200,
+        }];
+        let b = post("bb", 2);
+        let c = post("cc", 1);
+        nest.push_page(vec![a, b, c], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        m.set_spam_marked(vec!["aa".into(), " BB ".into()]);
+        assert!(m.is_spam_marked("Aa"));
+        assert!(!m.is_spam_marked("cc"));
+        let snap = m.snapshot();
+        let labels = |id: &str| {
+            snap.posts
+                .iter()
+                .find(|p| p.post_id == id)
+                .unwrap()
+                .labels
+                .clone()
+        };
+        let top = ContentLabelEntry {
+            category: "spam".into(),
+            confidence_per_mille: SPAM_MARK_CONFIDENCE_PER_MILLE,
+        };
+        assert_eq!(labels("AA"), vec![top.clone()], "raised, not doubled");
+        assert_eq!(labels("bb"), vec![top], "added");
+        assert!(labels("cc").is_empty(), "an unmarked post is untouched");
+
+        m.set_spam_marked(vec![]);
+        let snap = m.snapshot();
+        let served = snap.posts.iter().find(|p| p.post_id == "AA").unwrap();
+        assert_eq!(
+            served.labels[0].confidence_per_mille, 200,
+            "served labels restored"
+        );
+        assert!(
+            snap.posts
+                .iter()
+                .find(|p| p.post_id == "bb")
+                .unwrap()
+                .labels
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn reveal_remote_images_projects_revealed_onto_the_revealed_post_only() {
         // D3 (render-model.md § D3): feed remote-image reveal is manager-owned and
         // symmetric with conversations — `reveal_remote_images(post_id)` opts a post in,
@@ -9350,6 +9897,172 @@ mod tests {
         nest.push_page(vec![post("cc", 3)], None);
         block_on(m.refresh_current_feed());
         assert_eq!(m.snapshot().posts[0].post_id, "cc");
+    }
+
+    /// Start a reload that parks before its fetch, so the page the mock serves
+    /// it is the one queued NOW — a page fetched before whatever the caller
+    /// does next. Returns the parked reload for [`release_and_land`].
+    fn park_a_reload_on<'a>(
+        m: &'a FeedManager<Arc<MockNest>>,
+        nest: &MockNest,
+        stale_page: Vec<FeedPostItem>,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = ()> + 'a>> {
+        nest.push_page(stale_page, None);
+        m.hold_next_reload_for_test();
+        let mut refresh = Box::pin(m.refresh_current_feed());
+        assert!(
+            poll_once(&mut refresh).is_pending(),
+            "the reload parks before its fetch"
+        );
+        refresh
+    }
+
+    fn release_and_land(
+        m: &FeedManager<Arc<MockNest>>,
+        mut refresh: std::pin::Pin<Box<impl std::future::Future<Output = ()>>>,
+    ) {
+        m.release_held_reload_for_test();
+        assert!(
+            poll_once(&mut refresh).is_ready(),
+            "released, the reload commits"
+        );
+        let (started, _, committed) = m.reload_counts();
+        assert_eq!(
+            started, committed,
+            "the stale page committed — it was not superseded"
+        );
+    }
+
+    /// `ui/feed.md` § Interaction bar → *A reload already fetching does not undo
+    /// the act*. A like folds the nest's post-act counters and the ♥ into the
+    /// loaded window; a reload that began BEFORE the like then lands a page
+    /// fetched before it. Committed bare, that page puts the count back down and
+    /// the ♥ back out — no error, and no further reload comes to correct it (the
+    /// windows red of the archive-import interaction journey: `like #2 … did not
+    /// land; error=''`, the count stuck at 1). An archive-imported target, as
+    /// there: native, so the like toggles.
+    #[test]
+    fn a_like_folded_while_a_reload_fetches_survives_the_page_fetched_before_it() {
+        let target = "cc".repeat(32);
+        let imported = || {
+            let mut p = post(&target, 2);
+            p.source = fauna_core::source::FACEBOOK.into();
+            p.like_count = 1;
+            p
+        };
+        let nest = MockNest::arc();
+        nest.push_page(vec![imported()], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, vec![imported()]);
+        nest.set_interact_counts(2, 0, 0, 0);
+        block_on(m.like(target.clone())).expect("like ok");
+        assert_eq!(
+            m.snapshot().posts[0].like_count,
+            2,
+            "the like folds at once"
+        );
+        release_and_land(&m, refresh);
+
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).expect("the post stays listed");
+        assert_eq!(
+            row.like_count, 2,
+            "a page fetched before the like must not put its count back down"
+        );
+        assert!(row.viewer_liked, "nor put the ♥ back out");
+
+        // A reload that began AFTER the like reads the nest's own answer: the
+        // re-fold is spent, so a later count (someone else liked too) shows.
+        let mut later = imported();
+        later.like_count = 3;
+        later.viewer_liked = true;
+        nest.push_page(vec![later], None);
+        block_on(m.refresh_current_feed());
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).unwrap();
+        assert_eq!(
+            row.like_count, 3,
+            "a reload begun after the act is the truth"
+        );
+        assert!(row.viewer_liked);
+    }
+
+    /// The same rule for the other per-viewer half: an un-like folded while a
+    /// reload fetches stays un-liked over the page fetched before it.
+    #[test]
+    fn an_unlike_folded_while_a_reload_fetches_survives_the_page_fetched_before_it() {
+        let target = "cc".repeat(32);
+        let liked = || {
+            let mut p = post(&target, 2);
+            p.viewer_liked = true;
+            p.like_count = 1;
+            p
+        };
+        let nest = MockNest::arc();
+        nest.push_page(vec![liked()], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, vec![liked()]);
+        nest.set_interact_counts(0, 0, 0, 0);
+        block_on(m.like(target.clone())).expect("unlike ok");
+        release_and_land(&m, refresh);
+
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).unwrap();
+        assert!(!row.viewer_liked, "the ♥ stays out");
+        assert_eq!(row.like_count, 0, "and the count stays down");
+    }
+
+    /// A repost folded while a reload fetches keeps its carrier: the toggle's
+    /// next tap must still name the repost to undo.
+    #[test]
+    fn a_repost_folded_while_a_reload_fetches_keeps_its_carrier() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![post(&target, 2)], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, vec![post(&target, 2)]);
+        block_on(m.repost(target.clone())).expect("repost ok");
+        release_and_land(&m, refresh);
+
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).unwrap();
+        assert_eq!(
+            row.viewer_repost_id.as_deref(),
+            Some("ab".repeat(32).as_str()),
+            "the carrier the repost folded survives the stale page"
+        );
+    }
+
+    /// A post deleted while a reload fetches stays gone: the page fetched
+    /// before the delete still lists it, and committing it bare would put a
+    /// post back on screen that the nest no longer has.
+    #[test]
+    fn a_post_deleted_while_a_reload_fetches_stays_gone() {
+        let gone = "cc".repeat(32);
+        let kept = "dd".repeat(32);
+        let page = || vec![post(&gone, 2), post(&kept, 1)];
+        let nest = MockNest::arc();
+        nest.push_page(page(), None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, page());
+        block_on(m.delete_post(gone.clone())).expect("delete ok");
+        release_and_land(&m, refresh);
+
+        let ids: Vec<String> = m
+            .snapshot()
+            .posts
+            .iter()
+            .map(|p| p.post_id.clone())
+            .collect();
+        assert_eq!(ids, vec![kept], "the deleted post does not come back");
     }
 
     /// The `{started, completed, committed_gen}` reload triple behind
@@ -10392,6 +11105,243 @@ mod tests {
             row.like_count, 1,
             "the count is the nest's post-act value folded by `interact` — never a local +1"
         );
+    }
+
+    /// An outbox that records what it was handed, reporting a fixed connection
+    /// word — the app side of `OfflineIntentQueue`.
+    struct RecordingOutbox {
+        word: &'static str,
+        queued: std::sync::Mutex<Vec<(String, String, Vec<u8>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_core::offline_intent::OfflineIntentQueue for RecordingOutbox {
+        fn connection_state(&self) -> String {
+            self.word.to_string()
+        }
+        async fn enqueue(
+            &self,
+            kind: &'static str,
+            scope: String,
+            payload: Vec<u8>,
+        ) -> Result<[u8; 16], String> {
+            self.queued
+                .lock()
+                .unwrap()
+                .push((kind.to_string(), scope, payload));
+            Ok([9; 16])
+        }
+    }
+
+    /// The first `OfflineQueued` composer (`account-offline-mutation.md`
+    /// § The offline-mutation contract): with the outbox wired and no nest, a
+    /// like is appended to the outbox — the exact request the online tap would
+    /// send, scoped to its target post — and nothing goes to the nest. The
+    /// toggle still lights (the act WILL be recorded); the count is left for
+    /// the nest to assign.
+    #[test]
+    fn a_like_with_no_nest_is_queued_in_the_outbox_and_lights_the_toggle() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![post(&target, 2)], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        let outbox = Arc::new(RecordingOutbox {
+            word: "disconnected",
+            queued: std::sync::Mutex::new(Vec::new()),
+        });
+        m.set_offline_intent_queue(outbox.clone());
+
+        block_on(m.like(target.clone())).expect("a queued like is not a failure");
+
+        assert!(
+            !nest.kinds().contains(&"fauna.posts.interact".to_string()),
+            "no nest: the like must not be sent"
+        );
+        let queued = outbox.queued.lock().unwrap();
+        assert_eq!(queued.len(), 1, "exactly one intent queued");
+        assert_eq!(queued[0].0, "fauna.posts.interact");
+        assert_eq!(queued[0].1, format!("posts.interact:{target}"));
+        let req: fauna_protocol::posts::PostInteractRequest =
+            fauna_protocol::decode_strict(&queued[0].2).expect("the drain re-sends these bytes");
+        assert_eq!(req.post_id, target);
+        assert_eq!(req.action, "like");
+        let snap = m.snapshot();
+        assert!(snap.posts[0].viewer_liked, "the toggle lights");
+        assert_eq!(
+            snap.posts[0].like_count, 0,
+            "the count is the nest's to assign"
+        );
+    }
+
+    /// An outbox with the store's three states: it keeps what it was handed
+    /// in compose order, parks an intent on the test's word, and settles a
+    /// parked one by retry — the read model `AccountOutbox` serves over the
+    /// real store, built with the same shared derivation and describer.
+    struct ParkingOutbox {
+        word: &'static str,
+        rows: std::sync::Mutex<Vec<ParkingRow>>,
+        retried: std::sync::Mutex<Vec<[u8; 16]>>,
+    }
+
+    /// `(intent id, scope, payload, failure reason once parked)`.
+    type ParkingRow = ([u8; 16], String, Vec<u8>, Option<String>);
+
+    impl ParkingOutbox {
+        fn new(word: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                word,
+                rows: std::sync::Mutex::new(Vec::new()),
+                retried: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn park_all(&self, code: &str) {
+            for row in self.rows.lock().unwrap().iter_mut() {
+                row.3 = Some(code.to_string());
+            }
+        }
+        fn drain_all(&self) {
+            self.rows.lock().unwrap().clear();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_core::offline_intent::OfflineIntentQueue for ParkingOutbox {
+        fn connection_state(&self) -> String {
+            self.word.to_string()
+        }
+        async fn enqueue(
+            &self,
+            _kind: &'static str,
+            scope: String,
+            payload: Vec<u8>,
+        ) -> Result<[u8; 16], String> {
+            let mut rows = self.rows.lock().unwrap();
+            let id = [rows.len() as u8 + 1; 16];
+            rows.push((id, scope, payload, None));
+            Ok(id)
+        }
+        async fn unsent_changes(
+            &self,
+        ) -> Result<Vec<fauna_core::offline_intent::UnsentChange>, String> {
+            use fauna_core::offline_intent::{OutboxRowFacts, UnsentChange, derive_unsent_states};
+            let rows = self.rows.lock().unwrap();
+            let facts: Vec<_> = rows
+                .iter()
+                .map(|r| OutboxRowFacts {
+                    scope: &r.1,
+                    parked: r.3.as_deref(),
+                })
+                .collect();
+            Ok(rows
+                .iter()
+                .zip(derive_unsent_states(&facts))
+                .map(|(r, state)| UnsentChange {
+                    intent_id: hex::encode(r.0),
+                    kind: "fauna.posts.interact".into(),
+                    scope: r.1.clone(),
+                    state,
+                    created_at: 0,
+                    attempts: 0,
+                    description: fauna_protocol::offline_describe::describe_intent(
+                        "fauna.posts.interact",
+                        &r.2,
+                    ),
+                })
+                .collect())
+        }
+        async fn retry_intent(&self, intent_id: [u8; 16]) -> Result<bool, String> {
+            self.retried.lock().unwrap().push(intent_id);
+            let mut rows = self.rows.lock().unwrap();
+            Ok(
+                match rows.iter_mut().find(|r| r.0 == intent_id && r.3.is_some()) {
+                    Some(row) => {
+                        row.3 = None;
+                        true
+                    }
+                    None => false,
+                },
+            )
+        }
+    }
+
+    /// The like's state word (`account-offline-mutation.md` § The
+    /// offline-mutation contract → *The unsent-changes surface*, point 2): a
+    /// like queued with no nest reads `queued`; parked by the nest it reads
+    /// `unsent`, and activating it then RETRIES the parked intent (no second
+    /// like, no network); drained, the heart reads `on` from `viewer_liked`.
+    #[test]
+    fn the_like_state_follows_the_outbox_and_an_unsent_heart_retries() {
+        use crate::LikeState;
+        let target = "cc".repeat(32);
+        let other = "dd".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![post(&target, 2), post(&other, 1)], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        let outbox = ParkingOutbox::new("disconnected");
+        m.set_offline_intent_queue(outbox.clone());
+        let state_of = |id: &str| {
+            m.snapshot()
+                .posts
+                .iter()
+                .find(|p| p.post_id == id)
+                .map(|p| p.like_state)
+        };
+        assert_eq!(state_of(&target), Some(LikeState::Off));
+
+        block_on(m.like(target.clone())).expect("queued");
+        assert_eq!(state_of(&target), Some(LikeState::Queued));
+        assert_eq!(state_of(&other), Some(LikeState::Off), "only its own post");
+
+        outbox.park_all("fauna.posts.not_found");
+        block_on(m.refresh_unsent_likes()).expect("re-read");
+        assert_eq!(state_of(&target), Some(LikeState::Unsent));
+
+        block_on(m.like(target.clone())).expect("the unsent heart retries");
+        assert_eq!(*outbox.retried.lock().unwrap(), vec![[1; 16]]);
+        assert_eq!(
+            outbox.rows.lock().unwrap().len(),
+            1,
+            "no second like queued"
+        );
+        assert!(
+            !nest.kinds().contains(&"fauna.posts.interact".to_string()),
+            "a retry is the outbox's to send"
+        );
+        assert_eq!(state_of(&target), Some(LikeState::Queued));
+
+        outbox.drain_all();
+        block_on(m.refresh_unsent_likes()).expect("re-read");
+        assert_eq!(
+            state_of(&target),
+            Some(LikeState::On),
+            "drained: the viewer's like, lit"
+        );
+        assert_eq!(LikeState::Unsent.word(), "unsent");
+    }
+
+    /// With the outbox wired and the nest connected, the like is sent as
+    /// before and nothing is queued.
+    #[test]
+    fn a_like_with_the_nest_connected_is_sent_not_queued() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![post(&target, 2)], None);
+        nest.set_interact_counts(1, 0, 0, 0);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        let outbox = Arc::new(RecordingOutbox {
+            word: "connected",
+            queued: std::sync::Mutex::new(Vec::new()),
+        });
+        m.set_offline_intent_queue(outbox.clone());
+
+        block_on(m.like(target.clone())).expect("like ok");
+
+        assert!(nest.kinds().contains(&"fauna.posts.interact".to_string()));
+        assert!(outbox.queued.lock().unwrap().is_empty());
+        assert_eq!(m.snapshot().posts[0].like_count, 1);
     }
 
     /// The toggle's OFF direction: a second tap UN-likes. The distinction from
@@ -13790,6 +14740,43 @@ mod tests {
         );
     }
 
+    /// A native item's author-chosen root-relative `remote_url` must not fold to a
+    /// block — every app would send the reader's session token in a GET to that route on the
+    /// reader's own nest. Only the two proxied forms (bridges.md ruling 4) fold; `//host`,
+    /// `/\host` and any other route fold to nothing.
+    #[test]
+    fn an_author_chosen_relative_remote_url_folds_only_when_it_is_a_proxied_form() {
+        use fauna_core::render::RenderBlock;
+        let bsky = "/api/v1/bluesky/media?url=https%3A%2F%2Fcdn.bsky.app%2Fa.jpg";
+        let proxy = "/api/v1/media/proxy?url=https%3A%2F%2Ff.example%2Fa.png";
+        let (_nest, m) = resolve_bridged(vec![
+            remote_item("image/png", "/api/v1/account/anything"),
+            remote_item("image/png", bsky),
+            remote_item("image/png", "/\\evil"),
+            remote_item("image/png", "//evil.example/a.png"),
+            remote_item("image/png", proxy),
+            remote_item(
+                "image/png",
+                "/api/v1/media/proxy?url=https%3A%2F%2Fa.example%2F\\x",
+            ),
+            remote_item("image/png", "/api/v1/media/proxy/../../account"),
+        ]);
+        let aa = &m.snapshot().posts[0];
+        assert_eq!(
+            aa.document.media_blocks(),
+            vec![
+                RenderBlock::ProxiedImage {
+                    path: bsky.into(),
+                    alt: String::new(),
+                },
+                RenderBlock::ProxiedImage {
+                    path: proxy.into(),
+                    alt: String::new(),
+                },
+            ],
+        );
+    }
+
     /// D6c case 2: an absolute `https://` `remote_url` (a row written before the ingest
     /// rewrite) is rewritten through the shared proxy form, so the snapshot never carries the
     /// remote origin; an unrewritable one (`http://`, a bare host) folds to nothing. (A
@@ -16389,6 +17376,55 @@ mod tests {
         );
     }
 
+    /// The sold post's payment link subscribes to the unlock tier FIRST, then
+    /// hands back the checkout URL carrying the buyer's actor id on a Stripe
+    /// host; the offer stays (a buyer who closed the checkout taps again).
+    #[test]
+    fn pay_unlock_offer_subscribes_then_returns_the_bound_checkout() {
+        let nest = MockNest::arc();
+        let mut p = post("aa", 1);
+        p.gated_tier = Some("post-unlock-abc123".into());
+        nest.push_page(vec![p], None);
+        nest.inner
+            .lock()
+            .unwrap()
+            .tiers
+            .push(fauna_protocol::subscriptions::TierItem {
+                name: "post-unlock-abc123".into(),
+                rank: 5,
+                description: None,
+                price_hint: Some("$3".into()),
+                payment_url: Some("https://buy.stripe.com/test_abc".into()),
+                auto_approve: false,
+                created_at: fauna_core::data::Timestamp(0),
+                unlocks_post: Some("aa".into()),
+                asking_price: None,
+                hidden: false,
+                extra: Default::default(),
+            });
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_post_unlock_offer("aa".into()));
+        let before = nest.kinds().len();
+        let url = block_on(m.pay_unlock_offer("aa".into()))
+            .expect("offer resolved with a link")
+            .expect("subscribed");
+        let me = ActorKeypair::from_secret(TEST_SECRET).actor_id().to_hex();
+        assert_eq!(
+            url,
+            format!("https://buy.stripe.com/test_abc?client_reference_id={me}")
+        );
+        assert_eq!(
+            nest.kinds()[before..],
+            ["fauna.subscriptions.subscribe".to_string()],
+            "the subscribe intent goes ahead of the checkout"
+        );
+        assert!(
+            m.snapshot().posts[0].unlock_offer.is_some(),
+            "the link stays tappable"
+        );
+    }
+
     /// A bought post's offer stays cleared when the render trigger fires again.
     ///
     /// `buy_unlock_offer` clears `unlock_offer` and calls `notify()`, and every
@@ -18077,6 +19113,29 @@ mod tests {
         assert_eq!(m.cue_verdict_for_test("bb"), (true, None), "an unseen item");
     }
 
+    /// The in-memory hydration hold is the lever a process with no env (web,
+    /// a phone app) sets from its e2e command: it reads as held exactly while
+    /// set, per manager, so `hydrate_cues` parks before its fetch only then.
+    #[test]
+    fn the_in_memory_cue_hydration_hold_reads_as_held_while_set() {
+        let m = mgr(MockNest::arc());
+        let other = mgr(MockNest::arc());
+        assert!(!m.cue_hydration_held_for_test(), "never held by default");
+        m.set_cue_hydration_hold_for_test(true);
+        assert!(m.cue_hydration_held_for_test(), "held once set");
+        assert!(
+            !other.cue_hydration_held_for_test(),
+            "the hold is this manager's alone"
+        );
+        m.set_cue_hydration_hold_for_test(false);
+        assert!(
+            !m.cue_hydration_held_for_test(),
+            "cleared, a parked hydrate goes on"
+        );
+        block_on(m.hydrate_cues()).expect("an unheld hydrate fetches at once");
+        assert_eq!(m.cue_verdict_for_test("aa"), (true, None));
+    }
+
     /// An unopenable rollup (corruption / a newer layout) is a **surfaced error**,
     /// never a silent fresh rollup — starting fresh would erase every cue the
     /// user's other devices recorded on the next put.
@@ -18851,6 +19910,10 @@ mod tests {
                 reposted_post_id: Some("orig".into()),
                 viewer_repost_id: None,
                 quoted_post_id: Some("quoted".into()),
+                labels: vec![fauna_core::content_category::ContentLabelEntry {
+                    category: "spam".into(),
+                    confidence_per_mille: 1000,
+                }],
                 document: fauna_core::render::RenderDocument {
                     blocks: vec![
                         fauna_core::render::RenderBlock::LinkPreview {
@@ -18896,6 +19959,7 @@ mod tests {
                     "reposted_post_id": "orig",
                     "viewer_repost_id": null,
                     "quoted_post_id": "quoted",
+                    "labels": [{"category": "spam", "confidence_per_mille": 1000}],
                     "link_previews": [
                         {"url": "https://a.example/", "state": "failed"},
                         {"url": "https://b.example/", "state": "resolving"},
@@ -18920,6 +19984,7 @@ mod tests {
                     "reposted_post_id": null,
                     "viewer_repost_id": null,
                     "quoted_post_id": null,
+                    "labels": [],
                     "link_previews": [],
                     "author_display": null,
                 },

@@ -92,6 +92,23 @@ public final class LaunchMachineBox {
         launch == generation
     }
 
+    /// May `machine`'s just-delivered verdict be rendered? `true` only while it is
+    /// still the machine this box holds — the rule on ``machine``. Every apple
+    /// verdict passes here once, after the `await` that produced it (the cold
+    /// launch's `start()`, the Trust and Retry re-sends), and is counted either way
+    /// (``LaunchVerdicts``, the `launch_verdicts` barrier) before the caller renders
+    /// or drops it. An ownership test, never an "is a session present?" one: the
+    /// held launch's verdict still routes over a live session.
+    ///
+    /// Unlike linux's in-flight holder, this does not clear the box on a routed
+    /// verdict: the held machine stays the session's trust/retry source.
+    @MainActor
+    public func deliver(_ machine: LaunchMachine) -> Bool {
+        let current = self.machine === machine
+        LaunchVerdicts.record(current: current)
+        return current
+    }
+
     public init() {}
 }
 

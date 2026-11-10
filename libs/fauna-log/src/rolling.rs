@@ -16,10 +16,25 @@
 //!   until the others fit in [`MAX_TOTAL_BYTES`] − [`MAX_FILE_BYTES`], so the
 //!   directory never holds more than [`MAX_TOTAL_BYTES`] (plus one line of
 //!   overshoot on the live file).
+//!
+//! **Test-capable builds only:** `FAUNA_E2E_LOG_TOTAL_CAP_BYTES` LOWERS the
+//! total cap (the per-file cap follows at the same one-fifth ratio), so a tier_3
+//! journey can watch the bound hold on a real app's log directory without
+//! writing 50 MiB. The same gate and posture as `fauna-client-region`'s
+//! `FAUNA_E2E_REGION_REGISTRY` seed (`e2e-automation-surface-gating.md`,
+//! convention 15): compiled out of release artifacts, so a shipped app never
+//! even names the variable — and it can only shrink the caps, never raise them.
+//! A process whose launch environment arrives only after its logging is up (the
+//! android app: `FaunaApp.onCreate` installs the subscriber before the launch
+//! intent's extras are re-exported as process env) calls
+//! [`reload_e2e_caps_for_test`] once the variable is set, and the open writer
+//! lowers its caps at its next write.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The file-name prefix every log file carries (`fauna.log.<date>…`).
 pub const FILE_PREFIX: &str = "fauna.log";
@@ -27,6 +42,50 @@ pub const FILE_PREFIX: &str = "fauna.log";
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// The whole directory's `fauna.log.*` files, live file included, stay under this.
 pub const MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The environment variable carrying the e2e total-cap override.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub const E2E_TOTAL_CAP_ENV: &str = "FAUNA_E2E_LOG_TOTAL_CAP_BYTES";
+
+/// `(max_file_bytes, max_total_bytes)` for an e2e total-cap override value:
+/// `None` (the production constants apply) for an absent, unparsable or zero
+/// value, or one that would not lower the cap; otherwise the lowered total and a
+/// per-file cap of one fifth of it — the production ratio.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn e2e_caps(value: Option<&str>) -> Option<(u64, u64)> {
+    let total: u64 = value?.trim().parse().ok()?;
+    (total > 0 && total < MAX_TOTAL_BYTES).then(|| ((total / 5).max(1), total))
+}
+
+/// The caps [`CappedRollingFile::open`] applies: the constants, or — in a
+/// test-capable build — the lowered e2e override.
+fn caps() -> (u64, u64) {
+    #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+    if let Some(caps) = e2e_caps(std::env::var(E2E_TOTAL_CAP_ENV).ok().as_deref()) {
+        return caps;
+    }
+    (MAX_FILE_BYTES, MAX_TOTAL_BYTES)
+}
+
+/// The lowered total cap [`reload_e2e_caps_for_test`] published for the writer
+/// already open (0: none). Read at every write, so it takes effect without
+/// reopening the file layer.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+static E2E_TOTAL_CAP_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+
+/// Re-read [`E2E_TOTAL_CAP_ENV`] now and lower the caps of the writer already
+/// open — for a process whose launch environment reaches it after
+/// [`crate::init`] ran (the android app re-exports its launch intent's extras as
+/// process env in `MainActivity`, after `FaunaApp` installed logging). Answers
+/// the lowered total in force, or `None` when the variable asks for no
+/// lowering. Like the variable itself it only ever lowers the caps, and it is
+/// compiled out of release artifacts (convention 15).
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub fn reload_e2e_caps_for_test() -> Option<u64> {
+    let total = e2e_caps(std::env::var(E2E_TOTAL_CAP_ENV).ok().as_deref()).map(|(_, t)| t);
+    E2E_TOTAL_CAP_OVERRIDE.store(total.unwrap_or(0), Ordering::Relaxed);
+    total
+}
 
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
@@ -48,11 +107,12 @@ impl CappedRollingFile {
     /// newest one a previous run left behind. Fails — so the caller can degrade
     /// file logging away — when the directory or the file cannot be written.
     pub fn open(dir: &Path) -> io::Result<Self> {
+        let (max_file_bytes, max_total_bytes) = caps();
         Self::open_with(
             dir,
             Box::new(|| fauna_core::data::Timestamp::now_millis() as i64),
-            MAX_FILE_BYTES,
-            MAX_TOTAL_BYTES,
+            max_file_bytes,
+            max_total_bytes,
         )
     }
 
@@ -81,6 +141,19 @@ impl CappedRollingFile {
             this.open_current()?;
         }
         Ok(this)
+    }
+
+    /// Lower this writer's caps to a published e2e `total` (0: none) — the
+    /// per-file cap at the production one-fifth ratio, exactly as
+    /// [`e2e_caps`] derives it at open. Never raises them.
+    #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+    fn lower_caps_to(&mut self, total: u64) {
+        if let Some((max_file, max_total)) = e2e_caps(Some(&total.to_string()))
+            && max_total < self.max_total_bytes
+        {
+            self.max_file_bytes = max_file;
+            self.max_total_bytes = max_total;
+        }
     }
 
     fn current_path(&self) -> PathBuf {
@@ -132,6 +205,8 @@ impl CappedRollingFile {
 
 impl Write for CappedRollingFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+        self.lower_caps_to(E2E_TOTAL_CAP_OVERRIDE.load(Ordering::Relaxed));
         let today = day_of((self.now_millis)());
         if today != self.day {
             self.day = today;
@@ -194,6 +269,37 @@ fn newest_seq_for_day(dir: &Path, day: i64) -> u32 {
         .unwrap_or(0)
 }
 
+/// The largest burst [`emit_burst_for_test`] writes, in lines.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub const E2E_BURST_MAX_LINES: u64 = 100_000;
+/// The largest padding [`emit_burst_for_test`] puts on one line, in bytes.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub const E2E_BURST_MAX_PAD: u64 = 4_096;
+
+/// Every app's `app_log_emit` agent command: write `count` `info` lines
+/// through the installed subscriber, line `i` reading `<tag> #<i> <padding>`
+/// (`bytes` of padding), so a tier_3 journey can push the on-device file past
+/// its lowered cap ([`E2E_TOTAL_CAP_ENV`]) without a real runaway writer. One
+/// body for every app (priority #2), so the line shape the journey searches
+/// for cannot drift between them. Answers the count written, or a refusal —
+/// an untagged burst would ack green and be unfindable in the file, so it is
+/// refused loudly (convention 11), as is one over the bounds. Test-capable
+/// builds only, behind the same gate as the cap override (convention 15).
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub fn emit_burst_for_test(tag: &str, count: u64, bytes: u64) -> Result<u64, &'static str> {
+    if tag.is_empty() {
+        return Err("payload needs a non-empty `tag`");
+    }
+    if count > E2E_BURST_MAX_LINES || bytes > E2E_BURST_MAX_PAD {
+        return Err("`count` is at most 100000 and `bytes` at most 4096");
+    }
+    let padding = "x".repeat(bytes as usize);
+    for i in 0..count {
+        tracing::info!(target: "fauna_log::e2e", "{tag} #{i} {padding}");
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +308,14 @@ mod tests {
 
     // 2026-09-30T00:00:00Z.
     const DAY0: i64 = 20_726 * MILLIS_PER_DAY;
+
+    #[test]
+    fn the_e2e_burst_writes_its_count_and_refuses_an_untagged_or_oversized_one() {
+        assert_eq!(emit_burst_for_test("tag", 3, 10), Ok(3));
+        assert!(emit_burst_for_test("", 3, 10).is_err());
+        assert!(emit_burst_for_test("tag", E2E_BURST_MAX_LINES + 1, 10).is_err());
+        assert!(emit_burst_for_test("tag", 3, E2E_BURST_MAX_PAD + 1).is_err());
+    }
 
     struct Fixture {
         dir: PathBuf,
@@ -325,6 +439,46 @@ mod tests {
         let mut w = fx.open(10, 1_000);
         w.write_all(b"ef\n").unwrap();
         assert_eq!(fx.names().last().unwrap(), "fauna.log.2026-09-30.002");
+    }
+
+    #[test]
+    fn a_writer_open_under_the_production_caps_takes_a_later_lowering() {
+        // The android shape: logging is up before the launch environment
+        // arrives, so the open writer must take the lowered cap at a write.
+        let fx = Fixture::new("late-lower");
+        let mut w = fx.open(10_000, 50_000);
+        w.write_all(&[b'x'; 99]).unwrap();
+        w.lower_caps_to(1_000);
+        assert_eq!((w.max_file_bytes, w.max_total_bytes), (200, 1_000));
+        // A later, higher (or absent) value never raises them back.
+        w.lower_caps_to(5_000);
+        w.lower_caps_to(0);
+        assert_eq!((w.max_file_bytes, w.max_total_bytes), (200, 1_000));
+        for _ in 0..200 {
+            w.write_all(&[b'y'; 49]).unwrap();
+            w.write_all(b"\n").unwrap();
+        }
+        assert!(
+            fx.total_bytes() <= 1_000 + 50,
+            "{} bytes: {:?}",
+            fx.total_bytes(),
+            fx.names()
+        );
+        assert!(fx.names().len() > 1, "{:?}", fx.names());
+    }
+
+    #[test]
+    fn the_e2e_override_only_ever_lowers_the_caps() {
+        assert_eq!(e2e_caps(Some("250000")), Some((50_000, 250_000)));
+        assert_eq!(e2e_caps(Some(" 3 ")), Some((1, 3)));
+        assert_eq!(e2e_caps(None), None);
+        assert_eq!(e2e_caps(Some("")), None);
+        assert_eq!(e2e_caps(Some("0")), None);
+        assert_eq!(e2e_caps(Some("-5")), None);
+        assert_eq!(e2e_caps(Some("lots")), None);
+        // Never a way to RAISE the bound the constants set.
+        assert_eq!(e2e_caps(Some(&MAX_TOTAL_BYTES.to_string())), None);
+        assert_eq!(e2e_caps(Some(&u64::MAX.to_string())), None);
     }
 
     #[test]

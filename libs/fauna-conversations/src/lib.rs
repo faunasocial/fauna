@@ -44,6 +44,9 @@ mod member_review;
 pub mod message;
 pub mod notification;
 pub mod observer;
+/// MLS offline compose: the plaintext intent a send made with no nest becomes
+/// (`devices.md` § Offline compose).
+pub mod offline_compose;
 /// Where a conversation record sits on the account data plane — the identity an
 /// app reports when it paints the body (`account-data-plane.md` § The replica
 /// boundary → T1).
@@ -67,8 +70,9 @@ pub use address::{Rail, TypedAddress, try_parse_typed_address};
 pub use backend::{
     CommitGate, ConversationsRpc, FetchedRecord, InboundBucket, InboundMailPage, InboundMailRecord,
     InboundMailSource, LinkPreviewResolution, LinkPreviewRpc, MailFlagCallError, MailFlagChange,
-    MailFlagChangesPage, OutboundMailSink, RailBackend, RailInboundMessage, SchedulingSink,
-    SelfAddress, SendOutcome, SkippedMailRecord, WelcomeChannelKind, carries_seen_flag,
+    MailFlagChangesPage, MailSpamFacts, OutboundMailSink, RailBackend, RailInboundMessage,
+    SchedulingSink, SelfAddress, SendOutcome, SkippedMailRecord, SpamScorerState,
+    WelcomeChannelKind, carries_seen_flag,
 };
 pub use capabilities::{DeliveryMode, ThreadCapabilities, ThreadEncryption};
 pub use compose::{
@@ -82,7 +86,7 @@ pub use manager::ConversationsManager;
 pub use member_review::member_review_flags;
 pub use message::{
     AttachmentSnapshot, BodyFormat, DeleteClaim, MessageBadges, MessageId, MessageSnapshot,
-    attachment_blocks,
+    QueuedSendState, attachment_blocks,
 };
 pub use notification::{
     MessageNotificationTracker, ThreadActivity, banner_pass_completed, banner_pass_started,

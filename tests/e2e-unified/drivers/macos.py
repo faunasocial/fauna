@@ -549,6 +549,11 @@ class MacosInProcessDriver(InProcessAgentDriver):
 
     #: The CURRENT app process's home (CFFIXED_USER_HOME target; see `launch`).
     _home: str | None = None
+    #: The CURRENT app process's `HOME` — the device's per-user dir the agent
+    #: socket and the conversations door derive from (`fauna_ipc`'s
+    #: `default_socket_path`). The launch's own `_home` unless the caller
+    #: passed `config["device_home"]` (see `launch`).
+    _device_home: str | None = None
     #: The at-rest twin of `_preserved_cred_dir`: set by
     #: `preserve_state_across_relaunch()` so a relaunch reads back the previous
     #: process's Application Support (MLS db, SwiftData) too, not just its keychain.
@@ -673,9 +678,10 @@ class MacosInProcessDriver(InProcessAgentDriver):
         for a launch that spawns no real agent (no `FAUNA_E2E_REAL_SYNC_AGENT`).
         linux's twin is `drivers/linux.py`'s; `sync_seats.AppSeatDriver` reads
         the agent through it."""
-        if not getattr(self, "_real_sync_agent", False) or not self._home:
+        device_home = getattr(self, "_device_home", None) or self._home
+        if not getattr(self, "_real_sync_agent", False) or not device_home:
             return None
-        return os.path.join(self._home, _AGENT_SOCKET_RELPATH)
+        return os.path.join(device_home, _AGENT_SOCKET_RELPATH)
 
     def is_macos(self) -> bool:
         return True
@@ -918,6 +924,17 @@ class MacosInProcessDriver(InProcessAgentDriver):
         home = config.get("home") or self._preserved_home or os.path.join(tmp, "home")
         os.makedirs(home, exist_ok=True)
         self._home = home
+        # `config["device_home"]`: a second install on the SAME device — the
+        # door journey's second seat of one account (`test_cli_conversations_door.py`).
+        # `HOME`, which shared Rust derives the agent socket and the door from,
+        # is that device home; `CFFIXED_USER_HOME` (below) stays this launch's
+        # own `home`, and every install-scoped path follows it — Swift's
+        # Application Support, and in an e2e build shared Rust's state base too
+        # (`fauna_core::platform_ids::macos_install_home`), so the account store
+        # and its locks stay this seat's. linux's twin is a shared
+        # `XDG_RUNTIME_DIR` over a private `XDG_CONFIG_HOME`.
+        device_home = config.get("device_home") or home
+        self._device_home = device_home
         # A launch that will spawn the real sync agent must derive a bindable
         # socket path (see `_LAUNCH_TMP_ROOT`). The default home always fits; a
         # caller-PINNED `config["home"]` can still overshoot — pytest's own
@@ -926,10 +943,10 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # real-agent flag because the many launches that never start an agent are
         # legitimately free to pin a long home.
         if config.get("environment", {}).get("FAUNA_E2E_REAL_SYNC_AGENT"):
-            sock = os.path.join(home, _AGENT_SOCKET_RELPATH)
+            sock = os.path.join(device_home, _AGENT_SOCKET_RELPATH)
             if len(sock.encode()) >= _SUN_PATH_MAX:
                 raise RuntimeError(
-                    f"launch HOME {home!r} derives a {len(sock.encode())}-byte sync-agent "
+                    f"launch HOME {device_home!r} derives a {len(sock.encode())}-byte sync-agent "
                     f"socket path, over macOS's sun_path limit of {_SUN_PATH_MAX - 1} usable "
                     f"bytes:\n  {sock}\nThe agent would spawn and die at bind "
                     f"('path must be shorter than SUN_LEN'), and the app would report only "
@@ -976,7 +993,7 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # included — lands in this launch's `app.err`. A caller-supplied
         # override wins. Read back via `custody_hold_file()`.
         env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
-        env["HOME"] = home
+        env["HOME"] = device_home
         # macOS resolves `.applicationSupportDirectory` — where the MLS state db
         # (`conv-mls.db`, `mls.db`) and the SwiftData store live — from CoreFoundation's
         # notion of the home dir, which honors `CFFIXED_USER_HOME` but *not* `HOME`

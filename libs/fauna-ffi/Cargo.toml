@@ -177,10 +177,26 @@ zaps = ["payments", "fauna-protocol/zaps", "fauna-client-nostr/zaps"]
 # for the seed's managed-path mirror (`authoritative_dns::send_txt_update`, gated
 # the same way; `fauna-client-dns/test-helpers` cannot forward it — fauna-wasm
 # turns that feature on for wasm32).
-e2e-harness = ["sync-engine-host", "dep:fauna-iroh", "dep:fauna-feed", "dep:fauna-archive-import-machine", "dep:fauna-credential-store", "dep:fauna-client-capabilities", "dep:fauna-bridge-nostr", "dep:fauna-client-share", "dep:fauna-atproto-settings-machine", "dep:fauna-client-atproto", "fauna-client-folders/mls", "mail-admin", "mail-import", "fauna-mail/test-helpers", "fauna-client-dns/test-helpers", "fauna-core/test-helpers", "dep:fauna-client-pair"]
+# Names `backup-audit` for the backup legs (`cabi/harness/backup.rs`): an
+# app-less enroll, audit pass, recovery and re-seed run the very shared
+# sequences the backups page's faces compose, and reuse those faces' row and
+# result projections rather than re-deriving them.
+e2e-harness = ["sync-engine-host", "backup-audit", "dep:fauna-iroh", "dep:fauna-feed", "dep:fauna-archive-import-machine", "dep:fauna-credential-store", "dep:fauna-client-capabilities", "dep:fauna-bridge-nostr", "dep:fauna-client-share", "dep:fauna-atproto-settings-machine", "dep:fauna-client-atproto", "fauna-client-folders/mls", "mail-admin", "mail-import", "fauna-mail/test-helpers", "fauna-client-dns/test-helpers", "fauna-core/test-helpers", "dep:fauna-client-pair", "recovery-aftermath", "payments"]
+# (`recovery-aftermath` above: `fauna_harness_successor_pass` runs the
+# successor's store-ready ledger pass, `run_ledger_aftermath`, as the apps do.
+# `payments`: `fauna_harness_redeem` runs the shared cross-nest redeem,
+# `PaymentsClient::claims_redeem_across_nests`, the apps' redeem gesture.)
 # Also runs a nest document's `wasm` labelers in `FfiNestRulesBook::join_labels`
 # (`fauna-client-policy/scorers`) wherever the book is built.
 labeler = ["dep:fauna-labeler", "dep:serde_bare", "fauna-mail/parser", "fauna-client-policy?/scorers"]
+# The mail bridge's e2e cdylib flavor (`just mail-bridge-ffi-e2e`, linked only
+# by `just mail-bridge-build-e2e`): `mail-bridge-ffi`'s `labeler` flavor plus
+# fauna-mail's harness seams — the inbound verification's resolver and deadline
+# (`FAUNA_MAIL_E2E_RESOLVER`, `FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS`,
+# `libs/fauna-mail/src/auth.rs`). Adds no export, so the Go binding is the
+# shipped flavor's byte for byte. Never named by a shipping recipe (convention
+# 15; `mail-bridge-build` greps its artifact clean of both variables).
+mail-bridge-e2e = ["fauna-mail/test-helpers"]
 # The personalization surface's community-labeler-catalog page FFI
 # (src/labeler_catalog.rs — the `LabelerCatalogMachine` browse /
 # inspect-before-subscribe / (un)subscribe over `fauna.labelers.*`).
@@ -565,6 +581,7 @@ p2p-share = [
 offline-share = [
     "dep:fauna-client-capabilities",
     "fauna-client-capabilities/p2p-share",
+    "fauna-iroh/ceremony",
     "fauna-client-capabilities/uniffi",
     "fauna-sync-engine/p2p-share",
     "dep:fauna-iroh",
@@ -781,7 +798,14 @@ sync-engine-host = ["fauna-sync-engine/engine-lifecycle", "fauna-sync-engine/pul
 # `fauna-core/local-clock`: the let-go door (src/generation_let_go.rs) dates the
 # unreadable-generations line with `format_unix_local_date_ms`, and a trimmed
 # build without `value-format` must pull the clock itself or fail E0425.
-account-runtime = ["dep:fauna-client-account-runtime", "dep:tracing", "accounts-registry", "fauna-core/local-clock"]
+# `dep:fauna-iroh` (its `quic` half only — the ceremony half rides
+# `offline-share`): the same-account peer leg's transport factory
+# (`fauna_iroh::peer_leg_factory`), which `start_account_runtime` hands the
+# runtime so an app hosting it in-process — iOS and android, which run no sync
+# agent — serves and dials its siblings while the nest is down
+# (`account-sync-plane.md` § The peer leg). Not a gated-registry member: the
+# store-safe flavor keeps it (wormability rule 5; `ffi-store-safe-check`).
+account-runtime = ["dep:fauna-client-account-runtime", "dep:tracing", "accounts-registry", "fauna-core/local-clock", "dep:fauna-iroh"]
 # The control-inverted on-demand host (src/file_provider_host.rs) — the
 # hydration host apple's `NSFileProviderReplicatedExtension` calls
 # (`on-demand-files-apple.md` § Apple File Provider binding) and, through its
@@ -1078,6 +1102,11 @@ test-helpers = [
     # release-profile, so without this forward the arm is absent from exactly the
     # builds the e2e drives.
     "fauna-mail/test-helpers",
+    # app-log's size-cap seams (`log_reload_e2e_caps_for_test`,
+    # `log_emit_burst_for_test` in `src/logs.rs`): `fauna-log` gates the cap
+    # override and the burst on `debug_assertions OR e2e-agent`, and the
+    # release-profile `*-ffi-test` flavors need it forwarded (weak: `logs`).
+    "fauna-log?/e2e-agent",
     "fauna-onboarding-machine/test-helpers",
     "fauna-launch-machine/test-helpers",
     "fauna-conversations/test-helpers",
@@ -1091,6 +1120,10 @@ test-helpers = [
     # resolves through (agent_spawner::agent_binary) — compiled out of a
     # production fauna-ffi build together with the spawner itself.
     "fauna-client-sync/test-helpers",
+    # `hold_author_drain_for_test` — the `subscriptions_hold_author_drain`
+    # command's anchor for a standing paid request (`e2e_seams.rs`), in the
+    # release-profile `*-ffi-test` flavors too (convention 15).
+    "fauna-client-subscriptions/test-helpers",
     # The Feed-page snapshot injection seam (FfiFeedManager::inject_posts_for_test
     # over fauna_feed::test_support + set_feed_snapshot_for_test) — the windows/apple
     # e2e twin of the conversations inject seam, driving the unverified-source-badge
@@ -1700,6 +1733,9 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# `RecordingQueue` — the outbox double the family composer doors' tests queue
+# into (`src/family.rs`, the same double fauna-tui's family tests use).
+fauna-client-testkit = { path = "../fauna-client-testkit" }
 # The conversations-seam wiring tests (`account_runtime.rs`): a no-nest
 # `RpcRequester` for the real account store they install, whose generic
 # `request` bounds name serde's traits.

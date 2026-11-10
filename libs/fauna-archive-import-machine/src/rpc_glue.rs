@@ -857,6 +857,11 @@ impl<$($generics)*> ArchiveNest for $ty {
             fauna_client_folders::SetLifecycleError::Custody(e) => {
                 ArchiveNestError::Transport(format!("{e:#}"))
             }
+            // An import creates private sets only, so neither arm is reached.
+            e @ (fauna_client_folders::SetLifecycleError::Unattestable
+            | fauna_client_folders::SetLifecycleError::Unattested { .. }) => {
+                ArchiveNestError::Transport(e.to_string())
+            }
         })
     }
 

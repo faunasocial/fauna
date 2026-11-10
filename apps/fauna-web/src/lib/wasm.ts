@@ -15,6 +15,7 @@ import type {
   MutedKeyword,
   MutedKeywordLevel,
   NodeLeg,
+  FamilyApprovalEntry,
 } from '#lib/rpc';
 import type {
   IssuerForcedArm,
@@ -269,6 +270,29 @@ export async function accountDeviceSetState(deviceIdHex: string): Promise<unknow
     );
   }
   return JSON.parse(await (fn as (id: string) => Promise<string>)(deviceIdHex));
+}
+/** Test-only: the `folder_set_custody` command's body — which content-key
+ *  generations this browser's folder custody holds for one shared set (a
+ *  version and a one-way key fingerprint each), the shared reader every
+ *  hosting app answers with (`fauna_client_folders::custody::
+ *  read_held_generations`). Same `wasm-core-test`-only gating as
+ *  `accountDeviceSetState`; THROWS on a production bundle, and REJECTS on a
+ *  refused selector. */
+export async function accountFolderSetCustody(
+  setName: string | undefined,
+  channelIdHex: string | undefined,
+): Promise<unknown> {
+  await ensureWasm();
+  const fn = (wasm() as unknown as Record<string, unknown>).accountFolderSetCustodyJsonForTest;
+  if (typeof fn !== 'function') {
+    throw new Error(
+      'accountFolderSetCustodyJsonForTest is absent: this SPA is running the PRODUCTION ' +
+        'wasm flavor, which compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  return JSON.parse(
+    await (fn as (name?: string, channel?: string) => Promise<string>)(setName, channelIdHex),
+  );
 }
 /** Test-only: the `read_marker_state` command's body — this browser's account
  *  store read marker for one channel, the shared reader every hosting app
@@ -1717,6 +1741,18 @@ export function reportFailed(error: string): LocalizedText {
   return wasm().reportFailed(error) as LocalizedText;
 }
 
+/** `report::report_queued` — the `report-status` line after a report was
+ *  queued with no nest. */
+export function reportQueued(): LocalizedText {
+  return wasm().reportQueued() as LocalizedText;
+}
+
+/** `report::report_block_not_sent` — the `error-message` line when a queued
+ *  report asked to block its author (the block needs the nest). */
+export function reportBlockNotSent(): LocalizedText {
+  return wasm().reportBlockNotSent() as LocalizedText;
+}
+
 /** `report::ledger_title` / `ledger_empty`. */
 export function reportLedgerWords(): { title: LocalizedText; empty: LocalizedText } {
   return wasm().reportLedgerWords() as { title: LocalizedText; empty: LocalizedText };
@@ -2074,6 +2110,23 @@ export function describePendingAction(actionType: string, target: string | null)
   return wasm().describePendingAction(actionType, target ?? undefined);
 }
 
+// `fauna_protocol::pending_actions::describe_pending_action_with_folder` (over
+// wasm) — `describePendingAction` naming the folder an automatic prune targets,
+// by the name the folder roster gave (`sessionFolderName`, `#lib/devices-session`);
+// `null` paints the neutral sentence. See `docs/goal/ui/settings.md` § Pending
+// actions.
+export function describePendingActionWithFolder(
+  actionType: string,
+  target: string | null,
+  folderName: string | null,
+): string {
+  return wasm().describePendingActionWithFolder(
+    actionType,
+    target ?? undefined,
+    folderName ?? undefined,
+  );
+}
+
 // `fauna_protocol::nostr_relay::trimmed_relay_input` (over wasm) — the
 // trimmed relay input, or `null` when that's empty. Shared trim/empty rule
 // every "Add relay" control applies (android/apple via the UniFFI twin
@@ -2338,6 +2391,29 @@ export function trustSetClockOffsetForTest(offsetSecs: number): void {
   (fn as (o: number) => void)(offsetSecs);
 }
 
+/** Test-only: hold (`true`) or release (`false`) the subscriptions author
+ *  drain — the wasm half of the `subscriptions_hold_author_drain` /
+ *  `subscriptions_release_author_drain` e2e commands (`#lib/subscriptions-e2e`),
+ *  so a payment-backed subscribe request stands in the author's §2 requests
+ *  while the test reads its paid badge (`monetization.md` § Pillar 3). The flag
+ *  is shared Rust's, read by `subscriptionsDrainAutoApprovals` after its queue
+ *  read.
+ *
+ *  Same two-flavor discipline as `trustSetClockOffsetForTest` above: the exports
+ *  exist only in the `wasm-core-test` chunk, so they are reached off the module
+ *  record and THROW on a production bundle (convention 11). */
+export function subscriptionsSetAuthorDrainHeldForTest(held: boolean): void {
+  const name = held ? 'subscriptionsHoldAuthorDrainForTest' : 'subscriptionsReleaseAuthorDrainForTest';
+  const fn = (wasm() as unknown as Record<string, unknown>)[name];
+  if (typeof fn !== 'function') {
+    throw new Error(
+      `${name} is absent: this SPA is running the PRODUCTION ` +
+        'wasm flavor, which compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  (fn as () => void)();
+}
+
 /** Test-only: move the submission-token refresh's clock (the 7-day re-mint
  *  cadence and each re-minted token's `issued_at`; never the bearer clock) — the
  *  wasm half of the `mail_token_refresh_advance_clock` e2e command
@@ -2470,6 +2546,20 @@ export function shortNestId(id: string): string {
  *  § Account display label. */
 export function accountDisplayLabel(handle: string | null | undefined, actorId: string): string {
   return wasm().accountDisplayLabel(handle ?? undefined, actorId) as string;
+}
+
+/** The canonical `handle@domain` a principal is named by, or `null` when no
+ *  handle was served (absent or empty). An absent or empty domain leaves the
+ *  handle bare — a user of the viewer's own nest; a handle with a domain
+ *  beside it is a foreign user the viewer's nest bound to that domain's key.
+ *  Twin of `fauna_core::format::qualified_handle`; its result feeds
+ *  `accountDisplayLabel` as the handle. See `value-formatting.md` § Account
+ *  display label. */
+export function qualifiedHandle(
+  handle: string | null | undefined,
+  domain: string | null | undefined,
+): string | null {
+  return (wasm().qualifiedHandle(handle ?? undefined, domain ?? undefined) as string | undefined) ?? null;
 }
 
 /** Whole-percent (half-up) display of a moderation classifier's confidence.
@@ -3201,6 +3291,26 @@ export function contentRenderForItem(
   ) as { verdict: ContentRenderVerdict; reported: boolean };
 }
 
+/** The show-again control on a reported placeholder (`moderation.md`
+ *  § Corollary — the reporter's hide is theirs to undo): the hidden ids one
+ *  press of `content-policy-show-again-button` removes and the button's label,
+ *  naming the scope. */
+export interface ShowAgain {
+  ids: string[];
+  label: LocalizedText;
+}
+
+/** `reportedShowAgain` — the shared `obligation::show_again_for_item`: `null`
+ *  when no hidden id matched the item (the placeholder is not the viewer's own
+ *  report, so there is nothing of theirs to undo). */
+export function reportedShowAgain(
+  hiddenContent: string[],
+  itemId: string,
+  authorId: string | null,
+): ShowAgain | null {
+  return (wasm().reportedShowAgain(hiddenContent, itemId, authorId ?? undefined) as ShowAgain | null) ?? null;
+}
+
 /** The settings region surface's read (`RegionPlane::view`); times are unix
  *  seconds. */
 export interface RegionView {
@@ -3818,6 +3928,24 @@ export function approvalDisplayTextRaw(
   ) as string | null;
 }
 
+// The family page's fold of a decision `familyApprovalsDecideOrQueue`
+// answered QUEUED: the approvals list without the decided item, matched by its
+// item key (`fauna_client_family::approvals_after_queued_decision` over wasm —
+// `account-offline-mutation.md` § Implementation status today).
+export function approvalsAfterQueuedDecision(
+  approvals: FamilyApprovalEntry[],
+  decided: FamilyApprovalEntry,
+): FamilyApprovalEntry[] {
+  return wasm().familyApprovalsAfterQueuedDecision(approvals, decided) as FamilyApprovalEntry[];
+}
+
+// The family page's render key for one approvals-queue entry — the shared
+// item identity (`fauna_client_family::approval_item_key`), so two items one
+// ward holds never share a key (every `dm_hold` row has an empty peer actor).
+export function approvalItemKey(entry: FamilyApprovalEntry): string {
+  return wasm().familyApprovalItemKey(entry) as string;
+}
+
 // When a held mail arrived, beside `approvalDisplayTextRaw`'s sender —
 // `fauna_core::format::approval_timestamp_display` over wasm: the
 // `conversationTimestampRaw` shape over the entry's `created_at` (unix
@@ -3917,11 +4045,25 @@ export function contactRowBlocksActor(
 
 // Shared `profile-follow-button` label. `fauna_core::format::follow_toggle_label` (over
 // wasm) owns the toggle wording (`profile.following` when the viewer already follows,
-// else `profile.follow`), so web shares it instead of its own ternary. The `isFollowing`
-// derivation (subscription status / optimistic flip) stays web-local by ratified
-// decision. See `docs/goal/ui/profile.md` § Where logic lives → Follow / unfollow.
+// else `profile.follow`), so web shares it instead of its own ternary. The bool is
+// `isFollowing` below (the optimistic post-press flip stays page-local). See
+// `docs/goal/ui/profile.md` § Where logic lives → Follow / unfollow / follow-status.
 export function followToggleLabel(isFollowing: boolean): LocalizedText {
   return wasm().followToggleLabel(isFollowing) as LocalizedText;
+}
+
+// `fauna_core::format::is_following` (over wasm): following ⇔ the viewer's `status.get`
+// names a tier or a follow is pending (`subscriptions.md` § The free followers tier —
+// follow and unfollow, rule 4). Replaces web's old `tier === 'followers'` test, which
+// read *Follow* for a paid subscriber.
+export function isFollowing(tier: string | null, followPending: boolean): boolean {
+  return wasm().isFollowing(tier ?? undefined, followPending) as boolean;
+}
+
+// `fauna_core::format::unfollow_ends_paid_tier` (over wasm): a press on *Following*
+// is confirm-gated when the status names a paid tier, which the unfollow ends too.
+export function unfollowEndsPaidTier(tier: string | null): boolean {
+  return wasm().unfollowEndsPaidTier(tier ?? undefined) as boolean;
 }
 
 // Shared Devices `device-status` label. `fauna_core::format::device_status_label` (over
@@ -4278,6 +4420,14 @@ export function bridgeLinkBlock(
 // browser capability), ANDed after this.
 export function bridgeModeApplies(modePlatform: string | undefined, platform: string): boolean {
   return wasm().bridgeModeApplies(modePlatform, platform) as boolean;
+}
+
+// A Bridges page network row's title — `"<emoji> <name>"` for a consented
+// bridge app declaring a glyph, the bare name otherwise. The shared
+// `fauna_client_bridges::bridge_card_title` composes it with the one
+// `SourceGlyph::emoji` map (bridges.md § Coverage contract, outcome 11).
+export function bridgeCardTitle(name: string, glyph: string | null | undefined): string {
+  return wasm().bridgeCardTitle(name, glyph ?? undefined) as string;
 }
 
 // Which control a bridge setting's `setting_type` paints — the shared
@@ -5642,6 +5792,40 @@ export function notificationDestination(row: unknown): NotificationDestination |
  *  (a security notice never collapses) is the shared decision's, never the SPA's. */
 export function notificationMuted(row: unknown, mutedKeywords: MutedKeyword[]): boolean {
   return wasm().notificationMuted(row, mutedKeywords) as boolean;
+}
+
+/** The knock toast to raise for one `fauna.knock` push — `null` when a muted
+ *  word withholds it (`notifications.md` § Muted words rule 6), else the knock
+ *  row's own sentence (§ Localized body, *The knock toast*). The shared
+ *  `fauna_client_notifications::knock_toast`, the natives' knock arms' twin.
+ *  `payload` is the push payload as `onPushEvent` hands it over. */
+export function knockToast(payload: unknown, mutedKeywords: MutedKeyword[]): NotificationText | null {
+  return (wasm().knockToast(payload, mutedKeywords) ?? null) as NotificationText | null;
+}
+
+/** `fauna_client_notifications::KNOCK_TOAST_REPLACE_ID` — the one id every
+ *  knock toast is raised under; web's `Notification` tag is derived from it. */
+export function knockToastReplaceId(): number {
+  return wasm().knockToastReplaceId() as number;
+}
+
+/** Test-only: the shared `KnockNotices` log's two writes (`observe` before the
+ *  muted gate, `record` after the toast was handed over). No-ops on a
+ *  production bundle, which compiles the log out. */
+export function knockNoticesObserveForTest(): void {
+  const fn = coreTestExport('knockNoticesObserveForTest');
+  if (fn) (fn as () => void)();
+}
+export function knockNoticesRecordForTest(key: string | null, text: string, replaceId: number | null): void {
+  const fn = coreTestExport('knockNoticesRecordForTest');
+  if (fn) (fn as (k: string | undefined, t: string, r: number | undefined) => void)(key ?? undefined, text, replaceId ?? undefined);
+}
+
+/** The `knock_notices` observable (`fauna_e2e_agent::KNOCK_NOTICES_KEY`), or
+ *  `null` where this bundle has no leg — which the witness refuses loudly. */
+export function knockNoticesForTest(): unknown {
+  const fn = coreTestExport('knockNoticesForTest');
+  return fn ? JSON.parse((fn as () => string)()) : null;
 }
 
 // The conversations rail / feed badge source icon: glyph id → display emoji.

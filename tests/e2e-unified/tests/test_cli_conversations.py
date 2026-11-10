@@ -125,7 +125,9 @@ def custodian(request, app, consent_nest, consent_bridge):
     )
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
-    return Seat(app=app, actor=alice)
+    # The port lets `found_community_room` read the key-in barrier off the
+    # home nest, as it does for a seat `launch_seat` builds.
+    return Seat(app=app, actor=alice, port=consent_nest["port"])
 
 
 @pytest.fixture
@@ -143,8 +145,10 @@ def _door_location(seat: Seat) -> dict:
     """Where the cli finds the custodian's door, as ``CliMcpSession`` keywords.
     linux and tui: the custodian launch's private ``XDG_RUNTIME_DIR`` — the agent
     socket is ``<runtime>/fauna/sync-agent.sock`` and the door sits beside it.
-    macOS (the app, and tui, whose darwin launch relocates HOME too): the launch's ``HOME``, whose ``Library/Application Support/Fauna``
-    holds the door (the runtime dir plays no part there). Windows: nothing —
+    macOS (the app, and tui, whose darwin launch relocates HOME too): the launch's ``HOME``
+    — its device home, which a second install on the same device shares while its
+    install home stays its own — whose ``Library/Application Support/Fauna`` holds
+    the door (the runtime dir plays no part there). Windows: nothing —
     the door is the per-SID named pipe, one name per (OS user, account) that the
     cli derives exactly as the custodian does, with nothing per launch to
     point it at."""
@@ -152,9 +156,12 @@ def _door_location(seat: Seat) -> dict:
         return {}
     driver = seat.app.driver
     if sys.platform == "darwin":
-        # The macOS app driver keeps the launch HOME in `_home`; the tui driver
-        # (darwin relocates HOME for it too) keeps it in `_resolved_home`.
-        home = getattr(driver, "_home", None) or getattr(driver, "_resolved_home", None)
+        # The launch's `HOME`: the macOS app driver keeps it in `_device_home`,
+        # the tui driver (darwin relocates HOME for it too) in
+        # `_resolved_device_home`.
+        home = getattr(driver, "_device_home", None) or getattr(
+            driver, "_resolved_device_home", None
+        )
         assert home, "the custodian seat's launch relocated its HOME"
         return {"user_home": home}
     socket = driver.sync_agent_socket
@@ -238,7 +245,7 @@ def _until_served(cli: CliMcpSession, tool: str, arguments: dict | None = None) 
         time.sleep(1.0)  # sleep-ok: paces a deadline poll on the shell's own state, never asserted on
 
 
-@pytest.mark.feature("connected-apps")
+@pytest.mark.feature("connected-apps", "fauna-for-ai-assistants")
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.macos

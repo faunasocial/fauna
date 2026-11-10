@@ -124,6 +124,10 @@ def test_macos_driver_publishes_the_sync_agent_socket_only_for_a_real_agent_laun
     driver._real_sync_agent = True
     assert driver.sync_agent_socket == os.path.join(driver._home, _AGENT_SOCKET_RELPATH)
 
+    # A second install on the same device: the socket is the device home's.
+    driver._device_home = "/tmp/fauna-e2e-macos-agent-y/home"
+    assert driver.sync_agent_socket == os.path.join(driver._device_home, _AGENT_SOCKET_RELPATH)
+
 
 def test_tui_driver_publishes_the_darwin_sync_agent_socket_under_its_relocated_home(
     monkeypatch,
@@ -137,9 +141,11 @@ def test_tui_driver_publishes_the_darwin_sync_agent_socket_under_its_relocated_h
     driver = tui.TuiDriver()
     assert driver.sync_agent_socket is None
 
-    driver._resolved_home = "/tmp/fauna-e2e-tui-agent-x/home"
+    # The socket derives from the device home (`HOME`), never the install home.
+    driver._resolved_home = "/tmp/fauna-e2e-tui-agent-y/home"
+    driver._resolved_device_home = "/tmp/fauna-e2e-tui-agent-x/home"
     assert driver.sync_agent_socket == os.path.join(
-        driver._resolved_home, tui._AGENT_SOCKET_RELPATH
+        driver._resolved_device_home, tui._AGENT_SOCKET_RELPATH
     )
 
 
@@ -161,7 +167,9 @@ def test_linux_driver_publishes_the_sync_agent_socket_its_launch_env_makes(tmp_p
 
     xdg_base = str(tmp_path / "xdg")
     env = linux.build_launch_env({}, 13, xdg_base)
-    driver._resolved_xdg_base = xdg_base
+    # What `launch()` records from the env it built — the property reads back
+    # the dir the launch used, caller-passed or the private default.
+    driver._xdg_runtime = env["XDG_RUNTIME_DIR"]
     assert driver.sync_agent_socket == os.path.join(
         env["XDG_RUNTIME_DIR"], "fauna", "sync-agent.sock"
     )
