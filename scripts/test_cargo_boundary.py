@@ -177,9 +177,22 @@ def test_the_line_is_prelude_then_the_boundary_with_the_token_then_the_outer_hal
         "set -e",
         _UNSET,
         "cargo fetch",
-        shlex.join([*prefix, "cargo", "test", "-p", "x", "--no-run"]),
-        "exec cargo test -p x -- t",
+        'stale="$(mktemp "${TMPDIR:-/tmp}/cargo-boundary-stale.XXXXXX")"',
+        """trap 'rm -f -- "$stale"' EXIT""",
+        "for attempt in 1 2 3; do",
+        "    " + shlex.join([*prefix, "cargo", "test", "-p", "x", "--no-run"]),
+        "    rc=0",
+        f'    FAUNA_CARGO_BOUNDARY_STALE="$stale" RUSTC_WRAPPER={shlex.quote(cb.REFUSE_RUSTC)} '
+        "cargo test -p x -- t || rc=$?",
+        '    if [ ! -s "$stale" ]; then exit "$rc"; fi',
+        '    : > "$stale"',
+        "done",
+        "echo '[cargo-boundary] `cargo test -p x…`: a source changed during each of 3 compiles"
+        " — giving up' >&2",
+        'exit "$rc"',
     ], argv[2]
+    assert Path(cb.REFUSE_RUSTC) == _HERE / "cargo-boundary-refuse-rustc"
+    assert os.access(cb.REFUSE_RUSTC, os.X_OK), "the refuser is RUSTC_WRAPPER: it needs the bit"
     argv = cb.argv(["cargo", "build", "-p", "x"], None, {}, plat)
     assert argv[2].splitlines()[-1] == "exec " + shlex.join([*prefix, "cargo", "build", "-p", "x"])
 
@@ -1050,9 +1063,16 @@ def test_darwin_maps_the_set_to_its_roles_with_a_scratch_under_the_target(monkey
     assert lines[4] == cb.tag_line("/w/target")
     assert lines[5] == "trap " + shlex.quote(f"rm -rf -- {scratch}") + " EXIT"
     assert lines[6] == shlex.join([*_mac("/p.sb", roles), "cargo", "build"]), lines
-    # an outer half: the scratch goes before the program runs outside
+    # an outer half: the scratch is made before each inside half and goes before
+    # the program runs outside, and again when the command ends
     lines = cb.argv(["cargo", "run"], None, {}, "darwin", "/p.sb")[2].splitlines()
-    assert lines[-3:] == [f"rm -rf -- {scratch}", "trap - EXIT", "exec cargo run"], lines
+    lines = lines[lines.index('stale="$(mktemp "${TMPDIR:-/tmp}/cargo-boundary-stale.XXXXXX")"'):]
+    assert lines[1] == "trap " + shlex.quote(f'rm -rf -- {scratch}; rm -f -- "$stale"') + " EXIT", lines
+    assert lines[3:6] == [f"    mkdir -p -- {scratch}",
+                           "    " + shlex.join([*_mac("/p.sb", {"FAUNA_TARGET": "/w/target",
+                                                                "FAUNA_SCRATCH": scratch}), "cargo", "build"]),
+                           f"    rm -rf -- {scratch}"], lines
+    assert "RUSTC_WRAPPER=" in lines[7] and lines[7].endswith(" cargo run || rc=$?"), lines
     # `fix`: the workspace root is the workspace role
     monkeypatch.setattr(cb, "writable_set", lambda cmd, env=None: ["/w/target", "/w"])
     line = cb.argv(["cargo", "fix"], None, {}, "darwin", "/p.sb")[2]
@@ -1751,3 +1771,137 @@ def test_a_background_urlsession_reaches_nothing_inside_the_darwin_profile_and_t
         assert got == ["/boundary-mach"] and out == "BODY boundary-probe-body", (out, got)
     finally:
         server.shutdown()
+
+
+# --- the run/test split: the outside half never compiles -------------------------
+
+#: A fake cargo for the split: logged as `_fake_cargo_dir`'s, and its outside
+#: `test` half (no `--no-run`) "compiles" through RUSTC_WRAPPER — as a real cargo
+#: does for a unit a mid-build edit made stale — the first FAKE_STALE_TIMES
+#: times, else exits FAKE_TEST_EXIT (a test's own result).
+_FAKE_SPLIT = ('if [ "$1" = test ] && [[ " $* " != *" --no-run "* ]]; then\n'
+               '  n=$(grep -c "^CARGO test .* -- t$" "$FAKE_CARGO_LOG")\n'
+               '  if [ "$n" -le "${FAKE_STALE_TIMES:-0}" ]; then\n'
+               '    "$RUSTC_WRAPPER" rustc --crate-name fauna_nest --edition=2021 src/lib.rs || exit 101\n'
+               '  fi\n'
+               '  exit "${FAKE_TEST_EXIT:-0}"\n'
+               'fi\n')
+
+
+def _split_run(root: Path, **env) -> tuple[subprocess.CompletedProcess, list[str]]:
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "cargo").write_text('#!/bin/bash\n' + _FAKE_METADATA + 'echo "CARGO $*" >> "$FAKE_CARGO_LOG"\n'
+                                   + _FAKE_SPLIT)
+    (bin_dir / "cargo").chmod(0o755)
+    log = root / "target" / "log"
+    log.parent.mkdir()
+    log.touch()
+    got = _run("--", "cargo", "test", "-p", "x", "--", "t",
+               env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_CARGO_LOG": str(log),
+                    "FAUNA_KACHE_INSIDE": "", **{k: str(v) for k, v in env.items()}})
+    return got, log.read_text().splitlines()
+
+
+_INSIDE, _OUTSIDE = "CARGO test -p x --no-run", "CARGO test -p x -- t"
+
+
+@pytest.mark.skipif(not _bwrap_works(), reason="needs a working /usr/bin/bwrap (Linux)")
+def test_a_unit_stale_outside_is_refused_and_compiled_again_inside(probe_root):
+    """The fault of 2026-11-11 (`couldn't find file bins/fauna-nest/src/lib.rs`):
+    the outside half compiling a unit a mid-build edit made stale. The refuser
+    stops it with one line naming the unit, and the line runs the inside half
+    again, then the outside half, green."""
+    got, calls = _split_run(probe_root, FAKE_STALE_TIMES=1)
+    assert got.returncode == 0, got.stderr
+    assert calls == ["CARGO fetch", _INSIDE, _OUTSIDE, _INSIDE, _OUTSIDE], calls
+    assert got.stderr.count("[cargo-boundary] fauna_nest went stale between the compile and the run") == 1, \
+        got.stderr
+
+
+@pytest.mark.skipif(not _bwrap_works(), reason="needs a working /usr/bin/bwrap (Linux)")
+def test_a_test_failure_outside_is_the_lines_result_never_a_second_compile(probe_root):
+    got, calls = _split_run(probe_root, FAKE_TEST_EXIT=101)
+    assert got.returncode == 101, got.stderr
+    assert calls == ["CARGO fetch", _INSIDE, _OUTSIDE], calls
+    assert "went stale" not in got.stderr
+
+
+@pytest.mark.skipif(not _bwrap_works(), reason="needs a working /usr/bin/bwrap (Linux)")
+def test_sources_that_keep_changing_give_up_after_three_compiles(probe_root):
+    got, calls = _split_run(probe_root, FAKE_STALE_TIMES=9)
+    assert got.returncode != 0
+    assert calls == ["CARGO fetch", *[_INSIDE, _OUTSIDE] * cb.STALE_ATTEMPTS], calls
+    assert "a source changed during each of 3 compiles — giving up" in got.stderr, got.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a bash refuser")
+def test_the_refuser_passes_the_probes_and_refuses_a_compile_into_the_marker(tmp_path):
+    marker = tmp_path / "stale"
+    env = {**os.environ, cb.STALE_ENV: str(marker)}
+    for probe in (["-vV"], ["-", "--crate-name", "___", "--print=file-names"], ["--print", "sysroot"]):
+        got = subprocess.run([cb.REFUSE_RUSTC, "/bin/echo", *probe], env=env, capture_output=True, text=True)
+        assert got.returncode == 0 and got.stdout.split() == probe, (probe, got)
+    assert not marker.exists()
+    got = subprocess.run([cb.REFUSE_RUSTC, "/bin/echo", "--crate-name", "fauna_ffi_core", "src/lib.rs"],
+                         env=env, capture_output=True, text=True)
+    assert got.returncode != 0 and got.stdout == ""
+    assert marker.read_text() == "fauna_ffi_core\n"
+    assert got.stderr.startswith("[cargo-boundary] fauna_ffi_core went stale"), got.stderr
+
+
+#: A cargo in front of the real one, for a real compile: its first outside
+#: `test` half (no `--no-run`) edits the crate's source before handing over —
+#: a source changed between the inside compile and the run.
+_EDIT_BETWEEN_HALVES = ('#!/bin/bash\n'
+                        'if [ "$1" = test ] && [[ " $* " != *" --no-run "* ]] && [ ! -e "$EDIT_DONE" ]; then\n'
+                        '  touch "$EDIT_DONE"; sleep 1; echo "// edited between the halves" >> "$EDIT_SRC"\n'
+                        'fi\n'
+                        'exec "$REAL_CARGO" "$@"\n')
+
+
+def _edited_between_halves(root: Path, mutate_loop: bool) -> subprocess.CompletedProcess:
+    crate, bin_dir = root / "crate", root / "bin"
+    for d in (crate / "src", bin_dir, root / "target"):
+        d.mkdir(parents=True)
+    (crate / "Cargo.toml").write_text('[package]\nname = "stale-probe"\nversion = "0.0.0"\n'
+                                      'edition = "2021"\n[workspace]\n')
+    (crate / "src" / "lib.rs").write_text("#[test]\nfn passes() { assert_eq!(1 + 1, 2); }\n")
+    (bin_dir / "cargo").write_text(_EDIT_BETWEEN_HALVES)
+    (bin_dir / "cargo").chmod(0o755)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("FAUNA_KACHE_INSIDE", "RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER",
+                        "RUSTC_WORKSPACE_WRAPPER", "FAUNA_CARGO_FRONT", "FAUNA_CARGO_FRONT_PYTHON", "BASH_ENV")}
+    env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep)
+                                  if os.path.basename(p.rstrip("/")) != "cargo-shim")
+    real = shutil.which("cargo", path=env["PATH"])
+    env.update({"CARGO_TARGET_DIR": str(root / "target"), "RUSTUP_TOOLCHAIN": _toolchain(),
+                "REAL_CARGO": real, "EDIT_DONE": str(root / "edited"), "EDIT_SRC": str(crate / "src" / "lib.rs")})
+    cmd = [str(bin_dir / "cargo"), "test", "--manifest-path", str(crate / "Cargo.toml")]
+    old_cwd = os.getcwd()
+    os.chdir(crate)  # the read list's `.cargo` walk starts at the cwd: the crate's, as the run's
+    try:
+        bounded = cb.argv(cmd, None, env, "linux")
+    finally:
+        os.chdir(old_cwd)
+    assert bounded is not None and "for attempt in 1 2 3; do" in bounded[2]
+    if mutate_loop:
+        bounded = [*bounded[:2], bounded[2].replace("for attempt in 1 2 3; do", "for attempt in 1; do"),
+                   *bounded[3:]]
+    return subprocess.run(bounded, env=env, cwd=crate, capture_output=True, text=True, timeout=900)
+
+
+@_NEEDS_REAL_COMPILE
+def test_a_source_edited_between_the_halves_compiles_again_inside_and_the_mutation_reads_the_fault(probe_root):
+    """The row's pin, on a real compile: the outside
+    half meets a stale unit, is refused, and the inside half compiles it again —
+    the test's own result (green), never `couldn't find file`; with the loop cut
+    to one pass the same run reds on the refusal — so this test is known to see
+    the fault."""
+    got = _edited_between_halves(probe_root / "looped", mutate_loop=False)
+    assert got.returncode == 0, got.stderr[-3000:]
+    assert "stale_probe went stale between the compile and the run" in got.stderr, got.stderr[-3000:]
+    assert "test passes ... ok" in got.stdout, got.stdout[-3000:]
+    cut = _edited_between_halves(probe_root / "cut", mutate_loop=True)
+    assert cut.returncode != 0, cut.stdout[-2000:]
+    assert "stale_probe went stale" in cut.stderr and "test passes ... ok" not in cut.stdout

@@ -80,41 +80,43 @@ generic alert and the number of unread items; on an Android phone, or an iPhone
 on iOS 26 and later, the store's age signal — from an iPhone with an attestation
 of the app whenever the phone can make one, and from an Android phone with one
 once nests can check it — read on the device and sent only to your nest; and, on
-an iPhone or Mac, a copy of your identity key to Apple's iCloud Keychain if you
-turn that on, which is off by default. When the app rents a server, manages your
-domain or imports your old mailbox for you, to the provider you chose, with the
-credential you gave it (on the web app, where a provider refuses calls from a
-browser, such a call will pass through a relay of ours, which parses and keeps
-nothing it forwards); and when you link a Bluesky account, your browser signs in
-at the server that holds that account. And, from the desktop and terminal apps,
-to the site that publishes our releases — only to learn whether a newer version
-is out, when you ask and once at sign-in. And, directly, from the Linux, Windows
-and terminal apps to your own other devices, and from those and the Mac app to
-the devices of people you share a folder with — from the iPhone and Android apps
-only what pairing in person itself exchanges, never a file. And, when you enter
-a handle or retire a nest — and, on the web app, when it reconnects to your nest
-— to a public DNS service (Cloudflare's), only to look up that domain's records.
-And, when you load the pictures a message or mail links to from elsewhere, or
-open an article from someone you follow or a nest's web page, to the sites that
-host those pictures. And, when something you look up, open, send or share rests
-on another Fauna nest — the person you type to reach, a post someone there
-wrote, a conversation someone there started, a room or a folder whose home is
-there, or a backup you chose to keep there — to that nest, only to look that
-person up, to read what rests there, to store there the files you attach to a
-conversation and, from the Linux app, your changes to a shared folder, encrypted
-on your device, and, for the backup, to sign in there as you to set it up and
-manage it and to read it back, still encrypted, to check it or to restore it.
-And, from the Linux app, and from the terminal app on Linux and macOS, today, to
-a program on the same computer that you have connected to your account and
-approved to read or send in your conversations — a program serving an AI
-assistant, say: only what that approval covers — your rooms and their messages
-as it asks for them, the matches of a search it runs, and a message it sends as
-you — never your conversation keys; the app notes on your nest each thing it did
-for that program — what kind, in which room, and when, never what was read,
-searched or said; and what the program does with what it reads is its own:
-Fauna's program for AI assistants passes it on to whichever assistant you
-connected it to, and to that assistant's provider if the assistant runs on a
-company's servers. Nothing stays with us.
+an iPhone, a copy of your identity — its key, with your handle and your nest's
+address — to Apple's iCloud Keychain if you turn that on, which is off by
+default. When the app rents a server, manages your domain or imports your old
+mailbox for you, to the provider you chose, with the credential you gave it (on
+the web app, where a provider refuses calls from a browser, such a call will
+pass through a relay of ours, which parses and keeps nothing it forwards); and
+when you link a Bluesky account, your browser signs in at the server that holds
+that account. And, from the desktop and terminal apps, to the site that
+publishes our releases — only to learn whether a newer version is out, when you
+ask and once at sign-in. And, directly, from the Linux, Windows, Mac and
+terminal apps to your own other devices and to the devices of people you share a
+folder with; and from the iPhone and Android apps, while the app is open, to
+your own other devices and to no one else's — apart from what pairing in person
+on the Android app itself exchanges with the device in front of you, never a
+file. And, when you enter a handle or retire a nest — and, on the web app, when
+it reconnects to your nest — to a public DNS service (Cloudflare's), only to
+look up that domain's records. And, when you load the pictures a message or mail
+links to from elsewhere, or open an article from someone you follow or a nest's
+web page, to the sites that host those pictures. And, when something you look
+up, open, send or share rests on another Fauna nest — the person you type to
+reach, a post someone there wrote, a conversation someone there started, a room
+or a folder whose home is there, or a backup you chose to keep there — to that
+nest, only to look that person up, to read what rests there, to store there the
+files you attach to a conversation and, from the Linux app, your changes to a
+shared folder, encrypted on your device, and, for the backup, to sign in there
+as you to set it up and manage it and to read it back, still encrypted, to check
+it or to restore it. And, from the Linux app, and from the terminal app on Linux
+and macOS, today, to a program on the same computer that you have connected to
+your account and approved to read or send in your conversations — a program
+serving an AI assistant, say: only what that approval covers — your rooms and
+their messages as it asks for them, the matches of a search it runs, and a
+message it sends as you — never your conversation keys; the app notes on your
+nest each thing it did for that program — what kind, in which room, and when,
+never what was read, searched or said; and what the program does with what it
+reads is its own: Fauna's program for AI assistants passes it on to whichever
+assistant you connected it to, and to that assistant's provider if the assistant
+runs on a company's servers. Nothing stays with us.
 
 **Your nest.** The nest is the server program that you, or the admin of the
 nest you joined, run — on a rented machine, on a computer at home, or as the

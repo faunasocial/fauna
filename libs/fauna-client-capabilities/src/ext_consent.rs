@@ -651,6 +651,10 @@ mod tests {
                 .sign(self.0.signing_key())
                 .map_err(|e| grant_log::GrantEventSignError::Sign(e.to_string()))
         }
+
+        fn remint_replacement_id(&self, old_grant_id: &[u8; 16]) -> [u8; 16] {
+            crate::succession::remint_grant_id(self.0.secret_bytes(), old_grant_id)
+        }
     }
 
     fn manifest(domain: &str, kinds: &[&str]) -> String {

@@ -84,6 +84,16 @@ ENV CARGO_RESOLVER_FEATURE_UNIFICATION=selected
 # also needed for `-Z threads` below). One-time full recompile when the cache
 # first switches from mtime to checksum fingerprints (same one-time cost as any
 # RUSTFLAGS/toolchain change), then incremental again.
+# ⚠ MEASURED INERT 2026-11-11: inside this stage, cargo passes rustc no
+# `-Z checksum-hash-algorithm`, so its `dep-lib-*` fingerprints record no
+# checksum and freshness silently falls back to mtime. On the primary dev VM
+# the same cargo and rustc binaries do record one; the container-side trigger
+# is not found.
+# A caldav compile then ran against another checkout's fauna-client-drafts. The
+# hole is closed by `docker/cargo-content-freshness.sh` instead. Each compile
+# RUN gives every source file the mtime the mount recorded for its content, or
+# now for content the mount has not seen, so the mtime path is correct by itself. This ENV stays harmless and
+# would take effect on its own if cargo starts honouring it here.
 ENV CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true
 
 # rust-wasm's base: rust-base's own image (the same pinned digest), on the BUILD
@@ -214,6 +224,10 @@ COPY services/fauna-cors-proxy services/fauna-cors-proxy
 COPY services/fauna-front-door services/fauna-front-door
 COPY tools/check-additive-evolution tools/check-additive-evolution
 COPY tools/kache-launcher tools/kache-launcher
+# Content-keyed freshness over the shared target mount (the script's header;
+# the `CARGO_UNSTABLE_CHECKSUM_FRESHNESS` comment in rust-base). Outside /src,
+# so its own content is not part of what it hashes.
+COPY docker/cargo-content-freshness.sh /usr/local/bin/cargo-content-freshness.sh
 # The target/ cache mount carries compiled deps + crates across builds; cargo's
 # incremental fingerprinting recompiles only what changed. Binaries are cp-ed to
 # /out in the same RUN because a cache-mounted target/ is not kept in the layer.
@@ -264,6 +278,7 @@ RUN --network=none \
     --mount=type=cache,id=rust-target-native-${TARGETARCH}${FAUNA_CACHE_SALT},sharing=locked,target=/src/target \
     ulimit -c 0 && ulimit -f 16777216 \
     && export CARGO_NET_OFFLINE=true \
+    && sh /usr/local/bin/cargo-content-freshness.sh /src/target /src \
     && cargo build --locked --release -p fauna-nest -p fauna-sandbox -p fauna-sni-router --features bluesky,nostr,activitypub \
     && cargo build --locked --release -p fauna-ffi --no-default-features --features labeler \
     && cargo build --locked --release -p fauna-iroh-relay --features fauna-iroh-relay/relay \
@@ -364,6 +379,10 @@ COPY services/fauna-cors-proxy services/fauna-cors-proxy
 COPY services/fauna-front-door services/fauna-front-door
 COPY tools/check-additive-evolution tools/check-additive-evolution
 COPY tools/kache-launcher tools/kache-launcher
+# Content-keyed freshness over the shared target mount (the script's header;
+# the `CARGO_UNSTABLE_CHECKSUM_FRESHNESS` comment in rust-base). Outside /src,
+# so its own content is not part of what it hashes.
+COPY docker/cargo-content-freshness.sh /usr/local/bin/cargo-content-freshness.sh
 # target/ id suffixed with ${BUILDARCH}: the wasm32 OUTPUT is
 # host-arch-independent, but the build-script/proc-macro intermediates in
 # target/ are artifacts of the arch this stage runs as — the build host's, so a
@@ -406,6 +425,23 @@ ARG BUILDARCH
 # nothing; a `Compiling` line in its output means it did — a third-party build
 # script ran with the network — and the RUN fails. Every chunk below needs a
 # line in BOTH (2) and (3): the WASM-chunk parity gate holds the two lists equal.
+#
+# (3) never mounts the shared target. The mount's `sharing=locked` lock is held
+# per RUN, so between (2) and (3) another checkout's image build can take the
+# mount and leave its own units there: they read fresh, nothing compiles, the
+# `Compiling` guard stays silent, and wasm-pack would package THAT checkout's
+# wasm. So (2) ends, still holding the lock, by copying its target into its own
+# layer (/wasm-target, outside /src so the freshness script never hashes it),
+# and (3) links that copy at /src/target, the path cargo built it under
+# (measured 2026-11-11: every unit reads Fresh through the link). What (3)
+# packages is then what this build's (2) compiled, whatever the mount holds by
+# now, and a layer-cached (2) carries its own copy. The cost is one copy of the
+# target per built tree in the builder's layer cache (a `just wasm` target is
+# about 1.3 GB), never in the image. The `rmdir` refuses a /src/target that
+# holds anything: the link must never land inside a real directory. When
+# wasm-pack runs with no network (image-pipeline.md § The Dockerfile's stages
+# compile hermetically, the gap), (2) and (3) become one RUN under one lock and
+# the copy goes away.
 # FAUNA_CACHE_SALT suffixes every cache-mount id of this stage: empty for every
 # ordinary build, so the ids and the warm caches are unchanged; a cold-cache
 # witness (image-pipeline.md § Witnessing an image-plumbing change →
@@ -421,6 +457,7 @@ RUN --network=none \
     ulimit -c 0 && ulimit -f 16777216 \
     && export CARGO_NET_OFFLINE=true \
     && CPUSET="0-$((BUILD_JOBS - 1))" \
+    && sh /usr/local/bin/cargo-content-freshness.sh /src/target /src \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm/Cargo.toml \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-onboarding/Cargo.toml \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-launch/Cargo.toml \
@@ -430,14 +467,16 @@ RUN --network=none \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-labeler-catalog/Cargo.toml \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-share/Cargo.toml \
     && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-connected-apps/Cargo.toml \
-    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-atproto-settings/Cargo.toml
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-atproto-settings/Cargo.toml \
+    && rm -rf /wasm-target && cp -a /src/target /wasm-target
 RUN --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},target=/usr/local/cargo/git \
-    --mount=type=cache,id=rust-target-wasm-${BUILDARCH}${FAUNA_CACHE_SALT},sharing=locked,target=/src/target \
     --mount=type=cache,id=wasm-pack-tool-cache${FAUNA_CACHE_SALT},target=/root/.cache/.wasm-pack \
     ulimit -c 0 && ulimit -f 16777216 \
     && export CARGO_NET_OFFLINE=true \
     && CPUSET="0-$((BUILD_JOBS - 1))" \
+    && { [ ! -e /src/target ] || rmdir /src/target; } \
+    && ln -s /wasm-target /src/target \
     && log=/tmp/wasm-pack.log \
     && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm --target web -- --locked 2>>"$log" \
     && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-onboarding --target web -- --locked 2>>"$log" \
@@ -484,7 +523,7 @@ RUN --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},target=/usr/loc
 # what we release. Kept equal to bins/fauna-bridges/go.mod's `toolchain`
 # directive (the single source of truth) by a dedicated merge-gate toolchain-sync
 # gate. Bump both together — § Go toolchain pin in build-system.md.
-FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:5b1f78db1f54cc8cb46e652c51d3f854441c4310a449161b6fe9fb553edab505 AS bridges-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS bridges-builder
 WORKDIR /src
 # Cap Go's build parallelism to match the Rust stages (see the global BUILD_JOBS
 # comment) so the mail-bridge cross-compile doesn't spike the shared host.
@@ -625,20 +664,103 @@ ARG FAUNA_BUILD_COMMIT=dev
 ENV VITE_GIT_SHA=${FAUNA_BUILD_COMMIT}
 RUN --mount=type=cache,id=deno-dir${FAUNA_CACHE_SALT},target=/deno-dir deno task build
 
-# The served SPA tree alone — exactly what the final stage copies to
-# /usr/share/fauna-web/ — for `--target web-tree --output type=local`, so the
-# reproducibility probe workflow (web-tree-reproducibility.yml) can
-# extract and hash it without building rust-native or pushing an image
-# (release-integrity.md § Release signing → Web-app verifiability). Not on the
-# final image's path: nothing below copies from it.
+# ── Licences and notices (shipped-notices.md § Per channel) ─────────
+# The web app and the image each carry LICENSE-MIT, LICENSE-APACHE (the
+# repository's files, byte for byte) and a THIRD-PARTY-NOTICES generated for
+# what that artifact bundles: `scripts/shipped-notices.py`, the manifest's
+# `web-app` and `nest-image` artifacts (installer/shipped-notices.toml). A
+# generator refusal fails the build. The generated file and the cached licence
+# files it copies are dependency-authored text: copied, never read, never
+# printed — the RUN prints the generator's verdict lines only.
+#
+# web-notices runs on rust-wasm (the build platform, the full source tree, the
+# wasm32 target) with the SPA's node_modules beside it, and writes the three
+# files the web app serves beside its entry page, `.txt` so a browser shows
+# them. `just web-notices` writes the same three into a `just web` tree, so the
+# hosted tree and a verifier's rebuild agree (release-integrity.md § Release
+# signing → Web-app verifiability). Fetch, then generate with no network, as
+# every compiling stage does; the generator passes `--offline` to cargo itself.
+# The registry mounts are rust-wasm's own (its fetch takes the whole locked
+# graph, which `cargo metadata` needs), `sharing=locked` because the two
+# per-arch nest-notices stages below fetch into them at once. The interpreter
+# is the pinned base image's own /usr/bin/python3 (Debian's 3.11): the stage
+# holds no uv, and a digest-pinned image is one interpreter everywhere.
+FROM rust-wasm AS web-notices
+COPY --from=web-builder /src/apps/fauna-web/node_modules/ apps/fauna-web/node_modules/
+COPY apps/fauna-web/package.json apps/fauna-web/deno.lock apps/fauna-web/
+COPY LICENSE-MIT LICENSE-APACHE deny.toml THIRD-PARTY-NOTICES.m[d] ./
+COPY installer/shipped-notices.toml installer/
+COPY supply-chain/licence-texts/ supply-chain/licence-texts/
+COPY scripts/shipped-notices.py scripts/
+ARG FAUNA_CACHE_SALT=
+RUN --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/git \
+    cargo fetch --locked
+RUN --network=none \
+    --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/git \
+    set -e; \
+    mkdir -p /notices-web; \
+    /usr/bin/python3 scripts/shipped-notices.py web-app /notices-web/THIRD-PARTY-NOTICES.txt; \
+    cp LICENSE-MIT /notices-web/LICENSE-MIT.txt; \
+    cp LICENSE-APACHE /notices-web/LICENSE-APACHE.txt
+
+# nest-notices: the image's own three files, for every Fauna binary in it — the
+# native Rust groups (resolved for the image's own triple: this stage runs at
+# the build platform, so `--host-target` names the target), the three Go
+# binaries read with `go version -m` exactly as built, and the web app the
+# image serves. The Go toolchain and the binaries come from bridges-builder;
+# the module cache is its `go-mod` mount, filled by its own download first.
+# The repository's notices file (the Go modules' licence ids) sits at the root
+# of the public tree and under the publish tree's injected files here.
+FROM web-notices AS nest-notices
+COPY --from=bridges-builder /usr/local/go/ /usr/local/go/
+ENV PATH=/usr/local/go/bin:${PATH} GOPATH=/go GOMODCACHE=/go/pkg/mod GOTOOLCHAIN=local
+COPY --from=bridges-builder /fauna-mail-bridge /fauna-supervisor /fauna-atproto-bridge bins/fauna-bridges/
+ARG FAUNA_CACHE_SALT=
+ARG TARGETARCH
+RUN --mount=type=cache,id=go-mod${FAUNA_CACHE_SALT},target=/go/pkg/mod \
+    go -C bins/fauna-bridges mod download
+RUN --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/git \
+    cargo fetch --locked
+RUN --network=none \
+    --mount=type=cache,id=go-mod${FAUNA_CACHE_SALT},target=/go/pkg/mod \
+    --mount=type=cache,id=cargo-registry-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm${FAUNA_CACHE_SALT},sharing=locked,target=/usr/local/cargo/git \
+    set -e; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu ;; \
+      arm64) triple=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /notices-nest; \
+    /usr/bin/python3 scripts/shipped-notices.py nest-image /notices-nest/THIRD-PARTY-NOTICES --host-target "$triple"; \
+    cp LICENSE-MIT LICENSE-APACHE /notices-nest/
+
+# The served SPA tree alone — the built SPA and its three licence files, exactly
+# what the final stage copies to /usr/share/fauna-web/ (through web-export) —
+# for `--target web-tree --output type=local`, so the reproducibility probe
+# workflow (web-tree-reproducibility.yml) can extract and hash it without
+# building rust-native or pushing an image (release-integrity.md § Release
+# signing → Web-app verifiability).
 FROM scratch AS web-tree
 COPY --from=web-builder /src/apps/fauna-web/build/ /
+COPY --from=web-notices /notices-web/ /
 
-# The `clang --version` of the wasm32 C compiler that built the chunks above,
-# exported beside the web tree (never inside it): the asset manifest records
-# the compiler that built the tree, and the workflow host does not hold it
-# (`scripts/web-asset-manifest.py write --wasm32-cc-version-file`).
-FROM scratch AS wasm32-cc-version
+# What a workflow exports in ONE invocation (`--target web-export --output
+# type=local`): the served tree under /web-tree/ and, beside it (never inside
+# it), the `clang --version` of the wasm32 C compiler that built the chunks —
+# the asset manifest records the compiler that built the tree, and the workflow
+# host does not hold it (`scripts/web-asset-manifest.py write
+# --wasm32-cc-version-file`). The final stage copies its tree from HERE, so the
+# image build itself builds and caches both COPY layers while rust-wasm's
+# snapshot is present: the export after it is served from those layers' cache
+# and never needs that snapshot again (a separate stage the image did not
+# build re-ran rust-wasm's wasm-pack layer when BuildKit had dropped the
+# snapshot — fleet-guests.md § the self-hosted CI runner, the 2026-11-13 reading).
+FROM scratch AS web-export
+COPY --from=web-tree / /web-tree/
 COPY --from=rust-wasm /opt/wasm32-cc/version.txt /wasm32-cc-version.txt
 
 # ── Final image ─────────────────────────────────────────────────────
@@ -744,8 +866,15 @@ COPY --from=bridges-builder /fauna-atproto-bridge /usr/local/bin/fauna-atproto-b
 RUN ldconfig \
     && setcap cap_net_bind_service=+ep /usr/local/bin/fauna-mail-bridge
 
-# Copy web SPA build output
-COPY --from=web-builder /src/apps/fauna-web/build/ /usr/share/fauna-web/
+# Copy the served SPA tree (the build output and its three licence files) —
+# the web-tree stage, by way of web-export, so this build caches the export
+COPY --from=web-export /web-tree/ /usr/share/fauna-web/
+
+# The image's licences and notices (shipped-notices.md § Per channel, the Nest
+# image row): Fauna's two licence texts and the notices for every Fauna binary
+# here and the web app it serves. The base image's own packages keep the
+# copyright files Debian ships under /usr/share/doc/<package>/.
+COPY --from=nest-notices /notices-nest/ /usr/share/doc/fauna/
 
 # Copy default config (base for first-run initialization)
 COPY config/default.toml /etc/fauna/default.toml
@@ -827,6 +956,7 @@ ENV FAUNA_BUILD_COMMIT=${FAUNA_BUILD_COMMIT}
 ARG FAUNA_VERSION=
 LABEL org.opencontainers.image.revision=${FAUNA_BUILD_COMMIT} \
       org.opencontainers.image.version=${FAUNA_VERSION} \
-      org.opencontainers.image.source="https://github.com/faunasocial/fauna"
+      org.opencontainers.image.source="https://github.com/faunasocial/fauna" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 ENTRYPOINT ["/entrypoint.sh"]

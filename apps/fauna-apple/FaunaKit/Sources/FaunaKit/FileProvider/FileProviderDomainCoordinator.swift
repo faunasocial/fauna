@@ -590,6 +590,7 @@ import Foundation
                 signer: FileProviderSignerWatch.machineSigner(actorId: actorId)
             )
             FileProviderSignerWatch.mirrorRetainedKeys(actorId: actorId)
+            seatGroupRingMirror(actorId: actorId)
             // Intra-process read-back guard, the same one the FP test CLI runs:
             // the writer swallows `SecItemAdd`'s status, and the one failure that
             // matters here — the data-protection keychain refusing the app-group
@@ -611,6 +612,33 @@ import Foundation
                     message: "[fp] capability provisioned into the shared data-protection keychain")
             }
             return actorId
+        }
+
+        /// Seat the account's group-ring mirror in the extension's own state
+        /// dir (`group-set.md` § Build design — the group set, decision 12 (3)):
+        /// the container-domain root every `FfiFileProviderHost.appDead` host
+        /// of the account is built with (`fileProviderStateDir`). From then on
+        /// the FFI account runtime keeps `group-rings.sealed` current from the
+        /// store itself, and the extension opens it under a key it derives from
+        /// the `BackupKey` it is provisioned with — no cadence here, no
+        /// keychain item. Idempotent; on macOS the app is the container's
+        /// steward and writes there as it writes `domain-owners.json`.
+        ///
+        /// EXCISED BY `FAUNA_EXCISE_P2P_SHARE` (the reason is written once, at
+        /// the top of `SharePlaneModel.swift`): a group set is a share-plane
+        /// set, and the FFI's seat rides `offline-share`, which the store-safe
+        /// flavor drops — there it is a no-op, as there are no group sets.
+        static func seatGroupRingMirror(actorId: Data) {
+            #if !FAUNA_EXCISE_P2P_SHARE
+                do {
+                    let stateDir = try fileProviderStateDir(actorIdHex: data_to_hex(actorId))
+                    try installGroupRingMirror(actorId: actorId, stateDir: stateDir.path)
+                } catch {
+                    logMessage(
+                        level: .warn, target: "fauna.fileprovider",
+                        message: "[fp] group-ring mirror not seated — group sets stay keys-pending in the extension: \(error)")
+                }
+            #endif
         }
     }
 

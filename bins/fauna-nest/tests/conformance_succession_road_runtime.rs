@@ -244,6 +244,7 @@ async fn successor_runtime(
         peer_transport: None,
         enrollment_target_device_id: format!("{:0<64}", hex::encode(name.as_bytes())),
         enrollment_device_label: None,
+        foreground: true,
     })
     .await
     .expect("the successor's runtime assembles")

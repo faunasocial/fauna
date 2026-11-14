@@ -12,10 +12,7 @@ absences:
 
 Two people sitting together can share a folder device to device: each copies the
 other's code from the screen in front of them, one gets ready to receive, the
-other begins, and the folder is listed on both sides. Copying the folder's files
-across this way is still being built; in a folder you share through your nest, a
-file added while the nest is unreachable can already reach the other person
-straight from your device. Nobody can start a share with you that you did not
+other begins, and the folder is listed on both sides. Once each of you picks a place for the folder on your own device, a file either of you adds there reaches the other person straight from your device while both apps are open, with no nest involved — and in a folder you share through your nest, a file added while the nest is unreachable can reach the other person the same way. Nobody can start a share with you that you did not
 ask for. This is about giving a folder to another person face to face; your own
 devices moving your own files between themselves is [Files move straight between
 your own devices](device-to-device-file-transfer.md).
@@ -53,11 +50,11 @@ Stamped 2026-10-21 at 77c610862e.
 | linux | ✅ full | 0.1.5-dev+0cfdd6c6 standalone |
 | windows | ✅ full | 0.1.6-dev+00ef95a1 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+2e009c0f standalone |
+| ios | 🚧 unbuilt | 0.1.5-dev+2e009c0f standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+d739a57d standalone |
+| tui | ✅ full | 0.1.6 docker |
 | android-kids |  no run recorded | |
-| ios-kids |  no run recorded | |
+| ios-kids | 🚧 unbuilt | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

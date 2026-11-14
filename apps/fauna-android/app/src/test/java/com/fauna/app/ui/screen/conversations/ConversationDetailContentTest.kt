@@ -980,6 +980,52 @@ class ConversationDetailContentTest {
         composeTestRule.onNodeWithTag("dm-attachment-image").assertTextEquals("pic.png (10B)")
     }
 
+    /** conversation-attachments 12: a tap on a held picture opens `image-lightbox` over the
+     *  thread; Escape closes it and the thread (the picture) is still there. */
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun tappingAHeldPictureOpensTheLightboxAndEscapeClosesIt() {
+        val png = pngBytes()
+        render(
+            detail(messages = listOf(msg("m1", attachments = listOf(picture)))),
+            loadAttachmentBytes = { png },
+            attachmentResident = { true },
+        )
+        composeTestRule.onNodeWithTag("image-lightbox").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("dm-attachment-image").performClick()
+        composeTestRule.onNodeWithTag("image-lightbox").assertExists()
+        // Escape is the dismiss the lightbox itself adds (back is the platform Dialog's own
+        // onDismissRequest); drive it as a key event on the lightbox node.
+        composeTestRule.onNodeWithTag("image-lightbox")
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.RequestFocus)
+        composeTestRule.onNodeWithTag("image-lightbox").performKeyInput {
+            pressKey(androidx.compose.ui.input.key.Key.Escape)
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("image-lightbox").assertDoesNotExist()
+        assertEquals("painted", attachmentState())
+    }
+
+    /** conversation-attachments 13: a picture whose bytes the device does not hold still
+     *  opens `image-lightbox` — as its placeholder, never a dropped click — and the close
+     *  button returns to the thread. */
+    @Test
+    fun tappingAPlaceholderPictureOpensTheLightboxAsItsPlaceholder() {
+        render(detail(messages = listOf(msg("m1", attachments = listOf(picture)))))
+        composeTestRule.onNodeWithTag("dm-attachment-image").performClick()
+        composeTestRule.onNodeWithTag("image-lightbox").assertExists()
+        // The declared filename-and-size shows twice: in the thread and as the lightbox's body.
+        composeTestRule.onAllNodesWithText("pic.png (10B)", useUnmergedTree = true)
+            .assertCountEquals(2)
+        composeTestRule.onNodeWithContentDescription(
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+                .getString(com.fauna.app.R.string.common_close),
+        ).performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("image-lightbox").assertDoesNotExist()
+        assertEquals("placeholder", attachmentState())
+    }
+
     /** The compose bar renders the shared `reply_preview` record — sender and excerpt —
      *  never the bare answered-message id it painted before. */
     @Test

@@ -170,15 +170,16 @@ mod index_lease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use index_lease::{FIRST_ANSWER_CEILING, IndexLeaseSeat};
 
-/// The custody-ceremony conversations glue (W8.4 (account-data-plane.md § Workstreams)). Native-only for now —
-/// web's ceremony wiring rides the web leg.
-#[cfg(not(target_arch = "wasm32"))]
+/// The custody-ceremony conversations glue (W8.4 (account-data-plane.md § Workstreams)) — both
+/// targets: web's rail registers the same sink and drives with the same poster
+/// (`ui/devices.md` § Where logic lives; only the session-bound entry is native).
 mod custody_ceremony_glue;
 #[cfg(not(target_arch = "wasm32"))]
+pub use custody_ceremony_glue::custody_mint_candidates;
 pub use custody_ceremony_glue::{
-    CustodyCeremonyIngestCounts, CustodyCeremonyObserver, CustodyMintCandidate,
-    SessionCustodyPoster, StoreCustodyCeremonySink, custody_ceremony_ingest_counts,
-    custody_mint_candidates, mint_candidates_from_channels,
+    BackendCustodyPoster, CustodyCeremonyIngestCounts, CustodyCeremonyObserver,
+    CustodyMintCandidate, StoreCustodyCeremonySink, custody_ceremony_ingest_counts,
+    custody_mint_candidates_over, drive_ceremony_pass, mint_candidates_from_channels,
 };
 
 /// Test-only tracing capture for the drain-side Welcome-ingest-failure pin — kept crate-local because it
@@ -551,7 +552,73 @@ where
             )
             .await
     }
+}
 
+/// The MLS outbox drain's keyed appends (`devices.md` § Offline compose →
+/// *Idempotency*): the requests [`ConversationsClient::channel_send`] /
+/// [`ConversationsClient::channel_send_remote`] make, ungated, with the queued
+/// intent's id as the envelope key, so a replay gets the nest's recorded ack
+/// and never a second message. The one body both `ConversationsRpc`
+/// transports delegate to — the native `NestConversationsRpc` and the
+/// browser's `WsConversationsRpc` — so neither can fall back to the trait's
+/// refusing default, which parks every queued message unsent.
+impl<R> ConversationsClient<R>
+where
+    R: fauna_protocol::KeyedRpcRequester,
+    R::Error: RpcErrorClass,
+{
+    pub async fn channel_send_keyed(
+        &self,
+        channel_id: impl Into<String>,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<ChannelSendReply, R::Error> {
+        self.nest
+            .request_keyed(
+                "fauna.conversations.channel.send",
+                idempotency_key,
+                ChannelSendRequest {
+                    channel_id: channel_id.into(),
+                    envelope,
+                    attachment_refs,
+                    expect_no_commit_since: None,
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
+    pub async fn channel_send_remote_keyed(
+        &self,
+        channel_id: impl Into<String>,
+        home_nest_url: impl Into<String>,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<ChannelSendReply, R::Error> {
+        self.nest
+            .request_keyed(
+                "fauna.conversations.channel.send_remote",
+                idempotency_key,
+                ChannelSendRemoteRequest {
+                    channel_id: channel_id.into(),
+                    nest_url: home_nest_url.into(),
+                    envelope,
+                    expect_no_commit_since: None,
+                    attachment_refs,
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+}
+
+impl<R> ConversationsClient<R>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
     /// `fauna.conversations.blob.write_token.get` — a **foreign member** asks
     /// its own nest to relay a short-lived, write-only bulk-byte token from the
     /// channel's home nest, so its sealed attachment bytes can be POSTed DIRECT
@@ -3254,8 +3321,8 @@ impl fauna_conversations::backend::RoomCeremonyRpc for NestConversationsRpc {
 #[async_trait::async_trait]
 impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
     // The MLS outbox drain's keyed appends (`devices.md` § Offline compose →
-    // *Idempotency*): the requests `channel_send` / `channel_send_remote` make,
-    // ungated, with the queued intent's id as the envelope key.
+    // *Idempotency*) — the shared `ConversationsClient` body, as the browser's
+    // `WsConversationsRpc` delegates too.
     async fn channel_send_keyed(
         &self,
         channel_id_hex: String,
@@ -3263,20 +3330,8 @@ impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
         attachment_refs: Vec<String>,
         idempotency_key: [u8; 16],
     ) -> Result<i64, ConvRpcError> {
-        use fauna_protocol::KeyedRpcRequester;
-        self.nest
-            .as_ref()
-            .request_keyed::<_, ChannelSendReply>(
-                "fauna.conversations.channel.send",
-                idempotency_key,
-                ChannelSendRequest {
-                    channel_id: channel_id_hex,
-                    envelope,
-                    attachment_refs,
-                    expect_no_commit_since: None,
-                    extra: std::collections::BTreeMap::new(),
-                },
-            )
+        self.client
+            .channel_send_keyed(channel_id_hex, envelope, attachment_refs, idempotency_key)
             .await
             .map(|r| r.seq)
             .map_err(channel_send_error)
@@ -3290,20 +3345,13 @@ impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
         attachment_refs: Vec<String>,
         idempotency_key: [u8; 16],
     ) -> Result<i64, ConvRpcError> {
-        use fauna_protocol::KeyedRpcRequester;
-        self.nest
-            .as_ref()
-            .request_keyed::<_, ChannelSendReply>(
-                "fauna.conversations.channel.send_remote",
+        self.client
+            .channel_send_remote_keyed(
+                channel_id_hex,
+                home_nest_url,
+                envelope,
+                attachment_refs,
                 idempotency_key,
-                ChannelSendRemoteRequest {
-                    channel_id: channel_id_hex,
-                    nest_url: home_nest_url,
-                    envelope,
-                    expect_no_commit_since: None,
-                    attachment_refs,
-                    extra: std::collections::BTreeMap::new(),
-                },
             )
             .await
             .map(|r| r.seq)
@@ -8152,6 +8200,45 @@ impl fauna_conversations::backend::RoomCeremonyRpc for WsConversationsRpc {
 #[cfg(target_arch = "wasm32")]
 #[async_trait::async_trait(?Send)]
 impl fauna_conversations::backend::ConversationsRpc for WsConversationsRpc {
+    // The MLS outbox drain's keyed appends (`devices.md` § Offline compose →
+    // *Idempotency*) — the shared `ConversationsClient` body, as the native
+    // `NestConversationsRpc` delegates too. Without these the trait's refusing
+    // default parked every message queued offline in a tab.
+    async fn channel_send_keyed(
+        &self,
+        channel_id_hex: String,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<i64, ConvRpcError> {
+        self.client
+            .channel_send_keyed(channel_id_hex, envelope, attachment_refs, idempotency_key)
+            .await
+            .map(|r| r.seq)
+            .map_err(channel_send_error)
+    }
+
+    async fn channel_send_remote_keyed(
+        &self,
+        channel_id_hex: String,
+        home_nest_url: String,
+        envelope: Vec<u8>,
+        attachment_refs: Vec<String>,
+        idempotency_key: [u8; 16],
+    ) -> Result<i64, ConvRpcError> {
+        self.client
+            .channel_send_remote_keyed(
+                channel_id_hex,
+                home_nest_url,
+                envelope,
+                attachment_refs,
+                idempotency_key,
+            )
+            .await
+            .map(|r| r.seq)
+            .map_err(channel_send_error)
+    }
+
     async fn own_withheld_records(
         &self,
     ) -> Result<Vec<fauna_conversations::message::WithheldRecord>, ConvRpcError> {
@@ -9582,6 +9669,120 @@ mod tests {
         let req: SendEmailRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.recipients, vec!["alice@fauna.test", "bob@peer.test"]);
         assert_eq!(req.raw_rfc5322, vec![0x52, 0x46, 0x43]);
+    }
+
+    // ── The MLS outbox drain's keyed appends (`devices.md` § Offline compose →
+    //    *Idempotency*) ──────────────────────────────────────────────────────
+    //
+    // One body for both transports: the native `NestConversationsRpc` and the
+    // browser's `WsConversationsRpc` each delegate their `channel_send_keyed` /
+    // `channel_send_remote_keyed` to these. A transport left on the trait's
+    // refusing default parks every queued message "this transport cannot send
+    // a queued message" — web did.
+
+    /// Records the one keyed request it is sent and answers `seq: 7`.
+    #[derive(Clone, Default)]
+    struct KeyedRecorder(Arc<std::sync::Mutex<Option<KeyedCall>>>);
+
+    /// The one keyed request seen: `(kind, idempotency key, payload)`.
+    type KeyedCall = (&'static str, [u8; 16], Vec<u8>);
+
+    impl RpcRequester for KeyedRecorder {
+        type Error = MockError;
+
+        async fn request<Req, Reply>(&self, kind: &'static str, _: Req) -> Result<Reply, MockError>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            panic!("a queued intent must go keyed, never through the unkeyed `{kind}`")
+        }
+    }
+
+    impl fauna_protocol::KeyedRpcRequester for KeyedRecorder {
+        async fn request_keyed<Req, Reply>(
+            &self,
+            kind: &'static str,
+            idempotency_key: [u8; 16],
+            payload: Req,
+        ) -> Result<Reply, MockError>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            let bytes = fauna_protocol::encode_canonical(&payload).expect("encode request");
+            *self.0.lock().unwrap() = Some((kind, idempotency_key, bytes.to_vec()));
+            let reply = fauna_protocol::encode_canonical(&ChannelSendReply {
+                seq: 7,
+                extra: Default::default(),
+            })
+            .expect("encode reply");
+            Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"))
+        }
+    }
+
+    #[test]
+    fn a_keyed_send_carries_the_intent_id_as_its_key_on_a_blind_append() {
+        let rec = KeyedRecorder::default();
+        let client = ConversationsClient::new(rec.clone());
+        let key = [0xA5; 16];
+        let reply = block_on(client.channel_send_keyed("ab".repeat(32), vec![1, 2], vec![], key))
+            .expect("keyed send");
+        assert_eq!(reply.seq, 7);
+        let (kind, sent_key, bytes) = rec.0.lock().unwrap().take().expect("one keyed request");
+        assert_eq!(kind, "fauna.conversations.channel.send");
+        assert_eq!(
+            sent_key, key,
+            "the intent id is the envelope's idempotency key"
+        );
+        let req: ChannelSendRequest = fauna_protocol::decode_strict(&bytes).expect("decodes");
+        assert_eq!(req.envelope, vec![1, 2]);
+        assert_eq!(
+            req.expect_no_commit_since, None,
+            "a drained intent is a blind append"
+        );
+
+        block_on(client.channel_send_remote_keyed(
+            "cd".repeat(32),
+            "https://home.test".to_string(),
+            vec![3],
+            vec![],
+            key,
+        ))
+        .expect("keyed remote send");
+        let (kind, sent_key, bytes) = rec.0.lock().unwrap().take().expect("one keyed request");
+        assert_eq!(kind, "fauna.conversations.channel.send_remote");
+        assert_eq!(sent_key, key);
+        let req: ChannelSendRemoteRequest = fauna_protocol::decode_strict(&bytes).expect("decodes");
+        assert_eq!(req.nest_url, "https://home.test");
+        assert_eq!(req.expect_no_commit_since, None);
+    }
+
+    /// Both `ConversationsRpc` transports override the keyed appends — the
+    /// browser's impl block cannot be compiled by a native test, so it is read.
+    #[test]
+    fn both_conversations_transports_send_a_queued_intent_keyed() {
+        let src = include_str!("lib.rs");
+        let (prod, _) = src.split_once("#[cfg(test)]\nmod tests {").unwrap();
+        for transport in ["NestConversationsRpc", "WsConversationsRpc"] {
+            let header =
+                format!("impl fauna_conversations::backend::ConversationsRpc for {transport} {{");
+            let (_, body) = prod
+                .split_once(&header)
+                .unwrap_or_else(|| panic!("{header}"));
+            let body = body.split_once("\n}\n").map_or(body, |(b, _)| b);
+            for method in ["channel_send_keyed", "channel_send_remote_keyed"] {
+                assert!(
+                    body.contains(&format!("async fn {method}(")),
+                    "{transport} leaves `{method}` on the refusing default: every \
+                     message queued offline on it parks unsent"
+                );
+                assert!(
+                    body.contains(&format!(".{method}(")),
+                    "{transport}'s `{method}` must delegate to the shared ConversationsClient body"
+                );
+            }
+        }
     }
 
     /// A one-off mock answering `fauna.email.send` with a non-empty `remote_errors`

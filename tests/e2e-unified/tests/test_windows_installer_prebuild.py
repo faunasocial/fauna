@@ -410,13 +410,17 @@ def _calls(node: ast.AST, name: str) -> list[ast.Call]:
 
 
 def test_build_msi_runs_only_its_subject():
-    """The publish and the WiX link, and nothing else: the ratchet cannot see a
-    `cargo_cmd` variable behind `cmd /c`, so this one reads the steps."""
+    """The publish and the WiX link, and between them the MSI's licence files —
+    nothing else: the ratchet cannot see a `cargo_cmd` variable behind `cmd /c`,
+    so this one reads the steps. The licence step (`just windows-msi-notices`)
+    compiles nothing, and cannot move to collection time: its notices read the
+    project.assets.json the publish's restore writes."""
     steps = _calls(_function(_module_tree(), "_build_msi"), "run_build_step")
-    assert len(steps) == 2, [ast.unparse(step)[:80] for step in steps]
-    first, second = (step.args[0] for step in sorted(steps, key=lambda s: s.lineno))
+    assert len(steps) == 3, [ast.unparse(step)[:80] for step in steps]
+    first, notices, link = (step.args[0] for step in sorted(steps, key=lambda s: s.lineno))
     assert isinstance(first, ast.Name) and first.id == "publish_cmd"
-    assert isinstance(second, ast.BinOp), "the wix argv is a list + the source files"
+    assert isinstance(notices, ast.List) and [ast.literal_eval(e) for e in notices.elts[:2]] == ["just", "windows-msi-notices"]
+    assert isinstance(link, ast.BinOp), "the wix argv is a list + the source files"
 
 
 def test_no_build_argv_is_left_in_the_module():

@@ -297,17 +297,10 @@ def session_microsoft_identity() -> FakeMicrosoftIdentity:
     """
     global _SESSION
     if _SESSION is None:
-        import atexit
-
         from fake_imap_source import session_cert
 
         from drivers.port_util import find_free_port
-        from helpers import android_venue
 
-        # The port is leased through the seam every nest port comes from: an
-        # android app reaches the authority only as its own loopback through an
-        # `adb reverse`, which the venue carries home for that range alone.
-        port, release = android_venue.nest_port(find_free_port)
-        atexit.register(release)
+        port = find_free_port()
         _SESSION = FakeMicrosoftIdentity(cert=session_cert(), port=port).start()
     return _SESSION

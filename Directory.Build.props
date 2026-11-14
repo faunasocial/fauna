@@ -12,9 +12,11 @@
        project a tool generates under this tree) is never forced into locked mode;
        a tracked project with none fails test_nuget_references_pinned.py instead.
 
-       A round regenerates a lock deliberately, on a scratch copy: one restore with
-       locked mode switched off and a forced re-evaluation, typed by hand — never
-       committed to a recipe, script or workflow (the same test holds that). -->
+       A round regenerates a lock deliberately: one restore with locked mode
+       switched off and a forced re-evaluation, run by the round tool's `resolve`
+       verb on the exact version a need names and logged — never typed by hand,
+       never committed to a recipe or workflow (the same test holds that, the
+       round tool's one constant excepted). -->
   <PropertyGroup Condition="Exists('$(MSBuildProjectDirectory)/packages.lock.json')">
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode>true</RestoreLockedMode>

@@ -621,7 +621,8 @@ class FeedActions:
 
     def sell_post(self, full_text: str, preview: str, price: str,
                   subscribers_get_it_free: bool = True,
-                  image_path: str | None = None) -> None:
+                  image_path: str | None = None,
+                  asking_price_sats: int | None = None) -> None:
         """Sell a post through the composer's gate select — "Sell this post…",
         the third answer to `compose-gate-tier-select` (`monetization.md`
         § Per-post pay-to-unlock; IDs user-approved 2026-07-29).
@@ -650,6 +651,10 @@ class FeedActions:
         self.driver.select("compose-gate-tier-select", S.feed.post.gate_sell)
         self.driver.wait_for("compose-sell-price")
         self.driver.type_text("compose-sell-price", price)
+        if asking_price_sats is not None:
+            # The machine-comparable price (`monetization.md` § The asking
+            # price) — what an advertised note's `price` tag carries.
+            self.driver.type_text("compose-sell-asking-price", str(asking_price_sats))
         if not subscribers_get_it_free:
             self.driver.click("compose-sell-subscribers-free")
         self.driver.type_text("compose-gate-preview-field", preview)
@@ -1054,13 +1059,16 @@ class FeedActions:
         (``fauna_feed::FeedManager::set_cue_hydration_hold_for_test``): set
         before the feed page first mounts, the seat's rollup fetch parks until
         it is cleared. The lever for an app no environment variable reaches —
-        web (wasm32 reads no env; ``WasmFeedManager.setCueHydrationHoldForTest``)
-        and macos/ios (FaunaKit's ``FeedCueHydrationHoldTestCommand`` over
-        ``FfiFeedManager.setCueHydrationHoldForTest``); tui and linux take the
-        ``FAUNA_E2E_CUE_HYDRATION_HOLD_FILE`` file at launch instead. android
-        needs neither: on an android run the held second device is the tui
-        seat ``alice_second_device`` launches beside the emulator, which takes
-        the file."""
+        web (wasm32 reads no env; ``WasmFeedManager.setCueHydrationHoldForTest``),
+        macos/ios (FaunaKit's ``FeedCueHydrationHoldTestCommand`` over
+        ``FfiFeedManager.setCueHydrationHoldForTest``) and windows (the agent's
+        arm over ``FeedManagerHost.SetCueHydrationHoldForTest``, kept until the
+        Feed page first builds the manager — ``drivers/windows.py`` builds the
+        launch env from scratch, so the hold file never reaches it); tui and
+        linux take the ``FAUNA_E2E_CUE_HYDRATION_HOLD_FILE`` file at launch
+        instead. android needs neither: on an android run the held second
+        device is the tui seat ``alice_second_device`` launches beside the
+        emulator, which takes the file."""
         if not self.has_in_memory_cue_hydration_hold():
             raise NotImplementedError(
                 f"{type(self.driver).__name__} has no in-memory cue-hydration hold "
@@ -1071,11 +1079,19 @@ class FeedActions:
     def has_in_memory_cue_hydration_hold(self) -> bool:
         """Whether this app arms the cue-hydration hold in memory
         (:meth:`set_cue_hydration_hold`) rather than taking the launch-time
-        hold file — web and both apple apps. On each of them the capture's
-        sampling waits on the feed's hydrate (web's ``hydrateCuesOnce``,
-        FaunaKit's ``CueViewportObserver.run``), so a held seat measures
-        nothing at all, and leaving the feed is the save barrier."""
-        return self.driver.is_web() or self.driver.is_macos() or self.driver.is_ios()
+        hold file — web, both apple apps and windows. On each of them the
+        capture's sampling waits on the feed's hydrate (web's
+        ``hydrateCuesOnce``, FaunaKit's ``CueViewportObserver.run``, windows'
+        ``FeedPage.StartCueCaptureWhenHydratedAsync``), so a held seat measures
+        nothing at all. Where the cue step is the record barrier
+        (:meth:`cue_step_is_the_record_barrier` — web, apple) leaving the feed
+        is the save barrier; windows keeps its quit door."""
+        return (
+            self.driver.is_web()
+            or self.driver.is_macos()
+            or self.driver.is_ios()
+            or self.driver.is_windows()
+        )
 
     def inject_error_for_test(self, message: str, key: str = "feed.error_load") -> None:
         """Drive the feed page's ``error-message`` directly via ``feed_inject_error``.
@@ -1210,9 +1226,22 @@ class FeedActions:
         post_id = self._post_id_of_card(index)
         want_ms = int(seconds * 1000)
         self.freeze_cue_clock()
+
+        def in_view() -> dict | None:
+            probe = self.cue_probe()
+            if post_id in probe["tracked"]:
+                return probe
+            # The list moved under the placement: a feed page's own reload can
+            # land after it and put the list back at the top (a reload that
+            # clears its list empties windows' ListView, measured 2026-11-12).
+            # Place the card again, found by its post — the wait is for the
+            # card in view, never for a time.
+            self.bring_post_into_dwell_view(self.card_index_by_id(post_id))
+            return None
+
         try:
             probe = wait_until(
-                lambda: (lambda p: p if post_id in p["tracked"] else None)(self.cue_probe()),
+                in_view,
                 RPC_ROUNDTRIP_S,
                 diagnose=lambda: f"post-card[{index}] ({post_id[:12]}) never came into "
                                  f"view for the dwell: {self.cue_probe()!r}",
@@ -1331,8 +1360,12 @@ class FeedActions:
         """Freeze the capture's monotonic AND wall clocks at their current
         readings — before any card is on screen, so nothing accrues real time."""
         self._require_cue_clock()
-        self.driver.call_command("feed_cue_clock_freeze", {})
-        assert self.cue_probe()["frozen"], "the cue clock did not freeze"
+        result = self.driver.call_command("feed_cue_clock_freeze", {})
+        assert not (isinstance(result, dict) and "error" in result), (
+            f"feed_cue_clock_freeze refused: {result!r}"
+        )
+        probe = self.cue_probe()
+        assert probe.get("frozen"), f"the cue clock did not freeze: {probe!r}"
 
     def thaw_cue_clock(self) -> None:
         """Back to the real clocks (a no-op where none was frozen)."""
@@ -1367,7 +1400,11 @@ class FeedActions:
         raw = self.driver.call_command("feed_cue_probe", {})
         assert raw, "feed_cue_probe returned nothing"
         # The bridge hands back a JSON result already parsed.
-        return raw if isinstance(raw, dict) else json.loads(raw)
+        probe = raw if isinstance(raw, dict) else json.loads(raw)
+        # A refused probe answers `{error}` (convention 11): name it, rather
+        # than let a caller fail later on a key the refusal does not carry.
+        assert "error" not in probe, f"feed_cue_probe refused: {probe!r}"
+        return probe
 
     # One pixel step of the non-tui scroll walk: small beside any card, so a
     # step moves at most one card across the half-visible line.
@@ -2993,6 +3030,70 @@ class FeedActions:
         self.open_post_actions(index=index)
         self.driver.wait_for("feed-post-publish-web-button")
         self.driver.click("feed-post-publish-web-button")
+
+    def advertise_post_on_nostr(self, index: int = 0, timeout_s: float = 30.0) -> None:
+        """Open post ``index``'s ⋯ menu, press *Advertise on Nostr* and accept
+        the confirm step (``advertise-nostr-confirm-dialog`` →
+        ``advertise-nostr-confirm-button``) — `monetization.md` § The Nostr
+        advertisement of a sold post → *What the author sees and agrees to*.
+        The verb appears once the menu's capability read lands, so the wait
+        is on the verb, not the menu."""
+        self.open_post_actions(index=index)
+        self.driver.wait_for("feed-post-advertise-nostr-button", timeout=timeout_s)
+        self.driver.click("feed-post-advertise-nostr-button")
+        self.driver.wait_for("advertise-nostr-confirm-dialog")
+        self.driver.click("advertise-nostr-confirm-button")
+
+    def stop_advertising_post_on_nostr(self, index: int = 0, timeout_s: float = 30.0) -> None:
+        """Open post ``index``'s ⋯ menu and press *Stop advertising on Nostr*
+        (one tap, no confirm: the withdrawal is de-escalation)."""
+        self.open_post_actions(index=index)
+        self.driver.wait_for("feed-post-stop-advertising-nostr-button", timeout=timeout_s)
+        self.driver.click("feed-post-stop-advertising-nostr-button")
+
+    def open_sale_price_dialog(self, index: int = 0, timeout_s: float = 30.0) -> tuple[str, str]:
+        """Open post ``index``'s ⋯ menu, press *Change price…*
+        (``feed-post-sale-price-button``) and wait for its dialog
+        (``feed-post-sale-price-dialog``), which paints once the author's own
+        tier read lands — `monetization.md` § The asking price → *Re-pricing a
+        sold post*. Returns the two fields' pre-filled values
+        ``(price_hint, asking_price_sats_text)``, so a caller can assert the
+        dialog opened on what the nest holds."""
+        self.open_post_actions(index=index)
+        self.driver.wait_for("feed-post-sale-price-button", timeout=timeout_s)
+        self.driver.click("feed-post-sale-price-button")
+        self.driver.wait_for("feed-post-sale-price-dialog", timeout=timeout_s)
+        return (
+            self.driver.get_text("feed-post-sale-price-hint"),
+            self.driver.get_text("feed-post-sale-price-asking"),
+        )
+
+    def change_sale_price(self, index: int, hint: str, asking: str,
+                          timeout_s: float = 30.0) -> tuple[str, str]:
+        """Re-price sold post ``index`` through its *Change price…* dialog:
+        open it, replace both fields (``asking`` empty clears the asking
+        price), save, and wait for the dialog to close — it closes only on a
+        saved answer, a refusal leaves it open with the reason on
+        ``error-message`` (read into the timeout, convention 6). Returns the
+        pre-filled values the dialog opened with (``open_sale_price_dialog``).
+        """
+        prefill = self.open_sale_price_dialog(index=index, timeout_s=timeout_s)
+        self.driver.clear_and_type("feed-post-sale-price-hint", hint)
+        self.driver.clear_and_type("feed-post-sale-price-asking", asking)
+        self.driver.click("feed-post-sale-price-save-button")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.driver.is_absent("feed-post-sale-price-dialog"):
+                return prefill
+            time.sleep(0.2)
+        try:
+            err = self.driver.get_text("error-message")
+        except Exception:  # noqa: BLE001 — diagnosis only
+            err = "<no error-message>"
+        raise TimeoutError(
+            f"the Change price… dialog stayed open {timeout_s}s after save; "
+            f"error-message={err!r}"
+        )
 
     def unpublish_post_from_web(self, index: int = 0) -> None:
         """Open post ``index``'s ⋯ menu and take its published page down. One

@@ -183,13 +183,10 @@ which a sender can write however they like.
 ## Whose eyes: the privacy model
 
 Events and contact cards are **stored encrypted on every nest**, locked to
-your keys before they're stored — no nest can read your calendar on its disk unless you give it permission to, as below, and no permission you give it lets it read your address book — only a connected app's signed-in session does, as below. The Fauna
+your keys before they're stored — no nest can read your calendar or your address book on its disk unless you give it permission to, as below. The Fauna
 apps open everything on your own device. When a standard calendar or contacts app connects over CalDAV/CardDAV, your nest opens your items with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session — so while one is connected, your box does handle readable copies of what it serves. Invitations
 and replies that travel by email are readable to your nest as they pass to
-and from email, like any mail; one that arrives is stored encrypted. Beyond those, your nest reads your calendar
-itself only if you give it permission to — by saying yes to **Trust this box?** when you
-claim or join a nest, or with **Read my calendar**, under **Add trust…**
-in Settings → Nests — and only until you take that back. Your nest also sees
+and from email, like any mail; one that arrives is stored encrypted. Beyond those, your nest reads your calendar itself only if you give it permission to — by saying yes to **Trust this box?** when you claim or join a nest, or under **Add trust…** in Settings → Nests, with **Read my calendar** or **Keep my calendar searchable on this nest** — and your address book only if you choose **Keep my contacts searchable on this nest**, under **Add trust…** too. Keeping either searchable leaves a searchable copy of it on your nest's disk, and every one of these lasts only until you take it back. Your nest also sees
 what any server that delivers your messages must: who you're connected to —
 your contacts, whom you follow, the groups you're in — and when and how much
 you send.

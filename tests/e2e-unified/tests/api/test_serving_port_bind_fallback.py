@@ -19,6 +19,7 @@ handle only; the held port is this test's own socket.
 from __future__ import annotations
 
 import socket
+from urllib.parse import urlparse
 
 import pytest
 
@@ -57,9 +58,16 @@ def test_an_unbindable_serving_port_leaves_the_nest_reachable_on_the_port_it_had
 
     nest = port_nest
     identity = _nest_id(nest)
-    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Held on the nest's OWN bind address, never the wildcard: the nest binds
+    # with SO_REUSEADDR (std sets it on unix), and BSD — macOS — lets that
+    # more-specific bind through a listener on 0.0.0.0, so the nest really
+    # moved to the "unbindable" port and never answered on the old one (red on
+    # mac only, 2026-11-13). An exact address-and-port duplicate is refused
+    # `AddrInUse` on both kernels.
+    host = urlparse(nest["url"]).hostname
+    held = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
     try:
-        held.bind(("0.0.0.0", 0))
+        held.bind((host, 0))
         held.listen(1)
         taken = held.getsockname()[1]
         _admin_call(nest, "fauna.admin.set_serving_port", {"port": taken})

@@ -41,7 +41,7 @@ Stamped 2026-11-07 at b844c771f6.
 7. [nest] A sending server that greets with an empty or garbled name, with the name every machine calls itself, or with a bare single-word name is refused — `docs/goal/behavior/smtp-server.md` § Architectural rules
    - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_an_empty_garbled_localhost_or_single_word_greeting_is_refused`
 8. [nest] A sending server that greets with your nest's own name is refused as an impersonation — `docs/goal/behavior/smtp-server.md` § HELO / EHLO syntactic + identity validation
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_greeting_with_the_nests_own_name_is_refused`
 9. [nest] Mail whose sender address names a domain that does not exist is refused, and a sender address with no domain at all is refused as invalid — `docs/goal/behavior/smtp-server.md` § Architectural rules
    - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_sender_domain_that_does_not_exist_or_is_missing_is_refused`
 10. [nest] When a lookup the checks depend on cannot be answered, mail is not refused for that reason; the nest accepts it instead of turning a legitimate sender away — `docs/goal/behavior/smtp-server.md` § Error / tempfail strategy
@@ -94,13 +94,13 @@ Stamped 2026-11-07 at b844c771f6.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| linux | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| windows | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| ios | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| android | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| tui | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| windows | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| macos | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| ios | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| android | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| tui | ✅ full | 0.1.2-dev+b3cb40c5 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -119,7 +119,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_quarantine_policy_failure_is_accepted_and_filed_as_spam` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_an_spf_hard_fail_is_refused_and_a_softer_answer_never_is` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_an_empty_garbled_localhost_or_single_word_greeting_is_refused` | nest (linux): passed |
-| 8 | nest | (none) | — |
+| 8 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_greeting_with_the_nests_own_name_is_refused` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_sender_domain_that_does_not_exist_or_is_missing_is_refused` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_lookup_that_cannot_be_answered_never_refuses_mail` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_the_default_blocklist_refuses_a_listed_server_at_the_door` | nest (linux): passed |
@@ -144,5 +144,5 @@ Stamped 2026-11-07 at b844c771f6.
 | 28 | nest | `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_message_accepted_under_an_admin_set_size_limit_is_still_scanned` | nest (linux): passed |
 | 28 | nest | `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_size_limit_raised_above_the_boot_value_applies_without_a_restart` | nest (linux): passed |
 | 28 | nest | `tests/e2e-unified/tests/api/test_mail_scan_every_accepted.py::test_a_submitted_message_and_the_senders_sent_copy_carry_no_verdict` | nest (linux): passed |
-| 29 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_whose_sender_cannot_be_checked_in_time_is_put_off_with_451` | nest (linux): passed |
+| 29 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_whose_sender_cannot_be_checked_in_time_is_put_off_with_451` | nest (linux): passed, nest (windows): passed |
 <!-- features-render:end -->

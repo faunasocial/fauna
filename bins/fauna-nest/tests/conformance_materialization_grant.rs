@@ -405,6 +405,72 @@ async fn a_lapsed_window_deletes_the_area_at_the_next_reconcile() {
     assert!(!dir.exists(), "a lapsed one-off window ends the view");
 }
 
+/// The MSEK-rotation top-up (`capability-grants.md` § Capability tiering →
+/// *What a master-key mail wrap conveys*, ruled 2026-11-13): the owner's app
+/// rebuilds the standing mail wrap over the post-rotation generation set
+/// (`master_key_rotation_heal_keys`) and sends it as an equal-end renew → the
+/// renew door REPLACES the grant's one `epoch: None` wrap in place (differing
+/// bytes, same `(scope, epoch)`) and the materialization door passes it → the
+/// stored grant still holds exactly one wrap of the read, the new bytes.
+#[tokio::test]
+async fn a_rotation_top_up_replaces_the_standing_wrap_in_place() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let owner = ActorKeypair::from_secret(OWNER_SEED).actor_id().0;
+    db.create_user(&owner, "free", "owner").await.unwrap();
+    let nest = start_nest(db.clone()).await;
+    let caps = CapabilitiesClient::new(
+        connected_client(&nest.base, ActorKeypair::from_secret(OWNER_SEED)).await,
+    );
+    let grant_id = [0x66; 16];
+    caps.mint(mint_blob(
+        &nest.materializer,
+        &owner,
+        grant_id,
+        GrantWindow(0, u64::MAX),
+    ))
+    .await
+    .expect("mint");
+
+    let rotated = MailConfig {
+        msek: Some([0x5B; 32].into()),
+        prior_mseks: vec![OWNER_MSEK.into()],
+        ..MailConfig::default()
+    };
+    let keys = fauna_client_capabilities::master_key_rotation_heal_keys(
+        &rotated,
+        &owner,
+        nest.materializer.holder_x25519(),
+        Some(nest.materializer.holder_mlkem_ek()),
+        &fauna_client_capabilities::grant_log::event_scope_of(
+            &fauna_client_capabilities::materialization_scope("mail"),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        keys.len(),
+        1,
+        "one standing wrap: the read, not the keyless tuple"
+    );
+    let top_up = keys[0].to_canonical_bytes().unwrap();
+    caps.renew(grant_id, 0, u64::MAX, vec![top_up.clone()])
+        .await
+        .expect("an equal-end top-up passes the renew and materialization doors");
+
+    let stored = db
+        .fetch_capability_grants_for_holder(nest.materializer.holder_x25519(), 0)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    let blob = fauna_mls::wrapped_blob::GrantBlob::from_canonical_bytes(&stored[0]).unwrap();
+    assert_eq!(
+        blob.wrapped_keys.len(),
+        1,
+        "replaced in place, never appended"
+    );
+    assert_eq!(blob.wrapped_keys[0].epoch, None);
+    assert_eq!(blob.wrapped_keys[0].to_canonical_bytes().unwrap(), top_up);
+}
+
 #[tokio::test]
 async fn the_mint_door_refuses_another_holder_and_a_bounded_mail_read() {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());

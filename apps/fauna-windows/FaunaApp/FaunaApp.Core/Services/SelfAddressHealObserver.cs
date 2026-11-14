@@ -40,19 +40,23 @@ internal sealed class SelfAddressHealObserver : LaunchObserver
     public Action? Ticked { get; set; }
 
     /// <summary>
-    /// Raised (on the machine's own thread) when the published identity's handle or domain
-    /// moved — resolved, renamed, or a primary-domain rename the verify reply carries — so
-    /// the profile SELF header repaints its <c>&lt;handle&gt;@&lt;current primary&gt;</c>
-    /// (<c>mail-primary-domain-rename.md</c> § Display-handle interaction; linux's
-    /// <c>repaint_self_headers</c>, tui's <c>SelfAddressRefreshed</c> push). Defaults to the
-    /// process-wide <see cref="SelfDisplayHandle.Moved"/> fan-out, so no construction site
-    /// wires it; it needs no conversations session.
+    /// Raised (on the machine's own thread) when the published identity's handle, domain or
+    /// tier moved — resolved, renamed, a primary-domain rename the verify reply carries, or
+    /// the account moved to another tier — so the profile SELF header repaints its
+    /// <c>&lt;handle&gt;@&lt;current primary&gt;</c> (<c>mail-primary-domain-rename.md</c>
+    /// § Display-handle interaction; linux's <c>repaint_self_headers</c>, tui's
+    /// <c>SelfAddressRefreshed</c> push) and the Settings identity cell repaints its address
+    /// and tier (<c>settings.md</c> § Layout &amp; flow item 1). The persistence's
+    /// <c>SaveAuthenticated</c> has written the cache before the machine notifies, so a
+    /// repaint reads the new values. Defaults to the process-wide
+    /// <see cref="SelfDisplayHandle.Moved"/> fan-out, so no construction site wires it; it
+    /// needs no conversations session.
     /// </summary>
     public Action? IdentityMoved { get; set; } = SelfDisplayHandle.RaiseMoved;
 
     private IConversationsSession? _session;
     private string? _lastApplied;
-    private (string Handle, string Domain)? _lastIdentity;
+    private (string Handle, string Domain, string Tier)? _lastIdentity;
 
     public void OnChanged()
     {
@@ -71,7 +75,7 @@ internal sealed class SelfAddressHealObserver : LaunchObserver
             return;
         }
 
-        var now = (identity.handle ?? "", identity.domain ?? "");
+        var now = (identity.handle ?? "", identity.domain ?? "", identity.tier ?? "");
         if (now == _lastIdentity)
         {
             return;

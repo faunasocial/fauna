@@ -39,11 +39,11 @@ Stamped 2026-09-19 at 0bb8814071.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+646e0070 standalone |
 | linux | ✅ full | 0.1.5-dev+aaa3f320 standalone |
-| windows | ✅ full | 0.1.3-dev+3a518178 standalone |
+| windows | ✅ full | 0.1.6-dev+8cbc32a3 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| tui | ✅ full | 0.1.6-dev+8438e5ce standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 

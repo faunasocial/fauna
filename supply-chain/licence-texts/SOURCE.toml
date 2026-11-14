@@ -1,0 +1,98 @@
+# Written by scripts/fetch-licence-texts.py — do not edit by hand.
+# The fallback licence texts of the notices generator, fetched from the SPDX
+# licence-list data at one pinned commit; the cheap gate re-checks each sha256.
+
+[spdx]
+repository = "spdx/license-list-data"
+version = "3.27.0"
+commit = "d46e94e2c78ceede1cfc63cfa0396472d2798d4c"
+
+[text."0BSD.txt"]
+id = "0BSD"
+blobs = ["0b8ae762b2405a862d8592c5ff2799a1bd9c43e0"]
+sha256 = "e3f18c71e10d673590eb9856c1d79dd3b4b0d65404efb5e8584dbede7edd608b"
+
+[text."Apache-2.0.txt"]
+id = "Apache-2.0"
+blobs = ["137069b823873b8bcf42979bcf8e9371052d26a2"]
+sha256 = "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+
+[text."Apache-2.0-WITH-LLVM-exception.txt"]
+id = "Apache-2.0 WITH LLVM-exception"
+blobs = ["137069b823873b8bcf42979bcf8e9371052d26a2", "fa4b725a0ee50ef723ce5292865e54de7b0bfca4"]
+sha256 = "56b69bccf29e97fda51ded0f11ae3805200ca8312ba1548144b2baa5202c25d9"
+
+[text."BSD-1-Clause.txt"]
+id = "BSD-1-Clause"
+blobs = ["4005b63def76dacc03b7c0832d1c7349aabf94dc"]
+sha256 = "244e17b6f02493de568a8ddfd7f4349996a6c332c0585d304ceaf5394becea52"
+
+[text."BSD-2-Clause.txt"]
+id = "BSD-2-Clause"
+blobs = ["5f662b354cd40cd5339d5aa05d74b15405138230"]
+sha256 = "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df"
+
+[text."BSD-3-Clause.txt"]
+id = "BSD-3-Clause"
+blobs = ["ea890afbc70c94011b765722a95e2c8c7d4f1233"]
+sha256 = "5a93d5831e1297ab10fe643e1a631e83be392896da14ee2951285a79012df69d"
+
+[text."BSL-1.0.txt"]
+id = "BSL-1.0"
+blobs = ["2d87ab1a9fa42781f9eec80c1d29e605ad313b85"]
+sha256 = "84c6ef3ea9e3254a54d0acf5d3e0c61ae011b8fef7dd6940591cf060e6380a8f"
+
+[text."CC0-1.0.txt"]
+id = "CC0-1.0"
+blobs = ["0e259d42c996742e9e3cba14c677129b2c1b6311"]
+sha256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+
+[text."CDLA-Permissive-2.0.txt"]
+id = "CDLA-Permissive-2.0"
+blobs = ["cc0f954b59ba22a5c892e9833b0013aa281f5838"]
+sha256 = "4531a67d443284d93ffed0803df5b10634aff21c3d77e381f2d48af01d875868"
+
+[text."ISC.txt"]
+id = "ISC"
+blobs = ["b9c199c98f9bec183a195a9c0afc0a2e4fcc7654"]
+sha256 = "f2ec607f67bb0dd3053b49835b02110d5cd0f8eb6da3aac4dc0b142a6b299be9"
+
+[text."LGPL-2.1-or-later.txt"]
+id = "LGPL-2.1-or-later"
+blobs = ["c6487f4fdf701640ac0f559eb0130cdf76c5d3f4"]
+sha256 = "5749785c8bdefafcb5d798270ed0a967036fe2ca63dcedade1627565dfef81d2"
+
+[text."MIT.txt"]
+id = "MIT"
+blobs = ["d817195dad53ec992418c28ffca5fbd1cd86502a"]
+sha256 = "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
+
+[text."MIT-0.txt"]
+id = "MIT-0"
+blobs = ["a4e9dc9061885b4d1d4dde9d5db62608a973b26a"]
+sha256 = "59746d6285ffa44bfc7ecada352aa5d6a20dc8eab418a60ce091cc739012c135"
+
+[text."MPL-2.0.txt"]
+id = "MPL-2.0"
+blobs = ["ee6256cdb62a765749a71aae3abea32884301cd1"]
+sha256 = "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
+
+[text."Unicode-3.0.txt"]
+id = "Unicode-3.0"
+blobs = ["11f2842a303a7935740f7a1d09139b0b9c28c3b6"]
+sha256 = "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1"
+
+[text."Unlicense.txt"]
+id = "Unlicense"
+blobs = ["cde4ac6981861bbb9025ce5e77a4a0e232fe6329"]
+sha256 = "0bdebfeda07d45dada625ae1317c6f833186e798b171d0db640bcf32e92a8240"
+
+[text."Zlib.txt"]
+id = "Zlib"
+blobs = ["e0e3605ba4269a62d38ef0a510d5e96c0ae009cc"]
+sha256 = "bfb1112d49db5b1daecdfef24bd7e2f3ea0bafb33aa67aa0ab51e2bf8407c03d"
+
+[text."zlib-acknowledgement.txt"]
+id = "zlib-acknowledgement"
+blobs = ["cf95431f2476d470b94b7fe7b9ed64f29a372932"]
+sha256 = "aeb83cf7f4c9076691f72856d3b8f64a152027e9b1a136d399198c683fd26c12"

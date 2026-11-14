@@ -993,6 +993,17 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # included — lands in this launch's `app.err`. A caller-supplied
         # override wins. Read back via `custody_hold_file()`.
         env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
+        # The e2e outbox drain hold (`fauna_account_plane::outbox`'s
+        # `outbox_drain_held`, the compile-gated `FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`
+        # seam), as tui sets it: a path in this launch's scratch dir that does
+        # not exist, so every drain runs as usual until a test creates the file
+        # (`helpers/outbox_drain.py::hold_outbox_drain`). Both processes read
+        # it — this app's MLS/identity drain and the spawned `fauna-sync-agent`
+        # child's generic pump (it inherits the env). A caller-supplied
+        # override wins. Read back via `outbox_drain_hold_file()`.
+        env.setdefault(
+            "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE", os.path.join(tmp, "outbox-drain-hold")
+        )
         env["HOME"] = device_home
         # macOS resolves `.applicationSupportDirectory` — where the MLS state db
         # (`conv-mls.db`, `mls.db`) and the SwiftData store live — from CoreFoundation's
@@ -1377,6 +1388,12 @@ class MacosInProcessDriver(InProcessAgentDriver):
         custody (`FAUNA_E2E_CUSTODY_HOLD_FILE`, set in `launch()`); None before
         `launch()`. Driven through `helpers/folder_content.py::hold_custody_reread`."""
         return (getattr(self, "_launch_env", None) or {}).get("FAUNA_E2E_CUSTODY_HOLD_FILE")
+
+    def outbox_drain_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's outbox drains
+        (`FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`, set in `launch()`); None before
+        `launch()`. Driven through `helpers/outbox_drain.py`."""
+        return (getattr(self, "_launch_env", None) or {}).get("FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE")
 
     def app_stderr_text(self) -> str:
         """This launch's `app.err` so far ("" if it has none yet).

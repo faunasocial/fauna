@@ -11,9 +11,28 @@ class ModerationActions:
     def __init__(self, driver: PlatformDriver):
         self.driver = driver
 
+    #: How long a fresh visit may show a loading-state error before it settles.
+    _SETTLE_BUDGET_S = 30.0
+
     def navigate(self) -> None:
-        """Navigate to the moderation page."""
+        """Navigate to the moderation page and let its first reads settle.
+
+        Web hosts the queue on its Privacy settings page, which paints the
+        inbox-mode-unknown sentence on ``error-message`` while the inbox-mode
+        read is still out (``privacy_page.inbox_mode_unknown``) — a true
+        loading state, not a failure. A caller asserting "no page error" right
+        after the visit would race that read, so the visit polls (a deadline,
+        never a fixed sleep — convention 14) until the error clears; one that
+        persists past the budget is left showing, for the caller's own
+        assertion to name.
+        """
+        from actions import ActionLayer
+
         self.driver.navigate_to("moderation")
+        page = ActionLayer(self.driver)
+        deadline = time.monotonic() + self._SETTLE_BUDGET_S
+        while time.monotonic() < deadline and page.has_error():  # deadline-ok: settle only; a persistent error is the caller's assertion to name
+            time.sleep(0.25)
 
     def require_web_throwaway_sender_local_detection_leg(self) -> None:
         """Skip unless this app is web — the only client with a
@@ -30,14 +49,16 @@ class ModerationActions:
         require_surface(self.driver, "single-engine-local-detection")
 
     def require_second_real_engine_fixture_supported(self, *, flow: str) -> None:
-        """Skip unless this app is one of the two the `second_real_faunamls_app`
+        """Skip unless this app is one of those the `second_real_faunamls_app`
         fixture supports (e2e convention 7 — the platform check lives in the
         action layer, not the test body).
 
         These journeys drive `flow` through TWO real GUI engines at once
         (alice's + bob's), so both need a standalone moderation queue AND a
         `second_real_faunamls_app`-capable fixture: linux (the original leg),
-        tui (joined 2026-07-29 with its own moderation queue), macos and ios.
+        tui (joined 2026-07-29 with its own moderation queue), macos, ios and
+        windows (joined 2026-11-11 — its fixture seat and its queue's
+        local-detection row were already built).
 
         ⚠ **Widening means widening TWO places.** Each consuming test also
         carries its app markers so collection deselects

@@ -1884,6 +1884,28 @@ pub trait FolderCustodySink: MaybeSendSync {
         false
     }
 
+    /// The **present claimant** of a shared set's folder channel, as the set's
+    /// home nest serves it to a member — the identity the forked-seat rule's
+    /// claim trigger compares to a policy-refused commit's committer
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*, part (a)). The nest moves the claim and the set's owning row
+    /// together on a succession, so the member-visible owner of the set IS
+    /// the claimant: same-nest (`home_nest_url` `None`) the member row's
+    /// `owner_actor_id`, cross-nest the `role == "owner"` row of the relayed
+    /// actor roster. `group_id_hex` is the raw MLS group id, `channel_id` its
+    /// derived channel. `None` when the read fails or names no claimant —
+    /// the caller then marks nothing. Default `None`.
+    async fn folder_claimant(
+        &self,
+        channel_id: &[u8; 32],
+        group_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> Option<[u8; 32]> {
+        let _ = (channel_id, group_id_hex, home_nest_url);
+        None
+    }
+
     /// Clear the durable row a forked SAME-nest seat kept in the member's
     /// Folders list (`fauna_core::data::ForkedFolderSeat`, written by the
     /// native sink just before [`Self::unlist_forked_seat`]'s drop): called
@@ -4139,12 +4161,28 @@ pub trait CommitGate: MaybeSendSync {
     /// malicious nest cannot roll the replica back to a superseded pending and
     /// fork this device onto a never-landed commit (design §3 resync-identity
     /// hardening).
+    ///
+    /// **The replica is asked before anything is restored** (`devices.md`
+    /// § Cross-device MLS group-state sync, Rule 2 → *An own-leaf claim is the
+    /// account's replica's to answer*): any member can post a record naming
+    /// this identity's leaf, so the impl reads the replica, judges it without
+    /// restoring ([`fauna_mls::state_replica::ProviderReplica::answer_own_leaf_claim`]),
+    /// and restores, merges and revokes the send right only on
+    /// [`OwnLeafAnswer::Ours`](fauna_mls::state_replica::OwnLeafAnswer::Ours).
+    /// No replica stored is *not ours*; a failed read is *no answer*.
     async fn resync_channel(
         &self,
         channel: ChannelId,
         logged_commit_epoch: u64,
         logged_commit_hash: [u8; 32],
-    ) -> Result<(), BackendError>;
+    ) -> fauna_mls::state_replica::OwnLeafAnswer;
+
+    /// Re-seal the replica after a walk settled `channel`'s **unanswered**
+    /// gate-send ([`fauna_mls::engine::MlsEngine::settle_unanswered_pending`]):
+    /// the pending it kept for a send that may have landed is gone now, so the
+    /// replica must stop carrying it. Best-effort; a failure leaves the next
+    /// flush to carry the cleared state.
+    async fn reseal_settled_pending(&self, channel: ChannelId);
 
     /// Record that a **foreign member's** commit advanced `channel`'s epoch
     /// (the inbound driver processed it Ok): this device no longer authors the

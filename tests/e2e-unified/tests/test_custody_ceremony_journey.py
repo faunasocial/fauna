@@ -242,8 +242,10 @@ def _poll_ui(app, predicate, *, what: str, receive: bool = False, budget_s: floa
 # timeout) instead of reaching `require_supported()`'s declared skip.
 #
 # This journey and the three below it are marked for the six apps that can run
-# the ceremony: web lacks the mint and the accept (`require_supported`), and the
-# second seat they drive is `second_real_faunamls_app`, which skips on web. They
+# the whole ceremony: web lacks the accept (`require_supported`), and the
+# second seat they drive is `second_real_faunamls_app`, which skips on web. Web's
+# own half, the owner's mint, is witnessed against a tui friend by
+# `test_a_web_owner_mints_an_offer_a_native_friend_accepts`. They
 # are never gated on web at run time, which would write no record and hold web's
 # cell short for ever (feature-catalog.md § Cell semantics, the marked-witness
 # rule). What web does render, piece 2, is witnessed by
@@ -431,31 +433,14 @@ def test_custody_ceremony_two_accounts(
                 return i
         return None
 
-    def _relay_marked() -> bool:
-        i = _relay_card()
-        return i is not None and bob_app.driver.is_visible_scrolled(
-            "device-keyless-posture-badge", scope=f"device-card[{i}]"
-        )
-
-    _poll_ui(bob_app, _relay_marked, what="bob's keyless device row marked relay-only")
-    assert (
-        bob_app.driver.get_text("device-keyless-posture-badge", scope=f"device-card[{_relay_card()}]")
-        == S.devices.keyless_posture_badge
+    # The relay-only marker on this row is witnessed by
+    # `test_a_device_that_holds_no_keys_is_marked_relay_only` (devices
+    # outcome 10); here the row only has to be listed before its removal.
+    _poll_ui(
+        bob_app,
+        lambda: _relay_card() is not None,
+        what="bob's keyless device row listed",
     )
-    # The marker is per device, never "the account": bob's own device holds
-    # the keys it minted, so its row carries no marker.
-    own = next(
-        (
-            i
-            for i in range(bob_app.driver.count("device-card"))
-            if bob_app.driver.is_visible_scrolled("device-this-mark-badge", scope=f"device-card[{i}]")
-        ),
-        None,
-    )
-    assert own is not None, bob_app.driver.diagnose("device-this-mark-badge")
-    assert not bob_app.driver.is_visible_scrolled(
-        "device-keyless-posture-badge", scope=f"device-card[{own}]"
-    ), "the device that minted bob's generation holds its keys — no relay-only marker"
 
     await_device_removal_ready(bob_app.driver)
     bob_app.driver.click("device-remove-button", index=_relay_card())
@@ -530,6 +515,75 @@ def test_custody_ceremony_two_accounts(
         alice,
         lambda: alice.custody.holder_count() == 0,
         what="alice's custodian row leaving the Now list after revoke",
+    )
+
+
+# Web's half of the ceremony — the OWNER's mint (`ui/devices.md` § Where logic
+# lives: web owes the mint, the friend's accept stays native). alice is the web
+# app; bob, the friend, is a tui seat (`custody_host_seat`), because the accept
+# is the one step web declares absent. The six native apps run the whole journey
+# above; this is web's witness for devices outcome 11 / backup outcome 5.
+@pytest.mark.web
+@pytest.mark.real_conversations
+@pytest.mark.feature("backup-destinations-and-restore")
+@pytest.mark.feature("devices")
+def test_a_web_owner_mints_an_offer_a_native_friend_accepts(
+    real_faunamls_app, custody_host_seat, nest_instance
+):
+    alice = real_faunamls_app
+    bob_app, bob = custody_host_seat
+    alice.custody.require_mint_supported()
+    bob_app.custody.require_supported()
+
+    _open_carrier(alice, bob_app, bob, nest_instance["port"])
+
+    # ── Offer initiation on web, through the UI: the 1:1 thread is the sole
+    # candidate the shared fold derives from web's own rail.
+    alice.backups.navigate_devices()
+    alice.custody.mint_offer(*_peer_thread_labels(bob))
+    assert not (
+        alice.driver.is_visible("error-message")
+        and alice.driver.get_text("error-message")
+    ), f"the mint must not refuse: {alice.driver.get_text('error-message')!r}"
+    _poll_ui(
+        alice,
+        lambda: alice.custody.holder_count() >= 1,
+        what="alice's pending custodian row after the web mint",
+    )
+
+    # ── Consent on the native friend's own card.
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.offer_count() >= 1,
+        what="the consent card on bob's (tui) Devices page — the web offer posted",
+        receive=True,
+    )
+    bob_app.custody.accept_offer(0)
+
+    # ── Web ingests the accept on its rail (the ceremony sink), its drive pass
+    # mints + delivers, and the row leaves pending: the friend is a custodian.
+    try:
+        _poll_ui(
+            alice,
+            lambda: alice.custody.holder_count() >= 1
+            and alice.driver.is_enabled("custody-holder-revoke-button"),
+            what="alice's (web) custodian row bound + minted (revoke enabled)",
+            receive=True,
+            budget_s=_UI_LEG_S * 2,
+        )
+    except AssertionError as e:
+        # Convention 6: each seat's own account of the ceremony — the web
+        # rail's sink capture and drive pass log to its console ring.
+        raise AssertionError(
+            f"{e}\n--- alice's (web) custody log ---\n{_custody_log_tail(alice)}"
+            f"\n--- bob's (tui) custody log ---\n{_custody_log_tail(bob_app)}"
+        ) from e
+    assert alice.custody.holder_receipt_status(0) == S.devices.custody_receipt_none
+    _poll_ui(
+        bob_app,
+        lambda: bob_app.custody.held_count() >= 1,
+        what="bob's held-for-others row after web's deliver",
+        receive=True,
     )
 
 
@@ -794,6 +848,63 @@ def test_a_declined_custody_offer_stays_gone_when_its_owner_sends_again(
     assert not alice.driver.is_visible("error-message"), (
         f"the re-sent offer must not surface an error: {alice.driver.get_text('error-message')!r}"
     )
+
+
+@pytest.mark.feature("devices")
+def test_a_device_that_holds_no_keys_is_marked_relay_only(
+    app, request, nest_instance, test_user
+):
+    """Devices outcome 10 on its own, on every app that renders the Devices
+    page (``devices.md`` § Custody facet, piece 1): a granted device whose key
+    never joined the fleet holds no generation wrap at the tip, so its row is
+    marked relay-only; the device in hand holds the keys it minted, so its
+    row carries no marker. The marker is a fact about one device, never "the
+    account". Lifted out of ``test_custody_ceremony_two_accounts`` (which
+    cannot run on web) so web's cell is witnessed too.
+
+    A DEDICATED actor (``test_user`` is requested only for its device-cap
+    lift). Every wait is a deadline poll on state (convention 14)."""
+    from conftest import _make_user
+
+    nest_url = nest_instance["url"]
+    user = _make_user(nest_instance)
+    enrollment.sign_in(app, request, nest_instance, user)
+    enrollment.await_enrollment(app, nest_url, user)
+    driver = app.driver
+    await_device_removal_ready(driver)
+
+    relay_label = "relay-only-kiosk"
+    enrollment.register_granted_device(nest_url, user, relay_label)
+
+    def _relay_card() -> int | None:
+        for i in range(driver.count("device-card")):
+            if app.backups.device_name(i) == relay_label:
+                return i
+        return None
+
+    def _relay_marked() -> bool:
+        i = _relay_card()
+        return i is not None and driver.is_visible_scrolled(
+            "device-keyless-posture-badge", scope=f"device-card[{i}]"
+        )
+
+    _poll_ui(app, _relay_marked, what="the keyless device row marked relay-only")
+    assert (
+        driver.get_text("device-keyless-posture-badge", scope=f"device-card[{_relay_card()}]")
+        == S.devices.keyless_posture_badge
+    )
+    own = next(
+        (
+            i
+            for i in range(driver.count("device-card"))
+            if driver.is_visible_scrolled("device-this-mark-badge", scope=f"device-card[{i}]")
+        ),
+        None,
+    )
+    assert own is not None, driver.diagnose("device-this-mark-badge")
+    assert not driver.is_visible_scrolled(
+        "device-keyless-posture-badge", scope=f"device-card[{own}]"
+    ), "the device that holds the keys it minted carries no relay-only marker"
 
 
 @pytest.fixture

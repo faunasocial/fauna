@@ -170,11 +170,20 @@ pub(crate) async fn run_agent_with_store(
             .filter(|l| l.mode == crate::config::LocationMode::OnDemand)
             .map(|l| std::path::PathBuf::from(&l.path))
             .collect();
+        // The presence roots' leftovers too (`on-demand-files-linux.md` § Linux
+        // FUSE binding, the presence-root bullet): their paths come from a plan
+        // that reads the nest, so the sweep names their directory instead.
+        #[cfg(target_os = "linux")]
+        let presence_dir = crate::presence_roots::user_home()
+            .map(|home| home.join(crate::presence_roots::PRESENCE_DIR));
         let reconciled = tokio::task::spawn_blocking(move || {
             let _ = state.on_demand.set(crate::state::probe_on_demand());
             #[cfg(target_os = "linux")]
             {
-                let swept = crate::fuse_host::sweep_ghost_mounts(&on_demand_locations);
+                let swept = crate::fuse_host::sweep_ghost_mounts(
+                    &on_demand_locations,
+                    presence_dir.as_deref(),
+                );
                 if swept > 0 {
                     tracing::info!(swept, "unmounted leftover on-demand mounts");
                 }

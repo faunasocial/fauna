@@ -47,6 +47,7 @@ from common.nest import lan_ipv4
 from drivers.port_util import find_free_port
 from helpers.admin_wire import admit_adult
 from helpers.ap_nest import enable_ap, start_ap_nest
+from helpers.macos_firewall import skip_if_lan_self_dial_is_broken
 from tests.api import ws_api
 from tests.api.bare import sign_and_encode_post
 
@@ -137,6 +138,10 @@ def lan_ap_nest(ap_binary, tmp_path_factory):
         bind_host="0.0.0.0",
     )
     try:
+        # A box whose firewall refuses its own LAN address (the macOS
+        # application firewall on macOS) cannot host the stranger at all: an
+        # environment skip naming the cause, never a red blamed on the nest.
+        skip_if_lan_self_dial_is_broken(f"http://{lan}:{port}")
         yield nest, f"http://{lan}:{port}"
     finally:
         nest["proc"].kill()

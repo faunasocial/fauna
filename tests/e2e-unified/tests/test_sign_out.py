@@ -41,7 +41,7 @@ import time
 
 import pytest
 
-from common.cred_store import attach_account_store, attach_cred_store
+from common.cred_store import INSTALL_DEVICE_SECRET_SLOT, attach_account_store, attach_cred_store
 from common.scope_store import attach_scope_store
 from helpers import app_surface
 from helpers.relaunch import pin_store_across_relaunch
@@ -1086,7 +1086,7 @@ _RECORD_WRITTEN_BUDGET_S = 15.0
 def _install_base(driver):
     """The install base a native seat keeps its records under — its flat erase
     base: tui's `<XDG_CONFIG_HOME>/fauna-tui`, linux's `<XDG_CONFIG_HOME>/fauna`
-    (`_serving_locks`)."""
+    (`_serving_locks`), windows' pinned data dir (`AccountStateDir.Base`)."""
     return attach_scope_store(app_surface.app_name(driver), driver).scope_roots()[0]
 
 
@@ -1167,7 +1167,12 @@ def test_a_launch_after_the_app_died_mid_sign_out_finishes_the_sign_out(
     def finished():
         last.clear()
         last.update(
-            slots=sorted(creds.stored_accounts() - {"signed-out/v1"}),
+            # Install-scoped rows name no account and a sign-out never takes them:
+            # the signed-out marker, and the install device secret an app with one
+            # secret store keeps beside the identity rows (windows; apple).
+            slots=sorted(
+                creds.stored_accounts() - {"signed-out/v1", INSTALL_DEVICE_SECRET_SLOT}
+            ),
             shared_slots=sorted(k for k in shared.stored_accounts() if actor in k),
             scopes=[str(r / actor) for r in roots if (r / actor).exists()],
             record=record.exists(),

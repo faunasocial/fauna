@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  The licence texts every Fauna binary carries (docs/goal/architecture/
+  shipped-notices.md § The rule; § Per channel, the Windows MSI row):
+  LICENSE-MIT.txt and LICENSE-APACHE.txt, the repository's own files byte for
+  byte, and THIRD-PARTY-NOTICES.txt, generated for this MSI's closure (every
+  feature's binaries; the self-contained .NET runtime and app host, the
+  Windows App SDK runtime, the WebView2 loader and the app's NuGet packages;
+  libunwind.dll and the mingw-w64 runtime in the mail bridge; the Rust and Go
+  standard libraries — the full list is the MSI row of § Per channel). All
+  three sit in INSTALLFOLDER, with a .txt extension so they open.
+
+  $(var.NoticesDir) is the directory `just windows-msi-notices <dir> <arch>` writes
+  them into; every MSI build runs it first (release.yml's assembly job and the
+  test fixture test_installer.py::_build_msi), so a build whose notices cannot
+  be produced fails before WiX runs. The notices file is dependency-authored
+  text: nothing reads it, the build only carries it.
+
+  Every top-level feature references this group (Package.wxs), as DataCleanup
+  is referenced twice: every feature is deselectable, and whichever subset an
+  install takes (the headless nest-only `ADDLOCAL=Nest` included) installs the
+  three files with it. MSI reference-counts the shared components, so they
+  leave with the last feature that holds them. A hidden always-on feature
+  would not do: a command-line ADDLOCAL installs only the features it names.
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <ComponentGroup Id="NoticesComponents" Directory="INSTALLFOLDER">
+
+      <Component Id="LicenseMitTxt" Guid="4a7b8c00-0070-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="LicenseMitTxt"
+              Source="$(var.NoticesDir)LICENSE-MIT.txt"
+              KeyPath="yes"
+              Name="LICENSE-MIT.txt" />
+      </Component>
+
+      <Component Id="LicenseApacheTxt" Guid="4a7b8c00-0071-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="LicenseApacheTxt"
+              Source="$(var.NoticesDir)LICENSE-APACHE.txt"
+              KeyPath="yes"
+              Name="LICENSE-APACHE.txt" />
+      </Component>
+
+      <Component Id="ThirdPartyNoticesTxt" Guid="4a7b8c00-0072-4d3a-b5c6-d7e8f9a0b1c2">
+        <File Id="ThirdPartyNoticesTxt"
+              Source="$(var.NoticesDir)THIRD-PARTY-NOTICES.txt"
+              KeyPath="yes"
+              Name="THIRD-PARTY-NOTICES.txt" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

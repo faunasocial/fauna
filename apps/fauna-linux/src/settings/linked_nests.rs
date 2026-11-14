@@ -1201,9 +1201,13 @@ fn build_mint_flow(ctx: &Rc<Ctx>, row: &LinkedNestRow) -> gtk::Box {
     set_test_id(&mint_btn, ids::NEST_TRUST_GRANT_MINT_BUTTON);
     mint_box.append(&mint_btn);
 
-    // The form, revealed by the mint button.
-    let form = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    // The form, revealed by the mint button: the selects on one line, then
+    // the picked option's mint-time note, then the confirm — the note is read
+    // BEFORE the confirm.
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 4);
     form.set_visible(false);
+    let selects = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    form.append(&selects);
 
     // Scope select: option 0 is the placeholder; option i+1 = mint_options[i].
     let mut labels: Vec<String> = vec![S::MINT_SCOPE_PLACEHOLDER.to_string()];
@@ -1214,7 +1218,7 @@ fn build_mint_flow(ctx: &Rc<Ctx>, row: &LinkedNestRow) -> gtk::Box {
         gtk::Expression::NONE,
     );
     set_test_id(&scope_dd, ids::NEST_TRUST_MINT_SCOPE_SELECT);
-    form.append(&scope_dd);
+    selects.append(&scope_dd);
 
     // Conditional holder select — populated + shown only when the chosen
     // option has >1 candidate. Candidates are the stable holder names
@@ -1226,10 +1230,23 @@ fn build_mint_flow(ctx: &Rc<Ctx>, row: &LinkedNestRow) -> gtk::Box {
     );
     holder_dd.set_visible(false);
     set_test_id(&holder_dd, ids::NEST_TRUST_MINT_HOLDER_SELECT);
-    form.append(&holder_dd);
+    selects.append(&holder_dd);
 
     let duration_dd = build_duration_select(row);
-    form.append(&duration_dd);
+    selects.append(&duration_dd);
+
+    // The picked option's mint-time note (the shared `mint_option_note` — the
+    // materialization options' honesty copy): `capability-grants.md` §
+    // Capability tiering → *The materialization grant* (f). Hidden (absent)
+    // for an option that carries none.
+    let note_lbl = gtk::Label::new(None);
+    note_lbl.set_halign(gtk::Align::Start);
+    note_lbl.set_xalign(0.0);
+    note_lbl.set_wrap(true);
+    note_lbl.add_css_class("caption");
+    note_lbl.set_visible(false);
+    set_test_id(&note_lbl, ids::NEST_TRUST_MINT_MATERIALIZE_NOTE);
+    form.append(&note_lbl);
 
     let confirm_btn = gtk::Button::with_label(S::MINT_CONFIRM);
     confirm_btn.add_css_class("suggested-action");
@@ -1249,11 +1266,32 @@ fn build_mint_flow(ctx: &Rc<Ctx>, row: &LinkedNestRow) -> gtk::Box {
         let options = row.mint_options.clone();
         let holder_dd = holder_dd.clone();
         let confirm_btn = confirm_btn.clone();
+        let note_lbl = note_lbl.clone();
+        let duration_dd = duration_dd.clone();
+        let row_default = row.mint_default_duration;
         scope_dd.connect_selected_notify(move |dd| {
             let idx = dd.selected();
             let picked = (idx != gtk::INVALID_LIST_POSITION && idx > 0)
                 .then(|| &options[(idx - 1) as usize]);
             confirm_btn.set_sensitive(picked.is_some());
+            match picked.and_then(fauna_client_pair::mint_option_note) {
+                Some(note) => {
+                    note_lbl.set_label(&note.resolve(crate::i18n::strings::lookup));
+                    note_lbl.set_visible(true);
+                }
+                None => note_lbl.set_visible(false),
+            }
+            // A new pick pre-selects that option's default window (the shared
+            // `mint_option_default_duration` — a view is standing by nature).
+            let default = picked.map_or(row_default, |o| {
+                fauna_client_pair::mint_option_default_duration(o, row_default)
+            });
+            if let Some(pos) = fauna_client_pair::mint_duration_options()
+                .iter()
+                .position(|d| *d == default)
+            {
+                duration_dd.set_selected(pos as u32);
+            }
             match picked {
                 Some(o) if o.holder_candidates.len() > 1 => {
                     let cands: Vec<&str> = o.holder_candidates.iter().map(String::as_str).collect();
@@ -1671,17 +1709,11 @@ fn build_grant_item(
     gi.append(&status_lbl);
 
     // REQUIRED honest-bound copy (nests.md § Honest bound) — never over-promise.
-    // A bounded (content-sealing-epochs) mail grant gets the stronger,
-    // crypto-bounded wording WITH the honest INFO-A caveat; every other
-    // kind/regime keeps the standing trust-until-revoke wording (flip-checklist
-    // line 6). Never re-derive the (class, kind, tier) check here — the shared
-    // predicate is the single source of truth (priority #2).
-    let bound_note = if fauna_client_pair::trust_scope_is_bounded_mail_grant(grant.scope.clone()) {
-        S::BOUND_NOTE_BOUNDED_MAIL
-    } else {
-        S::BOUND_NOTE_STANDING
-    };
-    let bound_lbl = gtk::Label::new(Some(bound_note));
+    // The regime (materialization, bounded mail, standing) is picked by the
+    // shared `grant_bound_note`, never re-derived here (priority #2).
+    let bound_note = fauna_client_pair::grant_bound_note(grant.scope.clone())
+        .resolve(crate::i18n::strings::lookup);
+    let bound_lbl = gtk::Label::new(Some(&bound_note));
     bound_lbl.set_halign(gtk::Align::Start);
     bound_lbl.set_xalign(0.0);
     bound_lbl.set_wrap(true);

@@ -15,7 +15,7 @@ import Foundation
     /// which is why this hangs off the app binary rather than a separate tool.
     ///
     /// `run` returns `nil` for argv it does not own (normal GUI launch — including
-    /// zero args), else the process exit code. Only the nine exact FP verbs are
+    /// zero args), else the process exit code. Only the ten exact FP verbs are
     /// intercepted, so ordinary app argv (URLs, Finder flags) falls through.
     ///
     /// **DEBUG-only, and it must be** (convention 15,
@@ -49,6 +49,8 @@ import Foundation
                 return readCommand(Array(arguments.dropFirst()))
             case "write":
                 return writeCommand(Array(arguments.dropFirst()))
+            case "staged":
+                return stagedCommand(Array(arguments.dropFirst()))
             default:
                 return nil
             }
@@ -324,6 +326,65 @@ import Foundation
                 print("read FAILED: \(rel) dataless-before=\(dataless): \(error)")
                 return 1
             }
+        }
+
+        /// `staged <set-ref>` — list what the extension's engine **staging root**
+        /// for `<set-ref>` holds (`fileProviderRootDir(for:)`, in the app-group
+        /// container), one `staged: <rel> bytes=<n> sha256=<hex>` line per file,
+        /// then `staged OK: <count>`. Read-only. The staging root is what the
+        /// extension's own relay seat serves from (`relay-serving.md` § Relay
+        /// serving → *Apple's File Provider replica*), so this is the observable
+        /// a witness reads for "kept here" and "never fetched here"; it runs in
+        /// the signed app's process, the one that may open the group container
+        /// (a test process reading it raises the OS's other-app-data prompt).
+        /// The domain is scoped exactly as `register` scopes it, so `provision`
+        /// runs first. Exit 0 on a listing, 1 when the root cannot be read.
+        private static func stagedCommand(_ args: [String]) -> Int32 {
+            guard args.count == 1 else {
+                stderrLine("usage: Fauna staged <set-ref>")
+                return 2
+            }
+            let ref = args[0]
+            guard let creds = FileProviderCredentialStore.load(),
+                let identity = FileProviderDomainIdentity(
+                    actorIdHex: data_to_hex(creds.actorId), folderId: ref)
+            else {
+                stderrLine(
+                    "staged FAILED: a set's domain is scoped to the provisioned account — run `provision` first"
+                )
+                return 2
+            }
+            let root: URL
+            do {
+                root = try fileProviderRootDir(for: identity)
+            } catch {
+                stderrLine("staged FAILED: no staging root for \(identity.domainId): \(error)")
+                return 1
+            }
+            guard
+                let walker = FileManager.default.enumerator(
+                    at: root, includingPropertiesForKeys: [.isRegularFileKey])
+            else {
+                stderrLine("staged FAILED: cannot list \(root.path)")
+                return 1
+            }
+            var count = 0
+            let prefix = root.standardizedFileURL.path + "/"
+            for case let url as URL in walker {
+                guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                else { continue }
+                let path = url.standardizedFileURL.path
+                let rel = path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : path
+                guard let bytes = try? Data(contentsOf: url) else {
+                    print("staged: \(rel) unreadable")
+                    continue
+                }
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                print("staged: \(rel) bytes=\(bytes.count) sha256=\(digest)")
+                count += 1
+            }
+            print("staged OK: \(count)")
+            return 0
         }
 
         /// The user-visible root of `manager`'s domain; nil after printing why.

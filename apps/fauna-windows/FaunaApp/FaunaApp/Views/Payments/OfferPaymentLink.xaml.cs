@@ -13,12 +13,13 @@ namespace FaunaApp.Views.Payments;
 /// Bound by snapshot from ProfilePage's <c>OfferPaymentLinkHost_Loaded</c>, the
 /// <see cref="SubscriptionOfferPriceText"/> shape. The link shows only when the tier
 /// carries a URL (<see cref="SubscriptionOfferRow.HasPaymentUrl"/>, linux
-/// <c>offers.rs</c>); the open itself, and its https-only guard, are the page's.
+/// <c>offers.rs</c>); the gesture itself — the https-only guard, then subscribe first
+/// and open the checkout URL the shared rule composes — is the page's.
 /// </remarks>
 public sealed partial class OfferPaymentLink : UserControl
 {
-    /// <summary>Fires on click with the row whose <c>PaymentUrl</c> the host should
-    /// open.</summary>
+    /// <summary>Fires on click with the row whose tier the host should pay (subscribe,
+    /// then open the composed checkout URL).</summary>
     public event EventHandler<SubscriptionOfferRow>? OpenRequested;
 
     private SubscriptionOfferRow? _row;

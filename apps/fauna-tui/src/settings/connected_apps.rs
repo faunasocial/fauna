@@ -14,7 +14,8 @@
 //! 3. **The roster** — one row per connected app, Revoke with an inline confirm.
 //!    A mail app-password row additionally carries its login, kind and secret
 //!    controls; a principal the oracle served, what the nest did with the
-//!    user's keys for it.
+//!    user's keys for it; a principal that attested a holder key, its trust
+//!    facet — the Nests page's Now / History lens over the keys it holds.
 //! 4. **Blocked apps** — one row per blocked client with Unblock. Painted only
 //!    while something is blocked.
 //!
@@ -36,22 +37,23 @@ use std::sync::Arc;
 
 use fauna_client_connected_apps::{
     ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver, ConnectedAppsSnapshot,
-    ConsentCardRow,
+    ConsentCardRow, PrincipalTrust, TrustGrantRow, TrustHistoryRow, TrustLens,
     compose::{
-        ComposedText, LINE_SEPARATOR, request_card_lines, request_install_text, roster_row_text,
+        ComposedText, LINE_SEPARATOR, oracle_op_text, request_card_lines, request_install_text,
+        roster_row_text,
     },
-    machine::opens_settings_card,
+    machine::{opens_record, opens_settings_card},
     observer::NullObserver,
 };
 use fauna_client_mail_settings::{MailSettingsMachine, resolve_mua_username};
 use fauna_core::secret::SecretString;
 use fauna_i18n::strings::settings::mail as mail_t;
-use fauna_i18n::strings::{atproto_settings as card_t, connected_apps as t};
+use fauna_i18n::strings::{atproto_settings as card_t, connected_apps as t, nests as nest_t};
 
 pub(crate) use fauna_client_connected_apps::ConnectedAppsGesture;
 
 use super::{Action, SettingsField, SettingsState};
-use crate::element::{Element, Field, Gesture};
+use crate::element::{Element, Field, Gesture, SelectTarget};
 
 /// The page's state. The machine is built once at the post-auth hook
 /// (`attach_session`), the `MailAliasesState` shape; `clear_session` drops it.
@@ -116,6 +118,13 @@ impl ConnectedAppsState {
         self.revoke_armed = None;
         self.revealed.clear();
         self.snapshot = None;
+        if let Some(machine) = &self.machine {
+            // The trust facet's lens is the shared machine's page state.
+            machine.reset_lenses();
+            // An open record is a reading of THIS visit too: the next visit
+            // starts with every row's record closed.
+            machine.close_record();
+        }
     }
 }
 
@@ -346,6 +355,10 @@ fn row_elements(
         );
     }
 
+    if opens_record(row) {
+        oracle_record_elements(c, row, i, els);
+    }
+
     // A hosted plugin's row links to its settings card on the Bridges page —
     // which rows link is the shared machine's (`opens_settings_card`).
     if opens_settings_card(row) {
@@ -358,6 +371,13 @@ fn row_elements(
             )
             .within(ITEM, i),
         );
+    }
+
+    // The trust facet, after the row's own leaves and before its one Revoke —
+    // which IS the participant's revoke control: no per-grant renew or revoke
+    // here (`connected-apps.md` § The trust facet and history lens).
+    if let Some(trust) = &row.trust {
+        push_trust_facet(els, &row.key, trust, i);
     }
 
     if c.revoke_armed.as_deref() == Some(row.key.as_str()) {
@@ -388,6 +408,153 @@ fn row_elements(
                 true,
                 Gesture::Settings(Action::ConnectedAppsArmRevoke(row.key.clone())),
             )
+            .within(ITEM, i),
+        );
+    }
+}
+
+/// A principal row's trust facet — the Nests page's lens pair, then the Now
+/// list (or its empty state) or the History list, under the `nest-trust-*`
+/// IDs scoped to this `connected-apps-item` (`nests.rs::push_trust_facet`'s
+/// shape; owner-ruled 2026-10-16 to reuse the IDs). Absent on a row with no
+/// facet — never an empty state: only a read of the log may say *no keys*.
+fn push_trust_facet(els: &mut Vec<Element>, key: &str, trust: &PrincipalTrust, i: usize) {
+    const ITEM: &str = ids::CONNECTED_APPS_ITEM;
+    for (id, label, history) in [
+        (ids::NEST_TRUST_VIEW_NOW, nest_t::VIEW_NOW, false),
+        (ids::NEST_TRUST_VIEW_HISTORY, nest_t::VIEW_HISTORY, true),
+    ] {
+        els.push(
+            Element::gesture_button(
+                id,
+                label,
+                true,
+                Gesture::Settings(Action::ConnectedAppsSetLens {
+                    key: key.to_owned(),
+                    history,
+                }),
+            )
+            .within(ITEM, i),
+        );
+    }
+    match trust.lens {
+        TrustLens::Now if trust.grants.is_empty() => {
+            els.push(Element::label(ids::NEST_TRUST_EMPTY, t::TRUST_EMPTY).within(ITEM, i));
+        }
+        TrustLens::Now => {
+            els.push(Element::label(ids::NEST_TRUST_GRANT_LIST, String::new()).within(ITEM, i));
+            for (j, grant) in trust.grants.iter().enumerate() {
+                push_trust_grant(els, grant, i, j);
+            }
+        }
+        TrustLens::History => {
+            els.push(Element::label(ids::NEST_TRUST_HISTORY_LIST, String::new()).within(ITEM, i));
+            for (j, h) in trust.history.iter().enumerate() {
+                els.push(
+                    Element::label(ids::NEST_TRUST_HISTORY_ITEM, trust_history_line(h))
+                        .within(ids::NEST_TRUST_HISTORY_LIST, j)
+                        .within(ITEM, i),
+                );
+            }
+        }
+    }
+}
+
+/// One live key on a principal's row: its scope in the consent card's words,
+/// *lasts-until*, the liveness (an expired one says the app will ask again —
+/// nothing renews a principal's trust) and the required honest-bound copy.
+fn push_trust_grant(els: &mut Vec<Element>, grant: &TrustGrantRow, i: usize, j: usize) {
+    const ITEM: &str = ids::CONNECTED_APPS_ITEM;
+    let leaf = |e: Element| e.within(ids::NEST_TRUST_GRANT_ITEM, j).within(ITEM, i);
+    els.push(Element::label(ids::NEST_TRUST_GRANT_ITEM, String::new()).within(ITEM, i));
+    els.push(leaf(Element::label(
+        ids::NEST_TRUST_GRANT_SCOPE,
+        trust_scope_line(&grant.scope, grant.folder.clone()),
+    )));
+    els.push(leaf(Element::label(
+        ids::NEST_TRUST_GRANT_LASTS_UNTIL,
+        format!(
+            "{} {}",
+            nest_t::LASTS_UNTIL,
+            fauna_core::format::format_unix_local(grant.lasts_until)
+        ),
+    )));
+    els.push(leaf(Element::label(
+        ids::NEST_TRUST_GRANT_STATUS,
+        fauna_client_pair::trust_status_label(grant.liveness, false)
+            .resolve(fauna_i18n::strings::lookup),
+    )));
+    els.push(leaf(Element::label(
+        ids::NEST_TRUST_GRANT_BOUND_NOTE,
+        fauna_client_pair::principal_grant_bound_note().resolve(fauna_i18n::strings::lookup),
+    )));
+}
+
+/// A principal grant's scope line: the shared `principal_scope_labels`,
+/// resolved and joined.
+fn trust_scope_line(
+    scope: &[fauna_client_pair::TrustScope],
+    folder: Option<fauna_client_pair::TrustFolder>,
+) -> String {
+    fauna_client_pair::principal_scope_labels(scope.to_vec(), folder)
+        .iter()
+        .map(|l| l.resolve(fauna_i18n::strings::lookup))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn trust_history_line(h: &TrustHistoryRow) -> String {
+    let scope = trust_scope_line(&h.scope, h.folder.clone());
+    let when = fauna_core::format::format_unix_local(h.at);
+    fauna_client_pair::history_line_text(h.kind, &scope, &when).resolve(fauna_i18n::strings::lookup)
+}
+
+/// A served principal's record (`connected-apps.md` § Layout & flow, region
+/// 3): the open control on every row the oracle served, then — while this
+/// row's record is open and its read has returned — the list, newest first,
+/// or its empty state. The words are the shared composition's
+/// ([`oracle_op_text`]); the record is the machine's read, never kept here.
+fn oracle_record_elements(
+    c: &ConnectedAppsState,
+    row: &ConnectedAppRow,
+    i: usize,
+    els: &mut Vec<Element>,
+) {
+    const ITEM: &str = ids::CONNECTED_APPS_ITEM;
+    let record = c
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.record.as_ref())
+        .filter(|r| r.key == row.key);
+    els.push(
+        Element::gesture_button(
+            ids::CONNECTED_APPS_ORACLE_OPEN,
+            if record.is_some() {
+                t::ORACLE_CLOSE
+            } else {
+                t::ORACLE_OPEN
+            },
+            true,
+            Gesture::Settings(Action::ConnectedAppsToggleRecord(row.key.clone())),
+        )
+        .within(ITEM, i),
+    );
+    let Some(record) = record.filter(|r| r.loaded) else {
+        return;
+    };
+    els.push(Element::label(ids::CONNECTED_APPS_ORACLE_LIST, "").within(ITEM, i));
+    if record.ops.is_empty() {
+        els.push(Element::label(ids::CONNECTED_APPS_ORACLE_EMPTY, t::ORACLE_EMPTY).within(ITEM, i));
+        return;
+    }
+    for (j, op) in record.ops.iter().enumerate() {
+        els.push(
+            Element::label(
+                ids::CONNECTED_APPS_ORACLE_OP,
+                oracle_op_text(op).resolve(fauna_i18n::strings::lookup),
+            )
+            .attr("class", &op.class)
+            .within(ids::CONNECTED_APPS_ORACLE_OP, j)
             .within(ITEM, i),
         );
     }
@@ -437,13 +604,20 @@ fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Eleme
     const CARD: &str = ids::CONNECTED_APPS_REQUEST_CARD;
     // Heading, who is asking, the scopes in words, the permission sets and what
     // the approve ends — the shared composition's lines, resolved here.
-    let card_text = request_card_lines(consent)
+    let mut lines = request_card_lines(consent)
         .iter()
         .map(|line| line.resolve(fauna_i18n::strings::lookup))
-        .collect::<Vec<_>>()
-        .join("\n");
-    els.push(Element::label(CARD, card_text));
+        .collect::<Vec<_>>();
+    // A card no folder can be chosen on says why in its own text.
+    let picker = consent.folder_picker.as_ref();
+    if let Some(reason) = picker.and_then(|p| p.none_eligible.as_ref()) {
+        lines.push(reason.resolve(fauna_i18n::strings::lookup));
+    }
+    els.push(Element::label(CARD, lines.join("\n")));
     install_section_elements(consent, i, els);
+    folder_picker_element(consent, i, els);
+    // A bare folder card is approvable only once a folder is chosen.
+    let approvable = picker.is_none_or(|p| p.chosen.is_some());
     els.push(
         Element::label(
             ids::CONNECTED_APPS_REQUEST_CODE,
@@ -469,7 +643,7 @@ fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Eleme
             Element::gesture_button(
                 id,
                 label,
-                true,
+                approvable || !approved,
                 Gesture::Settings(Action::ConnectedAppsResolveRequest {
                     consent_id_hex: consent.consent_id_hex.clone(),
                     approved,
@@ -489,6 +663,41 @@ fn consent_card_elements(consent: &ConsentCardRow, i: usize, els: &mut Vec<Eleme
         )
         .within(CARD, i),
     );
+}
+
+/// The card's folder picker (`connected-apps-request-folder`), painted after
+/// the scope rows and before the controls — present exactly on a card
+/// carrying a bare folder-plane scope (`authorization-server.md` § Consent →
+/// *The card chooses the folder*). The option keys are the folders' row ids
+/// in decimal (what `get_text` returns and `select` takes), the names their
+/// labels; the shared machine composed and filtered them. A card with no
+/// eligible folder paints the picker with no option: its reason is the
+/// card's own text.
+fn folder_picker_element(consent: &ConsentCardRow, i: usize, els: &mut Vec<Element>) {
+    let Some(picker) = consent.folder_picker.as_ref() else {
+        return;
+    };
+    let keys: Vec<String> = picker.options.iter().map(|o| o.id.to_string()).collect();
+    let names: Vec<String> = picker.options.iter().map(|o| o.name.clone()).collect();
+    let chosen = picker.chosen.map(|id| id.to_string()).unwrap_or_default();
+    let shown = picker
+        .chosen
+        .and_then(|id| picker.options.iter().find(|o| o.id == id))
+        .map_or_else(
+            || card_t::CONSENT_FOLDER_PROMPT.to_string(),
+            |o| o.name.clone(),
+        );
+    let mut el = Element::select(
+        ids::CONNECTED_APPS_REQUEST_FOLDER,
+        chosen,
+        SelectTarget::ConnectedAppsFolder { card: i },
+        keys,
+    )
+    .option_labels(names)
+    .display_value(shown)
+    .within(ids::CONNECTED_APPS_REQUEST_CARD, i);
+    el.label = Some(card_t::CONSENT_FOLDER_LABEL.to_string());
+    els.push(el);
 }
 
 /// The install section of an admin's hosted-plugin install card

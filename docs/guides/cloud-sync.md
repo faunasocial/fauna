@@ -127,9 +127,7 @@ or under `/mnt` or `/media`; anywhere else the folder's row tells you
 on-demand can't be used there and keeps syncing the files already on the
 device. On Linux there is no right-click menu for this, so the folder's row in Settings → Folders carries it: it shows how much of the folder is on this device and has a **Free up space** button. Pressing it frees every file your nest or your other devices can give back, and keeps any file this device may hold the only copy of — one with changes still uploading, or one you added or changed in a folder whose **Content kept on the nest** is set to **Metadata only — content stays on my devices**. To keep the whole folder on the device instead, turn on-demand off.
 
-On Mac and iPhone/iPad, a folder appears as a **Fauna location** — in the
-Finder sidebar on a Mac, and under Browse in the Files app on iOS. It's on by
-default for every folder this device **receives changes from elsewhere** in:
+On iPhone and iPad, a folder appears as a **Fauna location** under Browse in the Files app. On a Mac the same location is built into the Finder sidebar, but in the released Mac app it does not list your folders yet; until it does, sync a folder to a location of your own choosing on the Mac. What follows describes the Fauna location as it works on iPhone and iPad and as it will on a Mac; where it mentions a folder synced to a location of your own choosing, that part is about a Mac. The location is on by default for every folder this device **receives changes from elsewhere** in:
 the files show up as
 placeholders (names and sizes, no disk space) and download when you open
 them. Each folder has a **"Show in Finder"** / **"Show in Files"** switch in Settings → Folders if you'd rather keep a folder out of your file browser on that device; a folder you've synced to a location of your own choosing shows up there instead of as a Fauna location. Every folder you own has the switch,
@@ -161,7 +159,7 @@ already keeps in sync from one of your own phone folders shows a note instead
 of the switch, because that folder is already on the phone.
 You can edit, create, rename and delete files there too, and your changes reach your nest — an edit as soon as you close the file.
 
-Platform status differs today: Windows has the full experience, the macOS/iOS Finder and Files integration is built and being polished, the Android file browser integration lets you browse, open and edit files, and Linux has the per-folder on-demand switch and a **Free up space** button on the folder's row — see the [status table](#where-this-stands-today).
+Platform status differs today: Windows has the full experience, the iOS Files-app integration is built and being polished, the Mac Finder location is built but does not list your folders in the released Mac app yet, the Android file browser integration lets you browse, open and edit files, and Linux has the per-folder on-demand switch and a **Free up space** button on the folder's row — see the [status table](#where-this-stands-today).
 
 ## Mount it like a network drive (WebDAV)
 
@@ -269,7 +267,7 @@ them; Fauna will tell you to turn serving off first.)
 | Per-file status badges | **Available** — on Windows also as File Explorer's own cloud-status icons |
 | One device at a time (exclusive editing) for unmergeable files | **Available** — switched on per folder; the folder's row names the device editing it |
 | Conflict detection + automatic resolution | **Available** — text merge or latest-wins, with a per-folder review list to override the automatic choice |
-| On-demand files / free-up-space | **Available on Windows**; **macOS Finder + iOS Files-app locations built** (per-folder Show in Finder / Show in Files switch, on by default); **Android file-browser location built** (per-folder Show in Files switch, on by default; browse, open and edit); **Linux per-folder on-demand switch built** (needs the `fuse3` package; **Free up space** on the folder's row) |
+| On-demand files / free-up-space | **Available on Windows**; **iOS Files-app location built** (per-folder Show in Files switch, on by default); **macOS Finder location built but not yet listing your folders in the released Mac app** (per-folder Show in Finder switch); **Android file-browser location built** (per-folder Show in Files switch, on by default; browse, open and edit); **Linux per-folder on-demand switch built** (needs the `fuse3` package; **Free up space** on the folder's row) |
 | WebDAV serving (Finder/Dolphin/rclone read-write) | **Server complete & tested**; the per-folder toggle is available on every app; Windows Explorer's own native write **planned** (needs locking) |
 | Selective sync (include/exclude paths inside a folder) | **Available** — an edit reaches every signed-in device within a scan cycle, no restart |
 | Per-file version history browser | **Available on every app** — Windows also gets a File Explorer right-click → Fauna → Version history shortcut; every app can restore an older version in place |

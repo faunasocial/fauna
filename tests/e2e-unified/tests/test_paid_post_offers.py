@@ -169,7 +169,6 @@ def test_a_post_sold_to_everyone_leaves_existing_subscribers_out(app, request, o
     once the sale's tier exists the enqueue is settled: with the toggle off it
     named no existing subscriber. The subscriber's own app then shows the post
     as something to BUY."""
-    app.subscriptions.require_sell_post_seller_fanout_leg_supported()
     seller = _register(offers_nest)
     subscriber = _register(offers_nest)
     seller_id = seller["actor_id_bytes"]
@@ -219,7 +218,6 @@ def test_buying_a_subscribers_free_post_does_not_make_you_a_follower(app, reques
     provisions it, so the old edge had a rank-0 target the buyer could have been
     enrolled into. The absence is read behind the positive barrier of the same
     approval pass (convention 14): the buyer reads the bought post first."""
-    app.subscriptions.require_sell_post_seller_fanout_leg_supported()
     seller = _register(offers_nest)
     follower = _register(offers_nest)
     buyer = _register(offers_nest)
@@ -342,8 +340,6 @@ def test_a_sold_post_is_never_offered_as_a_tier_or_an_audience(app, request, off
     an agent REFUSES a select value its frame did not paint
     (`SelectOptionNotOffered`, convention 11), so selecting the sold tier is
     the read."""
-    app.subscriptions.require_sell_post_seller_fanout_leg_supported()
-    app.profile.require_other_profile_offers_browse_supported()
     seller = _register(offers_nest)
     visitor = _register(offers_nest)
     _login_as(app, request, offers_nest, seller, handle=_unique("e2e-seller"))

@@ -42,9 +42,9 @@ any time from the same page where you approved it.
 
 - **A Fauna account**, and any one of your Fauna apps signed in — your phone
   is enough. You need it to approve the connection; to read and reply in your
-  conversations, a Fauna app must also be open and signed in on the computer
-  where the assistant runs (see [What it can do](#what-it-can-do)).
-- **The `fauna-cli` program** on the computer where the assistant runs. It comes with the terminal app: each release's terminal-app archive for your operating system carries it, and the archive's `install.sh` installs it (on Windows, unpack the zip into a folder on your `PATH`); the macOS package and the Windows installer put it on your computer with the terminal app — see [Terminal (TUI)](install.md#terminal-tui) in the install guide. Until the first release, build it from the source code, the same way the terminal app is built in its *Building from source* section (the package is `fauna-cli-device`, the program `fauna-cli`).
+  conversations, the Fauna desktop app or terminal app must also be open and
+  signed in on the computer where the assistant runs (see [What it can do](#what-it-can-do)).
+- **The `fauna-cli` program** on the computer where the assistant runs. It comes with the terminal app: each release's terminal-app archive for your operating system carries it, and the archive's `install.sh` installs it (on Windows, unpack the zip into a folder on your `PATH`); the Windows installer puts it on your computer with the terminal app, and the macOS package will once it is published — see [Terminal (TUI)](install.md#terminal-tui) in the install guide. Where no archive or installer fits your computer, build it from the source code, the same way the terminal app is built in its *Building from source* section (the package is `fauna-cli-device`, the program `fauna-cli`).
 - **An assistant that can run a local MCP server.** Two kinds work: one that
   starts the program itself, and one that connects to a web address on the
   same computer. An assistant that runs only in the cloud and can connect
@@ -122,7 +122,8 @@ approve the whole list or nothing; there is no partial approval.
   apps would fold away is shown to it in full.
 - **Read and reply in your conversations** — list your rooms, read and
   search their messages, and send a message as you into one. This works only
-  while a Fauna app is open and signed in on the same computer: that app does
+  while the Fauna desktop app or terminal app is open and signed in on the same
+  computer: that app does
   the reading and the sending, and the assistant is never given your
   conversation keys. It
   cannot invite, remove or rename anyone, and every room stays the kind of
@@ -205,11 +206,11 @@ you add `--yes`.
 | Reading feeds, posting and deleting its own posts | **Available** |
 | Reading profiles and editing your own name, bio and links | **Available** |
 | Reading notifications and marking them read | **Available** |
-| Reading, searching and replying in conversations while a Fauna app is open on the same computer | **Available** |
+| Reading, searching and replying in conversations while the Fauna desktop app or terminal app is open on the same computer | **Available** |
 | The admin's daily work, for an admin who asks for it | **Available** |
 | Assistants that start the program themselves, and assistants that connect to an address on the same computer | **Available** |
 | Using the same commands yourself at the terminal, with `--json` for scripts | **Available** |
-| Getting the program from a release download | **With the first release** — in the terminal app's archive and in the macOS and Windows installers; built from source until then |
+| Getting the program from a release download | **Available** — in the terminal app's archive for Linux, macOS and Windows, and in the Windows installer; the macOS package, once published, will carry it too |
 | Staying connected between launches on a computer with no keychain or secret store it can use | **Available** — the connection is stored on its disk, protected by file permissions alone, and the assistant says so when you connect |
 | Mail, calendar, contacts, files, and searching beyond your conversations, for an assistant | **Planned** — one permission at a time, each a new line on the approval card |
 | An assistant that runs only in the cloud and connects to a public address | **Planned** — a form of the program that runs on your nest |

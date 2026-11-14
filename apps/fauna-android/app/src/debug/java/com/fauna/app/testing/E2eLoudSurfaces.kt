@@ -8,6 +8,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.node.RootForTest
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -15,9 +17,12 @@ import androidx.compose.ui.semantics.getOrNull
 import com.fauna.ffi.FfiConnectionReportsForTest
 import com.fauna.ffi.FfiConnectionState
 import com.fauna.ffi.FfiKnockNoticesForTest
+import com.fauna.ffi.FfiLaidOutText
+import com.fauna.ffi.FfiLayoutSize
 import com.fauna.ffi.FfiNestClient
 import com.fauna.ffi.FfiPaintedElement
 import com.fauna.ffi.FfiPaintedErrorTallyForTest
+import com.fauna.ffi.FfiPaintedTextAreaForTest
 import com.fauna.ffi.criticalAlertSweepWakeForTest
 import com.fauna.ffi.criticalAlertsRegistry
 import org.json.JSONObject
@@ -28,7 +33,9 @@ import java.util.WeakHashMap
  * {ALERT_SWEEP_WAKE, RECONNECT_BACKOFF, CONNECTION_REPORTS_KEY,
  * PAINTED_ERRORS_KEY}`, which own the cross-app contracts — plus the sweep's
  * pass counters (`ALERT_SWEEP_PASSES_KEY`) those journeys anchor on, and the
- * knock-toast log (`KNOCK_NOTICES_KEY`), the same shape of firing-site seam. Every one
+ * knock-toast log (`KNOCK_NOTICES_KEY`), the same shape of firing-site seam, and
+ * convention 17's `painted_text_area` record (`PAINTED_TEXT_AREA_KEY`), read off
+ * the same frame as `painted_errors`. Every one
  * is a thin call into `fauna-ffi`'s `test-helpers` exports (`e2e_seams.rs`,
  * `critical_alerts.rs`), so android counts, parses and wakes with the same Rust
  * as tui, linux, web, windows and apple (apple's `E2eLoudSurfaces.swift` and
@@ -48,6 +55,7 @@ object E2eLoudSurfaces {
     @Volatile private var connectionReports = FfiConnectionReportsForTest()
     @Volatile private var paintedErrors = FfiPaintedErrorTallyForTest()
     @Volatile private var knockNotices = FfiKnockNoticesForTest()
+    @Volatile private var paintedTextArea = FfiPaintedTextAreaForTest()
 
     private val main by lazy { Handler(Looper.getMainLooper()) }
 
@@ -59,6 +67,9 @@ object E2eLoudSurfaces {
 
     /** Main-thread only. The last `painted_errors` value logged. */
     private var lastShown = ""
+
+    /** Main-thread only. The last `painted_text_area` value logged. */
+    private var lastStarved = ""
 
     private var activity: java.lang.ref.WeakReference<Activity>? = null
 
@@ -123,6 +134,12 @@ object E2eLoudSurfaces {
             }
         }
         paintedErrors.observe(roots.flatMap { paintedElementsOf(it) })
+        paintedTextArea.observe(roots.flatMap { laidOutTextOf(it) })
+        val starved = paintedTextArea.json()
+        if (starved != lastStarved) {
+            lastStarved = starved
+            android.util.Log.i("fauna.e2e", "[painted-text-area] $starved")
+        }
         // One log line per change of what is painted, never per frame: the
         // evidence a count that did (or did not) move can be checked against.
         val shown = paintedErrors.json()
@@ -178,6 +195,89 @@ object E2eLoudSurfaces {
         node.children.forEach { walk(it, out) }
     }
 
+    /**
+     * Convention 17's `painted_text_area` feed: every PLACED, test-tagged node
+     * with non-empty text of its OWN under [root], with the room the layout gave
+     * it in DIP (`frame_invariants.py::_check_painted_text_has_area` owns the
+     * contract; the shared `fauna_e2e_contract::PaintedTextArea` keeps the
+     * starved ones). A descendant's text is never the tag's: it is judged in
+     * its own node, with its own box.
+     *
+     * ⚠ The measure is the ROOM, never the measured size alone. Compose lets a
+     * child measure LARGER than its constraints (`requiredWidth`, a text that
+     * cannot wrap) and centres the overflow, painting it unless a clip layer
+     * cuts it — so a node's own size says nothing about what a human sees (the
+     * WinUI `ActualWidth` trap, `PaintedTextAreaObserver.cs`). The box is the
+     * node's bounds mapped up with `clipBounds = true`, which intersects it with
+     * every clip layer on the way (`Modifier.clip`, `clipToBounds`, a scroll
+     * container's viewport) and with nothing else.
+     *
+     * A scroll container's viewport is NOT such a clip: a node scrolled out of
+     * view keeps its box. So a node under a scroll container is mapped only up
+     * to that container's CONTENT (its inner coordinates — below its own clip
+     * layer and scroll offset), then capped by the container's own room, size by
+     * size; positions are ignored there, so the cap can miss a starved element,
+     * never invent one. A scroll container is a semantics node carrying a
+     * scroll axis range (`verticalScroll`, `LazyColumn`, a pager).
+     *
+     * `pane` is the room of the nearest semantics ancestor that has area (null
+     * when none has), `depth` the box-less semantics ancestors between them.
+     */
+    internal fun laidOutTextOf(root: View): List<FfiLaidOutText> {
+        val out = mutableListOf<FfiLaidOutText>()
+        composeRoots(root).forEach { owner ->
+            val density = owner.density.density
+            val top = owner.semanticsOwner.unmergedRootSemanticsNode
+            val coords = top.layoutInfo.coordinates
+            if (!coords.isAttached) return@forEach
+            val anchor = TextRoom(coords.findRootCoordinates(), Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+            walkRoom(top, anchor, null, 0, density, out)
+        }
+        return out
+    }
+
+    /** What the room walk carries down: the coordinates a node's box is mapped
+     *  into, and the size cap that anchor's own room sets. */
+    private data class TextRoom(val anchor: LayoutCoordinates, val capW: Float, val capH: Float)
+
+    private fun walkRoom(
+        node: SemanticsNode,
+        room: TextRoom,
+        pane: FfiLayoutSize?,
+        depth: Int,
+        density: Float,
+        out: MutableList<FfiLaidOutText>,
+    ) {
+        if (!node.layoutInfo.isPlaced) return
+        val coords = node.layoutInfo.coordinates
+        if (!coords.isAttached || !room.anchor.isAttached) return
+        val bounds = room.anchor.localBoundingBoxOf(coords, clipBounds = true)
+        val width = minOf(bounds.width / density, room.capW)
+        val height = minOf(bounds.height / density, room.capH)
+        node.config.getOrNull(SemanticsProperties.TestTag)?.let { tag ->
+            val text = ownText(node).trim()
+            if (text.isNotEmpty()) {
+                out += FfiLaidOutText(
+                    id = tag,
+                    text = text,
+                    width = round1(width),
+                    height = round1(height),
+                    pane = pane,
+                    depth = depth.toUInt(),
+                )
+            }
+        }
+        val hasArea = width >= 1f && height >= 1f
+        val innerPane = if (hasArea) FfiLayoutSize(round1(width), round1(height)) else pane
+        val innerDepth = if (hasArea) 0 else depth + 1
+        val scrolls = node.config.getOrNull(SemanticsProperties.VerticalScrollAxisRange) != null ||
+            node.config.getOrNull(SemanticsProperties.HorizontalScrollAxisRange) != null
+        val innerRoom = if (scrolls) TextRoom(coords, width, height) else room
+        node.children.forEach { walkRoom(it, innerRoom, innerPane, innerDepth, density, out) }
+    }
+
+    private fun round1(v: Float): Double = Math.round(v.toDouble() * 10.0) / 10.0
+
     private fun ownText(node: SemanticsNode): String =
         listOfNotNull(
             node.config.getOrNull(SemanticsProperties.EditableText)?.text,
@@ -195,7 +295,7 @@ object E2eLoudSurfaces {
     }
 
     /**
-     * Write `connection_reports`, `painted_errors`, `knock_notices` and `alert_sweep_passes` into
+     * Write `connection_reports`, `painted_errors`, `painted_text_area`, `knock_notices` and `alert_sweep_passes` into
      * the agent's top-level state, decoded (a raw JSON string would
      * double-encode at the wire). All three are process-wide and start at zero,
      * so they are published unconditionally — zeros are an answer, the key's
@@ -206,6 +306,9 @@ object E2eLoudSurfaces {
         main.post { observePaintedFrame() }
         state.put("connection_reports", JSONObject(connectionReports.json()))
         state.put("painted_errors", JSONObject(paintedErrors.json()))
+        // `fauna_e2e_agent::PAINTED_TEXT_AREA_KEY` — the last laid-out frame's
+        // starved text; `{"starved": []}` before the first read is an answer.
+        state.put("painted_text_area", JSONObject(paintedTextArea.json()))
         // `fauna_e2e_agent::KNOCK_NOTICES_KEY` — process-wide from zero like the
         // two above, so published unconditionally: `seen` 0 is an answer.
         state.put("knock_notices", JSONObject(knockNotices.json()))
@@ -270,12 +373,15 @@ object E2eLoudSurfaces {
         connectionReports = FfiConnectionReportsForTest()
         paintedErrors = FfiPaintedErrorTallyForTest()
         knockNotices = FfiKnockNoticesForTest()
+        paintedTextArea = FfiPaintedTextAreaForTest()
         lastShown = ""
+        lastStarved = ""
     }
 
     /** Test seam: feed one frame read off [root] now, on the calling (main)
      *  thread — what a draw on that window schedules. */
     internal fun observeFrameForTest(root: View) {
         paintedErrors.observe(paintedElementsOf(root))
+        paintedTextArea.observe(laidOutTextOf(root))
     }
 }

@@ -35,6 +35,8 @@ mod seal;
 pub mod store;
 pub mod succession_aftermath;
 pub mod sync;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod testing;
 
 pub use restore::{LaunchRestore, restore_when_loaded};
 pub use seal::{

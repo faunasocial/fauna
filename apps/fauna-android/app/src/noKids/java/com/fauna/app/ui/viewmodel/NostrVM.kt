@@ -335,8 +335,10 @@ class NostrVM @Inject constructor(
         viewModelScope.launch {
             _error.value = null
             try {
-                api.addBridgeFollow(NOSTR_BRIDGE_ID, trimmed, petname?.trim()?.ifBlank { null })
-                refresh()
+                // Queued with no nest: no list changes (tui's rule).
+                val queued =
+                    api.addBridgeFollowOrQueue(NOSTR_BRIDGE_ID, trimmed, petname?.trim()?.ifBlank { null })
+                if (!queued) refresh()
             } catch (e: Exception) {
                 _error.value = e.message
             }
@@ -347,8 +349,7 @@ class NostrVM @Inject constructor(
         viewModelScope.launch {
             _error.value = null
             try {
-                api.removeBridgeFollow(NOSTR_BRIDGE_ID, followId)
-                refresh()
+                if (!api.removeBridgeFollowOrQueue(NOSTR_BRIDGE_ID, followId)) refresh()
             } catch (e: Exception) {
                 _error.value = e.message
             }

@@ -1613,6 +1613,14 @@ fn build_users_hub(client: &Rc<FaunaClient>) -> UsersHubHandles {
     registration_readonly_label.set_margin_bottom(8);
     registration_readonly_label.add_css_class("dim-label");
     registration_readonly_label.set_visible(false);
+    // The read-only reading carries the select's id, as tui's label does: the
+    // dropdown sits in the hidden editable box then, so the driver's read of
+    // `admin-users-registration-mode-select` lands on the explainer naming the
+    // raw mode — never on a stale known selection.
+    crate::testid::set_test_id(
+        &registration_readonly_label,
+        ids::ADMIN_USERS_REGISTRATION_MODE_SELECT,
+    );
     registration_section.append(&registration_readonly_label);
 
     let registration_editable_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -9806,7 +9814,9 @@ fn build_user_row(
     // the e2e queries them scoped to the row (`user-row[i]`). One click acts
     // immediately — no confirm dialog, since both cut-off paths are reversible by
     // the Cancel-eviction control beside them.
-    let controls = fauna_client_admin::admin_user_row_controls(user);
+    // The viewer id keys only the take-over offer, which this app does not
+    // render yet (the trickle-down lift passes the session actor id).
+    let controls = fauna_client_admin::admin_user_row_controls(user, &[]);
 
     if controls.evict {
         let actor = evict_actor.clone();

@@ -70,7 +70,7 @@ public sealed partial class SettingsSubscriptionsPage : Page
         // as a queued grant in the list above, which the panel does not own.
         _claimRedeem = new Views.Payments.ClaimRedeemPanel();
         ClaimRedeemHost.Content = _claimRedeem;
-        _claimRedeem.Attach(_vm, () =>
+        _claimRedeem.Attach(_vm.RedeemClaimAsync, () =>
         {
             RenderError(_vm.ErrorMessage);
             UpdatePlaceholder();

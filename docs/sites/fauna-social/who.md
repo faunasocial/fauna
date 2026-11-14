@@ -29,6 +29,6 @@ The software is free and open source, under the MIT and Apache 2.0 licences, and
 
 
 
-> Fauna is in <strong>closed alpha</strong>. Apps for iPhone, Android, Mac, Windows, Linux, the web and the terminal are on their way; the source code is published at {repo}.
+> Fauna is in <strong>closed alpha</strong>. The first downloads, for Mac, Windows, Linux and the terminal, are on the [apps](/apps) page, and every Fauna server serves the web app itself by default; the Android app is in Google Play's invitation-only testing, and the iPhone app is on its way. The source code is published at {repo}.
 >
 > Curious, want in early or want to contribute? Send an email to {email}

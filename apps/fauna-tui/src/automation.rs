@@ -679,9 +679,16 @@ fn session_device_id(shared: &mut SharedState, app: &App) -> Option<String> {
 #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
 fn state_json(app: &App, machine_result: Option<String>, device_id: Option<&str>) -> Value {
     let session = match &app.session {
+        // The handle the app itself shows: the registry's nest-confirmed one
+        // (the session mint's identity watch keeps it current — the same
+        // source `session_self_address` / the identity cell read), the
+        // attach-time handle only until the nest has answered. A same-actor
+        // re-login patch converges without re-establishing, so the attach-time
+        // handle alone would outlive the patch.
         Some(s) => json!({
             "authenticated": true,
-            "handle": s.handle,
+            "handle": crate::session::session_account_handle(app)
+                .unwrap_or_else(|| s.handle.clone()),
             "actor_id": s.actor_id,
             "device_id": device_id,
         }),
@@ -1026,6 +1033,10 @@ fn state_json(app: &App, machine_result: Option<String>, device_id: Option<&str>
     // Published unconditionally, pre-auth included, for the same reason as
     // `message_banners`: absent means "no knock-toast leg at all".
     state[fauna_e2e_agent::KNOCK_NOTICES_KEY] = app.knock_notices.json();
+    // The id-bearing text the newest frame gave no room — convention 17's
+    // `painted-text-has-area` (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`).
+    // Measured by the render loop; a field read here. TOP-level.
+    state[fauna_e2e_agent::PAINTED_TEXT_AREA_KEY] = app.painted_text_area.json();
     // The admin Held-Custody page's `{answered, row_count}` — whether the
     // registry read has ANSWERED, read off the loop while the nav's awaited
     // read is held at the nest (`admin::custody_hosting::state_json`).
@@ -2199,6 +2210,15 @@ async fn dispatch_command(
                 recognized(true)
             }
         },
+        // The app-only outbox drain, rung now: the same loop the lend and
+        // every reconnect run (`session::spawn_outbox_drain`), for a test that
+        // has just released the e2e drain hold, whose held pass ended the
+        // loop. A no-op offline or pre-auth. Fire-and-forget — the barrier is
+        // the effect. `fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW` owns the contract.
+        fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW => {
+            crate::session::spawn_outbox_drain(app);
+            recognized(true)
+        }
         // The custody owner sends again: every granted ceremony re-posts its
         // newest sent step through the shared body (the deliver re-signed by
         // the drive's own signing site), recording nothing. No gesture re-sends,
@@ -4275,6 +4295,33 @@ mod tests {
         assert_eq!(
             state_json(&app, None, None)[fauna_e2e_agent::CONNECTION_REPORTS_KEY],
             json!({ "reports": 3, "transitions": 1, "word": "unreachable" })
+        );
+    }
+
+    /// The reported session handle is the one the app itself shows — the
+    /// account registry's nest-confirmed handle, kept current by the session
+    /// mint's identity watch — and the attach-time patch handle only until the
+    /// nest has answered. A same-actor re-login patch converges on the live
+    /// session without re-establishing it, so reporting the attach-time
+    /// handle kept an earlier module's made-up handle alive past the patch
+    /// (`test_state_protocol.py::test_set_session_state` after
+    /// `test_navigation.py` in one process).
+    #[test]
+    fn state_session_handle_follows_the_nest_confirmed_handle() {
+        let mut app = authed_app();
+        app.session.as_mut().expect("authed").handle = "made-up".to_string();
+        assert_eq!(
+            state_json(&app, None, None)["session"]["handle"],
+            "made-up",
+            "before the nest answers, the attach-time handle is all there is"
+        );
+        let actor_id = app.session.as_ref().expect("authed").actor_id.clone();
+        crate::session::registry(&app)
+            .update_cache(&actor_id, Some("confirmed"), None, None)
+            .expect("cache the confirmed handle");
+        assert_eq!(
+            state_json(&app, None, None)["session"]["handle"],
+            "confirmed"
         );
     }
 

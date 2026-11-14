@@ -6,9 +6,6 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.Media.Core;
-using Windows.Media.Playback;
-using Windows.Storage.Streams;
 using uniffi.fauna_core;
 
 namespace FaunaApp.Controls;
@@ -36,6 +33,17 @@ namespace FaunaApp.Controls;
 /// decision about that block, so a <c>ProxiedVideo</c> plays off the ticketed path
 /// <c>playback_source</c> answers for it — this view never builds a URL.</para>
 ///
+/// <para><b>The player outlives the card</b> — linux's shape
+/// (<c>apps/fauna-linux/src/views/feed/video_thumbnail.rs</c>). The playback itself — the
+/// resolve, the player, its stream, the phase — is an <see cref="InlineVideoSession"/> this
+/// view shows. A list card's session is kept by its list
+/// (<see cref="Feed.PostCardHost.Players"/>), keyed by post and video: WinUI regenerates a
+/// row's container whenever the feed moves the row (a live re-rank — <c>engagement-cues.md</c>
+/// § <i>A play is attention</i>), and the card rebuilt for that post adopts the player, still
+/// playing, instead of starting over at the glyph. The list stops it once it no longer holds
+/// the post with that video, or leaves the screen. The post-detail dialog's slot sits in no
+/// list: its session is its own, stopped when the slot unloads.</para>
+///
 /// <para><b>What the drivers read</b> (<c>drivers/base.py::get_attr</c>): <c>state</c>
 /// (<c>idle</c> / <c>loading</c> / <c>playing</c> / <c>error</c>), <c>position</c> (the
 /// player's seconds) and <c>source</c> (what it was handed). UIA carries one
@@ -43,22 +51,20 @@ namespace FaunaApp.Controls;
 /// its HelpText (<see cref="AutomationAttributePack"/>) and the bridge answers each key on
 /// its own. The peer computes the string AT READ TIME off the live player, so the position
 /// a test polls is the player's own and no timer republishes it. The phase walk itself is
-/// the pure <see cref="VideoPlaybackMachine"/>, pinned by <c>InlineVideoPlaybackTests</c>;
-/// this control is only the glue that feeds it player events.</para>
+/// the pure <see cref="VideoPlaybackMachine"/>, pinned by <c>InlineVideoPlaybackTests</c>,
+/// and the keep the pure <see cref="InlinePlayerKeep{TPlayer}"/>, pinned by
+/// <c>InlinePlayerKeepTests</c>; this control is only the glue.</para>
 ///
-/// <para><b>Threading:</b> every machine transition runs on the UI thread — the resolve
-/// awaits without <c>ConfigureAwait(false)</c>, and the player's events (raised on its own
-/// threads) are marshalled through <see cref="FrameworkElement.DispatcherQueue"/> — which
-/// is also where UIA calls the peer, so the published phase is never read mid-write.</para>
+/// <para><b>Threading:</b> UI thread only — the session raises its changes there, which is
+/// also where UIA calls the peer, so the published phase is never read mid-write.</para>
 /// </summary>
-public sealed class VideoThumbnailView : UserControl
+public sealed class VideoThumbnailView : UserControl, IInlinePlayerViewer
 {
-    private readonly VideoPlaybackMachine _machine = new();
     private readonly Grid _slot = new();
     private readonly StackPanel _row = new() { Orientation = Orientation.Horizontal, Spacing = 4 };
     private readonly TextBlock _glyph = new()
     {
-        Text = "",
+        Text = "",
         FontFamily = new FontFamily("Segoe MDL2 Assets"),
         FontSize = 14,
         VerticalAlignment = VerticalAlignment.Center,
@@ -83,17 +89,25 @@ public sealed class VideoThumbnailView : UserControl
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
     };
 
+    /// <summary>What an idle slot publishes: no session, nothing tapped.</summary>
+    private static readonly VideoPlaybackMachine IdleMachine = new();
+
     private RenderBlock? _block;
-    private MediaPlayer? _player;
-    /// <summary>The element showing <see cref="_player"/>, while one does — detached from
-    /// the player before the player is disposed (<see cref="TearDownPlayer"/>).</summary>
+    private string? _postId;
+
+    /// <summary>The playback this slot shows, while it shows one.</summary>
+    private InlineVideoSession? _session;
+
+    /// <summary>The element showing <see cref="_session"/>'s player, while it has one —
+    /// detached from the player before the player is disposed (the session's
+    /// <c>ReleasePlayer</c>).</summary>
     private MediaPlayerElement? _element;
-    /// <summary>The stream the player reads, while it reads one — kept so its reader is
-    /// released with the player (a sealed video's bytes need no release).</summary>
-    private PlaybackMedia.Streamed? _streamed;
-    /// <summary>Bumped on every tap and stop, so a resolve that outlives its tap — or a
-    /// row recycled onto another post while it ran — is dropped.</summary>
-    private int _attempt;
+
+    /// <summary>The card list this slot sits in, found when it loads — <c>null</c> for the
+    /// post-detail dialog, whose session is its own.</summary>
+    private Feed.PostCardHost? _host;
+
+    private bool _loaded;
 
     public VideoThumbnailView()
     {
@@ -102,9 +116,21 @@ public sealed class VideoThumbnailView : UserControl
         _row.Children.Add(_label);
         _button.Click += (_, _) => Activate();
         Content = _slot;
-        // A row scrolled away or a dialog closed releases its player: nothing plays
-        // where the reader cannot see it, and the decoder's memory goes with it.
-        Unloaded += (_, _) => Stop();
+        Loaded += (_, _) =>
+        {
+            _loaded = true;
+            _host = Feed.PostCardHost.Of(this);
+            AdoptKept();
+        };
+        // A slot leaving the tree lets go of what it shows. A list card's player goes on, for
+        // the card rebuilt for its post to adopt — the list stops it once nothing can show it;
+        // the dialog's player stops with its slot: nothing plays where the reader cannot see
+        // it, and the decoder's memory goes with it.
+        Unloaded += (_, _) =>
+        {
+            _loaded = false;
+            LeaveSession();
+        };
         Paint();
     }
 
@@ -115,7 +141,7 @@ public sealed class VideoThumbnailView : UserControl
     /// the text beside the glyph — the hash, or the nest-relative path — which is also the
     /// element's accessible name (a DataTemplate element with no name is pruned from UIA, so
     /// FlaUI would count 0). A new block — a recycled row now showing another post —
-    /// returns the slot to its idle glyph.</summary>
+    /// leaves the old one's playback and shows the new one's, if its list keeps one.</summary>
     public object? Block
     {
         get => _block;
@@ -123,26 +149,34 @@ public sealed class VideoThumbnailView : UserControl
         {
             var next = value as RenderBlock;
             if (Equals(next, _block)) return;
+            LeaveSession();
             _block = next;
-            var text = next switch
-            {
-                RenderBlock.Video video => video.hash,
-                RenderBlock.ProxiedVideo proxied => proxied.path,
-                _ => "",
-            };
+            var text = InlineVideoKey.Of(next) ?? "";
             _label.Text = text;
             AutomationProperties.SetName(this, text);
-            Stop();
+            AdoptKept();
+            Paint();
         }
     }
 
-    /// <summary>The post a list card's slot belongs to, so its player's progress reaches
-    /// the engagement-cue capture (<see cref="Feed.CueViewportObserver.NotePlayed"/>):
-    /// a video played to its end derives the media <c>watch-complete</c>
-    /// (<c>engagement-cues.md</c> § Cue vocabulary &amp; derivation). Left <c>null</c> by
-    /// the post-detail dialog, whose player plays outside the list the capture
-    /// samples.</summary>
-    public string? PostId { get; set; }
+    /// <summary>The post a list card's slot belongs to — the key its list keeps the player
+    /// under, beside the video, and the post its session reports progress and engagement for
+    /// to the engagement-cue capture (<see cref="Feed.CueViewportObserver.NotePlayed"/>): a
+    /// video played to its end derives the media <c>watch-complete</c>
+    /// (<c>engagement-cues.md</c> § Cue vocabulary &amp; derivation). Left <c>null</c> by the
+    /// post-detail dialog, whose player plays outside the list the capture samples.</summary>
+    public string? PostId
+    {
+        get => _postId;
+        set
+        {
+            if (value == _postId) return;
+            LeaveSession();
+            _postId = value;
+            AdoptKept();
+            Paint();
+        }
+    }
 
     /// <summary>The post's shared <c>post_blob_home</c> (<c>FfiPostBlobHome</c>, typed
     /// <c>object</c> for the same reason as <see cref="Block"/>), handed unchanged to the
@@ -150,217 +184,130 @@ public sealed class VideoThumbnailView : UserControl
     /// on another nest; <c>null</c> = this nest.</summary>
     public object? Home { get; set; }
 
-    /// <summary><c>state;position;source</c>, packed — what the automation peer answers as
-    /// HelpText. Read on the UI thread (UIA's provider calls are marshalled there).</summary>
+    /// <summary>The video element's settled label (<c>PostMediaElement.Alt</c> — the author's
+    /// alt, else the shared <c>feed.post.video_alt_fallback</c> text), published as the
+    /// element's <c>alt</c> attribute beside <c>state</c>/<c>position</c>/<c>source</c>
+    /// (render-model.md § D6c → <i>Proxied video</i>, the <c>alt</c> paragraph). <c>null</c>
+    /// publishes no <c>alt</c>.</summary>
+    public string? Alt { get; set; }
+
+    /// <summary>The keep this slot's playback lives in, and its key — only for a list card
+    /// with a post and something to play.</summary>
+    private (InlinePlayerKeep<InlineVideoSession> Keep, string Post, string Video)? Kept
+        => _host?.Players is { } keep && _postId is { Length: > 0 } post && InlineVideoKey.Of(_block) is { } video
+            ? (keep, post, video)
+            : null;
+
+    /// <summary><c>state;position;source</c> (and <c>alt</c>, when the slot has one), packed —
+    /// what the automation peer answers as HelpText. Read on the UI thread (UIA's provider
+    /// calls are marshalled there).</summary>
     internal string AutomationAttributes()
-        => _machine.AutomationAttributes(_player?.PlaybackSession.Position.TotalSeconds ?? 0);
-
-    /// <summary>The tap — the button, or UIA's Invoke. Resolves what plays, then plays it;
-    /// <c>Play()</c> is called here and nowhere else.</summary>
-    internal async void Activate()
     {
-        if (_block is not { } block || !_machine.Tap()) return;
-        TearDownPlayer();
-        var attempt = ++_attempt;
-        // The tap engages the player, loading included (engagement-cues.md, A play is
-        // attention): from here the post's media row is attended whatever its visible
-        // fraction, until a pause, the end, a failure or the teardown releases it.
-        NotePlaying(true);
-        Paint();
-
-        PlaybackMedia? media;
-        try
-        {
-            media = await VideoPlaybackResolver.ResolveAsync(
-                App.CurrentNest, Core.FeedManagerHost.Current, block,
-                hosts: Core.PostBlobHostsHost.Current, home: Home as uniffi.fauna_ffi.FfiPostBlobHome);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"VideoThumbnailView: resolve {block} failed: {ex}");
-            media = null;
-        }
-        if (attempt != _attempt)
-        {
-            // A resolve that outlived its tap still opened a reader: close it here, since
-            // no player will.
-            (media as PlaybackMedia.Streamed)?.Release();
-            return;
-        }
-
-        _machine.Resolved(media);
-        if (_machine.Media is not { } resolved)
-        {
-            NotePlaying(false);
-            Paint();
-            return;
-        }
-        await StartPlayerAsync(resolved, attempt);
+        var playback = _session?.AutomationAttributes() ?? IdleMachine.AutomationAttributes(0);
+        return string.IsNullOrEmpty(Alt)
+            ? playback
+            : $"{playback};{AutomationAttributePack.Pack(("alt", Alt))}";
     }
 
-    private async Task StartPlayerAsync(PlaybackMedia media, int attempt)
+    /// <summary>The tap — the button, or UIA's Invoke. Starts a session when the slot shows
+    /// none (kept by the list for a list card), then hands it the tap.</summary>
+    internal void Activate()
     {
-        MediaSource source;
-        switch (media)
+        if (_block is not { } block) return;
+        if (_session is null)
         {
-            case PlaybackMedia.Streamed streamed:
-                // The player reads the nest's bytes through the pinned reader the resolver
-                // opened — WinUI's media stack never dials the nest (security.md § Transport
-                // trust → The native-player leg). The view owns the reader from here and
-                // releases it with the player.
-                source = MediaSource.CreateFromStream(
-                    new RangedNestStream(new RangedNestCursor(streamed.Reader)), streamed.ContentType);
-                _streamed = streamed;
-                break;
-            case PlaybackMedia.Opened opened:
-                // Held bytes — a sealed video's plaintext, or a plain video fetched whole
-                // from the post's own home — play from memory: they never touch disk, so
-                // no temp file outlives the session.
-                source = MediaSource.CreateFromStream(await InMemoryAsync(opened.Bytes), opened.ContentType);
-                if (attempt != _attempt) return;
-                break;
-            default:
-                return;
+            var session = new InlineVideoSession(_postId, DispatcherQueue);
+            if (Kept is { } kept) kept.Keep.Start(kept.Post, kept.Video, session, this);
+            Show(session);
         }
-
-        var player = new MediaPlayer { AutoPlay = false, Source = source };
-        // Whether this player has reached Playing yet: a Paused or None reported while it
-        // opens, before the first play, is not the user pausing, so it keeps the tap's
-        // engagement (apple drops its initial `.paused` the same way). Touched only on the
-        // UI thread, inside the enqueued callbacks.
-        var hasPlayed = false;
-        player.PlaybackSession.PlaybackStateChanged += (session, _) =>
-        {
-            // Playing engages the cue capture's attention; a later pause or an idle player
-            // releases it. Opening and buffering change nothing.
-            var state = session.PlaybackState;
-            if (state is not (MediaPlaybackState.Playing or MediaPlaybackState.Paused or MediaPlaybackState.None)) return;
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (!ReferenceEquals(_player, player)) return;
-                if (state == MediaPlaybackState.Playing)
-                {
-                    hasPlayed = true;
-                    _machine.PlayerStartedPlaying();
-                    NotePlaying(true);
-                }
-                else if (hasPlayed)
-                {
-                    NotePlaying(false);
-                }
-            });
-        };
-        // Every progress report, the end included (an ended player reads as played to
-        // its end), is noted for the cue capture — web's `notePlayed` on `timeupdate`
-        // and `ended`.
-        player.PlaybackSession.PositionChanged += (session, _) =>
-        {
-            var position = session.Position.TotalSeconds;
-            var duration = session.NaturalDuration.TotalSeconds;
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (ReferenceEquals(_player, player)) NotePlayed(position, duration);
-            });
-        };
-        player.MediaEnded += (sender, _) =>
-        {
-            var duration = sender.PlaybackSession.NaturalDuration.TotalSeconds;
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (!ReferenceEquals(_player, player)) return;
-                NotePlayed(duration, duration);
-                NotePlaying(false);
-            });
-        };
-        player.MediaFailed += (_, args) =>
-        {
-            System.Diagnostics.Debug.WriteLine(
-                $"VideoThumbnailView: player failed ({args.Error}): {args.ErrorMessage}");
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (!ReferenceEquals(_player, player)) return;
-                _machine.PlayerFailed();
-                NotePlaying(false);
-            });
-        };
-
-        var element = new MediaPlayerElement
-        {
-            AreTransportControlsEnabled = true,
-            AutoPlay = false,
-            Height = 200,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Stretch = Stretch.Uniform,
-        };
-        element.SetMediaPlayer(player);
-        _player = player;
-        _element = element;
-        _slot.Children.Clear();
-        _slot.Children.Add(element);
-        player.Play();
+        _session!.Activate(block, Home as uniffi.fauna_ffi.FfiPostBlobHome);
     }
 
-    private void NotePlayed(double position, double duration)
+    /// <summary>Another card took this slot's player over, or the list is stopping it:
+    /// stop showing it (<see cref="IInlinePlayerViewer"/>).</summary>
+    void IInlinePlayerViewer.LetGo()
     {
-        if (PostId is { Length: > 0 } postId)
-            Feed.CueViewportObserver.NotePlayed(postId, position, duration);
-        else
-            Core.Logs.E2eTrace.Write($"[cue] note dropped: no PostId (position={position:0.###})");
+        Trace("lets go of its player");
+        Show(null);
     }
 
-    /// <summary>Hand the player's engagement to the cue capture
-    /// (<see cref="Feed.CueViewportObserver.NotePlaying"/>). The post-detail dialog's player
-    /// has no <see cref="PostId"/>: it plays outside the list the capture samples.</summary>
-    private void NotePlaying(bool playing)
+    /// <summary>A loaded list card shows the player its list keeps for its post and video,
+    /// if one is live.</summary>
+    private void AdoptKept()
     {
-        if (PostId is { Length: > 0 } postId)
-            Feed.CueViewportObserver.NotePlaying(postId, playing);
+        if (!_loaded || _session is not null || Kept is not { } kept) return;
+        if (kept.Keep.Attach(kept.Post, kept.Video, this) is not { } session) return;
+        Trace($"adopts its kept player ({session.Phase})");
+        Show(session);
     }
 
-    /// <summary>Back to the idle glyph, releasing any player.</summary>
-    private void Stop()
+    /// <summary>Stop showing the session: a kept one goes on unviewed, for the card rebuilt
+    /// for its post; the dialog's own stops.</summary>
+    private void LeaveSession()
     {
-        _attempt++;
-        NotePlaying(false);
-        TearDownPlayer();
-        _machine.Reset();
+        if (_session is not { } session) return;
+        var kept = Kept;
+        Show(null);
+        if (kept is { } k)
+        {
+            Trace($"leaves its player playing on ({session.Phase}), for the card rebuilt for its post");
+            k.Keep.Detach(k.Post, k.Video, this);
+        }
+        else session.Stop();
+    }
+
+    /// <summary>One line of the e2e trace (<c>FAUNA_E2E_AGENT_LOG</c>; compiled out of
+    /// release builds) about this list card's player hand-off.</summary>
+    private void Trace(string what)
+    {
+        var post = _postId is { } id ? id[..Math.Min(12, id.Length)] : "";
+        Core.Logs.E2eTrace.Write($"[video] card of post={post} {what}");
+    }
+
+    private void Show(InlineVideoSession? session)
+    {
+        if (ReferenceEquals(session, _session)) return;
+        if (_session is { } previous) previous.Changed -= Paint;
+        _session = session;
+        if (session is not null) session.Changed += Paint;
         Paint();
     }
 
-    private void TearDownPlayer()
-    {
-        // The element lets go of the player, and leaves the slot, BEFORE the player is
-        // disposed. A MediaPlayerElement still holding a disposed MediaPlayer faults inside
-        // XAML's own callbacks, and that stowed exception kills the process (0xC000027B,
-        // faulting in CoreMessagingXP.dll). Measured whenever a playing slot unloads:
-        // leaving the feed page, the window closing, the list rebuilding its rows.
-        if (_element is { } element)
-        {
-            _element = null;
-            element.SetMediaPlayer(null);
-            _slot.Children.Remove(element);
-        }
-        if (_player is { } player)
-        {
-            _player = null;
-            player.Pause();
-            player.Source = null;
-            player.Dispose();
-        }
-        // After the player: the reader outlives every read the player may still have in
-        // flight (the binding frees it only once those return).
-        _streamed?.Release();
-        _streamed = null;
-    }
-
-    /// <summary>The slot without a player: the glyph (a spinner while resolving) + the
-    /// text, inside a button when there is something to play, bare when there is not.
-    /// An idle slot with nothing to play is disabled, so a tap on it is the named refusal
-    /// rather than a silent no-op.</summary>
+    /// <summary>The slot as the session stands: its player's element while it has a player,
+    /// else the glyph (a spinner while resolving) + the text, inside a button when there is
+    /// something to play, bare when there is not. An idle slot with nothing to play is
+    /// disabled, so a tap on it is the named refusal rather than a silent no-op.</summary>
     private void Paint()
     {
-        if (_player is not null) return;
-        var loading = _machine.Phase == VideoPlaybackPhase.Loading;
+        var player = _session?.Player;
+        if (_element is { } shown && !ReferenceEquals(shown.MediaPlayer, player))
+        {
+            // The element lets go of the player, and leaves the slot, BEFORE the player is
+            // disposed — the session tells this view (Changed) before it disposes one.
+            _element = null;
+            shown.SetMediaPlayer(null);
+            _slot.Children.Remove(shown);
+        }
+        if (player is not null)
+        {
+            if (_element is not null) return;
+            var element = new MediaPlayerElement
+            {
+                AreTransportControlsEnabled = true,
+                AutoPlay = false,
+                Height = 200,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Stretch = Stretch.Uniform,
+            };
+            element.SetMediaPlayer(player);
+            _element = element;
+            _slot.Children.Clear();
+            _slot.Children.Add(element);
+            IsEnabled = true;
+            return;
+        }
+
+        var loading = _session?.Phase == VideoPlaybackPhase.Loading;
         _glyph.Visibility = loading ? Visibility.Collapsed : Visibility.Visible;
         _spinner.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
 
@@ -377,19 +324,6 @@ public sealed class VideoThumbnailView : UserControl
         {
             _slot.Children.Add(_row);
         }
-    }
-
-    private static async Task<IRandomAccessStream> InMemoryAsync(byte[] bytes)
-    {
-        var stream = new InMemoryRandomAccessStream();
-        using (var writer = new DataWriter(stream))
-        {
-            writer.WriteBytes(bytes);
-            await writer.StoreAsync();
-            writer.DetachStream();
-        }
-        stream.Seek(0);
-        return stream;
     }
 
     protected override AutomationPeer OnCreateAutomationPeer()

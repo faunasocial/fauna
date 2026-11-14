@@ -12,7 +12,8 @@ namespace FaunaApp.Core.Helpers;
 // the player's own transient state, which the ruling keeps out of the model: the phase
 // the element publishes, and the turn of a `PlaybackSource` into what WinUI's
 // `MediaPlayerElement` is handed. The player itself is `FaunaApp.Controls
-// .VideoThumbnailView` — WinUI, which the unit-test project cannot reference, so every
+// .InlineVideoSession`, shown by `VideoThumbnailView` — WinUI, which the unit-test
+// project cannot reference, so every
 // decision lives here, pinned by `InlineVideoPlaybackTests`. The twin of apple's
 // FaunaKit `InlineVideoPlayback.swift`.
 

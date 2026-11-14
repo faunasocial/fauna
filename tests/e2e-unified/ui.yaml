@@ -149,6 +149,7 @@ gated_features:
       - gated-post-payment-link               # the price-and-route class: a gated post's payment link
       - gated-post-buy-button                 # the price-and-route class: a gated post's buy button
       - gated-post-purchase-pending           # the price-and-route class: a bought sold post's purchase-pending line
+      - feed-post-sale-price-                 # the price-and-route class: a sold post's Change price… verb and dialog (monetization.md § The asking price → Re-pricing a sold post); watched by tui's witness, the app that renders it first
   # The NIP-57 Lightning zap plane — a subset member of `payments` (excising `payments`
   # excises this too; excising this alone keeps provider-rail payments).
   zaps:
@@ -1810,6 +1811,11 @@ pages:
       - admin-users-cancel-eviction-button  # button, indexed — restore a suspended/evicted user
       - admin-users-make-admin-button    # button, indexed — grant the admin role (admin.md § Admin continuity and succession)
       - admin-users-remove-admin-button  # button, indexed — revoke the admin role (admin.md § Admin continuity and succession)
+      - admin-users-supervised-by        # text, indexed — the supervised row's guardian, present only on a supervised row (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-button     # button, indexed — arms the take-over confirm on a row supervised by someone other than the viewer (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-confirm-summary  # text, indexed — the armed confirm's decision surface, present only while armed (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-confirm-button   # button, indexed — dispatches the take-over, present only while armed (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
+      - admin-users-take-over-cancel-button    # button, indexed — disarms the confirm, present only while armed (family-safety.md § App surface → Admin take-over; declared 2026-11-13)
       - admin-users-action-error         # text — user action error display
       - admin-users-pagination           # view — pagination container
       - admin-users-prev-page            # button — previous page
@@ -2989,6 +2995,9 @@ pages:
       # ── Tiers tab · OTHER · offers ──
       - subscription-offers-section       # view — another creator's offered tiers
       #   rows → subscription-offer-list (component)
+      #   the redeem row (monetization.md § Pillar 3 → Buyer↔actor binding (Q4) → The doors, ruled 2026-11-08; profile.md § Layout & flow): the subscription-settings pair, also in this page's scope — an additive scope widening declared 2026-11-10 (rule A's advisory class); unbuilt on every app — tui leads
+      - subscription-claim-redeem-input   # text_input — paste a claim code of THIS creator; redeems at the page's actor_home (OTHER only)
+      - subscription-claim-redeem-button  # button — redeem the pasted code at the creator's home (OTHER only)
       # ── Tiers tab · SELF · §4 Payment providers (Pillar 3; IDs reserved 2026-07-12) ──
       - subscription-provider-section     # view — the author's configured payment providers + add
       - subscription-provider-add-button  # button — open the provider add/edit form
@@ -5415,6 +5424,18 @@ components:
       - feed-post-unpublish-web-button     # indexed — take the published page down (fauna.web.publish.unset; one-tap — idempotent + reversible, unlike delete); gated is_own && web_slug
       - feed-post-copy-web-link-button     # indexed — copy the public page URL (shared site_link_view origin + post/{slug}.html; the selling link — visitors get the teaser); gated is_own && web_slug; disabled with reason when no serving origin
       - feed-post-copy-paywall-link-button # indexed — mint + copy a short-lived full-access capability URL (fauna.web.paywall.mint_token; UI copy states the ~10-min validity — durable comps are Pillar-3 claim codes); gated is_own && web_slug && gated_tier (monetization.md § Pillar 2 → Creator comp-link surface)
+      - feed-post-advertise-nostr-button   # indexed — advertise this sold post on Nostr (fauna.nostr.advertise.set; the first act opens advertise-nostr-confirm-dialog); gated is_own && gated_tier && !nostr_advertised && a linked Nostr key && the nest's `nostr-advertise` capability (monetization.md § The Nostr advertisement of a sold post → What the author sees and agrees to; IDs declared 2026-11-13 under the advisory approvals, vetoable for a week; unbuilt, tui leads)
+      - feed-post-stop-advertising-nostr-button # indexed — withdraw the advertisement (fauna.nostr.advertise.clear; one-tap — de-escalation, never gated by the zaps member); gated is_own && nostr_advertised
+      - advertise-nostr-confirm-dialog     # view — the confirm step before the advertise act, stating the consequence in plain words (the media-delete-confirm-modal precedent); present only while open
+      - advertise-nostr-confirm-button     # confirm — runs fauna.nostr.advertise.set; a typed refusal surfaces as it is
+      - advertise-nostr-cancel-button      # close the confirm step without side effect
+      - feed-post-sale-price-button        # indexed — Change price…: set, change or clear a sold post's price; gated is_own && the post is sold; payments plane (monetization.md § The asking price → Re-pricing a sold post; IDs declared 2026-11-14 under the advisory approvals, vetoable for a week; unbuilt, tui leads)
+      - feed-post-sale-price-dialog        # view — the price editor (the composer's two price fields, pre-filled); present only while open
+      - feed-post-sale-price-hint          # the free-text price (price_hint); emptied + saved clears
+      - feed-post-sale-price-asking        # the machine sats price (asking_price); emptied + saved clears
+      - feed-post-sale-price-advertised-note # shown only when the post is advertised on Nostr — what the edit does to the advertisement
+      - feed-post-sale-price-save-button   # save: tiers.update for changed fields, tiers.clear_field for emptied ones (one shared-Rust plan)
+      - feed-post-sale-price-cancel-button # close without side effect
       - feed-post-report-button            # indexed — report this post to your nest admins (opens the shared report-sheet with subject post {cid}); gated !is_own (moderation.md § User-initiated reporting → App surface; IDs user-approved 2026-09-25; built on all 7 apps by 2026-10-08). The post's mark-as-spam verb sits beside it (report-sharing.md § Report capture → The post's mark-as-spam verb, ruled 2026-11-07; IDs user-approved 2026-11-07)
       - feed-post-mark-as-spam-button      # indexed — mark someone else's post as spam, or un-mark it (a toggle; state on/off off the spam_marked list): MailSettingsMachine::train_moderation_correction(post_id, is_spam) — the sealed model half when mail is on, then fauna.moderation.train {spam|ham} (the opt-in report:spam capture) — plus the marker's own spam collapse (report-sharing.md § Report capture → The post's mark-as-spam verb; ruled 2026-11-07; IDs user-approved 2026-11-07); gated !is_own; sits BESIDE the report verb, never replacing it
     used_in: [feed (inside post-card)]
@@ -5853,7 +5874,6 @@ components:
     used_in: [events]
     notes:
       windows: "ItemTemplate in EventsPage agenda view with left color bar."
-      android: "Only the separate invited-events quick-list carries inline event-rsvp-*; the main event-card list does not — a narrower placement than web/linux/windows/macos/ios, flagged for whoever next touches android's events screen (priority #4)."
 
   rsvp-button-group:
     description: "RSVP response buttons: Going, Interested, Decline"
@@ -6400,6 +6420,7 @@ components:
       - connected-apps-request-approve     # button — resolve_consent(approved)
       - connected-apps-request-decline     # button — resolve_consent(declined), recorded nest-side
       - connected-apps-request-block       # button — Never show requests from this app (per-client block)
+      - connected-apps-request-folder      # select — the folder picker, only on a card carrying a bare folder-plane scope (ConsentCardRow.folder_picker; authorization-server.md § Consent → The card chooses the folder). Owner-approved 2026-10-16.
       # ── The install section — only on an admin's hosted-plugin install card (ConsentCardRow.install;
       # third-party.md § The install-approval leg). IDs owner-approved 2026-10-16. ──
       - connected-apps-request-install            # text — the section heading (installing runs this code on your nest)
@@ -6433,6 +6454,32 @@ components:
       # (connected-apps.md § Layout & flow, region 3). Owner-approved
       # 2026-10-16.
       - connected-apps-item-settings-link  # button — open the plugin's settings card
+      # The trust facet and history lens — render only on a principal that
+      # attested a holder key, on an app that reads the owner's grant log
+      # (connected-apps.md § The trust facet and history lens). The Nests
+      # page's IDs reused verbatim, scoped within this item (owner-ruled
+      # 2026-10-16); declared 2026-11-13 under rule A's advisory class.
+      - nest-trust-view-now                # button — the row's Now lens
+      - nest-trust-view-history            # button — the row's History lens
+      - nest-trust-grant-list              # view — Now: the live keys (holds nest-trust-grant-item rows)
+      - nest-trust-empty                   # text — Now: "This app holds no keys to your records"
+      - nest-trust-history-list            # view — History: the grant-event timeline
+      - nest-trust-history-item            # text, indexed within the history list — Minted / Revoked ‹scope› · ‹when›
+      # Render only on a principal row the oracle served (the shared
+      # opens_record — an app-password session's summary has no record):
+      # the per-operation record, newest first (connected-apps.md § Layout &
+      # flow, region 3). Owner-approved 2026-10-16.
+      - connected-apps-oracle-open         # button — open the record; while open, close it
+      - connected-apps-oracle-list         # view — the open record, once its read returned
+      - connected-apps-oracle-op           # component (indexed) — one operation
+      - connected-apps-oracle-empty        # text — an open record with no operation
+    used_in: [connected-apps]
+
+  connected-apps-oracle-op:
+    description: "One operation of a served principal's open record (indexed, newest first), scoped within its connected-apps-item: when, its class in the consent card's words, its detail verbatim; the class verbatim as its `class` value. connected-apps.md § Layout & flow, region 3."
+    indexed: true
+    elements:
+      - connected-apps-oracle-op
     used_in: [connected-apps]
 
   connected-apps-blocked-item:
@@ -6840,11 +6887,12 @@ components:
       - nest-trust-mint-scope-select       # scope-first use-case picker: one option per LinkedNestRow.mint_options entry (mail / calendar / per-tier paywalled posts)
       - nest-trust-mint-holder-select      # CONDITIONAL: rendered only when the chosen option has >1 holder candidate (ambiguity case; today every option derives exactly one holder)
       - nest-trust-mint-duration-select    # how long the new trust lasts: 'For a few hours' / 'For 90 days' (the shared mint_duration_options); pre-selects LinkedNestRow.mint_default_duration (IDs user-approved 2026-09-24)
+      - nest-trust-mint-materialize-note   # text, CONDITIONAL: the picked option's mint-time note (the shared mint_option_note — today the materialization options' honesty copy), before the confirm (declared 2026-11-13 under rule A's advisory class; docs/goal/architecture/capability-grants.md § Capability tiering → The materialization grant (f))
       - nest-trust-mint-confirm-button     # dispatch Mint{nest_id, holder_bridge_id (derived or picked), scope, duration}
     used_in: [nests]
 
   nest-trust-grant-item:
-    description: "One current content-processing grant on a nest. Indexed; nested inside `nests-item` — queried scoped (e.g. scope=nests-item[i] then nest-trust-grant-item[j]). Shows the trust scope, lasts-until, liveness status, the REQUIRED honest-bound copy, and renew/revoke controls. Rendered copy uses 'trust'/'trusted to read …' — never 'capability'/'grant' (participants.md § Naming). docs/goal/ui/nests.md § Trust facet."
+    description: "One current content-processing grant on a nest, or one live key a connected app holds to the user's records. Indexed; nested inside `nests-item` or `connected-apps-item` — queried scoped (e.g. scope=nests-item[i] then nest-trust-grant-item[j]). Shows the trust scope, lasts-until, liveness status, the REQUIRED honest-bound copy, and renew/revoke controls. On a connected app's row (a third-party principal) the renew, revoke, unattested-mark and keep leaves are ABSENT: the row's one Revoke is the participant's revoke control, and only the app asking again renews (connected-apps.md § The trust facet and history lens; owner-ruled 2026-10-16). Rendered copy uses 'trust'/'trusted to read …' — never 'capability'/'grant' (participants.md § Naming). docs/goal/ui/nests.md § Trust facet."
     elements:
       - nest-trust-grant-item
       - nest-trust-grant-scope             # "Trusted to read: Mail, Calendar"
@@ -6862,7 +6910,7 @@ components:
       # across). IDs user-approved 2026-08-03.
       - nest-trust-grant-unattested-mark   # text, indexed — the review mark
       - nest-trust-grant-keep-button       # button, indexed — Keep clears it
-    used_in: [nests]
+    used_in: [nests, connected-apps]
 
   nest-trust-backup-item:
     description: "One backup trust row on the HOME nest's row (indexed; nested inside nests-item, queried scoped like nest-trust-grant-item). Renders in the Now lens after the content-processing grant rows. Two instances today, distinguished by scope text: the owner→source-nest NestBackupKey seal grant ('Backs up your messages…'; read: fauna.backup.status enrolled; revoke → fauna.backup.nest_key.revoke) and one row per destination for the source nest's writer authorization there ('Writes your backups to ‹dest›'; read: fauna.backup.writer_grant.list on the destination's own connection; revoke → fauna.backup.writer_grant.revoke, spoken to the destination — operable with the source nest hostile). Live nest reads, NOT the grant-event log — hence no lasts-until/renew/History leaves. Rendered copy uses trust vocabulary, never 'capability'/'grant'. IDs user-approved 2026-07-24; docs/goal/ui/nests.md § Trust facet — backup rows."
@@ -10090,6 +10138,45 @@ elements:
     description: "Mint + copy a short-lived full-access capability URL for a published post (fauna.web.paywall.mint_token; UI copy states the ~10-min validity — durable comps are Pillar-3 claim codes); gated is_own && web_slug && gated_tier (monetization.md § Pillar 2 → Creator comp-link surface)."
     type: button
     indexed: true
+  feed-post-advertise-nostr-button:
+    description: "Advertise this sold post on Nostr (in the feed-post-actions-menu overflow, beside the web-publish family): opens advertise-nostr-confirm-dialog, whose confirm runs fauna.nostr.advertise.set { post_id } — the post's teaser is published as a kind-1 note carrying the tier's price, so a zap of at least that price buys the post. Gated is_own && a tier sells the post && not advertised yet && the account has a linked Nostr key && the nest advertises the `nostr-advertise` capability. monetization.md § The Nostr advertisement of a sold post → What the author sees and agrees to; IDs declared 2026-11-13 under the advisory approvals (vetoable for a week); unbuilt (tui leads)."
+    type: button
+    indexed: true
+  feed-post-stop-advertising-nostr-button:
+    description: "Withdraw a sold post's Nostr advertisement (fauna.nostr.advertise.clear { post_id }; one-tap — de-escalation, reversible by advertising again): the note is deleted from the author's relay and the publish relays are asked to delete their copies. Gated is_own && advertised. monetization.md § The Nostr advertisement of a sold post; unbuilt (tui leads)."
+    type: button
+    indexed: true
+  advertise-nostr-confirm-dialog:
+    description: "Confirm step before the Advertise on Nostr act (the media-delete-confirm-modal precedent). States the consequence in plain words: the post's preview text is published to your relay and your Nostr publish relays with its price; anyone on Nostr can read it; a zap of at least that price buys the post for the zapper; stopping deletes it from your relay and asks the other relays to delete their copies, which may persist. Present only while open. monetization.md § The Nostr advertisement of a sold post → What the author sees and agrees to; unbuilt (tui leads)."
+    type: view
+  advertise-nostr-confirm-button:
+    description: "Confirm the advertisement — runs fauna.nostr.advertise.set for the post the dialog was opened on; the kind's typed refusals (not sold, no asking price, no linked key) surface as they are."
+    type: button
+  advertise-nostr-cancel-button:
+    description: "Close the advertise confirm step without side effect"
+    type: button
+  feed-post-sale-price-button:
+    description: "Change price… — set, change or clear the price of a post the author already sells (in the feed-post-actions-menu overflow, beside the web-publish family and the Nostr advertisement pair): opens feed-post-sale-price-dialog. Gated is_own && the post is sold (its gate names a per-post unlock tier). Inside the payments plane (its gated_features prefix feed-post-sale-price- lands with the first build, beside the store-safe witnesses that watch it). monetization.md § The asking price → Re-pricing a sold post; IDs declared 2026-11-14 under the advisory approvals (vetoable for a week); unbuilt (tui leads)."
+    type: button
+    indexed: true
+  feed-post-sale-price-dialog:
+    description: "The sold post's price editor: the composer's two price fields, pre-filled from the selling tier, plus save and cancel. Present only while open. Save sends only what changed — a changed non-empty field by fauna.subscriptions.tiers.update, a field emptied from a stored value by fauna.subscriptions.tiers.clear_field — through one shared-Rust plan; then the feed is re-read. monetization.md § The asking price → Re-pricing a sold post; unbuilt (tui leads)."
+    type: view
+  feed-post-sale-price-hint:
+    description: "The sold post's free-text price (the selling tier's price_hint; compose-sell-price's twin), pre-filled. Emptied and saved, it clears the stored value."
+    type: text_input
+  feed-post-sale-price-asking:
+    description: "The sold post's machine-comparable sats price (the selling tier's asking_price; compose-sell-asking-price's twin), pre-filled — independent of feed-post-sale-price-hint, no parsing infers one from the other. Emptied and saved, it clears the stored value (and the nest then stops the post's Nostr advertisement)."
+    type: text_input
+  feed-post-sale-price-advertised-note:
+    description: "Shown in feed-post-sale-price-dialog only when the post is advertised on Nostr: changing the price replaces the advertisement with one carrying the new price; removing the price stops the advertisement (monetization.md § The Nostr advertisement of a sold post → Lifecycle (1)–(2))."
+    type: text
+  feed-post-sale-price-save-button:
+    description: "Save the sold post's price edit; a refused asking-price parse keeps the dialog open with the composer's error; saving with nothing changed sends nothing"
+    type: button
+  feed-post-sale-price-cancel-button:
+    description: "Close the sold post's price editor without side effect"
+    type: button
   feed-post-muted:
     description: "Collapse placeholder shown iff this post matches a muted keyword (client-side via FeedManager::is_muted over the muted-keywords list on the account plane); the body/media are hidden behind it. The feed twin of dm-message-muted. A mute collapses in EVERY feed including chronological ones (topic-factors.md § Scoring); moderation.md § Muted keywords."
     type: view
@@ -12057,6 +12144,10 @@ elements:
     description: "One live consent request in the Requests tray (indexed): the built consent card — client identity verbatim, scopes in words, the binding code. The tray paints no row when no request is live."
     type: view
     indexed: true
+  connected-apps-request-folder:
+    description: "The consent card's folder picker, scoped within connected-apps-request-card, present exactly on a card carrying a bare folder-plane scope (fauna:folder:deposit / fauna:folder:read with no folder named). Option keys (native dropdowns show the human label, which the driver's select() normalizes onto the key): the folder's row id in decimal; labels the owner's folder names. Offers only the folders every bare folder verb on the card can take (deposit: not metadata-only; read: served by the owner's custody); no option is chosen until the user chooses, and the card's Approve is disabled until then. A card with no eligible folder offers no option and says why in its own text, Approve disabled. authorization-server.md § Consent → The card chooses the folder; connected-apps.md § Element IDs."
+    type: select
+    indexed: true
   connected-apps-request-code:
     description: "The binding code on a request card (also carried as the `code` attr), scoped within connected-apps-request-card"
     type: text
@@ -12146,6 +12237,22 @@ elements:
   connected-apps-item-settings-link:
     description: "On a hosted plugin's row only, scoped within its connected-apps-item — opens the plugin's settings card on the Bridges page (connected-apps.md § Layout & flow, region 3)"
     type: button
+    indexed: true
+  connected-apps-oracle-open:
+    description: "On a principal row the oracle served only (the shared opens_record; an app-password session's row carries the summary but no record), scoped within its connected-apps-item — opens the row's per-operation record and, while open, closes it; one record open at a time (connected-apps.md § Layout & flow, region 3)"
+    type: button
+    indexed: true
+  connected-apps-oracle-list:
+    description: "The open record's container, scoped within its connected-apps-item — painted once the record's read has returned (connected-apps.md § Layout & flow, region 3)"
+    type: view
+    indexed: true
+  connected-apps-oracle-op:
+    description: "One operation of the open record (indexed, newest first), scoped within its connected-apps-item: when, its class in words, its detail verbatim; `class` attr = the identity.op class verbatim (connected-apps.md § Layout & flow, region 3)"
+    type: text
+    indexed: true
+  connected-apps-oracle-empty:
+    description: "The open record's empty state, scoped within its connected-apps-item — its read returned no operation (connected-apps.md § Layout & flow, region 3)"
+    type: text
     indexed: true
   connected-apps-blocked-item:
     description: "One blocked app in the Blocked apps section (indexed): the client identity verbatim and when it was blocked. The section paints only while something is blocked."
@@ -12655,6 +12762,26 @@ elements:
     type: button
     description: "Revoke this user's admin role. Offered on any admin row; the nest refuses when it would leave zero superadmins, surfaced on admin-users-action-error. A scheduled (pending-action) act. See admin.md § Admin continuity and succession."
     indexed: true
+  admin-users-supervised-by:
+    type: text
+    description: "The supervised row's current guardian: the handle, the full actor hex for a handle-less account (one shared fallback in fauna-client-admin). Present only on a supervised row; view only. Data: AdminUser.guardian. See family-safety.md § App surface → Admin take-over."
+    indexed: true
+  admin-users-take-over-button:
+    type: button
+    description: "Arms the inline take-over confirm on this row. Offered by the shared admin_user_row_controls(…).take_over: on a row supervised by someone other than the viewing admin, whatever the row's lifecycle state. One row armed at a time; arming another disarms it. See family-safety.md § App surface → Admin take-over."
+    indexed: true
+  admin-users-take-over-confirm-summary:
+    type: text
+    description: "The armed confirm's decision surface: the ward's handle, the current guardian, that the viewer becomes the guardian at once and a pending hand-over, if any, is withdrawn, and that the policy is then theirs on the Family page. Present only while armed."
+    indexed: true
+  admin-users-take-over-confirm-button:
+    type: button
+    description: "Dispatches fauna.family.transfer with the ward as supervised and the viewing admin as the new guardian (disarm-before-dispatch); a self-proposal completes at once. A nest refusal surfaces on admin-users-action-error. Present only while armed."
+    indexed: true
+  admin-users-take-over-cancel-button:
+    type: button
+    description: "Disarms the take-over confirm, touching nothing. Present only while armed."
+    indexed: true
   admin-users-pagination:
     type: view
     description: "Pagination controls for admin users list"
@@ -13134,6 +13261,10 @@ elements:
   nest-trust-mint-duration-select:
     type: select
     description: "How long the new trust lasts — one option per the shared mint_duration_options list: 'For a few hours' (the one-off window, never renewed) and 'For 90 days' (renews itself on a blessed nest). Pre-selects LinkedNestRow.mint_default_duration: 90 days on a blessed nest, a few hours otherwise. IDs user-approved 2026-09-24; docs/goal/ui/nests.md § Expiry / renewal → Duration and blessing."
+    indexed: true
+  nest-trust-mint-materialize-note:
+    type: text
+    description: "CONDITIONAL mint-time note: rendered inside the mint flow, before nest-trust-mint-confirm-button, only while the picked scope option carries a note (the shared mint_option_note — the materialization options: mail, calendar, card, each its kind's honesty copy: the nest can read it and keeps a searchable copy on its disk; anyone who can read that disk can read the copy; on an honest nest turning it off deletes the copy and the key, and cannot undo what a hostile nest already read). Declared 2026-11-13 under rule A's advisory class; docs/goal/architecture/capability-grants.md § Capability tiering → The materialization grant (f), docs/goal/ui/nests.md § Trust facet — grants → The materialization option."
     indexed: true
   nest-trust-mint-confirm-button:
     type: button
@@ -15718,10 +15849,10 @@ elements:
     type: button
     indexed: true
   subscription-claim-redeem-input:
-    description: "Paste a post-payment claim code, on subscription-settings (consumer side). monetization.md § Pillar 3 Q4 fallback."
+    description: "Paste a post-payment claim code (consumer side). On subscription-settings: a code of the buyer's own nest. On profile, in the OTHER Tiers tab's subscription-offers-section: a code of that creator, bound at the page's actor_home. monetization.md § Pillar 3 Q4 fallback → The doors."
     type: text_input
   subscription-claim-redeem-button:
-    description: "Redeem the pasted claim code: binds the payment to this actor and the entitlement lands (both webhook and manual-mint rails). monetization.md § Pillar 3 Q4 fallback."
+    description: "Redeem the pasted claim code: binds the payment to this actor and the entitlement lands (both webhook and manual-mint rails). On subscription-settings and, in the OTHER Tiers tab's subscription-offers-section, on profile — there redeeming at the page's actor_home, the creator's nest. monetization.md § Pillar 3 Q4 fallback → The doors."
     type: button
   subscription-mine-section:
     description: "subscription-settings page — the consumer's list of subscriptions across all creators."

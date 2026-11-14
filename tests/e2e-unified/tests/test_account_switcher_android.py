@@ -13,7 +13,7 @@ today*); `second-identity-in-its-own-window` is a declared android absence.
 **Where android's state is read from.** Everything the journeys assert about
 the device is on-device, in the app's private data directory, which no host
 path reaches on any venue (`testing.md` § Default app and nest mode →
-*Android's run venue*):
+*Android's emulator placement*):
 
 - the credential file (``fauna/index`` + the per-actor slots) over the
   bridge's ``GET /credentials`` (``AndroidBridgeDriver.credential_map``);

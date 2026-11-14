@@ -15,8 +15,9 @@
 //!
 //! Claim redemption (`subscription-claim-redeem-{input,button}` —
 //! `monetization.md` § Pillar 3 Q4's universal fallback binding): the buyer
-//! pastes a post-payment claim code; the thin `PaymentsClient::claims_redeem`
-//! binds it to this actor and the entitlement lands through Pillar 1's grant
+//! pastes a post-payment claim code; `PaymentsClient::claims_redeem_across_nests`
+//! with no home (the one call shape both redeem doors use — the profile Tiers
+//! tab's names the creator's home) binds it to this actor and the entitlement lands through Pillar 1's grant
 //! queue — a success re-reads the mine list, where the queued grant renders
 //! exactly like a queued subscribe (a "pending" row). Typed errors
 //! (`fauna.payments.claim_{not_found,already_redeemed,voided}`) surface via
@@ -232,12 +233,16 @@ fn redeem_claim(ctx: &Rc<Ctx>) {
         return;
     }
     let nest = ctx.client.nest_rpc().clone();
+    let redeemer_secret = ctx.client.secret_bytes();
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
         &ctx.rt,
         move || async move {
+            let me = fauna_core::identity::ActorKeypair::from_secret(redeemer_secret);
+            // No home: this page knows no creator, so the code redeems on this
+            // nest and `author_id` is never read — by convention the redeemer's own.
             PaymentsClient::new(nest)
-                .claims_redeem(code)
+                .claims_redeem_across_nests(code, &me, me.actor_id(), None)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())

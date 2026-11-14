@@ -1,4 +1,6 @@
-//! Tests for the rotation-flow bounded-grant **heal driver**.
+//! Tests for the rotation-flow grant **heal driver** — bounded mail grants and
+//! master-key grants (`capability-grants.md` § Capability tiering → *What a
+//! master-key mail wrap conveys*).
 //!
 //! Authority: `docs/goal/architecture/encryption-at-rest.md` § Capability
 //! tiering — the content-sealing-epochs rotation-heal amendment (2026-07-19).
@@ -65,8 +67,7 @@ fn seed_bounded_grant(
 }
 
 /// Seed a **master** (standing) mail grant — the mail scope with NO bounded
-/// tier marker. The heal driver must leave these alone (a master grant's window
-/// bump is a different lifecycle event, not epoch healing).
+/// tier marker. The heal driver tops its one standing wrap up in place.
 fn seed_master_mail_grant(
     cfg: &FakeSuccessionLedgerStore,
     grant_id: [u8; 16],
@@ -392,33 +393,34 @@ async fn a_failed_heal_renew_does_not_fail_the_rotation() {
     );
 }
 
-/// A **master** (unmarked) mail grant is left untouched by the heal driver —
-/// only bounded (epoch-tiered) grants heal at rotation.
+/// A **master-key** (standing) mail grant heals IN PLACE (`capability-grants.md`
+/// § Capability tiering → *What a master-key mail wrap conveys*, ruled
+/// 2026-11-13): one equal-end renew whose one appended wrap is the standing
+/// (`epoch: None`) wrap rebuilt over the post-rotation generation set — the new
+/// generation's chunk (standing secret ∥ mail-epoch root) first, the retired
+/// one after — never an `epoch: Some` wrap.
 #[tokio::test]
-async fn a_master_mail_grant_is_not_healed() {
+async fn a_master_mail_grant_is_healed_with_the_new_generation_first() {
     let common::Fixture {
         machine,
         nest,
         config: cfg,
-        mail: _,
+        mail,
     } = common::fixture();
     enable_and_rotate(&machine).await;
+    let pre_msek = mail.current().msek.unwrap();
 
-    let (_holder_sk, holder_pk) = generate_x25519_keypair();
+    let (holder_sk, holder_pk) = generate_x25519_keypair();
     nest.state().content_processor_holders = vec![HolderInfo {
         pubkey: holder_pk,
         mlkem_ek: None,
-        role: "mda".into(),
-        bridge_id: "mda-1".into(),
+        role: "content-processor".into(),
+        bridge_id: "materializer".into(),
     }];
     let now = Timestamp::now_secs() as u64;
-    seed_master_mail_grant(
-        &cfg,
-        [0xE0; 16],
-        holder_pk,
-        now - EPOCH_SECS,
-        now + EPOCH_SECS,
-    );
+    let grant_id = [0xE0; 16];
+    let window_end = now + EPOCH_SECS;
+    seed_master_mail_grant(&cfg, grant_id, holder_pk, now - EPOCH_SECS, window_end);
 
     machine
         .dispatch(MailSettingsAction::StartRotation {
@@ -426,10 +428,32 @@ async fn a_master_mail_grant_is_not_healed() {
         })
         .await
         .expect("rotation succeeds");
+    let post_msek = mail.current().msek.unwrap();
 
+    let renews = nest.state().renewed_grants.clone();
+    assert_eq!(renews.len(), 1, "one equal-end top-up for the master grant");
+    let (renewed_id, _, renewed_end, appended) = &renews[0];
+    assert_eq!(renewed_id, &grant_id);
+    assert_eq!(*renewed_end, window_end, "equal-end: a pure key refresh");
+    assert_eq!(
+        appended.len(),
+        1,
+        "the one standing wrap, replaced in place"
+    );
+    let wrap = WrappedScopeKey::from_canonical_bytes(&appended[0]).unwrap();
+    assert_eq!(wrap.epoch, None, "never an epoch: Some wrap");
+    let opened = unseal_capability(&wrap, &ACTOR, &holder_sk).expect("unseal");
+    let want = fauna_mls::wrapped_blob::derive_master_mail_capability_payload(
+        &post_msek.to_array(),
+        &[pre_msek.to_array()],
+    );
+    assert_eq!(opened.as_slice(), want.as_slice(), "new generation first");
     assert!(
-        nest.state().renewed_grants.is_empty(),
-        "a master mail grant is never epoch-healed"
+        cfg.current()
+            .grant_events
+            .iter()
+            .any(|e| e.kind == GrantEventKind::Renew),
+        "the top-up is recorded in History"
     );
 }
 

@@ -35,6 +35,11 @@ pub use fauna_account_plane::account_state_plane;
 pub use fauna_account_plane::attested_predecessors;
 pub use fauna_account_plane::bind_leg;
 pub use fauna_account_plane::linked_leg;
+// Behind the plane's `account-driver`, which this crate enables through
+// `account-runtime` — ungated, a lean build (the Go mail bridge's fauna-ffi
+// `--no-default-features`) cannot resolve it.
+#[cfg(feature = "account-runtime")]
+pub use fauna_account_plane::outbox_carry;
 pub mod adaptive;
 pub mod always_resident;
 pub mod atomic_write;
@@ -97,6 +102,10 @@ pub use fauna_account_store::root;
 /// Decision 2's re-resolve edges: the row basis, the floor comparison, and the
 /// engine's pre-seal hold (`on-demand-files-shared-sets.md` § Shared sets on a capability host).
 pub mod binding_edge;
+/// The set's sealed binding record — the last row and custody slice a host
+/// read, what a cold build with the nest unreachable stands on
+/// (`on-demand-files-shared-sets.md` decision 2″).
+pub mod binding_record;
 /// The ceremony's admission clock and its compile-gated e2e offset — the
 /// `now` a receive-act expectation is minted and judged against. Same gate as
 /// [`offline_share`], whose `now_fn` is its only production reader.
@@ -292,6 +301,8 @@ mod authenticated_mismatch_test;
 #[cfg(test)]
 mod backfill_thumbnail_test;
 #[cfg(all(test, feature = "engine-lifecycle"))]
+mod binding_record_build_test;
+#[cfg(all(test, feature = "engine-lifecycle"))]
 mod build_engine_retired_custody_test;
 #[cfg(test)]
 mod catchup_failed_report_test;
@@ -329,6 +340,8 @@ mod off_disk_placeholder_test;
 mod offline_placeholder_delete_test;
 #[cfg(test)]
 mod offline_publication_hold_test;
+#[cfg(test)]
+mod on_demand_skip_test;
 #[cfg(test)]
 mod own_folder_pending_mint_test;
 #[cfg(test)]

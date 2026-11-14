@@ -80,15 +80,15 @@ Stamped 2026-11-07 at ac836c937b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| linux | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| web | ⚠ partial | 0.1.5-dev+d6b5dbea.dirty standalone |
+| linux | ⚠ partial | 0.1.5-dev+02e5676e standalone |
+| windows | ⚠ partial | 0.1.6 docker |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| ios | ⚠ partial | 0.1.6 docker |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| tui | ✅ full | 0.1.6 docker |
 | android-kids |  no run recorded | |
-| ios-kids |  no run recorded | |
+| ios-kids | 🚧 unbuilt | 0.1.6 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -106,8 +106,8 @@ Stamped 2026-11-07 at ac836c937b.
 | 6 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_conflict_policy_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_folders.py::test_sync_default_conflict_policy_stamps_new_sets` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_folders.py::test_sync_default_conflict_policy_survives_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_resolved_conflict_renders_review_row_and_repoints` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): failed |
-| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_unresolved_conflict_row_is_informational` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): failed |
+| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_resolved_conflict_renders_review_row_and_repoints` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_unresolved_conflict_row_is_informational` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_device_activity_reflects_recorded_changes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_folder_nest_place.py::test_nest_place_policy_is_reachable_editable_and_clearable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_folder_wizard_places.py::test_a_new_folder_starts_with_the_devices_and_places_picked_in_the_wizard` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -123,6 +123,6 @@ Stamped 2026-11-07 at ac836c937b.
 | 18 | app | `tests/e2e-unified/tests/test_folder_place_flags_kept.py::test_every_place_flag_combination_is_kept_exactly_as_set` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 18 | app | `tests/e2e-unified/tests/test_folder_place_flags_kept.py::test_a_file_dropped_into_an_archive_seats_directory_syncs` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
 | 19 | app | `tests/e2e-unified/tests/test_folder_left_stays_gone.py::test_a_folder_left_on_one_device_does_not_come_back_on_the_other` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restored` — requires `group-set-feed` (not built: web, ios, android, android-kids, ios-kids) | tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_a_repoint_to_a_version_the_nest_does_not_hold_changes_nothing` | tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_offline_share_two_seat.py::test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restored` — requires `group-set-feed` (not built: web, ios, android, android-kids, ios-kids) | linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_a_repoint_to_a_version_the_nest_does_not_hold_changes_nothing` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

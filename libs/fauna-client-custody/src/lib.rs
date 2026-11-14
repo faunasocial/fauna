@@ -24,11 +24,9 @@
 use std::sync::Arc;
 
 use fauna_client::NestClient;
-use fauna_client_capabilities::custody_ceremony::{CeremonyRecords, drive_ceremonies};
+use fauna_client_capabilities::custody_ceremony::CeremonyRecords;
 use fauna_client_capabilities::custody_view::CustodyMintCandidateView;
-use fauna_client_capabilities::rpc::CapabilitiesClient;
 use fauna_client_capabilities::view_model::CustodyFacetSnapshot;
-use fauna_client_conversations::SessionCustodyPoster;
 use fauna_conversations::ConversationsSession;
 use fauna_core::data::Timestamp;
 use fauna_core::identity::ActorKeypair;
@@ -115,34 +113,7 @@ pub fn mint_candidates(
 fn project_mint_candidate(
     c: &fauna_client_conversations::CustodyMintCandidate,
 ) -> CustodyMintCandidateView {
-    CustodyMintCandidateView {
-        host: c.host.0.to_vec(),
-        channel_hex: c.channel_hex.clone(),
-        label: c.label.clone(),
-    }
-}
-
-/// Does `(host, channel_hex)` name a real row of `candidates`? The enforcement
-/// `custody_mint`'s own doc comment documents but never checked: `host`/`channel_hex` arrive at that boundary as free parameters,
-/// so nothing stopped a leg from hand-assembling a pair `mint_candidates`
-/// never offered. Split from the session read
-/// ([`mint_candidates`]) for the same reason [`fauna_client_conversations::
-/// mint_candidates_from_channels`] is split from [`fauna_client_conversations::
-/// custody_mint_candidates`] — the rule is what a leg can get wrong, and a
-/// `ConversationsSession` cannot be built in a unit test.
-///
-/// This one check also carries the candidate rules' self-exclusion for free:
-/// `mint_candidates` never lists the owner's own actor as a host, so a
-/// `host == own actor` pair is already "not a candidate" here, with no second
-/// check needed.
-fn host_channel_is_a_mint_candidate(
-    candidates: &[CustodyMintCandidateView],
-    host: &[u8; 32],
-    channel_hex: &str,
-) -> bool {
-    candidates
-        .iter()
-        .any(|c| c.host == host.as_slice() && c.channel_hex == channel_hex)
+    c.view()
 }
 
 /// Everything a custody act needs off the app at dispatch time — cloned into
@@ -362,81 +333,64 @@ pub async fn run_custody_act(
         CustodyAct::Remove { grant_id } => {
             error = remove_held_custody(&ctx, &records, &grant_id, now).await;
         }
-        CustodyAct::Mint { host, channel_hex } if ctx.session.is_none() => {
-            // The offer is POSTED by the drive pass over the chosen
-            // conversation's channel, and a drive with no session returns
-            // immediately. Recording it anyway would leave an offer that is
-            // never sent and never reported — a silent drop (e2e convention
-            // 11), and the reason the mint sat un-exported at both boundaries.
-            // Answer instead, so the gesture reaches the page's
-            // `error-message`. The faces make this unreachable by requiring a
-            // session; a native app assembling `CustodyCtx` by hand does not.
-            let _ = (host, channel_hex);
-            error = Some(
-                "no conversation channel to send the request over — start a conversation first"
-                    .to_string(),
-            );
-        }
-        CustodyAct::Mint { host, channel_hex }
-            if !host_channel_is_a_mint_candidate(
-                &ctx.session
-                    .as_deref()
-                    .map(|session| mint_candidates(session, ctx.secret))
-                    .unwrap_or_default(),
-                &host.0,
-                &channel_hex,
-            ) =>
-        {
-            // `host`/`channel_hex` arrive as free parameters at every
-            // boundary above this function — `custody_mint`'s own doc comment
-            // documents "passed back unchanged, the leg picks a row, it does
-            // not assemble a channel" but nothing enforced it. tui is safe by
-            // construction (it indexes the candidate vec); this refuses a
-            // hand-assembled pair from any other caller, before the offer is
-            // ever recorded.
-            let _ = (host, channel_hex);
-            error = Some(
-                "that person is not an eligible custodian — refresh and pick again".to_string(),
-            );
-        }
         CustodyAct::Mint { host, channel_hex } => {
+            // The shared assembly (`custody_acts::mint_custody`, wasm-clean so
+            // web runs it too) refuses a session-less mint — the drive posts
+            // the offer over the chosen conversation's channel, and recording
+            // one with nothing to post it on is a silent drop (e2e convention
+            // 11) — and a `(host, channel)` pair the candidate fold never
+            // offered, before anything is recorded.
+            let candidates = ctx
+                .session
+                .as_deref()
+                .map(|session| mint_candidates(session, ctx.secret));
             // The offer's dial-identity discovery seed: this device's real
-            // principal (addresses heal over the T13 step-4 re-exchange). A
-            // failed resolve degrades to an empty seed — the nest URL below is
-            // the always-on anchor either way.
-            let owner_devices = match resolve_device_principal(ctx.secret).await {
-                Ok(key) => vec![fauna_core::device_endpoints::DeviceEndpoints {
-                    node_id: key,
-                    ..Default::default()
-                }],
-                Err(e) => {
-                    tracing::warn!("custody mint: no device principal for the offer seed ({e})");
-                    Vec::new()
+            // principal (addresses heal over the T13 step-4 re-exchange),
+            // resolved only for a pair the shared check will accept. A failed
+            // resolve degrades to an empty seed — the nest URL is the
+            // always-on anchor either way.
+            let offered = candidates.as_deref().is_some_and(|c| {
+                fauna_client_capabilities::custody_acts::host_channel_is_a_mint_candidate(
+                    c,
+                    &host.0,
+                    &channel_hex,
+                )
+            });
+            let owner_devices = if offered {
+                match resolve_device_principal(ctx.secret).await {
+                    Ok(key) => vec![fauna_core::device_endpoints::DeviceEndpoints {
+                        node_id: key,
+                        ..Default::default()
+                    }],
+                    Err(e) => {
+                        tracing::warn!(
+                            "custody mint: no device principal for the offer seed ({e})"
+                        );
+                        Vec::new()
+                    }
                 }
+            } else {
+                Vec::new()
             };
-            let nest_url = ctx.nest.nest_url();
-            let params = ceremony::OfferParams {
+            error = fauna_client_capabilities::custody_acts::mint_custody(
+                &records,
+                &keypair,
+                candidates.as_deref(),
                 host,
                 channel_hex,
-                scopes: fauna_core::custody_grant::CustodyScopeSet::Account,
-                duration_secs: fauna_client_capabilities::DEFAULT_GRANT_WINDOW_SECS,
                 owner_devices,
-                owner_nest_url: Some(nest_url),
-                grant_id: fauna_core::custody_grant::random_grant_id(),
-            };
-            let result = records
-                .update(|cfg| ceremony::begin_offer(cfg, &keypair, params, now))
-                .await;
-            match result {
+                ctx.nest.nest_url(),
+                now,
+            )
+            .await;
+            if error.is_none() {
                 // The offer is recorded (unposted) — the drive posts it.
-                Ok(Ok(_)) => spawn_drive(
+                spawn_drive(
                     Arc::clone(&ctx.nest),
                     ctx.secret,
                     ctx.session.clone(),
                     ctx.store.clone(),
-                ),
-                Ok(Err(e)) => error = Some(e.to_string()),
-                Err(e) => error = Some(e.to_string()),
+                );
             }
         }
         CustodyAct::Revoke { grant_id, holder } => {
@@ -703,37 +657,6 @@ async fn put_held_row(
     }
 }
 
-/// The hosting-deposit seam with the refusal reason kept. The shared seam
-/// answers `bool` (a refusal stays owed and re-drives), which is right for
-/// the drive and wrong for anyone reading why a nest-form custody never
-/// reached its pump: the register door's refusals (the dial policy, a witness
-/// that does not admit this nest, the deposit bounds) would otherwise leave
-/// nothing behind but a `still_owed` count.
-struct LoggedHostingDepositor(
-    fauna_client_capabilities::custody_hosting::CustodyHostingClient<Arc<NestClient>>,
-);
-
-impl fauna_client_capabilities::custody_ceremony::CustodyHostingDepositor
-    for LoggedHostingDepositor
-{
-    async fn register(
-        &self,
-        deposit: &fauna_client_capabilities::custody_hosting::HostingDeposit,
-    ) -> bool {
-        match self.0.register(deposit).await {
-            Ok(reply) if reply.ok => true,
-            Ok(_) => {
-                tracing::warn!("custody hosting register: the nest answered ok=false");
-                false
-            }
-            Err(e) => {
-                tracing::warn!("custody hosting register refused: {e}");
-                false
-            }
-        }
-    }
-}
-
 /// The shared stage (c) owner-side leg
 /// ([`fauna_client_capabilities::custody_ceremony::ingest_nest_receipts`], the
 /// one web's `custodyFacetLoad` runs too), its skips logged.
@@ -769,41 +692,12 @@ pub fn spawn_drive(
     let owner = ActorKeypair::from_secret(secret);
     let Some(session) = session else { return };
     let Some(store) = store else { return };
+    // The pass itself — receipts first (stage (c)'s owner-side leg, so this
+    // same pass writes any re-opened `custodian-endpoints` row), then the
+    // drive with both deposit doors — is the shared body web's rail runs too.
     tokio::spawn(async move {
-        // Stage (c)'s owner-side leg, BEFORE the drive pass — so this same
-        // pass writes any re-opened `custodian-endpoints` row.
-        ingest_nest_receipts(&nest, &store).await;
-
-        let poster = SessionCustodyPoster(session);
-        let depositor = CapabilitiesClient::new(Arc::clone(&nest));
-        // Stage (b)'s runtime hand-off: a NEST-form held ceremony deposits
-        // its hosting row on the host's own nest through this seam.
-        let hosting = LoggedHostingDepositor(
-            fauna_client_capabilities::custody_hosting::CustodyHostingClient::new(Arc::clone(
-                &nest,
-            )),
-        );
-        let now = Timestamp::now();
-        let report = drive_ceremonies(
-            &store, &store, &owner, &poster, &store, &depositor, &hosting, now,
-        )
-        .await;
-        match report {
-            Ok(r) if r.posted + r.minted + r.rows_written + r.still_owed > 0 => {
-                tracing::info!(
-                    posted = r.posted,
-                    minted = r.minted,
-                    rows_written = r.rows_written,
-                    still_owed = r.still_owed,
-                    "custody ceremony drive"
-                );
-            }
-            Ok(_) => {}
-            // A drive error aborts the whole pass — every ceremony behind the
-            // failing record stays owed — so it is worth a line at the default
-            // level, not a debug one nobody reads.
-            Err(e) => tracing::warn!("custody ceremony drive aborted: {e}"),
-        }
+        fauna_client_conversations::drive_ceremony_pass(nest, &store, &owner, session.backend())
+            .await;
     });
 }
 
@@ -823,7 +717,7 @@ pub fn spawn_owner_resend(
     let Some(session) = session else { return };
     let Some(store) = store else { return };
     tokio::spawn(async move {
-        let poster = SessionCustodyPoster(session);
+        let poster = fauna_client_conversations::BackendCustodyPoster(session.backend());
         match fauna_client_capabilities::custody_ceremony::resend_owner_ceremonies(
             &store, &store, &owner, &poster, &store,
         )
@@ -931,62 +825,6 @@ mod mint_tests {
                 label: "Bo".to_string(),
             }
         );
-    }
-
-    /// the check that closes the finding — a leg picking an actual
-    /// candidate row must be able to mint over it.
-    #[test]
-    fn a_listed_candidates_own_pair_is_a_candidate() {
-        let candidates = vec![CustodyMintCandidateView {
-            host: vec![7u8; 32],
-            channel_hex: "c0ffee".to_string(),
-            label: "Bo".to_string(),
-        }];
-        assert!(host_channel_is_a_mint_candidate(
-            &candidates,
-            &[7u8; 32],
-            "c0ffee"
-        ));
-    }
-
-    /// The defect this fixes: a leg (or a hostile/buggy one) hand-assembles
-    /// a channel `mint_candidates` never offered. Wrong host, real channel.
-    #[test]
-    fn a_pair_with_the_right_channel_but_the_wrong_host_is_not_a_candidate() {
-        let candidates = vec![CustodyMintCandidateView {
-            host: vec![7u8; 32],
-            channel_hex: "c0ffee".to_string(),
-            label: "Bo".to_string(),
-        }];
-        assert!(!host_channel_is_a_mint_candidate(
-            &candidates,
-            &[9u8; 32],
-            "c0ffee"
-        ));
-    }
-
-    /// Same defect, the other free parameter: right host, a channel that row
-    /// never named — e.g. a group channel the host also happens to sit in.
-    #[test]
-    fn a_pair_with_the_right_host_but_the_wrong_channel_is_not_a_candidate() {
-        let candidates = vec![CustodyMintCandidateView {
-            host: vec![7u8; 32],
-            channel_hex: "c0ffee".to_string(),
-            label: "Bo".to_string(),
-        }];
-        assert!(!host_channel_is_a_mint_candidate(
-            &candidates,
-            &[7u8; 32],
-            "deadbeef"
-        ));
-    }
-
-    /// The self-exclusion rides this same check for free: `mint_candidates`
-    /// never lists the owner's own actor, so any pair naming it is already
-    /// absent from the list — no second `host == own` check is needed.
-    #[test]
-    fn an_empty_candidate_list_refuses_every_pair() {
-        assert!(!host_channel_is_a_mint_candidate(&[], &[7u8; 32], "c0ffee"));
     }
 
     /// A mint with no session must ANSWER, not record. The offer is POSTED by

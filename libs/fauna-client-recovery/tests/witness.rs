@@ -2618,6 +2618,7 @@ fn the_state_report_carries_the_poll_the_producer_and_the_verdict() {
         awaiting_remove_old: 1,
         not_in_this_group: 1,
         held_commits: 2,
+        future_epoch_skips: 3,
         park_full: 1,
     };
 
@@ -2635,6 +2636,7 @@ fn the_state_report_carries_the_poll_the_producer_and_the_verdict() {
     assert_eq!(json["statements"]["awaiting_remove_old"], 1);
     assert_eq!(json["statements"]["not_in_this_group"], 1);
     assert_eq!(json["statements"]["held_commits"], 2);
+    assert_eq!(json["statements"]["future_epoch_skips"], 3);
     assert_eq!(json["statements"]["park_full"], 1);
 
     // The PRODUCER half, keyed by actor so a driver can find its own peer.

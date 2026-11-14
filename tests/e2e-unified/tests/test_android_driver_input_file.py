@@ -1,7 +1,7 @@
 """tier_1: android's `set_input_files` carries the picked file's BYTES to the device.
 
 Authority: `docs/goal/architecture/testing.md` § Default app and nest mode →
-*Android's run venue* (venue A2: pytest on Linux, the device on the emulator host behind a
+*Android's emulator placement* (emulator placement A2: pytest on Linux, the device on the emulator host behind a
 tunnel — so no host path is ever a device path) and
 `docs/goal/ui/conversations.md` § the attachments-outbound android cell (the
 agent reads ``compose.file`` on the device's own filesystem).

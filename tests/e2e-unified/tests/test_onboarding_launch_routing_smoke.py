@@ -74,6 +74,8 @@ the client set it targets and why):
   launch path (``launch_and_route``), assert the routed surface. The web
   ``LaunchMachine`` connects to the injected per-actor ``nest_url`` itself, so web
   reaches the same routing landings the native binaries do (recon 2026-07-15).
+  E alone also runs on macos and ios (2026-11-11), whose launch harness the
+  ``NATIVE_ONLY`` cases already drive.
 * **G (factory reset) — native only.** Web's ``driver.reset()`` sweeps the whole
   ``fauna_*``/``fauna/*`` localStorage namespace as the *test agent's* cleanup
   (``web-bridge/agent.js``), not through the product path, so a reset-erase
@@ -486,8 +488,13 @@ def test_smoke_d_unreachable_dns_fail_shows_retry_surface(launch_harness):
 # E — silent-challenge not_registered on a CLAIMED nest, saved nest_url →
 #     the sign-in-refused surface (never the invite wizard)
 # ---------------------------------------------------------------------------
+# Every app. macos and ios join on the same seed-and-launch call cases E2 and
+# F2 already drive them through; the refused surface they land is FaunaKit's
+# shared `LaunchSignInRefusedView`.
 @pytest.mark.parametrize(
-    "launch_harness", _clients(*WEB_FIT, "windows"), indirect=True
+    "launch_harness",
+    _clients("linux", "tui", "web", "android", "windows", "macos", "ios"),
+    indirect=True,
 )
 @pytest.mark.feature("connect-and-sign-in")
 def test_smoke_e_previously_signed_in_identity_refused_by_claimed_nest_lands_refused_surface(
@@ -675,18 +682,44 @@ def test_smoke_f_retry_surface_fallthrough_goes_to_handle_entry(launch_harness):
 )
 @pytest.mark.feature("connect-and-sign-in")
 def test_smoke_f2_fallthrough_clears_the_binding_so_relaunch_starts_at_handle_entry(
-    launch_harness,
+    request, launch_harness,
 ):
     """connect-and-sign-in outcome 16: "Use a different nest" walks the account
     away from its nest through the registry (`clear_nest_binding`), keeping the
     identity. Without the clear, the stale (nest_url, device_id) binding survives
     an abandoned re-onboard and the next launch silently retries the same dead
     nest. So: fall through, force-quit before picking a new nest, relaunch, and
-    the routed surface is `handle_entry` — the identity kept, no retry surface."""
+    the routed surface is `handle_entry` — the identity kept, no retry surface.
+
+    iOS reaches the retry surface the one way its entry posture allows. iOS is
+    the one app that enters optimistically: a stored session whose nest is down
+    stays in its cached shell on the transient verdict, so a dead nest alone
+    never paints `launch_retry` there (`onboarding.md` § App-launch routing, the
+    entry-posture paragraph). When there is nothing to enter optimistically,
+    entry withheld for a pending-factory-reset slot, iOS GATES like the other
+    six. So the ios arm adds the stale slot
+    `test_launch_retry_gating_case.py` lands `launch_retry` with
+    (`helpers/launch_retry_seed.py`, naming the session's live claimed nest so
+    the boot reconcile clears it). The relaunch carries no slot (`relaunch()`
+    re-injects nothing), so it routes on the binding alone, as on every app: an
+    uncleared binding would re-enter the cached session there, never
+    `handle_entry`."""
     dead_url = f"http://127.0.0.1:{_free_closed_port()}"
-    driver = launch_harness.launch_and_route(
-        secret_hex=secrets.token_hex(32), node_url=dead_url, trust=None
-    )
+    secret_hex = secrets.token_hex(32)
+    if launch_harness.client == "ios":
+        from helpers.launch_retry_seed import stale_reset_slot_fields
+
+        nest_url = request.getfixturevalue("nest_instance")["url"]
+        driver = launch_harness.launch(
+            secret_hex=secret_hex,
+            node_url=dead_url,
+            trust=None,
+            raw_fields=stale_reset_slot_fields(secret_hex, nest_url),
+        )
+    else:
+        driver = launch_harness.launch_and_route(
+            secret_hex=secret_hex, node_url=dead_url, trust=None
+        )
     driver.wait_for(LAUNCH_FALLTHROUGH, timeout=ROUTE_TIMEOUT)
     driver.click(LAUNCH_FALLTHROUGH)
     driver.wait_for(HANDLE_INPUT, timeout=15)

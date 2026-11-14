@@ -1000,11 +1000,25 @@ public sealed partial class MainPage : Page
                 NavFamily.Visibility = Visibility.Visible;
                 ShellLog.Info("MainPage", "[family-gate] revealed family-tab");
             }
+            else
+            {
+                // The live read is authoritative BOTH ways: RestoreSupervisionSnapshot
+                // may have shown the tab and the supervised mark from the last-known
+                // snapshot, and a read that finds no family relationship (a ward who
+                // graduated while the app was closed) takes them down again — the
+                // guardian's mark outliving the link is what family-safety outcome
+                // 68 pins (test_family_graduation_enforcement.py).
+                NavFamily.Visibility = Visibility.Collapsed;
+            }
             if (status.@supervisedBy is { } guardian)
             {
                 SupervisedIndicatorButton.Content = S.Get("family/supervised_indicator")
                     .Replace("{guardian}", guardian.@handle);
                 SupervisedIndicatorButton.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                SupervisedIndicatorButton.Visibility = Visibility.Collapsed;
             }
         }
         catch (Exception ex)
@@ -1116,7 +1130,15 @@ public sealed partial class MainPage : Page
         // the apply in the handler that actually constructs the shell is
         // correct regardless of whether that handler fires synchronously or
         // is deferred to a later dispatcher tick.
-        _pendingSettingsSubId = subId;
+        //
+        // A bare Settings request (no id) means the Status sub-page, as the doc
+        // comment says — stashed as "status", never as null: null is the
+        // "nothing pending" value ApplyPendingSettingsSubId returns early on, so
+        // a bare request made while the shell already showed a sub-page left
+        // that sub-page up and its OnNavigatedFrom unrun (a Connected apps
+        // reveal kept its screen-capture hold — security.md § On-screen secret
+        // exposure, rule 2's navigate-away release).
+        _pendingSettingsSubId = subId ?? SettingsNavigation.Status;
         if (!ReferenceEquals(NavView.SelectedItem, NavSettings))
         {
             NavView.SelectedItem = NavSettings;

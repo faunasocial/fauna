@@ -68,6 +68,12 @@ impl DraftsHost for CliFeedManager {
     async fn restore_drafts_at(&self, _epoch: u64, bytes: Vec<u8>) {
         CliFeedManager::restore_drafts(self, bytes)
     }
+    /// The feed's fill has no probe to skip: the shared
+    /// `FeedManager::fill_drafts_for_leave` (the launch restore's body, then
+    /// the snapshot).
+    fn fill_drafts_for_leave(&self, _epoch: u64, bytes: &[u8]) -> Vec<u8> {
+        CliFeedManager::fill_drafts_for_leave(self, bytes)
+    }
 }
 
 /// The feed composer's `__drafts` path (one combined blob, per

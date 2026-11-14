@@ -287,8 +287,22 @@ class AtprotoSettingsActions:
         """`atproto-contest` — open the confirm card. Signs nothing."""
         self.driver.click("atproto-contest")
 
-    def is_contest_confirm_visible(self) -> bool:
-        return self.driver.is_visible("atproto-contest-confirm-card")
+    def wait_for_contest_confirm(self, timeout: float = 8.0) -> bool:
+        """`atproto-contest-confirm-card` shown — a POSITIVE read that waits.
+
+        The press that opens it is a click whose repaint lands after the click
+        returns on some apps (a UIA Invoke on windows is asynchronous), and the
+        card sits under the contest card and the custody alarm, below the fold
+        of windows' 600-DIP default window, where a bare ``is_visible`` (UIA
+        ``IsOffscreen``) reads it as not shown. So it polls the scrolled read
+        (convention 14). A negative read uses ``driver.is_absent``."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.driver.is_visible_scrolled("atproto-contest-confirm-card"):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.25)  # sleep-ok: pacing between poll iterations
 
     def contest_confirm_text(self) -> str:
         return self.driver.get_text("atproto-contest-confirm-card")

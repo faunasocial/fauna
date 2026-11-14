@@ -2816,7 +2816,41 @@ def harness_answer_consent(
 
 
 
-def harness_enable_mail(nest_url: str, owner_secret: bytes) -> str:
+if hasattr(_lib, "fauna_harness_provision"):
+    _lib.fauna_harness_provision.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # dag-cbor request, len
+        ctypes.POINTER(_FfiBuffer),                        # out: {"ok": snapshot JSON}
+    ]
+    _lib.fauna_harness_provision.restype = ctypes.c_int32
+
+
+def harness_provision(calls: list[list[str]], *, retry_error: str | None = None,
+                      max_retries: int = 0) -> dict:
+    """Provision a box app-less through the shared onboarding machine every app
+    runs: each ``[method, json_arg]`` of ``calls`` goes through the machine's
+    bridge dispatcher (the names an app driver's ``call_machine_method`` sends),
+    then provisioning runs to its end — blocking, minutes on a real cloud — and
+    a run that fails with exactly ``retry_error`` is retried up to
+    ``max_retries`` times. Returns the provisioning snapshot (the
+    ``provisioning_snapshot`` reader's object), whatever its outcome. Callers
+    normally go through ``helpers.live_provision.provision_app_less``."""
+    fn_name = "fauna_harness_provision"
+    if not hasattr(_lib, fn_name):
+        raise RuntimeError(
+            f"libfauna_ffi has no `{fn_name}` — it is stale, or not the "
+            "`e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    body = cbor2.dumps([[list(c) for c in calls], retry_error, int(max_retries)],
+                       canonical=True)
+    req_arr = (ctypes.c_uint8 * len(body)).from_buffer_copy(body)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_provision(req_arr, len(body), ctypes.byref(out))
+    reply = cbor2.loads(_take_buffer(rc, out, fn_name))
+    return json.loads(reply["ok"])
+
+
+def harness_enable_mail(nest_url: str, owner_secret: bytes, *,
+                        epoch_schedule: bool = False) -> str:
     """Enable mail for the account whose seed is ``owner_secret``, app-less: the
     shared ``MailSettingsMachine`` the apps' Mail settings page builds, sent
     ``EnableMail`` with one generated plain credential over the owner's mail
@@ -2826,8 +2860,15 @@ def harness_enable_mail(nest_url: str, owner_secret: bytes) -> str:
     test mints afterwards). Returns the generated plain credential, which an
     IMAP or DAV client authenticates as the owner with. Like
     ``harness_create_set``, the call hosts the account store for its length
-    (one fleet enrollment). Raises on a refusal."""
-    return _seat_call("fauna_harness_enable_mail", nest_url, owner_secret, [])
+    (one fleet enrollment). Raises on a refusal.
+
+    ``epoch_schedule=True`` also runs the connect-time refresh pass every
+    signed-in app runs, publishing the account's content-sealing epoch
+    schedule — so the MTA seals inbound mail under per-epoch keys, the state
+    every app leaves. Without it the mail is sealed to the standing recipient
+    key alone, a state no app produces."""
+    return _seat_call("fauna_harness_enable_mail", nest_url, owner_secret,
+                      [True] if epoch_schedule else [])
 
 
 def harness_device_removal(

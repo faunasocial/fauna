@@ -280,7 +280,12 @@ async fn the_mailbox_is_not_read_until_the_index_observer_is_registered() {
     );
 
     journal.push(Event::GateOpened);
-    gate.notify_waiters();
+    // `notify_one`, never `notify_waiters`: the launcher journals `LaunchEntered`
+    // before it awaits `notified()`, and a `notify_waiters` landing in that gap
+    // stores no permit, so the launch parks for ever and the budget below fails
+    // (flaked once in the release lane's grade). `notify_one`
+    // keeps the permit for the one waiter.
+    gate.notify_one();
 
     await_event(
         &journal,

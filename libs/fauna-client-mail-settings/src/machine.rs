@@ -14,7 +14,8 @@ use zeroize::Zeroizing;
 
 use fauna_client_bridges::HolderInfo;
 use fauna_client_capabilities::{
-    DEFAULT_GRANT_WINDOW_SECS, bounded_mail_rotation_heal_keys, grant_log, mint_grant,
+    DEFAULT_GRANT_WINDOW_SECS, bounded_mail_rotation_heal_keys, grant_log, master_key_heal_tuple,
+    master_key_rotation_heal_keys, mint_grant,
 };
 use fauna_client_config::SuccessionLedgerStore;
 use fauna_core::data::{MailConfig, MailCredential, MsekFingerprint, Timestamp};
@@ -47,6 +48,7 @@ use fauna_protocol::wrapped_blob::{
 use crate::credential::{Credential, derive_credential_id};
 use crate::error::{DispatchError, NestError, SetMailEnabledError, SignerError};
 use crate::rotation;
+use crate::rotation::DeploymentFlip;
 use crate::state::{
     MailCredentialSummary, MailSettingsAction, MailSettingsSnapshot, MuaInstructions,
     PendingRotationStatus, SettingsStatus,
@@ -392,7 +394,7 @@ pub trait NestClient: MaybeSendSync {
     /// never shrinks and the start never moves back (the nest refuses both —
     /// narrowing is revocation's job).
     ///
-    /// The rotation-heal driver ([`MailSettingsMachine::heal_outstanding_bounded_grants`])
+    /// The rotation-heal driver ([`MailSettingsMachine::heal_outstanding_grants_after_rotation`])
     /// calls this once per outstanding bounded mail grant after an MSEK rotation,
     /// with the grant's **recorded** window unchanged (a pure key refresh) and
     /// `appended_keys` re-wrapping that whole window under the post-rotation
@@ -1588,8 +1590,18 @@ impl MailSettingsMachine {
         Ok(())
     }
 
-    /// Best-effort heal of the actor's outstanding **bounded** mail grants after
-    /// an MSEK rotation (design § 5 + the 2026-07-19 amendment; owner doc
+    /// Best-effort heal of the actor's outstanding **bounded** mail grants AND
+    /// **master-key** mail, calendar and card grants (materialization grants
+    /// included) after an MSEK rotation.
+    ///
+    /// **Master-key** (`capability-grants.md` § Capability tiering → *What a
+    /// master-key mail wrap conveys*, ruled 2026-11-13): the grant's one
+    /// standing wrap per read is rebuilt over the post-rotation generation set
+    /// (the new generation's chunk first, [`master_key_rotation_heal_keys`]) and
+    /// sent as an equal-end renew, which the nest replaces in place — the
+    /// regime guard and the materialization shape check stand unamended.
+    ///
+    /// **Bounded** (design § 5 + the 2026-07-19 amendment; owner doc
     /// `encryption-at-rest.md` § Capability tiering). An MSEK hard-revoke resets
     /// the mail epoch lineage, so a bounded grant's per-epoch wraps (sealed under
     /// the retired root) stop covering content sealed under the new root. For each
@@ -1613,7 +1625,7 @@ impl MailSettingsMachine {
     /// fails to decrypt). A holder absent from the roster is **skipped**, not
     /// healed classical-blind: a re-wrap without the holder's resolved ML-KEM ek
     /// could PQ-downgrade a hybrid grant's wraps via replace-on-append.
-    pub(crate) async fn heal_outstanding_bounded_grants(&self) {
+    pub(crate) async fn heal_outstanding_grants_after_rotation(&self) {
         let ledger = match self.ledger.load().await {
             Ok(l) => l,
             Err(e) => {
@@ -1629,13 +1641,16 @@ impl MailSettingsMachine {
             }
         };
         let now = Timestamp::now_secs().max(0) as u64;
-        // Outstanding, still-in-window bounded mail grants. Enumerating first lets
-        // the common path (no bounded grants — the pre-flip reality, since
-        // `mint_bounded_mail_grant` has zero production callers) skip the holder
-        // discovery RPC entirely.
+        // Outstanding, still-in-window bounded mail grants and master-key mail,
+        // calendar or card grants. Enumerating first lets the common path (none
+        // outstanding) skip the holder discovery RPC entirely.
         let healable: Vec<grant_log::CurrentGrant> = grant_log::current_grants(&ledger)
             .into_iter()
-            .filter(|g| grant_log::is_bounded_mail_grant(&g.scope) && g.window_end >= now)
+            .filter(|g| {
+                g.window_end >= now
+                    && (grant_log::is_bounded_mail_grant(&g.scope)
+                        || g.scope.iter().any(|s| master_key_heal_tuple(s).is_some()))
+            })
             .collect();
         if healable.is_empty() {
             return;
@@ -1669,14 +1684,26 @@ impl MailSettingsMachine {
             // re-wrapped key exactly as the mint's did, or the heal would
             // append a composed-read wrap to a grant the owner confined.
             let factor = grant_log::labeler_factor_of_grant(&g.scope);
-            let wraps = match bounded_mail_rotation_heal_keys(
-                &mail,
-                &self.actor_id,
-                &holder_pk,
-                holder.mlkem_ek.as_deref(),
-                &window,
-                factor.as_deref(),
-            ) {
+            let rebuilt = if grant_log::is_bounded_mail_grant(&g.scope) {
+                bounded_mail_rotation_heal_keys(
+                    &mail,
+                    &self.actor_id,
+                    &holder_pk,
+                    holder.mlkem_ek.as_deref(),
+                    &window,
+                    factor.as_deref(),
+                )
+            } else {
+                master_key_rotation_heal_keys(
+                    &mail,
+                    &self.actor_id,
+                    &holder_pk,
+                    holder.mlkem_ek.as_deref(),
+                    &g.scope,
+                )
+            };
+            let wraps = match rebuilt {
+                Ok(w) if w.is_empty() => continue,
                 Ok(w) => w,
                 Err(e) => {
                     tracing::warn!(error = %e, "rotation heal: re-wrap failed; grant heals at next renew");
@@ -2716,6 +2743,23 @@ impl MailSettingsMachine {
         // nothing — the nest's own refusal of the enable stands behind the
         // first, and an unread DAV toggle only hides an affordance.
         let deployment = self.nest.deployment_status().await.unwrap_or_default();
+        // Best-effort: the lost-mailbox restore, before the marker heal — the
+        // page of any device holding the plane is a recovery door for a nest
+        // that lost the mailbox (`mail-credentials.md` § A nest that lost the
+        // mailbox; `nest/common.md` § Client-state recoverability). A failure
+        // logs; the next hydrate or connect retries.
+        let rows = if heal {
+            match self.restore_lost_mailbox().await {
+                Ok(true) => self.mail.load_rows().await?,
+                Ok(false) => rows,
+                Err(e) => {
+                    tracing::warn!(error = %e, "mail restore: failed; retried next hydrate");
+                    self.mail.load_rows().await?
+                }
+            }
+        } else {
+            rows
+        };
         // Best-effort: the generation marker's heal and its delete dual — a
         // failure logs and leaves the rows owed for the next hydrate.
         let rows = match heal && self.heal_generation_markers(&rows).await {
@@ -2803,6 +2847,15 @@ impl MailSettingsMachine {
     /// else → walk ([`MailStore::walk`]) and re-read, moving nothing
     /// when no walk can be taken now (the next connect retries).
     pub async fn refresh_epoch_schedule(&self) -> Result<(), DispatchError> {
+        // A nest that lost the mailbox (a factory reset and a reclaim, a box
+        // rebuilt over an empty database) gets it back from the custody first
+        // — before the pending-rotation return below, since a carried sentinel
+        // is one of the custody's shapes the restore resumes
+        // (`mail-credentials.md` § A nest that lost the mailbox). Restored →
+        // the restore re-sealed; nothing left to slide.
+        if self.restore_lost_mailbox().await? {
+            return Ok(());
+        }
         let mut mail = self.mail.load().await?;
         if mail.msek.is_none() || mail.pending_rotation.is_some() {
             return Ok(());
@@ -2837,6 +2890,15 @@ impl MailSettingsMachine {
                 return Ok(());
             }
         }
+        self.reseal_registration(&mail).await
+    }
+}
+
+impl MailSettingsMachine {
+    /// Snapshot then registration under the custody's standing MSEK — the
+    /// connect-time refresh's re-seal, and the lost-mailbox restore's first
+    /// nest step ([`Self::restore_lost_mailbox`]). A no-op with no MSEK.
+    async fn reseal_registration(&self, mail: &MailConfig) -> Result<(), DispatchError> {
         let Some(msek) = mail.msek.as_ref() else {
             return Ok(());
         };
@@ -2853,7 +2915,7 @@ impl MailSettingsMachine {
         // conditional on a read-back: the blob is small, the write is an
         // idempotent atomic replace, and a pairing that holds by construction
         // is worth one extra write per connect.
-        self.provision_snapshot_for(&Self::snapshot_mseks(&mail), &mail.prior_retired_at_unix())
+        self.provision_snapshot_for(&Self::snapshot_mseks(mail), &mail.prior_retired_at_unix())
             .await?;
         self.nest
             .provision_recipient_mls_pubkey(
@@ -2867,6 +2929,130 @@ impl MailSettingsMachine {
         Ok(())
     }
 
+    /// **The lost-mailbox restore** (`mail-credentials.md` § A nest that lost
+    /// the mailbox), as the connect-time refresh and the mail page's hydrate
+    /// run it: never touching the deployment-wide subsystem flag. Whether the
+    /// nest had lost the mailbox (and the restore ran).
+    pub async fn restore_lost_mailbox(&self) -> Result<bool, DispatchError> {
+        self.restore_lost_mailbox_with(DeploymentFlip::Leave).await
+    }
+
+    /// The claim-time door (`serving_enablement::provision_mail_at_first_setup`,
+    /// both arms): a custody that already holds a mailbox is restored, never
+    /// minted over — a nest that lost it gets the lost-mailbox restore, and a
+    /// sentinel standing on a nest that did not is resumed here, by the launch
+    /// glue (§ A nest that lost the mailbox, rule 3). `admin_enable_email` is
+    /// the claim's enable-email choice: the deployment subsystem goes on
+    /// exactly then, as a fresh claim's mint turns it on.
+    ///
+    /// `true` → the custody held a mailbox and it was put back to work: the
+    /// caller mints nothing. `false` → mint as on a fresh claim (no mailbox in
+    /// custody, a healthy nest — whose own refusals then answer — or a restored
+    /// calendar-only mailbox the claim asked email of, which the Enable's
+    /// upgrade arm finishes).
+    pub async fn restore_mailbox_at_claim(
+        &self,
+        admin_enable_email: bool,
+    ) -> Result<bool, DispatchError> {
+        let flip = match admin_enable_email {
+            true => DeploymentFlip::Assert,
+            false => DeploymentFlip::Leave,
+        };
+        let restored = self.restore_lost_mailbox_with(flip).await?;
+        if !restored {
+            if self.mail.load().await?.pending_rotation.is_none() {
+                return Ok(false);
+            }
+            crate::rotation::resume_rotation_with(self, flip).await?;
+        }
+        let mail = self.mail.load().await?;
+        Ok(!(admin_enable_email && !mail.is_mail_enabled()))
+    }
+
+    /// The restore body. **The reading** (rule 1): the custody holds the MSEK
+    /// and a live credential row naming a generation, while the nest has no
+    /// standing registration for the actor. The marker is written only after
+    /// a wrap and a wrap only after the registration on that same nest, so the
+    /// pair is never a first enable in flight. Anything else moves nothing.
+    ///
+    /// **The restore** (rule 2), ordered so a stop anywhere converges: the
+    /// submission tokens and the per-actor flag first — the token-mint stamp is
+    /// a later-wins maximum, so every live credential is minted explicitly,
+    /// never asked what is due — while the markers still make the reading
+    /// true, so a stop before the markers clear reads lost again and redoes
+    /// the whole; then every live row's generation marker is cleared (owed its
+    /// wrap again); then, with a sentinel standing, its Resume, which now owes
+    /// every wrap; else snapshot and registration under the standing MSEK and
+    /// the marker heal for the wraps. A stop after the markers clear is the
+    /// ordinary owed state the connect-time re-seal and the hydrate's heal
+    /// already finish.
+    async fn restore_lost_mailbox_with(&self, flip: DeploymentFlip) -> Result<bool, DispatchError> {
+        let rows = self.mail.load_rows().await?;
+        let Some(state) = rows.state.as_ref() else {
+            return Ok(false);
+        };
+        if state.msek.is_none() {
+            return Ok(false);
+        }
+        let marked_live: Vec<MailCredential> = rows
+            .credentials
+            .values()
+            .filter(|c| !c.is_marked() && c.wrapped_under.is_some())
+            .cloned()
+            .collect();
+        if marked_live.is_empty()
+            || self
+                .nest
+                .fetch_own_recipient_pubkey(self.actor_id)
+                .await?
+                .is_some()
+        {
+            return Ok(false);
+        }
+        tracing::info!(
+            credentials = marked_live.len(),
+            "mail: the nest holds no registration for a mailbox the custody holds — \
+             restoring the nest-side half from the custody"
+        );
+        self.set_status(SettingsStatus::Syncing);
+
+        let mail = rows.config();
+        if mail.is_mail_enabled() {
+            for row in rows.credentials.values().filter(|c| !c.is_marked()) {
+                self.provision_submission_token(&row.credential_id, &Credential::of_row(row)?)
+                    .await?;
+            }
+            self.nest.set_actor_mail_enabled(true).await?;
+        }
+
+        for row in marked_live {
+            self.mail
+                .put_credential(MailCredential {
+                    wrapped_under: None,
+                    ..row
+                })
+                .await?;
+        }
+
+        if mail.pending_rotation.is_some() {
+            crate::rotation::resume_rotation_with(self, flip).await?;
+            return Ok(true);
+        }
+
+        let mail = self.mail.load().await?;
+        self.reseal_registration(&mail).await?;
+        let rows = self.mail.load_rows().await?;
+        self.heal_generation_markers(&rows).await;
+        if mail.is_mail_enabled() && flip == DeploymentFlip::Assert {
+            self.turn_mail_subsystem_on().await?;
+        }
+        self.refresh_snapshot().await?;
+        Ok(true)
+    }
+}
+
+#[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
+impl MailSettingsMachine {
     /// Re-mint every live credential's outbound submission token that is due
     /// at `now` (unix seconds on the token clock, [`token_refresh::now_secs`])
     /// — at least [`token_refresh::SUBMISSION_TOKEN_REFRESH_INTERVAL_SECS`]

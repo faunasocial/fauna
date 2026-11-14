@@ -11,23 +11,11 @@ import SwiftUI
 /// embeds it in the detail pane of the `NavigationSplitView`, iOS in a pushed
 /// `NavigationStack` screen; the body is identical.
 public struct ThreadDetailView: View {
+    /// The thread as the shell last read it — the IDENTITY of what is open
+    /// (its `threadId`) and the fallback while the manager no longer lists it.
+    /// It is never what paints: the body re-reads the live snapshot itself.
     public let detail: ThreadDetail
-    /// Whether this view carries the PAGE-level error (`ConversationsVM.pageError`
-    /// — a refused add-participant, a failed rename) as well as the send error.
-    /// Only a shell whose list pane is off screen while a thread is open passes
-    /// `true`: iOS's pushed screen, where the list's own banner is hidden under
-    /// the push and a refusal stamped while the thread is open would otherwise
-    /// reach no visible `error-message` at all. macOS keeps the list pane and its
-    /// banner beside the thread, so it passes `false` — two banners would be two
-    /// `error-message` elements on one page.
     public let showsPageError: Bool
-    /// A room-search POST hit's destination (`room-search.md` § The surface →
-    /// *Opening a hit*): the shell switches to its feed page and parks the post id
-    /// with the room's `homeNestUrl` (non-nil iff the room is homed on another
-    /// nest) on `FeedVM.pendingPostOpen`/`pendingPostOpenHome`, which resolves it
-    /// through `resolve_post_from`. The page switch is per shell (macOS sidebar,
-    /// iOS tab), so it rides in as a closure; `nil` (the kids build, which has no
-    /// feed) leaves a post hit inert.
     public var onOpenRoomPost: ((String, String?) -> Void)?
 
     public init(
@@ -38,6 +26,49 @@ public struct ThreadDetailView: View {
         self.showsPageError = showsPageError
         self.onOpenRoomPost = onOpenRoomPost
     }
+
+    @Environment(ConversationsVM.self) private var vm
+
+    /// Paints off the LIVE `vm.detail(threadId)`, read in this view's own body,
+    /// never off the copy the shell handed in. The two differ whenever the
+    /// shell's body does not re-run on a manager change while this one does:
+    /// iOS's pushed `NavigationStack` destination is that case — the late
+    /// red where the page's `error-message` (read live off
+    /// `vm.pageError`) repainted a refused removal while every
+    /// `thread-member-chip` still painted, and still removed, the roster as it
+    /// stood at the push. `vm.detail` reads the observer tick, so this body is
+    /// re-run on every manager change whoever its parent is, and macOS's
+    /// split-view pane (which happened to re-run its parent too) paints the
+    /// same thing it always did.
+    public var body: some View {
+        ThreadDetailContent(
+            detail: vm.detail(detail.threadId) ?? detail,
+            showsPageError: showsPageError,
+            onOpenRoomPost: onOpenRoomPost)
+    }
+}
+
+/// The open thread's contents, drawn off one `ThreadDetail` snapshot — the
+/// live one ``ThreadDetailView`` resolves on every pass.
+private struct ThreadDetailContent: View {
+    let detail: ThreadDetail
+    /// Whether this view carries the PAGE-level error (`ConversationsVM.pageError`
+    /// — a refused add-participant, a failed rename) as well as the send error.
+    /// Only a shell whose list pane is off screen while a thread is open passes
+    /// `true`: iOS's pushed screen, where the list's own banner is hidden under
+    /// the push and a refusal stamped while the thread is open would otherwise
+    /// reach no visible `error-message` at all. macOS keeps the list pane and its
+    /// banner beside the thread, so it passes `false` — two banners would be two
+    /// `error-message` elements on one page.
+    let showsPageError: Bool
+    /// A room-search POST hit's destination (`room-search.md` § The surface →
+    /// *Opening a hit*): the shell switches to its feed page and parks the post id
+    /// with the room's `homeNestUrl` (non-nil iff the room is homed on another
+    /// nest) on `FeedVM.pendingPostOpen`/`pendingPostOpenHome`, which resolves it
+    /// through `resolve_post_from`. The page switch is per shell (macOS sidebar,
+    /// iOS tab), so it rides in as a closure; `nil` (the kids build, which has no
+    /// feed) leaves a post hit inert.
+    var onOpenRoomPost: ((String, String?) -> Void)?
 
     @Environment(ConversationsVM.self) private var vm
     @Environment(FaunaClient.self) private var client: FaunaClient?
@@ -124,7 +155,7 @@ public struct ThreadDetailView: View {
         }
     }
 
-    public var body: some View {
+    var body: some View {
         VStack(spacing: 0) {
             ThreadHeader(
                 detail: detail,
@@ -269,7 +300,11 @@ public struct ThreadDetailView: View {
                                     #endif
                                 },
                                 linkPreviewImageURL: { vm.linkPreviewImageURL($0) },
-                                onResolveLinkPreview: { url in Task { await vm.resolveLinkPreview(url) } }
+                                onResolveLinkPreview: { url in
+                                    #if !FAUNA_KIDS
+                                    Task { await vm.resolveLinkPreview(url) }
+                                    #endif
+                                }
                             )
                             // Explicit `.id` for `scrollTo` below, which addresses views by
                             // their `.id()` modifier — separate from the ForEach's own
@@ -289,6 +324,19 @@ public struct ThreadDetailView: View {
                     withAnimation {
                         scrollProxy.scrollTo(target, anchor: .center)
                     }
+                }
+                // Otherwise follow the newest message: on opening a thread and
+                // whenever a genuinely new message is appended — never on a
+                // same-message-set edit (a reaction, a delete, a reveal), and
+                // never over a selected message, which owns the viewport above.
+                // Linux's thread pane does the same (`views/conversations/
+                // detail.rs`, `thread_switched || appended_new_message`). Without
+                // it the `LazyVStack` never realizes a row that arrives below the
+                // fold, so the newest message is neither seen nor laid out.
+                .onChange(of: "\(detail.threadId)\u{1F}\(detail.messages.last?.messageId ?? "")", initial: true) { _, _ in
+                    guard detail.selectedMessageId == nil,
+                          let newest = detail.messages.last?.messageId else { return }
+                    scrollProxy.scrollTo(newest, anchor: .bottom)
                 }
             }
         }

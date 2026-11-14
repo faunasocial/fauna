@@ -126,6 +126,17 @@ def build_launch_env(config: dict, port: int, tmp: str) -> dict:
     # when it is deleted. Read back through the driver's `custody_hold_file`.
     env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
 
+    # The e2e outbox drain hold (`fauna_account_plane::outbox`'s
+    # `outbox_drain_held`, the compile-gated `FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`
+    # seam): a path in this launch's scratch dir that does not exist, so the
+    # generic outbox drain runs as usual until a test creates the file
+    # (`helpers/outbox_drain.py::hold_outbox_drain`), in whichever process of
+    # this launch pumps. Read back through the driver's
+    # `outbox_drain_hold_file`.
+    env.setdefault(
+        "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE", os.path.join(tmp, "outbox-drain-hold")
+    )
+
     if config.get("use_real_keyring"):
         xdg_data = os.path.join(tmp, "data")
         xdg_config = os.path.join(tmp, "config")
@@ -503,6 +514,12 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         `helpers/folder_content.py::hold_custody_reread`."""
         return getattr(self, "_custody_hold_file", None)
 
+    def outbox_drain_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's generic outbox drain
+        (`FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`, set by `build_launch_env`); None
+        before `launch()`. Driven through `helpers/outbox_drain.py`."""
+        return getattr(self, "_outbox_drain_hold_file", None)
+
     def download_dir(self) -> str | None:
         """Where fauna-desktop saves e2e-mode downloads (no save dialog under e2e).
 
@@ -624,6 +641,7 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         os.makedirs(env["FAUNA_E2E_DOWNLOAD_DIR"], exist_ok=True)
         self._download_dir = env["FAUNA_E2E_DOWNLOAD_DIR"]
         self._custody_hold_file = env.get("FAUNA_E2E_CUSTODY_HOLD_FILE")
+        self._outbox_drain_hold_file = env.get("FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE")
 
         # Isolate from the box's desktop session bus (see `_wants_private_bus`).
         # `teardown()` stops the bus, so a `recover()`/`hard_reload()` relaunch

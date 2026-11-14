@@ -26,6 +26,10 @@ import SwiftUI
 public struct FamilyView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = FamilyVM()
+    /// The shell's screen-time lock: the Family visit's status read re-binds
+    /// it (`FamilyVM.screenTime`). Optional — a host that injects none (a
+    /// preview, a test) simply skips the re-bind.
+    @Environment(ScreenTimeStore.self) private var screenTime: ScreenTimeStore?
     /// macOS passes `navGeneration` so a *re*-navigation to the same page
     /// refetches: the e2e's `reload()` re-enters `family` via the state protocol
     /// and then polls, which a first-mount-only `.task` would never satisfy
@@ -88,6 +92,7 @@ public struct FamilyView: View {
                 vm.reset()
                 return
             }
+            vm.screenTime = screenTime
             await vm.configure(api: client.api)
         }
     }

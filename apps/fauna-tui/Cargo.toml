@@ -856,6 +856,7 @@ fauna-backups-machine = { path = "../../libs/fauna-backups-machine", features = 
     "test-helpers",
 ] }
 fauna-feed = { workspace = true, features = ["test-helpers"] }
+fauna-client-drafts = { path = "../../libs/fauna-client-drafts", features = ["test-helpers"] }
 fauna-client-sync = { path = "../../libs/fauna-client-sync", features = ["test-helpers"] }
 fauna-client-search = { path = "../../libs/fauna-client-search", features = ["test-helpers"] }
 fauna-media-machine = { path = "../../libs/fauna-media-machine", features = [

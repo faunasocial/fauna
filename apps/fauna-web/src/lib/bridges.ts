@@ -75,14 +75,16 @@ export function listBridgeFollows(secretHex: string, bridgeId: string): Promise<
   return rpc.bridgesListFollows(secretHex, bridgeId);
 }
 
-export function addBridgeFollow(
+/** A follow sent or, with no nest, queued; `true` = queued (route through
+ *  `changeFollow`, `bridge-follow.ts`). */
+export function addBridgeFollowOrQueue(
   secretHex: string,
   bridgeId: string,
   id: string,
   petname?: string,
   extra?: Record<string, unknown>,
-): Promise<void> {
-  return rpc.bridgesAddFollow(secretHex, bridgeId, id, petname, extra);
+): Promise<boolean> {
+  return rpc.bridgesAddFollowOrQueue(secretHex, bridgeId, id, petname, extra);
 }
 
 export function listBridgeFollowRequests(
@@ -108,10 +110,11 @@ export function refuseBridgeFollowRequest(
   return rpc.bridgesRefuseFollowRequest(secretHex, bridgeId, id);
 }
 
-export function removeBridgeFollow(
+/** An unfollow sent or, with no nest, queued; `true` = queued. */
+export function removeBridgeFollowOrQueue(
   secretHex: string,
   bridgeId: string,
   followId: string,
-): Promise<void> {
-  return rpc.bridgesRemoveFollow(secretHex, bridgeId, followId);
+): Promise<boolean> {
+  return rpc.bridgesRemoveFollowOrQueue(secretHex, bridgeId, followId);
 }

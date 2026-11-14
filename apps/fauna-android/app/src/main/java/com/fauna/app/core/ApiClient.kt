@@ -447,6 +447,23 @@ class ApiClient @Inject constructor(
     }
 
     /**
+     * Tell the shared account runtime whether the app is in front
+     * (`p2p-shared-set-build.md` § Phone peers — design, decision 2: a phone
+     * peer stops, not pauses, when the app leaves the foreground). A pure
+     * pass-through to `set_account_runtime_foreground`; the stand-down, the
+     * re-bind pass and the process-wide memory all live in shared Rust.
+     * Mirrors apple's `APIClient.setAccountRuntimeForeground`.
+     */
+    suspend fun setAccountRuntimeForeground(foreground: Boolean) {
+        com.fauna.app.service.AccountRuntimeForeground.signalLock.withLock {
+            try {
+                nestClient?.setAccountRuntimeForeground(foreground)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
      * The sign-out-shaped twin of [stopAccountRuntimeAwaited] — call in its
      * place wherever the erase that follows takes this machine's
      * account-store slot (the writer key) with it: retires this machine's
@@ -889,6 +906,15 @@ class ApiClient @Inject constructor(
             // Before the start, so the runtime's first changed run is heard.
             // Idempotent: a re-register replaces the same listener.
             com.fauna.ffi.setStoreChangeListener(storeChangeListener)
+            // The process's place first: a runtime started out of front starts
+            // stood down (`AccountRuntimeForeground.seed` says why the
+            // lifecycle edges alone do not cover it).
+            com.fauna.app.service.AccountRuntimeForeground.seed { inFront ->
+                try {
+                    client.setAccountRuntimeForeground(inFront)
+                } catch (_: Exception) {
+                }
+            }
             // The container crosses PAIRED with how it stays out of Google
             // device backup — android's manifest arm, the same statement the
             // custodian host makes (`CloudBackupPosture`). The account store's
@@ -1895,7 +1921,9 @@ class ApiClient @Inject constructor(
 
     // The leave (`subscriptionUnsubscribe`, carrying the row's tier and home) and the
     // follow (`subscriptionSubscribe`) are [KidsExcisedApi] members: the across-nests
-    // pair is a `subscriptions-author` export the kids flavor does not carry.
+    // pair is a `subscriptions-author` export the kids flavor does not carry. So is
+    // the payment link's subscribe-then-checkout (`subscriptionSubscribeAndCheckout`),
+    // whose result rides the app-local [SubscribeCheckout].
 
     // ── Payments — Pillar 3 client legs (monetization.md § Pillars 2+3). ──
     // Author side: the Tiers-tab §4 provider section; buyer side: the
@@ -1919,9 +1947,12 @@ class ApiClient @Inject constructor(
     // a creator's tiers via tiers_list); lifts the linux lead
     // (apps/fauna-linux/src/views/profile/offers.rs).
 
-    /** Another author's offered tiers (by hex actor_id) — the OTHER-profile offers section. */
-    suspend fun subscriptionOffersList(authorIdHex: String): List<com.fauna.ffi.FfiTierItem> =
-        subscriptionsClient().offersList(HexUtil.hexToBytes(authorIdHex))
+    /** Another author's offered tiers (by hex actor_id) — the OTHER-profile offers
+     * section — read from [home], the page's actor-home slot: `null` reads this
+     * nest, another nest's URL relays the read to the author's home through this
+     * nest (`subscriptions.md` § Pillar 1 → *The offers browse across nests*). */
+    suspend fun subscriptionOffersList(authorIdHex: String, home: String?): List<com.fauna.ffi.FfiTierItem> =
+        subscriptionsClient().offersListAcrossNests(HexUtil.hexToBytes(authorIdHex), home)
 
     /** The viewer's subscription status for [authorIdHex] (the held tier name, if any). */
     suspend fun subscriptionStatus(authorIdHex: String): com.fauna.ffi.FfiSubscriptionStatus =
@@ -3378,18 +3409,22 @@ class ApiClient @Inject constructor(
     suspend fun listBridgeFollows(bridgeId: String): List<FfiBridgeFollow> =
         bridgesRpc().listFollows(bridgeId)
 
-    suspend fun addBridgeFollow(
+    /** `fauna.bridges.add_follow` sent now, or queued in the device outbox with
+     *  no nest (the shared `OfflineQueued` composer, one drain scope per
+     *  followed account — account-offline-mutation.md § The offline-mutation
+     *  contract). `true` = queued: the follow is not on the nest's list until
+     *  the drain, so nothing is re-read. */
+    suspend fun addBridgeFollowOrQueue(
         bridgeId: String,
         id: String,
         petname: String? = null,
         extra: FfiCborValue? = null,
-    ) {
-        bridgesRpc().addFollow(bridgeId, id, petname, extra)
-    }
+    ): Boolean = bridgesRpc().addFollowOrQueue(bridgeId, id, petname, extra)
 
-    suspend fun removeBridgeFollow(bridgeId: String, followId: String) {
-        bridgesRpc().removeFollow(bridgeId, followId)
-    }
+    /** `fauna.bridges.remove_follow` sent or queued as [addBridgeFollowOrQueue];
+     *  `true` = queued (the account stays on the nest's list until the drain). */
+    suspend fun removeBridgeFollowOrQueue(bridgeId: String, followId: String): Boolean =
+        bridgesRpc().removeFollowOrQueue(bridgeId, followId)
 
     // Follow requests (bridges.md § Follow requests): the shared row model
     // crosses as FfiFollowRequestRow (id, address, name, display).

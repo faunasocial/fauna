@@ -206,7 +206,12 @@ impl std::error::Error for GrantRemintError {}
 /// holder of `owner_secret` — deterministic so concurrent devices and
 /// crash-retries converge on one replacement grant (see the module docs; the
 /// idiom is `folder_paywall_grant_id`'s).
-fn remint_grant_id(owner_secret: &[u8; 32], old_grant_id: &[u8]) -> [u8; 16] {
+///
+/// Public because the derivation is also the only map from a retired id to
+/// its replacement: nothing at rest records the handover, so a *Keep* pressed
+/// on a row the re-mint has since retired finds the row that replaced it by
+/// deriving the same id ([`grant_log::GrantEventSigner::remint_replacement_id`]).
+pub fn remint_grant_id(owner_secret: &[u8; 32], old_grant_id: &[u8]) -> [u8; 16] {
     let mut material = Vec::with_capacity(32 + old_grant_id.len());
     material.extend_from_slice(owner_secret);
     material.extend_from_slice(old_grant_id);
@@ -344,6 +349,35 @@ fn carried_marks(
     }
 }
 
+/// The verdicts a retired id's marks hold that its replacement's still-`Open`
+/// marks have not taken — a *Keep* that reached the ledger on the retired id
+/// AFTER the retirement's carry: pressed on another of the owner's devices
+/// before it held the retirement, so its write decided the old id alone and
+/// the plane's merge brought it here. The replacement is found by deriving
+/// its id, the one map there is; a mark is carried only onto a replacement
+/// mark of the same raising event that is still open, so the pass writes
+/// nothing once it has converged.
+fn late_verdicts(ledger: &SuccessionLedger, owner_secret: &[u8; 32]) -> Vec<GrantUnattestedMark> {
+    ledger
+        .unattested_grant_marks
+        .iter()
+        .filter(|m| !m.verdict.is_open())
+        .filter_map(|m| {
+            let new_id = remint_grant_id(owner_secret, &m.grant_id);
+            ledger
+                .unattested_grant_marks
+                .iter()
+                .any(|n| {
+                    n.grant_id == new_id && n.predecessor == m.predecessor && n.verdict.is_open()
+                })
+                .then(|| GrantUnattestedMark {
+                    grant_id: new_id.to_vec(),
+                    ..m.clone()
+                })
+        })
+        .collect()
+}
+
 /// A replacement grant whose `Mint` is recorded (or already was, from a prior
 /// interrupted pass) but whose blob has not yet shipped — phase 1's product,
 /// phase 2's input.
@@ -405,6 +439,16 @@ where
     // ledger can be predecessor-signed, so skip the fold's verify work too.
     if current.prior_actor_ids.is_empty() {
         return Ok(GrantRemintOutcome::NothingToRemint);
+    }
+    // Before anything else, and whether or not a grant is still owed: an
+    // answer given on a retired id since its marks were carried follows the
+    // row onto its replacement (`late_verdicts`). The mark arm's join keeps
+    // the most restrictive verdict, so this never re-opens anything.
+    let late = late_verdicts(&current, &owner_secret);
+    if !late.is_empty() {
+        let mut carry = SuccessionLedger::events_replica(owner, Vec::new());
+        carry.unattested_grant_marks = late;
+        ledger.merge(carry).await.map_err(GrantRemintError::Save)?;
     }
     let now = Timestamp::now_secs().max(0) as u64;
     let candidates = remint_candidates(&current, &owner, now);

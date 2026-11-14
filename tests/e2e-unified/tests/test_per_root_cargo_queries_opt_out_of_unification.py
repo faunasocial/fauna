@@ -45,8 +45,10 @@ _OVERRIDE = "CARGO_RESOLVER_FEATURE_UNIFICATION"
 
 #: Shell: a non-comment line running `cargo tree`.
 _SHELL_CALL = re.compile(r"\bcargo\s+tree\b")
-#: Python: the list form, `["cargo", "tree", ...]`, however it is spaced.
-_PY_CALL = re.compile(r"""["']cargo["']\s*,\s*["']tree["']""")
+#: Python: the list form, `["cargo", "tree", ...]`, however it is spaced — never
+#: a dict whose `"tree"` is a KEY (`{"eco": "cargo", "tree": "."}`, a bump
+#: report row a tooling test builds), which runs nothing.
+_PY_CALL = re.compile(r"""["']cargo["']\s*,\s*["']tree["'](?!\s*:)""")
 
 
 def _scanned_files() -> list[Path]:

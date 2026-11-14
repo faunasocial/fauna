@@ -95,24 +95,30 @@ public class SubscriptionsSettingsViewModel : ViewModelBase
     /// — <c>monetization.md</c> § Pillar 3 Q4's universal fallback binding): binds
     /// the entitlement to this actor, then re-reads so the queued grant renders
     /// exactly like a queued subscribe (a "pending" row). Typed
-    /// <c>fauna.payments.claim_{not_found,already_redeemed,voided}</c> errors
-    /// surface via <see cref="ViewModelBase.ShowError"/>. A blank code is a
-    /// no-op (mirrors linux/android's trim-then-empty-check).</summary>
-    public async Task RedeemClaimAsync(string code)
+    /// <c>fauna.payments.claim_*</c> errors surface via
+    /// <see cref="ViewModelBase.ShowError"/>. A blank code is a no-op (mirrors
+    /// linux/android's trim-then-empty-check). Returns whether the nest took the
+    /// code — the panel clears its input only then.</summary>
+    public async Task<bool> RedeemClaimAsync(string code)
     {
         var trimmed = code.Trim();
         if (trimmed.Length == 0)
-            return;
+            return false;
         ErrorMessage = null;
         try
         {
-            await _nest.PaymentsClaimsRedeemAsync(trimmed);
-            await HydrateAsync();
+            // The one call shape both redeem doors use; this page knows no creator,
+            // so no home (the plain redeem on this nest, which never reads the author
+            // slot — null fills it with the caller's own id).
+            await _nest.PaymentsClaimsRedeemAcrossNestsAsync(trimmed, null, null);
         }
         catch (Exception ex)
         {
             ShowError(ex);
+            return false;
         }
+        await HydrateAsync();
+        return true;
     }
 #endif   // PAYMENTS
 }

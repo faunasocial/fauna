@@ -1,17 +1,31 @@
 ---
 slug: fauna-for-ai-assistants
-title: fauna-for-ai-assistants
+title: Fauna for AI assistants
 section: your data and devices
 goal: docs/goal/architecture/apps/cli.md § Goal
 guide: docs/guides/connect-an-ai-assistant.md § How it works
 absences:
+  web (outcome 8): "docs/goal/behavior/conversations-oracle.md § The custodian and the door"
+  android (outcome 8): "docs/goal/behavior/conversations-oracle.md § The custodian and the door"
+  ios (outcome 8): "docs/goal/behavior/conversations-oracle.md § The custodian and the door"
   android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
   ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
 ---
 
 ## What a user gets
 
-This text is being written and will appear here once it has been reviewed.
+An AI assistant on your computer can operate Fauna for you: it reads your feeds,
+posts publicly as you, reads and edits your profile, keeps up with your
+notifications, reads and replies in your conversations through your Fauna
+desktop or terminal app open on the same computer, and, if you are an admin,
+does the daily work of running a nest. It gets exactly what you approve on its
+card and nothing before you approve it, it never holds your identity key, your
+recovery kit or any recovery secret, and the things that stay with you — your identity,
+your devices and sessions, its own permission, deleting your account — are
+never among its tools. The command that gives an assistant this comes with the
+terminal app; you connect it by typing a short code into Connect an app on any
+of your Fauna apps, and you disconnect it there in one row. The same commands
+work for you at the terminal.
 
 ## Coverage contract
 
@@ -57,13 +71,13 @@ Stamped 2026-11-07 at 69a49ad33d.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
+| web | ✅ full | |
 | linux | ✅ full | 0.1.6-dev+3aeb19b0 standalone |
 | windows |  no run recorded | |
-| macos |  no run recorded | |
-| ios | ⚠ partial | |
-| android | ⚠ partial | |
-| tui | ✅ full | 0.1.6-dev+64373b38 standalone |
+| macos | ✅ full | 0.1.6-dev+41450449 standalone |
+| ios | ✅ full | |
+| android | ✅ full | |
+| tui | ✅ full | 0.1.6-dev+54cdf1b6.dirty standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -77,7 +91,8 @@ Stamped 2026-11-07 at 69a49ad33d.
 | 5 | nest | `tests/e2e-unified/tests/test_cli_mcp.py::test_the_feed_tools_read_one_feeds_definition_and_its_posts` | nest (linux): passed, nest (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_cli_mcp.py::test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user` | nest (linux): passed, nest (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_cli_mcp.py::test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user` | nest (linux): passed, nest (macos): passed |
-| 8 | app | `tests/e2e-unified/tests/test_cli_conversations.py::test_the_cli_reads_and_sends_through_tui_as_custodian_until_revoked` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_cli_conversations.py::test_the_cli_reads_and_sends_through_tui_as_custodian_until_revoked` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | absent by design on web, ios, android | — |
 | 9 | nest | `tests/e2e-unified/tests/test_cli_mcp.py::test_two_accounts_are_two_principals_and_a_call_names_which` | nest (linux): passed, nest (macos): passed |
 | 10 | nest | `tests/e2e-unified/tests/test_cli_mcp.py::test_a_dropped_session_is_redialled_a_read_runs_again_and_a_write_never_does` | nest (linux): passed, nest (macos): passed |
 | 11 | nest | `tests/e2e-unified/tests/test_cli_mcp.py::test_with_no_os_store_the_connection_rests_in_a_declared_0600_file_and_resumes` | nest (linux): passed, nest (macos): passed |

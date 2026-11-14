@@ -36,20 +36,6 @@ class ProfileActions:
         self.driver.set_state({"nav": {"stack": [{"view": "profile"}]}})
         self.driver.wait_for("profile-view", timeout=10.0)
 
-    def require_other_profile_offers_browse_supported(self) -> None:
-        """Skip unless this app renders the OTHER-profile offers-browse
-        surface (e2e convention 7 — the platform check lives in the action
-        layer, not the test body).
-
-        linux-lead (item 7); web + windows + macos/ios (shared FaunaKit
-        ProfileOffersVM + contact-row tap-through, 2026-06-21) + tui (M5
-        slice 2, shared offers_list/status_get + offer_status) lifted it
-        (same ui.yaml IDs — each app's contact row resolves by the hex
-        actor_id); android lifts after (per-app NEXTs)."""
-        from helpers.app_surface import require_surface
-
-        require_surface(self.driver, "profile-offers-browse")
-
     # --- header pictures (``profile-avatar`` / ``profile-banner``) ---
 
     def picture_state(self, element_id: str) -> str:
@@ -352,6 +338,18 @@ class ProfileActions:
         (``subscription-offer-payment-link``): the subscribe to that tier goes
         first, then the checkout opens (``monetization.md`` § Pillar 3, Q13)."""
         self.driver.click("subscription-offer-payment-link", index=index)
+
+    def redeem_claim(self, code: str) -> None:
+        """Paste a claim code of THIS creator into the OTHER Tiers tab's redeem
+        row and redeem it — at the page's home, so a code minted on another
+        nest redeems from the creator's profile (``monetization.md`` § Pillar 3
+        → *Which nest an in-app redeem binds on*). Typed refusals surface via
+        ``error-message``; a taken code leaves the input."""
+        self.driver.clear_and_type("subscription-claim-redeem-input", code)
+        self.driver.click("subscription-claim-redeem-button")
+
+    def redeem_input_text(self) -> str:
+        return self.driver.get_text("subscription-claim-redeem-input")
 
     def wait_for_offer(self, name: str, timeout: float = 15.0) -> bool:
         """Poll until an offer row renders ``name`` (the offers read is async —

@@ -38,6 +38,7 @@ from helpers.succession_ceremony import (
     require_stolen_gate,
     settled_actor_id,
 )
+from helpers.diagnostics import launch_log_lines
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -197,6 +198,27 @@ def test_when_another_holder_of_the_kit_got_there_first_the_ceremony_says_so_as_
     assert shown != other_successor, (
         "the device must not switch to the other holder's successor — it holds "
         f"no key for it; Status reads {shown!r}"
+    )
+
+    # And the device lands where a succeeded identity goes: the launch surface's
+    # import step. Leaving Account (the read above) is what performs the
+    # escalation this device's own ceremony held back (`settings.md` § Recovery
+    # kit → *The persist-failure message survives the page*), and on web that
+    # escalation is a full document load. Waited for HERE, inside the test that
+    # caused it: a load still in flight when the test ends commits under the
+    # next test's reset or login, which then reads as a dropped login (an empty
+    # live actor id) or a missing test agent — this module's flake on a loaded
+    # box (convention 14: a deadline poll on the state at rest, never a sleep).
+    wait_until(
+        lambda: app.driver.is_visible("paste-secret-field"),
+        SUCCESSION_AND_RELAUNCH_S,
+        diagnose=lambda: (
+            "a device whose identity another holder succeeded must route to the "
+            "launch surface's import step (onboarding.identity_import, "
+            "paste-secret-field), but it never painted; "
+            f"error surface: {app.error_text()!r}; launch log says "
+            f"{launch_log_lines(app)}"
+        ),
     )
 
 

@@ -286,6 +286,42 @@ internal static class DocumentRenderer
         return MediaProxiedVideoPath(doc) is { } path ? new RenderBlock.ProxiedVideo(path, "") : null;
     }
 
+    /// <summary>Every media element the post's document folded in, in body order — one per
+    /// <c>Image</c>, <c>ProxiedImage</c>, <c>Video</c> and <c>ProxiedVideo</c> block of the
+    /// shared <c>RenderDocument::media_blocks</c> (render-model.md § D6b <i>Accessors</i>: paint
+    /// every item, never just the first), each labelled with its block's <c>alt</c>, or the
+    /// shared <c>feed.post.image_alt_fallback</c> / <c>video_alt_fallback</c> text when the
+    /// author wrote none (§ D6c → <i>Proxied video</i>, the <c>alt</c> paragraph). The list card
+    /// and the post detail paint one <c>post-image</c> / <c>video-thumbnail</c> per element.
+    /// <b>Single-sourced on the shared Rust fold</b> via <c>render_document_media_blocks</c>;
+    /// only the fallback string is app glue — the windows twin of apple's
+    /// <c>documentMediaElements</c> and tui's <c>feed::media_elements</c>.</summary>
+    internal static IReadOnlyList<PostMediaElement> MediaElements(RenderDocument doc)
+    {
+        static string AltOr(string alt, string fallbackKey)
+            => string.IsNullOrEmpty(alt) ? Services.Strings.Get(fallbackKey) : alt;
+        const string imageFallback = "feed/post/image_alt_fallback";
+        const string videoFallback = "feed/post/video_alt_fallback";
+        var elements = new List<PostMediaElement>();
+        foreach (var block in uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentMediaBlocks(doc))
+        {
+            PostMediaElement? element = block switch
+            {
+                RenderBlock.Image image =>
+                    new(PostMediaKind.Image, image.hash, AltOr(image.alt, imageFallback), null),
+                RenderBlock.ProxiedImage proxied =>
+                    new(PostMediaKind.ProxiedImage, proxied.path, AltOr(proxied.alt, imageFallback), null),
+                RenderBlock.Video video =>
+                    new(PostMediaKind.Video, video.hash, AltOr(video.alt, videoFallback), video),
+                RenderBlock.ProxiedVideo proxied =>
+                    new(PostMediaKind.ProxiedVideo, proxied.path, AltOr(proxied.alt, videoFallback), proxied),
+                _ => null,
+            };
+            if (element is not null) elements.Add(element);
+        }
+        return elements;
+    }
+
     /// <summary>Every <c>Resolved</c> folded <c>LinkPreview</c>, in body order (render-model.md
     /// § D4). The producer's bare-URL rule emits one (<c>state: Resolving</c>) after **each**
     /// standalone paragraph that is a single bare URL, <b>leaving the inline link in place</b>,

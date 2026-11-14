@@ -136,10 +136,12 @@ pub(crate) mod dll {
     /// untouched — only the tests gain a critical section. Every shell-ext test that
     /// calls `registry::register`/`registry::unregister` on `HKEY_CURRENT_USER` MUST
     /// hold this for that critical section. Same pattern as `fauna-sync-agent`'s cfapi
-    /// shell-root test guard — both now share `fauna_ipc::test_support`.
+    /// shell-root test guard — both now share `fauna_ipc::test_support`. The
+    /// observation harness's run-scoped registration (`crate::per_user`) holds the same
+    /// mutex for its whole run, so a test never unregisters what a live run reads.
     #[cfg(test)]
     pub(crate) fn hkcu_registry_test_guard() -> fauna_ipc::test_support::NamedMutexTestGuard {
-        fauna_ipc::test_support::NamedMutexTestGuard::acquire("FaunaShellExtHkcuRegistryTest")
+        fauna_ipc::test_support::NamedMutexTestGuard::acquire(crate::per_user::REGISTRATION_MUTEX)
     }
 
     /// CLSIDs (8 total): 4 overlay handlers + 4 context-menu handlers, per
@@ -486,8 +488,13 @@ pub(crate) mod dll {
             Ok(())
         }
 
-        /// Test helper: does `root\subkey` exist?
-        #[cfg(test)]
+        /// Does `root` hold the all-files verb key — the key the legacy menu's
+        /// "Fauna" entry is drawn from?
+        pub(crate) fn verb_registered(root: HKEY) -> bool {
+            key_exists(root, CONTEXT_VERB_PATH)
+        }
+
+        /// Does `root\subkey` exist?
         pub(crate) fn key_exists(root: HKEY, subkey: &str) -> bool {
             use windows::Win32::System::Registry::{KEY_READ, RegOpenKeyExW};
             let sub = wide(subkey);
@@ -750,6 +757,49 @@ pub(crate) mod dll {
             );
             registry::unregister(HKEY_CURRENT_USER).expect("unregister");
         }
+    }
+}
+
+/// Per-user registration of this DLL's COM classes and shell verbs, for a run that
+/// needs Explorer to load a build output without the elevated MSI — the observation
+/// harness (`fauna-shellext-fixture register-shell`, driven by
+/// `observe-context-menu.ps1`). The same `dll::registry` writes the keys the MSI's
+/// HKLM registration holds, under `HKEY_CURRENT_USER` instead: `HKEY_CLASSES_ROOT` is
+/// the merge of the two hives, so Explorer reads a per-user registration like a
+/// machine-wide one, and writing it needs no elevation.
+///
+/// The keys are user-global, not per-checkout, so every writer serializes on
+/// [`REGISTRATION_MUTEX`] (`Local\` + the name): the shell extension's own HKCU
+/// unit tests hold it for their register/unregister pair, and the harness holds it
+/// for the whole run between [`register`] and [`unregister`].
+#[cfg(windows)]
+pub mod per_user {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    /// The name of the named mutex every writer of the per-user registration holds.
+    pub const REGISTRATION_MUTEX: &str = "FaunaShellExtHkcuRegistryTest";
+
+    /// Register every COM class and shell verb under `HKEY_CURRENT_USER`, each class's
+    /// `InprocServer32` naming `dll_path`.
+    pub fn register(dll_path: &str) -> windows::core::Result<()> {
+        crate::dll::registry::register(HKEY_CURRENT_USER, dll_path)
+    }
+
+    /// Remove everything [`register`] wrote (best-effort, as the HKLM twin is).
+    pub fn unregister() -> windows::core::Result<()> {
+        crate::dll::registry::unregister(HKEY_CURRENT_USER)
+    }
+
+    /// True when the machine-wide registration (the MSI's, or `regsvr32`'s) holds the
+    /// verb. A per-user registration written over it would redirect the installed
+    /// classes to another DLL for the run, so a caller steps aside instead.
+    pub fn machine_registered() -> bool {
+        crate::dll::registry::verb_registered(HKEY_LOCAL_MACHINE)
+    }
+
+    /// True when a per-user registration holds the verb.
+    pub fn registered() -> bool {
+        crate::dll::registry::verb_registered(HKEY_CURRENT_USER)
     }
 }
 

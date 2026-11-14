@@ -7,6 +7,9 @@ guide: docs/guides/bridges-bluesky-nostr.md § Nostr: a personal Nostr home
 absences:
   android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
   ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  linux (outcome 28): "docs/goal/architecture/security.md § On-screen secret exposure"
+  web (outcome 28): "docs/goal/architecture/security.md § On-screen secret exposure"
+  tui (outcome 28): "docs/goal/architecture/security.md § On-screen secret exposure"
 ---
 
 ## What a user gets
@@ -86,6 +89,10 @@ Stamped 2026-11-07 at 6a0ded1015.
    - `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_signer_connect_string_suppresses_capture_until_left`
 29. [nest] A relay that accepts your nest's connection and then never answers, stops reading or never pauses is given up on within a bound and tried again later, so publishing and refresh keep going for everyone on the nest — `docs/goal/architecture/nest/network-exposure.md` § Rulings
    - `tests/e2e-unified/tests/api/test_nostr_silent_relay_bounded.py::test_a_relay_that_never_answers_is_given_up_on_sat_out_and_tried_again_later`
+30. [app] On a post you sell at a price, you can advertise it on Nostr after a step that says what will be published and who can read it, and the note that goes out carries the price; stopping withdraws it — `docs/goal/behavior/monetization.md` § The Nostr advertisement of a sold post
+   - `tests/e2e-unified/tests/test_advertise_post_nostr.py::test_an_advertised_sold_post_reaches_nostr_with_its_price_and_stopping_retracts_it`
+31. [nest] Changing or removing the price of a post you advertise on Nostr withdraws the note that carried the old price, so a price out on Nostr never misstates your offer — `docs/goal/behavior/monetization.md` § The Nostr advertisement of a sold post
+   - `tests/e2e-unified/tests/api/test_nostr_advertise_price_lifecycle.py::test_a_price_edit_or_a_cleared_price_withdraws_the_note_that_carried_the_old_price`
 
 ## Status
 
@@ -94,9 +101,9 @@ Stamped 2026-11-07 at 6a0ded1015.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+962dc452 standalone |
 | linux | ⚠ partial | 0.1.5-dev+962dc452 standalone |
-| windows | ⚠ partial | 0.1.2-dev+d6ff0673 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+962dc452 standalone |
+| windows | 🚧 unbuilt | 0.1.2-dev+d6ff0673 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+962dc452 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.5-dev+962dc452 standalone |
 | android-kids | — absent | |
@@ -136,10 +143,13 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 21 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_an_empty_relay_list_publishes_nowhere` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_unlinking_disconnects_every_signer_app` | nest (linux): passed |
 | 23 | app | `tests/e2e-unified/tests/test_nostr_zap_signer_gate.py::test_a_named_zap_signer_stays_removable_when_zaps_are_turned_off` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 24 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 24 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 25 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_post_by_someone_nobody_follows_never_reaches_a_feed` | nest (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_deletion_removes_only_its_own_authors_events_from_your_nests_relay` | nest (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_other_nostr_apps_search_your_shared_posts_by_their_words` | nest (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_signer_connect_string_suppresses_capture_until_left` | macos (macos): passed, ios (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_signer_connect_string_suppresses_capture_until_left` | windows (windows): passed, macos (macos): passed, ios (macos): passed |
+| 28 | app | absent by design on web, linux, tui | — |
 | 29 | nest | `tests/e2e-unified/tests/api/test_nostr_silent_relay_bounded.py::test_a_relay_that_never_answers_is_given_up_on_sat_out_and_tried_again_later` | nest (linux): passed |
+| 30 | app | `tests/e2e-unified/tests/test_advertise_post_nostr.py::test_an_advertised_sold_post_reaches_nostr_with_its_price_and_stopping_retracts_it` — requires `feed-post-advertise-nostr` (not built: windows, android-kids, ios-kids) | — |
+| 31 | nest | `tests/e2e-unified/tests/api/test_nostr_advertise_price_lifecycle.py::test_a_price_edit_or_a_cleared_price_withdraws_the_note_that_carried_the_old_price` | nest (linux): passed |
 <!-- features-render:end -->

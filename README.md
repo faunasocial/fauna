@@ -26,7 +26,7 @@ Fauna uses a shared-core architecture. A single Rust library (`fauna-core`) impl
 
 ## Status
 
-Fauna is under active development and not yet ready for general use. The core protocol, Nest server, and clients for web, iOS, macOS, Android, Windows, Linux, and the terminal are implemented and in closed alpha testing. Bridge support for AT Protocol, ActivityPub, Nostr, and email is functional. There is no public release yet; outside Google Play's invitation-only testing of the Android app and the pre-release downloads of the Windows, Linux and terminal apps, and apart from the web app (which needs no install at all), trying it means building from source.
+Fauna is under active development and not yet ready for general use. The core protocol, Nest server, and clients for web, iOS, macOS, Android, Windows, Linux, and the terminal are implemented and in closed alpha testing. Bridge support for AT Protocol, ActivityPub, Nostr, and email is functional. Released versions, the first of them 0.1.6, are published on the project's releases page, with downloads of the macOS, Windows, Linux and terminal apps; the Android app is in Google Play's invitation-only testing, the web app needs no install at all, and the iOS app is built from source.
 
 ## Building
 

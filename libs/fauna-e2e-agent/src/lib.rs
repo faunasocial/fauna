@@ -910,6 +910,48 @@ pub const ACCOUNT_PUMP_CYCLES_KEY: &str = "account_pump_cycles";
 /// the consumer's own deadline poll, naming the app and the key.
 pub const ACCOUNT_PUMP_NOW: &str = "account_pump_now";
 
+/// The app-only outbox drain's **poke**: run the app's drain loop now
+/// (`AccountOutbox::drain_until_settled` through the live conversations
+/// session and the seated identity composer — the loop the app runs at the
+/// lend and on every reconnect, never a bypass).
+///
+/// **Why it exists.** The e2e outbox drain hold
+/// (`fauna_account_plane::outbox::OUTBOX_DRAIN_HOLD_FILE_ENV`) ends the app's
+/// drain loop at its first held pass, so deleting the hold file alone leaves a
+/// queued MLS or identity intent waiting for the next reconnect. A test that
+/// releases the hold rings the loop with this (the succession outbox carry's
+/// MLS witness, `test_identity_succession_outbox_carry.py`).
+///
+/// **Contract.** Fire-and-forget like [`ACCOUNT_PUMP_NOW`]: the barrier is the
+/// effect the caller polls for (the message on the nest's channel log). A
+/// no-op offline or pre-auth. Compiled out of release artifacts (convention
+/// 15). Armed by tui (`session::spawn_outbox_drain`), linux
+/// (`offline_outbox::spawn_mls_drain`), web (fauna-wasm's
+/// `appOutboxDrainNowForTest`), and android and the Apple apps through
+/// fauna-ffi's `app_outbox_drain_now_for_test` (on Apple the shared FaunaKit
+/// `AppOutboxDrainTestCommand`), each ringing the process's one drain loop.
+pub const APP_OUTBOX_DRAIN_NOW: &str = "app_outbox_drain_now";
+
+/// The e2e outbox drain hold, **in process**: payload `{"held": <bool>}` sets
+/// or clears `fauna_account_plane::outbox::set_outbox_drain_hold`, which holds
+/// the generic drain and the app's MLS and identity drains exactly as the hold
+/// file does (`fauna_account_plane::outbox::OUTBOX_DRAIN_HOLD_FILE_ENV`).
+///
+/// **Why it exists.** The hold file reaches a desktop app and the sync agent
+/// it spawns through the launch environment. A web tab has no environment or
+/// filesystem, and an android app's process inherits nothing from the
+/// harness, but on both the pump and the app drain run in the process the test
+/// drives — so the hold is a flag there, and this command is how a test sets
+/// it (`helpers/outbox_drain.py`, through each driver's
+/// `set_outbox_drain_hold`).
+///
+/// **Contract.** Synchronous: the ack means the flag is set. A missing or
+/// non-boolean `held` is a loud refusal (convention 11), never a default.
+/// Clearing releases; an app-only intent then also needs
+/// [`APP_OUTBOX_DRAIN_NOW`]. Compiled out of release artifacts (convention
+/// 15).
+pub const OUTBOX_DRAIN_HOLD: &str = "outbox_drain_hold";
+
 /// The custody owner's **send-again** poke: every ceremony this account
 /// granted posts its newest sent step once more on its channel — a delivered
 /// ceremony's deliver, re-signed through the drive's own witness-signing site;
@@ -1497,6 +1539,19 @@ pub const PAINTED_ERRORS_KEY: &str = "painted_errors";
 pub use fauna_e2e_contract::{
     ConnectionReports, KnockNotices, PaintedErrorTally, is_error_surface, reconnect_backoff_bounds,
 };
+
+/// State key: the id-bearing text elements the newest laid-out frame gave no
+/// room — `{"starved": [{"id", "text", "width", "height", "pane", "depth"}, …]}`,
+/// built by [`PaintedTextArea::json`] (`fauna-e2e-contract`). Convention 17's
+/// `painted-text-has-area` invariant reads it on every frame; its contract and
+/// verdict are owned by `tests/e2e-unified/helpers/frame_invariants.py::
+/// _check_painted_text_has_area`. Each app measures from its OWN layout — the
+/// room it gave the element, never its arranged size alone — once per layout
+/// pass, beside its painted-error observer, and publishes it as a field read
+/// (convention 11). An app with no leg publishes no key (`n/a`).
+pub const PAINTED_TEXT_AREA_KEY: &str = "painted_text_area";
+
+pub use fauna_e2e_contract::{LaidOutText, MIN_READABLE_LAYOUT_UNIT, PaintedTextArea};
 
 /// A request forwarded to the client's UI thread, with the one-shot reply
 /// channel the (blocking) server thread waits on.

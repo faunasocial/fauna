@@ -72,3 +72,38 @@ private let cid = String(repeating: "cd", count: 32)
     let merged = ContentPolicyStore.merged(previous: previous, policy: .failed, own: .failed)
     #expect(merged.hiddenContent == [cid])
 }
+
+// The abuse-report composer (account-offline-mutation.md § Implementation
+// status today, the knock-accept and abuse-report composers). With no nest
+// `abuseReportSubmitOrQueue` answers `nil` (queued in the device outbox — the
+// queue-then-send half is pinned in Rust, `libs/fauna-ffi/src/abuse_report.rs`);
+// these pin the sheet's half. Mirrors android's `ReportSheetStoreTest`.
+
+private func tickedPost() -> (FfiReportTarget, FfiReportForm) {
+    let target = reportPostTarget(cid: cid, author: author, plaintext: "x", gated: false)
+    let form = FfiReportForm(reason: nil, note: "", includeText: false, blockAuthor: true)
+    return (target, form)
+}
+
+@Test func aReportWithNoNestIsQueuedAndSaysSo() {
+    let (target, form) = tickedPost()
+    let outcome = ReportSheetStore.outcome(of: nil, draft: form, target: target)
+    #expect(outcome.status == renderLocalizedText(reportQueued()))
+    #expect(outcome.blockAuthor == nil, "a queued report never tries the block — it needs the nest")
+    #expect(outcome.notice == renderLocalizedText(reportBlockNotSent()))
+
+    var unticked = form
+    unticked.blockAuthor = false
+    let quiet = ReportSheetStore.outcome(of: nil, draft: unticked, target: target)
+    #expect(quiet.notice == nil, "no block asked, nothing to say was not sent")
+}
+
+@Test func aReportWithTheNestConnectedIsSentNotQueued() {
+    let (target, form) = tickedPost()
+    let ack = reportQueued()   // any LocalizedText stands in for the nest's acknowledgement
+    let reply = FfiReportSent(reportId: "r1", routedTo: [], acknowledgement: ack)
+    let outcome = ReportSheetStore.outcome(of: reply, draft: form, target: target)
+    #expect(outcome.status == renderLocalizedText(ack))
+    #expect(outcome.blockAuthor == author, "a sent report with the box ticked blocks the author")
+    #expect(outcome.notice == nil)
+}

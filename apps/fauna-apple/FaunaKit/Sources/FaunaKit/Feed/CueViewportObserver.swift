@@ -173,7 +173,6 @@ public final class CueViewportObserver {
              onError: @escaping (Int, String) -> Void) async {
         let generation = feedVM.managerGeneration
         self.calls = calls
-        self.lastSelection = nil
         Self.current = self
         self.sampleNow = { [weak self, weak feedVM] in
             guard let self, let feedVM else { return [] }
@@ -240,14 +239,7 @@ public final class CueViewportObserver {
         // here the scroll view can stay mounted across a switch, and a post
         // both feeds hold keeps its card in place, so the sampler drains on
         // the selection's own change instead — before measuring the new feed.
-        let selection = Self.selectionKey(
-            feedId: feedVM.selectedFeedId, trending: feedVM.trendingSelected,
-            imported: feedVM.importedSelected)
-        var ended: [CueObservation] = []
-        if Self.feedSwitched(from: lastSelection, to: selection) {
-            ended = calls.drainAll(Self.wallNowMs())
-        }
-        lastSelection = selection
+        let ended = calls.noteSelection(Self.wallNowMs())
 
         guard viewport.height > 0 else { return ended }   // not laid out yet — measure nothing
 
@@ -261,27 +253,6 @@ public final class CueViewportObserver {
             rows, Array(postsWindow.keys),
             Double(viewport.minY), Double(viewport.maxY),
             Self.monoNowMs(), Self.wallNowMs())
-    }
-
-    /// The feed selection the last sample measured — `nil` before a run's
-    /// first sample, so a mount never drains on its own start.
-    private var lastSelection: String?
-
-    /// One string per feed selection: a saved feed by id, the built-in
-    /// Trending feed, an imported-posts selection, or Local (none of those).
-    nonisolated static func selectionKey(feedId: String?, trending: Bool,
-                                         imported: String?) -> String {
-        if trending { return "trending" }
-        if let imported { return "imported:\(imported)" }
-        if let feedId { return "feed:\(feedId)" }
-        return "local"
-    }
-
-    /// Whether the selection changed since the last sample — never on a
-    /// run's first sample.
-    nonisolated static func feedSwitched(from previous: String?, to current: String) -> Bool {
-        guard let previous else { return false }
-        return previous != current
     }
 
     /// The last record in flight — every `record` chains behind it, so the
@@ -516,6 +487,10 @@ struct CueCaptureCalls {
     var sample: (_ rows: [CueRow], _ windowPostIds: [String], _ viewportStart: Double,
                  _ viewportEnd: Double, _ monoNowMs: UInt64, _ wallNowMs: UInt64) -> [CueObservation]
     var drainAll: (_ wallNowMs: UInt64) -> [CueObservation]
+    /// The shared feed-selection drain: reads the manager's own selection key
+    /// and hands it to the tracker, which ends every exposure when it changed
+    /// (`CueTracker::note_selection`, `WindowDropped`).
+    var noteSelection: (_ wallNowMs: UInt64) -> [CueObservation]
 
     static func live(manager: FfiFeedManager, tracker: FfiCueTracker) -> CueCaptureCalls {
         CueCaptureCalls(
@@ -532,7 +507,10 @@ struct CueCaptureCalls {
                     viewportStart: viewportStart, viewportEnd: viewportEnd,
                     monoNowMs: monoNowMs, wallNowMs: wallNowMs)
             },
-            drainAll: { wallNowMs in tracker.drainAll(wallNowMs: wallNowMs) })
+            drainAll: { wallNowMs in tracker.drainAll(wallNowMs: wallNowMs) },
+            noteSelection: { wallNowMs in
+                tracker.noteSelection(key: manager.cueSelectionKey(), wallNowMs: wallNowMs)
+            })
     }
 }
 

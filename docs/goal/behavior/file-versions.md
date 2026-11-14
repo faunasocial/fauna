@@ -709,8 +709,10 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
   row `Synced` at the restored head and signed as the restoring identity, and nothing more
   recorded. Its first run found the verb's record going out unsigned, which every nest
   refuses (`apps/windows.md` § Shell Extension, the `RestoreFileVersion` status row). The
-  live-Explorer render on a resident root has not been run: the shell extension is not
-  installed on the box that would run it.
+  live-Explorer render on a resident root was observed on 2026-11-13: the "Fauna"
+  item in the Windows 11 default menu on a tracked file in an always-resident folder and on
+  the folder itself (`apps/windows.md` § Shell Extension, the always-resident status
+  row).
   **A restore the loop never applied heals (2026-10-31):** a resident root has no start-up fold,
   so the root not running, the loop stopping before it answers, or a crash between the record
   and the hand-off is closed by the owed-restore intent of § Restore, ordering 1 — the

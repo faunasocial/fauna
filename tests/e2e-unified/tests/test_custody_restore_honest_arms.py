@@ -53,7 +53,6 @@ def _settled_notice(app) -> str:
 
 def test_a_refused_address_and_an_unadmitting_nest_each_say_so(logged_in_app):
     app = logged_in_app
-    app.nest_trust.require_custody_restore_supported()
     await_account_runtime_assembled(app.driver)
     app.linked_nests.navigate()
     app.driver.wait_for("nests-custody-restore-button", timeout=30.0)

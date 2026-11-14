@@ -53,9 +53,14 @@ that drives the whole leg through two real GUI apps over a real nest — the
 success bar for slice 5 leg 1 (linux) and the native FFI-factory leg
 (macOS + iOS + windows).
 
-The web second-device leg is ``test_fauna_mls_web_cross_device_sync.py``;
-android runs this same shape from its own machine. ``alice_second_device`` skips
-under any other ``app`` param.
+The web second-device leg is ``test_fauna_mls_web_cross_device_sync.py``.
+On **android** the emulator is one device, so ``alice_second_device`` seats
+device B as a tui seat beside it (the pairing ``alice_builder_seats`` uses):
+the phone is device A — its real session's autosave uploads the replica, and
+its receive loop folds tui's takeover commit and posts the follow-up — and the
+fresh device that restores the own message is tui's empty ``mls_state.db``.
+``FAUNA_CONV_POLL_SECS`` reaches the phone through MainActivity's ``Os.setenv``
+door. ``alice_second_device`` skips under any other ``app`` param.
 """
 
 from __future__ import annotations

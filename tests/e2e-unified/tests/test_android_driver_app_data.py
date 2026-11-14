@@ -2,7 +2,7 @@
 `AndroidScopeStore`, and the photo-permission pre-grant.
 
 Authority: `docs/goal/architecture/testing.md` § Default app and nest mode →
-*Android's run venue* (no device path is ever a host path) and
+*Android's emulator placement* (no device path is ever a host path) and
 `docs/goal/architecture/apps/account-scoping.md` § The scoping taxonomy (what
 the erase witnesses read: `<filesDir>/<actor>` and `<databases>/<actor>`,
 `AccountStores.kt`).
@@ -58,7 +58,7 @@ def recorded(monkeypatch):
 
     monkeypatch.setattr(android_mod.subprocess, "run", fake_run)
     driver = AndroidBridgeDriver()
-    monkeypatch.setattr(driver, "_adb_cmd", lambda: ["adb", "-s", "emulator-5554"])
+    monkeypatch.setattr(driver, "_adb_cmd", lambda: ["adb", "-s", "emulator-5580"])
     return driver, calls, answers
 
 
@@ -77,7 +77,7 @@ def test_the_device_command_is_run_as_from_outside_the_app(recorded):
     driver, calls, _ = recorded
     driver.app_data_exists(f"files/{ACTOR}")
     argv = calls[-1]
-    assert argv[:4] == ["adb", "-s", "emulator-5554", "exec-out"]
+    assert argv[:4] == ["adb", "-s", "emulator-5580", "exec-out"]
     assert argv[4] == (
         f'run-as social.fauna.fauna sh -c "test -e files/{ACTOR} && echo FAUNA_PRESENT"'
     )
@@ -180,7 +180,7 @@ def test_the_store_rot_overwrites_every_blob_in_place_and_counts_them(recorded, 
     answers["FAUNA_ROTTED"] = b"FAUNA_ROTTED\nFAUNA_ROTTED\n"
     assert driver.overwrite_custodian_store_blobs() == 2
     argv = calls[-1]
-    assert argv[:4] == ["adb", "-s", "emulator-5554", "exec-out"]
+    assert argv[:4] == ["adb", "-s", "emulator-5580", "exec-out"]
     assert "rm " not in argv[4], "an overwrite, never a delete"
 
     out = _device_shell(argv, tmp_path)
@@ -200,3 +200,67 @@ def test_the_heal_count_reads_only_blobs_holding_exactly_the_rot(recorded, tmp_p
     assert driver.custodian_store_blobs_holding_rot() == 1
 
     assert _device_shell(calls[-1], tmp_path).count(b"FAUNA_STILL_ROT") == 1
+
+
+# --- the residue journey's fault and readings (test_sign_out_tui.py's android arm)
+
+
+def test_tree_reads_only_entries_under_the_asked_directory(recorded):
+    driver, calls, answers = recorded
+    scope = f"files/account-store/{ACTOR}"
+    answers["stat -c"] = (
+        f"directory|4096|2026-11-11 00:00:00.123456789 +0000|{scope}/account-store\n"
+        f"regular file|12|2026-11-11 00:00:01.5 +0000|{scope}/account-store/db\n"
+        "find: files/elsewhere: Permission denied\n"
+        f"regular file|9|2026-11-11 00:00:02 +0000|files/account-store/{ACTOR}x/y\n"
+    ).encode()
+    tree = driver.app_data_tree(scope)
+    assert tree == {
+        "account-store": (True, 4096, "2026-11-11 00:00:00.123456789 +0000"),
+        "account-store/db": (False, 12, "2026-11-11 00:00:01.5 +0000"),
+    }
+    assert "run-as social.fauna.fauna" in calls[-1][-1]
+
+
+def test_chmod_raises_unless_the_device_prints_the_marker(recorded):
+    driver, calls, answers = recorded
+    with pytest.raises(RuntimeError, match="refused"):
+        driver.app_data_chmod({"files/account-store": 0o000})
+    answers["chmod"] = b"FAUNA_CHMOD\n"
+    driver.app_data_chmod({"files/account-store": 0o000, f"files/{ACTOR}": 0o555})
+    assert "chmod 0 files/account-store" in calls[-2][-1]
+    assert f"chmod 555 files/{ACTOR}" in calls[-1][-1]
+
+
+def test_a_fault_denies_only_when_the_device_does_not_print_allowed(recorded):
+    driver, _, answers = recorded
+    assert driver.app_data_denies("files/account-store", listing=True) is True
+    answers["ls files/account-store"] = b"FAUNA_ALLOWED\n"
+    assert driver.app_data_denies("files/account-store", listing=True) is False
+    answers["touch"] = b"FAUNA_ALLOWED\n"
+    assert driver.app_data_denies(f"files/{ACTOR}", listing=False) is False
+
+
+def test_read_is_none_without_the_marker(recorded):
+    driver, _, answers = recorded
+    assert driver.app_data_read("files/sign-out-residue.json") is None
+    answers["sign-out-residue.json"] = b'FAUNA_FILE\n{"paths": []}'
+    assert driver.app_data_read("files/sign-out-residue.json") == b'{"paths": []}'
+
+
+@pytest.mark.parametrize("method,args", [
+    ("app_data_tree", ("files/../x",)),
+    ("app_data_dir_modes", ("files/a b",)),
+    ("app_data_chmod", ({"files/$(id)": 0o700},)),
+    ("app_data_denies", ("/data", )),
+    ("app_data_read", ("files/;rm",)),
+    ("app_data_remove", (["files/ok", "files/.."],)),
+])
+def test_no_unplain_path_reaches_the_device(recorded, method, args):
+    driver, calls, _ = recorded
+    with pytest.raises(ValueError):
+        if method == "app_data_denies":
+            driver.app_data_denies(*args, listing=True)
+        else:
+            getattr(driver, method)(*args)
+    assert calls == []

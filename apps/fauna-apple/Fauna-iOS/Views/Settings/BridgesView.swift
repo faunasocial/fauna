@@ -40,7 +40,7 @@ struct BridgesView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                ForEach(Array(vm.bridges.enumerated()), id: \.offset) { index, bridge in
+                ForEach(Array(vm.bridges.enumerated()), id: \.element.id) { index, bridge in
                     // The title is the card's own first member
                     // (`bridge-card-name`), not a section header outside the
                     // `bridge-card[i]` scope.

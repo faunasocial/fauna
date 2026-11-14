@@ -99,8 +99,9 @@ impl TreeBodySource {
     }
 }
 
-/// An on-demand replica that owns its tree: the kept root, then the cache
-/// root, else none — a placeholder.
+/// An on-demand replica: the kept root, then the cache root, else none — a
+/// placeholder. A replica whose OS owns the cache (iOS's File Provider
+/// extension — `None` cache root) is read from its kept root alone.
 ///
 /// The lookup is the owned tree's own rule
 /// ([`crate::provider_face::owned_tree::body_path`]): a cache-root body counts
@@ -111,7 +112,7 @@ impl TreeBodySource {
 /// another process.
 pub struct OnDemandBodySource {
     kept: PathBuf,
-    cache: PathBuf,
+    cache: Option<PathBuf>,
     // `SyncDb` wraps a `rusqlite::Connection`, which is `Send` but not `Sync`.
     db: Mutex<SyncDb>,
 }
@@ -119,7 +120,7 @@ pub struct OnDemandBodySource {
 impl OnDemandBodySource {
     /// A source over the replica's two roots and `db`, a read connection to
     /// the set's state DB.
-    pub fn new(kept: PathBuf, cache: PathBuf, db: SyncDb) -> Self {
+    pub fn new(kept: PathBuf, cache: Option<PathBuf>, db: SyncDb) -> Self {
         Self {
             kept,
             cache,
@@ -129,7 +130,7 @@ impl OnDemandBodySource {
 
     /// The body's path on this device, or `None` for a placeholder.
     fn locate(&self, path: &str) -> Option<PathBuf> {
-        crate::provider_face::owned_tree::body_path(&self.kept, &self.cache, path, || {
+        crate::provider_face::owned_tree::body_path(&self.kept, self.cache.as_deref(), path, || {
             let db = self.db.lock().expect("body-source db mutex poisoned");
             Ok(db
                 .get_entry(path)?
@@ -222,8 +223,11 @@ mod tests {
         // A cache body under a row the nest's head moved away from.
         std::fs::write(cache.join("repointed.txt"), b"gone").unwrap();
 
-        let source =
-            OnDemandBodySource::new(kept.clone(), cache.clone(), SyncDb::open(&db_path).unwrap());
+        let source = OnDemandBodySource::new(
+            kept.clone(),
+            Some(cache.clone()),
+            SyncDb::open(&db_path).unwrap(),
+        );
 
         assert_eq!(
             source.read_range("edited.txt", 0, 4).await.as_deref(),

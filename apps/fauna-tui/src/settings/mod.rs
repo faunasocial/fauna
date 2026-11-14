@@ -65,7 +65,7 @@ pub(crate) mod nests;
 mod privacy;
 pub(crate) mod recovery;
 mod root;
-mod subscriptions;
+pub(crate) mod subscriptions;
 mod task_delegation;
 // `pub(crate)`: `element::SelectTarget` resolves the publish sheet's kind
 // picker through this module's `PublishKind`, so the select's raw-value
@@ -3683,6 +3683,11 @@ pub enum Action {
         consent_id_hex: String,
         approved: bool,
     },
+    /// `connected-apps-request-folder` — choose the folder on the request
+    /// card at index `card` (a bare folder-plane request); `id` is the
+    /// option key, the folder's row id in decimal. Local to the machine, no
+    /// nest call.
+    ConnectedAppsSetFolder { card: usize, id: String },
     /// `connected-apps-request-block` — *Never show requests from this app*.
     ConnectedAppsBlockRequest(String),
     /// `connected-apps-item-revoke` — open the row's inline confirm. Local.
@@ -3714,6 +3719,16 @@ pub enum Action {
     /// write, never a local optimistic guess (needs the machine →
     /// [`apply_local`]).
     ConnectedAppsToggleExternalApps,
+    /// `nest-trust-view-now` / `nest-trust-view-history` on a principal's
+    /// roster row — show its trust facet's Now or History lens. Keyed by the
+    /// row's opaque key, never an index. Local: the lens is the shared
+    /// machine's page state, no nest call.
+    ConnectedAppsSetLens { key: String, history: bool },
+    /// `connected-apps-oracle-open` — open a served principal's per-operation
+    /// record, by row key, or close it when it is the one open (one record
+    /// open at a time — `connected-apps.md` § Layout & flow, region 3). The
+    /// open is a Read of the record; the close is local to the machine.
+    ConnectedAppsToggleRecord(String),
     /// A rail row → enter the Mail → Aliases sub-page (self-hydrates the shared
     /// machine). The human affordance for a page that, until this landed, could
     /// only be reached from the e2e nav patch.
@@ -4543,6 +4558,9 @@ impl Action {
             // The reveal reads this account's own mail custody off its local
             // account store — no wire call.
             Action::ConnectedAppsRevealSecret(_) | Action::ConnectedAppsCopySecret(_) => None,
+            // Opening the record is a Read (`list_principal_ops`), which the
+            // gate declines to decide on; closing it is local.
+            Action::ConnectedAppsToggleRecord(_) => None,
 
             // ── Mail → credentials (`mail-settings.md`) ─────────────────────
             // Both submit arms — first credential (`EnableMail`) and subsequent
@@ -5019,7 +5037,9 @@ impl Action {
             // never nest state, which is also why they return no `Op`.
             Action::ConnectedAppsArmRevoke(_)
             | Action::ConnectedAppsCancelRevoke
+            | Action::ConnectedAppsSetFolder { .. }
             | Action::ConnectedAppsCopyUsername(_)
+            | Action::ConnectedAppsSetLens { .. }
             | Action::SessionsRevokeOthersArm
             | Action::SessionsRevokeOthersCancel
             | Action::ToggleMailEnabled
@@ -5630,12 +5650,15 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::ConnectedAppsBlockRequest(_)
         | Action::ConnectedAppsArmRevoke(_)
         | Action::ConnectedAppsCancelRevoke
+        | Action::ConnectedAppsSetFolder { .. }
         | Action::ConnectedAppsConfirmRevoke(_)
         | Action::ConnectedAppsRevealSecret(_)
         | Action::ConnectedAppsCopySecret(_)
         | Action::ConnectedAppsCopyUsername(_)
         | Action::ConnectedAppsUnblock(_)
         | Action::ConnectedAppsToggleExternalApps
+        | Action::ConnectedAppsSetLens { .. }
+        | Action::ConnectedAppsToggleRecord(_)
         | Action::OpenWeb
         | Action::ToggleWebSubdomain
         | Action::CopyWebLink(_)
@@ -8541,6 +8564,25 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 approved,
             },
         }),
+        // The card's folder choice: the index the picker was painted at names
+        // the card, the option key the folder; a key that is no row id, or a
+        // card no longer listed, changes nothing.
+        Action::ConnectedAppsSetFolder { card, id } => {
+            let c = &app.settings.connected_apps;
+            let machine = c.machine.clone()?;
+            let consent_id_hex = c
+                .snapshot
+                .as_ref()?
+                .requests
+                .get(card)?
+                .consent_id_hex
+                .clone();
+            let id = id.trim().parse::<i64>().ok()?;
+            Some(Op::ConnectedApps {
+                machine,
+                gesture: ConnectedAppsGesture::SetFolder { consent_id_hex, id },
+            })
+        }
         Action::ConnectedAppsBlockRequest(consent_id_hex) => Some(Op::ConnectedApps {
             machine: app.settings.connected_apps.machine.clone()?,
             gesture: ConnectedAppsGesture::Block(consent_id_hex),
@@ -8606,6 +8648,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             crate::wizard::copy_to_clipboard(&username);
             None
         }
+        Action::ConnectedAppsSetLens { key, history } => {
+            let c = &mut app.settings.connected_apps;
+            let machine = c.machine.clone()?;
+            machine.set_lens(
+                key,
+                if history {
+                    fauna_client_connected_apps::TrustLens::History
+                } else {
+                    fauna_client_connected_apps::TrustLens::Now
+                },
+            );
+            c.snapshot = Some(machine.snapshot());
+            None
+        }
         Action::ConnectedAppsUnblock(client_id) => Some(Op::ConnectedApps {
             machine: app.settings.connected_apps.machine.clone()?,
             gesture: ConnectedAppsGesture::Unblock(client_id),
@@ -8626,6 +8682,24 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::ConnectedApps {
                 machine: app.settings.connected_apps.machine.clone()?,
                 gesture: ConnectedAppsGesture::SetExternalApps(enabled),
+            })
+        }
+        // The record's open control toggles: the one open record closes, any
+        // other row's opens (the machine keeps one open at a time).
+        Action::ConnectedAppsToggleRecord(key) => {
+            let c = &app.settings.connected_apps;
+            let open = c
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.record.as_ref())
+                .is_some_and(|r| r.key == key);
+            Some(Op::ConnectedApps {
+                machine: c.machine.clone()?,
+                gesture: if open {
+                    ConnectedAppsGesture::CloseRecord
+                } else {
+                    ConnectedAppsGesture::OpenRecord(key)
+                },
             })
         }
         // Both rail rows route through `route_subpage`, the one place a settings
@@ -8756,7 +8830,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         #[cfg(feature = "payments")]
         Action::RedeemClaim => Some(Op::SubscriptionsConsumer {
             nest: app.settings.nest.clone()?,
-            action: ConsumerOp::RedeemClaim(app.settings.subscriptions.claim_code()?),
+            action: ConsumerOp::RedeemClaim {
+                code: app.settings.subscriptions.claim_code()?,
+                secret_hex: app.settings.secret_hex.clone(),
+            },
         }),
         // Each gesture is index-addressed into the machine's UNFILTERED entries —
         // the element carried the snapshot index, so no re-derivation here.
@@ -16149,6 +16226,10 @@ pub fn route_subpage(
     // page-level default conflict policy), so it takes the compound op —
     // Devices, which has no such facet, keeps the plain machine hydrate.
     if state.sub == SubPage::Folders {
+        // The linger reading, once per nav into the page — the same read the
+        // rail click (`Action::OpenFolders`) makes, so both entries paint the
+        // `sync-agent-linger-toggle` alike.
+        state.folders.linger_enabled = crate::sync_agent::linger_enabled();
         return folders_hydrate_op(state, false);
     }
     if state.sub == SubPage::Devices {
@@ -21364,6 +21445,23 @@ mod tests {
         assert_eq!(state.sub, SubPage::Root, "an unknown id falls back to Root");
     }
 
+    /// The nav-patch entry into Folders resolves the linger reading exactly as
+    /// the rail click (`Action::OpenFolders`) does. It used to reset the page
+    /// state to its default, so `linger_enabled` stayed `None` and the
+    /// `sync-agent-linger-toggle` never rendered on that path — on a box whose
+    /// linger is readable, the e2e witness found no toggle at all.
+    #[test]
+    fn route_subpage_into_folders_resolves_the_linger_reading() {
+        let mut state = SettingsState::default();
+        route_subpage(&mut state, Some("folders"), None);
+        assert_eq!(state.sub, SubPage::Folders);
+        assert_eq!(
+            state.folders.linger_enabled,
+            crate::sync_agent::linger_enabled(),
+            "the nav patch must read linger like the rail click"
+        );
+    }
+
     #[test]
     fn apply_opens_and_leaves_the_sub_page() {
         let mut state = SettingsState::default();
@@ -25050,13 +25148,22 @@ mod tests {
                 approved: true,
             },
             Action::ConnectedAppsBlockRequest(String::new()),
+            Action::ConnectedAppsSetFolder {
+                card: 0,
+                id: String::new(),
+            },
             Action::ConnectedAppsArmRevoke(String::new()),
             Action::ConnectedAppsCancelRevoke,
             Action::ConnectedAppsConfirmRevoke(String::new()),
             Action::ConnectedAppsRevealSecret(String::new()),
             Action::ConnectedAppsCopySecret(String::new()),
             Action::ConnectedAppsCopyUsername(String::new()),
+            Action::ConnectedAppsSetLens {
+                key: String::new(),
+                history: true,
+            },
             Action::ConnectedAppsUnblock(String::new()),
+            Action::ConnectedAppsToggleRecord(String::new()),
             Action::OpenMailAliases,
             Action::OpenMailSpam,
             Action::OpenMailExport,
@@ -25639,7 +25746,15 @@ mod tests {
     // 278 → 280 on 2026-11-08: `WizardSetAudience` (`wizard-audience-select`)
     // and `WizardConfirmPublic` (the wizard's `folder-audience-public-confirm`),
     // added to every_action() in the same commit.
-    const ACTION_COUNT: usize = 280;
+    // 280 → 281 on 2026-11-13: `ConnectedAppsToggleRecord`
+    // (`connected-apps-oracle-open`), added to every_action() in the same
+    // commit; → 282 the same day for `ConnectedAppsSetLens`
+    // (`nest-trust-view-now` / `-history` on a roster row), already in
+    // every_action() without this count moving.
+    // → 283 the same day: `ConnectedAppsSetFolder`
+    // (`connected-apps-request-folder`), added to every_action() in the same
+    // commit.
+    const ACTION_COUNT: usize = 283;
 
     #[test]
     fn every_settings_action_is_in_the_corpus() {
@@ -25893,6 +26008,7 @@ mod tests {
             "ConnectedAppsArmRevoke",
             "ConnectedAppsCancelRevoke",
             "ConnectedAppsCopyUsername",
+            "ConnectedAppsSetLens",
             "ToggleMailEnabled",
             "MailOpenAddCredential",
             "MailAddCredentialCancel",
@@ -26003,6 +26119,13 @@ mod tests {
             "AtprotoReveal",
             "ConnectedAppsRevealSecret",
             "ConnectedAppsCopySecret",
+            // The record's open is a Read of the nest's record (the gate
+            // declines to decide on reads); its close is local.
+            "ConnectedAppsToggleRecord",
+            // The consent card's folder choice is the machine's own state for
+            // this visit; the approve that carries it is the declared
+            // `resolve_consent`.
+            "ConnectedAppsSetFolder",
         ];
 
         let mut expected: Vec<&str> = nav

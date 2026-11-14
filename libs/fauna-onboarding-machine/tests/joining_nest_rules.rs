@@ -68,16 +68,22 @@ fn machine(
     (m, api)
 }
 
-/// The read runs in the background: wait for it to have been made, then for
-/// the store that follows it.
+/// The read runs in the background: wait until it has finished, store
+/// included. A fixed sleep after the fake records the call raced the
+/// signature check and the store on a loaded machine. The background runtime
+/// is one current-thread runtime that runs remote spawns in order, and the
+/// fake's read never yields, so the read task finishes in a single poll. A
+/// marker spawned behind it therefore runs only once the read is done.
 async fn settle(api: &FakeNestApi) {
-    for _ in 0..200 {
-        if !api.nest_rules_reads().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let (done, finished) = tokio::sync::oneshot::channel();
+    fauna_sleep::spawn_background(async move {
+        let _ = done.send(());
+    });
+    tokio::time::timeout(Duration::from_secs(10), finished)
+        .await
+        .expect("the background runtime ran the read")
+        .expect("the marker task ran");
+    assert_eq!(api.nest_rules_reads().len(), 1, "exactly one read was made");
 }
 
 async fn on_invite_request(m: &OnboardingMachine, api: &FakeNestApi) -> Option<NestRulesSummary> {

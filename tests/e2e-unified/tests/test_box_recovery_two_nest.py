@@ -104,7 +104,7 @@ each one's self-hosted recovery command — box A's seed and box B's own.
   over the same origin store, and each fresh device is a twin page in a
   BrowserContext of its own. T2 and T3 stay native: they turn on a stored nest
   URL edited between launches and a TCP proxy. T4 and T6 run on web too: they
-  need neither, only a device that outlives its box (`_SurvivingSeat`).
+  need neither, only a device that outlives its box (`SurvivingSeat`).
 
 **T6** — a rotated-away identity is never offered for recovery (§ Custody
 after rotation; tui, linux and web — the exclusion is shared Rust): the device
@@ -175,6 +175,7 @@ from helpers.box_recovery_launch import (  # noqa: E402
     LINKED_CUSTODY_NEEDLES,
     LOGGED_IN_MARKERS,
     RECOVER_BOX_ITEM,
+    SurvivingSeat,
     app_path_for,
     claim_fresh_identity,
     clear_stored_nest_url,
@@ -221,7 +222,7 @@ _LINKED_APPS = _TWO_NEST_APPS + [
 # glue used to read ONLY the saved nest, so the button never appeared exactly when
 # it was needed; android's launch-retry surface reads the same shared
 # `RecoverableBoxes.load` join; web's launch-retry surface reads the same join
-# through `fauna-wasm`, its device a tab that outlives its box (`_SurvivingSeat`).
+# through `fauna-wasm`, its device a tab that outlives its box (`SurvivingSeat`).
 # iOS relaunches into its cached shell and leaves it for the launch-retry surface
 # once the box stays unreachable past a blip (`LostNestOffer`).
 _DEAD_NEST_APPS = _TWO_NEST_APPS + [
@@ -601,7 +602,7 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
     (same XDG dirs, credentials and saved `nest_url`) → Case 1's silent
     challenge reaches nothing → Transient → launch-retry; the resolver's cold
     read fails too, so only the local read can answer. On web the device is a
-    tab left open across the box's death and then reloaded (`_SurvivingSeat`).
+    tab left open across the box's death and then reloaded (`SurvivingSeat`).
     """
     browser = client == "web"
     (nest_a,), stop_boxes = start_boxes(
@@ -654,7 +655,7 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
             # into) already survives a relaunch; the one thing that would replace
             # it is the launch's own credential-seed overwrite, so withhold it.
             h1_config["preserve_store"] = True
-        seat = _SurvivingSeat(client, nest_a, h1_config)
+        seat = SurvivingSeat(client, nest_a, h1_config)
 
         # ---- Launch 1: fresh identity, claim A. The custody leg merges A's
         # row into this device's own account store. ----
@@ -745,74 +746,6 @@ def _launch_facts(client, request) -> dict:
     if client == "ios":
         return app_launch_config(client, request)
     return {"app_path": app_path_for(client)}
-
-
-class _SurvivingSeat:
-    """T4 and T6's per-app seam: a device whose box dies under it and which then
-    comes back over the same store. Everything between — the claim, the
-    rotation, the recovery pages — is the same calls on every app.
-
-    Native: a process per launch over one state tree; the first launch is torn
-    down before the box dies. Web: one tab, left open while the box dies and
-    then reloaded over the same origin store. The page itself comes from the
-    harness's SPA proxy, so it outlives the nest it talks to."""
-
-    def __init__(self, client, nest, config):
-        self.client = client
-        self.browser = client == "web"
-        self._nest = nest
-        self.config = config
-        self._live = None
-
-    def launch(self):
-        """The device's first launch, on identity_choice."""
-        self._live = create_driver(self.client)
-        self._live.launch(self.config)
-        if self.browser:
-            # The nest leg and the session's socket dial the box (see
-            # `_LinkedSeat.launch`); the param survives the reload.
-            self._live.set_provider_base_urls({"nest": self._nest["url"]})
-        return self._live
-
-    def await_custody(self, driver, secret_hex: str) -> None:
-        """The barrier before the box dies: the row launch 2 must find locally
-        has landed. Native reads the leg's own log line. A browser's log is a
-        bounded ring, so web reads the very store launch 2 will read."""
-        if not self.browser:
-            wait_for_custody_leg(driver)
-            return
-        script = (
-            "(async () => (await window.__fauna_recoveryBoxesLocalForTest("
-            f"{secret_hex!r})).length)()"
-        )
-        _poll_until(lambda: (driver.eval_js(script) or 0) > 0, 60.0,
-                    "this tab's own store holds the custodied box",
-                    detail=lambda: driver.eval_js(script))
-
-    def leave(self) -> None:
-        """The first launch ends. A tab stays open: tearing it down would take
-        the origin store with its BrowserContext."""
-        if not self.browser:
-            self.close()
-
-    def relaunch(self):
-        """The same device again, over the same store."""
-        if self.browser:
-            self._live.hard_reload()
-            return self._live
-        if self.client == "ios":
-            # Launch 1's fresh install stands: its container holds the account
-            # store the custody leg wrote into.
-            self.config["keep_container"] = True
-        self._live = create_driver(self.client)
-        self._live.launch(self.config)
-        return self._live
-
-    def close(self) -> None:
-        """Tear down whatever launch is still up. Safe to repeat."""
-        if self._live is not None:
-            live, self._live = self._live, None
-            live.teardown()
 
 
 class _LinkedSeat:
@@ -1243,7 +1176,7 @@ def test_a_rotated_away_identity_is_never_offered_for_recovery(
             # custodied into) survives a relaunch; only the launch's own
             # credential-seed overwrite would replace it, so withhold it.
             h1_config["preserve_store"] = True
-        seat = _SurvivingSeat(client, nest, h1_config)
+        seat = SurvivingSeat(client, nest, h1_config)
 
         # ---- Launch 1: claim the box, custody its seed, rotate it. ----
         driver1 = seat.launch()

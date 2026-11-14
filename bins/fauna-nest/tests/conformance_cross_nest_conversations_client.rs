@@ -11443,3 +11443,153 @@ async fn a_cross_nest_folder_member_is_named_on_the_owners_roster_at_share_time(
          binding row — the reply's pair, domain-bound to F's key, awaited inline"
     );
 }
+
+/// **The offers browse across nests** (`behavior/subscriptions.md` § Pillar 1
+/// → *The offers browse across nests*; `federation.md` § Federation residue
+/// surface, the *Offers browse across nests* row). Bob on F lists the tiers of
+/// Alice, homed on H, through F's own `fauna.subscriptions.offers.list_remote`:
+/// F originates `fauna.federation.follow.offers.list` to H, which answers what
+/// its own `offers.list` answers — the offered tier, no per-post tier, no
+/// hidden tier, no `asking_price` — and F forwards it unstored. An author H
+/// does not host is the empty list.
+#[tokio::test]
+async fn a_reader_lists_a_remote_authors_tiers_through_their_own_nest() {
+    use fauna_protocol::subscriptions::{
+        OffersListRemoteRequest, OffersListRequest, TierAskingPrice, TiersListReply, UNIT_MSAT,
+    };
+
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, _f_authority, f_state) = start_foreign_nest().await;
+
+    let alice = ActorKeypair::generate();
+    h_state
+        .db
+        .create_user_with_handle(&alice.actor_id().0, "free", "alice", None)
+        .await
+        .unwrap();
+    let bob = ActorKeypair::generate();
+    f_state
+        .db
+        .create_user_with_handle(&bob.actor_id().0, "free", "bob", None)
+        .await
+        .unwrap();
+    let a = alice.actor_id().0;
+    let ask = TierAskingPrice {
+        value: 5000,
+        unit: UNIT_MSAT.into(),
+        extra: Default::default(),
+    };
+    h_state
+        .db
+        .create_subscription_tier(
+            &a,
+            "gold",
+            20,
+            Some("Top tier"),
+            Some("$10/mo"),
+            Some("https://pay.example/gold"),
+            false,
+            None,
+            Some(&ask),
+            false,
+        )
+        .await
+        .unwrap();
+    h_state
+        .db
+        .create_subscription_tier(
+            &a,
+            "backstage",
+            30,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    h_state
+        .db
+        .create_subscription_tier(
+            &a,
+            "post-unlock-1",
+            1,
+            None,
+            None,
+            None,
+            true,
+            Some("1".repeat(64).as_str()),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let bob_nest = connected_client(&f_base, ActorKeypair::from_secret(*bob.secret_bytes())).await;
+    let remote = |author: ActorKeypair| {
+        let bob_nest = bob_nest.clone();
+        let h_base = h_base.clone();
+        async move {
+            bob_nest
+                .request::<_, TiersListReply>(
+                    "fauna.subscriptions.offers.list_remote",
+                    OffersListRemoteRequest {
+                        author_id: author.actor_id(),
+                        nest_url: h_base,
+                        extra: Default::default(),
+                    },
+                )
+                .await
+        }
+    };
+
+    // F's own browse holds nothing of Alice — the gap this read closes.
+    let local: TiersListReply = bob_nest
+        .request(
+            "fauna.subscriptions.offers.list",
+            OffersListRequest {
+                author_id: alice.actor_id(),
+                extra: Default::default(),
+            },
+        )
+        .await
+        .expect("the local browse answers");
+    assert!(local.tiers.is_empty(), "F hosts no tier of Alice");
+
+    let relayed = remote(ActorKeypair::from_secret(*alice.secret_bytes()))
+        .await
+        .expect("Bob's own nest relays the browse to Alice's home");
+    let names: Vec<&str> = relayed.tiers.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["gold"],
+        "per-post and hidden tiers are never offered: {names:?}"
+    );
+    let gold = &relayed.tiers[0];
+    assert!(gold.asking_price.is_none(), "the asking price is withheld");
+    assert_eq!(gold.price_hint.as_deref(), Some("$10/mo"));
+    assert_eq!(
+        gold.payment_url.as_deref(),
+        Some("https://pay.example/gold")
+    );
+
+    // F forwarded and kept nothing.
+    assert!(
+        f_state
+            .db
+            .list_subscription_tiers(&a)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the relaying nest stores no tier of the remote author"
+    );
+
+    // An author H does not host answers the empty list, never not_found.
+    let stranger = remote(ActorKeypair::generate())
+        .await
+        .expect("an unhosted author is the empty list");
+    assert!(stranger.tiers.is_empty());
+}

@@ -506,6 +506,35 @@ class BridgesActions:
                 return False
             self.revisit()
 
+    def plugin_cards_diagnosis(self) -> str:
+        """Every card's title and every action button's ``client_id`` and
+        ``bound``, in order — folded into a "never read bound" failure so it
+        tells a missing card (the index found nothing) from a card that reads
+        unbound (convention 6). Each probe is guarded: diagnostic only."""
+        parts: list[str] = []
+
+        def probe(label: str, fn) -> None:
+            try:
+                parts.append(f"{label}={fn()!r}")
+            except Exception as e:  # noqa: BLE001 — diagnostic only
+                parts.append(f"{label}=<{type(e).__name__}: {e}>")
+
+        probe("heading", lambda: self.driver.is_visible("page-heading"))
+        probe("cards", lambda: self.driver.count("bridge-card"))
+        probe("names", self.card_names)
+        probe("buttons", lambda: self.driver.count("bridge-action-button"))
+        probe("client_ids", lambda: self.driver.get_attrs("bridge-action-button", "client_id"))
+        probe("bound", lambda: self.driver.get_attrs("bridge-action-button", "bound"))
+
+        def registered() -> list[str] | None:
+            snap = self.driver.registry_snapshot()
+            if snap is None:
+                return None
+            return sorted({str(e.get("id")) for e in snap if isinstance(e, dict)})[:80]
+
+        probe("registered", registered)
+        return "[plugin cards: " + ", ".join(parts) + "]"
+
     def _plugin_card_scope(self, client_id: str) -> str:
         i = self.plugin_card_index(client_id)
         if i is None:

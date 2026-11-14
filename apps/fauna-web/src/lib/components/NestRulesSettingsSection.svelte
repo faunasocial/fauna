@@ -38,10 +38,12 @@
       <p class="muted" data-testid={IDS.SETTINGS_NEST_RULES_INERT_NOTICE}>{resolveLocalized(summary.not_applied_sentence)}</p>
     {/if}
     {#each summary.rules as rule, i (i)}
-      <div class="field-group">
-        <span data-testid={IDS.SETTINGS_NEST_RULES_ITEM} data-index={i}>{nestRuleLine(rule)}</span>
+      <!-- The item is the rule's container, so its own not-applied note is a
+           descendant a scoped query finds (convention 1). -->
+      <div class="field-group" data-testid={IDS.SETTINGS_NEST_RULES_ITEM} data-index={i}>
+        <span>{nestRuleLine(rule)}</span>
         {#if rule.inert}
-          <p class="muted" data-testid={IDS.SETTINGS_NEST_RULES_INERT_NOTICE} data-index={i}>{resolveLocalized(rule.inert)}</p>
+          <p class="muted" data-testid={IDS.SETTINGS_NEST_RULES_INERT_NOTICE}>{resolveLocalized(rule.inert)}</p>
         {/if}
       </div>
     {/each}

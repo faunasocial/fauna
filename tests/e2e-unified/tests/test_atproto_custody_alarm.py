@@ -515,8 +515,9 @@ def test_recovery_fork_contest_end_to_end(
 
         # ── The ceremony: open, read, confirm. ──
         bs.open_contest()
-        assert bs.is_contest_confirm_visible(), (
-            "the contest button opens the confirm card"
+        assert bs.wait_for_contest_confirm(), (
+            "the contest button opens the confirm card; "
+            f"page error={bs.page_error_text(timeout=1.0)!r}"
         )
         bs.confirm_contest()
 
@@ -613,7 +614,10 @@ def test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds(
 
         # ── Only a confirm contests: opening and cancelling signs nothing. ──
         bs.open_contest()
-        assert bs.is_contest_confirm_visible(), "the contest button opens the confirm card"
+        assert bs.wait_for_contest_confirm(), (
+            "the contest button opens the confirm card; "
+            f"page error={bs.page_error_text(timeout=1.0)!r}"
+        )
         bs.cancel_contest()
         assert app.driver.is_absent("atproto-contest-confirm-card"), (
             "cancel closes the confirm card"
@@ -626,7 +630,10 @@ def test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds(
         # ── The press fails: the directory refuses the first submission. ──
         directory.refuse_next_submissions(1)
         bs.open_contest()
-        assert bs.is_contest_confirm_visible(), "the contest button opens the confirm card"
+        assert bs.wait_for_contest_confirm(), (
+            "the contest button opens the confirm card; "
+            f"page error={bs.page_error_text(timeout=1.0)!r}"
+        )
         bs.confirm_contest()
 
         deadline = time.monotonic() + 60
@@ -642,7 +649,7 @@ def test_a_contest_press_that_fails_keeps_the_card_open_and_a_retry_succeeds(
         while time.monotonic() < deadline and not error:
             error = bs.page_error_text(timeout=1.0)
         assert error, "a press that fails must say so in the page's error-message"
-        assert bs.is_contest_confirm_visible(), (
+        assert bs.wait_for_contest_confirm(), (
             f"a failed press keeps the confirm card open for a retry; error={error!r}"
         )
         assert not directory.forks, f"a refused submission is no fork: {directory.forks!r}"

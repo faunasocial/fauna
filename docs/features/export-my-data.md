@@ -36,13 +36,13 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ✅ full | 0.1.2-dev+920556fa standalone |
+| web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| windows | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| tui | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

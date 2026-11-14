@@ -23,9 +23,15 @@
 //! 4. **Each recorded account's erase**: its scopes under the swept bases and
 //!    its slots in the auxiliary namespaces; then, for a sign-out, the
 //!    residual sweep of every actor scope under the bases.
-//! 5. **The residue record's re-sweep** — only while the registry names
-//!    nobody, by the residue record's own four rules
-//!    ([`crate::retry_sign_out_residue`]).
+//! 5. **The residue record's re-sweep**, by the residue record's own four
+//!    rules ([`crate::retry_sign_out_residue`]). While the registry names
+//!    somebody the launch and the gesture's tail skip it (nobody asked, and
+//!    a signed-in user is not the one the residue was reported to);
+//!    **Remove Again** ([`FinishCaller::RemoveAgain`]) still re-sweeps the
+//!    recorded paths — the serving question and the fingerprints are what
+//!    protect a store a later sign-in adopted — and holds the credential
+//!    half as recorded, because the seat's credential erase is wholesale
+//!    and would sign that account out.
 //! 6. **The handover** (decision 6): what the erase left is written into the
 //!    residue record, and only then is each erased account settled out of
 //!    the sign-out record. A crash between the two leaves both standing, and
@@ -53,6 +59,70 @@ pub struct FinishSeat<'a> {
     pub serving: ServingBases<'a>,
     /// The seat's erase-complete registry.
     pub registry: &'a AccountRegistry,
+    /// Which of the routine's three callers this run is.
+    pub caller: FinishCaller,
+}
+
+/// The routine's three callers. They differ in one thing: what the residue
+/// record's re-sweep does while the registry names somebody
+/// (`apps/account-scoping.md` § Erasure follows scope → *The sign-out record
+/// is on all 7 apps*, decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishCaller {
+    /// The sign-out or remove-account gesture's tail.
+    Gesture,
+    /// A launch, before the launch law reads the registry. Silent: nobody
+    /// asked for it.
+    Launch,
+    /// `sign-out-residue-retry-button`, pressed in a signed-out window.
+    RemoveAgain,
+}
+
+/// What the residue re-sweep may do in this run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Resweep {
+    /// Nothing: the registry names somebody and nobody asked.
+    Skip,
+    /// The recorded paths only; the credential half stays as recorded.
+    PathsOnly,
+    /// Both halves.
+    Whole,
+}
+
+impl FinishSeat<'_> {
+    fn resweep(&self) -> Resweep {
+        let named = self.registry.list().len();
+        match (named, self.caller) {
+            (0, _) => Resweep::Whole,
+            (_, FinishCaller::RemoveAgain) => {
+                tracing::info!(
+                    "[sign-out residue] Remove Again while the registry names {named} \
+                     account(s) — recorded paths re-swept, credentials held as recorded"
+                );
+                Resweep::PathsOnly
+            }
+            _ => Resweep::Skip,
+        }
+    }
+}
+
+/// The residue record's re-sweep under `mode` (never [`Resweep::Skip`]).
+/// Answers the retry's outcome and whether the credential re-erase ran.
+fn run_resweep(
+    seat: FinishSeat<'_>,
+    host: &mut dyn FinishHost,
+    record: &SignOutResidue,
+    mode: Resweep,
+) -> (ResidueRetry, bool) {
+    let mut re_erased = false;
+    let outcome = crate::retry_sign_out_residue(record, seat.serving, |recorded| {
+        if mode == Resweep::PathsOnly {
+            return recorded;
+        }
+        re_erased = true;
+        host.re_erase_credentials(recorded)
+    });
+    (outcome, re_erased)
 }
 
 /// The seat's own acts, which differ per seat.
@@ -253,7 +323,8 @@ pub fn finish_sign_out_with(
         }
     }
 
-    // 5. The residue record's re-sweep, while the registry names nobody.
+    // 5. The residue record's re-sweep (skipped, or paths only, while the
+    //    registry names somebody — `FinishSeat::resweep`).
     let (left, re_erased) = resweep_residue(seat, host, residue);
 
     // 6. The handover: the residue record first, then the sign-out record.
@@ -280,20 +351,17 @@ fn finish_residue_only(
     let Some(record) = residue else {
         return SignOutFinish::NOTHING;
     };
-    if !seat.registry.list().is_empty() {
+    let mode = seat.resweep();
+    if mode == Resweep::Skip {
         // A signed-in user is not the one this residue was reported to.
         tracing::info!(
             "[sign-out residue] not re-swept and not painted — the registry names {} \
-             account(s); the record waits for a signed-out run",
+             account(s); the record waits for a signed-out run or Remove Again",
             seat.registry.list().len()
         );
         return SignOutFinish::NOTHING;
     }
-    let mut re_erased = false;
-    let outcome = crate::retry_sign_out_residue(&record, seat.serving, |recorded| {
-        re_erased = true;
-        host.re_erase_credentials(recorded)
-    });
+    let (outcome, re_erased) = run_resweep(seat, host, &record, mode);
     match outcome {
         ResidueRetry::Blocked(blocked) => SignOutFinish::Refused {
             blocked,
@@ -313,9 +381,9 @@ fn finish_residue_only(
     }
 }
 
-/// Re-sweep an earlier residue record when the registry names nobody;
-/// otherwise keep it as it is. Answers what is left and whether the
-/// credential re-erase ran.
+/// Re-sweep an earlier residue record as far as this run may
+/// ([`FinishSeat::resweep`]); otherwise keep it as it is. Answers what is
+/// left and whether the credential re-erase ran.
 fn resweep_residue(
     seat: FinishSeat<'_>,
     host: &mut dyn FinishHost,
@@ -324,14 +392,11 @@ fn resweep_residue(
     let Some(record) = residue else {
         return (SignOutResidue::default(), false);
     };
-    if !seat.registry.list().is_empty() {
+    let mode = seat.resweep();
+    if mode == Resweep::Skip {
         return (record, false);
     }
-    let mut re_erased = false;
-    let outcome = crate::retry_sign_out_residue(&record, seat.serving, |recorded| {
-        re_erased = true;
-        host.re_erase_credentials(recorded)
-    });
+    let (outcome, re_erased) = run_resweep(seat, host, &record, mode);
     match outcome {
         ResidueRetry::Swept(left) => (left, re_erased),
         ResidueRetry::Blocked(_) => (record, false),
@@ -420,7 +485,18 @@ mod tests {
                     store_root: Some(self.store_root.path()),
                 },
                 registry: &self.registry,
+                caller: FinishCaller::Launch,
             }
+        }
+
+        fn remove_again(&self, host: &mut Host<'_>) -> SignOutFinish {
+            finish_sign_out(
+                FinishSeat {
+                    caller: FinishCaller::RemoveAgain,
+                    ..self.seat()
+                },
+                host,
+            )
         }
 
         fn slot(&self) -> SignOutRecordFile {
@@ -813,5 +889,70 @@ mod tests {
         );
         assert!(!gone.exists());
         assert!(SignOutResidue::load(world.install.path()).is_none());
+    }
+
+    /// Remove Again in a signed-out window while the registry names an
+    /// account a later sign-in added: the recorded paths are re-swept behind
+    /// the fingerprint rule — a scope written since is dropped from the
+    /// record untouched, an unwritten one is removed — and the credential
+    /// half is neither re-erased nor forgotten. A launch in the same state
+    /// does nothing.
+    #[test]
+    fn remove_again_re_sweeps_the_paths_while_the_registry_names_somebody() {
+        let world = World::new();
+        let adopted = world.store_root.path().join(actor("ab"));
+        let stale = world.store_root.path().join(actor("cd"));
+        for scope in [&adopted, &stale] {
+            std::fs::create_dir_all(scope.join("account-store")).expect("scope");
+        }
+        let held = CredentialSweep {
+            survivors: vec!["fauna/kept-key".into()],
+            wipe_failed: false,
+        };
+        SignOutResidue::record(&[adopted.clone(), stale.clone()], &held)
+            .save(world.install.path())
+            .expect("saved");
+        // A later sign-in adopts one surviving store and writes one level down.
+        std::fs::write(adopted.join("account-store").join("rows.db"), b"new").expect("write");
+        let _b = world.sign_in("b");
+
+        let mut launch = Host::new(&world);
+        assert_eq!(world.finish(&mut launch), SignOutFinish::NOTHING);
+        assert!(
+            stale.is_dir(),
+            "a signed-in launch leaves the residue alone"
+        );
+
+        let mut host = Host::new(&world);
+        let outcome = world.remove_again(&mut host);
+        assert!(
+            adopted.join("account-store").join("rows.db").is_file(),
+            "the adopted store is untouched"
+        );
+        assert!(!stale.exists(), "the unwritten recorded scope is removed");
+        assert!(
+            !host.log.contains(&"re-erase".to_string()),
+            "the wholesale credential erase must not run under a signed-in account: {:?}",
+            host.log
+        );
+        assert_eq!(
+            world.registry.list().len(),
+            1,
+            "the account stays signed in"
+        );
+        let SignOutFinish::Finished {
+            residue: Some(left),
+            credentials_wiped: false,
+            found_record: false,
+        } = outcome
+        else {
+            panic!("the credential half is still owed and painted: {outcome:?}");
+        };
+        assert!(
+            left.paths.is_empty(),
+            "both scopes left the record: {left:?}"
+        );
+        assert_eq!(left.credentials(), held);
+        assert_eq!(SignOutResidue::load(world.install.path()), Some(left));
     }
 }

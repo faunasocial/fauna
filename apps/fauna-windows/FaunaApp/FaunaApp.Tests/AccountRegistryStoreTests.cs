@@ -201,8 +201,11 @@ public class AccountRegistryStoreTests
     /// Sign-out must erase the WHOLE namespace: on a two-account install a
     /// narrower wipe would leave account #2's secret sitting in Credential Manager
     /// referenced by nothing — an identity the user believes they signed out of
-    /// (<c>long-term-store.md</c> § Cleanup contract). This pins the behavior
-    /// <c>App.ClearCredentialNamespace</c> routes to.
+    /// (<c>long-term-store.md</c> § Cleanup contract). This pins <c>ClearAll()</c>,
+    /// which the e2e reset (<c>App.ClearCredentialNamespace</c>) and Remove Again's
+    /// credential re-erase (<c>SignOutHost.EraseCredentials</c>) run; the sign-out's
+    /// own wipe is the shared routine's <c>wipe_own</c>, which takes every listed
+    /// account the same way.
     /// </summary>
     [Fact]
     public void ClearAllErasesEveryAccountNotJustTheActiveOne()
@@ -234,8 +237,9 @@ public class AccountRegistryStoreTests
     // faked — the same reason the rest of this file runs against the real seam.
 
     /// <summary>
-    /// <b>The row's own definition of success.</b> A sign-out (<c>ClearAll()</c> —
-    /// what <c>App.ClearCredentialNamespace</c> calls) erases the account's
+    /// <b>The row's own definition of success.</b> A credential wipe (<c>ClearAll()</c> —
+    /// the e2e reset's and Remove Again's; the sign-out routine's <c>wipe_own</c> names
+    /// no install key either) erases the account's
     /// per-actor slot, but never <c>install/device_secret</c>
     /// (<c>DeviceIdForActor</c>'s own doc: "no erase in this crate names it") —
     /// windows has exactly one store, so <c>installStore</c> and the registry's

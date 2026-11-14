@@ -100,6 +100,7 @@ pytestmark = [
         "(no Apple Developer cert). Read-path mechanism proven headlessly at the FFI seam instead.",
     ),
     pytest.mark.tier_3,
+    pytest.mark.macos,
 ]
 
 # BLAKE3 derive_key contexts — MUST match `libs/fauna-core/src/crypto.rs`

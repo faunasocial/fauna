@@ -8,9 +8,9 @@
 //!   (`fauna.state.custody-ceremony`) — every received offer/accept/deliver
 //!   is verified and durably captured in ONE read-join before the poll moves
 //!   on (record-then-act's "record").
-//! * [`SessionCustodyPoster`] implements the machine's
+//! * [`BackendCustodyPoster`] implements the machine's
 //!   [`CustodyPayloadPoster`] post door over
-//!   `ConversationsSession::send_custody_payload` — how `drive_ceremonies`
+//!   `FaunaMlsBackend::send_custody_payload` — how `drive_ceremonies`
 //!   posts offers, accepts and witness deliveries.
 //!
 //! Wiring (an app or the tier_3 rig): register the sink via
@@ -19,7 +19,7 @@
 //! `CustodyRegistryWriter` impl on `AccountStoreHandle`) + the
 //! `CapabilitiesClient` depositor. The `NestFolderCustodySink` /
 //! `SchedulingSink` priority-#2 pattern: the conversations crate keeps no
-//! custody semantics, this crate wires them once for every native app.
+//! custody semantics, this crate wires them once for all seven apps (web registers the same sink and poster on its rail).
 
 use std::sync::Arc;
 
@@ -28,9 +28,13 @@ use fauna_client_capabilities::custody_ceremony::{
     CeremonyRecords, CustodyPayloadPoster, IngestOutcome, ReceiptOutcome, ingest_payload,
     ingest_receipt,
 };
-use fauna_client_config::CustodyCeremonyStore;
+use fauna_client_config::{BackgroundCustodyWrites, CustodyCeremonyStore};
+#[cfg(not(target_arch = "wasm32"))]
 use fauna_conversations::ConversationsSession;
+use fauna_conversations::ThreadSummary;
 use fauna_conversations::backend::CustodyCeremonySink;
+use fauna_conversations::backends::fauna_mls::FaunaMlsBackend;
+use fauna_core::MaybeSendSync;
 use fauna_core::data::Timestamp;
 use fauna_core::identity::ActorId;
 
@@ -42,7 +46,7 @@ use fauna_core::identity::ActorId;
 /// `drive_ceremonies` pass; the tier_3 rig drives explicitly and registers
 /// none. Called from the poll's async context — implementors notify, never
 /// work inline.
-pub trait CustodyCeremonyObserver: Send + Sync {
+pub trait CustodyCeremonyObserver: MaybeSendSync {
     fn ceremony_moved(&self, grant_id: &[u8]);
 }
 
@@ -121,7 +125,8 @@ pub fn custody_ceremony_ingest_counts() -> CustodyCeremonyIngestCounts {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: CustodyCeremonyStore> CustodyCeremonySink for StoreCustodyCeremonySink<S> {
     async fn custody_payload(&self, channel_hex: &str, sender: ActorId, bytes: &[u8]) -> bool {
         // Verify + capture in one read-join: `ingest_payload` mutates the
@@ -131,8 +136,10 @@ impl<S: CustodyCeremonyStore> CustodyCeremonySink for StoreCustodyCeremonySink<S
         // upserts are idempotent per grant id by construction.
         let now = Timestamp::now();
         let own = self.own_actor;
-        let result = self
-            .store
+        // The machinery's write, never a gesture: a background write, so an
+        // open Devices or Nests page repaints the capture (the store-change
+        // notice — `CustodyCeremonyStore::merge_custody_background`).
+        let result = BackgroundCustodyWrites(&self.store)
             .update(|cfg| ingest_payload(cfg, &own, &sender, channel_hex, bytes, now))
             .await;
         match result {
@@ -186,8 +193,7 @@ impl<S: CustodyCeremonyStore> CustodyCeremonySink for StoreCustodyCeremonySink<S
     /// case of a host whose serving device differs from the device that ran the
     /// ceremony chat.
     async fn custody_receipt(&self, channel_hex: &str, _sender: ActorId, bytes: &[u8]) -> bool {
-        let result = self
-            .store
+        let result = BackgroundCustodyWrites(&self.store)
             .update(|cfg| ingest_receipt(cfg, channel_hex, bytes))
             .await;
         match result {
@@ -232,19 +238,47 @@ pub struct CustodyMintCandidate {
     pub label: String,
 }
 
+impl CustodyMintCandidate {
+    /// The shared boundary row (`custody-mint-host-select`'s option) — the one
+    /// projection both faces (UniFFI and wasm) hand the page.
+    pub fn view(&self) -> fauna_client_capabilities::custody_view::CustodyMintCandidateView {
+        fauna_client_capabilities::custody_view::CustodyMintCandidateView {
+            host: self.host.0.to_vec(),
+            channel_hex: self.channel_hex.clone(),
+            label: self.label.clone(),
+        }
+    }
+}
+
 /// Derive the owner's custody-offer host candidates from the live session:
 /// every conversation channel whose MLS group has exactly two members — this
 /// account and one counterpart. Deduped per counterpart (the most recently
 /// listed thread wins is NOT promised; the first bound channel per host is
 /// kept — offering twice to one account is a fresh grant id either way).
-/// Shared here so every native app derives the same list (priority #2).
+/// The native apps' entry; it reads the session's backend and thread list and
+/// hands them to [`custody_mint_candidates_over`], which web calls directly.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn custody_mint_candidates(
     session: &ConversationsSession,
     own: &ActorId,
 ) -> Vec<CustodyMintCandidate> {
-    let backend = session.backend();
-    let engine = session.engine();
-    let summaries = session.manager().snapshot().threads;
+    custody_mint_candidates_over(
+        &session.backend(),
+        &session.manager().snapshot().threads,
+        own,
+    )
+}
+
+/// [`custody_mint_candidates`] over the rail backend itself and the thread
+/// list the manager renders — the shape both targets hold (web's conversations
+/// rail has no `ConversationsSession`, only the backend and the manager).
+/// Shared here so all seven apps derive the same list (priority #2).
+pub fn custody_mint_candidates_over(
+    backend: &FaunaMlsBackend,
+    summaries: &[ThreadSummary],
+    own: &ActorId,
+) -> Vec<CustodyMintCandidate> {
+    let engine = backend.engine();
     let channels = backend
         .conv_channels()
         .into_iter()
@@ -304,10 +338,12 @@ pub fn mint_candidates_from_channels(
     out
 }
 
-/// The machine's post door over the live conversations session.
-pub struct SessionCustodyPoster(pub Arc<ConversationsSession>);
+/// The machine's post door over the conversations rail's backend — the one
+/// poster every app drives with: a native app passes its session's
+/// `backend()`, web the backend its rail registered.
+pub struct BackendCustodyPoster(pub Arc<FaunaMlsBackend>);
 
-impl CustodyPayloadPoster for SessionCustodyPoster {
+impl CustodyPayloadPoster for BackendCustodyPoster {
     async fn post(&self, channel_hex: &str, bytes: Vec<u8>) -> bool {
         match self.0.send_custody_payload(channel_hex, bytes).await {
             Ok(()) => true,
@@ -326,6 +362,96 @@ impl CustodyPayloadPoster for SessionCustodyPoster {
                 false
             }
         }
+    }
+}
+
+/// The hosting-deposit door with the refusal logged — the bare client impl
+/// answers only `false`, and a host whose row never lands needs the reason.
+struct LoggedHostingDepositor<R: fauna_protocol::RpcRequester>(
+    fauna_client_capabilities::custody_hosting::CustodyHostingClient<R>,
+);
+
+impl<R> fauna_client_capabilities::custody_ceremony::CustodyHostingDepositor
+    for LoggedHostingDepositor<R>
+where
+    R: fauna_protocol::RpcRequester,
+{
+    async fn register(
+        &self,
+        deposit: &fauna_client_capabilities::custody_hosting::HostingDeposit,
+    ) -> bool {
+        match self.0.register(deposit).await {
+            Ok(reply) if reply.ok => true,
+            Ok(_) => {
+                tracing::warn!("custody hosting register: the nest answered ok=false");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("custody hosting register refused: {e}");
+                false
+            }
+        }
+    }
+}
+
+/// One custody-ceremony drive pass — the body every app's drive edge runs
+/// (session start, store ready, a ceremony-moved edge, the Devices page's
+/// load, a mint): fetch the receipts custodian nests deposited (stage (c)'s
+/// owner-side leg), then `drive_ceremonies` with this backend's poster, the
+/// account store as records + ledger + registry writer, and the nest as the
+/// two deposit doors. Shared so the native spawn
+/// (`fauna_client_custody::spawn_drive`) and web's `spawn_local` run one
+/// composition (priority #2); the caller owns only the executor.
+pub async fn drive_ceremony_pass<R, S>(
+    nest: R,
+    store: &S,
+    owner: &fauna_core::identity::ActorKeypair,
+    backend: Arc<FaunaMlsBackend>,
+) where
+    R: fauna_protocol::RpcRequester + Clone + MaybeSendSync,
+    S: CustodyCeremonyStore
+        + fauna_client_config::SuccessionLedgerStore
+        + fauna_client_capabilities::custody_ceremony::CustodyRegistryWriter,
+{
+    // The pass's record writes (a nest-door receipt ingested; the posted,
+    // minted and delivered marks) are the machinery's background writes, so
+    // an open Devices or Nests page repaints them through the store-change
+    // notice; the ledger and registry doors are their own.
+    let records = BackgroundCustodyWrites(store);
+    for skipped in
+        fauna_client_capabilities::custody_ceremony::ingest_nest_receipts(nest.clone(), &records)
+            .await
+    {
+        tracing::debug!("{skipped}");
+    }
+    let poster = BackendCustodyPoster(backend);
+    let depositor = fauna_client_capabilities::rpc::CapabilitiesClient::new(nest.clone());
+    let hosting = LoggedHostingDepositor(
+        fauna_client_capabilities::custody_hosting::CustodyHostingClient::new(nest),
+    );
+    let report = fauna_client_capabilities::custody_ceremony::drive_ceremonies(
+        &records,
+        store,
+        owner,
+        &poster,
+        store,
+        &depositor,
+        &hosting,
+        Timestamp::now(),
+    )
+    .await;
+    match report {
+        Ok(r) if r.posted + r.minted + r.rows_written + r.still_owed > 0 => {
+            tracing::info!(
+                posted = r.posted,
+                minted = r.minted,
+                rows_written = r.rows_written,
+                still_owed = r.still_owed,
+                "custody ceremony drive"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("custody ceremony drive aborted: {e}"),
     }
 }
 

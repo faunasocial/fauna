@@ -273,6 +273,12 @@ public sealed partial class ConversationsPage : Page
             _rpc.StoreChanged -= OnStoreChanged;
             _rpc.StoreChanged += OnStoreChanged;
         }
+        // The viewer's hide list moving re-binds the open thread's bubbles — a report,
+        // a show-again, or the store-change re-read finding a show-again made on
+        // another device of the account (moderation.md § Corollary): each bubble's
+        // verdict and show-again are read at bind.
+        FaunaApp.Core.Services.ContentPolicyCache.HiddenContentChanged -= OnHiddenContentChanged;
+        FaunaApp.Core.Services.ContentPolicyCache.HiddenContentChanged += OnHiddenContentChanged;
 
         // search.md § User actions (SearchNav.Mail / SearchNav.Draft): a
         // present message id (Mail only) selects that message inside its
@@ -333,6 +339,7 @@ public sealed partial class ConversationsPage : Page
         _ = App.ConvDrafts?.SaveNowAsync();
         if (_vm is not null) _vm.PropertyChanged -= Vm_PropertyChanged;
         if (_rpc is not null) _rpc.StoreChanged -= OnStoreChanged;
+        FaunaApp.Core.Services.ContentPolicyCache.HiddenContentChanged -= OnHiddenContentChanged;
 #if DEBUG || FAUNA_E2E_AGENT
         if (ReferenceEquals(Current, this)) Current = null;
 #endif
@@ -363,6 +370,12 @@ public sealed partial class ConversationsPage : Page
 
     private void Vm_PropertyChanged(object? sender, PropertyChangedEventArgs e) =>
         UnlessManagerRetired(Refresh, "observer refresh");
+
+    /// <summary>The hide list moved (<see cref="FaunaApp.Core.Services.ContentPolicyCache.HiddenContentChanged"/>),
+    /// possibly off the UI thread: hop back and re-bind — the same pass every observer
+    /// tick runs, so the compose draft is never touched.</summary>
+    private void OnHiddenContentChanged() =>
+        DispatcherQueue.TryEnqueue(() => UnlessManagerRetired(Refresh, "hide-list refresh"));
 
     /// <summary>
     /// Run one of this page's passes over the manager <see cref="_vm"/> renders,
@@ -942,6 +955,9 @@ public sealed partial class ConversationsPage : Page
             if (_latestSnapshotById.TryGetValue(msg.Id, out var m))
                 _ = OpenReportSheetAsync(m);
         };
+        // content-policy-show-again-button → one persisted un-hide per id the bubble's
+        // offer names (moderation.md § Corollary — the reporter's hide is theirs to undo).
+        bubble.ShowAgainRequested += msg => _ = ShowAgainAsync(msg);
         // dm-message-withheld-badge → the Moderation page, carrying the matched queue
         // row's content id; its queue read opens that row's own appeal behind the same
         // RowIsAppealable gate as the row's appeal-button (takedown-and-block.md § Legal
@@ -2259,6 +2275,19 @@ public sealed partial class ConversationsPage : Page
         Refresh();
     }
 
+    /// <summary>The reporter's show-again on a bubble's reported placeholder
+    /// (moderation.md § Corollary — the reporter's hide is theirs to undo): one persisted
+    /// un-hide per id the offer names, the stored list into the render state, then the
+    /// re-bind — the message paints again, with every other message the same ids hid. A
+    /// failure stays on <c>error-message</c> (the report line's surface); the report
+    /// itself is never withdrawn.</summary>
+    private async Task ShowAgainAsync(FaunaApp.Controls.DmMessageView msg)
+    {
+        if (_rpc is null || msg.ShowAgain is not { } offer) return;
+        _reportError = await FaunaApp.Core.ViewModels.ReportSheetViewModel.ShowAgainAsync(_rpc, offer.Ids);
+        UnlessManagerRetired(Refresh, "show-again refresh");
+    }
+
     // ── Helpers ──────────────────────────────────────────────────
 
     /// <summary>The sender's lowercase-hex actor id for a Fauna-rail address, else
@@ -2287,9 +2316,10 @@ public sealed partial class ConversationsPage : Page
         // hide with them. Null for a message with no plane ref (mail, bridged): it
         // can be neither reported nor hidden.
         var reportKey = m.planeRef?.recordDigest;
+        var senderHex = SenderActorHex(m.sender);
         var region = FaunaApp.Core.Services.ContentPolicyCache.RenderFor(
             m.labels, FaunaApp.Core.Services.RegionSubject.Message(
-                m.messageId, m.body, reportKey, SenderActorHex(m.sender)));
+                m.messageId, m.body, reportKey, senderHex));
         return new FaunaApp.Controls.DmMessageView(
             Id: m.messageId,
             From: from,
@@ -2351,6 +2381,12 @@ public sealed partial class ConversationsPage : Page
             // The viewer's own report is what hid it: the blocked-notice then reads
             // "You reported this" (`source="reported"`), not the family-policy words.
             Reported: region.Reported,
+            // ...and the show-again beside that notice (moderation.md § Corollary — the
+            // reporter's hide is theirs to undo): the shared fold over the same two keys
+            // the verdict matched, naming the scope — the message, or the sender.
+            ShowAgain: region.Reported
+                ? FaunaApp.Core.Services.ContentPolicyCache.ShowAgainFor(reportKey, senderHex)
+                : null,
             // The report verb is offered on a RECEIVED message that has a plane
             // identity to be reported against (the shared report_message_target
             // answers none for mail / bridged — the verb paints nothing there).

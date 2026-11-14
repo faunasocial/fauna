@@ -115,6 +115,15 @@ impl FfiFeedManager {
         self.inner.snapshot()
     }
 
+    /// The feed selection the list shows now
+    /// ([`fauna_feed::FeedManager::cue_selection_key`]) — the key a cue capture
+    /// hands [`FfiCueTracker::note_selection`] before every sample, read here
+    /// so no shell ships the whole snapshot across the boundary per tick or
+    /// re-spells the key.
+    pub fn cue_selection_key(&self) -> String {
+        self.inner.cue_selection_key()
+    }
+
     /// Register a foreign (Swift/Kotlin/C#) observer notified after every state
     /// mutation. `FeedSnapshotObserver` is `#[uniffi::export(with_foreign)]`, so the
     /// foreign object implements it directly.
@@ -246,6 +255,31 @@ impl FfiFeedManager {
     /// leg needs no error arm of its own.
     pub fn restore_drafts(&self, bytes: Vec<u8>) {
         self.inner.restore_drafts(bytes);
+    }
+}
+
+// The posts rail's leave face, in its own export block gated on `drafts` too:
+// it drives the `FfiDraftsSync` that feature builds.
+#[cfg(feature = "drafts")]
+#[fauna_uniffi_async::export]
+impl FfiFeedManager {
+    /// The posts rail's **leave-door save**
+    /// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise):
+    /// the shared `DraftsSync::save_on_leave` over `sync` (this session's
+    /// `"posts"` rail) with this rail's FILL rule,
+    /// `FeedManager::fill_drafts_for_leave` — so a door taken before the
+    /// launch load has lifted the save gate still saves, by one read of its
+    /// own. `captured` is [`drafts_snapshot_bytes`](Self::drafts_snapshot_bytes)
+    /// read at the door. The caller bounds the call (the shared leave budget);
+    /// a failed read saves nothing. Returns `true` when it wrote.
+    pub async fn save_drafts_on_leave(
+        &self,
+        sync: Arc<crate::FfiDraftsSync>,
+        captured: Vec<u8>,
+    ) -> Result<bool, crate::FfiError> {
+        crate::drafts::posts_leave_save(sync.drafts_sync(), &self.inner, captured)
+            .await
+            .map_err(crate::general_err)
     }
 }
 
@@ -1325,6 +1359,16 @@ impl FfiCueTracker {
         self.lock().drain_all(wall_now_ms)
     }
 
+    /// The feed selection the list shows now
+    /// ([`FfiFeedManager::cue_selection_key`]); its change since the last call
+    /// drains every exposure — a feed switch ends every exposure, and is no
+    /// scroll. Call it before [`FfiCueTracker::sample`] on every sample and
+    /// emit what it returns like a sample's. See
+    /// [`fauna_feed::CueTracker::note_selection`].
+    pub fn note_selection(&self, key: String, wall_now_ms: u64) -> Vec<CueObservation> {
+        self.lock().note_selection(&key, wall_now_ms)
+    }
+
     /// An inline player's reading on `post_id`'s media, both in one unit (a
     /// shell passes `CMTime` seconds as-is): the tracker keeps the peak until
     /// the post's exposure is emitted, so the shell passes
@@ -1633,6 +1677,44 @@ mod tests {
         assert!(drained[0].is_media);
         assert_eq!(drained[0].observed_at_ms, 999);
         assert!(t.drain_all(999).is_empty(), "drained rows are forgotten");
+    }
+
+    /// `note_selection` reaches the same live tracker: the first key never
+    /// drains, a repeat never drains, and a changed key drains every exposure
+    /// (a post both feeds hold keeps its row, so only the switch ends it).
+    #[test]
+    fn the_tracker_face_drains_on_a_feed_switch() {
+        let t = FfiCueTracker::new(LeaveModel::HoldUnmeasured);
+        let row = CueRow {
+            post_id: "p".to_string(),
+            top: 0.0,
+            height: 1000.0,
+            is_media: false,
+            media_played_pm: None,
+        };
+        let win = vec!["p".to_string()];
+        assert!(t.note_selection("local".into(), 5).is_empty());
+        t.sample(vec![row.clone()], win.clone(), 0.0, 1000.0, 0, 10);
+        assert!(t.note_selection("local".into(), 200).is_empty());
+        t.sample(vec![row], win, 0.0, 1000.0, 250, 260);
+
+        let drained = t.note_selection("trending".into(), 400);
+        assert_eq!(drained.len(), 1, "the switch ends the exposure");
+        assert_eq!(drained[0].observed_at_ms, 400);
+        assert!(t.drain_all(999).is_empty(), "nothing is left tracked");
+    }
+
+    /// A freshly-built façade's selection key is the default feed's — pins
+    /// that `cue_selection_key` passes through to the shared spelling.
+    #[test]
+    fn new_manager_selection_key_is_local() {
+        let nest = NestClient::new(
+            "wss://127.0.0.1:0/ws".into(),
+            ActorKeypair::from_secret([3u8; 32]),
+        );
+        let mgr = FfiFeedManager::new(nest, [3u8; 32]);
+        assert_eq!(mgr.cue_selection_key(), mgr.snapshot().cue_selection_key());
+        assert_eq!(mgr.cue_selection_key(), "local");
     }
 
     /// A freshly-built façade exposes the manager's default snapshot (empty +

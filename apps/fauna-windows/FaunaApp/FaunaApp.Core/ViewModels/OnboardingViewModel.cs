@@ -372,10 +372,11 @@ internal partial class OnboardingViewModel : ObservableObject
     /// surface</i>). <c>null</c> is the clean outcome and the only one.
     ///
     /// <para>Handed in by whatever built this wizard instance: a sign-out or the
-    /// unreadable-index start-over (<c>App.SignOutHandler</c>), or the
-    /// signed-out launch's silent re-check
-    /// (<c>App.DispatchLaunchSnapshotAsync</c>). <c>null</c> on every other
-    /// entry, the "Add account" append included, which erases nothing.</para>
+    /// unreadable-index start-over (<c>App.FinishSignOut</c>), or the launch's
+    /// own run of the sign-out routine (<c>App.FinishAtLaunchAsync</c>, painted on
+    /// the cold launch's first <c>identity_choice</c> — its refusal line when the
+    /// launch failed closed). <c>null</c> on every other entry, the "Add account"
+    /// append included, which erases nothing.</para>
     ///
     /// <para>State the wizard's machine does not own, which is the point: the
     /// line used to ride <see cref="ErrorMessage"/> as a sticky fallback, because
@@ -400,9 +401,11 @@ internal partial class OnboardingViewModel : ObservableObject
     public string? SignOutResidueMessage => _signOutResidue?.Line;
 
     /// <summary>
-    /// Remove Again (<c>sign-out-residue-retry-button</c>): re-sweep what the
-    /// painted residue recorded, off the UI thread, and paint what is left —
-    /// nothing, when the device is now clean.
+    /// Remove Again (<c>sign-out-residue-retry-button</c>): run the one sign-out
+    /// routine again (<c>SignOutResidueSurface.Retry</c> → <c>Finish</c> as Remove
+    /// Again — the sign-out record if one still owes work, then the residue
+    /// record), off the UI thread, and paint what is left — nothing, when the
+    /// device is now clean.
     ///
     /// <para>Presses are <b>serialized, never dropped</b>: a press that lands
     /// while a re-sweep is running was made after whatever the user just fixed,

@@ -55,6 +55,8 @@ domain: `alice@192.168.1.50`, `alice@pi.local`, or `alice@localhost` all work,
 and skip the domain checks. This is how you reach a nest on your own network
 — see [the home-nest guide](nest-home-setup.md).
 
+**Starting the terminal app already pointed at a nest?** Give the nest's address when you start it — `fauna-tui nest.example.org`, or `fauna-tui 192.168.1.50:8443` — and when you reach this step the handle field already has that nest filled in after the `@`. Type your name in front of it and press **Check** as usual. An argument with more than the address in it, such as a path, is ignored, and the field starts empty.
+
 ## Step 3a — Join with an invite
 
 If the nest already has an owner, its admin decides who can join, usually by invitation. The invite page gives you both ways in:

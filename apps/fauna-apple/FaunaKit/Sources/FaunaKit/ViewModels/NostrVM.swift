@@ -266,14 +266,13 @@ public class NostrVM {
         errorMessage = nil
         do {
             let petname = followPetname.trimmingCharacters(in: .whitespaces)
-            try await api.addNostrFollow(
+            let queued = try await api.addNostrFollowOrQueue(
                 pubkey: pubkey,
-                petname: petname.isEmpty ? nil : petname,
-                relayHints: nil
+                petname: petname.isEmpty ? nil : petname
             )
             followPubkey = ""
             followPetname = ""
-            await refresh()
+            if settleFollowChange(queued: queued) { await refresh() }
         } catch {
             errorMessage = DisplayError.http(error)
         }
@@ -282,11 +281,20 @@ public class NostrVM {
     public func removeFollow(npub: String) async {
         guard let api else { return }
         do {
-            try await api.removeNostrFollow(npub: npub)
-            await refresh()
+            let queued = try await api.removeNostrFollowOrQueue(npub: npub)
+            if settleFollowChange(queued: queued) { await refresh() }
         } catch {
             errorMessage = DisplayError.http(error)
         }
+    }
+
+    /// Settle one follow/unfollow's outcome; returns whether the page re-lists.
+    /// Queued with no nest (the bridges follow composer, account-offline-mutation.md
+    /// § The offline-mutation contract) → the page error clears and no list
+    /// changes; sent → re-list. The same rule as ``BridgeManagerVM``'s.
+    func settleFollowChange(queued: Bool) -> Bool {
+        if queued { errorMessage = nil }
+        return !queued
     }
 
     // MARK: - Connected apps (NIP-46 bunker) — the invite start

@@ -29,7 +29,7 @@
 //! Inventing a per-app "was it a compose change?" predicate would be exactly
 //! the cleverness the shared dedup exists to avoid.
 //!
-//! Wired from the AuthSuccess handler beside `crate::conversations::drafts::start`
+//! Wired from the SessionEstablished handler beside `crate::conversations::drafts::start`
 //! (`app.rs`), and, like the conversations leg, outside any engine/MLS gate:
 //! drafts seal under the owner's `BackupKey` and need no MLS, so an unrelated
 //! init failure must not also cost the user their unsent post.
@@ -97,22 +97,37 @@ pub fn flush_now_blocking(bounded: bool) {
     let Some(manager) = crate::feed::host::manager() else {
         return;
     };
-    let snapshot = manager.drafts_snapshot_bytes();
+    let captured = manager.drafts_snapshot_bytes();
     crate::blocking_flush::run_bounded(
         async move {
-            if let Err(e) = sync.save_if_changed(&snapshot).await {
+            if let Err(e) = leave_save(&sync, &manager, captured).await {
                 tracing::warn!("feed drafts: leave-flush failed: {e}");
             }
         },
-        Duration::from_millis(2_000),
-        Duration::from_millis(2_500),
+        fauna_client_drafts::LEAVE_FLUSH_BUDGET,
+        fauna_client_drafts::LEAVE_FLUSH_BUDGET + Duration::from_millis(500),
         bounded,
     );
 }
 
+/// The leave door's save of this rail (`reserved-folders.md` § The
+/// leave-flush promise): the shared `DraftsSync::save_on_leave` with the posts
+/// rail's FILL rule, `FeedManager::fill_drafts_for_leave` — so a door taken
+/// before the launch load has lifted the save gate still saves, by one read of
+/// its own. Generic over both transports so its tests run over an in-memory
+/// nest.
+async fn leave_save<R: fauna_protocol::RpcRequester, N: fauna_protocol::RpcRequester + Clone>(
+    sync: &DraftsSync<R>,
+    manager: &fauna_feed::FeedManager<N>,
+    captured: Vec<u8>,
+) -> Result<bool, fauna_client_drafts::DraftsClientError<R::Error>> {
+    sync.save_on_leave(captured, |resting| manager.fill_drafts_for_leave(&resting))
+        .await
+}
+
 /// Wire feed-draft persistence for the just-authenticated actor: build the
 /// shared [`DraftsSync`], restore the draft on launch, and attach the
-/// debounced autosave. Called from the `AuthSuccess` handler alongside
+/// debounced autosave. Called from the `SessionEstablished` handler alongside
 /// `crate::conversations::drafts::start`.
 ///
 /// A malformed secret is logged and skipped (drafts simply don't persist)
@@ -225,6 +240,72 @@ mod tests {
             "a fired debounce timer must skip the save rather than resurrect a \
              torn-down session's manager",
         );
+    }
+}
+
+#[cfg(test)]
+mod leave_door_tests {
+    use super::*;
+    use fauna_client_drafts::testing::{MemoryDraftsNest, SharedDraftsNest};
+
+    fn sync(nest: &Arc<MemoryDraftsNest>) -> DraftsSync<SharedDraftsNest> {
+        DraftsSync::new(
+            SharedDraftsNest(Arc::clone(nest)),
+            &ActorKeypair::from_secret([7u8; 32]),
+            RAIL,
+        )
+    }
+
+    fn feed_with(text: &str) -> fauna_feed::FeedManager<Arc<SharedDraftsNest>> {
+        let manager = fauna_feed::FeedManager::new(
+            Arc::new(SharedDraftsNest(Arc::new(MemoryDraftsNest::default()))),
+            [9u8; 32],
+        );
+        manager.update_compose(text.into(), String::new(), None);
+        manager
+    }
+
+    async fn rest(nest: &Arc<MemoryDraftsNest>, bytes: &[u8]) {
+        let other = sync(nest);
+        other.load().await.unwrap();
+        assert!(other.save_if_changed(bytes).await.unwrap());
+    }
+
+    /// **A leave door taken before the launch load lifted the gate still
+    /// saves the typed draft.** Mutation: put `save_if_changed(&captured)`
+    /// back in [`leave_save`] and this reds.
+    #[tokio::test]
+    async fn a_door_before_the_launch_load_saves_the_typed_draft() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        rest(&nest, &feed_with("resting").drafts_snapshot_bytes()).await;
+
+        let typed = feed_with("typed before the gate opened");
+        let captured = typed.drafts_snapshot_bytes();
+        assert!(
+            leave_save(&sync(&nest), &typed, captured.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(sync(&nest).load().await.unwrap(), Some(captured));
+    }
+
+    /// An untouched composer takes the resting draft: nothing is written.
+    #[tokio::test]
+    async fn a_door_with_nothing_typed_never_overwrites_the_resting_draft() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        let resting = feed_with("resting").drafts_snapshot_bytes();
+        rest(&nest, &resting).await;
+        let before = *nest.puts.lock().unwrap();
+
+        let untouched = feed_with("");
+        let captured = untouched.drafts_snapshot_bytes();
+        assert!(
+            !leave_save(&sync(&nest), &untouched, captured)
+                .await
+                .unwrap()
+        );
+        assert_eq!(*nest.puts.lock().unwrap(), before);
+        assert_eq!(sync(&nest).load().await.unwrap(), Some(resting));
     }
 }
 

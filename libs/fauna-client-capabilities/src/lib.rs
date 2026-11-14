@@ -45,11 +45,12 @@ pub use succession::{
 use fauna_client_subscriptions::custody::current_period;
 use fauna_core::data::{MailConfig, SubscriptionsConfig};
 use fauna_mls::wrapped_blob::{
-    GrantBlob, GrantWindow, PriorMsekGeneration, ScopeTuple, ScopeWraps, WrapError,
-    WrappedScopeKey, bounded_mail_epoch_wraps, bounded_mail_epoch_wraps_for_range,
-    build_bounded_mail_grant, build_grant_blob, build_grant_blob_with_epochs, build_renewal_wraps,
+    GrantBlob, GrantWindow, MAX_MASTER_MAIL_GENERATIONS, PriorMsekGeneration, ScopeTuple,
+    ScopeWraps, WrapError, WrappedScopeKey, bounded_mail_epoch_wraps,
+    bounded_mail_epoch_wraps_for_range, build_bounded_mail_grant, build_grant_blob,
+    build_grant_blob_with_epochs, build_renewal_wraps, derive_master_mail_capability_payload,
     derive_recipient_calendar_capability_secret, derive_recipient_card_capability_secret,
-    derive_recipient_mail_capability_secret, mail_sealing_epoch_of,
+    mail_sealing_epoch_of,
 };
 
 /// Advisory default grant window: ~90 days, in seconds — `GrantWindow`'s wire
@@ -193,6 +194,26 @@ pub enum DerivePayloadError {
     MaterializeRefused(String),
 }
 
+/// A master-key calendar or card payload: `derive` of each retained MSEK
+/// generation (`msek`, then `mail.prior_mseks`, newest first), concatenated —
+/// `k × 2432`, the form the shared length dispatch chunk-trials
+/// (`capability-grants.md` § Capability tiering → *The materialization grant*,
+/// part (e)).
+fn per_generation_payload(
+    msek: &fauna_core::secret::SecretArray32,
+    mail: &MailConfig,
+    derive: fn(&[u8; 32]) -> Vec<u8>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    for g in std::iter::once(msek)
+        .chain(mail.prior_mseks.iter())
+        .take(MAX_MASTER_MAIL_GENERATIONS)
+    {
+        out.extend_from_slice(&derive(&g.to_array()));
+    }
+    out
+}
+
 /// Derive the minimal payload a [`ScopeTuple`] wraps into its
 /// `WrappedScopeKey`, from material the owner already holds — the mail
 /// custody (`fauna.state.mail`, the account plane's READ fold) for the
@@ -224,7 +245,16 @@ pub fn derive_scope_payload(
                     .msek
                     .as_ref()
                     .ok_or(DerivePayloadError::MailNotEnabled)?;
-                Ok(Some(derive_recipient_calendar_capability_secret(msek)))
+                // One standing secret per retained generation, newest first
+                // (`k × 2432`): the master-key regime opens every record of
+                // every generation the wrap carries, and the existing length
+                // dispatch chunk-trials it (`capability-grants.md` § Capability
+                // tiering → *The materialization grant*, part (e)).
+                Ok(Some(per_generation_payload(
+                    msek,
+                    mail,
+                    derive_recipient_calendar_capability_secret,
+                )))
             }
             // The card's OWN standing secret, the calendar arm's twin
             // (`owner-key-material.md` § Path B-sibling-6): it opens
@@ -237,28 +267,31 @@ pub fn derive_scope_payload(
                     .msek
                     .as_ref()
                     .ok_or(DerivePayloadError::MailNotEnabled)?;
-                Ok(Some(derive_recipient_card_capability_secret(msek)))
+                Ok(Some(per_generation_payload(
+                    msek,
+                    mail,
+                    derive_recipient_card_capability_secret,
+                )))
             }
             Some(ScopeTuple::KIND_MAIL) => {
                 let msek = mail
                     .msek
                     .as_ref()
                     .ok_or(DerivePayloadError::MailNotEnabled)?;
-                // The `32 + 2400`-byte X-Wing shape (`x25519_secret ∥ ml-kem-dk`) —
-                // the goal-doc payload contract (`post-quantum.md` § surface A, the
-                // derived-High capability-grant note). Assembled by the shared
-                // `fauna_mls::wrapped_blob::derive_recipient_mail_capability_secret`
-                // (the single source of truth for the byte contract — the `fauna-ffi`
-                // recipient-material export the tier_3 seal-helper mint drives derives
-                // it from the SAME function, so the shape can't drift). The X25519 half
-                // is byte-identical to the classical recipient secret, so this is a pure
-                // superset: the holder's `open_mail_record_with_key` (32-vs-2432 length
-                // dispatch) opens BOTH classical and hybrid (X-Wing-sealed) mail records
-                // with it, which is what makes hybrid-sealed mail drainable under the
-                // grant. Deterministic in MSEK, so no "PQ published" gate is
-                // needed or available — and no larger than the derived key already is
-                // off-box.
-                Ok(Some(derive_recipient_mail_capability_secret(msek)))
+                // The master-key payload (`capability-grants.md` § Capability
+                // tiering → *Content-sealing epochs* → *What a master-key mail
+                // wrap conveys*, ruled 2026-11-13): per retained generation,
+                // newest first, its standing secret (`x25519 ∥ ml-kem-dk`) then
+                // its mail-epoch root, so the holder opens standing- AND
+                // epoch-sealed mail of every generation
+                // (`fauna_mls::wrapped_blob::open_mail_record_with_grant_key`).
+                // Every prior is carried, with or without a recorded
+                // retirement instant — the bounded mint's reader
+                // (`mail_msek_generations`) drops those, this one must not.
+                let priors: Vec<[u8; 32]> = mail.prior_mseks.iter().map(|m| m.to_array()).collect();
+                Ok(Some(
+                    derive_master_mail_capability_payload(&msek.to_array(), &priors).to_vec(),
+                ))
             }
             Some(ScopeTuple::KIND_POST) => {
                 let tier = tuple
@@ -1462,6 +1495,67 @@ pub fn bounded_mail_rotation_heal_keys(
     )?)
 }
 
+/// The MSEK-derived kinds whose **master-key** (standing, `epoch: None`)
+/// `content.read` wrap an MSEK rotation tops up in place (`capability-grants.md`
+/// § Capability tiering → *What a master-key mail wrap conveys*, and → *The
+/// materialization grant*, part (e)): mail (`k × 2464`), calendar and card
+/// (`k × 2432`).
+pub const MASTER_KEY_HEAL_KINDS: [&str; 3] = [
+    ScopeTuple::KIND_MAIL,
+    ScopeTuple::KIND_CALENDAR,
+    ScopeTuple::KIND_CARD,
+];
+
+/// The standing `content.read` tuple a folded grant-event scope entry names,
+/// when it is one the rotation heal tops up: class `content.read`, kind one of
+/// [`MASTER_KEY_HEAL_KINDS`] exactly (no labeler factor), no tier (a bounded
+/// grant's `tier` marks it, `grant_log::is_bounded_mail_grant`).
+#[must_use]
+pub fn master_key_heal_tuple(
+    scope: &fauna_core::grant_event::GrantEventScope,
+) -> Option<ScopeTuple> {
+    let kind = scope.kind.as_deref()?;
+    (scope.class == ScopeTuple::CLASS_CONTENT_READ
+        && scope.tier.is_none()
+        && MASTER_KEY_HEAL_KINDS.contains(&kind))
+    .then(|| ScopeTuple::delegable_kind_read(kind))
+}
+
+/// The `appended_keys` of the equal-end `fauna.capabilities.renew` that heals
+/// one outstanding **master-key** grant after an MSEK rotation: for every
+/// standing mail, calendar or card read the grant declares
+/// ([`master_key_heal_tuple`]), the standing wrap rebuilt from the
+/// post-rotation custody ([`derive_scope_payload`] — the new generation's
+/// chunk first). The nest replaces the grant's one `(scope, None)` wrap in
+/// place, so the grant never holds a second wrap of the scope and never an
+/// `epoch: Some` one (`capability-grants.md` § Capability tiering → *What a
+/// master-key mail wrap conveys*). Empty when the grant declares no such read.
+///
+/// # Errors
+///
+/// [`DerivePayloadError::MailNotEnabled`] when the mail custody's `msek` is
+/// unset; [`MintGrantError::Wrap`] on a seal failure.
+pub fn master_key_rotation_heal_keys(
+    mail: &MailConfig,
+    owner_actor_id: &[u8; 32],
+    holder_pubkey: &[u8; 32],
+    holder_mlkem_ek: Option<&[u8]>,
+    scope: &[fauna_core::grant_event::GrantEventScope],
+) -> Result<Vec<WrappedScopeKey>, MintGrantError> {
+    let mut wraps: Vec<ScopeWraps> = Vec::new();
+    for tuple in scope.iter().filter_map(master_key_heal_tuple) {
+        if let Some(payload) = derive_scope_payload(None, mail, &tuple)? {
+            wraps.push((tuple, vec![(None, payload)]));
+        }
+    }
+    Ok(build_renewal_wraps(
+        owner_actor_id,
+        holder_pubkey,
+        holder_mlkem_ek,
+        &wraps,
+    )?)
+}
+
 /// The `content.read{mail}` scope tuple, confined to `factor` when the grant
 /// is (`ScopeTuple::mail_for_factor`).
 fn mail_scope_tuple(factor: Option<&str>) -> ScopeTuple {
@@ -1477,8 +1571,9 @@ mod tests {
     use fauna_core::data::MailConfig;
     use fauna_mls::wrapped_blob::{
         FAUNA_KEM_XWING, MLKEM768_DECAPS_KEY_LEN, derive_bridge_service_user_mlkem768,
-        derive_recipient_hpke_keypair, derive_recipient_xwing_keypair, generate_x25519_keypair,
-        unseal_capability, unseal_capability_hybrid,
+        derive_recipient_hpke_keypair, derive_recipient_mail_capability_secret,
+        derive_recipient_xwing_keypair, generate_x25519_keypair, unseal_capability,
+        unseal_capability_hybrid,
     };
 
     fn mail_scope() -> ScopeTuple {
@@ -1527,22 +1622,86 @@ mod tests {
     #[test]
     fn mail_scope_derives_xwing_superset_payload_from_msek() {
         let mut mail = MailConfig::default();
-        // The mail/calendar payload is the `32 + 2400`-byte X-Wing shape
-        // (`x25519_secret ∥ ml-kem-dk`, `post-quantum.md` § surface A). Its first
-        // 32 bytes ARE the classical recipient secret (a pure superset), so a
-        // holder opens both classical and hybrid mail records with it.
+        // A one-generation master-key payload: the `32 + 2400`-byte X-Wing
+        // standing secret (`x25519_secret ∥ ml-kem-dk`, `post-quantum.md`
+        // § surface A) then the 32-byte mail-epoch root (`capability-grants.md`
+        // § Capability tiering → *What a master-key mail wrap conveys*). The
+        // first 32 bytes ARE the classical recipient secret (a pure superset).
         let msek = [0x42u8; 32];
         mail.msek = Some(msek.into());
         let payload = derive_scope_payload(None, &mail, &mail_scope())
             .unwrap()
             .expect("mail is key-bearing");
-        assert_eq!(payload.len(), 32 + MLKEM768_DECAPS_KEY_LEN);
+        assert_eq!(
+            payload.len(),
+            fauna_mls::wrapped_blob::MASTER_MAIL_CHUNK_LEN
+        );
         // Superset: the X25519 half is the classical recipient secret verbatim.
         let (expected_secret, _) = derive_recipient_hpke_keypair(&msek);
         assert_eq!(&payload[..32], &expected_secret[..]);
         // The ML-KEM half is the recipient's derived decaps key.
         let xwing = derive_recipient_xwing_keypair(&msek);
-        assert_eq!(&payload[32..], xwing.secret.mlkem_decaps_key());
+        assert_eq!(
+            &payload[32..32 + MLKEM768_DECAPS_KEY_LEN],
+            xwing.secret.mlkem_decaps_key()
+        );
+        // The tail is the generation's mail-epoch root.
+        assert_eq!(
+            &payload[32 + MLKEM768_DECAPS_KEY_LEN..],
+            &*fauna_mls::wrapped_blob::derive_mail_epoch_root(&msek)
+        );
+    }
+
+    /// The flow the master-key regime exists for (`capability-grants.md`
+    /// § Capability tiering → *What a master-key mail wrap conveys*): a minted
+    /// standing `content.read{mail}` wrap, unwrapped as its holder, opens a
+    /// record sealed under an epoch key of the current generation AND of a
+    /// prior one — every prior carried, recorded retirement instant or not.
+    #[test]
+    fn a_minted_master_mail_wrap_opens_epoch_sealed_mail_of_every_generation() {
+        use fauna_mls::wrapped_blob::{
+            MAIL_SEALING_EPOCH_SECS, derive_mail_epoch_root,
+            derive_recipient_epoch_xwing_keypair_from_root, open_mail_record_with_grant_key,
+            seal_to_recipient_xwing,
+        };
+        let new = [0x61u8; 32];
+        let old = [0x62u8; 32];
+        let mail = MailConfig {
+            msek: Some(new.into()),
+            prior_mseks: vec![old.into()],
+            ..MailConfig::default()
+        };
+        let (holder_sk, holder_pk) = generate_x25519_keypair();
+        let owner = [0x63u8; 32];
+        let blob = mint_grant(
+            None,
+            &mail,
+            &owner,
+            &[0x64u8; 16],
+            &holder_pk,
+            None,
+            GrantWindow(0, DEFAULT_GRANT_WINDOW_SECS),
+            &[mail_scope()],
+        )
+        .unwrap();
+        assert_eq!(blob.wrapped_keys.len(), 1);
+        assert_eq!(blob.wrapped_keys[0].epoch, None, "one standing wrap");
+        let key = unseal_capability(&blob.wrapped_keys[0], &owner, &holder_sk).unwrap();
+        assert_eq!(
+            key.len(),
+            2 * fauna_mls::wrapped_blob::MASTER_MAIL_CHUNK_LEN
+        );
+        let e = 2_990u64;
+        let t = e * MAIL_SEALING_EPOCH_SECS + 9;
+        for msek in [new, old] {
+            let kp =
+                derive_recipient_epoch_xwing_keypair_from_root(&derive_mail_epoch_root(&msek), e);
+            let env = seal_to_recipient_xwing(b"epoch mail", &kp.public).unwrap();
+            assert_eq!(
+                open_mail_record_with_grant_key(&env, &key, t).unwrap(),
+                b"epoch mail"
+            );
+        }
     }
 
     /// **The design's pinning test, at the mint** (`owner-key-material.md`
@@ -1595,7 +1754,11 @@ mod tests {
                 .unwrap();
         let open = |kind: RecordKind, env, payload: &[u8]| {
             let sk: [u8; 32] = payload[..32].try_into().unwrap();
-            let dk: [u8; MLKEM768_DECAPS_KEY_LEN] = payload[32..].try_into().unwrap();
+            // The standing secret's ML-KEM half; a master-key mail payload's
+            // trailing epoch root is not part of the standing open.
+            let dk: [u8; MLKEM768_DECAPS_KEY_LEN] = payload[32..32 + MLKEM768_DECAPS_KEY_LEN]
+                .try_into()
+                .unwrap();
             unseal_record_hybrid(kind, env, &sk, &dk)
         };
         assert_eq!(
@@ -2184,7 +2347,7 @@ mod tests {
             fauna_mls::wrapped_blob::KemSuite::STANDARD
         );
         let opened = unseal_capability(mail_key, &owner, &holder_sk).unwrap();
-        assert_eq!(opened.len(), 32 + MLKEM768_DECAPS_KEY_LEN);
+        assert_eq!(opened.len(), fauna_mls::wrapped_blob::MASTER_MAIL_CHUNK_LEN);
         let (expected_mail_secret, _) = derive_recipient_hpke_keypair(&msek);
         assert_eq!(&opened[..32], &expected_mail_secret[..]);
     }
@@ -2221,7 +2384,7 @@ mod tests {
         let opened = unseal_capability_hybrid(mail_key, &owner, &holder_sk, &holder_dk).unwrap();
         // The full X-Wing superset payload — the drain feeds this to
         // `open_mail_record_with_key` to open hybrid mail.
-        assert_eq!(opened.len(), 32 + MLKEM768_DECAPS_KEY_LEN);
+        assert_eq!(opened.len(), fauna_mls::wrapped_blob::MASTER_MAIL_CHUNK_LEN);
         let (expected_mail_secret, _) = derive_recipient_hpke_keypair(&msek);
         assert_eq!(&opened[..32], &expected_mail_secret[..]);
     }

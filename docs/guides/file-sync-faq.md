@@ -12,15 +12,20 @@ exactly what is available now.
 
 ## Can two people work in one shared folder straight from Explorer and Finder — without opening the Fauna app?
 
-Yes — that's the intended everyday experience. Fauna shows up as a cloud
-location in Windows Explorer and macOS Finder (the same way OneDrive and
-iCloud Drive do), and Word, Excel, or any other program reads and writes those
-folders directly.
+On Windows, yes — that's the everyday experience there. Fauna shows up as a
+cloud location in File Explorer (the same way OneDrive does), and Word, Excel,
+or any other program reads and writes those folders directly.
 
-You need the Fauna app itself only at the edges: accepting a share the first
-time, choosing which location on your machine carries it, browsing version
-history, and changing settings. The day-to-day open/edit/save loop is pure
-Explorer/Finder.
+On a Mac, not yet: the Fauna location in the Finder sidebar is built, but in
+the released Mac app it does not list your folders yet. Until it does, sync
+the folder to a location of your own choosing on the Mac: it is an ordinary
+folder in Finder; Word, Excel, or any other program reads and writes it
+directly, and Fauna keeps it in sync.
+
+Either way, you need the Fauna app itself only at the edges: accepting a share
+the first time, choosing which location on your machine carries it, browsing
+version history, and changing settings. The day-to-day open/edit/save loop
+happens in Explorer or Finder.
 
 ## Does sharing work when the other person's account lives on a different nest?
 
@@ -199,7 +204,7 @@ A location is never left *silently* stale.
 
 | Piece | Status |
 |---|---|
-| Explorer / Finder cloud folders (open/edit/save without the app) | **Available** (File Explorer on Windows; Finder on Mac) |
+| Explorer / Finder cloud folders (open/edit/save without the app) | **Available on Windows** (File Explorer); **not yet on Mac** — the Finder location is built but does not list your folders in the released Mac app; a folder synced to a location of your own choosing works in Finder meanwhile |
 | Sharing to someone on your nest, Reader/Writer roles, per-writer caps | **Available** — a writer's folder syncs both ways (the web app keeps no local folder to sync) |
 | Sharing to someone on **another nest** — browsing + downloading | **Available** (accept the invitation once, then it behaves like any other directory) |
 | Write access for someone on another nest (their location binding) | **Available** — accept the invitation, then bind the folder like one of your own |

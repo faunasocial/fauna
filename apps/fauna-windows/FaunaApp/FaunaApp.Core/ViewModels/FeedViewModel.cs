@@ -595,6 +595,17 @@ internal partial class FeedViewModel : ViewModelBase
     /// callers surface a thrown exception via <c>feed/error_buy_unlock</c>.</summary>
     public async Task<bool?> BuyUnlockOfferAsync(string postId) => await _manager.BuyUnlockOffer(postId);
 
+    /// <summary>The sold post's external checkout (<c>gated-post-payment-link</c>) — the
+    /// manager's shared <c>pay_unlock_offer</c>: subscribe to the offer's tier FIRST
+    /// (across nests at the post's home), then return the checkout URL the shared rule
+    /// composed, bound to the buyer's actor (<c>monetization.md</c> § Pillar 3 →
+    /// Buyer↔actor binding (Q4), the Q13 rules (1) and (2)). <c>null</c> = nothing to
+    /// open (no resolved offer or link, the caller's own post, or an unsafe link —
+    /// nothing subscribed then); a thrown exception = the subscribe was refused and
+    /// nothing opens (callers surface it via <c>feed/error_buy_unlock</c>). Mirrors tui
+    /// <c>Op::PayUnlockOffer</c>.</summary>
+    public async Task<string?> PayUnlockOfferAsync(string postId) => await _manager.PayUnlockOffer(postId);
+
     /// <summary>Dispatch <c>load-remote-content-button</c> to the manager (D3): flips the
     /// in-memory reveal set for <paramref name="postId"/> and re-emits; the next
     /// <c>Snapshot()</c> projects <c>RemoteImage.revealed=true</c> for that post
@@ -815,6 +826,15 @@ public partial class FeedPostItem : ObservableObject
     /// <summary>Gate for <c>video-thumbnail</c>'s visibility — true iff the document folded a
     /// <c>Video</c> or a <c>ProxiedVideo</c> embed.</summary>
     public bool HasVideo => VideoThumbnailText.Length > 0;
+
+    /// <summary>Every media element of the post, in body order — what the list card paints,
+    /// one <c>post-image</c> per picture and one <c>video-thumbnail</c> per video, each
+    /// publishing its settled <c>alt</c> (render-model.md § D6b <i>Accessors</i>;
+    /// <see cref="FaunaApp.Core.Helpers.DocumentRenderer.MediaElements"/>). Each element carries
+    /// this post's id and blob home, which its slot's player keep and loader need and a
+    /// nested template cannot reach on the row. The single-slot properties above stay what
+    /// the resolve guard, the C2PA check and the data snapshot read.</summary>
+    public IReadOnlyList<FaunaApp.Core.Helpers.PostMediaElement> MediaElements { get; }
 
     /// <summary>The post body as the shared semantic <c>RenderDocument</c>
     /// (<c>PostSummary.document</c>, produced once by the feed manager via
@@ -1320,6 +1340,22 @@ public partial class FeedPostItem : ObservableObject
     /// the row on the next re-sync.</summary>
     public bool Reported { get; }
 
+    /// <summary>The show-again the reported placeholder offers (moderation.md §
+    /// Corollary — the reporter's hide is theirs to undo): the hidden ids one press
+    /// removes and the label naming the scope, from the shared fold over the same keys
+    /// the <see cref="Reported"/> verdict matched (the post's cid, its author's actor
+    /// id); <c>null</c> unless the viewer's own report hid this post. Read once at
+    /// construction like the verdict, and part of <see cref="ContentEquals"/>.</summary>
+    public ShowAgainOffer? ShowAgain { get; }
+
+    /// <summary>Gate for <c>content-policy-show-again-button</c>: beside the reported
+    /// <c>content-policy-blocked-notice</c> and only there — a region or nest block
+    /// painted ahead of it keeps its own placeholder and no show-again.</summary>
+    public bool ShowShowAgain => ShowContentBlockedNotice && Reported && ShowAgain is not null;
+
+    /// <summary>The show-again button's words — the item, or the account.</summary>
+    public string ShowAgainLabel => ShowAgain?.Label ?? "";
+
     /// <summary>The words of the blocked-notice: the viewer's own act when they
     /// reported it, else the family-policy sentence.</summary>
     public string ContentBlockedNoticeText => Strings.Get(
@@ -1358,6 +1394,7 @@ public partial class FeedPostItem : ObservableObject
         OnPropertyChanged(nameof(ShowNestReveal));
         OnPropertyChanged(nameof(NestAccessibleNotice));
         OnPropertyChanged(nameof(ShowContentBlockedNotice));
+        OnPropertyChanged(nameof(ShowShowAgain));
         OnPropertyChanged(nameof(ShowMutedCollapse));
         OnPropertyChanged(nameof(ShowContentCollapse));
         OnPropertyChanged(nameof(ShowNormalContent));
@@ -1559,7 +1596,10 @@ public partial class FeedPostItem : ObservableObject
         _videoBlock = FaunaApp.Core.Helpers.DocumentRenderer.MediaVideoBlock(p.document);
         VideoHashHex = _videoBlock is uniffi.fauna_core.RenderBlock.Video video ? video.hash : "";
         VideoProxiedPath = _videoBlock is uniffi.fauna_core.RenderBlock.ProxiedVideo proxied ? proxied.path : "";
-        var quote = FaunaApp.Core.Helpers.DocumentRenderer.QuotedPost(p.document);
+        MediaElements = FaunaApp.Core.Helpers.DocumentRenderer.MediaElements(p.document)
+            .Select(e => e with { PostId = p.postId, Home = BlobHome })
+            .ToList();
+        var quote =FaunaApp.Core.Helpers.DocumentRenderer.QuotedPost(p.document);
         HasQuotedPost = quote is not null;
         QuotedPostAuthor = quote is not null ? FaunaFfiMethods.ShortId(quote.author) : "";
         QuotedPostBody = quote?.body ?? "";
@@ -1686,6 +1726,10 @@ public partial class FeedPostItem : ObservableObject
         Nest = decision.NestPlaceholder;
         GuardianReason = decision.GuardianReason;
         Reported = decision.Reported;
+        // The reporter's show-again beside that placeholder: the same keys the verdict
+        // matched (RegionSubject.Post's report key and author), the shared fold's ids
+        // and scope label.
+        ShowAgain = Reported ? ContentPolicyCache.ShowAgainFor(p.postId, p.author) : null;
         // Guardian Notify (family-safety.md § Guardian Notify): count any
         // GUARDIAN-floor enforcement on this item — never the own-threshold
         // collapse above, which is a different lens. A no-op unless the ward's
@@ -1741,6 +1785,7 @@ public partial class FeedPostItem : ObservableObject
             && VideoHashHex == other.VideoHashHex
             && MediaProxiedPath == other.MediaProxiedPath
             && VideoProxiedPath == other.VideoProxiedPath
+            && MediaElements.SequenceEqual(other.MediaElements)
             && HasBlockedRemoteImage == other.HasBlockedRemoteImage
             && LikeCount == other.LikeCount
             && ReplyCount == other.ReplyCount
@@ -1801,6 +1846,9 @@ public partial class FeedPostItem : ObservableObject
             // session-local reveal state, not snapshot content.
             && ContentVerdict == other.ContentVerdict
             && Reported == other.Reported
+            // ...and the show-again it offers: the account hidden on top of the post
+            // keeps the verdict and the words but changes the button's scope.
+            && Equals(ShowAgain, other.ShowAgain)
             // ...and the region placeholder beside it (a record: verb, region,
             // authority, reason) — a newer document can keep the verb and change
             // the reason, which is render-bound content too.

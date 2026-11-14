@@ -196,6 +196,7 @@ pub mod guardian_content_document_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod guardian_policy_test_hook;
 pub mod host_maintenance;
+pub mod http_drain;
 pub mod http_range;
 pub mod identity_domain_core;
 /// The oracle's grant check every custodian shares (TP11).
@@ -3270,6 +3271,21 @@ pub async fn start_server(
     if let Some(data_dir) = crate::mail_enable::data_dir_from_db_path(&state.config.nest.db_path) {
         state.scope_handle(crate::mail_enable::spawn_mail_enable_reconciliation(
             state.db.clone(),
+            data_dir,
+            crate::mail_enable::MAIL_ENABLE_RECONCILE_INTERVAL,
+        ));
+    }
+
+    // Supervisor re-assert tick — the flag reconciles heal the flags, this
+    // re-sends each mail-bridge role's up/down from the toggles, so a role an
+    // s6 run-script's boot flag guard re-downed after the enable's `up` comes
+    // back within one pass. Spec: `mail-bridge-lifecycle.md` § Default-off on
+    // first claim.
+    if let Some(data_dir) = crate::mail_enable::data_dir_from_db_path(&state.config.nest.db_path) {
+        state.scope_handle(crate::mail_enable::spawn_supervisor_reconciliation(
+            state.db.clone(),
+            state.node_mode.clone(),
+            state.content_scanners,
             data_dir,
             crate::mail_enable::MAIL_ENABLE_RECONCILE_INTERVAL,
         ));

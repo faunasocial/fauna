@@ -121,19 +121,7 @@ public struct SubscriptionSettingsView: View {
     /// linux `apps/fauna-linux/src/settings/subscriptions.rs`'s claim section.
     private var claimRedeemSection: some View {
         Section(L.subscriptions.redeemClaimTitle) {
-            HStack {
-                TextField(L.subscriptions.claimCode, text: $vm.claimCodeInput)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier(Ids.subscriptionClaimRedeemInput)
-                    .automationField(Ids.subscriptionClaimRedeemInput, text: $vm.claimCodeInput)
-                Button(L.subscriptions.redeem) { Task { await vm.redeemClaim() } }
-                    .accessibilityIdentifier(Ids.subscriptionClaimRedeemButton)
-                    .automationActivate(Ids.subscriptionClaimRedeemButton) {
-                        Task { await vm.redeemClaim() }
-                    }
-                    // The code field beside it is buffer and stays typeable.
-                    .faunaGate("fauna.payments.claims.redeem")
-            }
+            ClaimRedeemRow(code: $vm.claimCodeInput) { Task { await vm.redeemClaim() } }
         }
     }
     #endif

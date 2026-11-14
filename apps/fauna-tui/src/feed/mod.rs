@@ -144,6 +144,40 @@ pub enum Action {
     /// `feed-post-copy-paywall-link-button` — mint and copy a short-lived
     /// full-access URL for a published **and** gated post.
     CopyPaywallLink(String),
+    /// `feed-post-advertise-nostr-button` — arm the confirm step
+    /// (`advertise-nostr-confirm-dialog`) on this own sold post. Purely
+    /// local: nothing is published until the confirm (`monetization.md`
+    /// § The Nostr advertisement of a sold post → *What the author sees and
+    /// agrees to*). `zaps`-gated like the act it opens.
+    #[cfg(feature = "zaps")]
+    StartAdvertiseNostr(String),
+    /// `advertise-nostr-confirm-button` — `fauna.nostr.advertise.set`, then a
+    /// re-read of the feed so the card's `nostr_advertised_at` — and with it
+    /// the verb pair's arm — repaints from the nest's own answer.
+    #[cfg(feature = "zaps")]
+    ConfirmAdvertiseNostr(String),
+    /// `advertise-nostr-cancel-button` — disarm the confirm step; nothing is
+    /// sent.
+    CancelAdvertiseNostr,
+    /// `feed-post-stop-advertising-nostr-button` — `fauna.nostr.advertise.clear`
+    /// (one tap, no confirm: the withdrawal is de-escalation and idempotent),
+    /// then the same re-read. Ungated, like the nest's `clear`.
+    StopAdvertisingNostr(String),
+    /// `feed-post-sale-price-button` — open the sold post's *Change price…*
+    /// dialog (`monetization.md` § The asking price → *Re-pricing a sold
+    /// post*): reads the author's own tiers for the selling tier, whose two
+    /// price fields pre-fill the dialog. The money plane's.
+    #[cfg(feature = "payments")]
+    StartSalePrice(String),
+    /// `feed-post-sale-price-save-button` — run the shared save plan
+    /// (`fauna_client_subscriptions::plan_sale_price_edit`) and send what it
+    /// answers, then re-read the feed.
+    #[cfg(feature = "payments")]
+    SaveSalePrice(String),
+    /// `feed-post-sale-price-cancel-button` — close the dialog; nothing is
+    /// sent.
+    #[cfg(feature = "payments")]
+    CancelSalePrice,
     ClearSearch,
     SubmitPost,
     /// `compose-dialog-button` — open the rich compose dialog
@@ -578,6 +612,21 @@ pub struct FeedState {
     /// to destroy"), and every path that closes the menu clears both — an armed
     /// confirm surviving a menu close would re-arm on the next open.
     pub delete_confirm: Option<String>,
+    /// The post whose ⋯ menu is armed to advertise on Nostr — the open
+    /// `advertise-nostr-confirm-dialog` (`monetization.md` § The Nostr
+    /// advertisement of a sold post → *What the author sees and agrees to*).
+    /// The [`delete_confirm`](Self::delete_confirm) twin: painted only while
+    /// that post's menu is open, cleared by every fresh open.
+    pub advertise_confirm: Option<String>,
+    /// The open `feed-post-sale-price-dialog` — the sold post's *Change
+    /// price…* editor. Painted only while that post's menu is open, cleared
+    /// by every fresh open, as [`advertise_confirm`](Self::advertise_confirm).
+    #[cfg(feature = "payments")]
+    pub sale_price: Option<SalePriceDialog>,
+    /// Whether the nest serves the Nostr advertisement — its `nostr-advertise`
+    /// capability, read once per session by the first own-post menu open
+    /// (`Op::HydrateOwnPostMenu`). `None` = not read yet: no `Advertise` verb.
+    pub nostr_advertise: Option<bool>,
     /// The open `feed-post-train-target-sheet`: which post's ⋯ menu it opened
     /// on, and the trained factor it currently targets.
     ///
@@ -817,6 +866,10 @@ pub fn init(
         revealed_content: std::collections::HashSet::new(),
         actions_open: None,
         delete_confirm: None,
+        advertise_confirm: None,
+        #[cfg(feature = "payments")]
+        sale_price: None,
+        nostr_advertise: None,
         train_sheet: None,
         web_copied: None,
         compose_dialog_open: false,
@@ -860,6 +913,14 @@ pub enum FeedField {
     /// (`monetization.md` § The asking price).
     #[cfg(feature = "payments")]
     ComposeSellAskingPrice,
+    /// `feed-post-sale-price-hint` — the open *Change price…* dialog's
+    /// free-text price, page-local like the reply draft (the manager owns no
+    /// re-pricing state).
+    #[cfg(feature = "payments")]
+    SalePriceHint,
+    /// `feed-post-sale-price-asking` — the same dialog's sats price.
+    #[cfg(feature = "payments")]
+    SalePriceAsking,
     /// A **re-query**, not a local filter (`feed.md` § Anti-patterns) — writing
     /// it costs a round trip, which is why the write path can return work.
     Search,
@@ -903,6 +964,18 @@ pub fn field(state: &FeedState, field: &FeedField) -> String {
         #[cfg(feature = "payments")]
         FeedField::ComposeSellAskingPrice => compose
             .and_then(|c| c.sell.as_ref().map(|s| s.asking_price.clone()))
+            .unwrap_or_default(),
+        #[cfg(feature = "payments")]
+        FeedField::SalePriceHint => state
+            .sale_price
+            .as_ref()
+            .map(|d| d.hint.clone())
+            .unwrap_or_default(),
+        #[cfg(feature = "payments")]
+        FeedField::SalePriceAsking => state
+            .sale_price
+            .as_ref()
+            .map(|d| d.asking.clone())
             .unwrap_or_default(),
         FeedField::Search => snap
             .as_ref()
@@ -989,6 +1062,20 @@ pub fn set_field(state: &mut FeedState, field: FeedField, value: String) -> Opti
             let mut sell = snap.compose.sell?;
             sell.asking_price = value;
             manager.update_compose_sell(Some(sell), snap.compose.gate_preview);
+        }
+        // A stray write with no dialog open, or before its tier read landed
+        // (the fields are not painted then), is a no-op.
+        #[cfg(feature = "payments")]
+        FeedField::SalePriceHint => {
+            if let Some(d) = state.sale_price.as_mut().filter(|d| d.tier.is_some()) {
+                d.hint = value;
+            }
+        }
+        #[cfg(feature = "payments")]
+        FeedField::SalePriceAsking => {
+            if let Some(d) = state.sale_price.as_mut().filter(|d| d.tier.is_some()) {
+                d.asking = value;
+            }
         }
         FeedField::Search => {
             return Some(PendingSearch {
@@ -1119,6 +1206,24 @@ impl Action {
             Action::PublishWeb(_) => Some("fauna.web.publish.set"),
             Action::UnpublishWeb(_) => Some("fauna.web.publish.unset"),
             Action::CopyPaywallLink(_) => Some("fauna.web.paywall.mint_token"),
+            // The Nostr advertisement pair (both `OnlineOnly`: the nest signs
+            // the note with the custodial key). Only the CONFIRM declares the
+            // act, as delete's does — arming the step issues nothing.
+            #[cfg(feature = "zaps")]
+            Action::ConfirmAdvertiseNostr(_) => Some("fauna.nostr.advertise.set"),
+            Action::StopAdvertisingNostr(_) => Some("fauna.nostr.advertise.clear"),
+            #[cfg(feature = "zaps")]
+            Action::StartAdvertiseNostr(_) => None,
+            Action::CancelAdvertiseNostr => None,
+            // *Change price…*: opening reads the author's tiers, saving runs
+            // the plan's `tiers.update` (and any `tiers.clear_field` after
+            // it) — the tier verbs the Tiers tab's edit form issues.
+            #[cfg(feature = "payments")]
+            Action::StartSalePrice(_) => Some("fauna.subscriptions.tiers.list"),
+            #[cfg(feature = "payments")]
+            Action::SaveSalePrice(_) => Some("fauna.subscriptions.tiers.update"),
+            #[cfg(feature = "payments")]
+            Action::CancelSalePrice => None,
             // Destroying an own post is classified `OfflineSafe`: the author
             // signs a `Tombstone` locally and the end state is idempotent
             // (`deleted:false` is a success), so the gate leaves it actuable
@@ -1294,6 +1399,107 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
             app.feed.delete_confirm = None;
             app.feed.actions_open = None;
             Some(Op::DeletePost { manager, post_id })
+        }
+        // The Nostr advertisement pair — re-resolved at click time against the
+        // post it names, as the web verbs are (the window re-ranks in place).
+        #[cfg(feature = "zaps")]
+        Action::StartAdvertiseNostr(post_id) => {
+            advertise_verb_for(app, &manager, &post_id)
+                .filter(|v| *v == fauna_feed::NostrAdvertiseVerb::Advertise)?;
+            app.feed.advertise_confirm = Some(post_id);
+            None
+        }
+        #[cfg(feature = "zaps")]
+        Action::ConfirmAdvertiseNostr(post_id) => {
+            // Only the armed post's confirm acts: a stale click on another
+            // post's step publishes nothing.
+            if app.feed.advertise_confirm.as_deref() != Some(post_id.as_str()) {
+                return None;
+            }
+            app.feed.advertise_confirm = None;
+            advertise_verb_for(app, &manager, &post_id)
+                .filter(|v| *v == fauna_feed::NostrAdvertiseVerb::Advertise)?;
+            Some(Op::NostrAdvertise {
+                nest: app.session.as_ref()?.client.clone(),
+                manager,
+                post_id,
+            })
+        }
+        Action::CancelAdvertiseNostr => {
+            app.feed.advertise_confirm = None;
+            None
+        }
+        Action::StopAdvertisingNostr(post_id) => {
+            advertise_verb_for(app, &manager, &post_id)
+                .filter(|v| *v == fauna_feed::NostrAdvertiseVerb::StopAdvertising)?;
+            Some(Op::NostrStopAdvertising {
+                nest: app.session.as_ref()?.client.clone(),
+                manager,
+                post_id,
+            })
+        }
+        // The sold post's *Change price…* — re-resolved at click time against
+        // the post it names, like every verb in this menu.
+        #[cfg(feature = "payments")]
+        Action::StartSalePrice(post_id) => {
+            let tier = sale_price_post(app, &manager, &post_id)?.gated_tier?;
+            app.feed.sale_price = Some(SalePriceDialog {
+                post_id: post_id.clone(),
+                tier: None,
+                hint: String::new(),
+                asking: String::new(),
+            });
+            Some(Op::LoadSalePrice {
+                nest: app.session.as_ref()?.client.clone(),
+                post_id,
+                tier,
+            })
+        }
+        #[cfg(feature = "payments")]
+        Action::SaveSalePrice(post_id) => {
+            // Only the open dialog's own save acts, and only once its tier has
+            // been read: the plan compares against what the fields were
+            // pre-filled with.
+            let dialog = app
+                .feed
+                .sale_price
+                .as_ref()
+                .filter(|d| d.post_id == post_id)?;
+            let tier = dialog.tier.as_ref()?;
+            sale_price_post(app, &manager, &post_id)?;
+            match fauna_client_subscriptions::plan_sale_price_edit(
+                tier,
+                &dialog.hint,
+                &dialog.asking,
+            ) {
+                // The composer's own refusal, on the page's error line; the
+                // dialog stays open with what the author typed.
+                Err(e) => {
+                    app.errors.insert(
+                        crate::pages::Page::Feed,
+                        fauna_i18n::strings::lookup(e.i18n_key())
+                            .unwrap_or(e.i18n_key())
+                            .to_string(),
+                    );
+                    None
+                }
+                // Saved untouched: nothing to send.
+                Ok(edit) if edit.is_empty() => {
+                    app.feed.sale_price = None;
+                    None
+                }
+                Ok(edit) => Some(Op::SaveSalePrice {
+                    nest: app.session.as_ref()?.client.clone(),
+                    manager,
+                    post_id,
+                    edit,
+                }),
+            }
+        }
+        #[cfg(feature = "payments")]
+        Action::CancelSalePrice => {
+            app.feed.sale_price = None;
+            None
         }
         Action::PublishWeb(post_id) => {
             own_published_post(app, &manager, &post_id, false)?;
@@ -1617,6 +1823,13 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
             // property of THIS opening of the menu, so arming, closing and
             // reopening must present the un-armed verb again.
             app.feed.delete_confirm = None;
+            // Nor armed to advertise: the confirm step is this opening's too.
+            app.feed.advertise_confirm = None;
+            // Nor showing a price editor, for the same reason.
+            #[cfg(feature = "payments")]
+            {
+                app.feed.sale_price = None;
+            }
             // Nor does it open on a target sheet: the sheet is what a verb
             // opens, on this opening of the menu.
             app.feed.train_sheet = None;
@@ -1629,10 +1842,21 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
             // Own posts only, and once: a stranger's menu has no such verbs, and
             // a hydrated `view` is never re-read here (the settings page owns
             // refresh).
-            if own && app.settings.web.view.is_none() {
+            //
+            // The same open reads, once per session, whether the nest serves
+            // the Nostr advertisement (`nostr-advertise`): the verb pair's
+            // `Advertise` arm needs it, and an unread capability shows no verb
+            // rather than one that may only ever refuse.
+            let web_handle =
+                (own && app.settings.web.view.is_none()).then(|| app.settings.web_origin_handle());
+            let nostr = own && app.feed.nostr_advertise.is_none();
+            if web_handle.is_some() || nostr {
                 let nest = app.session.as_ref()?.client.clone();
-                let handle = app.settings.web_origin_handle();
-                return Some(Op::HydrateWebOrigin { nest, handle });
+                return Some(Op::HydrateOwnPostMenu {
+                    nest,
+                    web_handle,
+                    nostr,
+                });
             }
             None
         }
@@ -1896,9 +2120,52 @@ pub enum Op {
     /// have none — the same lie the settings page's own hydrate gate exists to
     /// prevent. So the menu reads them once, through the settings page's own
     /// `read_web_page`, rather than growing a second answer.
-    HydrateWebOrigin {
+    ///
+    /// The same op reads the nest's `nostr-advertise` capability when `nostr`
+    /// (the Nostr advertisement verb pair's `Advertise` arm), through the
+    /// connection's nest-info memo.
+    HydrateOwnPostMenu {
         nest: Arc<NestClient>,
-        handle: String,
+        /// `Some(handle)` when the web-origin inputs are still unread.
+        web_handle: Option<String>,
+        /// Whether the advertise capability is still unread.
+        nostr: bool,
+    },
+    /// `fauna.nostr.advertise.set` on an own sold post, then a re-read of the
+    /// feed (`NostrContentClient::advertise_post`).
+    #[cfg(feature = "zaps")]
+    NostrAdvertise {
+        nest: Arc<NestClient>,
+        manager: Arc<CliFeedManager>,
+        post_id: String,
+    },
+    /// `fauna.nostr.advertise.clear`, then the same re-read
+    /// (`NostrContentClient::clear_advertisement`).
+    NostrStopAdvertising {
+        nest: Arc<NestClient>,
+        manager: Arc<CliFeedManager>,
+        post_id: String,
+    },
+    /// The *Change price…* dialog's pre-fill: the author's own
+    /// `fauna.subscriptions.tiers.list`, for the tier named `tier` (the sold
+    /// post's `gated_tier`) — the full own-read, per-post unlock tiers
+    /// included, as the Tiers tab reads it.
+    #[cfg(feature = "payments")]
+    LoadSalePrice {
+        nest: Arc<NestClient>,
+        post_id: String,
+        tier: String,
+    },
+    /// Send the shared plan's verbs (the update before any clear), then
+    /// re-read the feed — the nest re-materializes or ends a Nostr
+    /// advertisement on the same verbs, and the menu's advertisement pair
+    /// follows the re-read flag.
+    #[cfg(feature = "payments")]
+    SaveSalePrice {
+        nest: Arc<NestClient>,
+        manager: Arc<CliFeedManager>,
+        post_id: String,
+        edit: fauna_client_subscriptions::SalePriceEdit,
     },
     /// The built-in **Trending** virtual feed (`trending.md` § The Trending
     /// feed) — the scored sibling of the local feed over
@@ -2189,12 +2456,35 @@ pub enum Outcome {
     /// The web-origin inputs the ⋯ menu's copy affordances resolve against,
     /// folded into the settings page's own state so both surfaces read one
     /// answer. A read failure lands on `error-message` like any other.
-    WebOrigin(crate::settings::WebPageRead),
+    ///
+    /// `nostr_advertise` is the `nostr-advertise` capability read alongside
+    /// (`None` = not asked, or the read failed — left unread for the next
+    /// open), folded into [`FeedState::nostr_advertise`].
+    OwnPostMenu {
+        web: Option<Result<crate::settings::WebPageRead, String>>,
+        nostr_advertise: Option<bool>,
+    },
     /// A freshly minted paywall link, already on the clipboard — folded into
     /// [`FeedState::web_copied`] so the button repaints its `copied` attr and
     /// the menu shows what was handed out. Carries the same value that reached
     /// `copy_to_clipboard`, never a re-derivation, so the two cannot drift.
     CopiedPaywallLink(CopiedFeedLink),
+    /// The *Change price…* dialog's tier read landed — folded into
+    /// [`FeedState::sale_price`] (pre-filling both fields) when that post's
+    /// dialog is still the open one.
+    #[cfg(feature = "payments")]
+    SalePriceLoaded {
+        post_id: String,
+        result: Result<fauna_protocol::subscriptions::TierItem, String>,
+    },
+    /// The *Change price…* save finished: `Ok` closes the dialog (the feed
+    /// was already re-read), `Err` keeps it open with the nest's refusal on
+    /// `error-message`.
+    #[cfg(feature = "payments")]
+    SalePriceSaved {
+        post_id: String,
+        result: Result<(), String>,
+    },
 }
 
 impl Op {
@@ -2291,12 +2581,108 @@ impl Op {
                     }
                 },
             },
-            Op::HydrateWebOrigin { nest, handle } => {
-                let client = fauna_client_web::WebClient::new(nest);
-                match crate::settings::read_web_page(&client, &handle).await {
-                    Ok(read) => Outcome::WebOrigin(read),
-                    Err(e) => Outcome::Error(e),
+            Op::HydrateOwnPostMenu {
+                nest,
+                web_handle,
+                nostr,
+            } => {
+                let web = match web_handle {
+                    Some(handle) => {
+                        let client = fauna_client_web::WebClient::new(nest.clone());
+                        Some(crate::settings::read_web_page(&client, &handle).await)
+                    }
+                    None => None,
+                };
+                // A failed capability read stays unread (`None`), so the next
+                // open asks again; it is never a page error — the verb is
+                // simply not offered yet.
+                let nostr_advertise = if nostr {
+                    fauna_client_nostr::NostrContentClient::new(nest)
+                        .advertise_supported()
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+                Outcome::OwnPostMenu {
+                    web,
+                    nostr_advertise,
                 }
+            }
+            // ── the own-post Nostr advertisement pair ──
+            //
+            // Both end in `refresh_current_feed`, the web verbs' reason: the
+            // card's `nostr_advertised_at` drives the pair, so it repaints from
+            // the nest's answer. A typed refusal (not sold, no price, no
+            // linked key, no custodial key) lands on `error-message` as the
+            // nest worded it.
+            #[cfg(feature = "zaps")]
+            Op::NostrAdvertise {
+                nest,
+                manager,
+                post_id,
+            } => match fauna_client_nostr::NostrContentClient::new(nest)
+                .advertise_post(post_id)
+                .await
+            {
+                Err(e) => Outcome::Error(fauna_i18n::strings::nostr_advertise::error_advertise(
+                    &e.to_string(),
+                )),
+                Ok(_) => {
+                    manager.refresh_current_feed().await;
+                    Outcome::Done
+                }
+            },
+            Op::NostrStopAdvertising {
+                nest,
+                manager,
+                post_id,
+            } => match fauna_client_nostr::NostrContentClient::new(nest)
+                .clear_advertisement(post_id)
+                .await
+            {
+                Err(e) => Outcome::Error(fauna_i18n::strings::nostr_advertise::error_stop(
+                    &e.to_string(),
+                )),
+                Ok(_) => {
+                    manager.refresh_current_feed().await;
+                    Outcome::Done
+                }
+            },
+            #[cfg(feature = "payments")]
+            Op::LoadSalePrice {
+                nest,
+                post_id,
+                tier,
+            } => {
+                let result = fauna_client_subscriptions::SubscriptionsClient::new(nest)
+                    .tiers_list()
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|tiers| {
+                        tiers
+                            .into_iter()
+                            .find(|t| t.name == tier)
+                            .ok_or_else(|| format!("no tier named {tier}"))
+                    })
+                    .map_err(|e| fauna_i18n::strings::sale_price::error_load(&e));
+                Outcome::SalePriceLoaded { post_id, result }
+            }
+            #[cfg(feature = "payments")]
+            Op::SaveSalePrice {
+                nest,
+                manager,
+                post_id,
+                edit,
+            } => {
+                let result = fauna_client_subscriptions::SubscriptionsClient::new(nest)
+                    .apply_sale_price_edit(&edit)
+                    .await
+                    .map_err(|e| fauna_i18n::strings::sale_price::error_save(&e.to_string()));
+                if result.is_ok() {
+                    manager.refresh_current_feed().await;
+                }
+                Outcome::SalePriceSaved { post_id, result }
             }
             Op::WebMintPaywallLink {
                 nest,
@@ -2807,10 +3193,70 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // Folded into the SETTINGS page's state, not the feed's: it is the same
         // read that page performs, and duplicating it here is how the two
         // surfaces would start disagreeing about a creator's address.
-        Outcome::WebOrigin(read) => {
-            app.errors.remove(&crate::pages::Page::Feed);
-            app.settings.apply_web_page_read(read);
+        Outcome::OwnPostMenu {
+            web,
+            nostr_advertise,
+        } => {
+            if let Some(supported) = nostr_advertise {
+                app.feed.nostr_advertise = Some(supported);
+            }
+            match web {
+                Some(Ok(read)) => {
+                    app.errors.remove(&crate::pages::Page::Feed);
+                    app.settings.apply_web_page_read(read);
+                }
+                Some(Err(e)) => {
+                    app.errors.insert(crate::pages::Page::Feed, e);
+                }
+                None => {}
+            }
         }
+        // Folded only into the dialog it was read for: a read landing after
+        // the author cancelled, or reopened another post's dialog, is dropped.
+        #[cfg(feature = "payments")]
+        Outcome::SalePriceLoaded { post_id, result } => {
+            let open = app
+                .feed
+                .sale_price
+                .as_ref()
+                .is_some_and(|d| d.post_id == post_id && d.tier.is_none());
+            if !open {
+                return;
+            }
+            match result {
+                Ok(tier) => {
+                    let prefill = fauna_client_subscriptions::sale_price_prefill(&tier);
+                    app.errors.remove(&crate::pages::Page::Feed);
+                    app.feed.sale_price = Some(SalePriceDialog {
+                        post_id,
+                        tier: Some(tier),
+                        hint: prefill.price_hint,
+                        asking: prefill.asking_price,
+                    });
+                }
+                Err(e) => {
+                    app.feed.sale_price = None;
+                    app.errors.insert(crate::pages::Page::Feed, e);
+                }
+            }
+        }
+        #[cfg(feature = "payments")]
+        Outcome::SalePriceSaved { post_id, result } => match result {
+            Ok(()) => {
+                app.errors.remove(&crate::pages::Page::Feed);
+                if app
+                    .feed
+                    .sale_price
+                    .as_ref()
+                    .is_some_and(|d| d.post_id == post_id)
+                {
+                    app.feed.sale_price = None;
+                }
+            }
+            Err(e) => {
+                app.errors.insert(crate::pages::Page::Feed, e);
+            }
+        },
     }
 }
 
@@ -2846,6 +3292,12 @@ async fn submit_post(
     staged: Option<String>,
 ) -> Option<String> {
     let sell = manager.snapshot().compose.sell;
+    // The one text → sats rule, read once for both sell phases; a refusal is
+    // already stamped on `compose-error` and nothing has been minted.
+    let asking_price_sats = match manager.compose_sell_asking_price_sats() {
+        Ok(sats) => sats,
+        Err(e) => return Some(e),
+    };
 
     // A SOLD post's attachment seals under the tier the sale itself mints — and
     // that tier does not exist yet, so the mint is split in two and its first
@@ -2854,10 +3306,7 @@ async fn submit_post(
     // this itself and the flow is the single call it has always been.
     if let (Some(sell), Some(_)) = (sell.as_ref(), staged.as_ref())
         && let Err(e) = manager
-            .stage_sell_tier(
-                sell.subscribers_get_it_free,
-                sell.asking_price.trim().parse::<u64>().ok(),
-            )
+            .stage_sell_tier(sell.subscribers_get_it_free, asking_price_sats)
             .await
     {
         // Already stamped on `compose-error` by the manager; nothing was
@@ -2886,12 +3335,11 @@ async fn submit_post(
             .prepare_sell_post(
                 (!sell.price.trim().is_empty()).then(|| sell.price.clone()),
                 sell.subscribers_get_it_free,
-                // Empty or unparseable means no machine price — the tier stays
-                // a tip target forever (`monetization.md` § The asking price).
-                // `prepare_sell_post` owns the sats→msat conversion and the
-                // overflow refusal; this is a plain text→u64 parse, nothing
-                // else.
-                sell.asking_price.trim().parse::<u64>().ok(),
+                // Empty means no machine price — the tier stays a tip target
+                // forever (`monetization.md` § The asking price); a bad
+                // number was refused above. `prepare_sell_post` owns the
+                // sats→msat conversion.
+                asking_price_sats,
             )
             .await
             .ok()?;
@@ -3842,6 +4290,13 @@ fn post_actions_menu(app: &App, manager: &CliFeedManager, snapshot: &FeedSnapsho
     // family behind an unrelated condition — pinned by
     // `the_web_verbs_paint_with_no_in_context_trained_factor`.
     out.extend(web_publish_verbs(app, manager, &post_id));
+    // Beside the web-publish family — the ratified home of per-post
+    // publication verbs (`web-content-hosting.md` § Published-post management).
+    out.extend(nostr_advertise_verbs(app, manager, &post_id));
+    // Beside the advertisement pair: the price is a property of the post,
+    // and the refusal that sends an author looking for it arrives here.
+    #[cfg(feature = "payments")]
+    out.extend(sale_price_verbs(app, manager, &post_id));
     // Last in the menu, and outside the training half for the same reason the
     // web verbs are: delete has nothing to do with training, so gating it there
     // could make an own-post's destruction verb vanish on any feed whose
@@ -4198,6 +4653,214 @@ fn web_publish_verbs(app: &App, manager: &CliFeedManager, post_id: &str) -> Vec<
             CopiedKind::Paywall => fauna_i18n::strings::web_publish::copied_paywall_link(&c.url),
         }));
     }
+    out
+}
+
+/// The consequence sentence of the advertise confirm step — a public text (it
+/// states what the act guarantees: who can read the note, what a zap buys, what
+/// stopping can and cannot delete), so it reaches the catalog only through its
+/// public-texts round, as `nostr_advertise.confirm_body` in an
+/// `app-strings-public` region. Read at run time: while the catalog lacks it the
+/// verb is not offered — informed consent is the act's precondition, the nest's
+/// claim-delivery DM posture (`monetization.md` § Implementation status today).
+fn advertise_confirm_body() -> Option<&'static str> {
+    #[cfg(test)]
+    if let Some(body) = tests::CONFIRM_BODY_FOR_TEST.with(std::cell::Cell::get) {
+        return Some(body);
+    }
+    fauna_i18n::strings::lookup("nostr_advertise.confirm_body")
+}
+
+/// Whether this build and this nest can advertise at all: the `zaps` member
+/// compiled in, the nest's `nostr-advertise` capability read and present, and
+/// the confirm step's sentence in the catalog. The withdrawal never needs this.
+fn can_advertise(app: &App) -> bool {
+    cfg!(feature = "zaps")
+        && app.feed.nostr_advertise == Some(true)
+        && advertise_confirm_body().is_some()
+}
+
+/// The arm of the own-post Nostr advertisement verb pair `post_id` offers —
+/// the shared `PostSummary::nostr_advertise_verb`, never re-derived here.
+fn advertise_verb_for(
+    app: &App,
+    manager: &CliFeedManager,
+    post_id: &str,
+) -> Option<fauna_feed::NostrAdvertiseVerb> {
+    let session = app.session.as_ref()?;
+    let post = manager.snapshot().find_post(post_id).cloned()?;
+    post.nostr_advertise_verb(&session.actor_id, can_advertise(app))
+}
+
+/// The own-post Nostr advertisement verb pair and its confirm step
+/// (`monetization.md` § The Nostr advertisement of a sold post → *What the
+/// author sees and agrees to*; IDs declared in ui.yaml's
+/// `feed-post-actions-menu`). *Stop advertising* is one tap; *Advertise* arms
+/// the confirm step in place — the delete verb's shape — which states the
+/// consequence and is the only door to the act.
+fn nostr_advertise_verbs(app: &App, manager: &CliFeedManager, post_id: &str) -> Vec<Element> {
+    use fauna_i18n::strings::nostr_advertise as t;
+    let Some(verb) = advertise_verb_for(app, manager, post_id) else {
+        return Vec::new();
+    };
+    let id = post_id.to_string();
+    match verb {
+        fauna_feed::NostrAdvertiseVerb::StopAdvertising => vec![Element::gesture_button(
+            ids::FEED_POST_STOP_ADVERTISING_NOSTR_BUTTON,
+            t::STOP,
+            true,
+            Gesture::Feed(Action::StopAdvertisingNostr(id)),
+        )],
+        #[cfg(feature = "zaps")]
+        fauna_feed::NostrAdvertiseVerb::Advertise => {
+            let mut out = vec![Element::gesture_button(
+                ids::FEED_POST_ADVERTISE_NOSTR_BUTTON,
+                t::ADVERTISE,
+                true,
+                Gesture::Feed(Action::StartAdvertiseNostr(id.clone())),
+            )];
+            if let (true, Some(body)) = (
+                app.feed.advertise_confirm.as_deref() == Some(post_id),
+                advertise_confirm_body(),
+            ) {
+                out.push(Element::label(
+                    ids::ADVERTISE_NOSTR_CONFIRM_DIALOG,
+                    t::CONFIRM_TITLE,
+                ));
+                out.push(Element::chrome(body));
+                out.push(Element::gesture_button(
+                    ids::ADVERTISE_NOSTR_CONFIRM_BUTTON,
+                    t::CONFIRM,
+                    true,
+                    Gesture::Feed(Action::ConfirmAdvertiseNostr(id)),
+                ));
+                out.push(Element::gesture_button(
+                    ids::ADVERTISE_NOSTR_CANCEL_BUTTON,
+                    fauna_i18n::strings::common::CANCEL,
+                    true,
+                    Gesture::Feed(Action::CancelAdvertiseNostr),
+                ));
+            }
+            out
+        }
+        // An excised build never offers the act (`can_advertise` is false),
+        // so this arm is unreachable there; it keeps the match total.
+        #[cfg(not(feature = "zaps"))]
+        fauna_feed::NostrAdvertiseVerb::Advertise => Vec::new(),
+    }
+}
+
+/// The open *Change price…* dialog of one sold post (`feed-post-sale-price-dialog`).
+#[cfg(feature = "payments")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SalePriceDialog {
+    pub post_id: String,
+    /// The selling tier as the author's own `tiers.list` answered it; `None`
+    /// while that read is in flight (the dialog is not painted yet). The save
+    /// plan compares the fields against it.
+    pub tier: Option<fauna_protocol::subscriptions::TierItem>,
+    /// `feed-post-sale-price-hint`.
+    pub hint: String,
+    /// `feed-post-sale-price-asking`.
+    pub asking: String,
+}
+
+/// The sentence the dialog shows on an advertised post
+/// (`feed-post-sale-price-advertised-note`): what the edit does to the Nostr
+/// advertisement — a public text, so it reaches the catalog only through its
+/// public-texts round, as `sale_price.advertised_note`. Read at run time:
+/// while the catalog lacks it the verb is not offered on an advertised post,
+/// since the author must be told before saving (`monetization.md` § The asking
+/// price → *Re-pricing a sold post*).
+#[cfg(feature = "payments")]
+fn sale_price_advertised_note() -> Option<&'static str> {
+    #[cfg(test)]
+    if let Some(note) = tests::ADVERTISED_NOTE_FOR_TEST.with(std::cell::Cell::get) {
+        return Some(note);
+    }
+    fauna_i18n::strings::lookup("sale_price.advertised_note")
+}
+
+/// The post `post_id` names when it offers *Change price…*: an own post that
+/// is sold (`PostSummary::is_sold_post`, the advertisement verb's rule) and,
+/// when advertised on Nostr, only while the dialog can say what the edit does
+/// to the advertisement.
+#[cfg(feature = "payments")]
+fn sale_price_post(
+    app: &App,
+    manager: &CliFeedManager,
+    post_id: &str,
+) -> Option<fauna_feed::PostSummary> {
+    own_post(app, manager, post_id).filter(|p| {
+        p.is_sold_post()
+            && (p.nostr_advertised_at.is_none() || sale_price_advertised_note().is_some())
+    })
+}
+
+/// The sold post's *Change price…* verb and its dialog (`monetization.md`
+/// § The asking price → *Re-pricing a sold post*; IDs declared in ui.yaml's
+/// `feed-post-actions-menu`). The dialog opens in place, the delete confirm's
+/// shape, once its tier read has landed; it carries the composer's two price
+/// fields pre-filled, and on an advertised post the note saying what saving
+/// does to the advertisement.
+#[cfg(feature = "payments")]
+fn sale_price_verbs(app: &App, manager: &CliFeedManager, post_id: &str) -> Vec<Element> {
+    use fauna_i18n::strings::sale_price as t;
+    let Some(post) = sale_price_post(app, manager, post_id) else {
+        return Vec::new();
+    };
+    let id = post_id.to_string();
+    let mut out = vec![Element::gesture_button(
+        ids::FEED_POST_SALE_PRICE_BUTTON,
+        t::BUTTON,
+        true,
+        Gesture::Feed(Action::StartSalePrice(id.clone())),
+    )];
+    let Some(dialog) = app
+        .feed
+        .sale_price
+        .as_ref()
+        .filter(|d| d.post_id == post_id && d.tier.is_some())
+    else {
+        return out;
+    };
+    out.push(Element::label(ids::FEED_POST_SALE_PRICE_DIALOG, t::TITLE));
+    out.push(
+        Element::input(
+            ids::FEED_POST_SALE_PRICE_HINT,
+            dialog.hint.clone(),
+            Field::Feed(FeedField::SalePriceHint),
+        )
+        .labelled(feed::post::SELL_PRICE_PLACEHOLDER),
+    );
+    out.push(
+        Element::input(
+            ids::FEED_POST_SALE_PRICE_ASKING,
+            dialog.asking.clone(),
+            Field::Feed(FeedField::SalePriceAsking),
+        )
+        .labelled(feed::post::SELL_ASKING_PRICE_PLACEHOLDER),
+    );
+    if post.nostr_advertised_at.is_some()
+        && let Some(note) = sale_price_advertised_note()
+    {
+        out.push(Element::label(
+            ids::FEED_POST_SALE_PRICE_ADVERTISED_NOTE,
+            note,
+        ));
+    }
+    out.push(Element::gesture_button(
+        ids::FEED_POST_SALE_PRICE_SAVE_BUTTON,
+        fauna_i18n::strings::common::SAVE,
+        true,
+        Gesture::Feed(Action::SaveSalePrice(id)),
+    ));
+    out.push(Element::gesture_button(
+        ids::FEED_POST_SALE_PRICE_CANCEL_BUTTON,
+        fauna_i18n::strings::common::CANCEL,
+        true,
+        Gesture::Feed(Action::CancelSalePrice),
+    ));
     out
 }
 
@@ -7663,6 +8326,9 @@ mod tests {
         let mut app = feed_app(posts);
         app.settings
             .set_web_origin_for_test("test-handle", serving_domain);
+        // The menu's other once-per-session read, answered: a nest without the
+        // advertisement, so these fixtures open with no hydrate op.
+        app.feed.nostr_advertise = Some(false);
         app
     }
 
@@ -7684,6 +8350,338 @@ mod tests {
             crate::settings::web::site_link(&none.settings).origin,
             None,
             "and the negative case must be caused by the missing serving domain"
+        );
+    }
+
+    // ── the own-post Nostr advertisement pair (monetization.md § The Nostr
+    //    advertisement of a sold post → What the author sees and agrees to) ──
+
+    thread_local! {
+        /// Stands in for the catalog's `nostr_advertise.confirm_body` — a
+        /// public text that reaches `en.yaml` only through its round — so the
+        /// confirm step is testable before it lands.
+        pub(super) static CONFIRM_BODY_FOR_TEST: std::cell::Cell<Option<&'static str>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    const SOLD: &str = "post-unlock-0101010101010101";
+
+    fn sold_own(advertised: Option<u64>) -> TestPostSpec {
+        TestPostSpec {
+            nostr_advertised_at: advertised,
+            ..own_post(None, Some(SOLD))
+        }
+    }
+
+    fn advertise_app(posts: Vec<TestPostSpec>, supported: bool) -> App {
+        let mut app = feed_app_with_origin(posts, "example.net");
+        app.feed.nostr_advertise = Some(supported);
+        app
+    }
+
+    // ── the sold post's Change price… (monetization.md § The asking price →
+    //    Re-pricing a sold post) ──
+
+    #[cfg(feature = "payments")]
+    thread_local! {
+        /// Stands in for the catalog's `sale_price.advertised_note` — a public
+        /// text that reaches `en.yaml` only through its round.
+        pub(super) static ADVERTISED_NOTE_FOR_TEST: std::cell::Cell<Option<&'static str>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    #[cfg(feature = "payments")]
+    fn selling_tier(
+        hint: Option<&str>,
+        sats: Option<u64>,
+    ) -> fauna_protocol::subscriptions::TierItem {
+        fauna_protocol::subscriptions::TierItem {
+            name: SOLD.into(),
+            rank: 1,
+            description: None,
+            price_hint: hint.map(str::to_string),
+            payment_url: None,
+            auto_approve: false,
+            created_at: fauna_core::data::Timestamp(1),
+            unlocks_post: Some("aa".repeat(32)),
+            asking_price: sats.and_then(fauna_protocol::subscriptions::TierAskingPrice::from_sats),
+            hidden: false,
+            extra: Default::default(),
+        }
+    }
+
+    /// Open the menu, press *Change price…* and land the tier read.
+    #[cfg(feature = "payments")]
+    fn open_sale_price(app: &mut App, tier: fauna_protocol::subscriptions::TierItem) {
+        let id = "aa".repeat(32);
+        open_menu(app);
+        let op = apply_local(app, Action::StartSalePrice(id.clone()));
+        assert!(
+            matches!(&op, Some(Op::LoadSalePrice { tier, .. }) if tier == SOLD),
+            "the verb reads the selling tier"
+        );
+        assert!(
+            !ids(app).contains("feed-post-sale-price-dialog"),
+            "no dialog before the read lands"
+        );
+        apply_outcome(
+            app,
+            Outcome::SalePriceLoaded {
+                post_id: id,
+                result: Ok(tier),
+            },
+        );
+    }
+
+    #[cfg(feature = "payments")]
+    #[test]
+    fn change_price_is_offered_on_an_own_sold_post_only() {
+        let mut sold = advertise_app(vec![sold_own(None)], false);
+        assert!(open_menu(&mut sold).contains("feed-post-sale-price-button"));
+        let mut tiered = advertise_app(vec![own_post(None, Some("gold"))], false);
+        assert!(!open_menu(&mut tiered).contains("feed-post-sale-price-button"));
+        let mut stranger = advertise_app(
+            vec![TestPostSpec {
+                gated_tier: Some(SOLD.into()),
+                ..post("theirs")
+            }],
+            false,
+        );
+        assert!(!open_menu(&mut stranger).contains("feed-post-sale-price-button"));
+    }
+
+    #[cfg(feature = "payments")]
+    #[test]
+    fn the_dialog_opens_pre_filled_from_the_selling_tier() {
+        let mut app = advertise_app(vec![sold_own(None)], false);
+        open_sale_price(&mut app, selling_tier(Some("$3"), Some(2100)));
+        let have = ids(&app);
+        for present in [
+            "feed-post-sale-price-dialog",
+            "feed-post-sale-price-hint",
+            "feed-post-sale-price-asking",
+            "feed-post-sale-price-save-button",
+            "feed-post-sale-price-cancel-button",
+        ] {
+            assert!(have.contains(present), "missing {present}; have {have:?}");
+        }
+        assert!(
+            !have.contains("feed-post-sale-price-advertised-note"),
+            "the note is for an advertised post only"
+        );
+        assert_eq!(field(&app.feed, &FeedField::SalePriceHint), "$3");
+        assert_eq!(field(&app.feed, &FeedField::SalePriceAsking), "2100");
+        // Cancel closes it and sends nothing.
+        assert!(apply_local(&mut app, Action::CancelSalePrice).is_none());
+        assert!(!ids(&app).contains("feed-post-sale-price-dialog"));
+    }
+
+    #[cfg(feature = "payments")]
+    #[test]
+    fn save_sends_the_shared_plan_and_nothing_when_untouched() {
+        let id = "aa".repeat(32);
+        let mut app = advertise_app(vec![sold_own(None)], false);
+        open_sale_price(&mut app, selling_tier(Some("$3"), Some(2100)));
+        // Untouched: nothing sent, dialog closed.
+        assert!(apply_local(&mut app, Action::SaveSalePrice(id.clone())).is_none());
+        assert!(app.feed.sale_price.is_none());
+
+        open_sale_price(&mut app, selling_tier(Some("$3"), Some(2100)));
+        set_field(&mut app.feed, FeedField::SalePriceAsking, "3000".into());
+        set_field(&mut app.feed, FeedField::SalePriceHint, String::new());
+        let op = apply_local(&mut app, Action::SaveSalePrice(id.clone()));
+        let Some(Op::SaveSalePrice { edit, .. }) = op else {
+            panic!("a changed dialog saves");
+        };
+        assert_eq!(
+            edit.update.as_ref().and_then(|u| u.asking_price.clone()),
+            fauna_protocol::subscriptions::TierAskingPrice::from_sats(3000)
+        );
+        assert_eq!(
+            edit.clears,
+            vec![fauna_protocol::subscriptions::TierClearableField::PriceHint]
+        );
+        // A landed save closes the dialog.
+        apply_outcome(
+            &mut app,
+            Outcome::SalePriceSaved {
+                post_id: id,
+                result: Ok(()),
+            },
+        );
+        assert!(app.feed.sale_price.is_none());
+    }
+
+    #[cfg(feature = "payments")]
+    #[test]
+    fn a_bad_price_keeps_the_dialog_open_with_the_composers_error() {
+        let id = "aa".repeat(32);
+        let mut app = advertise_app(vec![sold_own(None)], false);
+        open_sale_price(&mut app, selling_tier(None, None));
+        set_field(&mut app.feed, FeedField::SalePriceAsking, "21.5".into());
+        assert!(apply_local(&mut app, Action::SaveSalePrice(id)).is_none());
+        assert!(ids(&app).contains("feed-post-sale-price-dialog"));
+        assert_eq!(field(&app.feed, &FeedField::SalePriceAsking), "21.5");
+        assert_eq!(
+            app.errors
+                .get(&crate::pages::Page::Feed)
+                .map(String::as_str),
+            Some(fauna_i18n::strings::feed::COMPOSE_SELL_PRICE_NOT_WHOLE)
+        );
+    }
+
+    #[cfg(feature = "payments")]
+    #[test]
+    fn a_late_tier_read_for_a_closed_dialog_is_dropped() {
+        let id = "aa".repeat(32);
+        let mut app = advertise_app(vec![sold_own(None)], false);
+        open_menu(&mut app);
+        apply_local(&mut app, Action::StartSalePrice(id.clone()));
+        apply_local(&mut app, Action::CancelSalePrice);
+        apply_outcome(
+            &mut app,
+            Outcome::SalePriceLoaded {
+                post_id: id,
+                result: Ok(selling_tier(Some("$3"), None)),
+            },
+        );
+        assert!(app.feed.sale_price.is_none());
+    }
+
+    /// On an advertised post the dialog states what saving does to the
+    /// advertisement; while the catalog lacks that sentence the verb is not
+    /// offered there.
+    #[cfg(feature = "payments")]
+    #[test]
+    fn an_advertised_post_shows_the_note_or_offers_no_verb() {
+        ADVERTISED_NOTE_FOR_TEST.with(|c| c.set(None));
+        if fauna_i18n::strings::lookup("sale_price.advertised_note").is_none() {
+            let mut app = advertise_app(vec![sold_own(Some(1_762_500_000))], false);
+            assert!(!open_menu(&mut app).contains("feed-post-sale-price-button"));
+        }
+        ADVERTISED_NOTE_FOR_TEST.with(|c| c.set(Some("Saving replaces the note.")));
+        let mut app = advertise_app(vec![sold_own(Some(1_762_500_000))], false);
+        assert!(open_menu(&mut app).contains("feed-post-sale-price-button"));
+        open_sale_price(&mut app, selling_tier(Some("$3"), Some(2100)));
+        assert!(ids(&app).contains("feed-post-sale-price-advertised-note"));
+        ADVERTISED_NOTE_FOR_TEST.with(|c| c.set(None));
+    }
+
+    /// The first own-post open reads the capability (and nothing once read).
+    #[test]
+    fn the_first_own_menu_open_reads_the_advertise_capability() {
+        let mut app = feed_app_with_origin(vec![sold_own(None)], "example.net");
+        app.feed.nostr_advertise = None;
+        let op = apply_local(&mut app, Action::OpenPostActions("aa".repeat(32)));
+        assert!(
+            matches!(
+                op,
+                Some(Op::HydrateOwnPostMenu {
+                    web_handle: None,
+                    nostr: true,
+                    ..
+                })
+            ),
+            "wrong op"
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::OwnPostMenu {
+                web: None,
+                nostr_advertise: Some(true),
+            },
+        );
+        assert_eq!(app.feed.nostr_advertise, Some(true));
+        assert!(apply_local(&mut app, Action::OpenPostActions("aa".repeat(32))).is_none());
+    }
+
+    /// While the catalog lacks the confirm sentence, no `Advertise` verb —
+    /// even on a sold own post the nest can advertise.
+    #[test]
+    fn no_advertise_verb_until_the_confirm_sentence_is_in_the_catalog() {
+        CONFIRM_BODY_FOR_TEST.with(|c| c.set(None));
+        let mut app = advertise_app(vec![sold_own(None)], true);
+        let ids = open_menu(&mut app);
+        if fauna_i18n::strings::lookup("nostr_advertise.confirm_body").is_none() {
+            assert!(
+                !ids.contains("feed-post-advertise-nostr-button"),
+                "have {ids:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "zaps")]
+    #[test]
+    fn advertise_arms_the_confirm_step_and_only_the_confirm_acts() {
+        CONFIRM_BODY_FOR_TEST.with(|c| c.set(Some("Consequence.")));
+        let mut app = advertise_app(vec![sold_own(None)], true);
+        let opened = open_menu(&mut app);
+        assert!(
+            opened.contains("feed-post-advertise-nostr-button"),
+            "have {opened:?}"
+        );
+        for absent in [
+            "feed-post-stop-advertising-nostr-button",
+            "advertise-nostr-confirm-dialog",
+            "advertise-nostr-confirm-button",
+        ] {
+            assert!(!opened.contains(absent), "{absent}; have {opened:?}");
+        }
+        let id = "aa".repeat(32);
+        // A confirm that was never armed publishes nothing.
+        assert!(apply_local(&mut app, Action::ConfirmAdvertiseNostr(id.clone())).is_none());
+        assert!(apply_local(&mut app, Action::StartAdvertiseNostr(id.clone())).is_none());
+        let armed = ids(&app);
+        for present in [
+            "advertise-nostr-confirm-dialog",
+            "advertise-nostr-confirm-button",
+            "advertise-nostr-cancel-button",
+        ] {
+            assert!(armed.contains(present), "missing {present}; have {armed:?}");
+        }
+        // Cancel disarms and sends nothing.
+        assert!(apply_local(&mut app, Action::CancelAdvertiseNostr).is_none());
+        assert!(!ids(&app).contains("advertise-nostr-confirm-dialog"));
+        // Re-armed, the confirm is the act.
+        apply_local(&mut app, Action::StartAdvertiseNostr(id.clone()));
+        let op = apply_local(&mut app, Action::ConfirmAdvertiseNostr(id));
+        assert!(matches!(op, Some(Op::NostrAdvertise { .. })), "wrong op");
+        assert!(
+            app.feed.advertise_confirm.is_none(),
+            "the step closes on dispatch"
+        );
+        CONFIRM_BODY_FOR_TEST.with(|c| c.set(None));
+    }
+
+    #[cfg(feature = "zaps")]
+    #[test]
+    fn no_advertise_verb_without_the_capability_or_on_an_unsold_post() {
+        CONFIRM_BODY_FOR_TEST.with(|c| c.set(Some("Consequence.")));
+        let mut older_nest = advertise_app(vec![sold_own(None)], false);
+        assert!(!open_menu(&mut older_nest).contains("feed-post-advertise-nostr-button"));
+        let mut unsold = advertise_app(vec![own_post(None, Some("gold"))], true);
+        assert!(!open_menu(&mut unsold).contains("feed-post-advertise-nostr-button"));
+        CONFIRM_BODY_FOR_TEST.with(|c| c.set(None));
+    }
+
+    /// An advertised post offers the one-tap withdrawal, whatever the
+    /// capability or the catalog say.
+    #[test]
+    fn an_advertised_post_offers_stop_advertising() {
+        let mut app = advertise_app(vec![sold_own(Some(1_762_500_000))], false);
+        let ids = open_menu(&mut app);
+        assert!(
+            ids.contains("feed-post-stop-advertising-nostr-button"),
+            "have {ids:?}"
+        );
+        assert!(
+            !ids.contains("feed-post-advertise-nostr-button"),
+            "have {ids:?}"
+        );
+        let op = apply_local(&mut app, Action::StopAdvertisingNostr("aa".repeat(32)));
+        assert!(
+            matches!(op, Some(Op::NostrStopAdvertising { .. })),
+            "wrong op"
         );
     }
 

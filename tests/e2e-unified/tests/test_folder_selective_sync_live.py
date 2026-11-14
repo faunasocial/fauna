@@ -72,16 +72,24 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.macos,
     pytest.mark.linux,
+    pytest.mark.windows,
 ]
 
 #: Apps whose leg has landed. Grow this — and the markers above — together.
-_SUPPORTED_APPS = ("tui", "macos", "linux")
+_SUPPORTED_APPS = ("tui", "macos", "linux", "windows")
 
 #: What a leg's launch needs beyond the module's markers. macOS' production
 #: spawner is launchd, so an e2e launch runs an agent only under
 #: `real_sync_agent` (`test_folder_agent_content_sync.py`'s macOS leg); linux,
-#: like tui, spawns the real agent as a per-launch child by default.
-_APP_MARKS = {"macos": (pytest.mark.real_sync_agent,)}
+#: like tui, spawns the real agent as a per-launch child by default. windows
+#: spawns its agent DETACHED, so `real_sync_agent` is what runs one at all and
+#: `isolated_sync_agent` gives each seat its own pipe and state dir — and lets
+#: `app_stderr_text()` stitch the agent's own log into `agent_diagnosis`
+#: (`test_folder_agent_content_sync.py`'s windows legs).
+_APP_MARKS = {
+    "macos": (pytest.mark.real_sync_agent,),
+    "windows": (pytest.mark.real_sync_agent, pytest.mark.isolated_sync_agent),
+}
 
 #: The excluded directory, and the file under it that must be held back. The
 #: matcher adds a `{pat}/**` twin per configured pattern (`ignore.rs`), so the

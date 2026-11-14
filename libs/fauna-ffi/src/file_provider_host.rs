@@ -52,6 +52,19 @@
 //! sweep itself once the set is populated. A host built by [`Self::app_dead`]
 //! (apple's) answers those with an error — its surface is unchanged.
 //!
+//! ## The relay seat
+//!
+//! Every host answers the nest's relay asks through its resident engine,
+//! beside its request loop (`relay-serving.md` § Relay serving). Who announces
+//! it differs: android's owned-tree host registers in the process's on-demand
+//! registry and the app's seat announces it (`relay_serving.rs`); apple's
+//! File Provider host runs **its own** seat over its own bearer connection,
+//! for its one set (*Apple's File Provider replica*) — on macOS while the
+//! extension's process lives; on iOS not yet, its foreground lease unbuilt.
+//! It serves what its staging root holds, through the bound-tree body source
+//! over the engine's root; a file the OS evicted or never fetched has no
+//! copy there and answers none.
+//!
 //! ## A reader's host
 //!
 //! A set shared with the account that it may only read builds **read-only**
@@ -80,14 +93,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use fauna_core::folder_keys::FolderRef;
 use fauna_nest_http::{ApiError, BearerSource};
 use fauna_sync_engine::binding_edge::{ParkMark, park_mark_at_edge};
 use fauna_sync_engine::engine_lifecycle::{BuiltEngine, EdgeVerdict, build_engine};
 use fauna_sync_engine::provider_face;
-use fauna_sync_engine::provider_face::owned_tree::{BodyRoot, OwnedTree};
+use fauna_sync_engine::provider_face::owned_tree::{BodyRoot, OwnedTree, StagingTree};
 use fauna_sync_engine::relay_seat::ServedFolder;
 
 use crate::FfiError;
@@ -992,6 +1005,12 @@ enum Request {
         rel: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// A group set's review row's *use the other version* — the engine's own
+    /// restore, on this worker so no fold lands between its check and write.
+    RestoreRetainedVersion {
+        conflict_id: i64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     // ---- the share plane's two operations ----
     #[cfg(feature = "p2p-share")]
     ShareReplica {
@@ -1091,7 +1110,14 @@ pub struct FfiFileProviderHost {
     /// nest it is announced by — read by the relay seat without a round trip
     /// to the worker.
     serving: Arc<std::sync::Mutex<Option<ServedFolder>>>,
+    /// The app's foreground lease on this host's relay seat — the instant it
+    /// runs out, `None` with none granted ([`Self::grant_relay_lease`]). Read
+    /// only by a seat that serves under a lease ([`seat_needs_lease`]).
+    lease: watch::Sender<LeaseUntil>,
 }
+
+/// When a relay lease runs out; `None` while none is live.
+type LeaseUntil = Option<tokio::time::Instant>;
 
 /// One relay ask handed to the worker, and the signal that it was answered
 /// (the seat's concurrency bound counts it until then).
@@ -1113,31 +1139,40 @@ impl FfiFileProviderHost {
         root_dir: PathBuf,
         cache_root: Option<PathBuf>,
     ) -> Arc<Self> {
-        let (relay_asks, relay_rx) =
-            mpsc::channel(fauna_sync_engine::relay_seat::SERVE_CONCURRENCY);
-        let serving = Arc::new(std::sync::Mutex::new(None));
-        let published_folder = Arc::clone(&serving);
-        let requests = crate::worker_thread::spawn_worker_thread(
-            "fauna-fp-host",
-            "file-provider",
-            32,
-            move |requests| {
-                engine_worker(
-                    ctx,
-                    signer,
-                    folder_ref,
-                    root_dir,
-                    cache_root,
-                    requests,
-                    relay_rx,
-                    published_folder,
-                )
-            },
-        );
-        Arc::new(Self {
-            requests,
-            relay_asks,
-            serving,
+        let own_seat = runs_own_seat(cache_root.as_deref());
+        let (lease, lease_rx) = watch::channel(None);
+        let lease_rx = seat_needs_lease().then_some(lease_rx);
+        Arc::new_cyclic(|host| {
+            let (relay_asks, relay_rx) =
+                mpsc::channel(fauna_sync_engine::relay_seat::SERVE_CONCURRENCY);
+            let serving = Arc::new(std::sync::Mutex::new(None));
+            let published_folder = Arc::clone(&serving);
+            let own_seat = own_seat.then(|| OwnSeat(host.clone()));
+            let requests = crate::worker_thread::spawn_worker_thread(
+                "fauna-fp-host",
+                "file-provider",
+                32,
+                move |requests| {
+                    engine_worker(
+                        ctx,
+                        signer,
+                        folder_ref,
+                        root_dir,
+                        cache_root,
+                        requests,
+                        relay_rx,
+                        published_folder,
+                        own_seat,
+                        lease_rx,
+                    )
+                },
+            );
+            Self {
+                requests,
+                relay_asks,
+                serving,
+                lease,
+            }
         })
     }
 
@@ -1359,7 +1394,8 @@ impl FfiFileProviderHost {
     /// `proven_actor_hex` is the peer the channel proved. Every accepted row
     /// is recorded; a body lands only when the landing policy wants it, in
     /// the kept root. Provenance is re-judged here: the host never trusts
-    /// that the pump screened. Refused on a host that owns no tree.
+    /// that the pump screened. On a host built by [`Self::app_dead`] (iOS's
+    /// extension, whose OS owns the cache) the kept root is the staging root.
     ///
     /// android reaches this through the plane in-process; iOS's app calls it
     /// across to its File Provider extension, the set's one writer.
@@ -1370,6 +1406,24 @@ impl FfiFileProviderHost {
         spool_dir: String,
     ) -> Result<FfiShareIngestOutcome, FfiError> {
         self.share_ingest_page(proven_actor_hex, rows, spool_dir)
+            .await
+    }
+}
+
+#[fauna_uniffi_async::export]
+impl FfiFileProviderHost {
+    /// A group set's review row's **use the other version** on this host's
+    /// engine (`group-set.md` § Build design — the group set, decision 9):
+    /// `SyncEngine::restore_retained_version`, run on the worker that owns the
+    /// set's tree, so it is the set's one writer that writes. `conflict_id` is
+    /// a row [`sync_set_review_rows`] read. Errors — the row kept, nothing
+    /// written — when the bytes are gone or the file holds an edit not yet
+    /// shared; the message is the user's to read.
+    ///
+    /// iOS's app reaches this across its File Provider extension's service
+    /// channel (the share door's shape); android's host is in process.
+    pub async fn restore_retained_version(&self, conflict_id: i64) -> Result<(), FfiError> {
+        self.call(|reply| Request::RestoreRetainedVersion { conflict_id, reply })
             .await
     }
 }
@@ -1410,7 +1464,7 @@ impl fauna_sync_engine::share_glue::OnDemandReplicaHost for FfiFileProviderHost 
     }
 }
 
-/// The relay seat's view of this host (`file-sync.md` § Relay serving →
+/// The relay seat's view of this host (`relay-serving.md` § Relay serving →
 /// *Which seats hold*, the on-demand rows): the folder it serves while its
 /// engine is built, and the door its asks are answered through.
 #[async_trait]
@@ -1429,6 +1483,128 @@ impl fauna_sync_engine::relay_seat::ServingHost for FfiFileProviderHost {
         }
     }
 }
+
+/// The app's foreground lease on the extension's relay seat
+/// (`relay-serving.md` § Relay serving → *Apple's File Provider replica*,
+/// point (2)), granted and renewed across the extension's service door.
+#[uniffi::export]
+impl FfiFileProviderHost {
+    /// Grant or renew the lease: the seat serves until [`RELAY_LEASE`] from
+    /// now. The app calls this every [`RELAY_LEASE_RENEWAL`] while it is in
+    /// front. A seat that serves without a lease (macOS's) ignores it.
+    pub fn grant_relay_lease(&self) {
+        self.lease
+            .send_replace(Some(tokio::time::Instant::now() + RELAY_LEASE));
+    }
+
+    /// End the lease now — the app leaving the front: the seat stops and
+    /// withdraws its announce.
+    pub fn revoke_relay_lease(&self) {
+        self.lease.send_replace(None);
+    }
+}
+
+/// Whether a host runs its own relay seat over its own connection
+/// (`relay-serving.md` § Relay serving → *Apple's File Provider replica*): the
+/// File Provider extension's host, whose OS owns the cache (no `cache_root`) —
+/// on macOS while the extension's process lives, on iOS only under the app's
+/// foreground lease ([`seat_needs_lease`]). Android's provider owns its tree
+/// and is served by the app's seat through the registry ([`relay_hosts_for`]).
+fn runs_own_seat(cache_root: Option<&std::path::Path>) -> bool {
+    cfg!(any(target_os = "macos", target_os = "ios")) && cache_root.is_none()
+}
+
+/// Whether a self-serving host's seat holds only under the app's foreground
+/// lease: on iOS, where a backgrounded phone serves nothing
+/// (`p2p-shared-set-build.md` § Phone peers — design, decision 2) and the
+/// extension's process outlives the app's front.
+fn seat_needs_lease() -> bool {
+    cfg!(target_os = "ios")
+}
+
+/// How long one grant of the app's foreground lease keeps the iOS seat
+/// serving: a lease the app stops renewing — killed, or suspended before its
+/// revoke reached the extension — lapses within this.
+pub(crate) const RELAY_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How often the app renews its foreground lease: well inside
+/// [`RELAY_LEASE`], so one late renewal never lapses a lease in front.
+pub(crate) const RELAY_LEASE_RENEWAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The app's renewal period for the relay lease, in milliseconds — the one
+/// value its renewal loop reads ([`RELAY_LEASE_RENEWAL`]; no knob).
+#[uniffi::export]
+pub fn relay_lease_renewal_ms() -> u64 {
+    RELAY_LEASE_RENEWAL.as_millis() as u64
+}
+
+/// Run a seat only while `lease` is live (`relay-serving.md` § Relay serving
+/// → *Apple's File Provider replica*, point (2)): `serve` starts at a grant,
+/// and at a revoke or a lapse it is dropped and `withdraw` sent, so the nest
+/// asks this connection for nothing more; a later grant serves afresh. Ends
+/// when the lease's sender goes (the host dropped), or when `serve` itself
+/// ends (its connection gone for good).
+async fn serve_under_lease<S, SF, W, WF>(
+    mut lease: watch::Receiver<LeaseUntil>,
+    mut serve: S,
+    mut withdraw: W,
+) where
+    S: FnMut() -> SF,
+    SF: std::future::Future<Output = ()>,
+    W: FnMut() -> WF,
+    WF: std::future::Future<Output = ()>,
+{
+    let live = |until: LeaseUntil| until.filter(|until| *until > tokio::time::Instant::now());
+    loop {
+        while live(*lease.borrow_and_update()).is_none() {
+            if lease.changed().await.is_err() {
+                return;
+            }
+        }
+        let serving = serve();
+        tokio::pin!(serving);
+        let host_gone = loop {
+            let Some(until) = live(*lease.borrow_and_update()) else {
+                break false;
+            };
+            tokio::select! {
+                () = &mut serving => return,
+                () = tokio::time::sleep_until(until) => {}
+                changed = lease.changed() => {
+                    if changed.is_err() {
+                        break true;
+                    }
+                }
+            }
+        };
+        withdraw().await;
+        if host_gone {
+            return;
+        }
+    }
+}
+
+/// The one host a self-serving File Provider host's seat tracks: itself, held
+/// weakly, so the seat never keeps the host alive (and a host the extension
+/// dropped is withdrawn at the next rescan, if its worker has not ended the
+/// seat first). It never registers in the process's on-demand registry: the
+/// app's seat is not its road.
+#[derive(Clone)]
+struct OwnSeat(std::sync::Weak<FfiFileProviderHost>);
+
+impl fauna_sync_engine::relay_seat::ServingHosts for OwnSeat {
+    fn hosts(&self) -> Vec<Arc<dyn fauna_sync_engine::relay_seat::ServingHost>> {
+        self.0
+            .upgrade()
+            .map(|host| host as Arc<dyn fauna_sync_engine::relay_seat::ServingHost>)
+            .into_iter()
+            .collect()
+    }
+}
+
+/// How long a self-serving host's worker waits for its withdrawing announce
+/// as it ends; the connection's close withdraws it as well.
+const OWN_SEAT_WITHDRAW_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// One account's registered hosts as the relay seat tracks them — the same
 /// registry the share plane reads ([`on_demand_host`]).
@@ -1728,7 +1904,10 @@ impl FfiFileProviderHost {
     }
 
     /// The peer-transfer seam: `rel`'s body (kept root, then cache root), or
-    /// `None` for a placeholder.
+    /// `None` for a placeholder. On a host built by [`Self::app_dead`] it is
+    /// the staged body `fetchContents` answers with before asking the nest —
+    /// only a peer's body the nest has not confirmed, or bytes that hash to
+    /// the recorded head ([`StagingTree::kept_body`]).
     pub async fn lookup_body(&self, rel: String) -> Result<Option<String>, FfiError> {
         self.call(|reply| Request::LookupBody { rel, reply }).await
     }
@@ -1892,7 +2071,7 @@ impl Resident {
             Ok(db) => built.engine.set_serve_body(Arc::new(
                 fauna_sync_engine::share_body::OnDemandBodySource::new(
                     kept.clone(),
-                    cache.clone(),
+                    Some(cache.clone()),
                     db,
                 ),
             )),
@@ -2122,13 +2301,24 @@ impl Resident {
     }
 
     /// This host's replica as the share plane uses it: `None` while the
-    /// engine is not built (a refused binding) or the host owns no tree.
+    /// engine is not built (a refused binding). An owned tree offers both
+    /// roots; a staging tree (iOS's extension, whose OS owns the cache)
+    /// offers its staging root as the kept root and no cache root.
     #[cfg(feature = "p2p-share")]
     fn share_replica(
         &self,
         owned: Option<&OwnedTree>,
+        staging: Option<&StagingTree>,
     ) -> Option<fauna_sync_engine::share_glue::OnDemandReplica> {
-        let (tree, built) = (owned?, self.built.as_ref()?);
+        let built = self.built.as_ref()?;
+        let (kept_root, cache_root) = match (owned, staging) {
+            (Some(tree), _) => (
+                tree.kept_root().to_path_buf(),
+                Some(tree.cache_root().to_path_buf()),
+            ),
+            (None, Some(tree)) => (tree.staging_root().to_path_buf(), None),
+            (None, None) => return None,
+        };
         let folder_id = self.folder_ref.to_wire();
         Some(fauna_sync_engine::share_glue::OnDemandReplica {
             folder: built
@@ -2137,8 +2327,8 @@ impl Resident {
                 .map_or_else(|| folder_id.clone(), str::to_owned),
             folder_id,
             db_path: self.folder_ref.state_db_path(self.ctx.state_dir()),
-            kept_root: tree.kept_root().to_path_buf(),
-            cache_root: tree.cache_root().to_path_buf(),
+            kept_root,
+            cache_root,
         })
     }
 }
@@ -2148,13 +2338,17 @@ impl Resident {
 /// before any sweep could read either as a write intent.
 fn settle_peer_bodies(
     owned: Option<&OwnedTree>,
+    staging: Option<&StagingTree>,
     engine: &fauna_sync_engine::engine::SyncEngine,
     reconcile: &fauna_sync_engine::engine::OverlayReconcile,
     folder: &str,
 ) {
-    if let Some(tree) = owned
-        && let Err(e) = tree.settle_peer_bodies(engine, reconcile)
-    {
+    let settled = match (owned, staging) {
+        (Some(tree), _) => tree.settle_peer_bodies(engine, reconcile),
+        (None, Some(tree)) => tree.settle_peer_bodies(engine, reconcile),
+        (None, None) => Ok(()),
+    };
+    if let Err(e) = settled {
         tracing::warn!(
             "file-provider host ({}): settling peer-landed bodies failed: {e:#}",
             fauna_core::log_redact::log_folder_name(folder)
@@ -2203,6 +2397,8 @@ async fn engine_worker(
     requests: mpsc::Receiver<Request>,
     relay_asks: mpsc::Receiver<RelayAsk>,
     serving: Arc<std::sync::Mutex<Option<ServedFolder>>>,
+    own_seat: Option<OwnSeat>,
+    lease: Option<watch::Receiver<LeaseUntil>>,
 ) {
     // The relay answers run beside the request loop on this thread
     // (`fauna_sync_engine::relay_seat`: beside the loop, never inside it).
@@ -2213,6 +2409,7 @@ async fn engine_worker(
             tokio::task::spawn_local(answer_relay_asks(relay_asks, Rc::clone(&published)));
             serve_requests(
                 ctx, signer, folder_ref, root_dir, cache_root, requests, published, serving,
+                own_seat, lease,
             )
             .await;
         })
@@ -2246,9 +2443,15 @@ async fn serve_requests(
     mut requests: mpsc::Receiver<Request>,
     published: Published,
     serving: Arc<std::sync::Mutex<Option<ServedFolder>>>,
+    own_seat: Option<OwnSeat>,
+    lease: Option<watch::Receiver<LeaseUntil>>,
 ) {
     let serve_roots = cache_root.clone().map(|cache| (root_dir.clone(), cache));
     let owned = cache_root.map(|cache| OwnedTree::new(root_dir.clone(), cache));
+    // A host whose OS owns the cache (apple's File Provider): its staging
+    // root is the kept root a peer's body lands in (`p2p-shared-set-build.md`
+    // § *Phone peers — design*, decision 3).
+    let staging = owned.is_none().then(|| StagingTree::new(root_dir.clone()));
     // The set's identity, as every log line names it.
     let folder = folder_ref.to_wire();
     // The FP host owns its (bearer) nest connection and must connect it before
@@ -2260,6 +2463,47 @@ async fn serve_requests(
     if let Err(e) = ctx.nest_rpc().connect().await {
         tracing::error!("file-provider host ({folder}): nest connect failed: {e}");
     }
+    // A self-serving host's relay seat (`relay-serving.md` § Relay serving →
+    // *Apple's File Provider replica*): announced on this host's own
+    // connection, beside the request loop on this thread, from the moment the
+    // engine is built (the seat reads `serving`, which the build publishes).
+    // On iOS it serves only while the app's foreground lease is live, and
+    // withdraws at its revoke or lapse. It ends with the loop — the host
+    // dropped — and withdraws its announce.
+    let own_seat = own_seat.map(|hosts| {
+        let nest = Arc::clone(ctx.nest_rpc());
+        let device_id_hex = hex::encode(ctx.device_id());
+        let task = {
+            let (nest, device_id_hex) = (Arc::clone(&nest), device_id_hex.clone());
+            tokio::task::spawn_local(async move {
+                let serve = || {
+                    let (nest, device_id_hex, hosts) =
+                        (Arc::clone(&nest), device_id_hex.clone(), hosts.clone());
+                    async move {
+                        fauna_sync_engine::relay_seat::RelaySeat::new()
+                            .serve_hosts(
+                                &nest,
+                                &device_id_hex,
+                                Arc::new(hosts),
+                                fauna_sync_engine::relay_seat::HOST_RESCAN,
+                            )
+                            .await
+                    }
+                };
+                match lease {
+                    None => serve().await,
+                    Some(lease) => {
+                        let withdraw = || {
+                            let (nest, device_id_hex) = (Arc::clone(&nest), device_id_hex.clone());
+                            async move { withdraw_own_seat(&nest, &device_id_hex, "lease").await }
+                        };
+                        serve_under_lease(lease, serve, withdraw).await
+                    }
+                }
+            })
+        };
+        (task, nest, device_id_hex)
+    });
     let mut resident = Resident {
         ctx,
         signer,
@@ -2295,7 +2539,13 @@ async fn serve_requests(
     // binding).
     let reconciled = resident.populate(&folder, owned.as_ref()).await;
     if let Some(b) = resident.built.as_ref() {
-        settle_peer_bodies(owned.as_ref(), &b.engine, &reconciled, &folder);
+        settle_peer_bodies(
+            owned.as_ref(),
+            staging.as_ref(),
+            &b.engine,
+            &reconciled,
+            &folder,
+        );
     }
 
     // An owned tree's start sweep (`on-demand-files-android.md` § Android SAF
@@ -2379,7 +2629,7 @@ async fn serve_requests(
         #[cfg(feature = "p2p-share")]
         let request = match request {
             Request::ShareReplica { reply } => {
-                let _ = reply.send(Ok(resident.share_replica(owned.as_ref())));
+                let _ = reply.send(Ok(resident.share_replica(owned.as_ref(), staging.as_ref())));
                 continue;
             }
             other => other,
@@ -2427,6 +2677,7 @@ async fn serve_requests(
         serve(
             resident.built.as_deref(),
             owned.as_ref(),
+            staging.as_ref(),
             adopt_into,
             &mut kept_flips,
             &folder,
@@ -2437,6 +2688,30 @@ async fn serve_requests(
         if refresh {
             prebind = PrebindDrive::armed();
         }
+    }
+    // The host is dropped: its seat stops answering and withdraws, so the
+    // nest asks this connection for nothing more even before it closes.
+    if let Some((task, nest, device_id_hex)) = own_seat {
+        task.abort();
+        let _ = task.await;
+        withdraw_own_seat(&nest, &device_id_hex, &folder).await;
+    }
+}
+
+/// A self-serving host's withdrawing announce, bounded by
+/// [`OWN_SEAT_WITHDRAW_WAIT`]; one that does not reach the nest leaves the
+/// connection's close to withdraw it.
+async fn withdraw_own_seat(nest: &fauna_client::NestClient, device_id_hex: &str, why: &str) {
+    let withdrawn = tokio::time::timeout(
+        OWN_SEAT_WITHDRAW_WAIT,
+        fauna_sync_engine::relay_seat::withdraw(nest, device_id_hex),
+    )
+    .await;
+    if !matches!(withdrawn, Ok(Ok(()))) {
+        tracing::info!(
+            "file-provider host ({why}): the seat's withdrawing announce did not reach the \
+             nest; the connection's close withdraws it"
+        );
     }
 }
 
@@ -2509,6 +2784,7 @@ impl PrebindDrive {
 async fn serve(
     built: Option<&BuiltEngine>,
     owned: Option<&OwnedTree>,
+    staging: Option<&StagingTree>,
     adopt_into: Option<&std::path::Path>,
     kept_flips: &mut std::collections::BTreeSet<String>,
     folder: &str,
@@ -2562,29 +2838,24 @@ async fn serve(
             let _ = reply.send(out);
         }
         Request::Ingest { rel, reply } => {
-            let out = provider_face::serve_ingest(engine, &rel)
-                .await
-                .map(FfiFileProviderAck::from)
-                .map_err(|e| e.to_string());
-            let _ = reply.send(out);
+            let out = provider_face::serve_ingest(engine, &rel).await;
+            settle_staged_write(staging, engine, &rel, out.is_ok(), folder);
+            let _ = reply.send(out.map(FfiFileProviderAck::from).map_err(|e| e.to_string()));
         }
         Request::IngestWithBase {
             rel,
             base_content_version,
             reply,
         } => {
-            let out = provider_face::serve_ingest_with_base(engine, &rel, &base_content_version)
-                .await
-                .map(FfiFileProviderAck::from)
-                .map_err(|e| e.to_string());
-            let _ = reply.send(out);
+            let out =
+                provider_face::serve_ingest_with_base(engine, &rel, &base_content_version).await;
+            settle_staged_write(staging, engine, &rel, out.is_ok(), folder);
+            let _ = reply.send(out.map(FfiFileProviderAck::from).map_err(|e| e.to_string()));
         }
         Request::IngestDeletionConflicted { rel, reply } => {
-            let out = provider_face::serve_ingest_deletion_conflicted(engine, &rel)
-                .await
-                .map(FfiFileProviderAck::from)
-                .map_err(|e| e.to_string());
-            let _ = reply.send(out);
+            let out = provider_face::serve_ingest_deletion_conflicted(engine, &rel).await;
+            settle_staged_write(staging, engine, &rel, out.is_ok(), folder);
+            let _ = reply.send(out.map(FfiFileProviderAck::from).map_err(|e| e.to_string()));
         }
         Request::Delete { rel, reply } => {
             let out = provider_face::serve_delete(engine, &rel)
@@ -2598,11 +2869,9 @@ async fn serve(
             to_rel,
             reply,
         } => {
-            let out = provider_face::serve_rename(engine, &from_rel, &to_rel)
-                .await
-                .map(FfiFileProviderAck::from)
-                .map_err(|e| e.to_string());
-            let _ = reply.send(out);
+            let out = provider_face::serve_rename(engine, &from_rel, &to_rel).await;
+            settle_staged_write(staging, engine, &to_rel, out.is_ok(), folder);
+            let _ = reply.send(out.map(FfiFileProviderAck::from).map_err(|e| e.to_string()));
         }
         Request::IsIgnored { rel, reply } => {
             let _ = reply.send(Ok(provider_face::serve_is_ignored(engine, &rel)));
@@ -2656,7 +2925,7 @@ async fn serve(
             kept_flips.extend(flipped);
             let out = match pulled {
                 Ok((changed, reconciled)) => {
-                    settle_peer_bodies(owned, engine, &reconciled, folder);
+                    settle_peer_bodies(owned, staging, engine, &reconciled, folder);
                     let adopted = match adopt_into {
                         Some(staging_root) => {
                             adopt_deposits(engine, owned, staging_root, folder).await
@@ -2668,6 +2937,10 @@ async fn serve(
                 Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(out);
+        }
+        Request::RestoreRetainedVersion { conflict_id, reply } => {
+            let out = engine.restore_retained_version(conflict_id).await;
+            let _ = reply.send(out.map_err(|e| format!("{e:#}")));
         }
         Request::TakeKeptFlips { reply } => {
             let mut items = Vec::with_capacity(kept_flips.len());
@@ -2684,7 +2957,100 @@ async fn serve(
             }
             let _ = reply.send(Ok(items));
         }
-        owned_request => serve_owned(engine, owned, folder, owned_request).await,
+        owned_request => match (owned, staging) {
+            (None, Some(tree)) => serve_staging(engine, tree, folder, owned_request).await,
+            _ => serve_owned(engine, owned, folder, owned_request).await,
+        },
+    }
+}
+
+/// The staging root's second copy of a write the user made through the OS's
+/// tree (a `createItem`/`modifyItem`, a rename's new path): once the engine
+/// has recorded it, the row goes back to a placeholder and the staged copy is
+/// removed, on the engine's own dehydration proof
+/// ([`StagingTree::settle_recorded`]; `p2p-shared-set-build.md` § *Built —
+/// iOS's leg*). The OS keeps its copy: the row keeps its recorded head, so the
+/// item's `contentVersion` does not move. A write the proof does not cover —
+/// unrecorded, merged, a body the holder keeps, a group set's — stays staged.
+fn settle_staged_write(
+    staging: Option<&StagingTree>,
+    engine: &fauna_sync_engine::engine::SyncEngine,
+    rel: &str,
+    served: bool,
+    folder: &str,
+) {
+    let Some(tree) = staging.filter(|_| served) else {
+        return;
+    };
+    if let Err(e) = tree.settle_recorded(engine, rel) {
+        tracing::warn!(
+            "file-provider host ({}): settling a recorded write's staged copy failed: {e:#}",
+            fauna_core::log_redact::log_folder_name(folder)
+        );
+    }
+}
+
+/// Dispatch one tree request on a host whose OS owns the cache (apple's File
+/// Provider): the two the staging root answers — the kept-root lookup
+/// `fetchContents` asks first, and the share plane's ingest door — and a
+/// refusal for every owned-tree operation.
+async fn serve_staging(
+    engine: &fauna_sync_engine::engine::SyncEngine,
+    tree: &StagingTree,
+    folder: &str,
+    request: Request,
+) {
+    match request {
+        Request::LookupBody { rel, reply } => {
+            let out = tree
+                .kept_body(engine, &rel)
+                .map(|p| p.map(|p| p.to_string_lossy().into_owned()));
+            let _ = reply.send(out.map_err(|e| format!("{e:#}")));
+        }
+        #[cfg(feature = "p2p-share")]
+        Request::ShareIngest {
+            proven_actor_hex,
+            rows,
+            spool_dir,
+            reply,
+        } => {
+            let out = fauna_sync_engine::always_resident::share_ingest_on_demand(
+                engine,
+                tree,
+                &proven_actor_hex,
+                &rows,
+                PathBuf::from(spool_dir),
+            )
+            .await
+            .map(share_ingest_outcome);
+            let _ = reply.send(out.map_err(|e| format!("{e:#}")));
+        }
+        other => other.fail(format!(
+            "folder {folder}: this host's OS owns its tree (built by app_dead) — \
+             only the kept-root lookup and the share door are served here"
+        )),
+    }
+}
+
+/// The FFI's report of one share ingest page.
+#[cfg(feature = "p2p-share")]
+fn share_ingest_outcome(
+    (report, cursor): (fauna_sync_engine::peer_share_store::PeerIngestReport, i64),
+) -> FfiShareIngestOutcome {
+    for (path, reason) in &report.skipped {
+        tracing::debug!(
+            path = %fauna_core::log_redact::log_path(path),
+            %reason,
+            "share ingest: no body landed for this row"
+        );
+    }
+    FfiShareIngestOutcome {
+        refused: report.refused as u32,
+        overlaid: report.overlaid as u32,
+        materialized: report.materialized as u32,
+        already_current: report.already_current as u32,
+        cursor,
+        storage_limited: report.storage_limited,
     }
 }
 
@@ -2794,23 +3160,7 @@ async fn serve_owned(
             let out = tree
                 .share_ingest(engine, &proven_actor_hex, &rows, PathBuf::from(spool_dir))
                 .await
-                .map(|(report, cursor)| {
-                    for (path, reason) in &report.skipped {
-                        tracing::debug!(
-                            path = %fauna_core::log_redact::log_path(path),
-                            %reason,
-                            "share ingest: no body landed for this row"
-                        );
-                    }
-                    FfiShareIngestOutcome {
-                        refused: report.refused as u32,
-                        overlaid: report.overlaid as u32,
-                        materialized: report.materialized as u32,
-                        already_current: report.already_current as u32,
-                        cursor,
-                        storage_limited: report.storage_limited,
-                    }
-                });
+                .map(share_ingest_outcome);
             let _ = reply.send(out.map_err(|e| format!("{e:#}")));
         }
         other => other.fail(format!(
@@ -2920,6 +3270,9 @@ impl Request {
             Request::RecordPlaceholder { reply, .. } => {
                 let _ = reply.send(Err(msg));
             }
+            Request::RestoreRetainedVersion { reply, .. } => {
+                let _ = reply.send(Err(msg));
+            }
             #[cfg(feature = "p2p-share")]
             Request::ShareReplica { reply } => {
                 let _ = reply.send(Err(msg));
@@ -2990,6 +3343,33 @@ pub fn sync_set_park(
     })
 }
 
+/// One group set's review rows, read from its state DB at rest and mapped once
+/// through the shared `ConflictSummary::of_retained` (`group-set.md` § Build
+/// design — the group set, decision 9 — the phone's in-process read beside the
+/// agent's `ListSetConflicts`). The same cross-process WAL read as
+/// [`sync_set_park`], under the same `state_dir` and `folder_id`; `set_label`
+/// is the set's label on the page. A row's `id` is what
+/// [`FfiFileProviderHost::restore_retained_version`] takes. A missing DB reads
+/// no rows. The fold records a row with no gesture of this device, so the
+/// app re-reads this on a poll.
+#[cfg(feature = "folders")]
+#[uniffi::export]
+pub fn sync_set_review_rows(
+    state_dir: String,
+    folder_id: String,
+    set_label: String,
+) -> Result<Vec<crate::ConflictSummary>, FfiError> {
+    let folder_ref = parse_folder_id(&folder_id)?;
+    let rows = fauna_sync_engine::db::set_retained_conflicts(&PathBuf::from(state_dir), folder_ref)
+        .map_err(|e| FfiError::General {
+            msg: format!("review rows read failed: {e}"),
+        })?;
+    Ok(rows
+        .iter()
+        .map(|row| crate::ConflictSummary::of_retained(&set_label, row))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3026,6 +3406,141 @@ mod tests {
             Arc::new(ForeignBearer(Arc::new(StaticBearer))),
             fauna_client::pinned_http_client(&url),
         ))
+    }
+
+    /// Apple's host (the OS owns the cache) runs its own relay seat on macOS
+    /// and iOS — iOS's under the app's lease; a host that owns its tree
+    /// (android's) never does — the app's seat serves it through the registry.
+    #[test]
+    fn only_apples_host_runs_its_own_seat_and_ios_under_a_lease() {
+        assert_eq!(
+            runs_own_seat(None),
+            cfg!(any(target_os = "macos", target_os = "ios"))
+        );
+        assert!(!runs_own_seat(Some(std::path::Path::new("/cache"))));
+        assert_eq!(seat_needs_lease(), cfg!(target_os = "ios"));
+        assert!(RELAY_LEASE_RENEWAL * 2 < RELAY_LEASE);
+    }
+
+    /// What a leased seat did, as [`serve_under_lease`]'s two closures saw it.
+    #[derive(Default)]
+    struct SeatLog {
+        announced: std::sync::atomic::AtomicUsize,
+        withdrawn: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SeatLog {
+        fn announced(&self) -> usize {
+            self.announced.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn withdrawn(&self) -> usize {
+            self.withdrawn.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// A leased seat over a fake serve (announces, then serves until dropped)
+    /// and a fake withdraw, running on its own task.
+    fn leased_seat(
+        lease: watch::Receiver<LeaseUntil>,
+    ) -> (Arc<SeatLog>, tokio::task::JoinHandle<()>) {
+        let log = Arc::new(SeatLog::default());
+        let (serving, withdrawing) = (Arc::clone(&log), Arc::clone(&log));
+        let task = tokio::spawn(serve_under_lease(
+            lease,
+            move || {
+                let log = Arc::clone(&serving);
+                async move {
+                    log.announced
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::future::pending::<()>().await
+                }
+            },
+            move || {
+                let log = Arc::clone(&withdrawing);
+                async move {
+                    log.withdrawn
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+        ));
+        (log, task)
+    }
+
+    /// Let the seat's task run what it can at the current instant.
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn grant(lease: &watch::Sender<LeaseUntil>) {
+        lease.send_replace(Some(tokio::time::Instant::now() + RELAY_LEASE));
+    }
+
+    /// No lease, no announce; a grant announces.
+    #[tokio::test(start_paused = true)]
+    async fn a_granted_lease_announces() {
+        let (lease, rx) = watch::channel(None);
+        let (log, _task) = leased_seat(rx);
+        settle().await;
+        tokio::time::advance(RELAY_LEASE * 2).await;
+        settle().await;
+        assert_eq!(log.announced(), 0, "an ungranted seat announced");
+        grant(&lease);
+        settle().await;
+        assert_eq!(log.announced(), 1);
+        assert_eq!(log.withdrawn(), 0);
+    }
+
+    /// A revoke withdraws at once, and a later grant serves afresh.
+    #[tokio::test(start_paused = true)]
+    async fn a_revoke_withdraws_at_once() {
+        let (lease, rx) = watch::channel(None);
+        let (log, _task) = leased_seat(rx);
+        grant(&lease);
+        settle().await;
+        lease.send_replace(None);
+        settle().await;
+        assert_eq!(log.withdrawn(), 1, "a revoke did not withdraw at once");
+        grant(&lease);
+        settle().await;
+        assert_eq!(log.announced(), 2);
+    }
+
+    /// A renewed lease keeps serving past its first length; an unrenewed one
+    /// withdraws within the lease length.
+    #[tokio::test(start_paused = true)]
+    async fn an_unrenewed_lease_withdraws_within_its_length() {
+        let (lease, rx) = watch::channel(None);
+        let (log, _task) = leased_seat(rx);
+        grant(&lease);
+        settle().await;
+        for _ in 0..6 {
+            tokio::time::advance(RELAY_LEASE_RENEWAL).await;
+            grant(&lease);
+            settle().await;
+        }
+        assert_eq!(log.withdrawn(), 0, "a renewed lease lapsed");
+        assert_eq!(log.announced(), 1, "a renewal re-announced");
+        tokio::time::advance(RELAY_LEASE - std::time::Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(log.withdrawn(), 0, "the lease lapsed early");
+        tokio::time::advance(std::time::Duration::from_millis(2)).await;
+        settle().await;
+        assert_eq!(log.withdrawn(), 1, "an unrenewed lease did not withdraw");
+    }
+
+    /// The host dropped (the lease's sender gone) ends a serving seat with
+    /// its withdraw.
+    #[tokio::test(start_paused = true)]
+    async fn the_lease_dropped_withdraws_and_ends() {
+        let (lease, rx) = watch::channel(None);
+        let (log, task) = leased_seat(rx);
+        grant(&lease);
+        settle().await;
+        drop(lease);
+        task.await.unwrap();
+        assert_eq!(log.withdrawn(), 1);
     }
 
     /// Every capability host of one account in a process reads through one

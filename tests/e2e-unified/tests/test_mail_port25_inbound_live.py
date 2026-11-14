@@ -110,6 +110,7 @@ def _relax_perimeter() -> None:
     from nacl.signing import SigningKey
 
     from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers import box_actions
 
     sk = SigningKey(bytes.fromhex(SECRET))
     with WsRpcAdminClient(URL, actor_id=bytes(sk.verify_key), signing_key=bytes(sk)) as adm:
@@ -125,6 +126,8 @@ def _relax_perimeter() -> None:
                 "max_conn_per_min": 1000,
             },
         )
+    box_actions.record(URL, "spam perimeter relaxed over the admin wire (fauna.bridges.put_spam_policy)",
+                       detail={"greylist": "off", "dnsbl": "none", "fcrdns": "off"})
 
 
 def _deliver_port25(nonce: str, deadline: float) -> None:

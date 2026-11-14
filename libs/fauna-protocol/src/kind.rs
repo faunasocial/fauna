@@ -3744,6 +3744,14 @@ impl KindRegistry {
             "fauna.subscriptions.offers.list",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
+        // list_remote: `offers.list` relayed to the author's home nest
+        // (`subscriptions.md` § Pillar 1 → *The offers browse across nests*).
+        // Pure read, replay-safe; 30 s for the peer round trip, the
+        // `profile.get_remote` posture.
+        self.add(
+            "fauna.subscriptions.offers.list_remote",
+            RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
         self.add(
             "fauna.subscriptions.post_unlock.get",
             RpcKindMeta::new(false, Duration::from_secs(5)),

@@ -31,7 +31,8 @@
   import { tabPin } from '#lib/tabPin';
   import { createConnectEdge } from '#lib/connectEdge';
   import { loadPendingFactoryReset } from '#lib/onboarding/pending-factory-reset-store';
-  import { ensureLogging, ensureWasm, connectionStateLabel, tokenRefreshTickSecs } from '#lib/wasm';
+  import { ensureLogging, ensureWasm, tokenRefreshTickSecs } from '#lib/wasm';
+  import ConnectionStatusIndicator from '#lib/components/ConnectionStatusIndicator.svelte';
   import { resolveLocalized, type LocalizedText } from '#lib/i18n/localized';
   import { startReceivePoll } from '#lib/conversations';
   import { flushCuesNow } from '#lib/feed-cues';
@@ -65,9 +66,6 @@
 
   let { children } = $props();
 
-  /** Set once the wasm module is up — see `connectionLabel`. */
-  let wasmReady = $state(false);
-
   if (typeof window !== 'undefined') {
     // Install the ring-only logging subscriber at SPA boot (observability.md
     // § Surfaces / § Persistence & privacy — Web): the shared `fauna_log::RingLayer`
@@ -75,13 +73,7 @@
     // Logs page is never empty on first open. Memoized + awaitable (the Logs
     // page awaits the same promise before reading the ring, so the read never
     // races this async install). Fire-and-forget here.
-    // Also gates `connectionLabel` below: the shared label mapping lives in wasm,
-    // and `wasm()` throws until the module is up, so the indicator falls back to
-    // the plain "Disconnected" reading for the pre-init frame (which is exactly
-    // what `connectionStatus` holds until a client is built anyway).
-    void ensureLogging().then(() => {
-      wasmReady = true;
-    });
+    void ensureLogging();
     // Start the app-wide conversations receive poll (both rails: the FaunaMls MLS
     // DM backstop — drainInbox + pollConversations — and the SMTP receive rail).
     // Started here (not gated on the current route / a present session) because
@@ -661,19 +653,6 @@
     });
   });
 
-  // Global connection-status indicator label (top of the sidebar) — the live
-  // nest WS-RPC state, the web twin of linux's top-of-sidebar indicator. The
-  // state → label decision is the shared `fauna_core::format::connection_state_label`
-  // over wasm (priority #2), not a web-local ternary: a *transient* swap still
-  // shows as "Connecting…" and never as an error, but a connection that has
-  // failed to establish repeatedly reports `unreachable` → "Cannot connect", so
-  // a browser that can never open the socket (e.g. a nest on its self-signed
-  // floor, which no browser will carry a WSS handshake over) says so instead of
-  // showing "Connecting…" forever. transport.md § Connection-status indicator.
-  let connectionLabel = $derived(
-    wasmReady ? resolveLocalized(connectionStateLabel($connectionStatus)) : t.common.disconnected,
-  );
-
   // SINGLE OWNER of the `/app` root-index redirect (one owner per claim). This
   // guard alone decides where an app-root entry lands; the root
   // `+page.svelte` deliberately no longer redirects. It used to `goto`
@@ -846,13 +825,7 @@
   {:else}
     {#snippet sidebarContent()}
       <div class="logo">Fauna</div>
-      <div
-        class="connection-status"
-        class:connected={$connectionStatus === 'connected'}
-        data-testid={IDS.CONNECTION_STATUS}
-      >
-        {connectionLabel}
-      </div>
+      <ConnectionStatusIndicator />
       {#each tabs as tab}
         <a
           href={tab.path}
@@ -923,14 +896,6 @@
     font-weight: 700;
     padding: 0 1rem 1rem;
     color: var(--accent);
-  }
-  .connection-status {
-    font-size: 0.75rem;
-    padding: 0 1rem 0.75rem;
-    color: var(--text-muted);
-  }
-  .connection-status.connected {
-    color: var(--text);
   }
   .tab {
     display: flex;

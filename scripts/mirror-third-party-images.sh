@@ -8,8 +8,8 @@
 # can name only ghcr.io/faunasocial/*, and so a reviewed digest bump reaches
 # every box through Fauna's own gates + Watchtower: the private pipeline STAGES the
 # mirrors beside the nest image (`sha-<sha>`, then `dev`, before its verify gate);
-# the public pipeline's stage moves the signed ones to `test,<version>` and its
-# promote copies the verified ones to `latest`, both through
+# the public pipeline's stage moves the signed ones to `test` and its promote
+# copies the verified ones to `<version>,latest`, both through
 # release-nest-image.sh (image-pipeline.md § Image tags & channels).
 #
 # It is a MANIFEST COPY: no build, no docker pull, no dependency source read.
@@ -19,8 +19,8 @@
 #
 #   <dest-tags>           comma-separated tags to create on each mirror repo,
 #                         e.g. "sha-abc123,dev" (a private stage) or
-#                         "test,0.1.4" (the public pipeline's stage) or
-#                         "latest" (its promote)
+#                         "test" (the public pipeline's stage) or
+#                         "0.1.4,latest" (its promote)
 #   <source-tag>          optional. When given, copy from
 #                         <mirror-repo>:<source-tag> (the manifest this
 #                         pipeline already staged and verified). When omitted,

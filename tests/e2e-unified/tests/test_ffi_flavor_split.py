@@ -1684,14 +1684,11 @@ _MAIL_BRIDGE_RECIPES = (
     ("mail-bridge-build", "mail-bridge-build-e2e", '"fauna-mail-bridge-e2e"'),
     ("windows-mail-bridge-build", "windows-mail-bridge-build-e2e", '"fauna-mail-bridge-e2e.exe"'),
 )
-#: The literals each pair witnesses both ways. The windows pair carries the Go
-#: seams only: its e2e exe and the shipped one stage beside ONE
-#: `target/fauna_ffi.dll`, so no e2e cdylib flavor exists there
-#: yet.
-_MAIL_BRIDGE_PAIR_LITERALS = {
-    "mail-bridge-build": _MAIL_BRIDGE_SEAM_LITERALS + _MAIL_FFI_SEAM_LITERALS,
-    "windows-mail-bridge-build": _MAIL_BRIDGE_SEAM_LITERALS,
-}
+#: The literals every pair witnesses both ways: the Go seams in the binary and
+#: fauna-mail's Rust ones in the cdylib it loads — on windows the
+#: `fauna_ffi.dll` staged beside the exe, the e2e exe's in a directory of its
+#: own.
+_MAIL_BRIDGE_PAIR_LITERALS = _MAIL_BRIDGE_SEAM_LITERALS + _MAIL_FFI_SEAM_LITERALS
 
 
 @pytest.mark.parametrize("prod_name, e2e_name, e2e_out", _MAIL_BRIDGE_RECIPES, ids=lambda v: v if not v.startswith('"') else "")
@@ -1714,7 +1711,7 @@ def test_only_the_e2e_mail_bridge_recipes_set_the_fixtures_tag(prod_name, e2e_na
 def test_the_production_mail_bridge_recipes_witness_their_own_artifact(prod_name, e2e_name, e2e_out):
     _assert_two_way_artifact_witness(
         _recipe_body(prod_name), _recipe_body(e2e_name), prod_name, e2e_name,
-        literals=_MAIL_BRIDGE_PAIR_LITERALS[prod_name],
+        literals=_MAIL_BRIDGE_PAIR_LITERALS,
     )
 
 
@@ -1740,19 +1737,88 @@ def test_the_unix_mail_bridge_recipes_grep_the_cdylib_they_link():
     )
 
 
-def test_only_the_e2e_cdylib_recipe_turns_on_the_mail_seam_feature():
-    """fauna-ffi's `mail-bridge-e2e` feature (fauna-mail's `test-helpers`) is
-    built by `mail-bridge-ffi-e2e` alone — the one cargo line in the justfile
-    that names it — never by the shipped `mail-bridge-ffi`."""
-    justfile = (_REPO / "justfile").read_text(encoding="utf-8")
+#: Where the windows e2e mail bridge and ITS fauna_ffi.dll are staged: a
+#: directory of its own, because the loader resolves the dll from the exe's own
+#: directory, so two flavors in one directory would be one dll.
+_WIN_MAIL_E2E_DIR = "target/mail-bridge-e2e"
+
+
+def test_the_windows_mail_bridge_recipes_grep_the_dll_staged_beside_them():
+    """The windows twin of the Unix pin above. Windows has no rpath: an exe
+    loads the `fauna_ffi.dll` in its own directory, so the dll staged beside
+    each exe IS the one it runs — and the one the shipped recipe must grep.
+    The shipped exe and its dll stay in `target/` (what release.yml and the
+    MSI take); the e2e exe is built against the `mail-ffi-e2e-slot` flavor and
+    staged with that dll in `target/mail-bridge-e2e/`, which the shipped
+    recipe never names."""
+    prod = _strip_shell_comments(_recipe_body("windows-mail-bridge-build"))
+    e2e = _strip_shell_comments(_recipe_body("windows-mail-bridge-build-e2e"))
+    assert "target/fauna-mail-bridge.exe target/fauna_ffi.dll" in prod, (
+        "windows-mail-bridge-build must grep the shipped exe AND the fauna_ffi.dll staged beside it"
+    )
+    assert "mail-ffi-e2e-slot" not in prod and _WIN_MAIL_E2E_DIR not in prod, (
+        "windows-mail-bridge-build must never name the e2e dll flavor or its directory"
+    )
+    assert '"fauna_e2e_fixtures" mail-ffi-e2e-slot' in e2e, (
+        "windows-mail-bridge-build-e2e must link the e2e dll flavor "
+        "(`_windows-go-cgo-build … mail-ffi-e2e-slot`)"
+    )
+    pair = f"{_WIN_MAIL_E2E_DIR}/fauna-mail-bridge-e2e.exe {_WIN_MAIL_E2E_DIR}/fauna_ffi.dll"
+    assert pair in e2e, (
+        f"windows-mail-bridge-build-e2e must grep the e2e exe and the dll beside it ({pair})"
+    )
+    helper = _strip_shell_comments(_recipe_body("_windows-go-cgo-build"))
+    assert f'mail-ffi-e2e-slot) STAGE="$(pwd)/{_WIN_MAIL_E2E_DIR}"' in helper, (
+        f"_windows-go-cgo-build must stage the e2e dll flavor's exes in {_WIN_MAIL_E2E_DIR}/"
+    )
+    assert 'mail-ffi-slot) STAGE="$(pwd)/target"' in helper, (
+        "_windows-go-cgo-build must keep staging the shipped flavor in target/ "
+        "(release.yml and the MSI take it from there)"
+    )
+    conftest = (_REPO / "tests" / "e2e-unified" / "conftest.py").read_text(encoding="utf-8")
+    assert '"target" / "mail-bridge-e2e" / "fauna-mail-bridge-e2e.exe"' in conftest, (
+        "the conftest's windows e2e mail bridge must be the exe the recipe stages "
+        f"in {_WIN_MAIL_E2E_DIR}/ — the target/ copy would load the shipped dll"
+    )
+
+
+def _cgo_env_flavor_features() -> dict[str, str]:
+    """`_windows-go-cgo-env`'s feature set per `ffi_slot` arm."""
+    body = _strip_shell_comments(_recipe_body("_windows-go-cgo-env"))
+    arms = dict(re.findall(r"^\s*(mail-ffi(?:-e2e)?-slot)\)\s*\n\s*FEATURES=(\S+)", body, re.M))
+    assert set(arms) == {"mail-ffi-slot", "mail-ffi-e2e-slot"}, (
+        f"_windows-go-cgo-env must set FEATURES in exactly its two `ffi_slot` arms; found {arms}"
+    )
+    return arms
+
+
+def _unix_cdylib_features(recipe: str) -> str:
+    m = re.search(r"--no-default-features --features (\S+)", _strip_shell_comments(_recipe_body(recipe)))
+    assert m, f"{recipe} no longer names its fauna-ffi feature set"
+    return m.group(1)
+
+
+def test_only_the_e2e_cdylib_recipes_turn_on_the_mail_seam_feature():
+    """fauna-ffi's `mail-bridge-e2e` feature (fauna-mail's `test-helpers`) has
+    two homes, one per platform family, each the e2e twin of a shipped build:
+    the Unix `mail-bridge-ffi-e2e`, and the `mail-ffi-e2e-slot` arm of
+    `_windows-go-cgo-env`. Never the shipped `mail-bridge-ffi`, never the
+    shipped windows arm, and nowhere else in the justfile."""
     assert "labeler,mail-bridge-e2e" in _strip_shell_comments(_recipe_body("mail-bridge-ffi-e2e"))
     assert "mail-bridge-e2e" not in _strip_shell_comments(_recipe_body("mail-bridge-ffi")), (
         "mail-bridge-ffi turns on fauna-ffi's `mail-bridge-e2e` — the mail seams would ship"
     )
-    hits = re.findall(r"--features [^ ']*mail-bridge-e2e", justfile)
-    assert len(hits) == 1, (
-        f"fauna-ffi's `mail-bridge-e2e` feature is named by {len(hits)} cargo lines in the "
-        "justfile; only `mail-bridge-ffi-e2e` may build it"
+    arms = _cgo_env_flavor_features()
+    assert "mail-bridge-e2e" not in arms["mail-ffi-slot"], (
+        "_windows-go-cgo-env's shipped arm turns on `mail-bridge-e2e` — the mail seams "
+        "would ship in the MSI's fauna_ffi.dll"
+    )
+    assert arms["mail-ffi-e2e-slot"] == "labeler,mail-bridge-e2e"
+    code = _strip_shell_comments((_REPO / "justfile").read_text(encoding="utf-8"))
+    hits = re.findall(r"labeler,mail-bridge-e2e", code)
+    assert len(hits) == 2, (
+        f"fauna-ffi's `mail-bridge-e2e` feature set is spelled {len(hits)} times in the "
+        "justfile's code; only `mail-bridge-ffi-e2e` and `_windows-go-cgo-env`'s e2e arm may build it"
     )
 
 
@@ -1832,11 +1898,26 @@ def test_the_windows_go_cgo_recipes_share_one_feature_set():
     produced a labeler-less windows MDA *and* seal-helper, caught by a build
     failure rather than a gate). A second `cargo build … -p fauna-ffi` appearing
     in any caller is that drift re-opening.
+
+    Two flavors since 2026-11-12 (the e2e mail bridge's seam-carrying dll), each
+    an `ffi_slot` arm of the one cargo line, each in lockstep with its Unix
+    twin: the shipped arm with `mail-bridge-ffi`, the e2e arm with
+    `mail-bridge-ffi-e2e`.
     """
     shared = _strip_shell_comments(_recipe_body("_windows-go-cgo-env"))
-    assert "--no-default-features --features labeler" in shared, (
+    assert '--no-default-features --features "$FEATURES"' in shared, (
         "_windows-go-cgo-env is the single home of the windows gnullvm feature "
-        "set; it must stay in lockstep with mail-bridge-ffi"
+        "set; its one cargo line must take the flavor's FEATURES"
+    )
+    assert len(_FFI_CARGO_BUILD.findall(shared)) == 1, (
+        "_windows-go-cgo-env must build fauna-ffi on ONE cargo line for both flavors"
+    )
+    arms = _cgo_env_flavor_features()
+    assert arms["mail-ffi-slot"] == _unix_cdylib_features("mail-bridge-ffi"), (
+        "_windows-go-cgo-env's shipped arm drifted from mail-bridge-ffi's feature set"
+    )
+    assert arms["mail-ffi-e2e-slot"] == _unix_cdylib_features("mail-bridge-ffi-e2e"), (
+        "_windows-go-cgo-env's e2e arm drifted from mail-bridge-ffi-e2e's feature set"
     )
     callers = {
         "_windows-go-cgo-build": "_windows-go-cgo-env",

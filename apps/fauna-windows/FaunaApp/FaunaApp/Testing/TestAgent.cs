@@ -22,7 +22,13 @@ public class TestAgent
 
     private readonly string _bridgeUrl;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
-    private string _lastCommandId = "";
+    // The ack pair. A push snapshots `_lastCommandId` THEN `_ready`, and only then
+    // reads the state (PushStateAsync); the poll loop drops `_ready` BEFORE
+    // ProcessCommand publishes the next command's id and raises it only once that
+    // command's result is in place. So a push that reads the new id with
+    // `ready=true` reads a result that is the new command's own. Both volatile:
+    // the order has to hold on ARM64's weak memory model too.
+    private volatile string _lastCommandId = "";
     private volatile bool _ready = true;
     private bool _running;
     // The agent's SECOND deferral rail: work that must run off the poll thread
@@ -319,6 +325,15 @@ public class TestAgent
                         : null;
                     Log($"[{iteration}] Got command {commandName}"
                         + (methodName is null ? "" : $" ({methodName})") + ", processing");
+                    // Lower the ack BEFORE ProcessCommand publishes this command's id.
+                    // A push already in flight — the previous command's post-action
+                    // pushes from the thread pool once it is done — could otherwise
+                    // read the new id with the previous command's `ready=true` and
+                    // its result: the driver then takes the previous command's result
+                    // as this one's (a cue probe straight after a freeze read the
+                    // freeze's `{"ok":true}`, measured 2026-11-12). Raised
+                    // again below once this command's result is in place.
+                    _ready = false;
                     var postAction = ProcessCommand(command);
                     Log($"[{iteration}] Command processed, lastCmdId={_lastCommandId}");
                     // Take-and-clear BEFORE either rail runs: the arm sets it, this
@@ -431,6 +446,13 @@ public class TestAgent
                             }
                         });
                     }
+                    else
+                    {
+                        // A command with no deferred rail is done: its result, if any,
+                        // was set inside ProcessCommand, so the ack may rise now — the
+                        // early ack the `barrier_probe` arm relies on included.
+                        _ready = true;
+                    }
                     Log($"[{iteration}] Pushing state (ready={_ready})");
                     await PushStateAsync();
                     Log($"[{iteration}] State pushed");
@@ -499,6 +521,12 @@ public class TestAgent
             ? System.Diagnostics.Stopwatch.StartNew()
             : null;
 
+        // The ack pair FIRST, then the state (the order the `_lastCommandId` field
+        // comment explains): read the other way round, a push could pair a stale
+        // result with a newer command's id and `ready=true`.
+        var lastCommandId = _lastCommandId;
+        var ready = _ready;
+
         // State provider reads plain fields (no UI access), safe to call from any thread
         Dictionary<string, object?> state;
         try { state = _stateProvider(); }
@@ -511,8 +539,8 @@ public class TestAgent
 
         var payload = new Dictionary<string, object?>
         {
-            ["last_command_id"] = _lastCommandId,
-            ["ready"] = _ready,
+            ["last_command_id"] = lastCommandId,
+            ["ready"] = ready,
             ["state"] = state,
         };
         var json = JsonSerializer.Serialize(payload, JsonOpts);
@@ -2096,6 +2124,27 @@ public class TestAgent
                     FaunaApp.App.MachineMethodResult = verdictDoc.RootElement.Clone();
                     return null;
                 }
+            case "feed_cue_hydration_hold":
+                // Set or clear the e2e cue-hydration hold — `{held: bool}`: set before
+                // the Feed page first loads, the seat's rollup fetch parks until it is
+                // cleared (FeedManagerHost.SetCueHydrationHoldForTest). The in-memory
+                // lever web's and apple's agents answer under the same name; this
+                // driver builds the launch environment from scratch, so the hold file
+                // tui and linux take never reaches the app. A missing or non-boolean
+                // `held` is refused loudly, never read as a default (convention 11).
+                FaunaApp.App.MachineMethodResult = null;
+                if (command.TryGetValue("held", out var heldRaw) && heldRaw is JsonElement heldEl
+                    && heldEl.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    FaunaApp.Core.FeedManagerHost.SetCueHydrationHoldForTest(heldEl.GetBoolean());
+                }
+                else
+                {
+                    FaunaApp.App.MachineMethodResult = JsonSerializer.SerializeToElement(
+                        new Dictionary<string, object?> { ["error"] = "feed_cue_hydration_hold: needs a boolean `held`" });
+                    ReportCommandFailure(action, "needs a boolean `held`");
+                }
+                return null;
             case "feed_cue_clock_freeze":
             case "feed_cue_clock_thaw":
             case "feed_cue_clock_advance":

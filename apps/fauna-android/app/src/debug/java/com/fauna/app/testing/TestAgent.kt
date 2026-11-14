@@ -22,6 +22,7 @@ import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.ffi.connectionIsOnline
 import com.fauna.ffi.connectionStateWord
 import com.fauna.ffi.contentTypeForFilename
+import com.fauna.ffi.appOutboxDrainNowForTest
 import com.fauna.ffi.dialBudgetClearForTest
 import com.fauna.ffi.launchClockNowSecsForTest
 import com.fauna.ffi.launchClockOffsetSecsForTest
@@ -29,6 +30,7 @@ import com.fauna.ffi.logEmitBurstForTest
 import com.fauna.ffi.logReloadE2eCapsForTest
 import com.fauna.ffi.setDelegationClockOffsetSecs
 import com.fauna.ffi.setMailTokenRefreshClockOffsetSecs
+import com.fauna.ffi.setOutboxDrainHoldForTest
 import com.fauna.ffi.setTrustClockOffsetSecs
 import com.fauna.ffi.subscriptionsHoldAuthorDrainForTest
 import com.fauna.ffi.subscriptionsReleaseAuthorDrainForTest
@@ -563,6 +565,18 @@ object TestAgent {
      *  call below is a silent safe-call no-op. */
     internal fun setActorScopeForTest(scope: com.fauna.app.core.ActorScope?) {
         actorScope = scope
+    }
+
+    /** Test seam, same shape as [setConversationsManagerHostForTest]: point
+     *  `call_machine_method` at an [OnboardingHost] and an account registry a pin
+     *  owns, so its arms can be proven to MOVE the shared machine and registry,
+     *  not merely to be recognised. [start] sets the real Hilt singletons. */
+    internal fun setMachineMethodTargetsForTest(
+        host: OnboardingHost?,
+        accountRegistry: com.fauna.ffi.FfiAccountRegistry?,
+    ) {
+        onboardingHost = host
+        registry = accountRegistry
     }
 
     private suspend fun pollLoop(
@@ -1647,7 +1661,30 @@ object TestAgent {
                 val methodName = cmd.optString("method")
                 if (methodName.isNullOrEmpty()) return "the command carried no `method` name"
                 val jsonArg = cmd.optString("json_arg") ?: ""
-                // The registry arms first — they need this app's own account
+                // The provisioning drive first — the one arm each app owns,
+                // because it spawns work that outlives the call and which
+                // runtime owns that spawn is platform-divergent
+                // (`OnboardingMachine::call_machine_method_async`'s doc; the
+                // shared dispatchers deliberately leave both names out, so
+                // without this arm a live drive sat `Idle` for its whole
+                // budget — `helpers/live_provision.py`). Both names map to the
+                // async `runProvisioning()`, never the same-named sync exports,
+                // whose bare `tokio::spawn` needs an ambient runtime this thread
+                // lacks — the production buttons' choice (`NestProvisioningVM`),
+                // and iOS's and windows's arm. `run_provisioning_inner` resets the
+                // snapshot and the cancel flag at entry, so it is the retry entry
+                // too. Launched, not awaited: the drive takes minutes and the
+                // bridge acks at once; the driver polls `provisioning_snapshot`.
+                if (methodName == "start_provisioning" || methodName == "retry_provisioning") {
+                    val host = onboardingHost
+                        ?: return "call_machine_method($methodName) arrived before the " +
+                            "OnboardingHost was wired (TestAgent.start has not run yet)"
+                    machineMethodResult = null
+                    pokeScope.launch { host.machine.runProvisioning() }
+                    android.util.Log.i("TestAgent", "call_machine_method($methodName) launched")
+                    return null
+                }
+                // The registry arms next — they need this app's own account
                 // registry, which no machine dispatcher can reach (the shared
                 // `fauna_client_accounts::call_registry_method_for_test`; apple's
                 // `RegistryTestBridge` and tui's automation route the same way).
@@ -2199,6 +2236,25 @@ object TestAgent {
                         android.util.Log.i("TestAgent", "account_pump_now: no account runtime yet (pre-auth)")
                     }
                 }
+            }
+            "app_outbox_drain_now" -> {
+                // The app-only outbox drain, rung now — android's twin of tui's
+                // and linux's arm (`fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW` owns
+                // the contract): the process outbox's own drain loop, for a test
+                // that has just released the e2e drain hold, whose held pass
+                // ended the loop. The FFI body spawns on the store runtime and
+                // returns at once; a no-op pre-auth. The barrier is the effect.
+                appOutboxDrainNowForTest()
+            }
+            "outbox_drain_hold" -> {
+                // The in-process e2e outbox drain hold
+                // (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`): this process hosts the
+                // account runtime and inherits no harness environment, so the
+                // hold file the desktop apps read cannot reach it. A missing or
+                // non-boolean `held` is a loud refusal (convention 11).
+                val held = cmd.opt("held") as? Boolean
+                    ?: return "outbox_drain_hold needs a boolean `held`"
+                setOutboxDrainHoldForTest(held)
             }
             "custody_owner_resend_now" -> {
                 // The custody owner sends again, android's twin of tui's and

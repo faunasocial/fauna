@@ -79,7 +79,7 @@ fn get_or_mint_signer(
     conn.execute(
         "INSERT INTO nostr_bunker_signers (actor_id, signer_pubkey, encrypted_privkey, created_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![actor_id, kp.public_key_hex(), enc, now],
+        params![actor_id, kp.public_key_hex(), enc, i64::try_from(now)?],
     )?;
     Ok(kp)
 }
@@ -105,7 +105,7 @@ pub fn create_invite(conn: &Connection, actor_id: &str, now: u64) -> Result<Bunk
     conn.execute(
         "DELETE FROM nostr_bunker_apps
          WHERE actor_id = ?1 AND status = 'pending' AND expires_at <= ?2",
-        params![actor_id, now],
+        params![actor_id, i64::try_from(now)?],
     )?;
     let live: i64 = conn.query_row(
         "SELECT COUNT(*) FROM nostr_bunker_apps
@@ -128,8 +128,8 @@ pub fn create_invite(conn: &Connection, actor_id: &str, now: u64) -> Result<Bunk
         params![
             actor_id,
             secret_hash(&secret).as_slice(),
-            now,
-            now + INVITE_TTL_SECS
+            i64::try_from(now)?,
+            i64::try_from(now + INVITE_TTL_SECS)?
         ],
     )?;
     Ok(BunkerInvite {
@@ -181,10 +181,10 @@ pub fn list_apps(conn: &Connection, actor_id: &str) -> Result<Vec<BunkerApp>> {
                 app_pubkey: r.get(1)?,
                 label: r.get(2)?,
                 status: r.get(3)?,
-                created_at: r.get(4)?,
-                last_used_at: r.get(5)?,
-                use_count: r.get(6)?,
-                expires_at: r.get(7)?,
+                created_at: row_u64(r, 4)?,
+                last_used_at: row_opt_u64(r, 5)?,
+                use_count: row_u64(r, 6)?,
+                expires_at: row_u64(r, 7)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -286,10 +286,24 @@ fn authorized_app(
         .query_row(
             "SELECT id FROM nostr_bunker_apps
              WHERE actor_id = ?1 AND app_pubkey = ?2 AND status = 'active' AND expires_at > ?3",
-            params![actor_id, app_pubkey, now],
+            params![actor_id, app_pubkey, i64::try_from(now)?],
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// A non-negative integer column read as `u64`: rusqlite 0.39 reads no `u64`
+/// directly, so the column is read as `i64` and a negative value is refused.
+fn row_u64(r: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u64> {
+    let v: i64 = r.get(idx)?;
+    u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(idx, v))
+}
+
+/// [`row_u64`] for a nullable column.
+fn row_opt_u64(r: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<u64>> {
+    let v: Option<i64> = r.get(idx)?;
+    v.map(|v| u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(idx, v)))
+        .transpose()
 }
 
 /// Record a served request: audit counters + the sliding idle expiry.
@@ -298,7 +312,11 @@ fn record_use(conn: &Connection, connection_id: i64, now: u64) -> Result<()> {
         "UPDATE nostr_bunker_apps
          SET last_used_at = ?2, use_count = use_count + 1, expires_at = ?3
          WHERE id = ?1",
-        params![connection_id, now, now + IDLE_EXPIRY_SECS],
+        params![
+            connection_id,
+            i64::try_from(now)?,
+            i64::try_from(now + IDLE_EXPIRY_SECS)?
+        ],
     )?;
     Ok(())
 }
@@ -451,7 +469,9 @@ fn handle_connect(
          WHERE actor_id = ?1 AND status = 'pending' AND expires_at > ?2",
     )?;
     let pending: Vec<(i64, Vec<u8>)> = stmt
-        .query_map(params![actor_id, now], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![actor_id, i64::try_from(now)?], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     // blake3::Hash equality is constant-time; compare via Hash, not bytes.
     let matched = pending.iter().find(|(_, stored)| {
@@ -469,7 +489,12 @@ fn handle_connect(
          SET status = 'active', app_pubkey = ?2, secret_hash = NULL,
              last_used_at = ?3, use_count = use_count + 1, expires_at = ?4
          WHERE id = ?1",
-        params![connection_id, app_pubkey, now, now + IDLE_EXPIRY_SECS],
+        params![
+            connection_id,
+            app_pubkey,
+            i64::try_from(now)?,
+            i64::try_from(now + IDLE_EXPIRY_SECS)?
+        ],
     )?;
     Ok(build_response_json(&req.id, Ok("ack")))
 }

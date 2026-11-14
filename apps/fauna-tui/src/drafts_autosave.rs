@@ -17,6 +17,7 @@ use std::sync::{Arc, Weak};
 
 use fauna_client::NestClient;
 use fauna_client_drafts::{DraftsSync, LEAVE_FLUSH_BUDGET, LaunchRestore, autosave_debounce};
+use fauna_protocol::RpcRequester;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// A manager that owns compose state which can be snapshotted for the shared
@@ -34,6 +35,11 @@ pub(crate) trait DraftsHost {
     /// a probe (`ConversationsManager::restore_drafts_at`); the feed rail has no
     /// picker and its body is still synchronous.
     fn restore_drafts_at(&self, epoch: u64, bytes: Vec<u8>) -> impl Future<Output = ()> + Send;
+    /// The leave door's fill ([`LeaveFlush`]; `DraftsSync::save_on_leave`):
+    /// the launch restore's FILL of `bytes` at `epoch`, synchronously and
+    /// without the conversations rail's recipient probe (the session is
+    /// leaving), then the snapshot to save.
+    fn fill_drafts_for_leave(&self, epoch: u64, bytes: &[u8]) -> Vec<u8>;
 }
 
 /// Spawn the launch load: fetch + unseal this actor's drafts and hand them to
@@ -87,6 +93,9 @@ where
 /// (`main.rs`, awaited right before the process exits) and the session
 /// teardown (`session::sign_out`, awaited on the stop task before the client
 /// disconnects, which covers sign-out, account switch and the e2e reset alike).
+/// A door taken before the launch load has lifted a rail's save gate still
+/// saves: the rail reads once and fills from what rests before saving
+/// (`DraftsSync::save_on_leave`).
 ///
 /// Split into a synchronous [`Self::capture`] and an async [`Self::run`]
 /// because the sign-out tears the rails down in the same synchronous call that
@@ -98,17 +107,59 @@ pub(crate) struct LeaveFlush {
     saves: Vec<RailSave>,
 }
 
-/// One rail's half of a [`LeaveFlush`]: the snapshot taken at capture, and
-/// the sync that saves it.
-struct RailSave {
+/// The leave fill a rail hands its [`RailSave`]: given the draft the door's
+/// read found resting on the nest, the snapshot to save
+/// (`DraftsSync::save_on_leave`).
+type LeaveFill = Box<dyn FnOnce(Vec<u8>) -> Vec<u8> + Send>;
+
+/// One rail's half of a [`LeaveFlush`]: the snapshot taken at capture, the
+/// fill that applies a resting draft to it, and the sync that saves it.
+/// Generic over the transport only so the tests can run it over an in-memory
+/// nest; the app's rails all ride the session client.
+struct RailSave<R: RpcRequester = Arc<NestClient>> {
     log_prefix: &'static str,
-    sync: Arc<DraftsSync<Arc<NestClient>>>,
+    sync: Arc<DraftsSync<R>>,
     snapshot: Vec<u8>,
+    fill: LeaveFill,
 }
 
-impl RailSave {
+impl<R: RpcRequester> RailSave<R> {
+    /// A manager-backed rail's half: its snapshot now, and a fill that applies
+    /// a resting draft to the same manager at the identity epoch read now, so
+    /// a door that straddles an identity change fills nothing.
+    fn of_manager<M: DraftsHost + Send + Sync + 'static>(
+        log_prefix: &'static str,
+        sync: &Arc<DraftsSync<R>>,
+        manager: &Arc<M>,
+    ) -> Self {
+        let epoch = manager.identity_epoch();
+        let host = Arc::clone(manager);
+        Self {
+            log_prefix,
+            sync: Arc::clone(sync),
+            snapshot: manager.drafts_snapshot_bytes(),
+            fill: Box::new(move |resting| host.fill_drafts_for_leave(epoch, &resting)),
+        }
+    }
+
+    /// The events rail's half: the form as the door found it, filled by the
+    /// rail's own rule (`EventDrafts::filled_snapshot`).
+    fn of_event_draft(
+        sync: &Arc<DraftsSync<R>>,
+        draft: fauna_client_caldav::drafts::EventDrafts,
+    ) -> Self {
+        Self {
+            log_prefix: "event drafts",
+            sync: Arc::clone(sync),
+            snapshot: draft.snapshot_bytes(),
+            fill: Box::new(move |resting| draft.filled_snapshot(&resting)),
+        }
+    }
+
+    /// Open a gate the launch load has not lifted yet with one read, fill,
+    /// and save — the whole of it under [`LEAVE_FLUSH_BUDGET`].
     async fn run(self) {
-        let save = self.sync.save_if_changed(&self.snapshot);
+        let save = self.sync.save_on_leave(self.snapshot, self.fill);
         match tokio::time::timeout(LEAVE_FLUSH_BUDGET, save).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::warn!("{}: leave-flush failed: {e}", self.log_prefix),
@@ -122,35 +173,25 @@ impl LeaveFlush {
     /// (pre-auth, or a session whose identity secret could not seal).
     pub(crate) fn capture(app: &crate::app::App) -> Option<Self> {
         let mut saves = Vec::new();
-        let mut push = |log_prefix, sync: &Arc<_>, snapshot| {
-            saves.push(RailSave {
-                log_prefix,
-                sync: Arc::clone(sync),
-                snapshot,
-            });
-        };
         if let (Some(manager), Some(sync)) =
             (&app.conversations.manager, &app.conversations.drafts_sync)
         {
-            push("drafts", sync, manager.drafts_snapshot_bytes());
+            saves.push(RailSave::of_manager("drafts", sync, manager));
         }
         if let (Some(manager), Some(sync)) = (&app.feed.manager, &app.feed.drafts_sync) {
-            push("feed drafts", sync, manager.drafts_snapshot_bytes());
+            saves.push(RailSave::of_manager("feed drafts", sync, manager));
         }
         if let Some(sync) = &app.events.drafts_sync {
-            push(
-                "event drafts",
-                sync,
-                app.events.event_draft().snapshot_bytes(),
-            );
+            saves.push(RailSave::of_event_draft(sync, app.events.event_draft()));
         }
         (!saves.is_empty()).then_some(Self { saves })
     }
 
-    /// Save every captured snapshot, concurrently, each under its own
+    /// Save every captured rail, concurrently, each under its own
     /// [`LEAVE_FLUSH_BUDGET`] — one rail's timeout never costs another its
-    /// flush. An unchanged snapshot is a byte-compare, no upload
-    /// (`save_if_changed`).
+    /// flush. A rail whose save gate the launch load has not lifted yet first
+    /// reads once (`DraftsSync::save_on_leave`); an unchanged snapshot is a
+    /// byte-compare, no upload.
     pub(crate) async fn run(self) {
         futures_util::future::join_all(self.saves.into_iter().map(RailSave::run)).await;
     }
@@ -234,6 +275,9 @@ mod tests {
             0
         }
         async fn restore_drafts_at(&self, _epoch: u64, _bytes: Vec<u8>) {}
+        fn fill_drafts_for_leave(&self, _epoch: u64, _bytes: &[u8]) -> Vec<u8> {
+            self.drafts_snapshot_bytes()
+        }
     }
 
     fn offline_sync() -> Arc<DraftsSync<Arc<NestClient>>> {
@@ -300,6 +344,119 @@ mod tests {
         bounded("the loop to retire on a gone manager", task)
             .await
             .unwrap();
+    }
+
+    /// The feed rail's leave save over an in-memory nest: `rest` is what
+    /// another device left resting, `typed` the composer as this session's
+    /// door finds it. Returns the nest, the leaving manager and the put count
+    /// before the door.
+    async fn feed_leave(
+        rest: &str,
+        typed: &str,
+    ) -> (
+        Arc<fauna_client_drafts::testing::MemoryDraftsNest>,
+        Arc<crate::feed::CliFeedManager>,
+        u32,
+    ) {
+        use fauna_client_drafts::testing::{MemoryDraftsNest, SharedDraftsNest};
+        let nest = Arc::new(MemoryDraftsNest::default());
+        let posts_sync = |nest: &Arc<MemoryDraftsNest>| {
+            Arc::new(DraftsSync::new(
+                SharedDraftsNest(nest.clone()),
+                &fauna_core::identity::ActorKeypair::from_secret([5u8; 32]),
+                fauna_protocol::drafts::RAIL_POSTS,
+            ))
+        };
+        let feed_manager = || {
+            Arc::new(crate::feed::CliFeedManager::new(
+                crate::app::tests::test_session().client,
+                [7u8; 32],
+            ))
+        };
+
+        let other_device = feed_manager();
+        other_device.update_compose(rest.to_string(), String::new(), None);
+        let other_sync = posts_sync(&nest);
+        other_sync.load().await.unwrap();
+        assert!(
+            other_sync
+                .save_if_changed(&other_device.drafts_snapshot_bytes())
+                .await
+                .unwrap()
+        );
+        let puts_before = *nest.puts.lock().unwrap();
+
+        // This session's launch load never landed: its gate is shut.
+        let leaving = feed_manager();
+        if !typed.is_empty() {
+            leaving.update_compose(typed.to_string(), String::new(), None);
+        }
+        RailSave::of_manager("feed drafts", &posts_sync(&nest), &leaving)
+            .run()
+            .await;
+        (nest, leaving, puts_before)
+    }
+
+    /// Read back what rests on the posts rail, as a fresh manager restores it.
+    async fn resting_feed_text(
+        nest: &Arc<fauna_client_drafts::testing::MemoryDraftsNest>,
+    ) -> String {
+        let reader = DraftsSync::new(
+            fauna_client_drafts::testing::SharedDraftsNest(nest.clone()),
+            &fauna_core::identity::ActorKeypair::from_secret([5u8; 32]),
+            fauna_protocol::drafts::RAIL_POSTS,
+        );
+        let bytes = reader.load().await.unwrap().expect("a draft rests");
+        let manager =
+            crate::feed::CliFeedManager::new(crate::app::tests::test_session().client, [7u8; 32]);
+        manager.restore_drafts(bytes);
+        manager.snapshot().compose.text
+    }
+
+    /// A leave door taken before the launch load lifted the gate, over an
+    /// untouched composer: the resting draft fills it and nothing is written
+    /// over the draft another device left.
+    #[tokio::test]
+    async fn a_leave_door_over_a_shut_gate_never_overwrites_a_resting_draft() {
+        let (nest, leaving, puts_before) = feed_leave("from the other device", "").await;
+        assert_eq!(*nest.puts.lock().unwrap(), puts_before, "nothing written");
+        assert_eq!(resting_feed_text(&nest).await, "from the other device");
+        assert_eq!(leaving.snapshot().compose.text, "from the other device");
+    }
+
+    /// A leave door taken before the launch load lifted the gate, over a
+    /// typed edit: one read, then the user's text is saved — before this, the
+    /// shut gate refused the save and the edit was lost.
+    #[tokio::test]
+    async fn a_leave_door_over_a_shut_gate_saves_a_typed_edit() {
+        let (nest, _leaving, _) =
+            feed_leave("from the other device", "typed before the load").await;
+        assert_eq!(resting_feed_text(&nest).await, "typed before the load");
+    }
+
+    /// The events rail's door: a typed form over a shut gate is saved.
+    #[tokio::test]
+    async fn an_event_leave_door_over_a_shut_gate_saves_a_typed_form() {
+        use fauna_client_caldav::drafts::EventDrafts;
+        use fauna_client_drafts::testing::{MemoryDraftsNest, SharedDraftsNest};
+        let nest = Arc::new(MemoryDraftsNest::default());
+        let events_sync = || {
+            Arc::new(DraftsSync::new(
+                SharedDraftsNest(nest.clone()),
+                &fauna_core::identity::ActorKeypair::from_secret([5u8; 32]),
+                fauna_protocol::drafts::RAIL_EVENTS,
+            ))
+        };
+        let typed = EventDrafts {
+            summary: "standup".into(),
+            ..EventDrafts::default()
+        };
+        RailSave::of_event_draft(&events_sync(), typed.clone())
+            .run()
+            .await;
+        let reader = events_sync();
+        let rest = reader.load().await.unwrap().expect("a draft rests");
+        assert_eq!(EventDrafts::restore_from_bytes(&rest).unwrap(), typed);
     }
 
     /// The channel closing mid-wait is the retirement path, and `quiesce` must

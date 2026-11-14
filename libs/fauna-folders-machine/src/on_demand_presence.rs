@@ -271,6 +271,60 @@ pub fn held_sets(
         .collect()
 }
 
+/// Every set the account holds, as the presence plan takes it — the ONE body
+/// every presence door reads through: the app process's
+/// (`FfiFoldersClient::presence_sets`), the capability hosts'
+/// (`capability_host_presence_sets`) and the desktop sync agent's
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
+/// decision 3d, rule 5), which differ only in whose custody they read and
+/// where their group sets come from. The member-visible folder list, this
+/// device's place on each OWN folder (never asked for a member row: the roster
+/// read resolves a folder by name among the caller's own), custody, then
+/// [`held_sets`]'s rules.
+///
+/// # Errors
+/// Any failed read — the list, a roster, custody. An error is never an empty
+/// answer: a caller skips its reconcile rather than tearing presences down on
+/// a state it could not see.
+#[cfg(feature = "rpc-glue")]
+pub async fn presence_sets_over<T, R>(
+    client: &fauna_client_folders::FoldersClient<T>,
+    device_id_hex: &str,
+    custody: &R,
+    groups: &[HeldGroupScope],
+) -> anyhow::Result<Vec<PresenceSet>>
+where
+    T: fauna_protocol::RpcRequester,
+    T::Error: fauna_protocol::RpcErrorClass,
+    R: fauna_client_folders::FolderKeyReader + ?Sized,
+{
+    let rows = client
+        .list_owned_and_shared()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .folders;
+    let mut own_place_accepts = BTreeMap::new();
+    for row in rows.iter().filter(|r| r.role.as_deref() != Some("member")) {
+        let roster = client
+            .members_list(row.name.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        own_place_accepts.insert(
+            row.id,
+            fauna_protocol::folders::SeatRead::find(&roster.members, device_id_hex)
+                .delivers_presence(),
+        );
+    }
+    // `load_listed`: which sets get a presence is a decision, so a replica
+    // that has not yet listed custody refuses rather than answering an empty
+    // custody — which would drop every shared set and retire its root.
+    let custody = custody
+        .load_listed()
+        .await
+        .map_err(|e| anyhow::anyhow!("folder-key custody unreadable: {e:#}"))?;
+    Ok(held_sets(&rows, &custody, &own_place_accepts, groups))
+}
+
 /// The host of a nest base URL (`https://nest.example:8443/` →
 /// `nest.example:8443`) — the label a cross-nest set's display name carries.
 #[cfg(feature = "rpc-glue")]

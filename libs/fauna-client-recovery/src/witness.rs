@@ -1567,6 +1567,12 @@ pub fn state_json(
             // climbing while `parked` stays up is a set's commit rail
             // waiting on the sweep to settle its owner.
             "held_commits": counts.held_commits,
+            // Folder commit records skipped because their unprotected header
+            // claimed a later epoch nothing in front of them explains
+            // (`federation-shared-folders.md` § Cross-nest shared folders +
+            // channel append → *A later epoch in a header is a claim, not
+            // evidence*): junk on a set's commit rail.
+            "future_epoch_skips": counts.future_epoch_skips,
             // Statements a full park slot refused (`identity-succession.md`
             // § The succession statement (wire) → *The slot's replacement
             // policy*): non-zero reads as a member pre-filling a slot.

@@ -1378,7 +1378,10 @@ def custodian_pull_app(request, app, nest_instance, test_user, tmp_path_factory)
             "the test must carry `isolated_sync_agent` (convention 10)"
         )
         log_path = tmp_path_factory.mktemp("custodian-agent-spawn") / "agent.log"
-        with serving_agent(exe, pipe_path, data_dir, log_path):
+        with serving_agent(
+            exe, pipe_path, data_dir, log_path,
+            launch_env=app.driver.launch_environment(),
+        ):
             _login_app_as(app, request, nest_instance, test_user)
             yield app
         return
@@ -1584,11 +1587,13 @@ def custodian_seat(request, logged_in_app, nest_instance, test_user):
 @pytest.mark.android
 @pytest.mark.web
 @pytest.mark.macos
-# macos: the app spawns its external agent only under this marker, and the agent
-# is what takes the pass's clock offset (`CustodianPullTestCommand`'s `.agent`
-# side); without it the pass falls to the in-app host, which refuses a non-zero
-# offset by name. Inert for every other app — the env it sets is read only in the
-# macos/windows launch branches. ios joins with the shared in-app host's clock.
+@pytest.mark.ios
+# macos: the app spawns its external agent only under this marker, so the pass
+# runs where the product runs it (`CustodianPullTestCommand`'s `.agent` side);
+# without it the pass would fall to the in-app host and the store would land
+# where the agent's never does. Inert for every other app — the env it sets is
+# read only in the macos/windows launch branches; ios hosts in the app process
+# and takes the offset through the shared host's `runAllKindsAtOffset`.
 @pytest.mark.real_sync_agent
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
@@ -1663,13 +1668,15 @@ def test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner(
 
     **Two parts, one seat on every app but web.** ``app`` is the OWNER, whose
     Backups row the banner rises and clears on; ``custodian`` is the device that
-    enrolls itself, hosts the replica, is rotted and is pumped. On tui, linux and
-    android they are one app (tui/linux host in the app's own agent, android in
-    the app process — its pass takes the offset through the test-only
-    `FfiCustodianHost::run_all_kinds_at_offset`, and its store is rotted inside
-    the emulator sandbox over adb ``run-as``; macos hosts in its external agent,
-    which takes the offset, and its driver answers ``sync_agent_state_base``
-    where the store is rotted). Web is never a custodian, so there
+    enrolls itself, hosts the replica, is rotted and is pumped. On tui, linux,
+    android, macos and ios they are one app (tui/linux host in the app's own
+    agent; android and ios in the app process — their pass takes the offset
+    through the test-only `FfiCustodianHost::run_all_kinds_at_offset`, android's
+    store is rotted inside the emulator sandbox over adb ``run-as`` and ios's in
+    the simulator container its driver answers as ``sync_agent_state_base``;
+    macos hosts in its external agent, which takes the offset, and its driver
+    answers ``sync_agent_state_base`` where the store is rotted). Web is never a
+    custodian, so there
     the custodian is a native tui seat of the same account (`custodian_seat`)
     and web drives only its own page — it never adds that device, because
     enrolment runs on the device being enrolled (`ui/backups.md`, web's declared
@@ -2018,10 +2025,9 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
       agent's user-domain root, **not** the app-group container it lived in before
       2026-08-25 — and ios's is the simulator container's
       `Library/Application Support/Fauna`, the in-app host's unscoped base.
-      ⚠ The two replies are not the same six fields: ios's in-app door reports
-      only `hosting` / `held_bytes` (plus segment counts) and refuses a non-zero
-      `now_offset_secs` by name, so a test that needs the agent's `checked_in` /
-      `audit_state` or a shifted clock cannot yet widen to it.
+      Both replies carry the agent's six fields (plus `via`): ios's in-app
+      door runs the test-only `FfiCustodianHost::run_all_kinds_at_offset`, as
+      android's does, so it honours `now_offset_secs` too.
     * **android** — hosts in-app like ios: its test agent answers
       `custodian_pull_run_now` with the agent's six fields (`hosting`,
       `kinds_run`, `held_bytes`, `cap_state`, `audit_state`, `checked_in`, plus
@@ -3915,8 +3921,36 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
         app, request, nest_mode, tmp_path_factory)
 
 
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.requires_surface("backup-destination-reseed-preflight-lines")
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_the_pull_back_confirm_shows_each_sets_standing_before_anything_is_pulled(
+    app, request, nest_mode, tmp_path_factory
+):
+    """**Before a copy is pulled back from a destination, the confirm lists
+    each set as vouched, rolled back, unvouched or withheld by this device**
+    (`backup-destinations-and-restore` outcome 25;
+    `client-device-custodian.md` § Implementation status today, the confirm's
+    per-set vouch lines; `ui/backups.md` § Restore after losing the nest — the
+    lines are the confirm modal's body, read through its text).
+
+    The nest-held pull-back journey above, stopping at the confirm: this device
+    never audited D, so its pins vouch for nothing, and the confirm shows mail
+    as unvouched before the owner accepts. Then the restore runs as above. That
+    a set the confirm did not show is not pulled is the shared driver's (the
+    run accepts exactly the preflight shown; `fauna_client_backup::reseed`)."""
+    _lose_the_nest_and_pull_back_from_a_surviving_nest(
+        app, request, nest_mode, tmp_path_factory, read_preflight=True)
+
+
 def _lose_the_nest_and_pull_back_from_a_surviving_nest(
-    app, request, nest_mode, tmp_path_factory, *, seal=None
+    app, request, nest_mode, tmp_path_factory, *, seal=None, read_preflight=False
 ):
     """The after-loss nest-held pull-back journey the tests above and below
     run: box A holds the owner's mail, nest D holds A's backup, A is lost, A′ is
@@ -3925,7 +3959,10 @@ def _lose_the_nest_and_pull_back_from_a_surviving_nest(
     ``seal`` (the ``run_seal_helper`` fixture) adds every other backed-up kind
     to box A before D takes its copy — a covered folder with a file, a calendar
     event, a contact card and a post — and makes the journey read each one back
-    on A′ after the restore (`nest/box-recovery.md` § Goal, item 2)."""
+    on A′ after the restore (`nest/box-recovery.md` § Goal, item 2).
+
+    ``read_preflight`` stops at the confirm and reads its per-set preflight
+    lines before accepting: mail must read unvouched (outcome 25)."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
     from common.auth import claim_admin
     from conftest import _login_app_as, _start_dedicated_nest
@@ -4012,7 +4049,22 @@ def _lose_the_nest_and_pull_back_from_a_surviving_nest(
                                 f"gesture on the rebuilt box; error={app.error_text()!r}")
 
     # ── The gesture under test ───────────────────────────────────────────────
-    app.backups.reseed_from_nest_row(0)
+    if read_preflight:
+        # The confirm lists each set as the device stands to the copy before
+        # anything is pulled. This device never audited D, so its pins vouch
+        # for nothing: mail is unvouched.
+        app.backups.open_reseed_confirm_on_row(0)
+        lines = app.backups.reseed_preflight_lines()
+        prefix, suffix = S.backups.reseed_preflight_unvouched(
+            set=S.backups.reseed_set_mail, generation="\x00").split("\x00")
+        unvouched = re.compile(re.escape(prefix) + r"\d+" + re.escape(suffix))
+        assert any(unvouched.fullmatch(line) for line in lines), (
+            f"the pull-back confirm must show mail as unvouched before anything "
+            f"is pulled; its preflight lines: {lines!r} error={app.error_text()!r}"
+        )
+        app.backups.confirm_reseed()
+    else:
+        app.backups.reseed_from_nest_row(0)
     wait_until(
         lambda: app.backups.reseed_result_text() not in ("", S.backups.backup_reseed_running)
         or bool(app.error_text()),

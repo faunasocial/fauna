@@ -61,6 +61,8 @@ screen — each control answers for itself, and comes back on its own when the
 connection does. The current state is always on screen: see **Status** under
 [Settings](#settings).
 
+While the app is starting, and on the screen it shows when your nest does not answer — **Couldn't reach your nest**, with **Try again** — it names the account it is trying: your handle at your nest, followed by your account's tier once your nest has told the app one, both as your nest last confirmed them. So you know which account, and which nest, it is waiting for. Until the app has reached your nest once on this device, it has nothing confirmed to name, and the line is left out.
+
 ## Feeds
 
 The reading and writing surface. A *feed* is a filtered, ranked view of posts;
@@ -103,7 +105,7 @@ you can keep several and switch between them in the feed list.
   pay-per-view for everyone. You don't create or manage anything beforehand —
   the access is set up for you as part of publishing, and the post behaves like
   any other gated post from then on.
-  There are two separate price fields, and they do different things: the regular price is just text shown to readers (write it however you like, like "$3" or "pay what you want"), while the optional asking price is a number in sats that payment methods able to match an amount will use to unlock the post automatically — none does yet, so a buyer is approved by you, by a payment provider's verified payment, or with a claim code. Leave it blank if you only want the display price. A subscription tier can carry the same optional asking price.
+  There are two separate price fields, and they do different things: the regular price is just text shown to readers (write it however you like, like "$3" or "pay what you want"), while the optional asking price is a number in sats that a payment able to match an amount is checked against — today that is a zap on a post you advertise on Nostr (see [Nostr](#nostr)); any other buyer is approved by you, by a payment provider's verified payment, or with a claim code. Leave it blank if you only want the display price. A subscription tier can carry the same optional asking price, though no payment is checked against a subscription tier's asking price yet.
   A sold post can carry a picture, and the picture is protected the same way the writing is. Attach the
   file the usual way — choose "Sell this post…" first, then attach, so the app
   knows to lock the picture rather than publishing a readable copy of it.
@@ -146,7 +148,7 @@ you can keep several and switch between them in the feed list.
 - **Build your own feed** — create a feed from rules (include/require terms,
   tags, sources) combined with ranking factors and weights. Your feeds are
   yours: delete and remake them freely. Two of the factors are what other people did with a public post: **Watched to the end** and **Skipped past**, counted only from people who chose to share these signals, and only once at least three of them have said the same about a post. Weigh the first up
-  and the second down for a feed of what holds attention.
+  and the second down for a feed of what holds attention. A third, **Reported as spam**, counts the people here who share spam reports and marked a post as spam, again only once at least three of them have, and adds a small fixed amount when other nests report the same post — give it a negative weight to sink such posts in a feed of your own.
 - **Follow the wider world** — subscribe a feed to an external source through
   a [bridge](bridges-bluesky-nostr.md) (for example a Bluesky feed), and posts
   from there appear alongside native ones. Pictures on posts from Bluesky and
@@ -166,8 +168,7 @@ Your nest may also publish rules of its own: filters its admin sets for everyone
 All person-to-person communication in one place. Fauna does not separate
 "chat" from "email": a conversation is a thread, and each thread rides a
 *rail* — end-to-end-encrypted Fauna messaging, email (if your nest has mail
-enabled), or a bridged network (Bluesky, Nostr, the Fediverse). An icon on
-each thread shows which; the reading and writing experience is the same.
+enabled), or a bridged network (Bluesky, Nostr, the Fediverse). An icon on each thread shows which; the reading and writing experience is the same. Message threads you brought in from another service's archive are listed too, marked with a box icon, read-only and for you alone.
 
 - **The list** — threads with sender, snippet, subject and unread counts;
   filter by typing, sort as you like. A thread is marked unread when a message
@@ -402,12 +403,10 @@ supporters:
 
 - **On your own profile** you define *tiers* (free or paid levels of access),
   review pending subscription requests, and see your subscribers per tier.
-- **On another profile** you see the tiers on offer and can subscribe. Following someone is simply subscribing to their free tier, and it works for people on other nests too; a creator's paid tiers are offered only to people on the creator's own nest. A paid tier usually needs the creator's approval, so the row says so until they get to it; open the Tiers tab again whenever you want to check — it re-reads every time, and the row changes to show your subscription once you are in.
+- **On another profile** you see the tiers on offer and can subscribe. Following someone is simply subscribing to their free tier, and it works for people on other nests too, and so do paid tiers: for a creator on another nest the Tiers tab lists the tiers they offer, read through your own nest, and you can subscribe to a paid one and, where it has a payment link, pay through it. A paid tier usually needs the creator's approval, so the row says so until they get to it; open the Tiers tab again whenever you want to check — it re-reads every time, and the row changes to show your subscription once you are in. Got a claim code from that creator? Enter it under **Redeem a claim code** below their tiers; your subscription activates as soon as their app syncs.
 
 Creators charging for a tier can connect their own payment provider in the
-**Payment providers** section of the same tab: pick the provider, paste the
-webhook verification secret from the provider's dashboard, and choose which
-tier a payment unlocks. As soon as you pick a provider, the form shows the
+**Payment providers** section of the same tab: pick the provider, paste the webhook verification secret from the provider's dashboard, and choose which tier a payment unlocks. If you sell the tier through one particular payment link (on Stripe, a Payment Link), paste that link's id into the optional **Payment Link** field: then only payments made through that link grant the tier, so a tip link on the same account will not. Leave the field empty and every verified payment on the account grants the tier. As soon as you pick a provider, the form shows the
 exact webhook URL to register at that provider's dashboard, with a button to
 copy it — no more hand-assembling the address yourself. From then on a
 verified payment notification grants the buyer's subscription automatically —
@@ -420,7 +419,9 @@ actually received, never an active check. A payment-verified request in
 **Pending requests** carries a "Paid" badge so you can see at a glance which
 subscribers paid rather than requested access directly.
 
-Payments made without a linked Fauna account (bank transfer, cash, or any other out-of-band method) produce a *claim code* the buyer can redeem later. You can also mint a code yourself in the **Manual Claim Codes** section for any tier — hand the code to the buyer however you like. Every code, whether you minted it or a provider's webhook did, is listed there with its redemption status (unredeemed, redeemed, or voided) so you always have an audit trail of who's paid. If you minted a code by mistake, took a payment back, or want to withdraw a code you gave away, choose **Void** on its row. The button first changes to say what voiding will do — the code stops working, or, if someone already redeemed it, that person loses access to the tier — and only a second press voids it. A voided code is listed as voided and can no longer be redeemed in the app or on your website.
+**Paying from the app.** On another profile's Tiers tab, a paid tier's **Payment Link** first sends your subscription request and then opens the creator's checkout; the **Payment Link** on a sold post in your feed does the same for that post. When the checkout is on Stripe's own pages and the Stripe provider the creator connected unlocks what you are paying for, your payment is matched to that request, so what you paid for unlocks as soon as the creator's app syncs, with no claim code to enter.
+
+Payments the app cannot match to an account produce a *claim code* the buyer can redeem later. A verified payment that grants the tier but did not come from a buyer's app through Stripe's own checkout pages gets one automatically; for a bank transfer, cash, or any other out-of-band payment, mint one yourself in the **Manual Claim Codes** section for any tier — hand the code to the buyer however you like. Every code, whether you minted it or a provider's webhook did, is listed there with its redemption status (unredeemed, redeemed, or voided) so you always have an audit trail of who's paid. If you minted a code by mistake, took a payment back, or want to withdraw a code you gave away, choose **Void** on its row. The button first changes to say what voiding will do — the code stops working, or, if someone already redeemed it, that person loses access to the tier — and only a second press voids it. A voided code is listed as voided and can no longer be redeemed in the app or on your website.
 
 Visitors to your website can use these codes without a Fauna account: every paid post and paid file shows a box to enter one. To have a buyer land back on your site with their code after paying, set your provider's "after payment" redirect to your site's return address. Once your web address is switched on (Settings → Web), the provider form shows that exact address for the provider you picked, with a button to copy it; it already ends in that provider's own placeholder for the payment reference. It is your site's address followed by `/api/v1/paywall/return/<provider>?ref=`, plus the reference your provider fills in — for Stripe that is `https://<your site>/api/v1/paywall/return/stripe?ref={CHECKOUT_SESSION_ID}`. The page they land on shows their code and tells them to keep it. If a paid page you published earlier doesn't show the code box yet, publish or edit a post to refresh your site.
 
@@ -456,6 +457,23 @@ of your devices, from someone you share a folder with, or from a folder Fauna
 is watching on this device — turns up in the list on its own, within moments.
 You do not have to leave the page and come back.
 
+A folder someone shared with you from another nest is in the folder filter
+too, named with the person who shared it — "trip (alice@their-nest.example)".
+Choosing it shows that folder's files, read from their nest when you choose
+it, with thumbnails and the **Download** button working as for any shared
+folder; whether its files can be reached is what their nest reports. As in any
+shared folder, a file's detail view shows its version history, and if the
+owner gave you write access you can upload into the folder, delete from it and
+restore an older version. If it was shared with you only to read, an upload or
+a restore tells you the folder is read-only, and a folder whose content stays
+on its owner's devices takes no uploads, as above. Unlike a folder on your own
+nest, its files are not in **All media**, and its list does not keep up on its own:
+it shows what their nest held when you chose it or last changed something in
+it, so to see what has arrived since, choose another folder and then this one
+again. If the owner removes you from the folder, choosing it shows no files
+and tells you that you no longer have access; the folder stays in the filter
+until your app drops its copy of the share.
+
 The detail view is also where you **delete a file**. Deleting asks you to
 confirm, then removes the file everywhere it syncs. It is not a per-device
 action and it is not reversible from the app, so the confirmation is worth
@@ -479,7 +497,7 @@ sound, video or plain-text file shown in place; the file is unlocked in their
 own browser, and your nest never sees it, its name or the key. Because the
 key exists only in the link you copied when you made it, **Shared links**
 cannot copy a private link again — keep the one you copied. Files in a folder shared with other people offer no link unless the folder is public, and files in a folder you serve over WebDAV offer none.
-On Windows you can start from File Explorer too, and on Linux from GNOME Files or KDE's Dolphin: right-click a file in a public synced folder → **Fauna → Share**, and Fauna opens on that file with **Share a link** ready; on a synced folder itself, **Share** opens that folder's sharing in Fauna. In GNOME Files the entry appears once its Python extension support is installed (the `python3-nautilus` package on Debian and Ubuntu). Dolphin lists **Share** on every file and folder, and on one that can't be shared, choosing it does nothing. The Snap package offers the entry in neither. On a Mac the same **Share** is in Finder's menu for a file in a public Fauna location and for a Fauna location itself, and on iPhone and iPad it is in the Files app's menu for the same items.
+On Windows you can start from File Explorer too, and on Linux from GNOME Files or KDE's Dolphin: right-click a file in a public synced folder → **Fauna → Share**, and Fauna opens on that file with **Share a link** ready; on a synced folder itself, **Share** opens that folder's sharing in Fauna. In GNOME Files the entry appears once its Python extension support is installed (the `python3-nautilus` package on Debian and Ubuntu). Dolphin lists **Share** on every file and folder, and on one that can't be shared, choosing it does nothing. The Snap package offers the entry in neither. On iPhone and iPad the same **Share** is in the Files app's menu for a file in a public Fauna location and for a Fauna location itself; on a Mac it is built into Finder's menu for the same items, but the Finder location does not list your folders in the released Mac app yet.
 
 In the terminal app — which plays no audio or video inline — an audio or video file's detail view offers **Open externally** instead, and so does a video on a post in the feed: Fauna saves the file to a private temporary location (decrypting it first if it is stored encrypted) and hands it to your system's own media player. By default it asks before opening anything; **Play audio & video externally**, on the **Terminal** page of Settings, lets you choose **Always open** or **Never open (show details only)** instead, and the second removes the option from a file's detail view (a video on a post then just shows as a marker that opens nothing).
 
@@ -514,8 +532,9 @@ either way: [Who can see what](who-can-see-what.md).
 Nostr's key-based model gets its own page: generate or import your Nostr key
 (browser-extension signing works in the web app), choose what gets
 cross-published (posts, replies, reactions), whether inbound Nostr posts show
-in your feed, and manage your relay list and follows. Nostr DMs land in
-Conversations like everything else.
+in your feed, and manage your relay list and follows. Nostr DMs land in Conversations like everything else.
+
+**Advertising a post you sell.** On a post you sell, your own post's **⋯** menu in the feed offers **Advertise on Nostr** when your nest supports it. It tells you first what happens: your post's public teaser and its price are published to your nest's relay and to your Nostr relays, where anyone on Nostr can read them, and a zap of at least that price whose receipt is signed by one of the signers you chose under **Zap signers** can buy the post for the person who sent it. Once you tap **Advertise**, the same menu offers **Stop advertising on Nostr** instead: it deletes the note from your nest's relay and, while your nest holds your Nostr key, asks your Nostr relays to delete their copies, though some may keep them. Advertising is refused for a sold post with no asking price, because a zap could not buy it — the asking price is set when you choose "Sell this post…", so give one there if you mean to advertise the post — and advertising needs a Nostr key your nest holds, one you generated or imported on the Nostr page.
 
 ## Notifications
 
@@ -871,9 +890,12 @@ do. The sub-pages:
   files you synced to your site are not affected.
 - **Subscriptions** — the tiers you subscribe to, across all creators
   (the consumer side of [Profile](#profile)'s tiers). Paid for a
-  subscription outside Fauna and got a claim code? Redeem it here — the
+  subscription outside Fauna and got a claim code? Redeem it here if the
+  creator is on your own nest, or under **Redeem a claim code** on the
+  creator's profile, on its Tiers tab, whatever nest they are on — the
   subscription binds to your account and activates as soon as the creator's
-  app syncs. Leaving an active subscription works the same way: your leave
+  app syncs. A code for a membership of another nest is not redeemed this
+  way: use it as your invite code when you join that nest. Leaving an active subscription works the same way: your leave
   is recorded at once, needs no approval from the creator, and goes through
   on its own the next time their app is running — the row stays listed
   until then, except that a subscription to someone on another nest leaves
@@ -945,7 +967,7 @@ do. The sub-pages:
   apps signed in with one of your app passwords, and the Nostr apps your nest
   signs for. Each row says what the app is, where it comes from, what it may
   reach in plain words, when it was last used and how long it lasts, and has
-  a **Disconnect** button that asks you to confirm before it acts. Turning off **Allow external apps**, just above the list, pauses every app it affects at once: they are still listed here, marked **Paused**, until you turn it back on. Above the switch, **Connect an app** is where you type the code an app on another device
+  a **Disconnect** button that asks you to confirm before it acts. An app that holds keys in your account — to records it keeps there, or to a folder of yours it may read — also shows, under its row, the keys it holds: **Now** lists each one — what it opens (the app's own records by its publisher and the names it gave them, in quotes, and whether it may read and change them or only read them; or your folder by name, which it may only read), until when, and whether it is still active — and **History** lists when each was given and when it was taken back. Disconnecting the app ends them all: on an honest nest it stops the app getting keys again, though it cannot un-see what the app already read, and does not yet block content arriving after you disconnect. Turning off **Allow external apps**, just above the list, pauses every app it affects at once: they are still listed here, marked **Paused**, until you turn it back on. Above the switch, **Connect an app** is where you type the code an app on another device
   (a TV, a watch, a command-line tool) shows you; a valid code opens the same
   approval card a browser sign-in shows. An app on the same device as Fauna
   can skip the code: it hands you a link that opens Fauna straight onto its
@@ -955,9 +977,9 @@ do. The sub-pages:
   for more — without a browser in between — its request waits at the top of
   the page under **Requests**. An app you have never approved never interrupts
   you with a notification: its request just waits here. If you did not expect
-  it, decline it, or choose **Never show requests from this app**. An app you
+  it, decline it, or choose **Never show requests from this app**. An app that asks to put files into one of your folders, or to read one, without naming which, shows a **Folder** choice on its approval card listing only the folders it can use — to put files in, a folder that keeps its files on your nest; to read, one you serve over WebDAV — and approving gives it the folder you picked and no other. Until you pick one the card cannot be approved, and if none of your folders fits, the card says why. An app you
   blocked that way is listed at the bottom of the page under **Blocked apps**,
-  with **Allow requests again** to undo it. A mail app password's row also shows the exact address a mail app signs in with, and lets you copy it and reveal or copy the password itself. A plugin's row also has **Plugin settings**, which opens its card on the Bridges page. An app Fauna has acted for — your nest signing for it with a key it keeps for you (Nostr events with the Nostr key it holds for you, say, a short-lived Bluesky service token signed with your Bluesky account's signing key, or records written to your Bluesky repository for it, which shows the kind of record and its key), or a Fauna app of yours reading or sending in your conversations for it — also says how many times that happened in the current window, how many of its requests were answered in all, and what the most recent one was and when, worded the way its approval card worded the permission. No app is ever handed one of those keys, or the keys that open your conversations, and none of them is your identity key: your nest never holds that in a form it can use.
+  with **Allow requests again** to undo it. A mail app password's row also shows the exact address a mail app signs in with, and lets you copy it and reveal or copy the password itself. A plugin's row also has **Plugin settings**, which opens its card on the Bridges page. An app Fauna has acted for — your nest signing for it with a key it keeps for you (Nostr events with the Nostr key it holds for you, say, a short-lived Bluesky service token signed with your Bluesky account's signing key, or records written to your Bluesky repository for it, which shows the kind of record and its key), or a Fauna app of yours reading or sending in your conversations for it — also says how many times that happened in the current window, how many of its requests were answered in all, and what the most recent one was and when, worded the way its approval card worded the permission. Except on the row of an app signed in with an app password, **Show what Fauna did for this app** then lists the most recent of those acts, newest first — when it happened, what Fauna did in the approval card's words, and exactly what it was — and **Hide what Fauna did for this app** closes the list again. The list is read from your nest each time you open it, and says **Nothing recorded for this app yet** when there is nothing to show. No app is ever handed one of the keys your nest signs with for it, or the keys that open your conversations, and none of them is your identity key: your nest never holds that in a form it can use.
 - **Content Moderation** — its own **Moderation** page beside Settings, except
   in the web app, where it is a section of Settings → **Privacy**. It holds the
   training queue: correct the classifier when it mislabels something, and it
@@ -1076,7 +1098,7 @@ have [mail enabled](own-your-mail.md) first):
   on and the fact that you flagged a message as spam joins an anonymized
   count your nest shares with other nests — but only once you and at least
   two other people here have flagged the identical message, and never your
-  identity or the message itself. Turning it off withdraws every report you
+  identity or the message itself. The same goes for posts. You mark someone else's post from its **⋯** menu with **Mark as spam**, which also collapses it for you at once; press it again to take the mark back. If you share spam reports, your mark also counts towards that post's shared count: once enough people here have marked the same post, it is collapsed for everyone here whose own spam threshold it reaches — at the default threshold that takes about twenty-one people, and a lower threshold acts sooner. Nothing is removed, and each reader's own threshold decides. Turning **Share spam reports** off withdraws every report you
   contributed. **What this nest publishes**, just below the switch, shows
   exactly which anonymized counts your nest shares — the same view a peer
   nest sees.

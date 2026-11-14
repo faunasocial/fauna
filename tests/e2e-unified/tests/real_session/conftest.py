@@ -135,7 +135,7 @@ def _guard_android_device():
     if not android_device.probe_device(serial, server):
         _fail(
             f"no android device answers (serial {serial!r}, adb server {server!r}). "
-            "Bring the venue up (`just android-venue-probe` says whether it is), "
+            "Bring the venue up (`just android-emu-probe` says whether it is), "
             "then re-run"
         )
     probe = subprocess.run(

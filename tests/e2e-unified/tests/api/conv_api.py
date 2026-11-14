@@ -945,6 +945,18 @@ def inbox(base_url: str, actor: dict) -> list:
     return [{"id": it["id"], "payload": it["payload"].hex()} for it in reply.get("items", [])]
 
 
+def inbox_row_pending(
+    port: int, recipient: dict, inbox_id: int, *, scheme: str | None = None
+) -> bool:
+    """Whether ``recipient``'s inbox still holds row ``inbox_id`` un-acked (a
+    :func:`inbox` peek, never a consume). The nest-side half of a pending-share
+    diagnosis: a staged folder knock IS its un-acked Welcome row, so a page that
+    paints no ``folder-pending-share`` while this reads True failed to show a knock
+    the nest holds, and one that reads False had its knock acked (joined, declined
+    or dropped) before the page looked (convention 6)."""
+    return any(item["id"] == inbox_id for item in inbox(_base_url(port, scheme), recipient))
+
+
 def await_welcome_applied(
     port: int,
     recipient: dict,
@@ -970,10 +982,8 @@ def await_welcome_applied(
     message lands."""
     from helpers.waiting import wait_until
 
-    base = _base_url(port, scheme)
-
     def pending() -> bool:
-        return any(item["id"] == inbox_id for item in inbox(base, recipient))
+        return inbox_row_pending(port, recipient, inbox_id, scheme=scheme)
 
     wait_until(
         lambda: not pending(),

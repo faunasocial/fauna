@@ -106,6 +106,10 @@ fun ProfileScreen(
     val blockWorking by vm.blockWorking.collectAsState()
     val blockKnown by vm.blockKnown.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    // The page's actor-home slot — the value the follow carries; the OTHER Tiers
+    // tab's rows subscribe (and pay) across nests at it, and its claim redeem
+    // names the same home.
+    val actorHome by vm.actorHomeSlot.collectAsState()
     val appMessages = LocalAppMessages.current
     // OTHER: the knock + the ward's guardian-ask pair; the durable asks are
     // collected so a status read repaints the pair (rule (c)).
@@ -326,8 +330,10 @@ fun ProfileScreen(
                 } else if (vm.isSelf) {
                     ProfileTiersSection(reloadToken = tiersReloadToken)
                 } else {
+                    val actorHome by vm.actorHomeSlot.collectAsState()
                     ProfileOffersSection(
                         targetActorIdHex = vm.profileActorIdHex.orEmpty(),
+                        home = actorHome,
                         reloadToken = tiersReloadToken,
                     )
                 }

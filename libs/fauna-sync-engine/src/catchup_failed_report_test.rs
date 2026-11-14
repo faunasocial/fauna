@@ -377,6 +377,7 @@ async fn a_folded_delete_cures_the_skip() {
     let folded = || crate::engine::FoldedDelete {
         relative_path: REL.to_string(),
         deleting_device: Some("bb".repeat(32)),
+        seq: Some(1),
     };
     // No row, no file (a skipped create).
     let watch = tempfile::tempdir().unwrap();
@@ -409,11 +410,14 @@ use fauna_core::path_crypto::LabelRoot;
 
 use crate::pull_remote_changes_test::test_engine_with_keys;
 
-fn held_key() -> BackupKey {
+pub(crate) fn held_key() -> BackupKey {
     BackupKey::from_bytes([11u8; 32])
 }
 
-fn engine_holding_the_key(watch: &std::path::Path, control: &FakeSyncControl) -> SyncEngine {
+pub(crate) fn engine_holding_the_key(
+    watch: &std::path::Path,
+    control: &FakeSyncControl,
+) -> SyncEngine {
     let engine = test_engine_with_keys(
         watch.to_path_buf(),
         Some(OwnerSealKey::Client(held_key())),
@@ -424,7 +428,7 @@ fn engine_holding_the_key(watch: &std::path::Path, control: &FakeSyncControl) ->
     engine
 }
 
-fn sealed_row(seq: i64, path_sealed: Vec<u8>, path_hash: String) -> SyncChange {
+pub(crate) fn sealed_row(seq: i64, path_sealed: Vec<u8>, path_hash: String) -> SyncChange {
     SyncChange {
         seq,
         path_hash,
@@ -446,7 +450,9 @@ async fn open_then_apply(engine: &SyncEngine, mut changes: Vec<SyncChange>, sinc
 
 /// The details as a reader holding the set's root opens them, salted by the
 /// report's own `path_hash` — what the shared review-list render does.
-fn opened_details(report: &fauna_protocol::folders::ConflictReportRequest) -> Option<String> {
+pub(crate) fn opened_details(
+    report: &fauna_protocol::folders::ConflictReportRequest,
+) -> Option<String> {
     let salt: [u8; 32] = report.path_hash.as_ref()?[..].try_into().ok()?;
     label_custody::render_conflict_details(
         &fauna_core::file_download::FileDownloadKeys::owner(held_key()),

@@ -105,6 +105,7 @@ export function getFeedManager(): Promise<WasmFeedManager> {
       throw new Error('feed manager: build abandoned by its settle deadline');
     }
     manager = built;
+    logMessage('info', 'fauna_web::feed', 'feed manager built');
     // Observer-driven rendering (the header): the notify runs inside the
     // manager's own mutation, so it only queues the re-read.
     built.subscribe({ onChanged: scheduleFeedRefresh });
@@ -123,6 +124,7 @@ export function getFeedManager(): Promise<WasmFeedManager> {
     // undecryptable) blob.
     built.restoreDrafts().then(
       () => {
+        logMessage('info', 'fauna_web::feed', 'restore drafts landed: the posts save gate is open');
         // The identity and settle seams: a restore for a departed actor or an
         // abandoned build must not repaint the current page.
         if (!stillThisActor() || !stillWanted()) return;
@@ -239,15 +241,41 @@ export function scheduleDraftSave(): void {
  *  such handler on the web platform (the goal doc's own wording: a browser
  *  grants no reliable async work after either event) — mirrors
  *  `conversations.ts`'s twin one rail over. */
-export function flushDraftsNow(): Promise<void> {
+export async function flushDraftsNow(): Promise<void> {
   if (draftSaveTimer) {
     clearTimeout(draftSaveTimer);
     draftSaveTimer = null;
   }
-  if (!manager) return Promise.resolve();
-  return manager.saveDrafts().catch((e) => {
-    logMessage('debug', 'fauna_web::feed', `leave-flush drafts failed: ${e}`);
-  });
+  // A door taken while the build is still running — the first seconds of a
+  // session on a loaded box — waits for it (the caller's leave budget bounds
+  // the wait), so the edit typed meanwhile still reaches the save: the feed
+  // page hands an authored composer to the manager the moment it lands, ahead
+  // of this continuation (`#lib/drafts-leave-flush`, `reserved-folders.md`
+  // § The leave-flush promise).
+  let m = manager;
+  if (!m && managerPromise) {
+    try {
+      m = await managerPromise;
+    } catch {
+      m = null;
+    }
+  }
+  if (!m) {
+    // Loud, not silent: a leave door that finds no manager saves nothing, and
+    // the edit inside the debounce is lost — the line a failing door witness
+    // quotes.
+    logMessage('warn', 'fauna_web::feed', 'leave-flush: the posts rail has no manager — nothing saved');
+    return;
+  }
+  try {
+    // The leave save, not the debounced one: it opens a save gate the launch
+    // restore has not lifted yet with one read of its own, so a door taken
+    // before that restore lands still saves (`DraftsSync::load_for_leave`).
+    await m.saveDraftsOnLeave();
+    logMessage('info', 'fauna_web::feed', 'leave-flush: the posts rail save resolved');
+  } catch (e) {
+    logMessage('warn', 'fauna_web::feed', `leave-flush drafts failed: ${e}`);
+  }
 }
 
 /** Tear down the singleton (`identity.logout()` calls this). Without it a
@@ -259,6 +287,7 @@ export function flushDraftsNow(): Promise<void> {
  *  built it. The next `getFeedManager()` call builds fresh against whichever
  *  identity is current at that time. */
 export function resetFeedManager(): void {
+  if (manager || managerPromise) logMessage('info', 'fauna_web::feed', 'feed manager dropped (actor-scope reset)');
   manager = null;
   managerPromise = null;
   feedSnapshot.set(null);

@@ -21,19 +21,20 @@
 
 use fauna_protocol::RpcRequester;
 use fauna_protocol::nostr::{
-    BunkerAppEntry, CreateBunkerInviteReply, CreateBunkerInviteRequest, ListBunkerAppsReply,
-    ListBunkerAppsRequest, ListNostrBadgesReply, ListNostrBadgesRequest, NostrBadgeItem,
-    PublishSignedNostrEventReply, PublishSignedNostrEventRequest, RevokeBunkerAppReply,
-    RevokeBunkerAppRequest, SetBunkerAppLabelReply, SetBunkerAppLabelRequest,
+    AdvertiseClearReply, AdvertiseClearRequest, BunkerAppEntry, CreateBunkerInviteReply,
+    CreateBunkerInviteRequest, ListBunkerAppsReply, ListBunkerAppsRequest, ListNostrBadgesReply,
+    ListNostrBadgesRequest, NostrBadgeItem, PublishSignedNostrEventReply,
+    PublishSignedNostrEventRequest, RevokeBunkerAppReply, RevokeBunkerAppRequest,
+    SetBunkerAppLabelReply, SetBunkerAppLabelRequest,
 };
 // The `zaps` registry feature's wire types (`dynamic-features.md` § Charter
 // members). Separate `use` so the whole import disappears with the feature
 // rather than needing a per-name cfg.
 #[cfg(feature = "zaps")]
 use fauna_protocol::nostr::{
-    AddZapSignerReply, AddZapSignerRequest, ListZapSignersReply, ListZapSignersRequest,
-    NostrZapTotalReply, NostrZapTotalRequest, RemoveZapSignerReply, RemoveZapSignerRequest,
-    ZapSignerEntry,
+    AddZapSignerReply, AddZapSignerRequest, AdvertiseSetReply, AdvertiseSetRequest,
+    ListZapSignersReply, ListZapSignersRequest, NostrZapTotalReply, NostrZapTotalRequest,
+    RemoveZapSignerReply, RemoveZapSignerRequest, ZapSignerEntry,
 };
 
 pub use fauna_protocol::nostr;
@@ -307,6 +308,68 @@ impl<R: RpcRequester> NostrContentClient<R> {
         Ok(reply.badges)
     }
 
+    /// Whether this nest serves the Nostr advertisement of a sold post — the
+    /// `nostr-advertise` capability token on `fauna.nest.info`
+    /// (`monetization.md` § The Nostr advertisement of a sold post → *Wire
+    /// compat*). The apps show *Advertise on Nostr* only when this is `true`;
+    /// an older nest, or a build without the `zaps` member or the Nostr
+    /// bridge, answers `false` and shows no verb. Read through the
+    /// connection's nest-info memo, so asking per paint costs no round trip
+    /// once the connection has read it.
+    pub async fn advertise_supported(&self) -> Result<bool, R::Error> {
+        let info = fauna_protocol::read_nest_info(&self.nest).await?;
+        Ok(info
+            .capabilities
+            .iter()
+            .any(|c| c == fauna_protocol::discovery::capability::NOSTR_ADVERTISE))
+    }
+
+    /// `fauna.nostr.advertise.set` — advertise one of the caller's own sold
+    /// posts on Nostr: the nest publishes the post's teaser as a kind-1 note
+    /// carrying the selling tier's asking price, to its own relay and the
+    /// account's publish relays. Answers the act's time (idempotent: a second
+    /// call keeps the first time). The typed refusals reach the caller as the
+    /// transport's error, verbatim: `not_found`, `fauna.nostr.not_sold`,
+    /// `fauna.nostr.no_asking_price`, `fauna.nostr.not_linked`,
+    /// `fauna.nostr.no_custodial_key`.
+    ///
+    /// `zaps`-gated like the nest's `set` (surface `zaps.advertise`); its
+    /// withdrawal [`clear_advertisement`](Self::clear_advertisement) is not.
+    #[cfg(feature = "zaps")]
+    pub async fn advertise_post(&self, post_id: String) -> Result<u64, R::Error> {
+        let reply: AdvertiseSetReply = self
+            .nest
+            .request(
+                "fauna.nostr.advertise.set",
+                AdvertiseSetRequest {
+                    post_id,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(reply.advertised_at)
+    }
+
+    /// `fauna.nostr.advertise.clear` — stop advertising a post: the flag
+    /// clears and the published note is retracted (a kind 5 to the nest's
+    /// relay and the publish relays). `false` when the post was not
+    /// advertised (an idempotent no-op). Ungated and compiled always — the
+    /// de-escalation an excised build keeps (`dynamic-features.md` § Charter
+    /// members, ruling (i)).
+    pub async fn clear_advertisement(&self, post_id: String) -> Result<bool, R::Error> {
+        let reply: AdvertiseClearReply = self
+            .nest
+            .request(
+                "fauna.nostr.advertise.clear",
+                AdvertiseClearRequest {
+                    post_id,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(reply.cleared)
+    }
+
     /// `nostr.events.publish_signed` — relay-enqueue an event the client
     /// signed (NIP-07). `event_json` is the signed event's NIP-01 wire JSON,
     /// exactly as the extension returned it; the nest verifies the signature
@@ -397,6 +460,25 @@ mod tests {
                 badges: vec![],
                 extra: Default::default(),
             }),
+            #[cfg(feature = "zaps")]
+            "fauna.nostr.advertise.set" => fauna_protocol::encode_canonical(&AdvertiseSetReply {
+                advertised_at: 1_762_500_000,
+                extra: Default::default(),
+            }),
+            "fauna.nostr.advertise.clear" => {
+                fauna_protocol::encode_canonical(&AdvertiseClearReply {
+                    cleared: true,
+                    extra: Default::default(),
+                })
+            }
+            "fauna.nest.info" => {
+                fauna_protocol::encode_canonical(&fauna_protocol::discovery::NestInfoReply {
+                    capabilities: vec![
+                        fauna_protocol::discovery::capability::NOSTR_ADVERTISE.into(),
+                    ],
+                    ..Default::default()
+                })
+            }
             "nostr.events.publish_signed" => {
                 fauna_protocol::encode_canonical(&PublishSignedNostrEventReply {
                     extra: Default::default(),
@@ -589,5 +671,50 @@ mod tests {
             unlabeled.starts_with("Unnamed signer — "),
             "got {unlabeled}"
         );
+    }
+
+    // ── fauna.nostr.advertise.* wire-contract tests ──────────────────────────
+
+    #[cfg(feature = "zaps")]
+    #[test]
+    fn advertise_post_composes_kind_and_payload() {
+        let (rec, c) = content_client();
+        let at = block_on(c.advertise_post("ab".repeat(32))).expect("infallible mock");
+        assert_eq!(at, 1_762_500_000);
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.nostr.advertise.set");
+        let req: AdvertiseSetRequest = fauna_protocol::decode_strict(&payload).unwrap();
+        assert_eq!(req.post_id, "ab".repeat(32));
+    }
+
+    #[test]
+    fn clear_advertisement_composes_kind_and_payload() {
+        let (rec, c) = content_client();
+        assert!(block_on(c.clear_advertisement("cd".repeat(32))).expect("infallible mock"));
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.nostr.advertise.clear");
+        let req: AdvertiseClearRequest = fauna_protocol::decode_strict(&payload).unwrap();
+        assert_eq!(req.post_id, "cd".repeat(32));
+    }
+
+    #[test]
+    fn advertise_supported_reads_the_capability_token() {
+        let (rec, c) = content_client();
+        assert!(block_on(c.advertise_supported()).expect("infallible mock"));
+        assert_eq!(rec.recorded().0, "fauna.nest.info");
+
+        // A nest that does not advertise the token (an older nest) → no verb.
+        fn bare(kind: &'static str) -> Vec<u8> {
+            match kind {
+                "fauna.nest.info" => fauna_protocol::encode_canonical(
+                    &fauna_protocol::discovery::NestInfoReply::default(),
+                )
+                .unwrap()
+                .to_vec(),
+                other => panic!("unexpected {other}"),
+            }
+        }
+        let rec = std::sync::Arc::new(RecordingRequester::new(bare));
+        assert!(!block_on(NostrContentClient::new(rec).advertise_supported()).unwrap());
     }
 }

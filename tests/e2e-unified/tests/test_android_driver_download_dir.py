@@ -1,7 +1,7 @@
 """tier_1: android's `download_dir()` is a host mirror of the DEVICE's download directory.
 
 Authority: `docs/goal/architecture/testing.md` § Default app and nest mode →
-*Android's run venue* (venue A2: pytest on Linux, the device on the emulator host behind a
+*Android's emulator placement* (emulator placement A2: pytest on Linux, the device on the emulator host behind a
 tunnel — so no device path is ever a host path) and
 `docs/goal/behavior/mail-export.md` § Implementation status today, the android
 paragraph (the app saves into its own download directory and hands the finished

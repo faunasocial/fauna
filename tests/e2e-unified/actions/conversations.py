@@ -271,6 +271,17 @@ class ConversationsActions:
         legs land."""
         self.driver.click("new-conversation-cancel")
 
+    def open_new_conversation(self) -> None:
+        """Open the new-conversation composer from the conversations page and
+        wait for it to mount — nothing typed, nothing sent. On a two-pane app the
+        composer covers the selected thread without deselecting it, and
+        ``docs/goal/ui/conversations.md`` § When a thread is read says a covered
+        thread is not being read — the one closed-thread state every app shares.
+        Leave it with :meth:`step_out_of_new_conversation`."""
+        self.navigate()
+        self.driver.click("new-conversation-button")
+        self.driver.wait_for("recipient-picker-input", timeout=10.0)
+
     def step_out_of_new_conversation(self) -> None:
         """Step back out of the new-conversation composer WITHOUT discarding it —
         the everyday way out, which ``docs/goal/ui/conversations.md``

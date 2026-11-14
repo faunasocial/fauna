@@ -111,9 +111,16 @@ use crate::state::SyncServiceState;
 /// taking this lock for that whole window would stall every other checkout's
 /// cfapi suite on the box — its `#[ignore]` + human-supervised, solo-run
 /// nature is what keeps its (conditional, `FAUNA_HOLD_SHELL=1`-gated) shell
-/// registration safe without it.
+/// registration safe without it. It holds
+/// [`fauna_cfapi::test_roots::HOLD_MUTEX`] instead, which nothing else waits
+/// on but the dev fleet's leftover-root sweep.
+///
+/// The lock is also the sweep's liveness signal: a test root registered while
+/// nobody holds it belongs to a killed run, and
+/// `fauna_cfapi::test_roots::sweep_leftover_test_roots` (the win merge-gate
+/// check's pass) removes it.
 fn shell_sync_root_test_guard() -> fauna_ipc::test_support::NamedMutexTestGuard {
-    fauna_ipc::test_support::NamedMutexTestGuard::acquire("FaunaCfapiShellSyncRootTest")
+    fauna_ipc::test_support::NamedMutexTestGuard::acquire(fauna_cfapi::test_roots::SHELL_TEST_MUTEX)
 }
 
 /// The folder every test binds its sync root to.
@@ -678,6 +685,7 @@ fn production_engine(
             fauna_sync_engine::access_gate::AccessGate::new(),
             None, // change_signer
             std::sync::Arc::new(fauna_client_folders::MemoryFolderKeyStore::default()),
+            fauna_sync_engine::engine_lifecycle::ReaderHosting::Refuse,
         ),
         fauna_sync_engine::engine_lifecycle::ResolvedBinding {
             folder: FOLDER.to_string(),
@@ -2650,7 +2658,7 @@ async fn delete_a_placeholder_while_the_service_is_down(dir: &str) -> DownDelete
                 .expect("get entry")
                 .map(|e| e.state);
             let conn = crate::cfapi_host::register_and_connect_product_root(
-                &root, FOLDER, cmd_tx, db_path,
+                &root, FOLDER, cmd_tx, db_path, false,
             )
             .expect("connect #2 over the kept registration");
             let _ = connected_tx.send(row_at_connect);
@@ -2663,6 +2671,7 @@ async fn delete_a_placeholder_while_the_service_is_down(dir: &str) -> DownDelete
         crate::bridge::RootBoot {
             fresh_registration,
             connect,
+            read_only: false,
         },
         cmd_rx,
         None,
@@ -2792,6 +2801,7 @@ async fn a_full_teardown_clears_the_seen_marks_before_the_unregister() {
         FOLDER,
         cmd_tx,
         h.db_path.clone(),
+        false,
     )
     .expect("connect");
     // A kept registration (a service stop) is NOT a teardown: the marks survive it.
@@ -2808,6 +2818,7 @@ async fn a_full_teardown_clears_the_seen_marks_before_the_unregister() {
         FOLDER,
         cmd_tx,
         h.db_path.clone(),
+        false,
     )
     .expect("reconnect");
     crate::cfapi_host::mark_root_for_full_teardown(&h.root);
@@ -5166,6 +5177,7 @@ async fn diag_calls_that_wait_on_an_outstanding_fetch() {
                     size: 5,
                     mtime: MTIME,
                     is_dir: false,
+                    read_only: false,
                 },
             )
         }),
@@ -5334,6 +5346,13 @@ async fn hold_a_live_root_for_explorer() {
     // pass against this hold observes the exact registration a real user's root
     // carries, per-folder display name and all.
     let with_shell = std::env::var("FAUNA_HOLD_SHELL").as_deref() == Ok("1");
+    // Held for the shell registration's whole hold, before it exists: the dev
+    // fleet's leftover-root sweep reads and removes nothing while it is held
+    // (`fauna_cfapi::test_roots`'s liveness rule). Declared before `conn`, so it
+    // is released after the registration's teardown.
+    let _hold_guard = with_shell.then(|| {
+        fauna_ipc::test_support::NamedMutexTestGuard::acquire(fauna_cfapi::test_roots::HOLD_MUTEX)
+    });
     let conn = if with_shell {
         crate::cfapi_host::register_and_connect_shell(&h.root, FOLDER, cmd_tx)
             .expect("connect (product shell registration)")
@@ -7121,4 +7140,302 @@ async fn freeing_a_location_refuses_what_it_cannot_sweep() {
         };
         assert!(reason.contains(why), "{why:?} not in the refusal: {reason}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Presence roots (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
+// decision 3d (3), (4))
+// ---------------------------------------------------------------------------
+
+/// Run `line` under another process's `cmd /c`, verbatim (no argument quoting): the
+/// user's own act on a reader's root, as Explorer or any program makes it.
+fn cmd_from_another_process(line: &str) -> (bool, String) {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("cmd")
+        .raw_arg(format!("/c {line}"))
+        .output()
+        .expect("spawn cmd");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text.trim().to_string())
+}
+
+/// How many rels of the harness's state DB hold local content the nest never recorded —
+/// the park read a reader's root is shown through (`set_park`'s count).
+fn unrecorded(h: &Harness) -> u32 {
+    fauna_sync_engine::db::set_park(
+        h.db_path
+            .parent()
+            .expect("the state DB sits under the data-root"),
+        FOLDER_REF,
+    )
+    .expect("read the park")
+    .unrecorded
+}
+
+/// Take a product root's shell and filter registrations down at the end of a test.
+fn unregister_product_root(h: &Harness) {
+    let _ = fauna_cfapi::unregister_sync_root(&h.root_str());
+    if let Ok(Some(id)) = fauna_cfapi::shell_registration_for(&h.root_str()) {
+        let _ = fauna_cfapi::unregister_sync_root_with_shell(&id);
+    }
+}
+
+/// **A reader's presence root is refused by the OS** (decision 3d (4)): registered at the
+/// presence path through the product's own connect path, made a reader's before it
+/// connects (`cfapi_host::protect_reader_root`), it lists and hydrates for another process
+/// like any on-demand root — and every change that process tries is refused: a write, a
+/// create, a new directory, a delete and a rename, each leaving the disk as it was and
+/// nothing recorded. Another device's delete still reaches it: the agent's own unlink
+/// passes the access list that refuses the user's (`cfapi_host::own_delete`). It reconnects
+/// over its kept registration under its own list; then a writer's grant lifts it all: the
+/// same root, connected as a writer's, carries no list and no read-only bit and takes the
+/// user's write.
+#[tokio::test]
+async fn a_readers_presence_root_refuses_every_change_and_still_takes_remote_deletes() {
+    let _shell_guard = shell_sync_root_test_guard();
+    const SHARED: &[u8] = b"a file shared with this account, to read";
+    const GONE: &[u8] = b"deleted on the owner's device";
+    let h = harness(&[
+        ("shared.txt", SHARED.len() as i64),
+        ("gone.txt", GONE.len() as i64),
+    ])
+    .await;
+    let mut host = h.host(HashMap::from([
+        ("shared.txt".to_string(), SHARED.to_vec()),
+        ("gone.txt".to_string(), GONE.to_vec()),
+    ]));
+    host.fold_on_repull = vec![remote_delete(10, "gone.txt")];
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let connect = {
+        let (root, db_path) = (h.root.clone(), h.db_path.clone());
+        move || {
+            crate::cfapi_host::register_and_connect_product_root(
+                &root, FOLDER, cmd_tx, db_path, true,
+            )
+            .expect("connect a reader's root")
+        }
+    };
+    let loop_fut = crate::bridge::serve_hydration_root(
+        host,
+        CfapiInvalidator,
+        crate::bridge::RootBoot {
+            fresh_registration: true,
+            connect,
+            read_only: true,
+        },
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+        None,
+    );
+
+    let root = h.root.clone();
+    let shared = root.join("shared.txt");
+    let driver = async {
+        // It lists and hydrates for another process.
+        let (rs, src, dst) = (
+            h.root_str(),
+            shared.to_string_lossy().to_string(),
+            h._tmp.path().join("read.bin"),
+        );
+        let (listed, read) = tokio::task::spawn_blocking(move || {
+            let listed = dir_from_another_process(&rs);
+            (listed, read_from_another_process(&src, &dst))
+        })
+        .await
+        .expect("browse and read");
+        // The engine's own `.fauna-*` directories aside (they live in every root).
+        let listed: Vec<String> = listed
+            .into_iter()
+            .filter(|name| !name.starts_with(".fauna"))
+            .collect();
+        assert_eq!(
+            listed,
+            vec!["gone.txt".to_string(), "shared.txt".to_string()]
+        );
+        assert_eq!(read, SHARED, "a reader's root hydrates");
+        eventually(
+            || h.db_state("shared.txt") == Some(SyncState::Synced),
+            Duration::from_secs(10),
+            "the open's flip to Synced",
+        )
+        .await;
+
+        // Every change another process tries is refused.
+        let p = |rel: &str| root.join(rel).to_string_lossy().to_string();
+        let attempts = [
+            ("a write", format!("echo x>> {}", p("shared.txt"))),
+            ("a create", format!("echo x> {}", p("made.txt"))),
+            ("a new directory", format!("mkdir {}", p("made-dir"))),
+            ("a delete", format!("del /f /q {}", p("shared.txt"))),
+            ("a rename", format!("ren {} renamed.txt", p("shared.txt"))),
+        ];
+        for (what, line) in attempts {
+            let (_, said) = tokio::task::spawn_blocking(move || cmd_from_another_process(&line))
+                .await
+                .expect("spawn");
+            assert!(
+                said.contains("denied") || said.contains("cloud operation"),
+                "{what} on a reader's root must be refused by the OS; the program said {said:?}"
+            );
+        }
+        assert_eq!(std::fs::read(&shared).expect("read"), SHARED, "unchanged");
+        for gone in ["made.txt", "made-dir", "renamed.txt"] {
+            assert!(!root.join(gone).exists(), "{gone} must not exist");
+        }
+        assert_eq!(unrecorded(&h), 0, "nothing the user tried is recorded");
+
+        // Another device's delete reaches it — the agent's own unlink passes.
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || std::fs::symlink_metadata(root.join("gone.txt")).is_err(),
+            Duration::from_secs(10),
+            "the remote delete to leave the reader's root",
+        )
+        .await;
+        eventually(
+            || h.db_state("gone.txt").is_none(),
+            Duration::from_secs(5),
+            "the deleted row to go",
+        )
+        .await;
+        cancel.cancel();
+    };
+    drive_until_asserted(loop_fut, driver).await;
+
+    // A restart: the kept registration is re-registered under the root's own list.
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let conn = crate::cfapi_host::register_and_connect_product_root(
+        &h.root,
+        FOLDER,
+        cmd_tx,
+        h.db_path.clone(),
+        true,
+    )
+    .expect("a reader's root reconnects over its kept registration");
+    drop(conn);
+
+    // A writer's grant: the same root, connected as a writer's, takes a new file.
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let conn = crate::cfapi_host::register_and_connect_product_root(
+        &h.root,
+        FOLDER,
+        cmd_tx,
+        h.db_path.clone(),
+        false,
+    )
+    .expect("the root reconnects as a writer's");
+    assert!(
+        !fauna_cfapi::denies_user_writes(&h.root).expect("read the list"),
+        "a writer's root carries no reader's list"
+    );
+    // A write to the hydrated file asks this (unserved) connection for nothing — a new
+    // name would wait on a listing nobody answers here.
+    let (ok, said) = cmd_from_another_process(&format!("echo x>> {}", shared.display()));
+    assert!(ok, "a writer's root takes the user's write: {said}");
+    assert!(
+        std::fs::read(&shared).expect("read").len() > SHARED.len(),
+        "the write landed"
+    );
+    assert!(
+        !std::fs::metadata(&shared)
+            .expect("stat")
+            .permissions()
+            .readonly(),
+        "a writer's root carries no read-only attribute"
+    );
+    drop(conn);
+    unregister_product_root(&h);
+}
+
+/// **A writer's presence root is a two-way on-demand root at the presence path**
+/// (decision 3d (3)): connected through the product's path as a writer, it lists and
+/// hydrates for another process, and that process's edit is uploaded — the bytes reach
+/// the nest's byte plane.
+#[tokio::test]
+async fn a_writers_presence_root_populates_hydrates_and_uploads() {
+    let _shell_guard = shell_sync_root_test_guard();
+    const ORIGINAL: &[u8] = b"a file this account may write";
+    const EDITED: &[u8] = b"written through the presence root";
+    let nest = MockServer::start().await;
+    let chunk_posts = mount_nest_byte_plane(&nest, None).await;
+    let h = harness_against_nest(&[("notes.txt", ORIGINAL.len() as i64)], &nest.uri()).await;
+    let host = h.host(HashMap::from([(
+        "notes.txt".to_string(),
+        ORIGINAL.to_vec(),
+    )]));
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let connect = {
+        let (root, db_path) = (h.root.clone(), h.db_path.clone());
+        move || {
+            crate::cfapi_host::register_and_connect_product_root(
+                &root, FOLDER, cmd_tx, db_path, false,
+            )
+            .expect("connect a writer's root")
+        }
+    };
+    let loop_fut = crate::bridge::serve_hydration_root(
+        host,
+        CfapiInvalidator,
+        crate::bridge::RootBoot {
+            fresh_registration: true,
+            connect,
+            read_only: false,
+        },
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        None,
+        None,
+    );
+    let root = h.root.clone();
+    let scratch = h._tmp.path().join("scratch.bin");
+    let driver = async {
+        let (rs, src, dst) = (
+            h.root_str(),
+            root.join("notes.txt").to_string_lossy().to_string(),
+            h._tmp.path().join("read.bin"),
+        );
+        let read = tokio::task::spawn_blocking(move || {
+            dir_from_another_process(&rs);
+            read_from_another_process(&src, &dst)
+        })
+        .await
+        .expect("browse and read");
+        assert_eq!(read, ORIGINAL, "a writer's presence root hydrates");
+        eventually(
+            || h.db_state("notes.txt") == Some(SyncState::Synced),
+            Duration::from_secs(10),
+            "the open's flip to Synced",
+        )
+        .await;
+        write_from_another_process(&scratch, &root.join("notes.txt"), EDITED);
+        eventually(
+            || h.db_uploaded("notes.txt", ContentHash::of_raw(EDITED)),
+            Duration::from_secs(30),
+            "the edit through the presence root to be uploaded",
+        )
+        .await;
+        assert!(
+            chunk_posts.load(Ordering::SeqCst) > 0,
+            "the edited bytes reach the nest's byte plane"
+        );
+        cancel.cancel();
+    };
+    drive_until_asserted(loop_fut, driver).await;
+    unregister_product_root(&h);
 }

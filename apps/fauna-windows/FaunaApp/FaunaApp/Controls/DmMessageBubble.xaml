@@ -196,6 +196,21 @@
           Opacity="0.6"
           FontSize="12"
           TextWrapping="Wrap" />
+      <!-- The reporter's show-again (`content-policy-show-again-button`, moderation.md
+           § Corollary — the reporter's hide is theirs to undo): beside the block arm's
+           notice ONLY when it reads "You reported this", its label naming the scope
+           (the message, or the whole account) from the shared fold. A persisted
+           un-hide (ShowAgainRequested → the page), never the session-local reveal
+           below. Bind() sets its Content and Name per message. -->
+      <Button
+          x:Name="ShowAgainButton"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyShowAgainButton}"
+          Visibility="Collapsed"
+          HorizontalAlignment="Left"
+          Margin="0,2,0,0"
+          Padding="8,2"
+          FontSize="12"
+          Click="ShowAgainButton_Click" />
       <Button
           x:Name="ContentRevealButton"
           AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyCollapsedRevealButton}"
@@ -233,12 +248,15 @@
           Padding="8,2"
           FontSize="12"
           Click="MutedRevealButton_Click" />
+      <!-- The header row stays realized on every arm: its timestamp is the one
+           child every render arm paints (ui.yaml dm-message-bubble), so a
+           withholding arm collapses only HeaderIdentity, never the row. -->
       <Grid x:Name="HeaderRow">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+        <StackPanel x:Name="HeaderIdentity" Grid.Column="0" Orientation="Horizontal" Spacing="8">
             <TextBlock
                 x:Name="SenderText"
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.DmSender}"

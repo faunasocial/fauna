@@ -206,7 +206,21 @@ def test_windows_go_cgo_build_is_freshness_gated_outside_the_slot():
         rbody = _recipe_body(_JUSTFILE.read_text(encoding="utf-8"), recipe)
         assert f'"{out_name}"' in rbody, f"{recipe} must pass {out_name}"
     # The DLL staging is unconditional: after the gate, not inside its command.
-    assert joined.index('cp "$REL/fauna_ffi.dll"') > joined.index("-o \"$OUT\" {{cmd}}'")
+    # And it goes through the rename-aside stager, never a bare `cp`: an exe
+    # running from target/ keeps both dlls mapped, and a plain copy over a
+    # mapped image dies `Device or resource busy` (measured 2026-11-10 on Windows:
+    # a tui run's mail_bridge_binary prebuild beside a windows run from the
+    # same checkout, nothing changed) — test_windows_ffi_stage_over_mapped_dll.py
+    # pins the stager itself.
+    stage = 'bash scripts/win-stage-dll.sh "$REL/fauna_ffi.dll"'
+    assert stage in joined, "fauna_ffi.dll must be staged by scripts/win-stage-dll.sh"
+    assert 'bash scripts/win-stage-dll.sh "$UNWIND"' in joined, (
+        "libunwind.dll must be staged by scripts/win-stage-dll.sh"
+    )
+    assert not re.search(r'(?<![\w-])cp "\$(REL|UNWIND)', joined), (
+        "no bare cp of a runtime dll: it fails over a mapped image"
+    )
+    assert joined.index(stage) > joined.index("-o \"$OUT\" {{cmd}}'")
 
 
 def test_a_freshly_built_go_binary_reads_warm(tmp_path):
@@ -1340,6 +1354,117 @@ def test_a_warm_only_run_emits_its_boundaries_in_order(refuse_loop, monkeypatch,
     ]
 
 
+# ── iOS seats cross the warm step's process boundary by NOT crossing it
+# (mac-simulator-hold.md § Implementation status today, *Seats and the warm
+# step*): the tester's warm step is its own pytest process, and every device it
+# made was deleted by its `atexit` at that process's exit, so the shard booted
+# them all again under its held lane — 25 minutes of a held `e2e_tui` lane
+# through three boots. So the warm step boots no seat, and the shard boots its seats
+# before it takes its lane — the single-process order.
+
+_SEAT_JOBS = [
+    ("nest binary", "_fake_seat_world_build", ()),
+    ("ios simulator (create + finish booting)", "_get_ios_setup", ()),
+    ("ios simulator seat 1 (create + finish booting)", "_prewarm_ios_seat", (1,)),
+    ("ios file-provider seat 0 (create + finish booting)", "_prewarm_ios_fp_seat", (0,)),
+    ("ios simulators (still booted?)", "_recheck_ios_simulators", ()),
+]
+
+
+@pytest.fixture
+def seat_world(refuse_loop, monkeypatch):
+    """The refuse loop with real job lists and real job runs, every builder a
+    fake that logs its name into the lane's event list."""
+    mod, tree = refuse_loop
+    tree["jobs"] = list(_SEAT_JOBS)
+    monkeypatch.setattr(conftest, "_BINARY_BUILD_MEMO", {})
+    monkeypatch.setattr(conftest, "_PHASE_CONFIG", None)
+
+    def logging(name):
+        return lambda *args: mod.events.append(("job", name))
+
+    for _label, builder, _args in _SEAT_JOBS:
+        monkeypatch.setattr(conftest, builder, logging(builder), raising=False)
+    monkeypatch.setattr(conftest, "_prewarm_prebuilds", _REAL_PREWARM_PREBUILDS)
+    monkeypatch.setattr(conftest, "_prebuild_binaries", lambda session, *, prewarm=False:
+                        conftest._run_prebuild_jobs(list(tree["jobs"]), prewarm=prewarm))
+    return mod, tree
+
+
+def _jobs_run(events):
+    return [e[1] for e in events if isinstance(e, tuple) and e[0] == "job"]
+
+
+def test_the_warm_step_boots_no_seat(seat_world, monkeypatch):
+    """A prewarm-only run builds, but creates and boots no simulator: a device
+    it booted would be deleted at its own exit (`atexit`) and booted again by
+    the shard."""
+    mod, _tree = seat_world
+    monkeypatch.setenv(conftest.PREWARM_ONLY_ENV, "1")
+    with pytest.raises(pytest.exit.Exception) as exited:
+        conftest.pytest_collection_finish(_FakeSession())
+    assert exited.value.returncode == pytest.ExitCode.OK
+    assert _jobs_run(mod.events) == ["_fake_seat_world_build"], mod.events
+
+
+def test_an_ordinary_warm_pass_still_boots_its_seats_before_the_lane(seat_world):
+    """One process, warm pass then lane: the seats are booted in the warm pass,
+    and the in-hold pass only looks at them."""
+    mod, _tree = seat_world
+    conftest.pytest_collection_finish(_FakeSession())
+    acquire = mod.events.index(("acquire", "e2e_other"))
+    before = _jobs_run(mod.events[:acquire])
+    assert {"_get_ios_setup", "_prewarm_ios_seat", "_prewarm_ios_fp_seat"} <= set(before), mod.events
+    assert "_recheck_ios_simulators" in _jobs_run(mod.events[acquire:]), mod.events
+
+
+def test_the_shard_boots_its_seats_before_it_takes_its_lane(seat_world, monkeypatch, capsys):
+    """A warm-only run (the shard after the warm step): every seat job runs
+    before the lane is acquired; the in-hold re-check then finds them made and
+    looks at them, and nothing else runs before the lane."""
+    mod, _tree = seat_world
+    monkeypatch.setenv(conftest.WARM_ONLY_ENV, "1")
+    conftest.pytest_collection_finish(_FakeSession())
+    acquire = mod.events.index(("acquire", "e2e_other"))
+    assert _jobs_run(mod.events[:acquire]) == [
+        "_get_ios_setup", "_prewarm_ios_seat", "_prewarm_ios_fp_seat"], mod.events
+    assert "_recheck_ios_simulators" in _jobs_run(mod.events[acquire:]), mod.events
+    phases = [p for p, _ in _phases(capsys.readouterr().out)]
+    assert phases.index("seats") < phases.index("lane wait"), phases
+
+
+def test_a_shard_with_no_seat_boots_nothing_before_its_lane(seat_world, monkeypatch, capsys):
+    mod, tree = seat_world
+    tree["jobs"] = [_SEAT_JOBS[0]]
+    monkeypatch.setenv(conftest.WARM_ONLY_ENV, "1")
+    conftest.pytest_collection_finish(_FakeSession())
+    acquire = mod.events.index(("acquire", "e2e_other"))
+    assert _jobs_run(mod.events[:acquire]) == [], mod.events
+    assert "seats" not in [p for p, _ in _phases(capsys.readouterr().out)]
+
+
+def test_a_shard_whose_seat_would_compile_takes_no_lane(seat_world, monkeypatch, capsys):
+    """The seat pass runs in refuse mode like the in-hold re-check: a seat job
+    reaching a cold build (the iOS app it boots) is refused, and the shard ends
+    INTERRUPTED with the tester's refusal line before it takes its lane — a
+    shard never compiles."""
+    mod, _tree = seat_world
+
+    def cold_seat(*_args):
+        with open(os.environ[mod.REFUSE_BUILD_ENV], "a", encoding="utf-8") as fh:
+            fh.write("xcodebuild -scheme Fauna-iOS\n")
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(conftest, "_get_ios_setup", cold_seat)
+    monkeypatch.setenv(conftest.WARM_ONLY_ENV, "1")
+    with pytest.raises(pytest.exit.Exception) as exited:
+        conftest.pytest_collection_finish(_FakeSession())
+    assert exited.value.returncode == pytest.ExitCode.INTERRUPTED
+    assert not [e for e in mod.events if isinstance(e, tuple) and e[0] == "acquire"], mod.events
+    assert conftest.WARM_ONLY_REFUSAL in capsys.readouterr().err
+    assert mod.REFUSE_BUILD_ENV not in os.environ
+
+
 def test_a_prewarm_only_run_writes_no_last_green_record(monkeypatch, capsys):
     from helpers import last_green
 
@@ -2265,6 +2390,36 @@ def test_the_warm_pass_boots_every_seat_the_items_foreseeably_need(tmp_path, mon
     assert needed(_ios_item("t.py::test_a[macos]", ("app",), rooms)) == 1
     assert needed(_ios_item("t.py::test_a[ios]", ("subs_author_app",), plain),
                   _ios_item("t.py::test_b[ios]", (), rooms)) == 3
+    # A succession journey seating a member AND a thief needs both extra devices;
+    # either alone needs one.
+    thief = tmp_path / "test_thief.py"
+    thief.write_text("from helpers.succession_file_door import stolen_seat\n")
+    assert needed(_ios_item("t.py::test_a[ios]", ("succession_member_app",), thief)) == 3
+    assert needed(_ios_item("t.py::test_a[ios]", ("succession_member_app",), plain)) == 2
+    assert needed(_ios_item("t.py::test_a[ios]", ("succeedable_app",), thief)) == 1
+
+
+def test_each_extra_seat_of_one_test_claims_its_own_simulator(monkeypatch):
+    """Two extra seats of one test never share a device — the second launch's
+    reinstall would tear the first seat's app down (the member seat and the
+    stolen seat of the succession journeys, 2026-11-11) — and the claims reset
+    with the next test item."""
+    asked = []
+    monkeypatch.setattr(conftest, "_get_ios_seat_udid",
+                        lambda ordinal, **_kw: asked.append(ordinal) or f"SEAT-{ordinal}")
+
+    class _Item:
+        pass
+
+    class _Req:
+        def __init__(self):
+            self.node = _Item()
+
+    one = _Req()
+    assert conftest._claim_ios_extra_seat_udid(one) == "SEAT-1"
+    assert conftest._claim_ios_extra_seat_udid(one) == "SEAT-2"
+    assert conftest._claim_ios_extra_seat_udid(_Req()) == "SEAT-1"
+    assert asked == [1, 2, 1]
 
 
 def test_every_fixture_that_boots_a_second_ios_seat_is_prewarmed():

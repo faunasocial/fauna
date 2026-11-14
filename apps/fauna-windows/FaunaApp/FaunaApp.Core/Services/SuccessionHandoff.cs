@@ -275,8 +275,10 @@ internal static class SuccessionHandoff
     }
 
     /// <summary>The wipe clear point — see the type's doc for why this is the
-    /// <i>only</i> one. Called from <c>App.ClearCredentialNamespace</c>, which is
-    /// the erase behind both sign-out and factory reset.</summary>
+    /// <i>only</i> one. Called from <c>App.ForgetHandoffsOfWipedIdentities</c>, which
+    /// both credential wipes run — the sign-out's (<c>App.FinishSignOut</c>, behind a
+    /// sign-out and the unreadable-index start-over) and the e2e reset's
+    /// (<c>App.ClearCredentialNamespace</c>).</summary>
     internal static void ClearOnCredentialWipe()
     {
         lock (Gate)

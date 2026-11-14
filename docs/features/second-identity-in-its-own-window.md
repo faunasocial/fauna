@@ -71,7 +71,7 @@ Stamped 2026-09-19 at acb58fddf3.
 | macos | ✅ full | |
 | ios | — absent | |
 | android | — absent | |
-| tui | ✅ full | 0.1.5 docker |
+| tui | ✅ full | 0.1.5-dev+567e904f.dirty standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

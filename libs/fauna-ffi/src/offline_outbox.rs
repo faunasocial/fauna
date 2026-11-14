@@ -8,8 +8,9 @@
 //! One per process: it reads the account runtime's handle when it enqueues
 //! (`AccountOutbox::over_source`), so it needs no store-ready edge to exist and
 //! outlives a runtime into the next. Unlike linux it is wired by the app's
-//! FIRST connection word (`FfiFeedManager::set_connection_state`), not at
-//! process start: an app that never feeds a word keeps sending every gesture
+//! FIRST connection word (`set_device_connection_word`, which the app's
+//! connection observer feeds, or `FfiFeedManager::set_connection_state`), not
+//! at process start: an app that never feeds a word keeps sending every gesture
 //! online, as before the outbox existed, rather than queueing behind a word
 //! that never turns "connected".
 //!
@@ -27,6 +28,7 @@ use fauna_core::offline_intent::OfflineIntentQueue as _;
 use fauna_protocol::offline_class::is_online;
 use fauna_sync_engine::account_runtime::AccountHandleSource;
 use fauna_sync_engine::offline_intent_queue::AccountOutbox;
+use fauna_sync_engine::outbox_carry::OutboxCarry;
 
 /// Starts one drain of `outbox` through `session` — the process's spawns it on
 /// the store's runtime ([`spawn_on_store_runtime`]); a test counts it.
@@ -44,6 +46,12 @@ pub(crate) struct DeviceOutbox {
     /// (`AccountOutbox::set_drain_wake`) — the process's own
     /// [`DeviceOutbox::drain`].
     drain_wake: fn(),
+    /// The outbox carry (`succession-aftermath.md` § Re-key scope, the
+    /// device-local outbox row), seated by the account runtime's install —
+    /// the one place the registry and the store root are known — and applied
+    /// to every outbox this seat builds, the wired one and the doors'
+    /// fallback alike.
+    carry: Mutex<Option<Arc<OutboxCarry>>>,
 }
 
 impl DeviceOutbox {
@@ -53,7 +61,25 @@ impl DeviceOutbox {
             session: Mutex::new(Weak::new()),
             start_drain,
             drain_wake,
+            carry: Mutex::new(None),
         }
+    }
+
+    /// Seat (or, with `None`, unseat) the outbox carry: kept for every outbox
+    /// built from here on, and set on the wired one now if a word wired it.
+    pub(crate) fn seat_carry(&self, carry: Option<Arc<OutboxCarry>>) {
+        *self.carry.lock().unwrap_or_else(|e| e.into_inner()) = carry.clone();
+        if let Some(outbox) = self.wired() {
+            outbox.set_carry(carry);
+        }
+    }
+
+    /// An outbox over `source` with the seated carry — both of this seat's
+    /// builds go through here.
+    fn outbox_over(&self, source: AccountHandleSource, word: &str) -> Arc<AccountOutbox> {
+        let outbox = AccountOutbox::over_source(source, word);
+        outbox.set_carry(self.carry.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        outbox
     }
 
     /// The outbox, once the first word wired it.
@@ -73,7 +99,7 @@ impl DeviceOutbox {
         let mut first = false;
         let outbox = Arc::clone(self.outbox.get_or_init(|| {
             first = true;
-            let outbox = AccountOutbox::over_source(source(), word);
+            let outbox = self.outbox_over(source(), word);
             outbox.set_drain_wake(Arc::new(self.drain_wake));
             outbox
         }));
@@ -133,9 +159,42 @@ fn wake_device_drain() {
 /// one over the same runtime with no wake — the list and the doors work
 /// before the first word too.
 fn doors() -> Arc<AccountOutbox> {
-    DEVICE
-        .wired()
-        .unwrap_or_else(|| AccountOutbox::over_source(runtime_source(), "disconnected"))
+    DEVICE.doors_over(runtime_source)
+}
+
+impl DeviceOutbox {
+    /// [`doors`] over this seat: the wired outbox, else one over `source`
+    /// with no wake, carrying the seated carry.
+    fn doors_over(&self, source: impl FnOnce() -> AccountHandleSource) -> Arc<AccountOutbox> {
+        self.wired()
+            .unwrap_or_else(|| self.outbox_over(source(), "disconnected"))
+    }
+}
+
+/// The carry this device owes its signed-in account: over the app's registry
+/// and the store root the runtime's assembly resolves (`build_params` — the
+/// sandboxed container's dir, else the per-OS platform root). `None` with no
+/// registry wired (a unit-test seat) or no reachable root — nothing carried,
+/// which is fail-safe: the predecessor's rows stay in its store.
+pub(crate) fn carry_for(
+    accounts: Option<&crate::accounts_registry::FfiAccountRegistry>,
+    container_dir: Option<std::path::PathBuf>,
+) -> Option<Arc<OutboxCarry>> {
+    let accounts = accounts?;
+    let root = match container_dir {
+        Some(dir) => fauna_sync_engine::root::StoreRoot::at(dir),
+        None => match fauna_sync_engine::root::StoreRoot::platform() {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::warn!("outbox carry unseated: {e:#}");
+                return None;
+            }
+        },
+    };
+    Some(Arc::new(OutboxCarry::new(
+        accounts.registry().clone(),
+        root,
+    )))
 }
 
 fn intent_id(hex_id: &str) -> Result<[u8; 16], crate::FfiError> {
@@ -176,6 +235,34 @@ pub async fn discard_unsent_change(intent_id_hex: String) -> Result<bool, crate:
         .discard_intent(intent_id(&intent_id_hex)?)
         .await
         .map_err(|e| crate::general_err(format!("discard the change: {e}")))
+}
+
+/// The app's connection word, to the process's outbox directly — every
+/// transport state the app's connection observer receives, spelled by the
+/// shared `connection_state_word` (linux's `offline_outbox::set_connection_state`
+/// is the twin). The outbox is one per process and so is the word: feeding it
+/// only through a feed manager left it on the last word the outgoing client
+/// said when an account change dropped that manager — after a succession, the
+/// predecessor's `disconnected` — so the MLS drain read offline until the
+/// Feed page was opened again, and a carried message never went out. The
+/// first word wires the outbox, as a feed manager's does; a manager built
+/// afterwards borrows it (`FfiFeedManager::new`).
+#[uniffi::export]
+pub fn set_device_connection_word(connection_state: String) {
+    DEVICE.feed_word(runtime_source, &connection_state);
+}
+
+/// The `outbox_drain_hold` agent command's body
+/// (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`): set or clear the process's
+/// in-process outbox drain hold
+/// (`fauna_account_plane::outbox::set_outbox_drain_hold`). The app hosts its
+/// account runtime in-process and inherits no harness environment, so the
+/// hold file the desktop apps honour cannot reach it. The wasm twin is
+/// `setOutboxDrainHoldForTest`.
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn set_outbox_drain_hold_for_test(held: bool) {
+    fauna_sync_engine::outbox::set_outbox_drain_hold(held);
 }
 
 /// The handle source the process's outbox reads: this process's account
@@ -301,5 +388,113 @@ mod tests {
             2,
             "a released session drains nothing"
         );
+    }
+
+    /// A rung drain (the e2e agent's `app_outbox_drain_now`,
+    /// `crate::e2e_seams::app_outbox_drain_now_for_test`) starts one only with
+    /// a wired outbox and a live lent session: pre-word and pre-auth it is a
+    /// no-op, and each ring after both starts exactly one.
+    #[test]
+    fn a_rung_drain_starts_only_with_a_wired_outbox_and_a_lent_session() {
+        static DRAINS: AtomicUsize = AtomicUsize::new(0);
+        let device = DeviceOutbox::new(
+            |_, _| {
+                DRAINS.fetch_add(1, Ordering::SeqCst);
+            },
+            || {},
+        );
+        device.drain();
+        assert_eq!(DRAINS.load(Ordering::SeqCst), 0, "no word, no session");
+
+        let s = session();
+        device.lend_to_session(&s);
+        device.drain();
+        assert_eq!(DRAINS.load(Ordering::SeqCst), 0, "no word wired an outbox");
+
+        device.feed_word(no_runtime, "disconnected");
+        let after_word = DRAINS.load(Ordering::SeqCst);
+        device.drain();
+        assert_eq!(
+            DRAINS.load(Ordering::SeqCst),
+            after_word + 1,
+            "wired and lent: one ring, one drain"
+        );
+
+        drop(s);
+        device.drain();
+        assert_eq!(
+            DRAINS.load(Ordering::SeqCst),
+            after_word + 1,
+            "a released session drains nothing"
+        );
+    }
+
+    #[derive(Default)]
+    struct MapStore(Mutex<std::collections::HashMap<String, String>>);
+
+    impl crate::FfiSecretStore for MapStore {
+        fn get(&self, key: String) -> Option<String> {
+            self.0.lock().unwrap().get(&key).cloned()
+        }
+        fn set(&self, key: String, value: String) {
+            self.0.lock().unwrap().insert(key, value);
+        }
+        fn delete(&self, key: String) {
+            self.0.lock().unwrap().remove(&key);
+        }
+    }
+
+    /// The install's carry over a fresh registry and a container root.
+    fn a_carry() -> Arc<OutboxCarry> {
+        let registry = crate::FfiAccountRegistry::new(Arc::new(MapStore::default()));
+        carry_for(
+            Some(&registry),
+            Some(std::env::temp_dir().join("row-5126-carry")),
+        )
+        .expect("a registry seats a carry")
+    }
+
+    fn holds(outbox: &AccountOutbox, carry: &Arc<OutboxCarry>) -> bool {
+        outbox.carry().is_some_and(|c| Arc::ptr_eq(&c, carry))
+    }
+
+    /// The carry seated before the first word reaches the outbox that word
+    /// wires; one seated after reaches the wired outbox at once; the doors'
+    /// fallback (no word yet) carries the seated carry too; and an unseat
+    /// reaches the wired outbox.
+    #[test]
+    fn the_seated_carry_reaches_every_outbox_this_seat_builds() {
+        assert!(
+            carry_for(None, None).is_none(),
+            "no registry: nothing seated"
+        );
+        let device = DeviceOutbox::new(|_, _| {}, || {});
+        assert!(
+            device.doors_over(no_runtime).carry().is_none(),
+            "none seated"
+        );
+
+        let first = a_carry();
+        device.seat_carry(Some(Arc::clone(&first)));
+        assert!(
+            holds(&device.doors_over(no_runtime), &first),
+            "the doors' fallback carries it before any word"
+        );
+        let outbox = device.feed_word(no_runtime, "disconnected");
+        assert!(holds(&outbox, &first), "the word's outbox carries it");
+
+        let second = a_carry();
+        device.seat_carry(Some(Arc::clone(&second)));
+        assert!(
+            holds(&outbox, &second),
+            "a later seat reaches the wired outbox"
+        );
+        assert!(
+            Arc::ptr_eq(&device.doors_over(no_runtime), &outbox),
+            "the doors act through the wired outbox once a word wired it"
+        );
+
+        device.seat_carry(None);
+        assert!(outbox.carry().is_none(), "an unseat reaches it too");
     }
 }

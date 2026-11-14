@@ -21,11 +21,33 @@ name: Release
 # credentials and only a read token; the `release` job alone can write, and it
 # runs inside the `release` Environment (required reviewer + `v*` tags only),
 # so nothing is published without a human approving that specific run.
+#
+# The stores (docs/goal/architecture/installers/store-review.md § The store
+# legs): the Microsoft Store's two packages are built by `store-windows`, which
+# calls release-store-windows.yml as a reusable workflow -- no credential, and
+# artifact names no publish pattern takes -- and the approved `release` job
+# submits them to Partner Center as its LAST steps, after the downloads are
+# out, so the owner's one approval of the run covers the store too (GitHub
+# approves an Environment per job, never per run). A stores-only dispatch
+# (`stores_commit`, at the version's tag) builds the store packages from that
+# recorded commit and runs the store steps alone, publishing no download: how a
+# store step that went red after its release's downloads were out is finished.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      # A stores-only run (installers/store-review.md § The store legs, *A
+      # version already tagged is taken into the stores by the same steps,
+      # dispatched*): the public commit a version records. The store builds
+      # are made from it, and the approved job runs its store steps alone and
+      # publishes no download. Empty (and on every tag push): the full release.
+      stores_commit:
+        description: "Stores only: the public commit the version records (full 40-hex SHA); empty for the full release"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -74,6 +96,7 @@ jobs:
   # Build Rust server/CLI binaries (all 4 targets)
   build-rust:
     needs: supply-chain
+    if: inputs.stores_commit == ''
     strategy:
       matrix:
         include:
@@ -166,8 +189,15 @@ jobs:
             aarch64-apple-darwin)       suffix="aarch64-darwin" ;;
           esac
 
-          # collect <bin> <asset>: a binary the build did not produce fails the
-          # job — a release missing an asset must not publish quietly.
+          # collect <bin> <asset> <notices artifact>: a binary the build did
+          # not produce fails the job — a release missing an asset must not
+          # publish quietly. Each bare binary gets its sibling
+          # <asset>.NOTICES.txt from the notices generator, for the manifest
+          # artifact named, resolved for this leg's own triple only
+          # (shipped-notices.md § Per channel, the bare-binary row); a
+          # generator that refuses fails the job too. LICENSE-MIT and
+          # LICENSE-APACHE come once per release, from the x86_64 Linux leg
+          # below, and are signed and summed with every other asset.
           collect() {
             src="target/${target}/release/$1"
             if [ ! -f "$src" ]; then
@@ -175,21 +205,32 @@ jobs:
               exit 1
             fi
             cp "$src" "artifacts/$2-${suffix}"
+            just shipped-notices "$3" "artifacts/$2-${suffix}.NOTICES.txt" --target "$target" || exit 1
           }
 
           for crate in fauna-nest fauna-push-relay fauna-cors-proxy fauna-front-door; do
-            collect "$crate" "$crate"
+            collect "$crate" "$crate" "release-${crate#fauna-}"
           done
 
           # The linux desktop app: package fauna-linux, binary fauna-desktop.
           if [[ "$target" == *linux* ]]; then
-            collect fauna-desktop fauna-linux
+            collect fauna-desktop fauna-linux release-linux-desktop
           fi
 
-          # The terminal app's archive: fauna-tui-<suffix>.tar.gz (Linux targets).
+          # Fauna's two licence texts, once per release: one leg's artifact
+          # carries them (the publish job merges every leg's into one set).
+          if [ "$target" = x86_64-unknown-linux-gnu ]; then
+            just shipped-licences artifacts
+          fi
+
+          # The terminal app's archive: fauna-tui-<suffix>.tar.gz (Linux
+          # targets). Its notices file is written outside artifacts/: it ships
+          # inside the archive, never as an asset of its own.
           if [[ "$target" == *linux* ]]; then
+            just shipped-notices terminal-archive-linux notices/terminal-archive-linux.txt --target "$target"
             bash apps/fauna-tui/packaging/assemble-archive.sh \
-              --bin-dir "target/${target}/release" --out artifacts --suffix "$suffix"
+              --bin-dir "target/${target}/release" --out artifacts --suffix "$suffix" \
+              --notices notices/terminal-archive-linux.txt
             rm -rf "artifacts/fauna-tui-${suffix}"
           fi
 
@@ -234,6 +275,7 @@ jobs:
   # export in the bindings it generated.
   windows-ffi:
     needs: supply-chain
+    if: inputs.stores_commit == ''
     strategy:
       matrix:
         include:
@@ -285,6 +327,7 @@ jobs:
   # one committed Cargo.lock and `--locked` holds for real.
   windows-services:
     needs: supply-chain
+    if: inputs.stores_commit == ''
     strategy:
       matrix:
         include:
@@ -338,6 +381,7 @@ jobs:
   # invocation.
   windows-terminal:
     needs: supply-chain
+    if: inputs.stores_commit == ''
     strategy:
       matrix:
         include:
@@ -372,6 +416,9 @@ jobs:
           rel=target/${{ matrix.rust_target }}/release
           mkdir -p part
           cp "$rel/fauna-tui.exe" "$rel/fauna-cli.exe" part/
+          # The zip's notices file, written here where the Rust toolchain is
+          # (build-windows assembles without one) and carried in the part.
+          just shipped-notices terminal-archive-windows part/THIRD-PARTY-NOTICES.txt --target ${{ matrix.rust_target }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -387,9 +434,14 @@ jobs:
   # seam; the C# app keeps its own crt-static MSVC fauna_ffi.dll (a different
   # job, never mixed). Hands on fauna-mail-bridge.exe + the gnullvm
   # fauna_ffi.dll + libunwind.dll (the gnullvm dll's one non-OS runtime dep,
-  # the target triple's own copy), all three staged by the recipe in target/.
+  # the target triple's own copy), all three staged by the recipe in target/,
+  # and the toolchain's licence files the recipe stages beside them
+  # (llvm-mingw/LICENSE.TXT, which the MSI's notices copy for libunwind.dll, and
+  # llvm-mingw/mingw32/, the mingw-w64 runtime's, which the gnullvm link puts
+  # into the exe and its dll): the assembly job has no toolchain to take them from.
   windows-mail-bridge:
     needs: supply-chain
+    if: inputs.stores_commit == ''
     strategy:
       matrix:
         include:
@@ -431,7 +483,9 @@ jobs:
       # x86_64-w64-mingw32 and aarch64-w64-mingw32 cross-compilers, so this ONE
       # install on the x64 runner serves both matrix arches. Version-pinned and
       # checksum-verified; the expected value is the sha256 content digest of
-      # the public release asset.
+      # the public release asset. The MSI's notices name this release for its
+      # libunwind.dll (installer/shipped-notices.toml, the bundled entry, with
+      # the LLVM version it is built from): a tier_1 test holds them equal.
       - name: Install llvm-mingw (cgo cross-compiler for the Go MDA)
         shell: pwsh
         run: |
@@ -462,8 +516,10 @@ jobs:
         shell: bash
         run: |
           just windows-mail-bridge-build ${{ matrix.rust_target_gnullvm }} ${{ matrix.go_arch }}
-          mkdir -p part
+          mkdir -p part/llvm-mingw
           cp target/fauna-mail-bridge.exe target/fauna_ffi.dll target/libunwind.dll part/
+          cp target/llvm-mingw/LICENSE.TXT part/llvm-mingw/
+          cp -r target/llvm-mingw/mingw32 part/llvm-mingw/
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -472,7 +528,9 @@ jobs:
           if-no-files-found: error
 
   # Assemble each arch's MSI and terminal archive from the parts above: the
-  # .NET app, the MSI, the zip, and (x64) the install smoke. No Rust builds here.
+  # .NET app, the MSI, the zip, and (x64) the install smoke. No Rust builds here:
+  # the Rust toolchain and Go are here for the MSI's notices file alone, whose
+  # generator reads `cargo tree` and `go version -m` and compiles nothing.
   build-windows:
     needs: [windows-ffi, windows-services, windows-terminal, windows-mail-bridge]
     strategy:
@@ -484,8 +542,11 @@ jobs:
             dotnet_rid: win-arm64
     runs-on: windows-latest
     # Measured at most 9.4 min per arch over the five split runs that reached it
-    # (6-10 min); about 1.5x that.
-    timeout-minutes: 15
+    # (6-10 min), before the notices step: a toolchain install, the locked crate
+    # set fetched and the closure resolved (6.5 min on a loaded Windows dev VM with
+    # a warm cache, 2026-11-13; not yet measured on a hosted runner); about 1.5x
+    # the sum.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
@@ -494,6 +555,18 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
         with:
           dotnet-version: '10.0.204'  # = global.json; moves only in a bump round
+
+      # The MSI's notices file covers the parts' Rust and Go closures and this
+      # job's NuGet one, and project.assets.json exists only here, so the
+      # generator runs here: `cargo` for its resolve (no target, nothing built)
+      # and `go` for the bridge's recorded module list.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: bins/fauna-bridges/go.mod
 
       - name: Install uv
         shell: bash
@@ -577,6 +650,21 @@ jobs:
           cp -r apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/*/publish/* stage/${{ matrix.arch }}/app/ || \
           cp -r apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/*/*/publish/* stage/${{ matrix.arch }}/app/
 
+      # The three licence files Notices.wxs installs beside the binaries
+      # (shipped-notices.md § Per channel, the Windows MSI row), by the recipe the
+      # test fixture runs too. After the publish, whose restore wrote the
+      # project.assets.json the NuGet leg reads and whose deps.json names the
+      # runtime packs it copied and the runtime of the .NET app host its .exe is
+      # (downloaded by the restore, or the SDK's own copy, which the leg finds in
+      # the packs folder beside the `dotnet` on PATH — the one the publish ran);
+      # the bridge is the mail-bridge part's, whose directory holds
+      # libunwind.dll and the toolchain's licence files (its own and the
+      # mingw-w64 runtime's) the bundled leg copies. A generator that refuses
+      # fails the job.
+      - name: Stage the licence and notices files
+        shell: bash
+        run: just windows-msi-notices stage/${{ matrix.arch }}/notices ${{ matrix.arch }} parts/mail-bridge/fauna-mail-bridge.exe
+
       # Every -d path MUST be absolute. WiX resolves App.wxs's
       # <Files Include="$(var.AppDir)**"> harvest relative to the .wxs file's
       # directory (apps/fauna-windows/installer/), NOT the working dir — a
@@ -594,6 +682,7 @@ jobs:
           -ext WixToolset.Firewall.wixext
           -o Fauna-Setup-${{ matrix.arch }}.msi
           apps/fauna-windows/installer/*.wxs
+          -loc apps/fauna-windows/installer/Strings.wxl
           -d SyncBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-sync-agent.exe
           -d TuiBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-tui.exe
           -d CliBin=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna-cli.exe
@@ -605,6 +694,7 @@ jobs:
           -d ShellDll=${{ github.workspace }}/stage/${{ matrix.arch }}/fauna_shell.dll
           -d IconDir=${{ github.workspace }}/stage/${{ matrix.arch }}/icons/
           -d AppDir=${{ github.workspace }}/stage/${{ matrix.arch }}/app/
+          -d NoticesDir=${{ github.workspace }}/stage/${{ matrix.arch }}/notices/
           -d NoSparsePackage=1
 
       # The terminal app's Windows archive: fauna-tui.exe + fauna-sync-agent.exe
@@ -617,7 +707,8 @@ jobs:
         run: |
           bash apps/fauna-tui/packaging/assemble-archive.sh \
             --bin-dir "stage/${{ matrix.arch }}" \
-            --out tui-archive --suffix "${{ matrix.arch }}-windows" --exe
+            --out tui-archive --suffix "${{ matrix.arch }}-windows" --exe \
+            --notices parts/terminal/THIRD-PARTY-NOTICES.txt
 
       - name: Zip the fauna-tui archive
         shell: pwsh
@@ -700,14 +791,145 @@ jobs:
   # path builds it via `just mail-bridge-build`. Neither consumes a prebuilt
   # release binary.
 
+  # The Microsoft Store's two packages, built and graded from the recorded
+  # public commit by release-store-windows.yml (its own header says how), as
+  # jobs of THIS run that hold no credential. On a tag the recorded commit is
+  # the tag's; on a stores-only dispatch it is the one the dispatch names. Its
+  # artifacts (`store-windows-<arch>`, `certification-<arch>`) match no pattern
+  # the `release` job publishes; the job's store steps take them by their own.
+  store-windows:
+    needs: supply-chain
+    uses: ./.github/workflows/release-store-windows.yml
+    with:
+      commit: ${{ inputs.stores_commit || github.sha }}
+      flavour: store-no-payments
+
+  # A run that does not publish (a branch dispatch) checks the Microsoft Store
+  # step's inputs and stops: the packages, their certification grade, the
+  # version's store text and how far the leg goes, with no credential and no
+  # store call (store-review.md § The store legs, the dry-run sentence).
+  store-dry-run:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') && !cancelled() && needs.store-windows.result == 'success' }}
+    needs: store-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          pattern: store-windows-*
+          path: store-windows
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          pattern: certification-*
+          path: store-certification
+          merge-multiple: true
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - name: Microsoft Store leg (dry run)
+        run: >
+          uv run --no-project python scripts/msstore-submit.py --dry-run
+          --version tree --packages store-windows --certification store-certification
+          --record store-legs.json
+
+  # The Play upload: the `storeNoPayments` Android App Bundle, built UNSIGNED by
+  # the recipe the machines build it with (`just android-bundle-store-no-payments`,
+  # its automation-surface strip check and excision scan in the same body), in a
+  # job that holds no secret and names no Environment. Its artifact is named
+  # `store-android-bundle`, outside the `rust-*`/`windows-*` patterns the
+  # `release` job publishes, so the bundle is never a download; the approved job
+  # signs and uploads it as its last steps (installers/store-review.md § The
+  # store legs; installers/android.md § Signing model).
+  #
+  # The scripts and the store texts come from this run's own tree; the bundle is
+  # built from the version's recorded public commit on a stores-only run
+  # (`stores_commit`), from this tree otherwise.
+  android-store-bundle:
+    needs: supply-chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        if: inputs.stores_commit != ''
+        with:
+          ref: ${{ inputs.stores_commit }}
+          path: store-build
+          persist-credentials: false
+      - name: Resolve the tree and the version
+        env:
+          STORES_COMMIT: ${{ inputs.stores_commit }}
+        run: |
+          set -euo pipefail
+          if [ -n "$STORES_COMMIT" ]; then
+            [[ "$STORES_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "stores_commit is not a full 40-hex SHA" >&2; exit 1; }
+            [ "$(git -C store-build rev-parse HEAD)" = "$STORES_COMMIT" ] || { echo "the checkout is not $STORES_COMMIT" >&2; exit 1; }
+            TREE="$PWD/store-build"
+          else
+            TREE="$PWD"
+          fi
+          VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$TREE/Cargo.toml")"
+          if [ -z "$STORES_COMMIT" ] && [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "the tree's version $VERSION is not the tag $GITHUB_REF_NAME" >&2; exit 1
+          fi
+          echo "TREE=$TREE" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          rustflags: ""
+          cache: false
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The runner's own JDK 21 and Android NDK (no setup action); the NDK's
+      # clang wrappers on PATH are what the FFI recipe checks for.
+      - name: The runner's JDK 21 and NDK
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+          echo "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Build the storeNoPayments bundle (unsigned)
+        working-directory: ${{ env.TREE }}
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+          just android-bundle-store-no-payments
+      # The inputs the store step needs, checked with no credential in scope: the
+      # bundle is unsigned and of this version, and Play's text is approved for it.
+      # A dry run (a branch dispatch) stops here: the `release` job never runs.
+      - name: Check the Play leg's inputs
+        run: |
+          AAB="$TREE/apps/fauna-android/app/build/outputs/bundle/storeNoPayments/app-storeNoPayments.aab"
+          uv run --no-project python scripts/store-leg-play.py check --version "$VERSION" --aab "$AAB" --tree "$TREE"
+          mkdir -p store-android-bundle
+          cp "$AAB" store-android-bundle/app-storeNoPayments.aab
+          echo "$VERSION" > store-android-bundle/VERSION
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: store-android-bundle
+          path: store-android-bundle/
+          if-no-files-found: error
+
   # Sign all binaries and create the GitHub Release. Publishes only on a `v*`
   # tag ref (a branch dispatch skips this job — the dry run), and only after a
   # maintainer approves the run into the `release` Environment.
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-rust, build-windows, smoke-windows-arm64]
+    # A stores-only run (`stores_commit`) skips the download builds, so the
+    # guard reads each need's result instead of the default "every need passed".
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') && !cancelled()
+      && needs.android-store-bundle.result == 'success'
+      && needs.store-windows.result == 'success'
+      && (inputs.stores_commit != ''
+          || (needs.build-rust.result == 'success'
+              && needs.build-windows.result == 'success'
+              && needs.smoke-windows-arm64.result == 'success'))
+    needs: [build-rust, build-windows, smoke-windows-arm64, android-store-bundle, store-windows]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     environment: release
     permissions:
       contents: write        # upload the release assets
@@ -723,11 +945,13 @@ jobs:
       # `windows-<arch>`. The Windows jobs' `part-windows-*` intermediates are
       # never published -- every file this job downloads is signed and shipped.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: inputs.stores_commit == ''
         with:
           pattern: rust-*
           path: all-artifacts
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: inputs.stores_commit == ''
         with:
           pattern: windows-*
           path: all-artifacts
@@ -740,16 +964,20 @@ jobs:
       # release. Refuse to publish a release the table disagrees with, either
       # way: a linked file missing here, or a file here the table never named.
       - name: The downloads table matches the release
+        if: inputs.stores_commit == ''
         run: uv run --no-project python installer/check-downloads.py installer/downloads.json release.yml all-artifacts
 
       - name: Install cosign
+        if: inputs.stores_commit == ''
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       - name: Generate SHA256SUMS
+        if: inputs.stores_commit == ''
         working-directory: all-artifacts
         run: sha256sum * > SHA256SUMS
 
       - name: Sign all artifacts with cosign
+        if: inputs.stores_commit == ''
         working-directory: all-artifacts
         run: |
           for file in *; do
@@ -758,6 +986,7 @@ jobs:
           done
 
       - name: Create GitHub Release
+        if: inputs.stores_commit == ''
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           files: all-artifacts/*
@@ -765,6 +994,10 @@ jobs:
           # the direct-download channel's pre-release track. `fauna-publish
           # release` flips it after the promote to :latest.
           prerelease: true
+          # release-macos.yml publishes into this same Release, in whichever
+          # order the two runs finish: append, never replace, its notes. This
+          # step alone generates the change list, so it is listed once.
+          append_body: true
           generate_release_notes: true
           # public-text: release-body-main
           body: |
@@ -776,25 +1009,98 @@ jobs:
 
             ## Verify Downloads
 
-            Every file was signed by this repository's `Release` workflow with
-            its Sigstore identity (the regex below is anchored to this
-            repository, so a signature from anywhere else fails). Install
+            Every file this repository's `Release` workflow released, other
+            than the `.bundle` signatures themselves, was signed by that
+            workflow with its Sigstore identity, in the `.bundle` file beside
+            it (the regex below is anchored to this repository, so a signature
+            from anywhere else fails). The Mac download (the `.dmg`) and the
+            terminal app's Mac archives, with their `.sha256` files, come from
+            the `Release (macOS)` workflow instead; its own section of these
+            notes says how to check the `.dmg` and the archives. Install
             [cosign](https://docs.sigstore.dev/cosign/system_config/installation/), then:
 
             ```bash
             # Verify a specific binary
             cosign verify-blob \
-              --certificate-identity-regexp='^https://github\.com/faunasocial/fauna/' \
+              --certificate-identity-regexp="^https://github\.com/faunasocial/fauna/" \
               --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
               --bundle <binary>.bundle \
               <binary>
 
             # Or verify all at once via checksums
             cosign verify-blob \
-              --certificate-identity-regexp='^https://github\.com/faunasocial/fauna/' \
+              --certificate-identity-regexp="^https://github\.com/faunasocial/fauna/" \
               --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
               --bundle SHA256SUMS.bundle \
               SHA256SUMS
             sha256sum --check SHA256SUMS   # macOS: shasum -a 256 --check SHA256SUMS
             ```
           # public-text-end: release-body-main
+
+      # ---- the Google Play leg: last, converging (installers/store-review.md
+      # § The store legs). Its credentials rest in this Environment only. ----
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: store-android-bundle
+          path: store-android-bundle
+      - name: "Play: sign the bundle with the upload key"
+        env:
+          FAUNA_PLAY_UPLOAD_KEYSTORE: ${{ secrets.FAUNA_PLAY_UPLOAD_KEYSTORE }}
+          FAUNA_PLAY_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.FAUNA_PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+        run: >-
+          uv run --no-project python scripts/store-leg-play.py sign
+          --aab store-android-bundle/app-storeNoPayments.aab
+          --out store-android-bundle/app-storeNoPayments-signed.aab
+      # A refusal of permission (Google may take up to 48 hours to apply the
+      # service account's release permissions) is waited out inside this step,
+      # 20 minutes at most, inside this job's 60; past that the step is red and
+      # a stores-only dispatch at the tag finishes it.
+      - name: "Play: release on internal testing"
+        id: play-upload
+        env:
+          FAUNA_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.FAUNA_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: >-
+          uv run --no-project python scripts/store-leg-play.py upload
+          --version "$(cat store-android-bundle/VERSION)"
+          --aab store-android-bundle/app-storeNoPayments-signed.aab
+          --result store-legs.json
+      # ---- the Microsoft Store leg: the two packages this run's `store-windows`
+      # built and graded, submitted to Partner Center's private audience (public
+      # only when installer/store-legs.toml says so), the version's *What's new*
+      # from installer/store-texts/ at this tag; converging. The credential is
+      # an Entra application in the Manager role, resting only in this
+      # Environment. A red Play upload does not hold it back: the two stores are
+      # independent, the job stays red, and one stores-only run finishes both,
+      # each converging. ----
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: success() || steps.play-upload.outcome == 'failure'
+        with:
+          pattern: store-windows-*
+          path: store-windows
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: success() || steps.play-upload.outcome == 'failure'
+        with:
+          pattern: certification-*
+          path: store-certification
+          merge-multiple: true
+      - name: Microsoft Store leg
+        if: success() || steps.play-upload.outcome == 'failure'
+        env:
+          FAUNA_MSSTORE_TENANT_ID: ${{ secrets.FAUNA_MSSTORE_TENANT_ID }}
+          FAUNA_MSSTORE_CLIENT_ID: ${{ secrets.FAUNA_MSSTORE_CLIENT_ID }}
+          FAUNA_MSSTORE_CLIENT_SECRET: ${{ secrets.FAUNA_MSSTORE_CLIENT_SECRET }}
+        run: >
+          uv run --no-project python scripts/msstore-submit.py
+          --version "${GITHUB_REF_NAME#v}" --packages store-windows
+          --certification store-certification --record store-legs.json
+      # The leg's result, read by the release attempt's `stores` step: store,
+      # version, build, track, state, the stamp of the store's reading and its
+      # identifiers — no secret, no address, no tester.
+      - name: Keep the store legs' record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: store-legs
+          path: store-legs.json
+          if-no-files-found: ignore

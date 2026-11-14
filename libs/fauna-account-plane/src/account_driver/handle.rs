@@ -83,6 +83,13 @@ pub(crate) enum Cmd {
         drainer: IntentDrainer,
         reply: oneshot::Sender<Result<[u8; 16]>>,
     },
+    /// One retired identity's intent carried into this outbox verbatim
+    /// ([`AccountStoreHandle::carry_intent`]).
+    CarryIntent {
+        intent: fauna_account_store::types::NewOutboxIntent,
+        parked: Option<String>,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     /// Every undrained outbox row, `(scope, channel_seq)` ascending — the
     /// unsent-changes read model's source ([`AccountStoreHandle::outbox_rows`])
     /// and, filtered to [`IntentDrainer::Mls`], the MLS drain's read.
@@ -187,6 +194,9 @@ pub(crate) enum Cmd {
     /// ceremony record: it carries verbatim signed envelopes.
     MergeCustody {
         replica: Box<fauna_core::custody_ceremony::CustodyConfig>,
+        /// The machinery's write (the ceremony sink, the drive pass) rather
+        /// than a surface's gesture — [`Self::is_background_write`].
+        background: bool,
         reply: oneshot::Sender<Result<fauna_core::custody_ceremony::CustodyConfig>>,
     },
     /// The npub confirmation's write door
@@ -457,6 +467,13 @@ pub(crate) enum Cmd {
         on: bool,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// The app host left or re-entered the foreground
+    /// ([`AccountStoreHandle::set_foreground`]). The seat is already set when
+    /// this arrives; leaving stands the legs down here, between passes.
+    SetForeground {
+        foreground: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// Which `sync_devices` row this machine's grant is actually registered on
     /// ([`PrincipalSlot::grant_registration_row`]) — the This-device badge's
     /// read door. `None` = nothing enrolled for this actor yet.
@@ -567,6 +584,10 @@ pub(crate) enum Cmd {
         member: [u8; 32],
         reply: oneshot::Sender<Result<(), FleetRemovalRefusal>>,
     },
+    /// The host stopped a runtime of this store that this one displaced
+    /// ([`AccountStoreHandle::engine_role_vacated`]): a non-holder re-tries
+    /// the engine election now rather than at its backstop tick.
+    EngineRoleVacated,
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -652,7 +673,10 @@ impl Cmd {
     ///   is bounded, `FIRST_PASS_WAIT`, refused not-ready past it); `Settled` (the
     ///   barrier — answered between passes by definition);
     ///   `RestoreFromCustodian` (it walks both account-state planes, as a
-    ///   pass does, so it never interleaves with one); `RetireEnrollment`
+    ///   pass does, so it never interleaves with one); `SetForeground` (its
+    ///   background half stands the legs down, which the pass in flight is
+    ///   using — the yield's stand-down is between passes for the same
+    ///   reason); `RetireEnrollment`
     ///   and `Shutdown` (they end the principal's sessions, which no pass may
     ///   be mid-flight for); `DeadGenerations` and `LetGo` (they ask the
     ///   holder and retire at the nest, and the dead read must not race a
@@ -669,6 +693,7 @@ impl Cmd {
             | Cmd::WriteModeration { .. }
             | Cmd::RegisterContentScope { .. }
             | Cmd::EnqueueIntent { .. }
+            | Cmd::CarryIntent { .. }
             | Cmd::OutboxRows { .. }
             | Cmd::SettleIntent { .. }
             | Cmd::PrincipalBundleStatus { .. }
@@ -747,6 +772,8 @@ impl Cmd {
             | Cmd::DeadGenerations { .. }
             | Cmd::LetGo { .. }
             | Cmd::RestoreFromCustodian { .. }
+            | Cmd::SetForeground { .. }
+            | Cmd::EngineRoleVacated
             | Cmd::Shutdown { .. } => false,
         }
     }
@@ -769,6 +796,10 @@ impl Cmd {
                 write,
                 RefusedChangeWrite::Record(_) | RefusedChangeWrite::Merge(_)
             ),
+            // The custody ceremony sink's capture of a received payload and
+            // the drive pass's marks; a mint, accept or revoke from a page is
+            // that page's gesture.
+            Cmd::MergeCustody { background, .. } => *background,
             _ => false,
         }
     }
@@ -1267,6 +1298,10 @@ pub struct AccountStoreHandle {
     /// The facts a second store connection opens from — seated by the
     /// native host at every assembly ([`Self::serve_store_facts`]).
     pub(super) serve_store: ServeStoreSeat,
+    /// Whether the app host is in the foreground — shared with the driver,
+    /// whose host hands it to each assembly's legs
+    /// ([`Self::set_foreground`]).
+    pub(super) foreground: crate::host_legs::ForegroundSeat,
 }
 
 /// The identity half of the succession-ledger seam: the account this runtime
@@ -1598,6 +1633,38 @@ impl AccountStoreHandle {
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Append a retired identity's undrained intent to this outbox VERBATIM —
+    /// its intent id, kind, scope, payload and drainer kept, the store
+    /// assigning its own `channel_seq` — and, when `parked` names the
+    /// predecessor row's stored reason, park it with that reason (the outbox
+    /// carry, `crate::outbox_carry`; `succession-aftermath.md` § Re-key scope,
+    /// the device-local outbox row). `false` = the intent id is already here
+    /// (a re-run after a crash between the append and the predecessor's
+    /// delete): nothing is written, the row is left as it stands. No
+    /// `OfflineQueued` check: the predecessor's enqueue door made it.
+    pub async fn carry_intent(
+        &self,
+        intent: fauna_account_store::types::NewOutboxIntent,
+        parked: Option<String>,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::CarryIntent {
+                intent,
+                parked,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// The account this runtime serves, when its actor id decoded — the
+    /// identity the outbox carry runs for (`crate::outbox_carry`).
+    pub fn account_actor(&self) -> Option<fauna_core::identity::ActorId> {
+        self.ledger_identity.as_ref().map(|id| id.self_actor)
     }
 
     /// Drain this device's MLS plaintext intents through `sender` — the
@@ -2779,10 +2846,29 @@ impl AccountStoreHandle {
         &self,
         replica: fauna_core::custody_ceremony::CustodyConfig,
     ) -> Result<fauna_core::custody_ceremony::CustodyConfig> {
+        self.merge_custody_as(replica, false).await
+    }
+
+    /// [`Self::merge_custody`] for the runtime's own machinery — the ceremony
+    /// sink and the drive pass — whose write is a background write and so a
+    /// store-change notice source ([`Cmd::is_background_write`]).
+    pub async fn merge_custody_background(
+        &self,
+        replica: fauna_core::custody_ceremony::CustodyConfig,
+    ) -> Result<fauna_core::custody_ceremony::CustodyConfig> {
+        self.merge_custody_as(replica, true).await
+    }
+
+    async fn merge_custody_as(
+        &self,
+        replica: fauna_core::custody_ceremony::CustodyConfig,
+        background: bool,
+    ) -> Result<fauna_core::custody_ceremony::CustodyConfig> {
         let (reply, rx) = oneshot::channel();
         self.cmd
             .send(Cmd::MergeCustody {
                 replica: Box::new(replica),
+                background,
                 reply,
             })
             .await
@@ -3319,6 +3405,37 @@ impl AccountStoreHandle {
         Ok(())
     }
 
+    /// The app host's foreground signal — a phone's shell calls it from its
+    /// scene or lifecycle phase (`account-sync-plane.md` § Wormability walk,
+    /// rule 5; `p2p-shared-set-build.md` § Phone peers — design, decision 2).
+    /// Leaving the foreground (`false`) stands the legs down now — between
+    /// passes, after the pass in flight if there is one — so the peer leg's
+    /// listener and its dial pass are gone before the process is suspended,
+    /// and every later pass binds nothing ([`PeerLegPass::Backgrounded`])
+    /// until the host says `true` again. Returning re-binds at the next full
+    /// pass; a caller that wants it now follows with [`Self::reconcile_now`]
+    /// (the `fauna-ffi` seat does). A desktop host never calls it: the seat
+    /// starts foreground.
+    ///
+    /// [`PeerLegPass::Backgrounded`]: crate::host_legs::PeerLegPass::Backgrounded
+    pub async fn set_foreground(&self, foreground: bool) -> Result<()> {
+        // The seat first, so a pass that starts before the command is served
+        // already reads it and binds nothing.
+        self.foreground.set(foreground);
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::SetForeground { foreground, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))
+    }
+
+    /// Whether the app host last said it is in the foreground
+    /// ([`Self::set_foreground`]); `true` until it says otherwise.
+    pub fn is_foreground(&self) -> bool {
+        self.foreground.is_foreground()
+    }
+
     /// A wake that fires after every [`Self::set_p2p_participation`] on this
     /// handle or any clone of it — what [`crate::share_glue::run`] selects on
     /// beside its tick. Carries a change counter, never the value.
@@ -3650,6 +3767,16 @@ impl AccountStoreHandle {
     /// grant survive in the slot and on the nest, which is right whenever
     /// the slot survives too. A sign-out — the all-accounts erase — is
     /// [`Self::shutdown_for_sign_out`].
+    /// Tell this runtime that a runtime of its store it displaced has been
+    /// stopped — the host's supersession, in-process (`account-runtime.md`
+    /// § Multi-instance concurrency → *A supersession hands the engine role
+    /// over*). A non-holder re-tries the engine election at once, through its
+    /// backstop tick's path (on a win the tick's catch-up pass runs); a holder
+    /// ignores it. Fire-and-forget: a runtime already gone has nothing to take.
+    pub async fn engine_role_vacated(&self) {
+        let _ = self.cmd.send(Cmd::EngineRoleVacated).await;
+    }
+
     pub async fn shutdown(&self) {
         let (reply, rx) = oneshot::channel();
         if self.cmd.send(Cmd::Shutdown { reply }).await.is_ok() {
@@ -3994,6 +4121,14 @@ impl AccountStoreHandle {
     pub async fn closed(&self) {
         self.cmd.closed().await
     }
+
+    /// [`Self::closed`] as a reading: whether this handle's runtime has shut
+    /// down already. What a task following the process's CURRENT runtime
+    /// across a re-mount checks a slot's handle with, so it never re-runs on
+    /// the one that just ended.
+    pub fn is_closed(&self) -> bool {
+        self.cmd.is_closed()
+    }
 }
 
 /// The ceremony driver's registry-row seam (
@@ -4106,11 +4241,23 @@ impl fauna_client_config::SuccessionLedgerStore for AccountStoreHandle {
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
 
+    /// Crosses the read gate first (`account-client-lifecycle.md` § The
+    /// client-side lifecycle → *The first listing*, clause (3)): the raise
+    /// derives its mark writes from the ledger's live grants, and a
+    /// successor's never-listed store holds none of the predecessor's, so an
+    /// ungated raise marked nothing and the aftermath's re-mint, which reads
+    /// after it in the same pass, found nothing owed — leaving the inherited
+    /// grant live and unraised once the listing landed. Refused as not ready
+    /// instead, the pass's ledger legs stay owed. The plain `load` stays
+    /// ungated: the facet renders what it holds and a ledger write is a join.
     async fn raise_grant_marks(
         &self,
         predecessor: fauna_core::identity::ActorId,
     ) -> Result<bool, fauna_client_config::StoreError> {
         let identity = self.ledger_identity()?;
+        super::handle_source::read_gate(self, fauna_protocol::merge_policy::KIND_SUCCESSION_LEDGER)
+            .await
+            .map_err(super::handle_source::ScopeNotReady::into_load)?;
         AccountStoreHandle::raise_grant_marks(self, identity.self_actor, predecessor)
             .await
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
@@ -4272,6 +4419,15 @@ impl fauna_client_config::CustodyCeremonyStore for AccountStoreHandle {
         replica: fauna_core::custody_ceremony::CustodyConfig,
     ) -> Result<fauna_core::custody_ceremony::CustodyConfig, fauna_client_config::StoreError> {
         AccountStoreHandle::merge_custody(self, replica)
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
+    async fn merge_custody_background(
+        &self,
+        replica: fauna_core::custody_ceremony::CustodyConfig,
+    ) -> Result<fauna_core::custody_ceremony::CustodyConfig, fauna_client_config::StoreError> {
+        AccountStoreHandle::merge_custody_background(self, replica)
             .await
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
@@ -5143,7 +5299,7 @@ where
         }
         // The custody ceremony state: a read-join-put on this one store
         // thread — `custody_ceremony_rows` owns the mechanics.
-        Cmd::MergeCustody { replica, reply } => {
+        Cmd::MergeCustody { replica, reply, .. } => {
             let r = crate::custody_ceremony_rows::merge_custody(
                 local.store,
                 local.fleet_plane,
@@ -5420,6 +5576,14 @@ where
                 );
                 return Served::Reassemble;
             }
+        }
+        Cmd::CarryIntent {
+            intent,
+            parked,
+            reply,
+        } => {
+            let r = crate::outbox::carry_intent(local.store, &intent, parked.as_deref()).await;
+            let _ = reply.send(r);
         }
         Cmd::OutboxRows { reply } => {
             let _ = reply.send(local.store.outbox_undrained().await);
@@ -5742,6 +5906,7 @@ pub fn unsent_changes_of(
             created_at: r.created_at,
             attempts: r.retry_count,
             description: fauna_protocol::offline_describe::describe_intent(&r.kind, &r.payload),
+            hold: None,
         })
         .collect()
 }

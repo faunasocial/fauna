@@ -21,10 +21,29 @@ pub const SNIPPET_CHARS: usize = 160;
 /// `content.read{mail}` key the materializer holds. `None` when the key does
 /// not open it (a lineage no wrap covers yet, part (e)): the caller skips the
 /// record and counts it.
-pub fn open_mail_body(sealed_body: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+///
+/// Opens through the one grant-holder opener
+/// (`fauna_mls::wrapped_blob::open_mail_record_with_grant_key`), so a
+/// master-key `k × 2464` payload is read as such: its epoch roots open a
+/// record the MTA sealed under a content-sealing epoch key, its standing
+/// secrets a standing-sealed one. `stored_at_ms` is the record's floor
+/// `stored_at` (epoch ms; `0` = unknown) — the seal instant the opener keys
+/// its epoch trial order on, never the sender's `Date:` header.
+pub fn open_mail_body(sealed_body: &[u8], key: &[u8], stored_at_ms: i64) -> Option<Vec<u8>> {
     let inner =
         fauna_mls::wrapped_blob::MailRecordEnvelope::from_canonical_bytes(sealed_body).ok()?;
-    fauna_mls::wrapped_blob::unseal_mail_record_with_derived_key(&inner, key).ok()
+    fauna_mls::wrapped_blob::open_mail_record_with_grant_key(
+        &inner,
+        key,
+        seal_instant_secs(stored_at_ms),
+    )
+    .ok()
+}
+
+/// A floor's `stored_at` (epoch ms) as the opener's seal instant (unix secs);
+/// a missing or negative stamp is `0` = unknown.
+fn seal_instant_secs(stored_at_ms: i64) -> u64 {
+    u64::try_from(stored_at_ms).map_or(0, |ms| ms / 1000)
 }
 
 /// The doc's content id: the RFC `Message-ID` header value exactly as the
@@ -255,9 +274,54 @@ mod tests {
         let (secret, public) = derive_recipient_hpke_keypair(&msek);
         let env = seal_to_recipient(RAW, &public).unwrap();
         let sealed = env.to_canonical_bytes().unwrap();
-        assert_eq!(open_mail_body(&sealed, &secret).as_deref(), Some(RAW));
-        assert!(open_mail_body(&sealed, &[9u8; 32]).is_none());
-        assert!(open_mail_body(b"not an envelope", &secret).is_none());
+        assert_eq!(open_mail_body(&sealed, &secret, 0).as_deref(), Some(RAW));
+        assert!(open_mail_body(&sealed, &[9u8; 32], 0).is_none());
+        assert!(open_mail_body(b"not an envelope", &secret, 0).is_none());
+    }
+
+    /// The case every app produces: the owner's app published its
+    /// content-sealing epoch schedule, so the MTA sealed the record under the
+    /// epoch key of its `stored_at`. A master-key grant payload opens it (and
+    /// a standing-sealed one); another actor's epoch-sealed record stays shut.
+    #[test]
+    fn a_master_key_grant_opens_an_epoch_sealed_body_of_its_actor_only() {
+        use fauna_mls::wrapped_blob::{
+            MAIL_SEALING_EPOCH_SECS, derive_mail_epoch_root, derive_master_mail_capability_payload,
+            derive_recipient_epoch_xwing_keypair_from_root, derive_recipient_xwing_keypair,
+            seal_to_recipient_xwing,
+        };
+        let msek = [0x51u8; 32];
+        let other = [0x52u8; 32];
+        let key = derive_master_mail_capability_payload(&msek, &[]);
+        let e = 2_990u64;
+        let stored_at_ms = i64::try_from((e * MAIL_SEALING_EPOCH_SECS + 7) * 1000).unwrap();
+        let seal = |m: &[u8; 32]| {
+            let kp = derive_recipient_epoch_xwing_keypair_from_root(&derive_mail_epoch_root(m), e);
+            seal_to_recipient_xwing(RAW, &kp.public)
+                .unwrap()
+                .to_canonical_bytes()
+                .unwrap()
+        };
+        assert_eq!(
+            open_mail_body(&seal(&msek), &key, stored_at_ms).as_deref(),
+            Some(RAW)
+        );
+        assert!(open_mail_body(&seal(&other), &key, stored_at_ms).is_none());
+        let standing = seal_to_recipient_xwing(RAW, &derive_recipient_xwing_keypair(&msek).public)
+            .unwrap()
+            .to_canonical_bytes()
+            .unwrap();
+        assert_eq!(
+            open_mail_body(&standing, &key, stored_at_ms).as_deref(),
+            Some(RAW)
+        );
+    }
+
+    #[test]
+    fn a_floor_stamp_becomes_the_seal_instant_in_seconds() {
+        assert_eq!(seal_instant_secs(0), 0);
+        assert_eq!(seal_instant_secs(-5), 0);
+        assert_eq!(seal_instant_secs(1_700_000_000_999), 1_700_000_000);
     }
 
     #[test]

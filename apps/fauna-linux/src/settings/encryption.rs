@@ -13,6 +13,15 @@ pub fn build_encryption_page() -> gtk::Box {
 
     // --- Low-key warning row (hidden until count is fetched) ---
     let warning_group = adw::PreferencesGroup::new();
+    // error-message — the page-level error (`settings.md` § Errors): a failed
+    // count read says why here, on this page alone, never on the app-wide
+    // banner (tui's `encryption_error`). Hidden until a read fails.
+    let error_label = gtk::Label::builder().visible(false).build();
+    error_label.add_css_class("error");
+    error_label.set_halign(gtk::Align::Start);
+    error_label.set_wrap(true);
+    crate::testid::set_test_id(&error_label, ids::ERROR_MESSAGE);
+    warning_group.add(&error_label);
     let warning_row = adw::ActionRow::builder()
         .title(enc::LOW_KEY_WARNING_TITLE)
         .subtitle(enc::LOW_KEY_WARNING_SUBTITLE)
@@ -113,6 +122,9 @@ pub fn build_encryption_page() -> gtk::Box {
     WARNING_ROW.with(|cell| {
         *cell.borrow_mut() = Some(warning_row.clone());
     });
+    ERROR_LABEL.with(|cell| {
+        *cell.borrow_mut() = Some(error_label.clone());
+    });
 
     crate::testid::wrap_page_with_heading(enc::TITLE, ids::PAGE_HEADING, &page)
 }
@@ -126,10 +138,28 @@ use std::cell::RefCell;
 thread_local! {
     static KEY_COUNT_ROW: RefCell<Option<adw::ActionRow>> = const { RefCell::new(None) };
     static WARNING_ROW: RefCell<Option<adw::ActionRow>> = const { RefCell::new(None) };
+    static ERROR_LABEL: RefCell<Option<gtk::Label>> = const { RefCell::new(None) };
+}
+
+/// Paint (or, with `None`, clear) the page's own `error-message`.
+fn render_page_error(error: Option<&str>) {
+    ERROR_LABEL.with(|cell| {
+        if let Some(label) = cell.borrow().as_ref() {
+            super::render_error_label(label, error);
+        }
+    });
+}
+
+/// Called by `app.rs` when `DataMessage::KeyPackageCountFailed` arrives: the
+/// page says why, and the count row keeps the last count it read (tui's
+/// `a_failed_read_surfaces_the_message_and_leaves_the_prior_count`).
+pub fn show_count_error(error: &str) {
+    render_page_error(Some(error));
 }
 
 /// Called by `app.rs` when `DataMessage::KeyPackageCountLoaded` arrives.
 pub fn update_key_count(count: u32) {
+    render_page_error(None);
     KEY_COUNT_ROW.with(|cell| {
         if let Some(row) = cell.borrow().as_ref() {
             row.set_subtitle(&count.to_string());
@@ -162,5 +192,34 @@ pub fn refresh_on_visit() {
     });
     if let Some(client) = crate::settings::get_client() {
         client.fetch_key_package_count();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed count read paints the page's own `error-message` and a later
+    /// good read clears it (tui's `encryption_error` pair), so the failure
+    /// never needs the app-wide banner — which a read fired at the settings
+    /// shell's mount would leave standing over every other page.
+    #[test]
+    fn a_failed_count_read_says_so_on_this_page_and_a_good_read_clears_it() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let page = build_encryption_page();
+            let label = crate::testid::find_by_test_id(&page, "error-message")
+                .expect("the Encryption page carries its own error-message")
+                .downcast::<gtk::Label>()
+                .expect("error-message is a label");
+            assert!(!label.is_visible(), "no error before a read fails");
+
+            show_count_error("connection lost");
+            assert!(label.is_visible());
+            assert_eq!(label.text(), "connection lost");
+
+            update_key_count(20);
+            assert!(!label.is_visible(), "a good read clears the page's error");
+        });
     }
 }

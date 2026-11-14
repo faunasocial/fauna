@@ -165,9 +165,6 @@ def test_the_seeded_tester_sells_a_tier_and_a_post_a_stranger_sees(
     tab (`docs/features/store-install.md` outcomes 2 and 3, the premise the
     store build's reading rests on)."""
     from conftest import _login_admin_as
-
-    app.subscriptions.require_sell_post_seller_fanout_leg_supported()
-    app.profile.require_other_profile_offers_browse_supported()
     accounts, nest = seeded_reviewers
     where = nest.where
     stranger = {"localpart": "stranger", "secret_hex": secrets.token_bytes(32).hex()}

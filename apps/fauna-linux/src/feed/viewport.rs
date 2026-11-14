@@ -33,6 +33,10 @@
 //! engagement (`views::feed::is_engaged`) is relayed through
 //! `CueTracker::note_playing` before the sample — a play is attention, so a
 //! card its own player grew under the skip gate still carries its play.
+//!
+//! A feed switch drains every exposure through the shared
+//! `FeedSnapshot::cue_selection_key` + `CueTracker::note_selection` pair,
+//! called before each sample, the way tui's `sample_frame` does.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -242,7 +246,9 @@ fn sample(
     rt: &Handle,
     error_label: &gtk::Label,
 ) {
-    let posts = manager.snapshot().posts;
+    let snapshot = manager.snapshot();
+    let selection = snapshot.cue_selection_key();
+    let posts = snapshot.posts;
     let viewport_end = f64::from(scrolled.height());
 
     let mut rows: Vec<CueRow> = Vec::new();
@@ -307,18 +313,24 @@ fn sample(
 
     let window_post_ids: Vec<String> = posts.iter().map(|p| p.post_id.clone()).collect();
     let mut p = probe.borrow_mut();
+    // A feed switch ends every exposure before the new feed is measured
+    // (`CueTracker::note_selection`, `WindowDropped`): `render_posts` rebuilds
+    // the rows, the tracker holds an unallocated row, and a post both feeds
+    // hold stays in the loaded window — so neither the geometry nor the
+    // window ever ends it; the selection's own change does.
+    let mut left = p.tracker.note_selection(&selection, wall_now_ms());
     for (post_id, engaged) in &engagement {
         p.tracker.note_playing(post_id, *engaged);
     }
     let mono_now_ms = p.mono_now_ms();
-    let left = p.tracker.sample(
+    left.extend(p.tracker.sample(
         &rows,
         &window_post_ids,
         0.0,
         viewport_end,
         mono_now_ms,
         wall_now_ms(),
-    );
+    ));
     drop(p);
     emit(left, manager, rt, error_label);
 }

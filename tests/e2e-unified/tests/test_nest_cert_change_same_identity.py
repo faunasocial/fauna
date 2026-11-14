@@ -54,29 +54,30 @@ mint that follows the app withdrawing its capability on the app's own verdict �
 while a further file never arrives. The in-process twin, which isolates the
 agent's own identity park, is ``tls_stale_pin_consumer_heal.rs``.
 
-**android's background sync is in-process, so the second test has an arm of
-its own there.** Photo backup (``PhotoBackupEngine``) drives the
-``FfiSyncEngineHost`` built off the app's own ``NestClient``, so the carrier is a
-photo put in the device's gallery (never the host ``tmp_path``: android has no
-user-bindable folder tree, and its test agent refuses the folder-list commands by
-design) and the trigger is the production ``PhotoBackupWorker``, enqueued through
-WorkManager by the ``photo_backup_scheduled_pass_now`` poke (convention 14's
-``run_now``). "No restart" is the app's process — its pid and kernel start time
-(``AndroidBridgeDriver.app_process_identity``) — together with the session
-teardown counter. The park is read at positive events: the app's own log
+**android's and ios's background sync is in-process, so the second test has
+an arm of its own there.** Photo backup (``PhotoBackupEngine``, on both) drives
+the ``FfiSyncEngineHost`` built off the app's own ``NestClient``, so the carrier
+is a photo put in the device's gallery (never the host ``tmp_path``: neither has
+a user-bindable folder tree, and android's test agent refuses the folder-list
+commands by design) and the trigger is the production pass the
+``photo_backup_scheduled_pass_now`` poke runs (convention 14's ``run_now``):
+android's ``PhotoBackupWorker`` enqueued through WorkManager, ios's
+``BackgroundScheduler.runScheduledUploadPass`` — the body of the
+``social.fauna.sync.upload`` task. "No restart" is the app's process — its pid
+and start time, asked of the kernel (``app_process_identity`` on both drivers)
+— together with the session teardown counter. The park is read at positive events: the app's own log
 recording the identity refusal, the identity-changed surface, then a further
-worker pass completing (its pass counters) with no new create in the
+scheduled pass completing (its pass counters) with no new create in the
 photo-library set.
 
 tui leads (``testing.md`` § Default app and nest mode); the other native apps
 join by adding their marker. linux runs both (its launch spawns the real
-``fauna-sync-agent`` as an isolated per-launch child, as tui's does); android runs
-both, the second through its in-process arm above. macos runs both: its launch
-spawns the real ``fauna-sync-agent`` as a per-launch child under the relocated
-``HOME`` (the ``real_sync_agent`` marker), whose own log the driver reads from
-``sync_agent_state_base``. ios runs the first: it has no agent and no bindable
-folder, so the background-sync half needs an in-process arm of its own, as
-android's. web is structurally out of
+``fauna-sync-agent`` as an isolated per-launch child, as tui's does); android and ios
+run both, the second through the in-process arm above (neither has an agent or
+a bindable folder). macos runs both: its launch spawns the real
+``fauna-sync-agent`` as a per-launch child under the relocated ``HOME`` (the
+``real_sync_agent`` marker), whose own log the driver reads from
+``sync_agent_state_base``. web is structurally out of
 scope: the browser terminates TLS and hands WASM no certificate, so no pin
 exists to move (``transport-trust.md`` § The browser's bearer socket).
 """
@@ -166,7 +167,8 @@ def _diagnostics(app) -> str:
     """Rule 6: the app's own words on the dial, the pin and the identity."""
     text = app_text(app.driver) or ""
     lines = text.splitlines()
-    wanted = ("identity", "spki", "SPKI", "pin", "graduat", "ERROR", "WARN", "panic")
+    wanted = ("identity", "spki", "SPKI", "pin", "graduat", "ERROR", "WARN", "panic",
+              "launch", "verdict", "session", "offline", "photo_backup")
     hits = [ln for ln in lines if any(w in ln for w in wanted)]
     return (
         f"error={app.error_text()!r} status={_connection_status(app)!r} "
@@ -388,14 +390,17 @@ def _wait_media_count(app, nest, want: int, why: str) -> None:
     )
 
 
-# ── android: the in-process background sync's arm ───────────────────────────
+# ── android and ios: the in-process background sync's arm ───────────────────
 
-#: The worker poke's pass reaches ``passes_completed``: WorkManager's dispatch,
-#: the MediaStore scan, the seal and upload — and after a swap, the nest restart
+#: The poke's pass reaches ``passes_completed``: the dispatch (WorkManager on
+#: android, a spawned task on ios), the library scan, the seal and upload — and after a swap, the nest restart
 #: and the healed redial in front of them. A positive wait, free on a green run.
-ANDROID_PASS_S = 150.0
+IN_PROCESS_PASS_S = 150.0
 #: The poke (``fauna_e2e_agent::PHOTO_BACKUP_SCHEDULED_PASS_NOW``).
 PHOTO_BACKUP_SCHEDULED_PASS_NOW = "photo_backup_scheduled_pass_now"
+#: ios answers the poke with this line when it holds no live client — after an
+#: identity refusal tore the session down (``Fauna-iOS/App/FaunaApp.swift``).
+IOS_NO_SESSION_POKE_LOG = "photo_backup_scheduled_pass_now: no session yet"
 
 
 def _photo_creates(nest) -> int:
@@ -420,7 +425,7 @@ def _photo_creates(nest) -> int:
     )
 
 
-def _android_diagnostics(app, nest) -> str:
+def _in_process_diagnostics(app, nest) -> str:
     """Rule 6: the pass funnel, the nest's record, then the app's own words."""
     from helpers.waiting import describe_photo_backup_funnel
 
@@ -434,37 +439,75 @@ def _android_diagnostics(app, nest) -> str:
     )
 
 
-def _android_worker_pass(app, *, what: str) -> None:
-    """One production ``PhotoBackupWorker`` pass, poked and awaited on the
-    funnel's ``passes_completed`` (the two-counter barrier, convention 14)."""
-    from helpers.photo_backup import await_pass_after, passes
+def _live_engine(app, nest, *, what: str) -> None:
+    """Assert the app still holds the engine the arm drives, naming why when not.
 
-    baseline = passes(app.driver)[1]
-    app.driver.call_command(PHOTO_BACKUP_SCHEDULED_PASS_NOW)
-    await_pass_after(app.driver, baseline, what=what, timeout=ANDROID_PASS_S)
+    The funnel is published off the live client's own engine (ios:
+    ``appState.liveClient?.photoBackup``), so its absence after it was once seen
+    means the app dropped its session — on ios a launch verdict landing after the
+    optimistic entry (``leaveAuthenticatedSession``) is the one path that does it
+    with no test step. ``helpers.photo_backup.funnel``'s bare refusal cannot say
+    which; this reads the teardown counter, the app's words and the surface it
+    landed on into the failure (rule 6)."""
+    from helpers.waiting import photo_backup_funnel
 
-
-def _android_photo_backup_ready(app, nest, tmp_path) -> None:
-    """Photos granted, backup on through the app's own toggle, and one gallery
-    photo already up through a worker pass — so the in-process engine's bearer
-    dial has been made before any swap (fixture setup, rule 8 carve-out (b))."""
-    from helpers.photo_backup import (
-        a_real_png, a_tag, await_quiet, enable_photo_backup, prepare_photos_access,
+    if photo_backup_funnel(app.driver) is not None:
+        return
+    raise AssertionError(
+        f"{what}: the app publishes no `photo_backup` funnel any more — it holds "
+        "no live client, so the session was dropped (session_generation="
+        f"{session_generation(app.driver)!r}). {_in_process_diagnostics(app, nest)}"
     )
 
+
+def _in_process_pass(app, *, what: str, nest=None) -> None:
+    """One production scheduled pass (android's ``PhotoBackupWorker``, ios's
+    ``runScheduledUploadPass``), poked and awaited on the funnel's
+    ``passes_completed`` (the two-counter barrier, convention 14)."""
+    from helpers.photo_backup import await_pass_after, passes
+
+    if nest is not None:
+        _live_engine(app, nest, what=what)
+    baseline = passes(app.driver)[1]
+    app.driver.call_command(PHOTO_BACKUP_SCHEDULED_PASS_NOW)
+    await_pass_after(app.driver, baseline, what=what, timeout=IN_PROCESS_PASS_S)
+
+
+def _in_process_photo_backup_ready(app, nest, tmp_path) -> None:
+    """Photos granted, backup on through the app's own toggle, and one gallery
+    photo already up through a scheduled pass — so the in-process engine's bearer
+    dial has been made before any swap (fixture setup, rule 8 carve-out (b))."""
+    from helpers.photo_backup import (
+        a_real_png, a_tag, await_quiet, enable_photo_backup, granted,
+        prepare_photos_access,
+    )
+
+    generation_signed_in = session_generation(app.driver)
     prepare_photos_access(app)
     app.driver.add_photo_to_library(str(a_real_png(tmp_path, tag=a_tag())))
     enable_photo_backup(app)
+    # ios: the Photos grant is proven before anything is blamed on the product
+    # (a pass without it uploads nothing, exactly as a broken ingest would).
+    granted(app)
     await_quiet(app.driver)
-    _android_worker_pass(app, what="the pre-swap worker poke")
+    # The Photos grant rides a cold relaunch (`prepare_photos_access`) against
+    # this module's TLS nest; ios enters optimistically and a launch verdict can
+    # still drop the session after the funnel was first seen — name it here, at
+    # setup, rather than as a bare refusal inside the pass barrier.
+    _live_engine(
+        app, nest,
+        what=("after the Photos-grant relaunch (session_generation when signed "
+              f"in: {generation_signed_in!r})"),
+    )
+    _in_process_pass(app, what="the pre-swap scheduled-pass poke", nest=nest)
     assert _photo_creates(nest) >= 1, (
-        "precondition: the pre-swap worker pass uploaded no photo into the "
-        f"photo-library set over its own bearer dial. {_android_diagnostics(app, nest)}"
+        "precondition: the pre-swap scheduled pass uploaded no photo into the "
+        f"photo-library set over its own bearer dial. {_in_process_diagnostics(app, nest)}"
     )
 
 
 def _the_in_process_background_sync_arm(app, nest, photo_dir) -> None:
-    """The second test on android: the app's in-process background sync carries
+    """The second test on android and ios: the app's in-process background sync carries
     a same-identity key change with no restart, and parks on another identity."""
     from helpers.photo_backup import a_real_png, a_tag
 
@@ -488,7 +531,7 @@ def _the_in_process_background_sync_arm(app, nest, photo_dir) -> None:
 
     # ── Positive half: same identity, new served key. A photo taken now reaches
     #    the nest only through the engine's bearer dial against a moved SPKI that
-    #    the identity binding carried. Each attempt is one whole worker pass (a
+    #    the identity binding carried. Each attempt is one whole scheduled pass (a
     #    pass whose ingest met the nest still restarting leaves the photo pending,
     #    and the next trigger of any kind re-attempts it — `PhotoBackupEngine`).
     _swap(nest, new_identity=False)
@@ -499,23 +542,23 @@ def _the_in_process_background_sync_arm(app, nest, photo_dir) -> None:
     driver.add_photo_to_library(str(a_real_png(photo_dir, tag=a_tag())))
 
     def _a_pass_carried_it() -> bool:
-        _android_worker_pass(app, what="the post-swap worker poke")
+        _in_process_pass(app, what="the post-swap scheduled-pass poke", nest=nest)
         return _photo_creates(nest) > creates_before
 
     wait_until(
         _a_pass_carried_it,
-        AGENT_UPLOAD_S + ANDROID_PASS_S,
+        AGENT_UPLOAD_S + IN_PROCESS_PASS_S,
         diagnose=lambda: (
             "a photo taken after a same-identity key change never reached the "
             "nest — the background sync did not carry on. "
-            f"{_android_diagnostics(app, nest)}"
+            f"{_in_process_diagnostics(app, nest)}"
         ),
     )
     creates_after = _photo_creates(nest)
     assert driver.app_process_identity() == process, (
         "the app's process — the background sync's — was restarted across the "
         "same-identity key change; the outcome promises no restart. "
-        f"{_android_diagnostics(app, nest)}"
+        f"{_in_process_diagnostics(app, nest)}"
     )
     assert session_generation(driver) == generation_before, (
         f"the same-identity key change tore the app's session down. {_diagnostics(app)}"
@@ -525,15 +568,16 @@ def _the_in_process_background_sync_arm(app, nest, photo_dir) -> None:
     )
     assert (app_text(driver) or "").count(IDENTITY_REFUSAL_LOG) == refusals_before, (
         "the app logged an identity refusal for a box proving the SAME identity. "
-        f"{_android_diagnostics(app, nest)}"
+        f"{_in_process_diagnostics(app, nest)}"
     )
 
     # ── Negative control: another identity behind the same address. Read at
     #    positive events, never after a timed quiet window (convention 14): the
     #    app's own log recording the identity refusal, the identity-changed
-    #    surface, and then a further worker pass completing with nothing new on
+    #    surface, and then a further scheduled pass completing with nothing new on
     #    the nest — the engine dials over the app's client, so its park is that
-    #    client's (`NestClient::identity_park`).
+    #    client's (`NestClient::identity_park`); on ios the verdict drops the
+    #    client itself, so the park is read off the teardown (below).
     _swap(nest, new_identity=True)
     assert nest_id_from_data_dir(nest["tmp_dir"]) != identity, (
         "the control's swap did not change the nest's identity"
@@ -544,7 +588,7 @@ def _the_in_process_background_sync_arm(app, nest, photo_dir) -> None:
         AGENT_REFUSAL_S,
         diagnose=lambda: (
             "the app's log recorded no identity refusal against a box proving a "
-            f"DIFFERENT identity. {_android_diagnostics(app, nest)}"
+            f"DIFFERENT identity. {_in_process_diagnostics(app, nest)}"
         ),
     )
     wait_until(
@@ -555,14 +599,45 @@ def _the_in_process_background_sync_arm(app, nest, photo_dir) -> None:
             f"box. {_diagnostics(app)}"
         ),
     )
-    _android_worker_pass(app, what="the worker poke after the identity swap")
+    if driver.is_ios():
+        # ios parks by tearing the session down: the identity verdict drops the
+        # live client (`leaveAuthenticatedSession`, the escalation the first test
+        # counts as a teardown), and the photo-backup engine and its funnel hang
+        # off that client — so no further pass CAN run, which is the park. Read
+        # it at positive events: the teardown counter moved, the funnel is gone,
+        # and the production poke is answered by the app's own no-session line
+        # (FaunaApp.swift's `photo_backup_scheduled_pass_now` arm) — then the
+        # nest holds nothing new.
+        assert session_generation(driver) > generation_before, (
+            "the identity refusal left the ios session standing, so its "
+            f"background sync was not parked by a teardown. {_in_process_diagnostics(app, nest)}"
+        )
+        from helpers.waiting import photo_backup_funnel
+
+        assert photo_backup_funnel(driver) is None, (
+            "the ios session was torn down but the app still publishes a "
+            f"`photo_backup` funnel. {_in_process_diagnostics(app, nest)}"
+        )
+        noops_before = (app_text(driver) or "").count(IOS_NO_SESSION_POKE_LOG)
+        driver.call_command(PHOTO_BACKUP_SCHEDULED_PASS_NOW)
+        wait_until(
+            lambda: (app_text(driver) or "").count(IOS_NO_SESSION_POKE_LOG) > noops_before,
+            IN_PROCESS_PASS_S,
+            diagnose=lambda: (
+                "the scheduled-pass poke after the identity swap was not answered "
+                f"by the app's no-session line. {_in_process_diagnostics(app, nest)}"
+            ),
+        )
+    else:
+        _in_process_pass(app, what="the scheduled-pass poke after the identity swap",
+                         nest=nest)
     assert _photo_creates(nest) == creates_after, (
         "a photo reached a nest proving a DIFFERENT identity — the background "
-        f"sync's bearer rode a dial the pin refused. {_android_diagnostics(app, nest)}"
+        f"sync's bearer rode a dial the pin refused. {_in_process_diagnostics(app, nest)}"
     )
     assert driver.app_process_identity() == process, (
         "the app's process was restarted by the identity escalation; the park "
-        f"must hold in the running process. {_android_diagnostics(app, nest)}"
+        f"must hold in the running process. {_in_process_diagnostics(app, nest)}"
     )
 
 
@@ -574,16 +649,16 @@ def tls_agent_bound_app(request, app, rotatable_tls_nest, tmp_path):
     swap (fixture setup arranging the world, rule 8 carve-out (b)). Returns
     ``(app, nest, watch_dir)``.
 
-    On android — no agent, no bindable folder — it arranges the in-process
-    twin instead (:func:`_android_photo_backup_ready`), and ``watch_dir`` is the
+    On android and ios — no agent, no bindable folder — it arranges the in-process
+    twin instead (:func:`_in_process_photo_backup_ready`), and ``watch_dir`` is the
     host directory the gallery photos are written in before they are pushed."""
     from common.auth import user_create_folder, user_folder_ref
     from conftest import _bind_live_location, _declare_no_web_cert_trust, _login_app_as
 
     nest = rotatable_tls_nest
-    if app.driver.is_android():
+    if app.driver.is_android() or app.driver.is_ios():
         _login_app_as(app, request, nest, nest["user"])
-        _android_photo_backup_ready(app, nest, tmp_path)
+        _in_process_photo_backup_ready(app, nest, tmp_path)
         return app, nest, tmp_path
     secret_key = nest["user"]["signing_key"].encode().hex()
     user_create_folder(nest["port"], AGENT_SET, secret_key=secret_key, base_url=nest["url"])
@@ -610,11 +685,12 @@ def tls_agent_bound_app(request, app, rotatable_tls_nest, tmp_path):
 @pytest.mark.feature("connect-and-sign-in")
 @pytest.mark.android
 @pytest.mark.macos
+@pytest.mark.ios
 def test_the_background_sync_carries_a_same_identity_key_change_and_parks_on_another_identity(
     tls_agent_bound_app,
 ):
     app, nest, watch_dir = tls_agent_bound_app
-    if app.driver.is_android():
+    if app.driver.is_android() or app.driver.is_ios():
         _the_in_process_background_sync_arm(app, nest, watch_dir)
         return
 

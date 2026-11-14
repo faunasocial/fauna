@@ -246,6 +246,7 @@ local fauna-feed::personalization::TrainResult  # view model: crosses only FFI o
 local fauna-feed::snapshot::FeedStatus  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::LikeState  # view model: the like control's state word on PostSummary; crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::FeedEmptyState  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-feed::snapshot::NostrAdvertiseVerb  # view model: the own-post Nostr advertisement verb arm; crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::ReplyAudience  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::PostResolution  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::snapshot::PlaybackSource  # view model: crosses only FFI or wasm to the same build's UI

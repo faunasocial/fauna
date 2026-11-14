@@ -779,7 +779,13 @@ class EventsActions:
         # wrong event (and `attendee-status` then reads the wrong roster).
         if self.driver.count("attendee-item") > 0 and self._open_detail_is(summary):
             return self.driver.count("attendee-item")
-        deadline = time.monotonic() + 10
+        # The ceiling is the write's round-trip budget, not a fixed 10 s: an
+        # invite's roster row paints only when its op ends, and on tui that op
+        # runs the best-effort iMIP dispatch after the roster PUT (a lookup of
+        # the guest's domain included), so a 10 s poll read an invite that
+        # did land as "no attendee" (test_events_imip_outbound's REQUEST
+        # test, red on every run at 0 while a 20 s look showed the row).
+        deadline = time.monotonic() + EVENT_CREATE_BUDGET_S
         while time.monotonic() < deadline:
             self._click_event_card_by_summary(summary)
             try:

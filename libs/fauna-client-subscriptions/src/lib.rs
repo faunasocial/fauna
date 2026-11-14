@@ -34,14 +34,14 @@ use fauna_protocol::discovery::capability;
 use fauna_protocol::subscriptions::{
     ApproveRequestReply, ApproveRequestRequest, DelegateUploadReply, DelegateUploadRequest,
     EncapsKeyPublishReply, EncapsKeyPublishRequest, EncryptedKeyBlobUpload, KeyBlobGetReply,
-    KeyBlobGetRequest, MineListReply, MineListRequest, MineSubscription, OffersListRequest,
-    PendingRequest, PostUnlockGetReply, PostUnlockGetRequest, PostUnlockOffer, RejectRequestReply,
-    RejectRequestRequest, RemoveSubscriberReply, RemoveSubscriberRequest, RequestsListReply,
-    RequestsListRequest, RotateKeyBlobReply, RotateKeyBlobRequest, StatusGetReply,
-    StatusGetRequest, SubscribeReply, SubscribeRequest, SubscriberEntry, SubscribersListReply,
-    SubscribersListRequest, TierAskingPrice, TierCreateReply, TierCreateRequest, TierDeleteReply,
-    TierDeleteRequest, TierItem, TierUpdateReply, TierUpdateRequest, TiersListReply,
-    TiersListRequest, UnsubscribeReply, UnsubscribeRequest,
+    KeyBlobGetRequest, MineListReply, MineListRequest, MineSubscription, OffersListRemoteRequest,
+    OffersListRequest, PendingRequest, PostUnlockGetReply, PostUnlockGetRequest, PostUnlockOffer,
+    RejectRequestReply, RejectRequestRequest, RemoveSubscriberReply, RemoveSubscriberRequest,
+    RequestsListReply, RequestsListRequest, RotateKeyBlobReply, RotateKeyBlobRequest,
+    StatusGetReply, StatusGetRequest, SubscribeReply, SubscribeRequest, SubscriberEntry,
+    SubscribersListReply, SubscribersListRequest, TierAskingPrice, TierCreateReply,
+    TierCreateRequest, TierDeleteReply, TierDeleteRequest, TierItem, TierUpdateReply,
+    TierUpdateRequest, TiersListReply, TiersListRequest, UnsubscribeReply, UnsubscribeRequest,
 };
 
 pub use fauna_protocol::subscriptions;
@@ -108,6 +108,14 @@ pub mod custody;
 pub mod orchestration;
 pub mod period_keys;
 pub mod port;
+pub mod sale_price;
+
+/// The *Change price…* save plan and the shared asking-price parse
+/// (`monetization.md` § The asking price → *Re-pricing a sold post*).
+pub use sale_price::{
+    AskingPriceParseError, SalePriceEdit, SalePricePrefill, parse_asking_price_sats,
+    plan_sale_price_edit, plan_sale_price_edit_stored, sale_price_prefill,
+};
 
 /// The period-key store seam every custody consumer holds
 /// (`fauna.state.subscriptions`, implemented on the account runtime's handle).
@@ -621,6 +629,36 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
         Ok(reply.tiers)
     }
 
+    /// The Tiers-tab browse every app calls — [`Self::offers_list`] for an
+    /// author on this nest, and `fauna.subscriptions.offers.list_remote` for
+    /// one homed on another (`subscriptions.md` § Pillar 1 → *The offers browse
+    /// across nests*). `home` is the page's `actor_home` slot; `None` or blank
+    /// is this nest. The nest answers a hosted author locally whatever home is
+    /// named, so a stale home costs nothing; any other author is read from the
+    /// home through the nest and forwarded unstored. The reply is the home's
+    /// word — the same withholdings as the local door.
+    pub async fn offers_list_across_nests(
+        &self,
+        author_id: ActorId,
+        home: Option<String>,
+    ) -> Result<Vec<TierItem>, R::Error> {
+        let Some(nest_url) = normalize_home_nest_url(home) else {
+            return self.offers_list(author_id).await;
+        };
+        let reply: TiersListReply = self
+            .nest
+            .request(
+                "fauna.subscriptions.offers.list_remote",
+                OffersListRemoteRequest {
+                    author_id,
+                    nest_url,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(reply.tiers)
+    }
+
     /// `fauna.subscriptions.mine.list` — the calling actor's own subscriptions
     /// across **every** creator (active + pending), each carrying the creator's
     /// nest-resolved handle (or `None` → the client renders the hex actor id).
@@ -918,7 +956,7 @@ mod tests {
                     uploaded: true,
                 })
             }
-            "fauna.subscriptions.offers.list" => {
+            "fauna.subscriptions.offers.list" | "fauna.subscriptions.offers.list_remote" => {
                 fauna_protocol::encode_canonical(&TiersListReply {
                     extra: Default::default(),
                     tiers: vec![TierItem {
@@ -1142,6 +1180,36 @@ mod tests {
         assert_eq!(tiers.len(), 1);
         assert_eq!(tiers[0].name, "gold");
         assert_eq!(tiers[0].price_hint.as_deref(), Some("$10/mo"));
+    }
+
+    /// `subscriptions.md` § Pillar 1 → *The offers browse across nests*, the
+    /// client leg: a home selects the relay kind, carrying it normalized; no
+    /// home — or a blank one — is the local `offers.list`.
+    #[test]
+    fn offers_list_across_nests_picks_the_kind_by_home() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        let tiers = block_on(
+            client.offers_list_across_nests(actor(), Some(" https://home.example/ ".into())),
+        )
+        .expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.subscriptions.offers.list_remote");
+        let req: OffersListRemoteRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.author_id, actor());
+        assert_eq!(
+            Some(req.nest_url),
+            normalize_home_nest_url(Some(" https://home.example/ ".into()))
+        );
+        assert_eq!(tiers[0].name, "gold");
+
+        for home in [None, Some("   ".to_string())] {
+            let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+            let client = SubscriptionsClient::new(rec.clone());
+            block_on(client.offers_list_across_nests(actor(), home)).expect("infallible mock");
+            assert_eq!(rec.recorded().0, "fauna.subscriptions.offers.list");
+        }
     }
 
     #[test]

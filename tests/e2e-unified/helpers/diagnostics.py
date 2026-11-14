@@ -311,3 +311,43 @@ def account_plane_log_lines(app, limit: int = 40) -> str:
     if not hits:
         hits = ["<no account-runtime line in this launch's log>"]
     return "\n      ".join([head] + truncation + hits[-limit:])
+
+
+# The boot's own identity story on web: the launch sequence (`[launch]`,
+# `routes/onboarding/+page.svelte`), the identity store and the account scope
+# it gates on, a sign-out the store still owed and an uncaught error. The
+# lines a login that never reached the live session needs beside it — a boot
+# that came up signed out and one still running as the previous actor read
+# alike on the Status page.
+_LAUNCH_LOG_MARKERS = (
+    "[launch]",
+    "[identity]",
+    "[actor-scope]",
+    "[onboarding]",
+    "[succession]",
+    "sign-out",
+    "signOut",
+    "[pageerror]",
+)
+
+
+def launch_log_lines(app, limit: int = 40) -> str:
+    """The launch and identity lines of this page's log, for a login assert.
+
+    Same capability dispatch and truncation rule as :func:`aftermath_log_lines`
+    (on a native shell it reads stderr, where these markers mostly do not
+    occur, and says so).
+    """
+    reader = _log_reader(app)
+    if reader is None:
+        return "<no app-log reader on this driver>"
+    try:
+        text = reader()
+    except Exception as exc:  # never mask the real failure with a reader fault
+        return f"<unreadable: {type(exc).__name__}: {exc}>"
+    lines = [_ANSI_RE.sub("", ln).strip() for ln in text.splitlines()]
+    truncation = [ln for ln in lines if _TRUNCATED_MARKER in ln]
+    hits = [ln for ln in lines if any(m in ln for m in _LAUNCH_LOG_MARKERS)]
+    if not hits:
+        hits = ["<no launch or identity line in this launch's log>"]
+    return "\n      ".join([""] + truncation + hits[-limit:])

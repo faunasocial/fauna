@@ -725,19 +725,8 @@ public class ProfileViewModelTests
         Assert.Equal(1, rpc.Calls.Count(c => c == "SubscriptionOffersList"));
     }
 
-    [Fact]
-    public async Task FollowAsync_SubscribesToFollowersTierAndFlips()
-    {
-        var rpc = new MockNestRpcClient();
-        var vm = new ProfileViewModel(rpc, BobHex, isSelf: false);
-
-        await vm.FollowAsync();
-
-        Assert.Contains("SubscriptionSubscribe", rpc.Calls);
-        Assert.Equal("followers", rpc.LastSubscribe?.Tier);
-        Assert.Equal(Bob, rpc.LastSubscribe?.AuthorId);
-        Assert.True(vm.IsFollowing);
-    }
+    // The header follow toggle (Follow ⇄ Following, the paid-tier confirm) is pinned
+    // in ProfileFollowToggleTests.
 
     // ── OTHER-profile secondary relationship action: Block⇄Unblock toggle.
     // profile.md § User actions + § Where logic lives → block; contacts.md § Where

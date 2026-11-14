@@ -22,7 +22,13 @@ license.workspace = true
 # duplicating them (priority #2). `fauna-client-conversations` transitively pulls
 # `fauna-conversations` → `fauna-mls`, so it MUST ride this same `mls` feature to
 # keep the base (no-mls) thin-client/custody graph fauna-mls-free + wasm-light.
-mls = ["dep:fauna-mls", "dep:fauna-client-sync", "dep:fauna-client-conversations", "dep:fauna-conversations", "dep:fauna-client-capabilities", "dep:fauna-client-mls-sync", "dep:fauna-client", "dep:tokio", "dep:fauna-media-machine", "dep:fauna-rpc-wasm", "dep:fauna-provisioning"]
+mls = ["nest-resolver", "dep:fauna-mls", "dep:fauna-client-sync", "dep:fauna-client-conversations", "dep:fauna-conversations", "dep:fauna-client-capabilities", "dep:fauna-client-mls-sync", "dep:fauna-client", "dep:tokio", "dep:fauna-media-machine", "dep:fauna-rpc-wasm", "dep:fauna-provisioning"]
+# The shared-folder content-key resolver (`key_resolver::NestFolderKeyResolver`)
+# alone — a roster read + a custody read, no MLS. Its trait impls bind the
+# concrete transports (`fauna-client`'s `NestClient` natively, `fauna-rpc-wasm`'s
+# `WsRpcClient` on wasm), neither of which links fauna-mls; the bearer-only sync
+# agent takes this feature, never `mls`.
+nest-resolver = ["dep:fauna-client", "dep:fauna-rpc-wasm"]
 # The cross-user share leg's roster adapter (`peer_share_adapter`) — answers
 # `fauna_peer_share::SetMembership` through `FolderGroupCrypto`. Part of the
 # gated `p2p-share` plane (dynamic-features.md § The cargo feature spine):

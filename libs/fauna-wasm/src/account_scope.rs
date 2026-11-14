@@ -344,11 +344,16 @@ pub fn actors_served_by_another_tab(actor_ids: Vec<String>) -> js_sys::Promise {
 /// refuses the account THIS instance serves*): `'this_tab'` when `actor_id` is
 /// the account this tab serves — its own role says nothing about that, since
 /// the probe skips it — else `'other_tab'` when another tab holds its role,
-/// else `null`. `served_here` is this tab's signed-in actor (it follows the
-/// per-tab pin), not the registry's active pointer.
+/// else `'carry_owed'` when it is a retired identity whose undrained outbox
+/// this browser has not carried to its successor yet
+/// (`succession-aftermath.md` § Re-key scope, the device-local outbox row —
+/// the registry's half of `fauna_client_accounts::remove_account_carry_owed`,
+/// whose on-disk half has no IndexedDB twin), else `null`. `served_here` is
+/// this tab's signed-in actor (it follows the per-tab pin), not the
+/// registry's active pointer.
 #[wasm_bindgen(
     js_name = removeAccountBlock,
-    unchecked_return_type = "Promise<'this_tab' | 'other_tab' | null>"
+    unchecked_return_type = "Promise<'this_tab' | 'other_tab' | 'carry_owed' | null>"
 )]
 pub fn remove_account_block(actor_id: String, served_here: Option<String>) -> js_sys::Promise {
     future_to_promise(async move {
@@ -357,13 +362,15 @@ pub fn remove_account_block(actor_id: String, served_here: Option<String>) -> js
         {
             return Ok(JsValue::from_str("this_tab"));
         }
-        if actors_served_elsewhere(std::slice::from_ref(&actor_id))
+        if !actors_served_elsewhere(std::slice::from_ref(&actor_id))
             .await
             .is_empty()
         {
-            Ok(JsValue::NULL)
-        } else {
-            Ok(JsValue::from_str("other_tab"))
+            return Ok(JsValue::from_str("other_tab"));
         }
+        if AccountRegistry::new(Arc::new(WebIdentityStore)).outbox_carry_owed(&actor_id) {
+            return Ok(JsValue::from_str("carry_owed"));
+        }
+        Ok(JsValue::NULL)
     })
 }

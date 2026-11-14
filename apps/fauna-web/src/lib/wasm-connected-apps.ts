@@ -95,6 +95,16 @@ export interface RosterRowText {
    *  (`connected-apps-item-settings-link`) — a hosted plugin's row, decided in
    *  shared Rust (`opens_settings_card`), never by a class test here. */
   opens_settings_card: boolean;
+  /** Whether the row opens a per-operation record
+   *  (`connected-apps-oracle-open`) — a principal the oracle served, decided in
+   *  shared Rust (`opens_record`); never an app-password session's row. */
+  opens_record: boolean;
+}
+
+/** One operation of an open record, composed once in shared Rust
+ *  (`compose::oracle_op_text`). Resolve it with `resolveComposed`. */
+export function composeOracleOp(op: OracleOpRow): ComposedText {
+  return JSON.parse(wasm().oracleOpTextJson(JSON.stringify(op), localTimestamp)) as ComposedText;
 }
 
 /** Compose one snapshot row's text. Needs the chunk initialized (it is: a row
@@ -186,6 +196,39 @@ export interface ConnectedAppRow {
    *  served, or an ATProto app-password session that has written, never
    *  zero-filled on one it did not. */
   oracle?: OracleSummaryRow | null;
+  /** The trust facet — present exactly on a principal that attested a holder
+   *  key on a machine that reads the owner's grant log; absent on every other
+   *  row (never an empty state). */
+  trust?: PrincipalTrust | null;
+}
+
+export type TrustScopeTuple = { class: string; kind: string | null; tier: string | null };
+/** The folder a folder read grant covers (`fauna_client_pair::TrustFolder`). */
+export type TrustFolderRef = { Named: { name: string } } | 'Deleted';
+
+/** One live key (`fauna_client_pair::TrustGrantRow`); times are epoch seconds. */
+export interface PrincipalTrustGrant {
+  grant_id: number[];
+  scope: TrustScopeTuple[];
+  lasts_until: number;
+  liveness: 'Active' | 'ExpiringSoon' | 'Expired' | 'AutoRenewing';
+  folder?: TrustFolderRef | null;
+}
+
+/** One grant event (`fauna_client_pair::TrustHistoryRow`); `at` is epoch seconds. */
+export interface PrincipalTrustHistory {
+  grant_id: number[];
+  kind: 'Mint' | 'Renew' | 'Revoke';
+  scope: TrustScopeTuple[];
+  at: number;
+  folder?: TrustFolderRef | null;
+}
+
+/** A principal row's Now / History lens over its keys (`snapshots.rs::PrincipalTrust`). */
+export interface PrincipalTrust {
+  lens: 'Now' | 'History';
+  grants: PrincipalTrustGrant[];
+  history: PrincipalTrustHistory[];
 }
 
 /** What the oracle did for one principal: operations in the current window,
@@ -217,5 +260,19 @@ export interface ConnectedAppsSnapshot {
    *  said — what the toggle (`atproto-external-apps-enable`) paints. ON is the
    *  zero value. */
   external_apps_off: boolean;
+  /** The open per-operation record, if any — the machine's on-demand read,
+   *  at most one open (`openRecord` / `closeRecord`). */
+  record?: OracleRecord | null;
   error: LocalizedText | null;
+}
+
+/** One principal's per-operation record, open on the page (`snapshots.rs`). */
+export interface OracleRecord {
+  /** The row key it belongs to. */
+  key: string;
+  /** Whether the read has returned: before it, neither operations nor the
+   *  empty state paint. */
+  loaded: boolean;
+  /** Newest first. */
+  ops: OracleOpRow[];
 }

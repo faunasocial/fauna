@@ -538,7 +538,7 @@ private final class ScriptedSubscriptionsAPI: APIClient {
         throw ScopeTestFailure(account: account)
     }
 
-    override func subscriptionOffersList(authorIdHex: String) async throws -> [FfiTierItem] {
+    override func subscriptionOffersList(authorIdHex: String, home: String?) async throws -> [FfiTierItem] {
         guard status != nil else { throw ScopeTestFailure(account: account) }
         return offers
     }

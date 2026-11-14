@@ -1,5 +1,8 @@
 import Foundation
 import SwiftData
+#if os(iOS)
+import UIKit
+#endif
 
 @MainActor @Observable
 public class FaunaClient {
@@ -640,16 +643,14 @@ public class FaunaClient {
     /// does, and the caller's on-disk assertion fails loudly on it, with
     /// `via: "in-app"` in the reply naming the cause.
     ///
-    /// The in-app arm refuses a non-zero `nowOffsetSecs` by name rather than
-    /// dropping it: `FfiCustodianHost.runAllKinds` reads the wall clock itself, so
-    /// honouring the offset silently would let a caller believe it had crossed a
-    /// 24-hour audit debounce it never did (convention 11).
+    /// Both arms take `nowOffsetSecs` (convention 14's fake clock, for the
+    /// self-audit's 24-hour debounce) and answer the same six-field
+    /// `FfiCustodianPassReport`: the agent through `custodianRunPassNow`, this
+    /// process through the shared host's test-only `runAllKindsAtOffset` — the
+    /// very pass `runAllKinds` runs, its `now` shifted for this one pass only.
     public func custodianPassForTest(nowOffsetSecs: Int64) async throws -> CustodianPassOutcome {
         if let provisioner = syncAgentProvisioner {
             return .agent(try await provisioner.custodianRunPassNow(nowOffsetSecs: nowOffsetSecs))
-        }
-        guard nowOffsetSecs == 0 else {
-            throw CustodianPassPokeError.clockOffsetNotHonoured(nowOffsetSecs)
         }
         // The exact host `CustodianBackupEngine.runPass` builds — unscoped per-user
         // base, since `build_custodian_host` derives the actor scope itself.
@@ -660,7 +661,7 @@ public class FaunaClient {
                 excluder: CloudBackupExcluder()
             )
         else { return .inApp(nil) }
-        return .inApp(await host.runAllKinds())
+        return .inApp(await host.runAllKindsAtOffset(nowOffsetSecs: nowOffsetSecs))
     }
     #endif
 
@@ -832,6 +833,16 @@ public class FaunaClient {
 
         // After the runtime, never before it — see the method.
         await catchUpPhotoBackup()
+
+        // The share plane waits for the runtime and the conversations session
+        // itself; detached, so nothing here waits on that.
+        #if os(iOS) && !FAUNA_EXCISE_P2P_SHARE
+        Task { await self.startPhoneSharePlane() }
+        #endif
+        // The extension's relay seat serves under this foreground lease.
+        #if os(iOS)
+        Task { await self.startRelayLease() }
+        #endif
     }
 
     /// Host the **W3 account-store runtime** in this process
@@ -936,6 +947,20 @@ public class FaunaClient {
                     dir: dir,
                     exclusion: .excludedByShell(excluder: CloudBackupExcluder()))
             }
+            // The phone's place at the start, said before the runtime exists
+            // (shared Rust remembers it process-wide and a runtime that starts
+            // backgrounded starts stood down). The scene-phase edges alone do
+            // not cover every launch: `.onChange(of: scenePhase)` never fires
+            // for the phase a launch starts in, and a `.background` edge that
+            // lands before the client exists is dropped by `APIClient`'s
+            // no-client guard — so a launch that reaches here out of front
+            // would otherwise run with the Rust default, in front, and bind
+            // the same-account peer leg (`account-sync-plane.md`
+            // § Implementation status today). Read and sent on the main actor
+            // with no suspension between, so a later edge still wins.
+            if let inFront = Self.accountRuntimeForegroundSeed(Self.appRunStateNow()) {
+                await api.setAccountRuntimeForeground(inFront)
+            }
             try await api.startAccountRuntime(
                 appDataDir: AccountStateDir.base.path,
                 storeContainer: storeContainer,
@@ -954,6 +979,40 @@ public class FaunaClient {
                 message: "[account-runtime] start failed; preference surfaces stay on the "
                     + "blob rail and this account's own scopes go unwalked: \(error)")
         }
+    }
+
+    /// The app's place as the account runtime's foreground seed reads it —
+    /// `nil` where the app is never suspended (macOS), which signals nothing.
+    enum AppRunState: Equatable {
+        case active
+        case inactive
+        case background
+    }
+
+    /// The app's place right now: iOS's `applicationState`; `nil` on macOS.
+    static func appRunStateNow() -> AppRunState? {
+        #if os(iOS)
+        switch UIApplication.shared.applicationState {
+        case .active: return .active
+        case .inactive: return .inactive
+        case .background: return .background
+        @unknown default: return .background
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    /// The foreground signal to send before the account runtime starts
+    /// (`p2p-shared-set-build.md` § Phone peers — design, decision 2): only a
+    /// launch already in the background is out of front. `.inactive` is a
+    /// cold launch on its way to `.active` (and an interruption over a front
+    /// app), so it stays in front — reading it as out would leave the leg
+    /// down in front, since no `.active` edge fires for the starting phase.
+    /// `nil` (a desktop) sends nothing and keeps the Rust default.
+    nonisolated static func accountRuntimeForegroundSeed(_ state: AppRunState?) -> Bool? {
+        guard let state else { return nil }
+        return state != .background
     }
 
     // EXCISED BY `FAUNA_EXCISE_P2P_SHARE`: the store-safe FFI exports no share plane
@@ -980,10 +1039,63 @@ public class FaunaClient {
     ///   account's own state (tui and linux use `<config>/share-spool`).
     public func startSharePlane(provisioner: FfiSyncAgentProvisioner) async {
         await SharePlaneModel.shared.start(
-            api: api, ownerSecretHex: ownSecretHex, provisioner: provisioner,
+            api: api, ownerSecretHex: ownSecretHex,
+            access: agentReplicaAccess(provisioner: provisioner),
             spoolDir: AccountStateDir.base.appendingPathComponent("share-spool", isDirectory: true))
     }
 
+    #if os(iOS)
+        /// iOS's share plane — a **foreground** peer (`p2p-shared-set-build.md`
+        /// § Phone peers — design, decisions 2 and 3): started at [start] and at
+        /// every [resume], stopped at [suspend]. Starting again replaces a running
+        /// plane, so the two start edges are harmless together.
+        ///
+        /// The replica is the File Provider extension's — the set's one writer, in
+        /// another process — so the access is `foreignReplicaAccess` over this
+        /// account's registered domains (`FileProviderReplicaHosts`), whose door
+        /// crosses the service channel. The spool is in the app-group container,
+        /// because the extension reads the bodies from it, and is excluded from
+        /// device backup: an in-flight peer download must not restore onto another
+        /// device. No account, or no container, starts nothing.
+        public func startPhoneSharePlane() async {
+            guard let actor = ownActorIdHex,
+                let container = FileProviderCredentialStore.containerURL()
+            else { return }
+            let spool = container
+                .appendingPathComponent("share-spool", isDirectory: true)
+                .appendingPathComponent(actor, isDirectory: true)
+            await SharePlaneModel.shared.start(
+                api: api, ownerSecretHex: ownSecretHex,
+                access: foreignReplicaAccess(hosts: FileProviderReplicaHosts(actorIdHex: actor)),
+                spoolDir: spool,
+                prepareSpool: { try CloudBackupExcluder().exclude(root: $0.path) })
+        }
+
+        /// Stop iOS's share plane: the driver ends and the seat unbinds, so the
+        /// suspended app holds no socket (decision 2). A stopped plane renders
+        /// nothing.
+        public func stopPhoneSharePlane() async {
+            await SharePlaneModel.shared.stop(api: api)
+        }
+    #endif
+
+    #endif
+
+    #if os(iOS)
+        /// The app's foreground lease on its File Provider extension's relay
+        /// seat (`relay-serving.md` § Relay serving → *Apple's File Provider
+        /// replica*, point (2)): one per process, renewed every period the
+        /// Rust side names, revoked at [suspend]. Not excisable.
+        public static let relayLease = RelayLeaseRenewer(
+            period: .milliseconds(Int64(relayLeaseRenewalMs())))
+
+        /// Grant the lease on every on-demand domain of this account and keep
+        /// renewing it — started at [start] and every [resume]; starting again
+        /// replaces the running loop. No account starts nothing.
+        public func startRelayLease() async {
+            guard let actor = ownActorIdHex else { return }
+            await Self.relayLease.start(doors: RelayLeaseDoors(actorIdHex: actor))
+        }
     #endif
 
     /// Open one long-lived subscription on the shared `FfiNestClient` and post
@@ -1630,6 +1742,24 @@ public class FaunaClient {
         // `CustodianPushKick.onStop`). The periodic `BGProcessingTask` above
         // is what carries the custodian pass while backgrounded.
         custodianBackup.stopForegroundPushKick()
+        // The same-account peer leg STOPS out of the foreground
+        // (`p2p-shared-set-build.md` § Phone peers — design, decision 2): a
+        // suspended process answers nothing, so its listener and dial pass
+        // come down now, inside a background-task extension so the stand-down
+        // finishes before suspension. A refused extension still runs it.
+        // The cross-user share plane stops the same way and for the same reason.
+        let api = self.api
+        let extension_ = PeerLegBackgroundTask()
+        extension_.begin()
+        Task {
+            await api.setAccountRuntimeForeground(false)
+            #if !FAUNA_EXCISE_P2P_SHARE
+            await SharePlaneModel.shared.stop(api: api)
+            #endif
+            // The extension's relay seat withdraws at the lease's revoke.
+            await Self.relayLease.stop()
+            extension_.end()
+        }
         #endif
     }
 
@@ -1650,6 +1780,16 @@ public class FaunaClient {
         await custodianBackup.startForegroundPushKick()
         // The auto-renew tick at foreground (phones: no timer).
         await nestsAutoRenewTick()
+        // Back in front: the peer leg binds again (one pass runs now).
+        await api.setAccountRuntimeForeground(true)
+        // And the cross-user share plane starts again; its cursor and overlay
+        // are at rest in each set's state DB, so a transfer the background cut
+        // resumes with nothing re-sent.
+        #if !FAUNA_EXCISE_P2P_SHARE
+        Task { await self.startPhoneSharePlane() }
+        #endif
+        // And the extension's relay seat serves again, under the lease.
+        Task { await self.startRelayLease() }
         #endif
     }
 
@@ -1771,3 +1911,28 @@ public extension Notification.Name {
 /// is declared apart from the two methods only because they need the private
 /// `syncAgentProvisioner` above (`CustodianStoreAccess.swift` carries the why).
 extension FaunaClient: CustodianStoreAccess {}
+
+#if os(iOS)
+/// The background-task extension `FaunaClient.suspend()` takes around the
+/// peer leg's stand-down, so the listener is gone before the process is
+/// suspended. `end()` is idempotent and ends only an extension actually
+/// granted (ending `.invalid` is an API misuse); the expiration handler ends
+/// it too. A reference box because both the handler and the task end it.
+@MainActor
+private final class PeerLegBackgroundTask {
+    private var id: UIBackgroundTaskIdentifier = .invalid
+
+    func begin() {
+        id = UIApplication.shared.beginBackgroundTask(withName: "fauna.peer-leg.stand-down") {
+            [weak self] in
+            MainActor.assumeIsolated { self?.end() }
+        }
+    }
+
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
+    }
+}
+#endif

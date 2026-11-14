@@ -623,7 +623,7 @@ mod tests {
         // Bind and drop: nothing listens on that UDP port any more. The
         // connected socket reports the port-unreachable as an error, so the
         // UDP leg is over in milliseconds instead of the 5 s timeout — the
-        // android venue's fast path to the TCP retry rests on this.
+        // android emulator's fast path to the TCP retry rests on this.
         let addr = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind")

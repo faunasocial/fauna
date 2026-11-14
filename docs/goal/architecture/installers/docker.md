@@ -36,6 +36,7 @@ Provide the recommended deployment shape for the nest server: a single multi-arc
 | Base image | `debian:bookworm-slim` |
 | Process supervisor | s6-overlay v3.2.0.2 |
 | Runtime user | `fauna` (UID 1000) |
+| Licences | `/usr/share/doc/fauna/` (`LICENSE-MIT`, `LICENSE-APACHE`, the generated `THIRD-PARTY-NOTICES`) and the label `org.opencontainers.image.licenses`; the files, the label and the served web app's own three are owned by [`../shipped-notices.md`](../shipped-notices.md) § Per channel |
 
 Runs on any Linux host with Docker or Podman. Also works on Docker Desktop (macOS, Windows) for development.
 
@@ -43,8 +44,8 @@ Runs on any Linux host with Docker or Podman. Also works on Docker Desktop (macO
 
 The image is built in layered stages (BuildKit). Dependency caching is **BuildKit
 cache mounts**, not stub stages: the rust stages mount the cargo registry + target
-dir as `type=cache` mounts (with `CARGO_UNSTABLE_CHECKSUM_FRESHNESS` so cached
-artifacts stay fresh across COPY mtime churn), so source-only changes don't
+dir as `type=cache` mounts (with content-keyed freshness — `image-pipeline.md`'s
+compile-cache gotcha 4 — so a changed crate always recompiles across COPY mtime churn), so source-only changes don't
 recompile external crates. There is no `rust-deps` stub stage. **Every cargo
 invocation passes `--locked`** — the build must fail rather than silently update
 `Cargo.lock` (release-integrity contract; `architecture/release-integrity.md`).
@@ -57,7 +58,7 @@ the `labeler` half is ABI-load-bearing — dropping it is a linker failure, reco
 in the Dockerfile). A parallel `rust-wasm` stage builds the WASM modules for the
 web SPA.
 
-**Go** (an exact-patch-pinned `golang:1.26.10-bookworm` — never a floating
+**Go** (an exact-patch-pinned `golang:1.26.11-bookworm` — never a floating
 `golang:1.26-bookworm` tag, so the shipped toolchain is reproducible and
 `govulncheck` scans exactly what ships; kept in sync with
 `bins/fauna-bridges/go.mod`'s `toolchain` directive by a dedicated

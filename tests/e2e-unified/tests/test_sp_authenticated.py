@@ -189,10 +189,16 @@ def test_markdown_toolbar_visible(app):
     app.driver.set_state({"nav": {"stack": [{"view": "conversations"}]}})
     app.driver.wait_for("new-conversation-button")
     app.driver.click("new-conversation-button")
-    assert app.driver.is_visible("markdown-bold-button"), (
-        "the compose bar should render the markdown toolbar (bold button): "
-        f"{app.driver.diagnose('markdown-bold-button')}"
-    )
+    # Wait for the toolbar, never read it at once: the compose bar mounts after
+    # the click returns, so an instant `is_visible` raced the mount (convention
+    # 14) and on web read False while `diagnose` a moment later read it visible.
+    try:
+        app.driver.wait_for("markdown-bold-button")
+    except TimeoutError:
+        raise AssertionError(
+            "the compose bar should render the markdown toolbar (bold button): "
+            f"{app.driver.diagnose('markdown-bold-button')}"
+        ) from None
 
 
 # ---------------------------------------------------------------------------

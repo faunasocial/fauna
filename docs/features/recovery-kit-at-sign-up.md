@@ -33,11 +33,11 @@ Stamped 2026-09-19 at 0bb8814071.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+dea64163 standalone |
 | linux | ✅ full | 0.1.5-dev+0cfdd6c6 standalone |
-| windows | ✅ full | 0.1.2-dev+3f8c34d8.dirty standalone |
+| windows | ✅ full | 0.1.6-dev+8cbc32a3 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+2e009c0f standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+fa773d19.dirty standalone |
+| tui | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 

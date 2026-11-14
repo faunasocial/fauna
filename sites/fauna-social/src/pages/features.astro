@@ -1,15 +1,21 @@
 ---
 import Base from '../layouts/Base.astro';
-// The prose is single-sourced from docs/sites/fauna-social/features.md, like every
-// other page here; the TABLE is single-sourced from docs/features/matrix.json, which
-// `just features-render` generates from the feature catalog's pages and the ledger the
-// test runs write (docs/goal/architecture/feature-catalog.md § Render).
+// The opening prose is single-sourced from docs/sites/fauna-social/features.md, like
+// every other page here; the TABLES are single-sourced from docs/features/matrix.json,
+// which `just features-render` generates from the feature catalog's pages and the ledger
+// the test runs write (docs/goal/architecture/feature-catalog.md § Render).
 //
 // **There is deliberately no second generator.** This page imports the same committed
 // JSON that MATRIX.md is rendered from, so the site can never disagree with the
 // repository's own matrix — the bylaws pattern applied to generated data. Everything
 // below is placement and styling: no mark is computed here, no cell is judged here,
-// and a state this file does not know how to colour still renders its own glyph.
+// and a state this file does not know still renders its own glyph.
+//
+// Three placements are this page's own (owner-directed 2026-11-13, feature-catalog.md
+// § Render): the legend is a table built from STATES below, which also feeds every
+// cell's hover explanation, so the two can never say different things; a nest-only
+// feature shows its mark under every app instead of one spanning cell; and the two
+// Fauna Kids columns are a section of their own, listing the features a kids app has.
 import matrix from '../../../../docs/features/matrix.json';
 import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/features.md';
 import { fill } from '../data/fill.ts';
@@ -18,8 +24,8 @@ import { takeOpening } from '../data/copy.ts';
 const { heading, lead, rest } = takeOpening(fill(await compiledContent()));
 
 // The public column labels. The catalog's app keys are internal spellings; a visitor
-// reads platform names. Keyed off matrix.apps so a new column appears here the day it
-// appears there — an unknown key falls back to its own name rather than vanishing.
+// reads platform names. An unknown key falls back to its own name rather than
+// vanishing. A kids column is labelled by its parent app (matrix.parents).
 // public-text: site-features
 const APP_LABELS: Record<string, string> = {
   web: 'Web',
@@ -29,27 +35,52 @@ const APP_LABELS: Record<string, string> = {
   ios: 'iOS',
   android: 'Android',
   tui: 'Terminal',
-  'android-kids': 'Fauna Kids (Android)',
-  'ios-kids': 'Fauna Kids (iOS)',
 };
 // public-text-end: site-features
 
-// What each state MEANS, as a cell tooltip — the legend in the copy says it once in
-// prose, and this repeats it where the reader's cursor already is.
+// What each state MEANS: one name and one sentence per state, in legend order. The
+// legend table prints them once; every cell repeats its own where the cursor is.
 // public-text: site-features
-const STATE_TITLE: Record<string, string> = {
-  full: 'Every test for this feature passed on this platform',
-  partial: 'Partly covered, a mix of passes and failures, or a test needed something not yet built while another failed',
-  failing: 'Tests exist for this platform and none passed',
-  unbuilt: 'At its last run here, a test of this feature needed something not yet built for this platform — nothing else failed',
-  none: 'No run recorded yet — a statement about our records, not the software',
-  absent: 'Deliberately absent on this platform',
-};
+const STATES: { state: string; name: string; meaning: string }[] = [
+  { state: 'full', name: 'Works',
+    meaning: 'Every part of the feature has a test, and every test that counts for this app passed, whether it ran through the app or on the server.' },
+  { state: 'partial', name: 'Partial',
+    meaning: 'A mixed result: some tests passed and others failed or have no run on record yet, part of the feature has no test yet, or a test failed while another part is still being built.' },
+  { state: 'failing', name: 'Failing',
+    meaning: 'There are tests that count for this app, and none of them passed.' },
+  { state: 'unbuilt', name: 'Not built yet',
+    meaning: 'We know it is unfinished: part of the feature, or of the tooling that tests it, is not built for this app yet. Nothing that is built has failed.' },
+  { state: 'none', name: 'No result yet',
+    meaning: 'We do not know: no test counts for this app, or no run is on record yet for the tests that count for it through the app, or for those on the server. The feature may work fine.' },
+  { state: 'absent', name: 'Left out',
+    meaning: 'Not part of this app, on purpose: the platform has no such thing, or the app leaves it out by design.' },
+];
+const LEGEND_HEADING = 'What the marks mean';
+const LEGEND_HINT = 'Point at any mark in the tables, or tap it, to read the same explanation with the date of its last test run.';
+const LEGEND_COLUMNS = ['Mark', 'Name', 'What it tells you'];
+const LAST_RUN = 'Last test run:';
+const KIDS_HEADING = 'Fauna Kids';
+const KIDS_INTRO = 'Fauna Kids is the kids edition of the Android and iOS apps. It is planned and not yet available anywhere. It leaves some features out by design, so this table lists only the features a kids app has.';
 // public-text-end: site-features
 
-const apps: string[] = matrix.apps;
-const label = (app: string) => APP_LABELS[app] ?? app;
+const parents = (matrix.parents ?? {}) as Record<string, string>;
+const mainApps: string[] = matrix.apps.filter((app: string) => !(app in parents));
+const kidsApps: string[] = matrix.apps.filter((app: string) => app in parents);
+
+const label = (app: string) => APP_LABELS[parents[app] ?? app] ?? app;
 const mark = (state: string) => (matrix.marks as Record<string, string>)[state] ?? '?';
+const info = (state: string) => STATES.find((s) => s.state === state);
+const title = (name: string) => name.charAt(0).toUpperCase() + name.slice(1);
+
+// The kids table: each section's features that at least one kids app has. A feature
+// absent from both is one the kids edition leaves out, and KIDS_INTRO says so.
+const kidsSections = kidsApps.length === 0 ? [] : matrix.sections
+  .map((section: any) => ({
+    name: section.name,
+    features: section.features.filter((feature: any) =>
+      kidsApps.some((app) => feature.cells[app].state !== 'absent')),
+  }))
+  .filter((section: any) => section.features.length > 0);
 ---
 <Base title={fm.title} description={fm.description}>
   <div class="wrap page">
@@ -58,33 +89,56 @@ const mark = (state: string) => (matrix.marks as Record<string, string>)[state] 
       <p class="lead" set:html={lead} />
       <Fragment set:html={rest} />
 
+      <section class="legend">
+        <h2>{LEGEND_HEADING}</h2>
+        <table>
+          <thead>
+            <tr>{LEGEND_COLUMNS.map((column) => <th scope="col">{column}</th>)}</tr>
+          </thead>
+          <tbody>
+            {STATES.map((s) => (
+              <tr>
+                <td class={`cell state-${s.state}`}><span class="glyph" aria-hidden="true">{mark(s.state)}</span></td>
+                <th scope="row">{s.name}</th>
+                <td>{s.meaning}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p class="hint">{LEGEND_HINT}</p>
+      </section>
+
       {matrix.sections.map((section: any) => (
         <section class="matrix">
-          <h2>{section.name.charAt(0).toUpperCase() + section.name.slice(1)}</h2>
+          <h2>{title(section.name)}</h2>
           <div class="scroller">
             <table>
               <thead>
                 <tr>
                   <th scope="col" class="feature">Feature</th>
-                  {apps.map((app) => <th scope="col">{label(app)}</th>)}
+                  {mainApps.map((app) => <th scope="col">{label(app)}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {section.features.map((feature: any) => (
                   <tr>
                     <th scope="row" class="feature">{feature.title}</th>
-                    {feature.nest_only ? (
-                      <td class="cell nest" colspan={apps.length}
-                          title={STATE_TITLE[feature.cells[apps[0]].state]}>
-                        <span class="glyph">{mark(feature.cells[apps[0]].state)}</span>
-                        <span class="note">your nest — the same on every app</span>
-                      </td>
-                    ) : apps.map((app) => (
-                      <td class={`cell state-${feature.cells[app].state}`}
-                          title={STATE_TITLE[feature.cells[app].state]}>
-                        <span class="glyph">{mark(feature.cells[app].state)}</span>
-                      </td>
-                    ))}
+                    {mainApps.map((app) => {
+                      const cell = feature.cells[app];
+                      const s = info(cell.state);
+                      return (
+                        <td class={`cell state-${cell.state}`} tabindex="0">
+                          <span class="glyph" role="img" aria-label={s?.name ?? cell.state}>{mark(cell.state)}</span>
+                          {s && (
+                            <span class="tip" role="tooltip">
+                              <strong>{s.name}</strong>
+                              {s.meaning}
+                              {cell.date && <span class="when">{LAST_RUN} {cell.date}</span>}
+                            </span>
+                          )}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -92,6 +146,51 @@ const mark = (state: string) => (matrix.marks as Record<string, string>)[state] 
           </div>
         </section>
       ))}
+
+      {kidsSections.length > 0 && (
+        <section class="matrix kids">
+          <h2>{KIDS_HEADING}</h2>
+          <p>{KIDS_INTRO}</p>
+          <div class="scroller">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col" class="feature">Feature</th>
+                  {kidsApps.map((app) => <th scope="col">{label(app)}</th>)}
+                </tr>
+              </thead>
+              {kidsSections.map((section: any) => (
+                <tbody>
+                  <tr class="group">
+                    <th scope="colgroup" colspan={kidsApps.length + 1}>{title(section.name)}</th>
+                  </tr>
+                  {section.features.map((feature: any) => (
+                    <tr>
+                      <th scope="row" class="feature">{feature.title}</th>
+                      {kidsApps.map((app) => {
+                      const cell = feature.cells[app];
+                      const s = info(cell.state);
+                      return (
+                        <td class={`cell state-${cell.state}`} tabindex="0">
+                          <span class="glyph" role="img" aria-label={s?.name ?? cell.state}>{mark(cell.state)}</span>
+                          {s && (
+                            <span class="tip" role="tooltip">
+                              <strong>{s.name}</strong>
+                              {s.meaning}
+                              {cell.date && <span class="when">{LAST_RUN} {cell.date}</span>}
+                            </span>
+                          )}
+                        </td>
+                      );
+                    })}
+                    </tr>
+                  ))}
+                </tbody>
+              ))}
+            </table>
+          </div>
+        </section>
+      )}
 
       {matrix.versions.length > 0 && (
         <section class="matrix">
@@ -119,53 +218,114 @@ const mark = (state: string) => (matrix.marks as Record<string, string>)[state] 
 </Base>
 
 <style>
-  .matrix { margin-top: 2.5rem; }
-  .matrix h2 { font-size: 1.2rem; margin-bottom: 0.6rem; }
+  .legend, .matrix { margin-top: 2.5rem; }
+  .legend h2, .matrix h2 { font-size: 1.2rem; margin-bottom: 0.6rem; }
 
-  /* The table is wider than a phone. It scrolls inside its own box rather than
-     making the whole page scroll sideways. */
-  .scroller { overflow-x: auto; }
+  .legend table { font-size: 0.92rem; }
+  .legend th, .legend td { padding: 0.45rem 0.6rem; vertical-align: top; }
+  .legend thead th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+  .legend tbody th { font-weight: 700; white-space: nowrap; }
+  .legend td.cell { text-align: center; width: 3rem; }
+  .legend .hint { font-size: 0.88rem; color: var(--text-muted); }
 
-  table {
+  .matrix table {
     border-collapse: collapse;
     width: 100%;
     font-size: 0.92rem;
   }
-  th, td {
-    border-bottom: 1px solid var(--rule, rgba(0, 0, 0, 0.08));
+  .matrix th, .matrix td {
     padding: 0.45rem 0.5rem;
     text-align: center;
     vertical-align: middle;
   }
-  thead th {
+  .matrix thead th {
     font-weight: 600;
     font-size: 0.8rem;
     color: var(--text-muted);
     white-space: nowrap;
   }
-  th.feature {
+  .matrix th.feature {
     text-align: left;
     font-weight: 500;
     white-space: normal;
     min-width: 12rem;
   }
-  tbody th { font-weight: 500; }
-
-  .glyph { font-size: 1rem; line-height: 1; }
-  /* An empty cell still needs a hit area for its tooltip, and a visible
-     placeholder so a blank reads as "nothing recorded" rather than as a
-     rendering fault. */
-  .state-none .glyph::before { content: '·'; color: var(--text-muted); opacity: 0.5; }
-
-  .cell.nest { text-align: left; }
-  .cell.nest .note {
-    margin-left: 0.5rem;
-    font-size: 0.82rem;
+  .matrix tbody th { font-weight: 500; }
+  /* Every table gives the feature names the same share, so the marks line up
+     from one section to the next. */
+  .matrix:not(.kids) th.feature { width: 40%; }
+  .matrix.kids th.feature { width: 70%; }
+  .matrix tr.group th {
+    text-align: left;
+    font-weight: 700;
+    font-size: 0.8rem;
     color: var(--text-muted);
+    padding-top: 1.1rem;
   }
 
-  @media (max-width: 560px) {
-    table { font-size: 0.85rem; }
-    th.feature { min-width: 9rem; }
+  .legend .glyph, .matrix .glyph { font-size: 1rem; line-height: 1; }
+  /* An empty cell still needs a hit area for its explanation, and a visible
+     placeholder so a blank reads as "nothing recorded" rather than as a
+     rendering fault. */
+  .state-none .glyph::before { content: '·'; color: var(--text-muted); font-weight: 700; }
+
+  /* The hover explanation. No script: the site ships none. `display`, not
+     `visibility`, so a hidden one adds nothing to any scroll area. */
+  .matrix td.cell { position: relative; cursor: help; }
+  .matrix td.cell:hover,
+  .matrix td.cell:focus { background: var(--bg-hover); }
+  .matrix .tip {
+    display: none;
+    position: absolute;
+    z-index: 5;
+    bottom: calc(100% - 0.2rem);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 17rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-surface);
+    color: var(--text);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    font-size: 0.85rem;
+    font-weight: 400;
+    line-height: 1.4;
+    text-align: left;
+    white-space: normal;
+    cursor: default;
+    pointer-events: none;
+  }
+  /* A tap focuses the cell (it takes `tabindex`), so a phone opens the
+     explanation the way a pointer does, and so does the keyboard. */
+  .matrix td.cell:hover .tip,
+  .matrix td.cell:focus .tip { display: block; }
+  .matrix .tip strong { display: block; margin-bottom: 0.15rem; }
+  .matrix .tip .when { display: block; margin-top: 0.3rem; color: var(--text-muted); }
+  /* The last columns open leftwards, so the box never leaves the page. */
+  .matrix td.cell:nth-last-child(-n+2) .tip { left: auto; right: 0; transform: none; }
+
+  /* Narrower than the table: it scrolls inside its own box rather than making
+     the whole page scroll sideways. A scrolling box clips what hangs out of
+     it, so here the explanation is pinned to the bottom of the screen
+     instead, which is also where a thumb expects it after a tap. */
+  @media (max-width: 760px) {
+    .matrix .scroller { overflow-x: auto; }
+    .matrix table { font-size: 0.85rem; }
+    .matrix th.feature { min-width: 9rem; }
+    .legend tbody th { white-space: normal; }
+    .matrix .tip,
+    .matrix td.cell:nth-last-child(-n+2) .tip {
+      position: fixed;
+      left: 1rem;
+      right: 1rem;
+      bottom: 1rem;
+      width: auto;
+      transform: none;
+    }
   }
 </style>

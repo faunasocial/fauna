@@ -237,6 +237,55 @@ def test_mail_bridge_ffi_copies_into_the_private_slot_inside_the_gate():
     )
 
 
+def test_the_windows_gnullvm_dll_has_a_private_slot_per_flavor():
+    """The windows twin of the producer pins above. `_windows-go-cgo-env`
+    builds the gnullvm `fauna_ffi.dll` in two flavors — the shipped `labeler`
+    one and the e2e mail bridge's seam-carrying one — into ONE cargo output dir
+    (`$TARGET_DIR/<triple>/<profile>/`), so neither may be read from there: the
+    second build would hand the first flavor's callers its dll. Each flavor's
+    dll and import lib are copied into the `mail-ffi-slot` /
+    `mail-ffi-e2e-slot` path under the triple, and `REL` — what every caller
+    links, stages and puts on PATH — is that private slot.
+
+    The copy runs only when this recipe's own gate decided to build (a
+    `--check` probe, then the gated cargo step, then the copy), never as a gate
+    of its own keyed on the shared dir, which would import whatever flavor
+    built last. Not inside the gated command as on Unix: the gated command must
+    stay a bare slot-wrapped `cargo`, the form build-slot's compile-cache front
+    recognises (test_win_kache_wrapper_scope.py)."""
+    code = _code(_recipe_body(_justfile(), "_windows-go-cgo-env"))
+    assert re.search(r"^\s*just mail-ffi-slot \{\{profile\}\} >\"\$FFI_SLOT_FILE\"$", code, re.M), (
+        "_windows-go-cgo-env's shipped arm must derive its slot from `just mail-ffi-slot {{profile}}`"
+    )
+    assert re.search(r"^\s*just mail-ffi-e2e-slot >\"\$FFI_SLOT_FILE\"$", code, re.M), (
+        "_windows-go-cgo-env's e2e arm must derive its slot from `just mail-ffi-e2e-slot`"
+    )
+    assert 'REL="$TARGET_DIR/{{rust_target}}/$(cat "$FFI_SLOT_FILE")"' in code, (
+        "_windows-go-cgo-env's REL must be the flavor-private slot under the triple, "
+        "not cargo's shared output dir"
+    )
+    assert 'CARGO_OUT="$TARGET_DIR/{{rust_target}}/$PROFILE_DIR"' in code
+    check = code.find("build-if-stale.py --check")
+    build = code.find("{{slot_build}} cargo build")
+    copies = [m.start() for m in re.finditer(r'win-stage-dll\.sh "\$CARGO_OUT/', code)]
+    assert check != -1 and check < build, (
+        "_windows-go-cgo-env must probe its own gate (`--check`) before the build, "
+        "so the copy below runs only after a build this recipe decided to run"
+    )
+    assert len(copies) == 2 and all(build < c for c in copies), (
+        "_windows-go-cgo-env must copy the dll and its import lib from cargo's output "
+        "into the slot, after its gated build"
+    )
+    fi = code.find("\n    fi", build)
+    assert fi != -1 and all(c < fi for c in copies), (
+        "the slot copies must sit inside the `--check` branch — a copy run on every "
+        "call would import whatever flavor last wrote cargo's shared output"
+    )
+    assert re.search(r'--target "\$REL/fauna_ffi\.dll"', code), (
+        "the gate's --target must be the PRIVATE copy, so deleting it forces the rebuild"
+    )
+
+
 def test_the_bindgen_reads_the_private_slot_not_the_shared_one():
     """The gate's `--source` and the bindgen's input are the same private copy.
 

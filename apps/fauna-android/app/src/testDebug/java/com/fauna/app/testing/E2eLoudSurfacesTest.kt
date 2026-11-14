@@ -3,11 +3,20 @@ package com.fauna.app.testing
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.unit.dp
 import com.fauna.app.core.AppState
 import com.fauna.app.core.SecureStorage
 import com.fauna.ffi.FfiConnectionState
@@ -150,6 +159,58 @@ class E2eLoudSurfacesTest {
         painted = state().getJSONObject("painted_errors")
         assertEquals("a cleared error leaves the count: $painted", 2, painted.getInt("count"))
         assertEquals(0, painted.getJSONArray("showing").length())
+    }
+
+    /**
+     * Convention 17's `painted_text_area`: the room the layout gave each tagged
+     * text, never its measured size alone. A `weight(1f)` label beside a sibling
+     * that fills the row is starved; a text measured wider than a 0-wide parent
+     * is still painted (Compose centres the overflow) unless that parent clips;
+     * and a text scrolled out of a scroll container's viewport keeps its box.
+     */
+    @Test
+    fun thePaintedTextAreaReadMeasuresTheRoomNotTheMeasuredSize() {
+        composeRule.setContent {
+            Column {
+                Row(Modifier.width(200.dp)) {
+                    Text("@alice:example.org", Modifier.weight(1f).testTag("account-item-handle"))
+                    Box(Modifier.width(200.dp)) { Text("actions", Modifier.testTag("fits")) }
+                }
+                Box(Modifier.width(0.dp).clipToBounds()) {
+                    Text("clipped", Modifier.requiredWidth(80.dp).testTag("page-heading"))
+                }
+                Box(Modifier.width(0.dp)) {
+                    Text("overflowing", Modifier.requiredWidth(80.dp).testTag("feed-post-text"))
+                }
+                Column(Modifier.height(100.dp).verticalScroll(rememberScrollState())) {
+                    Spacer(Modifier.height(1000.dp))
+                    Text("far below", Modifier.testTag("feed-view"))
+                }
+                // The tag on a container, the words on its child: no text of its own.
+                Box(Modifier.width(0.dp).testTag("wrapper")) { Text("x") }
+            }
+        }
+        composeRule.waitForIdle()
+        val root = composeRule.activity.window.decorView
+        composeRule.runOnUiThread { E2eLoudSurfaces.observeFrameForTest(root) }
+
+        val record = state().getJSONObject("painted_text_area")
+        val starved = record.getJSONArray("starved")
+        val byId = (0 until starved.length()).associate {
+            starved.getJSONObject(it).let { e -> e.getString("id") to e }
+        }
+        assertEquals("only the starved and the clipped: $record", setOf("account-item-handle", "page-heading"), byId.keys)
+        val title = byId.getValue("account-item-handle")
+        assertEquals("@alice:example.org", title.getString("text"))
+        assertTrue("the weighted handle got no width: $title", title.getDouble("width") < 1.0)
+        assertTrue("its row had area: $title", title.getJSONObject("pane").getDouble("width") >= 1.0)
+        val clipped = byId.getValue("page-heading")
+        assertTrue("a clip cuts the overflow to nothing: $clipped", clipped.getDouble("width") < 1.0)
+    }
+
+    @Test
+    fun aFreshProcessPublishesAnEmptyPaintedTextAreaNotAnAbsentKey() {
+        assertEquals(0, state().getJSONObject("painted_text_area").getJSONArray("starved").length())
     }
 
     @Test

@@ -44,6 +44,7 @@ use fauna_conversations::backends::fauna_mls::{
 };
 use fauna_core::identity::ActorId;
 use fauna_mls::engine::MlsEngine;
+use fauna_mls::state_replica::OwnLeafAnswer;
 use fauna_mls::types::ChannelId;
 
 use crate::commit_gate::{CommitCatchUp, CommitGateError, GatedCommitSend};
@@ -345,82 +346,89 @@ impl CommitGate for FaunaCommitGate {
         channel: ChannelId,
         logged_commit_epoch: u64,
         logged_commit_hash: [u8; 32],
-    ) -> Result<(), BackendError> {
-        let Some(restored) = self
+    ) -> OwnLeafAnswer {
+        // Ask the account's replica BEFORE anything is restored (`devices.md`
+        // § Cross-device MLS group-state sync, Rule 2 → *An own-leaf claim is
+        // the account's replica's to answer*): any member can post a record
+        // naming this leaf, and restoring first would let every forged claim
+        // swap this engine's whole provider KV and revoke its send right on
+        // every channel.
+        let (provider, base) = match self.sync.fetch_provider_with_base().await {
+            Ok(fetched) => fetched,
+            Err(e) => {
+                return OwnLeafAnswer::NoAnswer {
+                    why: format!("the replica read failed: {e}"),
+                };
+            }
+        };
+        let Some(provider) = provider else {
+            // The nest answered that no replica is stored: a commit one of this
+            // account's devices sent went out only after the gate's step 2 put
+            // a replica carrying it, so none did.
+            return OwnLeafAnswer::NotOurs {
+                why: "the nest holds no replica for this account",
+            };
+        };
+        let answer = provider.answer_own_leaf_claim(
+            &self.engine.identity_actor_id(),
+            &channel,
+            logged_commit_epoch,
+            logged_commit_hash,
+        );
+        if answer != OwnLeafAnswer::Ours {
+            return answer;
+        }
+        let restored = match self
             .sync
-            .resync_provider(&self.engine)
-            .await
-            .map_err(|e| BackendError::Internal(format!("own-leaf resync: {e}")))?
-        else {
-            // An own-leaf commit exists on the log but no replica is stored —
-            // the other device has not uploaded yet (or the nest served
-            // nothing). Nothing to restore; the next resync trigger or launch
-            // load heals it.
-            return Err(BackendError::Internal(
-                "own-leaf resync: no provider replica stored yet".into(),
-            ));
+            .adopt_fetched_provider(&self.engine, provider, base)
+        {
+            Ok(Some(restored)) => restored,
+            Ok(None) => {
+                return OwnLeafAnswer::NoAnswer {
+                    why: "the replica judged ours was refused at the restore".into(),
+                };
+            }
+            Err(e) => {
+                return OwnLeafAnswer::NoAnswer {
+                    why: format!("restoring the replica judged ours failed: {e}"),
+                };
+            }
         };
         // Crash-window convergence (design §3 takeover crash-safety): a replica
-        // restored at exactly the logged commit's epoch is the other device's
-        // step-2 upload — its still-pending commit is the logged record, so
-        // merging it advances us onto the logged epoch. A restored epoch past the
-        // commit's is the normal post-merge upload — already converged.
-        match self.engine.current_epoch(&channel) {
-            Ok(epoch) if epoch == logged_commit_epoch => {
-                // Resync-identity hardening: merge the restored step-2 pending
-                // ONLY when its stamped identity matches the logged commit — else
-                // a malicious nest that rolled the replica back to a superseded
-                // step-2 upload (a genuine own-device pending that never landed on
-                // the log) would fork this device onto a never-landed commit.
-                match restored.pending_commit_hash(&channel) {
-                    Some(h) if h == logged_commit_hash => {
-                        // The restored pending IS the logged commit — converge.
-                        let _ = self.engine.merge_pending_commit(&channel);
-                    }
-                    Some(_) => {
-                        // Identity mismatch: the restored pending is NOT the logged
-                        // commit. Do not merge — that would fork onto a commit the
-                        // authoritative log never carried. Leave the inert pending
-                        // staged: openmls blocks a takeover from staging over it, so
-                        // this device cannot send (and so cannot fork); a later
-                        // honest resync / launch `load()` swaps the whole provider
-                        // KV and converges. Provably convergent-only.
-                        tracing::warn!(
-                            logged_commit_epoch,
-                            "own-leaf resync: restored pending's commit identity ≠ the logged commit (possible malicious-nest rollback); not merging — awaiting the authoring device's post-merge replica"
-                        );
-                    }
-                    None => {
-                        // No commit identity: the engine stamps one whenever it
-                        // stages a commit, so a current replica carrying a pending
-                        // always names it — `None` means nothing staged to merge,
-                        // or a pending whose identity cannot be checked. Either
-                        // way, never merge. (The epoch-only merge a stamp-less
-                        // replica once got was retired by the compat-remnant
-                        // sweep — `version-compatibility.md` § Dimension 2,
-                        // program 4.)
-                        tracing::warn!(
-                            logged_commit_epoch,
-                            "own-leaf resync: restored replica carries no commit identity for this channel; not merging"
-                        );
-                    }
-                }
-            }
-            Ok(epoch) if epoch < logged_commit_epoch => {
-                // The nest served a replica older than the log (stale-replica
-                // residual (d)) — restored, but not yet at the logged epoch.
-                tracing::warn!(
-                    restored_epoch = epoch,
-                    logged_commit_epoch,
-                    "own-leaf resync restored a replica behind the logged commit; awaiting the other device's next upload"
-                );
-            }
-            _ => {}
+        // answered *ours* at exactly the record's epoch is the other device's
+        // step-2 upload, and the answer already proved its stamped pending IS
+        // the record (resync-identity hardening — a superseded step-2 upload a
+        // malicious nest rolled the replica back to answers *not ours* and is
+        // never restored), so merging it advances us onto the logged epoch. A
+        // replica past the record's epoch is the normal post-merge upload —
+        // already converged. The stamp is re-checked on the restored bytes: a
+        // merge is the one step here that could fork.
+        if self.engine.current_epoch(&channel).ok() == Some(logged_commit_epoch)
+            && restored.pending_commit_hash(&channel) == Some(logged_commit_hash)
+            && let Err(e) = self.engine.merge_pending_commit(&channel)
+        {
+            tracing::warn!(
+                logged_commit_epoch,
+                "own-leaf resync: merging the restored pending the replica answered for failed: {e}"
+            );
         }
         // Whatever the restored state, the epoch was authored by the other
         // device — this one must take over before its next application send.
         self.sync.mark_foreign_epoch(&channel);
-        Ok(())
+        OwnLeafAnswer::Ours
+    }
+
+    async fn reseal_settled_pending(&self, channel: ChannelId) {
+        if let Err(e) = self
+            .sync
+            .save_engine_provider_if_changed(&self.engine)
+            .await
+        {
+            tracing::debug!(
+                channel = %channel,
+                "could not re-seal the replica after settling an unanswered gate-send: {e}"
+            );
+        }
     }
 
     fn note_foreign_commit(&self, _channel: ChannelId) {
@@ -500,11 +508,24 @@ mod tests {
     struct MemReplica {
         stored: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         events: EventLog,
+        /// When set, every `get` fails as a transport fault — the replica
+        /// read that gives the own-leaf question *no answer*.
+        fail_gets: Arc<std::sync::atomic::AtomicBool>,
+        /// When set, the next accepted `put` turns `fail_gets` on — so a
+        /// gated send's own step-2 put still lands and only the reads after
+        /// it fail.
+        fail_gets_after_next_put: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait]
     impl MlsReplicaTransport for MemReplica {
         async fn get(&self, path: String) -> Result<Option<Vec<u8>>, MlsTransportError> {
+            if self.fail_gets.load(Ordering::SeqCst) {
+                return Err(MlsTransportError {
+                    message: "replica read: connection reset".into(),
+                    transient: true,
+                });
+            }
             Ok(self.stored.lock().unwrap().get(&path).cloned())
         }
         async fn put(
@@ -526,6 +547,9 @@ mod tests {
                 self.events.lock().unwrap().push("provider-put");
             }
             map.insert(path, blob);
+            if self.fail_gets_after_next_put.swap(false, Ordering::SeqCst) {
+                self.fail_gets.store(true, Ordering::SeqCst);
+            }
             Ok(PutOutcome::Stored)
         }
     }
@@ -1266,8 +1290,15 @@ mod tests {
             "a thread-bound chat channel — this exercises the conv dispatch"
         );
 
-        // Alice's own commit lands on the log with no pending to merge and no
-        // newer replica to resync onto: unincorporated, and unhealable this pass.
+        // Alice's own commit lands on the log with no pending to merge, and the
+        // account's replica cannot be read: no answer, so the record is
+        // unincorporated and unhealable this pass. (A replica that answered
+        // *not ours* would skip it instead — `devices.md` Rule 2 → *An own-leaf
+        // claim is the account's replica's to answer*; this test pins the stall
+        // the no-answer arm keeps.)
+        replica
+            .fail_gets_after_next_put
+            .store(true, Ordering::SeqCst);
         let own = alice.self_update(&channel).unwrap();
         alice.clear_pending_commit(&channel).unwrap();
         let injected_seq = conv_nest.inject(
@@ -1640,9 +1671,11 @@ mod tests {
     /// stripped, the stamp-less shape only a build predating the resync-identity
     /// hardening sealed. The epoch-only merge such a replica once got was
     /// retired by the compat-remnant sweep (`version-compatibility.md`
-    /// § Dimension 2, program 4): A1's resync restores it at exactly the logged
-    /// commit's epoch, finds no identity, and does **not** merge — it stays at
-    /// the staged epoch, exactly like the mismatch arm (test (b)).
+    /// § Dimension 2, program 4): at exactly the logged commit's epoch with no
+    /// identity, the replica answers *not ours* (`devices.md` Rule 2 → *An
+    /// own-leaf claim is the account's replica's to answer*) — nothing is
+    /// restored or merged, and A1 stays at the staged epoch, exactly like the
+    /// mismatch arm (test (b)).
     #[test]
     fn a_restored_pending_without_a_commit_identity_is_not_merged() {
         let w = gate_world();
@@ -1749,6 +1782,10 @@ mod tests {
             "the restored pending's identity matched the logged commit — merged, converged"
         );
         assert!(!w.sync.authored_current_epoch(&w.channel));
+        // The sibling's real commit is answered *ours* through the same door a
+        // forged claim is denied by.
+        assert_eq!(w.backend.own_leaf_claim_counts().ours, 1);
+        assert_eq!(w.backend.own_leaf_claim_counts().not_ours, 0);
     }
 
     /// Test (b) — the **attack the hardening closes**. Two of alice's
@@ -1759,13 +1796,15 @@ mod tests {
     /// pending Y (stamped `blake3(Y)`) instead of `a_win`'s post-merge replica,
     /// while the log's own-leaf record is X.
     ///
-    /// Under epoch-only equality this forked A1 onto the never-landed Y. With the
-    /// identity gate, A1's resync sees `blake3(Y) ≠ blake3(X)` and **does not
-    /// merge** — it stays at epoch N with the inert pending, so it cannot even
-    /// take over (openmls blocks staging over the pending) and therefore cannot
-    /// fork. Then, once the honest post-merge replica is served (the rollback
-    /// ends), a plain resync **converges** A1 onto the merged epoch. Provably
-    /// convergent-only.
+    /// Under epoch-only equality this forked A1 onto the never-landed Y. Since
+    /// the own-leaf answer (`devices.md` Rule 2 → *An own-leaf claim is the
+    /// account's replica's to answer*) the replica is judged before anything is
+    /// restored: at X's epoch with a pending stamped `blake3(Y) ≠ blake3(X)`,
+    /// it answers *not ours* — nothing restored, nothing merged, A1 stays at
+    /// epoch N. That is the stale-replica residual the ruling accepts (the
+    /// nest reaches the same seat state by withholding X itself). Once the
+    /// honest post-merge replica is served, a plain resync **converges** A1
+    /// onto the merged epoch.
     #[test]
     fn attack_superseded_step2_replica_does_not_fork_then_heals() {
         use crate::sync::MlsStateSync;
@@ -1820,19 +1859,18 @@ mod tests {
         ))
         .unwrap();
 
-        // Safety: the identity mismatch blocked the merge — A1 did NOT fork onto Y.
+        // Safety: the superseded replica answered *not ours* — A1 did NOT fork
+        // onto Y, and restored nothing at all.
         assert_eq!(
             w.alice.current_epoch(&w.channel).unwrap(),
             epoch_n,
             "A1 did not merge the superseded pending Y — no fork onto a never-landed commit"
         );
-        assert!(!w.sync.authored_current_epoch(&w.channel));
-        // No-fork corollary: A1 cannot take over — the inert restored pending
-        // blocks staging a new commit, so A1 can never send onto the fork.
         assert!(
-            block_on(w.gate.ensure_takeover(w.channel)).is_err(),
-            "a device served a superseded replica cannot stage over the inert pending — so cannot fork"
+            !w.alice.has_pending_commit(&w.channel),
+            "nothing was restored: Y's pending never reached A1's engine"
         );
+        assert_eq!(w.backend.own_leaf_claim_counts().not_ours, 1);
 
         // Self-heal: the honest post-merge replica (epoch N+1, no pending) is now
         // served (the rollback ends). A plain resync converges A1 onto it.
@@ -2101,6 +2139,465 @@ mod tests {
         assert!(
             matches!(got.body, ChannelMessageBody::Text(t) if t == "hi from A"),
             "bob reads alice's plaintext from the log — only the twin cannot"
+        );
+    }
+
+    // ── The own-leaf claim is the account's replica's to answer ─────────
+    // `devices.md` § Cross-device MLS group-state sync, Rule 2 → *An own-leaf
+    // claim is the account's replica's to answer*, and its two premises.
+
+    /// The replica `w`'s account holds now, fetched without restoring it.
+    fn stored_provider(w: &GateWorld) -> fauna_mls::state_replica::ProviderReplica {
+        block_on(w.sync.fetch_provider_with_base())
+            .unwrap()
+            .0
+            .expect("a replica is stored")
+    }
+
+    /// Bob folds every commit on the log he has not applied yet (his own
+    /// already-merged ones skip as past-epoch).
+    fn bob_catches_up(w: &GateWorld) {
+        for (_, env) in w.conv_nest.fetch_after(&w.channel.to_string(), 0) {
+            if let Ok(ChannelEnvelope::Commit(c)) = ChannelEnvelope::from_bytes(&env) {
+                let _ = w.bob.process_commit(&w.channel, &c);
+            }
+        }
+    }
+
+    /// Premise (a), reproduced: a takeover the nest appended whose reply was
+    /// lost. Clearing the pending on that transport fault left the account's
+    /// own commit on the log with no device and no replica holding it — the
+    /// walk then met it as an own-leaf record nothing could resync, a stall
+    /// for good (and, under the replica's answer, a silent fork). The pending
+    /// is kept, on the device and in the replica, until the log decides it:
+    /// here the walk meets the record and merges it by hash (Rule 1).
+    #[test]
+    fn a_lost_reply_keeps_the_pending_and_the_walk_merges_the_landed_commit() {
+        let w = gate_world();
+        block_on(w.sync.save_provider_if_changed(
+            &fauna_mls::state_replica::ProviderReplica::from_engine(&w.alice),
+        ))
+        .unwrap();
+        let epoch_n = w.alice.current_epoch(&w.channel).unwrap();
+
+        w.conv_nest.lose_next_commit_reply();
+        let err = block_on(w.gate.ensure_takeover(w.channel))
+            .expect_err("the reply was lost: the gate cannot know the send landed");
+        assert!(format!("{err}").contains("reply"), "got: {err}");
+        assert_eq!(
+            w.conv_nest.commits_on(&w.channel),
+            1,
+            "but the nest appended it"
+        );
+
+        let kept = w
+            .alice
+            .pending_commit_hash(&w.channel)
+            .expect("the pending is kept on the device: the send may have landed");
+        assert_eq!(
+            stored_provider(&w).pending_commit_hash(&w.channel),
+            Some(kept),
+            "and the replica still carries it, so the account answers *ours* for it"
+        );
+
+        let mut cursor = 0i64;
+        let outcome = block_on(poll_inbound_conv(
+            &w.backend,
+            &w.manager,
+            &w.channel,
+            &mut cursor,
+            0,
+        ))
+        .unwrap();
+        assert!(
+            !outcome.stalled,
+            "the walk is not stopped by the device's own commit"
+        );
+        assert_eq!(
+            w.alice.current_epoch(&w.channel).unwrap(),
+            epoch_n + 1,
+            "the walk met the landed record and merged the kept pending by hash"
+        );
+        assert!(!w.alice.has_unanswered_pending(&w.channel));
+        assert_eq!(
+            stored_provider(&w).pending_commit_hash(&w.channel),
+            None,
+            "the settled pending is re-sealed out of the replica"
+        );
+        assert_eq!(
+            stored_provider(&w).channel_reading(&w.channel),
+            fauna_mls::state_replica::ChannelReading::AtEpoch(epoch_n + 1)
+        );
+
+        // The device sends again: its next takeover stages and lands.
+        block_on(w.gate.ensure_takeover(w.channel)).expect("the next takeover lands");
+        assert_eq!(w.alice.current_epoch(&w.channel).unwrap(), epoch_n + 2);
+    }
+
+    /// Premise (a), the other way the log decides: the request never reached
+    /// the nest. The pending is kept until a walk covers every record after the
+    /// seq the send gated on without meeting it — the nest admits a gated
+    /// commit only as the first commit after that seq — and only then is it
+    /// cleared and unstaged; the next gated send lets the log decide first, so
+    /// it is not blocked by the leftover.
+    #[test]
+    fn an_unanswered_send_that_never_landed_is_settled_and_the_next_send_goes_through() {
+        let w = gate_world();
+        block_on(w.sync.save_provider_if_changed(
+            &fauna_mls::state_replica::ProviderReplica::from_engine(&w.alice),
+        ))
+        .unwrap();
+        let epoch_n = w.alice.current_epoch(&w.channel).unwrap();
+
+        w.conv_nest.drop_next_commit_send();
+        block_on(w.gate.ensure_takeover(w.channel)).expect_err("no answer");
+        assert_eq!(w.conv_nest.commits_on(&w.channel), 0, "nothing landed");
+        assert!(
+            w.alice.has_unanswered_pending(&w.channel),
+            "kept: it may have landed"
+        );
+        assert!(
+            stored_provider(&w)
+                .pending_commit_hash(&w.channel)
+                .is_some()
+        );
+
+        block_on(w.gate.ensure_takeover(w.channel))
+            .expect("the log settles the leftover, then the takeover stages and lands");
+        assert_eq!(
+            w.conv_nest.commits_on(&w.channel),
+            1,
+            "exactly one commit landed"
+        );
+        assert_eq!(w.alice.current_epoch(&w.channel).unwrap(), epoch_n + 1);
+        assert!(!w.alice.has_unanswered_pending(&w.channel));
+        assert!(w.sync.authored_current_epoch(&w.channel));
+    }
+
+    /// Premise (a), the log deciding by another member's commit: the request
+    /// never reached the nest, and then another member committed. The nest
+    /// admits a gated commit only as the first commit after the seq the send
+    /// gated on, so a later commit whose hash is not the kept pending's proves
+    /// the send never landed: the walk clears the pending before it applies
+    /// that commit, applies it, settles and re-seals the replica, and the next
+    /// takeover lands on the epoch the other member's commit made.
+    #[test]
+    fn an_unanswered_send_superseded_by_another_members_commit_is_cleared_and_the_walk_applies_it()
+    {
+        let w = gate_world();
+        block_on(w.sync.save_provider_if_changed(
+            &fauna_mls::state_replica::ProviderReplica::from_engine(&w.alice),
+        ))
+        .unwrap();
+        let epoch_n = w.alice.current_epoch(&w.channel).unwrap();
+
+        w.conv_nest.drop_next_commit_send();
+        block_on(w.gate.ensure_takeover(w.channel)).expect_err("no answer");
+        assert!(w.alice.has_unanswered_pending(&w.channel));
+
+        inject_bob_commit(&w);
+
+        let mut cursor = 0i64;
+        let outcome = block_on(poll_inbound_conv(
+            &w.backend,
+            &w.manager,
+            &w.channel,
+            &mut cursor,
+            0,
+        ))
+        .unwrap();
+        assert!(
+            !outcome.stalled,
+            "the kept pending does not stall the walk on another member's commit"
+        );
+        assert_eq!(
+            w.alice.current_epoch(&w.channel).unwrap(),
+            epoch_n + 1,
+            "the walk applied bob's commit"
+        );
+        assert!(!w.alice.has_pending_commit(&w.channel));
+        assert!(!w.alice.has_unanswered_pending(&w.channel));
+        assert_eq!(
+            stored_provider(&w).pending_commit_hash(&w.channel),
+            None,
+            "the superseded pending is re-sealed out of the replica"
+        );
+
+        block_on(w.gate.ensure_takeover(w.channel)).expect("the next takeover lands");
+        assert_eq!(w.alice.current_epoch(&w.channel).unwrap(), epoch_n + 2);
+    }
+
+    /// An answered refusal is still unstaged at once: only a send with no
+    /// answer keeps its pending.
+    #[test]
+    fn an_answered_refusal_still_unstages_at_once() {
+        let w = gate_world();
+        block_on(w.sync.save_provider_if_changed(
+            &fauna_mls::state_replica::ProviderReplica::from_engine(&w.alice),
+        ))
+        .unwrap();
+        w.conv_nest.refuse_commits();
+        block_on(w.gate.ensure_takeover(w.channel)).expect_err("refused");
+        assert!(!w.alice.has_pending_commit(&w.channel));
+        assert!(!w.alice.has_unanswered_pending(&w.channel));
+        assert_eq!(stored_provider(&w).pending_commit_hash(&w.channel), None);
+    }
+
+    /// The walk half, with a gate whose replica is honest: a record forged in
+    /// another member's sender data to name alice's leaf, between two honest
+    /// messages. The replica is asked before anything is restored and answers
+    /// *not ours* (at the record's epoch, no pending stamped with its hash), so
+    /// the walk goes past it like an intrinsically invalid record: the message
+    /// behind it is ingested, nothing was restored (the group-install mark did
+    /// not move) and alice's send right stands.
+    #[test]
+    fn a_forged_own_leaf_claim_is_answered_not_ours_and_the_walk_goes_past_it() {
+        use fauna_conversations::address::TypedAddress;
+        use fauna_conversations::store::history::ChannelHistorySlice;
+        use fauna_core::data::Timestamp;
+        use fauna_mls::types::{ChannelMessage, ChannelMessageBody};
+
+        let w = gate_world();
+        // A real thread, so the walk's ingest has somewhere to land.
+        let thread = w.manager.restore_channel_slice(&ChannelHistorySlice {
+            channel_id_hex: w.channel.to_string(),
+            label: "bob".into(),
+            participants: vec![TypedAddress::Fauna {
+                handle: "bob".into(),
+                actor_id: w.bob.identity_actor_id(),
+            }],
+            ..Default::default()
+        });
+        w.backend.bind_channel(thread, w.channel);
+
+        // Alice owns the epoch (her takeover's step 4 sealed the replica at it)
+        // and Bob follows her onto it.
+        block_on(w.gate.ensure_takeover(w.channel)).unwrap();
+        bob_catches_up(&w);
+        let epoch = w.alice.current_epoch(&w.channel).unwrap();
+        assert_eq!(w.bob.current_epoch(&w.channel).unwrap(), epoch);
+        assert!(w.sync.authored_current_epoch(&w.channel));
+
+        let say = |sequence: u64, text: &str| {
+            let ct = w
+                .bob
+                .encrypt(
+                    &w.channel,
+                    &ChannelMessage {
+                        sender: w.bob.identity_actor_id(),
+                        sequence,
+                        channel_epoch: 0,
+                        body: ChannelMessageBody::Text(text.into()),
+                        timestamp: Timestamp::now(),
+                    },
+                )
+                .unwrap();
+            ChannelEnvelope::Application(ct).to_bytes().unwrap()
+        };
+        let hex = w.channel.to_string();
+        w.conv_nest.inject(&hex, say(1, "before"));
+        // Bob forges the claim from a commit he stages and never sends.
+        let staged = w.bob.self_update(&w.channel).unwrap();
+        let forged = fauna_mls::forged_claim::forged_other_leaf_commit(&w.bob, &staged);
+        w.bob.clear_pending_commit(&w.channel).unwrap();
+        assert!(
+            matches!(
+                w.alice.process_commit(&w.channel, &forged),
+                Err(fauna_mls::error::MlsError::OwnLeafCommit { .. })
+            ),
+            "the engine reads the forgery as alice's own leaf"
+        );
+        w.conv_nest
+            .inject(&hex, ChannelEnvelope::Commit(forged).to_bytes().unwrap());
+        w.conv_nest.inject(&hex, say(2, "behind"));
+
+        let mark = w.alice.group_install_mark(&w.channel);
+        let mut cursor = 0i64;
+        let outcome = block_on(poll_inbound_conv(
+            &w.backend,
+            &w.manager,
+            &w.channel,
+            &mut cursor,
+            0,
+        ))
+        .unwrap();
+
+        assert!(!outcome.stalled, "the walk goes past the forged claim");
+        assert_eq!(outcome.ingested, 2, "both honest messages are ingested");
+        assert_eq!(cursor, 4, "the cursor consumed the forged record");
+        assert_eq!(
+            w.alice.group_install_mark(&w.channel),
+            mark,
+            "nothing was restored: the engine's group state was never swapped"
+        );
+        assert_eq!(w.alice.current_epoch(&w.channel).unwrap(), epoch);
+        assert!(
+            w.sync.authored_current_epoch(&w.channel),
+            "no send right was revoked"
+        );
+        let counts = w.backend.own_leaf_claim_counts();
+        assert_eq!((counts.ours, counts.not_ours, counts.unanswered), (0, 1, 0));
+    }
+
+    /// No answer stalls: the replica read failing leaves the forged-or-not
+    /// record before the cursor, and it is asked again on the next pass.
+    #[test]
+    fn an_own_leaf_claim_with_no_answer_stalls_and_is_asked_again() {
+        let w = gate_world();
+        block_on(w.sync.save_provider_if_changed(
+            &fauna_mls::state_replica::ProviderReplica::from_engine(&w.alice),
+        ))
+        .unwrap();
+        let staged = w.bob.self_update(&w.channel).unwrap();
+        let forged = fauna_mls::forged_claim::forged_other_leaf_commit(&w.bob, &staged);
+        w.bob.clear_pending_commit(&w.channel).unwrap();
+        w.conv_nest.inject(
+            &w.channel.to_string(),
+            ChannelEnvelope::Commit(forged).to_bytes().unwrap(),
+        );
+
+        w.replica.fail_gets.store(true, Ordering::SeqCst);
+        let mut cursor = 0i64;
+        let first = block_on(poll_inbound_conv(
+            &w.backend,
+            &w.manager,
+            &w.channel,
+            &mut cursor,
+            0,
+        ))
+        .unwrap();
+        assert!(first.stalled, "no answer: stall before the record");
+        assert_eq!(cursor, 0);
+
+        w.replica.fail_gets.store(false, Ordering::SeqCst);
+        let second = block_on(poll_inbound_conv(
+            &w.backend,
+            &w.manager,
+            &w.channel,
+            &mut cursor,
+            0,
+        ))
+        .unwrap();
+        assert!(!second.stalled, "asked again, answered not ours, skipped");
+        assert_eq!(cursor, 1);
+        let counts = w.backend.own_leaf_claim_counts();
+        assert_eq!((counts.not_ours, counts.unanswered), (1, 1));
+    }
+
+    /// Premise (b), first half: a put from a device still at an earlier epoch
+    /// for a channel never moves the stored replica back. A2 takes the epoch
+    /// over (its post-merge replica is at N+1); A1, still at N with its own
+    /// unrelated progress, flushes — the CAS conflicts and the merge keeps the
+    /// channel at N+1.
+    #[test]
+    fn a_put_from_an_earlier_epoch_never_regresses_a_replica_ahead() {
+        use fauna_core::data::Timestamp;
+        use fauna_mls::state_replica::{ChannelReading, ProviderReplica};
+        use fauna_mls::types::{ChannelMessage, ChannelMessageBody};
+
+        let w = gate_world();
+        block_on(
+            w.sync
+                .save_provider_if_changed(&ProviderReplica::from_engine(&w.alice)),
+        )
+        .unwrap();
+        let epoch_n = w.alice.current_epoch(&w.channel).unwrap();
+
+        let alice2 = Arc::new(MlsEngine::new_in_memory(keypair(1)).unwrap());
+        let d2 = assemble_device(&alice2, 1, "alice", &w.conv_nest, &w.replica, w.channel);
+        block_on(d2.sync.load())
+            .unwrap()
+            .provider
+            .expect("A2 bootstraps from A1's replica")
+            .restore_into_unchecked(&alice2)
+            .unwrap();
+        block_on(d2.gate.ensure_takeover(w.channel)).expect("A2 takes the epoch over");
+        assert_eq!(
+            stored_provider(&w).channel_reading(&w.channel),
+            ChannelReading::AtEpoch(epoch_n + 1)
+        );
+
+        // A1 moves its own state at N (a sender-ratchet step) and flushes.
+        w.alice
+            .encrypt(
+                &w.channel,
+                &ChannelMessage {
+                    sender: w.alice.identity_actor_id(),
+                    sequence: 1,
+                    channel_epoch: 0,
+                    body: ChannelMessageBody::Text("from A1 at N".into()),
+                    timestamp: Timestamp::now(),
+                },
+            )
+            .unwrap();
+        block_on(w.sync.save_engine_provider_if_changed(&w.alice)).unwrap();
+
+        assert_eq!(
+            stored_provider(&w).channel_reading(&w.channel),
+            ChannelReading::AtEpoch(epoch_n + 1),
+            "the put from an earlier epoch did not move the replica back"
+        );
+    }
+
+    /// Premise (b), second half: a put at the same epoch never drops a stamped
+    /// pending. A2 staged a takeover and sealed its step-2 replica (the
+    /// pending stamped), its send not yet answered; A1, at the same epoch with
+    /// its own progress, flushes — the merge keeps the stamp, so the account
+    /// still answers *ours* for A2's commit when it lands.
+    #[test]
+    fn a_put_at_the_same_epoch_never_drops_a_stamped_pending() {
+        use fauna_core::data::Timestamp;
+        use fauna_mls::state_replica::{OwnLeafAnswer, ProviderReplica};
+        use fauna_mls::types::{ChannelMessage, ChannelMessageBody};
+
+        let w = gate_world();
+        block_on(
+            w.sync
+                .save_provider_if_changed(&ProviderReplica::from_engine(&w.alice)),
+        )
+        .unwrap();
+        let epoch_n = w.alice.current_epoch(&w.channel).unwrap();
+
+        let alice2 = Arc::new(MlsEngine::new_in_memory(keypair(1)).unwrap());
+        let d2 = assemble_device(&alice2, 1, "alice", &w.conv_nest, &w.replica, w.channel);
+        block_on(d2.sync.load())
+            .unwrap()
+            .provider
+            .expect("A2 bootstraps from A1's replica")
+            .restore_into_unchecked(&alice2)
+            .unwrap();
+        let commit = alice2.self_update(&w.channel).unwrap(); // step 1
+        block_on(d2.sync.save_engine_provider_if_changed(&alice2)).unwrap(); // step 2
+        let stamp = *blake3::hash(&commit).as_bytes();
+        assert_eq!(
+            stored_provider(&w).pending_commit_hash(&w.channel),
+            Some(stamp)
+        );
+
+        w.alice
+            .encrypt(
+                &w.channel,
+                &ChannelMessage {
+                    sender: w.alice.identity_actor_id(),
+                    sequence: 1,
+                    channel_epoch: 0,
+                    body: ChannelMessageBody::Text("from A1 at N".into()),
+                    timestamp: Timestamp::now(),
+                },
+            )
+            .unwrap();
+        block_on(w.sync.save_engine_provider_if_changed(&w.alice)).unwrap();
+
+        let stored = stored_provider(&w);
+        assert_eq!(
+            stored.pending_commit_hash(&w.channel),
+            Some(stamp),
+            "A1's put at the same epoch kept A2's stamped pending"
+        );
+        assert_eq!(
+            stored.answer_own_leaf_claim(&w.alice.identity_actor_id(), &w.channel, epoch_n, stamp),
+            OwnLeafAnswer::Ours,
+            "so A2's commit, landing now, is still answered ours"
         );
     }
 }

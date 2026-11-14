@@ -2702,6 +2702,7 @@ pub fn consent_card_row(
         ends: None,
         // Publisher-authored too, so fenced in this same pass.
         install: c.install.map(consent_install_row),
+        folder_picker: None,
     }
 }
 

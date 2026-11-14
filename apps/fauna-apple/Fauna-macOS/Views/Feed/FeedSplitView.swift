@@ -43,31 +43,19 @@ struct FeedSplitView: View {
         .task(id: appState.session.secretHex) {
             guard let client, let secret = appState.session.secretHex else { return }
             await vm.configure(api: client.api, secretHex: secret, deviceIdHex: client.deviceId)
-            await vm.loadFeeds()
             // Re-pull the CURRENT selection (Local if none) every time this page
             // becomes visible — the feed has no poll backstop, so a nav back must
             // re-fetch (mirrors linux's `connect_map` re-pull on visibility).
-            // Un-gating this from a `selectedFeedId == nil` check is what lets a
-            // mute set elsewhere in Settings reach the sealed scorers on return:
-            // `vm` is the persistent app-root FeedVM, so `selectedFeedId` survives
-            // across this view's remounts and the old nil-only guard skipped every
-            // re-entry after the first. `trendingSelected` is checked FIRST —
-            // selecting Trending also clears `selectedFeedId` (shared Rust), so
-            // without this branch a remount would silently kick the user off
-            // Trending back to Local (same class of bug `rehydrate()` already
-            // fixes for reconnect).
-            if vm.trendingSelected {
-                await vm.selectTrendingFeed()
-            } else if let current = vm.selectedFeedId {
-                await vm.selectFeed(current)
-            } else {
-                // Nothing selected and not on Trending → load the nest's Local
-                // timeline (ui/feed.md § Persistence; mirrors linux/web's
-                // `select_feed(None)`). Never `vm.feeds.first`: the nest lists the
-                // newest feed first, so that opened a ruled feed the user only
-                // just built and hid every post it did not match.
-                await vm.selectLocalFeed()
-            }
+            // `rehydrate` is `loadFeeds` + the shared `refreshCurrentFeed` seam,
+            // the iOS Feed tab's own entry path (priority #1): it re-runs whatever
+            // is selected — Local, Trending, a custom feed or the imported-posts
+            // selection — without changing it, and reloads the sealed scorers so
+            // a mute set elsewhere in Settings applies on return. Never re-select
+            // by hand here: `select_feed(nil)` clears `imported_selected`, so the
+            // archive import's View imported landed on plain Local (`feed.md`
+            // § State & data shape → *The imported-posts selection*), and
+            // `select_feed(current)` drops a viewer off Trending.
+            await vm.rehydrate()
         }
         // Re-pull the feed on WS-RPC reconnect (no poll backstop) so posts that
         // arrived while disconnected surface without a manual refresh.

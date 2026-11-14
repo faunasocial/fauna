@@ -8,7 +8,7 @@
   import PostCard from './PostCard.svelte';
   import { identity } from '#lib/store';
   import { siteLink } from '#lib/web-publish';
-  import { blobUrl, contentLabelFor, type FeedPostHost } from '#lib/feed-post-host.svelte';
+  import { advertiseConfirmBody, blobUrl, contentLabelFor, type FeedPostHost } from '#lib/feed-post-host.svelte';
   import type { BridgeIdentity } from '#lib/wasm';
 
   interface Props {
@@ -65,5 +65,9 @@
   oncopypaywalllink={host.copyPostPaywallLink}
   webLinkOrigin={$siteLink?.origin ?? null}
   webLinkCopied={host.webLink.copied?.postId === post.post_id ? host.webLink.copied : null}
+  nostrAdvertiseVerb={host.nostrAdvertiseVerbFor(post)}
+  advertiseConfirmBody={advertiseConfirmBody()}
+  onadvertisenostr={host.advertisePostOnNostr}
+  onstopadvertisingnostr={host.stopAdvertisingPostOnNostr}
   {onselect}
 />

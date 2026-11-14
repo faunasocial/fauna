@@ -314,6 +314,17 @@ public struct FaunaApp: App {
         // assembles on a real device (see the method). Mirrors macOS + android.
         FaunaAccounts.installPlatformCredentialStore()
 
+        // Lend the engine roster (File Provider domains + photo binding) to the
+        // launch folder pass before any conversations session is built, so the
+        // succession take-over never claims a set an engine here is bound to
+        // (succession-cut.md ruling (11)(l)). macOS installs none: its sync
+        // agent's roster is read in shared Rust. Mirrors android's FaunaApp.
+        // `#if os(iOS)`: the SwiftPM host build compiles this target for
+        // macOS, where the live roster (and the Rust read of it) does not exist.
+        #if os(iOS)
+            EngineRoster.install()
+        #endif
+
         // Start the in-process automation server in init() (before any render)
         // so its /health is up the moment the e2e driver polls it. Gated on
         // FAUNA_E2E_AGENT_PORT; mirrors FaunaMacApp.startInProcessAgentIfNeeded.
@@ -366,6 +377,10 @@ public struct FaunaApp: App {
                 // hosts hand it to `BridgeManagerVM` (family-safety.md §§
                 // Child-initiated contact requests / Feed-source approvals).
                 .environment(appState.familyStatus)
+                // The shared FaunaKit `FamilyView` re-binds the ward's
+                // `ScreenTimeStore` from its own status read on every visit
+                // (family-client-enforcement.md § Implementation status today).
+                .environment(appState.screenTime)
                 // The shared FaunaKit `SubscriptionTiersTab` reads
                 // `@Environment(WebPublishStore.self)` for the creator's web-site
                 // origin (the §4 provider form's return-URL display).
@@ -1414,11 +1429,14 @@ public struct FaunaApp: App {
         // `boundSets: []` (FP domain or RemoteOnly; the resident-engine arm can't
         // arise). Best-effort: only the appex-embedding `.xcodeproj`-built app
         // serves domains. Gated off e2e — FP domains + the shared app-group
-        // Keychain are machine-global (testing.md § conventions point 10).
+        // Keychain are machine-global (testing.md § conventions point 10) —
+        // save on a seat the harness launched from the appex-embedding app on
+        // its own ephemeral simulator (`FaunaE2E.fileProviderReconcile`, the
+        // `ios_file_provider_app` marker), where the domain stays that seat's.
         // `os(iOS)`-gated (not just canImport) — this file also typechecks for
         // the macOS host via the CrossPlatformUI shims, where UIDevice is absent.
         #if os(iOS)
-        if !FaunaE2E.isActive,
+        if !FaunaE2E.isActive || FaunaE2E.fileProviderReconcile,
            let secret = appState.session.secretHex,
            let nodeUrl = appState.session.nodeUrl,
            let deviceId = appState.session.deviceId {
@@ -1501,12 +1519,17 @@ public struct FaunaApp: App {
             // The saved nest is up but UNCLAIMED (verify 404 + setup-status claimed=false),
             // so no admin exists yet and the user must claim it themselves.
             if let secret { onboardingVM.machine.seedIdentity(secret: secret) }
+            // The kids build has no claim page: a child cannot claim a nest, so an
+            // unclaimed saved nest stays on handle entry, whose check says there is
+            // none to join (android's `AppLaunchVM` CLAIM_CODE arm).
+            #if !FAUNA_KIDS
             if let nodeUrl = material?.nestUrl {
                 onboardingVM.machine.navigateToClaimCodeForKnownNest(
                     nestUrl: nodeUrl,
                     handle: material?.handle ?? ""
                 )
             }
+            #endif
 
         case .pendingFactoryReset:
             // Factory-reset resume (gap CR-1). The code survives ONLY because it was minted
@@ -1530,11 +1553,16 @@ public struct FaunaApp: App {
             }
             onboardingVM.machine.reset()
             if let secret { onboardingVM.machine.seedIdentity(secret: secret) }
+            // The kids build re-enters at handle entry as well (no claim page).
+            #if !FAUNA_KIDS
             onboardingVM.machine.navigateToClaimCodeForKnownNestWithCode(
                 nestUrl: pending.nestUrl,
                 handle: pending.handle,
                 code: pending.claimCode
             )
+            #else
+            _ = pending
+            #endif
 
         case .awaitingManualDns:
             // Deferred-DNS relaunch (onboarding.md § App-launch routing): the user
@@ -2564,6 +2592,10 @@ public struct FaunaApp: App {
                 // Devices outcome 15's owner send-again poke — see the macOS twin
                 // (shared FaunaKit handler, fire-and-forget).
                 CustodyOwnerResendTestCommand.apply(client: appState.liveClient)
+            case AppOutboxDrainTestCommand.action:
+                // The app-only outbox drain, rung now — see the macOS twin
+                // (shared FaunaKit handler, fire-and-forget).
+                AppOutboxDrainTestCommand.apply()
             case "nav_back":
                 // The phone's back gesture (nav-bar back / edge swipe): pop the top
                 // screen off the visible tab's `NavigationStack`. iOS-only — macOS
@@ -3316,7 +3348,7 @@ public struct FaunaApp: App {
         // reset run it, so a sign-out or residue record a previous test left
         // never reaches this one (its residue dropped: no user in front of it).
         _ = SignOutResidueSurface.finish(
-            dismissAgent: false,
+            caller: .gesture,
             written: SignOutResidueSurface.recordSignOut(servedActor: appState.session.actorId))
         KeychainStore().deleteAll()
         // Reset the wizard machine so the next test (which doesn't relaunch
@@ -3661,8 +3693,20 @@ public struct FaunaApp: App {
         // (`claim_code_prefill()` feeds the input; the human never types it).
         onboardingVM.machine.reset()
         onboardingVM.machine.seedIdentity(secret: secretHex)
+        // The kids build has no claim page, so the wiped nest is not re-claimed
+        // from it: the wizard stays on handle entry (seeded above), as the launch
+        // router's factory-reset resume does on that build.
+        #if !FAUNA_KIDS
+        // The slot's qualified handle, never the session's bare localpart: the
+        // re-claim must carry the account's mail domain, or it derives email off
+        // and the mailbox never comes back (`AdminNestVM.reclaimHandle`).
         onboardingVM.machine.navigateToClaimCodeForKnownNestWithCode(
-            nestUrl: nestUrl, handle: handle, code: claimCode)
+            nestUrl: nestUrl,
+            handle: AdminNestVM.reclaimHandle(sessionHandle: handle, nestUrl: nestUrl),
+            code: claimCode)
+        #else
+        _ = (nestUrl, handle, claimCode)
+        #endif
 
         appState.isOnboarding = true
     }

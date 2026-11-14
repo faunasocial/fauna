@@ -203,6 +203,7 @@ class AccountSettingsVM @Inject constructor(
                 val line = when (blocked) {
                     is FfiEraseRemoveBlocked.ServedHere -> blocked.line
                     is FfiEraseRemoveBlocked.ServedElsewhere -> blocked.line
+                    is FfiEraseRemoveBlocked.CarryOwed -> blocked.line
                 }
                 switchError.value = resolveLocalized(context, line)
                 return@launch
@@ -414,10 +415,10 @@ class AccountSettingsVM @Inject constructor(
             // onboarding surface this hands them (`principles.md` § The user
             // always controls their data); every word of the line is shared.
             // On the caller's dispatcher, as the erase it replaces ran: no agent
-            // exchange (`dismissAgent = false`), only the sweep.
+            // exchange (the gesture caller), only the sweep.
             val outcome = accountStores.finishSignOut(
                 SignOutCredentialEraser(registry, secureStorage),
-                dismissAgent = false,
+                caller = com.fauna.ffi.FfiFinishCaller.GESTURE,
                 written = recorded,
             )
             WidgetDataWorker.refoldForAccountSwitch(context)

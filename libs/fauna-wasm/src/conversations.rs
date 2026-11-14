@@ -33,7 +33,7 @@ use fauna_core::identity::ActorId;
 use fauna_mail::spam::BayesianKnobs;
 use fauna_mls::types::ChannelId;
 use serde::Serialize;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,10 @@ use wasm_bindgen::prelude::*;
 // The FaunaMls rail's construction + inbound/wire drivers are wasm-only: they
 // reach the `WsConversationsRpc` seam + `MlsEngine` over the `Rc`-based WS-RPC
 // client, and the async drivers bridge to JS via `future_to_promise`.
+/// The custody mint — the owner's side of the custody ceremony on this rail.
+#[cfg(target_arch = "wasm32")]
+#[path = "conversations_custody.rs"]
+mod custody;
 #[cfg(target_arch = "wasm32")]
 use fauna_client_drafts::DraftsSync;
 // Cross-device MLS group-state sync (devices.md § Cross-device MLS group-state
@@ -583,6 +587,14 @@ pub struct WasmConversationsManager {
     /// `pollConversations` future can borrow it across the `await`-free read/write
     /// around each per-channel fetch.
     conv_cursors: Rc<RefCell<HashMap<ChannelId, i64>>>,
+    /// Set once [`Self::restore_mls_state`] has settled — the replica restored
+    /// and wired, or failed for good. Web's MLS engine is in-memory, so after a
+    /// reload it holds no group until the restore has run, and an engine with
+    /// no group is not evidence of a lost membership: until this is set the
+    /// offline outbox's sealing send answers retry, never park
+    /// (`crate::offline_outbox::WebMlsIntentSender`), and its settling is a
+    /// drain edge (`devices.md` § Offline compose → *Drain*).
+    mls_restored: Rc<Cell<bool>>,
     /// The [`Self::poll_folders`] twin of [`Self::conv_cursors`] — per-**folder**
     /// channel commit cursors, kept separate because folder channels are
     /// commit-only, bind no thread, and are derived from the engine rather than
@@ -973,6 +985,7 @@ impl WasmConversationsManager {
             peer_anchor_sweep: Rc::new(RefCell::new(None)),
             fauna_mls: RefCell::new(None),
             conv_cursors: Rc::new(RefCell::new(HashMap::new())),
+            mls_restored: Rc::new(Cell::new(false)),
             folder_cursors: Rc::new(RefCell::new(HashMap::new())),
             scheduling_cursors: Rc::new(RefCell::new(HashMap::new())),
             scheduling_successions: fauna_client_caldav::SuccessionMemo::new(),
@@ -2632,6 +2645,13 @@ impl WasmConversationsManager {
                 ),
             ),
         ));
+        // The account-custody ceremony sink (`ui/devices.md` § Custody facet):
+        // the owner's side of the custody ceremony rides this rail — a friend's
+        // accept and the A7 receipts arrive here and are captured into the
+        // account store, each move scheduling a drive pass
+        // (`conversations_custody`). The twin of the shared native
+        // `fauna_client_custody::register_ceremony_sink`.
+        custody::register_ceremony_sink(&fauna_mls, client.clone(), ActorKeypair::from_secret(arr));
         // The room plane's five nest-backed seams (`RoomSeams`):
         // - the floor-roster REPORT (`conversation-rooms.md` § The floor
         //   roster): after every membership commit this device authors on a
@@ -2756,6 +2776,7 @@ impl WasmConversationsManager {
             ))),
             fauna_mls: RefCell::new(Some(fauna_mls)),
             conv_cursors: Rc::new(RefCell::new(HashMap::new())),
+            mls_restored: Rc::new(Cell::new(false)),
             folder_cursors: Rc::new(RefCell::new(HashMap::new())),
             scheduling_cursors: Rc::new(RefCell::new(HashMap::new())),
             scheduling_successions: fauna_client_caldav::SuccessionMemo::new(),
@@ -2973,6 +2994,7 @@ impl WasmConversationsManager {
                 manager: Arc::downgrade(&self.manager),
                 fauna_mls: Arc::downgrade(&backend),
                 cursors: Rc::downgrade(&self.conv_cursors),
+                restored: Rc::downgrade(&self.mls_restored),
             },
         );
     }
@@ -3748,6 +3770,14 @@ impl WasmConversationsManager {
     // WS-RPC round-trip + the device-owned-epoch gate stay entirely in Rust
     // (priority #2), same split as `restoreDrafts`/`saveDrafts` above.
 
+    /// Mark the MLS restore settled and drain what the offline outbox holds
+    /// (see [`Self::mls_restored`]).
+    #[cfg(target_arch = "wasm32")]
+    fn settle_mls_restore(&self) {
+        self.mls_restored.set(true);
+        crate::offline_outbox::spawn_mls_drain();
+    }
+
     /// Restore the cross-device MLS state replica and wire the device-owned-epoch
     /// gate + cursor — the web trigger for the shared
     /// [`fauna_client_mls_sync::orchestration::restore_and_wire_with_retry`]
@@ -3771,20 +3801,48 @@ impl WasmConversationsManager {
     pub fn restore_mls_state(&self) -> js_sys::Promise {
         let (Some(sync), Some(backend)) = (self.mls_sync.clone(), self.fauna_mls.borrow().clone())
         else {
+            // Nothing to restore: the engine is as whole as it will get.
+            self.settle_mls_restore();
             return js_sys::Promise::resolve(&JsValue::from_f64(0.0));
         };
+        let restored = Rc::clone(&self.mls_restored);
         // The retry loop holds `Weak` handles (upgraded per attempt): this object
         // keeps the strong refs for the page's lifetime, and a torn-down wasm
         // session ends an in-flight retry instead of pinning the dropped engine.
         let backend = std::sync::Arc::downgrade(&backend);
         let manager = std::sync::Arc::downgrade(&self.manager);
+        let handles = (backend.clone(), manager.clone(), Arc::clone(&sync));
         future_to_promise(async move {
             use fauna_client_mls_sync::RestoreRetryEnd;
-            match fauna_client_mls_sync::orchestration::restore_and_wire_with_retry(
+            let end = fauna_client_mls_sync::orchestration::restore_and_wire_with_retry(
                 sync, backend, manager,
             )
-            .await
+            .await;
+            // The wired plane, reachable by identity for the succession
+            // ceremony's awaited flush before its submit
+            // (`fauna_client_mls_sync::leave_flush`; `succession-aftermath.md`
+            // § Re-key scope → *The predecessor's replica is flushed before the
+            // submit*): the SPA's `saveMlsState` debounce cannot carry that
+            // moment, and the ceremony holds none of this object's handles.
+            if matches!(end, RestoreRetryEnd::Wired(_))
+                && let (Some(backend), Some(manager)) = (handles.0.upgrade(), handles.1.upgrade())
             {
+                fauna_client_mls_sync::leave_flush::register_live_plane(
+                    backend.engine().identity_actor_id(),
+                    &manager,
+                    &backend,
+                    handles.2,
+                );
+            }
+            // Wired or failed for good, the engine now holds every group this
+            // tab will get back: the outbox may judge a membership from it,
+            // and what an earlier run queued drains now. A dropped session
+            // settles nothing — its sender is gone with it.
+            if !matches!(end, RestoreRetryEnd::SessionDropped) {
+                restored.set(true);
+                crate::offline_outbox::spawn_mls_drain();
+            }
+            match end {
                 RestoreRetryEnd::Wired(restored) => Ok(JsValue::from_f64(restored as f64)),
                 RestoreRetryEnd::Failed(e) => {
                     Err(JsValue::from_str(&format!("restore mls state: {e}")))
@@ -3925,6 +3983,31 @@ impl WasmConversationsManager {
                 .await
                 .map(|_| JsValue::UNDEFINED)
                 .map_err(|e| JsValue::from_str(&format!("save drafts: {e}")))
+        })
+    }
+
+    /// The leave door's save (`reserved-folders.md` § The leave-flush promise):
+    /// [`saveDrafts`](Self::save_drafts) through the shared
+    /// `DraftsSync::save_on_leave`, which first opens a save gate the launch
+    /// restore has not lifted yet with one read, whose bytes FILL the store
+    /// (`ConversationsManager::fill_drafts_for_leave`, never over a live
+    /// draft) before the snapshot is saved. Rejects with the read or save
+    /// error; the SPA logs it and the door goes on.
+    #[wasm_bindgen(js_name = saveDraftsOnLeave)]
+    pub fn save_drafts_on_leave(&self) -> js_sys::Promise {
+        let Some(sync) = self.drafts_sync.clone() else {
+            return js_sys::Promise::resolve(&JsValue::UNDEFINED);
+        };
+        let mgr = self.manager.clone();
+        let epoch = mgr.identity_epoch();
+        let captured = mgr.drafts_snapshot_bytes();
+        future_to_promise(async move {
+            sync.save_on_leave(captured, |resting| {
+                mgr.fill_drafts_for_leave(epoch, &resting)
+            })
+            .await
+            .map(|_| JsValue::UNDEFINED)
+            .map_err(|e| JsValue::from_str(&format!("save drafts on leave: {e}")))
         })
     }
 
@@ -4179,6 +4262,9 @@ impl WasmConversationsManager {
         let client = self.nest_client.borrow().clone();
         future_to_promise(async move {
             let Some(client) = client else {
+                // The client-less manager reads no inbox; say so, or its empty
+                // list reads exactly like "no knock waits" (convention 6).
+                tracing::warn!("pending shares: this manager has no nest client — listing none");
                 return crate::rpc::to_js(&Vec::<PendingShareJs>::new());
             };
             let inbox = fauna_client_inbox::InboxClient::new(client);
@@ -4366,6 +4452,19 @@ impl WasmConversationsManager {
             .with_commit_gate(Arc::new(gate_backend))
             .with_grant_log(crate::account_runtime::ledger_seam());
             if let Some(device_id) = device_id_hex {
+                // The take-over where no engine runs for the set
+                // (`succession-cut.md` ruling (11)(l)): web runs no sync engine,
+                // so every set's adoption marker is this walk's.
+                author =
+                    author.with_succession_take_over(fauna_client_folders::succession_take_over(
+                        client.clone(),
+                        &keypair,
+                        crate::account_runtime::folder_key_store(actor_hex.clone()),
+                        device_id.clone(),
+                        attested_predecessor_ids(&actor_hex),
+                        crate::succession::account_registry()
+                            .predecessor_backup_keys_by_actor(&actor_hex),
+                    ));
                 author =
                     author.with_served_set_converge(fauna_client_folders::served_set_converge(
                         client,

@@ -119,29 +119,33 @@ public final class SignOutResidueSurface: SignOutResidueSurfacing, @unchecked Se
     /// **The one routine** the sign-out's tail, the launch and Remove Again
     /// run — shared Rust's finish over this seat's install base and store
     /// container: the serving question, the sync agent dismissed
-    /// (`dismissAgent`; the gesture's own stop already did it), the wipe, each
+    /// (for every `caller` but `.gesture`, whose own stop already did it), the wipe, each
     /// recorded account's scopes and auxiliary slots, the residue re-sweep, the
     /// residue record written before the sign-out record clears (decisions
     /// 2–6). `ownLock` is a lock this process still holds (the macOS window's
     /// instance lock during its own sign-out), put down around the run;
     /// `written` is the gesture's `recordSignOut` answer, `nil` elsewhere.
     ///
-    /// Blocking file I/O and, with `dismissAgent`, up to the agent budget per
+    /// `caller` is which of the three runs this is: while the registry names
+    /// somebody only `.removeAgain` re-sweeps the residue record, its recorded
+    /// paths only, the credential half held as recorded (decision 3).
+    ///
+    /// Blocking file I/O and, but for the gesture, up to the agent budget per
     /// recorded account: call it off the main actor.
     public static func finish(
-        ownLock: FfiAccountInstanceLock? = nil, dismissAgent: Bool, written: [String]?
+        ownLock: FfiAccountInstanceLock? = nil, caller: FfiFinishCaller, written: [String]?
     ) -> SignOutFinishOutcome {
-        finish(seat: .live, ownLock: ownLock, dismissAgent: dismissAgent, written: written)
+        finish(seat: .live, ownLock: ownLock, caller: caller, written: written)
     }
 
     static func finish(
-        seat: ResidueSeat, ownLock: FfiAccountInstanceLock? = nil, dismissAgent: Bool,
+        seat: ResidueSeat, ownLock: FfiAccountInstanceLock? = nil, caller: FfiFinishCaller,
         written: [String]?
     ) -> SignOutFinishOutcome {
         let outcome = signOutFinish(
             registry: seat.registry(), baseDirs: [seat.baseDir],
             storeContainerDir: seat.storeContainerDir, ownLock: ownLock,
-            host: SignOutHost(registry: seat.registry), dismissAgent: dismissAgent,
+            host: SignOutHost(registry: seat.registry), caller: caller,
             written: written)
         if outcome.refused {
             logMessage(

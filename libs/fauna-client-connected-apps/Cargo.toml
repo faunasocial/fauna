@@ -9,7 +9,7 @@ license.workspace = true
 default = []
 # Turn on UniFFI scaffolding when consumed by fauna-ffi. Forwards the ATProto
 # settings machine's, whose `ConsentCardRow` this snapshot carries.
-uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-atproto-settings-machine/uniffi", "dep:fauna-uniffi-async"]
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-atproto-settings-machine/uniffi", "fauna-client-pair/uniffi", "dep:fauna-uniffi-async"]
 # Native-only: forwards `fauna-core`'s `local-clock`, which `compose` needs for
 # `format_unix_local_ms` (wasm has no OS timezone database, so web renders
 # instants in JS — the same split `fauna-client-dns` and `fauna-client-status`
@@ -51,6 +51,13 @@ fauna-client-mail-settings = { path = "../fauna-client-mail-settings" }
 # (`fauna.capabilities.{mint,revoke}`), which an approve of a records consent
 # runs through `fauna_atproto_settings_machine::consent_grant`. Wasm-clean.
 fauna-client-capabilities = { path = "../fauna-client-capabilities" }
+# The trust facet's row shapes — `TrustGrantRow` / `TrustHistoryRow` /
+# `TrustLens`, the Nests row's own projections — and its word doors
+# (`principal_scope_labels`, `trust_status_label`), reused so a principal's
+# facet is the Nests facet's shape, never a second copy
+# (`docs/goal/ui/connected-apps.md` § The trust facet and history lens).
+# Wasm-clean, and does not depend back on this crate.
+fauna-client-pair = { path = "../fauna-client-pair" }
 async-trait = "0.1"
 hex = { workspace = true }
 serde = { workspace = true }

@@ -764,6 +764,13 @@ class WebBridgeDriver(HttpBridgeDriver):
         context; otherwise reload the live page. Then re-inject the agent and wait
         for the SPA to rehydrate."""
         self._read_crash_before_close("the relaunch")
+        if self.__dict__.get("_replica_wipes"):
+            # `wipe_replica_at_next_relaunch`: close the SPA first, so no
+            # document holds the store open while it is deleted.
+            if not self._app_killed:
+                self._post("/page/kill", {})
+                self._app_killed = True
+            self._delete_owed_replicas()
         if self._app_killed:
             self._post("/page/relaunch", {"url": self._spa_url or ""}, timeout=HEAVY_BOOT_TIMEOUT_S)
             self._app_killed = False
@@ -774,6 +781,77 @@ class WebBridgeDriver(HttpBridgeDriver):
         self._inject_agent()
         self._ensure_agent()
         self._await_identity_restored()
+
+    def wipe_replica_at_next_relaunch(self, actor_id_hex: str) -> bool:
+        """Web's arm of `HttpBridgeDriver.wipe_replica_at_next_relaunch`: the
+        next `hard_reload()` boots over an origin whose account store for
+        `actor_id_hex` is gone while its identity (the registry's writer key in
+        `localStorage`) stays — a device that has never listed the account.
+
+        A web relaunch always keeps the origin's store (the BrowserContext
+        outlives the page), so there is always a replica to withhold: True.
+        The delete runs at that relaunch, after the SPA's page is closed — an
+        open connection would block `indexedDB.deleteDatabase` — from a
+        same-origin static document that runs no app
+        (`open_lock_holder_tab`), exactly what `IndexedDbBackend::delete` does:
+        the database, then the OPFS segment directory."""
+        self.__dict__.setdefault("_replica_wipes", set()).add(actor_id_hex.lower())
+        return True
+
+    _DELETE_STORE_JS = """async ([name, dir]) => {
+      const outcome = await new Promise((resolve) => {
+        const req = indexedDB.deleteDatabase(name);
+        req.onsuccess = () => resolve('deleted');
+        req.onerror = () => resolve('error: ' + (req.error && req.error.name));
+        req.onblocked = () => resolve('blocked: another connection holds ' + name);
+      });
+      if (outcome !== 'deleted') return outcome;
+      try {
+        const root = await navigator.storage.getDirectory();
+        await root.removeEntry(dir, { recursive: true });
+      } catch (e) {
+        if (!(e && e.name === 'NotFoundError')) return 'opfs: ' + (e && e.name);
+      }
+      const left = (await indexedDB.databases()).map((d) => d.name);
+      return left.includes(name) ? 'still listed: ' + name : 'deleted';
+    }"""
+
+    def _delete_owed_replicas(self) -> None:
+        """Delete every owed actor's store from the killed page's preserved
+        context (see `wipe_replica_at_next_relaunch`); raises naming the
+        browser's answer when a store would survive, so the relaunch below can
+        never pass for a never-listed replica while it holds the old one."""
+        import json as _json
+
+        from helpers.web_store import ACCOUNT_STORE_ROOT
+
+        wipes = self.__dict__.pop("_replica_wipes", set())
+        holder = self.open_lock_holder_tab()
+        try:
+            for actor in sorted(wipes):
+                # A store's name is `<root>/<actor-id-hex, lowercase>`
+                # (`fauna_account_store::root::StoreRoot::store_name`): the
+                # IndexedDB database, and, folded to one path component
+                # (`physical.rs::sanitize_component` — every byte outside
+                # `[A-Za-z0-9_-]` as lowercase `%xx`), the OPFS segment
+                # directory at the origin's OPFS root.
+                name = f"{ACCOUNT_STORE_ROOT}/{actor}"
+                folded = "".join(
+                    c if (c.isascii() and c.isalnum()) or c in "-_" else f"%{ord(c):02x}"
+                    for c in name
+                )
+                outcome = holder.eval_js(
+                    f"({self._DELETE_STORE_JS})({_json.dumps([name, folded])})"
+                )
+                if outcome != "deleted":
+                    raise RuntimeError(
+                        f"the web replica wipe of store {name!r} answered {outcome!r}"
+                    )
+        finally:
+            try:
+                self._delete(f"/page?page={holder._page_id}")
+            except Exception:
+                pass
 
     # A window global set on the document a hard navigation leaves: the new
     # document never carries it, so its absence is the state "the navigation
@@ -1133,6 +1211,14 @@ class WebBridgeDriver(HttpBridgeDriver):
         """
         self.call_command("barrier", timeout=timeout)
 
+    def set_outbox_drain_hold(self, held: bool) -> None:
+        """Set or clear this tab's in-process e2e outbox drain hold
+        (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`). A tab has no environment or
+        filesystem, so the hold file the desktop drivers set cannot reach it;
+        the tab's own pump reads this flag instead. Driven through
+        `helpers/outbox_drain.py`."""
+        self.call_command("outbox_drain_hold", {"held": bool(held)})
+
     # --- Convention 17 layer (c): focus_move / switch_pane, driver-level ---
     #
     # Both doors are overridden here rather than left to the base class's
@@ -1308,6 +1394,13 @@ class WebBridgeDriver(HttpBridgeDriver):
         )
         # Re-ensure agent in case navigation caused a full page reload
         self._ensure_agent()
+        if isinstance(session, dict) and session.get("secret_hex"):
+            # A signing-in patch hard-loads the SPA, which restores the identity
+            # from the registry asynchronously: hold until it has (the same wait
+            # `hard_reload` makes), so the caller's first actor-scoped command
+            # never meets "conversations manager: no identity yet" — the
+            # folder-share seats' `enable_real_faunamls` straight after it did.
+            self._await_identity_restored()
         self._sync_state_to_cache()
 
     def get_state(self, path: str | None = None, *,

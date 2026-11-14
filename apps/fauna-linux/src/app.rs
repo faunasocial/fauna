@@ -69,8 +69,18 @@ pub enum UiMessage {
 #[derive(Debug, Clone)]
 #[allow(dead_code, clippy::large_enum_variant)]
 pub enum DataMessage {
-    AuthSuccess {
+    /// The signed-in session exists on this device: posted once by
+    /// `launch_authenticated` at the authenticated shell's build, before the
+    /// bearer refresh starts, so it runs whether or not the nest answers. Its
+    /// arm runs every LOCAL post-auth hook (the session instance, the MLS
+    /// engine, the account runtime, the drafts rails) — tui's
+    /// `session::establish`. [`Self::AuthSuccess`] carries the network half.
+    SessionEstablished {
         actor_id: String,
+    },
+    /// The bearer is in hand: the NETWORK half of the post-auth hooks (the
+    /// WS-RPC connect, the nest reads). Never reached while the nest is down.
+    AuthSuccess {
         handle: String,
     },
     AuthFailed {
@@ -314,6 +324,14 @@ pub enum DataMessage {
     },
     KeyPackageCountLoaded {
         count: u32,
+    },
+    /// The key-package count read failed. A page-level fact of the Encryption
+    /// page (`settings.md` § Errors — `error-message` is page-level; tui's
+    /// `encryption_error`), never the app-wide banner: the read fires when the
+    /// build-once settings shell mounts, so with the nest unreachable a banner
+    /// would stand over every page the user visits afterwards.
+    KeyPackageCountFailed {
+        error: String,
     },
     HandleChanged {
         new_handle: String,
@@ -1298,6 +1316,27 @@ fn clamp_dims(width: i32, height: i32, max_w: i32, max_h: i32) -> (i32, i32) {
         width.clamp(MIN_WINDOW_WIDTH, cap_w),
         height.clamp(MIN_WINDOW_HEIGHT, cap_h),
     )
+}
+
+#[cfg(test)]
+mod transport_loss_banner_tests {
+    //! A lost connection never takes the app-wide banner ([`is_transport_loss`]),
+    //! with or without the `<kind>: ` prefix `ActionResult::Failed` adds; any
+    //! other failure still does.
+    use super::is_transport_loss;
+    use crate::i18n::strings::error::protocol::{DISCONNECTED, TIMEOUT};
+
+    #[test]
+    fn a_lost_connection_is_kept_off_the_banner_and_other_failures_are_not() {
+        assert!(is_transport_loss(DISCONNECTED));
+        assert!(is_transport_loss(&format!(
+            "fauna.spam.get_preferences: {DISCONNECTED}"
+        )));
+        assert!(!is_transport_loss(&format!(
+            "fauna.spam.get_preferences: {TIMEOUT}"
+        )));
+        assert!(!is_transport_loss("fauna.profile.handle.change: taken"));
+    }
 }
 
 #[cfg(test)]
@@ -2440,13 +2479,21 @@ pub fn handle_ui_message(
 ) {
     match msg {
         UiMessage::Data(data_msg) => match data_msg {
-            DataMessage::AuthSuccess { actor_id, handle } => {
-                // Breadcrumbs: this arm is the longest stretch of GTK-main-thread
-                // work in the app, and until 2026-08-17 only its MLS and P2P steps
-                // said anything, leaving a large silent gap (the account-cache read
-                // and the sync-agent install). See the note in
-                // `views::onboarding::launch_main_app_after_signin`.
-                tracing::info!("[launch] AuthSuccess: acquiring the session instance");
+            DataMessage::SessionEstablished { actor_id } => {
+                // The LOCAL half of the session's post-auth hooks: everything that reads
+                // only this device's state, run once per signed-in session at the
+                // authenticated shell's build (`launch_authenticated` posts this message
+                // before it starts the bearer refresh), whether or not the nest answers —
+                // tui's `session::establish` order (`account-client-lifecycle.md` § The
+                // client-side lifecycle). The NETWORK half stays on `AuthSuccess` below,
+                // which a launch with the nest down does not reach until the nest comes
+                // back; hosting the account runtime here is what lets such a launch answer
+                // a never-listed scope with its first-listing refusal (§ *The first
+                // listing*) instead of a store that never mounts.
+                //
+                // Breadcrumbs: this arm is the longest stretch of GTK-main-thread work in
+                // the app; see the note in `views::onboarding::launch_main_app_after_signin`.
+                tracing::info!("[launch] SessionEstablished: acquiring the session instance");
                 // The (OS login, account) single-instance guard — become this
                 // account's one instance BEFORE opening any of its scoped
                 // state below (MLS db, P2P stores, sync agent), reusing the
@@ -2462,34 +2509,14 @@ pub fn handle_ui_message(
                     refusal.exit(actor_id);
                 }
 
-                // Update state.
-                {
-                    let mut s = state.borrow_mut();
-                    s.actor_id = actor_id.clone();
-                    s.handle = handle.clone();
-                    s.connected = true;
-                }
-
-                // Update tray connection state.
-                *crate::tray::tray_state().connected.lock().unwrap() = true;
-
-                // Update status view.
+                state.borrow_mut().actor_id = actor_id.clone();
                 widgets.status_actor_id_row.set_subtitle(actor_id);
                 // The identity cell paints from the registry's cache only
-                // (`settings.md` § Layout & flow item 1), never this reply.
+                // (`settings.md` § Layout & flow item 1), never a nest reply.
                 views::status::paint_identity_cell(
                     &widgets.status_handle_row,
                     &widgets.status_tier_row,
                 );
-                widgets
-                    .status_connection_row
-                    .set_subtitle(common::CONNECTED);
-
-                // Start WS-RPC: connects the shared NestClient and spawns
-                // the connection-state + push pumps. Replaces the legacy
-                // raw `?token=` push socket (WS-RPC adoption, tracked internally).
-                tracing::info!("[launch] AuthSuccess: starting WS-RPC");
-                fauna_client.start_ws_rpc();
 
                 // The post-succession aftermath — FIRST among the post-auth hooks,
                 // and the ordering is deliberate: the pass is spawned ahead of the
@@ -2499,36 +2526,9 @@ pub fn handle_ui_message(
                 // one in-memory registry walk and starts nothing.
                 fauna_client.run_succession_aftermath();
 
-                // The deployment-seed custody leg's post-auth edge
-                // (box-recovery.md § The plane-era recovery floor → (c) The
-                // writes): runs now only if the account store is already up;
-                // otherwise `account_runtime::install`'s store-ready edge below,
-                // landing second, runs it. A run ending with custody unconfirmed
-                // for an admin surfaces as the custody-warning toast.
-                fauna_client.run_deployment_seed_custody_leg();
-
-                // The mail connect-time refresh, now and after every reconnect
-                // of this client (encryption-at-rest.md § Capability tiering →
-                // Content-sealing epochs; mail-credentials.md § Hard revoke →
-                // *Published before the nest moves*, rule (4)) — the shared
-                // trigger tui's `establish` spawns too. Best-effort / log-only;
-                // a no-op when mail is disabled.
-                fauna_client.spawn_mail_epoch_refresh_on_every_connect();
-
-                // Publish the subscriber encapsulation-key registry entry at the
-                // same hook (`post-quantum.md` § surface B); best-effort / log-only.
-                fauna_client.publish_subscriber_encaps_key();
-
-                // Run the feeders that have no page of their own, at the same
-                // universal post-auth hook (`critical-alerts.md` § Goal — a
-                // set-and-forget deployment must still raise its banner).
-                // tui's `session::establish` call is the reference; this is
-                // linux's leg.
-                fauna_client.run_critical_alert_sweep();
-
                 // Preload the sealed muted-keyword list into the conversation
-                // collapse cache (moderation.md § Muted keywords) at the same
-                // post-auth hook, so a matching DM collapses on a fresh launch
+                // collapse cache (moderation.md § Muted keywords) at session
+                // establishment, so a matching DM collapses on a fresh launch
                 // without first visiting the "Muted words" Settings page.
                 fauna_client.load_muted_keywords();
 
@@ -2629,25 +2629,6 @@ pub fn handle_ui_message(
                 // the agent from here on — file sync keeps running app-dead.
                 crate::sync_agent::install(fauna_client);
                 start_sync_agent_status_poll(widgets);
-                // Push (`common.md` § Registration): announce this device on
-                // every connection and re-arm the row when — and only when —
-                // this install opted in.
-                if let Some(actor) = fauna_client.actor_id() {
-                    crate::push::on_session_start(
-                        std::sync::Arc::clone(fauna_client.nest_rpc()),
-                        actor,
-                        fauna_client.runtime_handle(),
-                    );
-                }
-
-                // No in-app backup upload driver is started here: the slice-5
-                // flip (2026-07-29) made the owner's **source nest** the sole
-                // segment-backup writer, so this app no longer uploads segments
-                // at all. The nest's own `NestBackupWorker` sweeps every enrolled
-                // owner with each app asleep; this page only *reads* that
-                // work via `fauna.backup.status`, and audits it independently
-                // (`crate::backup_audit`).
-                // `message-segment-store.md` § Cross-location backup protocol.
 
                 // Build the shared conversations session (FaunaMls + SMTP + inbound
                 // mail) over the singleton manager and start its unified receive
@@ -2761,20 +2742,6 @@ pub fn handle_ui_message(
                     &succession_predecessors,
                 );
 
-                // Author-side subscription reconcile loop (monetization.md § The
-                // unifying model, grant path 2 + § Pillar 1): on connect (+ a poll
-                // backstop) auto-approve queued `auto_approve` follows and re-drive
-                // any crash-staged subscriber removal. Makes an encrypted-mode
-                // FOLLOW frictionless — the nest can't mint the KeyBlob, so the
-                // follow enqueues (`Queued`) until this loop mints + grants it.
-                // Independent of MLS (subscriptions custody seals under the owner's
-                // BackupKey), so it sits outside the conversations `mls` gate above.
-                crate::subscriptions_author::start(
-                    std::sync::Arc::clone(fauna_client.nest_rpc()),
-                    fauna_client.secret_bytes(),
-                    &fauna_client.runtime_handle(),
-                );
-
                 // Initialize P2P service. Reuses `account_dir`, already
                 // resolved + adopted above alongside the MLS engine — both are
                 // loose files under the same actor-scoped `fauna/` base.
@@ -2796,6 +2763,153 @@ pub fn handle_ui_message(
                         Err(e) => tracing::error!("P2P service init failed: {e}"),
                     }
                 }
+
+                // The co-present offline-share ceremony's identity half
+                // (`p2p.md` § Offline share initiation, row 334). Same
+                // no-work-here posture as tui's own `session.rs` post-auth
+                // hook, one step further: it does not even prepare a fetch —
+                // this only resolves the actor id whose hex IS the compare
+                // code, which is what makes the two entry buttons render; the
+                // ceremony LISTENER binds only when the user opens a panel.
+                // Then a repaint (the entry buttons become visible for the
+                // first time) and the group-share surface's own fetch,
+                // mirroring `fetch_folder_pending_shares` exactly.
+                // (The state itself was minted above, before the account
+                // runtime's install took its seat slot.)
+                #[cfg(feature = "p2p-share")]
+                {
+                    views::devices_folders::folders::render_offline_share(
+                        &widgets.offline_share,
+                        &widgets.offline_share_state.borrow().view(),
+                    );
+                }
+                // Clause 2 of the unfetched-policy ruling (family-safety.md
+                // § Content policy): restore the last-known supervision
+                // snapshot BEFORE the read below. "Read failed" and "read says
+                // unsupervised" are different facts, and rendering the second
+                // while the network is down is what let a ward walk past a
+                // bedtime lock by going offline (§ Screen time is enforced by
+                // pure client-local clock). Restores nothing when this device
+                // has never completed one successful read — clause 3's declared
+                // residual — so it costs an unsupervised user nothing.
+                //
+                // `own_policy`'s linux analogue (the ward's read-only policy
+                // summary) is deliberately NOT restored: the snapshot carries
+                // only the three client-enforced pillars, and synthesizing a
+                // ReachPolicy from it would show default REACH knobs the
+                // guardian never set. Those arrive with the read.
+                if let Some(snapshot) = crate::supervision_snapshot::load() {
+                    let guardian = snapshot.supervised_by.as_ref().map(|g| g.handle.clone());
+                    // `usage_today_minutes` is None: the day's cross-device
+                    // total is nest-accounted and unknowable offline. The
+                    // window half still binds; the budget half resumes at the
+                    // first heartbeat reply.
+                    crate::screen_lock::set_ward_screen_time(
+                        snapshot.screen_time,
+                        guardian.clone(),
+                        None,
+                    );
+                    crate::content_policy::set_ward_content_policy(snapshot.content_policy);
+                    crate::content_policy::set_ward_content_notify(snapshot.content_notify);
+                    if let Some(guardian) = guardian {
+                        // § Screen time requires the Family page stay reachable
+                        // read-only while a lock is up, so a restored lock must
+                        // bring its explanation surface with it.
+                        views::sidebar::show_family_sidebar_row(&widgets.sidebar_list_box);
+                        widgets
+                            .supervised_indicator
+                            .set_label(&family::supervised_indicator(&guardian));
+                        widgets.supervised_indicator.set_visible(true);
+                    }
+                }
+            }
+
+            DataMessage::AuthSuccess { handle } => {
+                // The NETWORK half of the post-auth hooks: the bearer is in hand, so the
+                // WS-RPC connection starts and the nest reads go out. Everything local —
+                // the session instance, the MLS engine, the account runtime, the drafts
+                // rails — already ran at `SessionEstablished`, once, whatever the nest did;
+                // nothing below may install a second account runtime (`account_runtime::install`
+                // would supersede the first).
+                {
+                    let mut s = state.borrow_mut();
+                    s.handle = handle.clone();
+                    s.connected = true;
+                }
+
+                // Update tray connection state.
+                *crate::tray::tray_state().connected.lock().unwrap() = true;
+
+                widgets
+                    .status_connection_row
+                    .set_subtitle(common::CONNECTED);
+
+                // Start WS-RPC: connects the shared NestClient and spawns
+                // the connection-state + push pumps. Replaces the legacy
+                // raw `?token=` push socket (WS-RPC adoption, tracked internally).
+                tracing::info!("[launch] AuthSuccess: starting WS-RPC");
+                fauna_client.start_ws_rpc();
+
+                // The deployment-seed custody leg's post-auth edge
+                // (box-recovery.md § The plane-era recovery floor → (c) The
+                // writes): runs now only if the account store is already up;
+                // otherwise `account_runtime::install`'s store-ready edge below,
+                // landing second, runs it. A run ending with custody unconfirmed
+                // for an admin surfaces as the custody-warning toast.
+                fauna_client.run_deployment_seed_custody_leg();
+
+                // The mail connect-time refresh, now and after every reconnect
+                // of this client (encryption-at-rest.md § Capability tiering →
+                // Content-sealing epochs; mail-credentials.md § Hard revoke →
+                // *Published before the nest moves*, rule (4)) — the shared
+                // trigger tui's `establish` spawns too. Best-effort / log-only;
+                // a no-op when mail is disabled.
+                fauna_client.spawn_mail_epoch_refresh_on_every_connect();
+
+                // Publish the subscriber encapsulation-key registry entry at the
+                // same hook (`post-quantum.md` § surface B); best-effort / log-only.
+                fauna_client.publish_subscriber_encaps_key();
+
+                // Run the feeders that have no page of their own, at the same
+                // universal post-auth hook (`critical-alerts.md` § Goal — a
+                // set-and-forget deployment must still raise its banner).
+                // tui's `session::establish` call is the reference; this is
+                // linux's leg.
+                fauna_client.run_critical_alert_sweep();
+
+                // Push (`common.md` § Registration): announce this device on
+                // every connection and re-arm the row when — and only when —
+                // this install opted in.
+                if let Some(actor) = fauna_client.actor_id() {
+                    crate::push::on_session_start(
+                        std::sync::Arc::clone(fauna_client.nest_rpc()),
+                        actor,
+                        fauna_client.runtime_handle(),
+                    );
+                }
+
+                // No in-app backup upload driver is started here: the slice-5
+                // flip (2026-07-29) made the owner's **source nest** the sole
+                // segment-backup writer, so this app no longer uploads segments
+                // at all. The nest's own `NestBackupWorker` sweeps every enrolled
+                // owner with each app asleep; this page only *reads* that
+                // work via `fauna.backup.status`, and audits it independently
+                // (`crate::backup_audit`).
+                // `message-segment-store.md` § Cross-location backup protocol.
+
+                // Author-side subscription reconcile loop (monetization.md § The
+                // unifying model, grant path 2 + § Pillar 1): on connect (+ a poll
+                // backstop) auto-approve queued `auto_approve` follows and re-drive
+                // any crash-staged subscriber removal. Makes an encrypted-mode
+                // FOLLOW frictionless — the nest can't mint the KeyBlob, so the
+                // follow enqueues (`Queued`) until this loop mints + grants it.
+                // Independent of MLS (subscriptions custody seals under the owner's
+                // BackupKey), so it sits outside the conversations `mls` gate above.
+                crate::subscriptions_author::start(
+                    std::sync::Arc::clone(fauna_client.nest_rpc()),
+                    fauna_client.secret_bytes(),
+                    &fauna_client.runtime_handle(),
+                );
 
                 // Trigger contacts, calendars, feeds, quota, node-info fetch.
                 fauna_client.fetch_knocks();
@@ -2860,26 +2974,10 @@ pub fn handle_ui_message(
                 // with you" section (`folders.md` § Sharing, Recipient side).
                 // Re-fetched when the Folders sub-page becomes visible.
                 fauna_client.fetch_folder_pending_shares();
-                // The co-present offline-share ceremony's identity half
-                // (`p2p.md` § Offline share initiation, row 334). Same
-                // no-work-here posture as tui's own `session.rs` post-auth
-                // hook, one step further: it does not even prepare a fetch —
-                // this only resolves the actor id whose hex IS the compare
-                // code, which is what makes the two entry buttons render; the
-                // ceremony LISTENER binds only when the user opens a panel.
-                // Then a repaint (the entry buttons become visible for the
-                // first time) and the group-share surface's own fetch,
-                // mirroring `fetch_folder_pending_shares` exactly.
-                // (The state itself was minted above, before the account
-                // runtime's install took its seat slot.)
+                // The group-share surface's own fetch (the co-present ceremony's
+                // identity half painted at `SessionEstablished`).
                 #[cfg(feature = "p2p-share")]
-                {
-                    views::devices_folders::folders::render_offline_share(
-                        &widgets.offline_share,
-                        &widgets.offline_share_state.borrow().view(),
-                    );
-                    fauna_client.fetch_group_shares();
-                }
+                fauna_client.fetch_group_shares();
                 // Initial Media-page load — the explorer renders off the shared
                 // `MediaMachine` (cross-set `fauna.media.list`); nav-to-Media
                 // refreshes it again (`connect_map`).
@@ -2894,45 +2992,6 @@ pub fn handle_ui_message(
                         .spawn(async move { machine.refresh(Some(backup_key)).await });
                 }
                 fauna_client.check_admin_status();
-                // Clause 2 of the unfetched-policy ruling (family-safety.md
-                // § Content policy): restore the last-known supervision
-                // snapshot BEFORE the read below. "Read failed" and "read says
-                // unsupervised" are different facts, and rendering the second
-                // while the network is down is what let a ward walk past a
-                // bedtime lock by going offline (§ Screen time is enforced by
-                // pure client-local clock). Restores nothing when this device
-                // has never completed one successful read — clause 3's declared
-                // residual — so it costs an unsupervised user nothing.
-                //
-                // `own_policy`'s linux analogue (the ward's read-only policy
-                // summary) is deliberately NOT restored: the snapshot carries
-                // only the three client-enforced pillars, and synthesizing a
-                // ReachPolicy from it would show default REACH knobs the
-                // guardian never set. Those arrive with the read.
-                if let Some(snapshot) = crate::supervision_snapshot::load() {
-                    let guardian = snapshot.supervised_by.as_ref().map(|g| g.handle.clone());
-                    // `usage_today_minutes` is None: the day's cross-device
-                    // total is nest-accounted and unknowable offline. The
-                    // window half still binds; the budget half resumes at the
-                    // first heartbeat reply.
-                    crate::screen_lock::set_ward_screen_time(
-                        snapshot.screen_time,
-                        guardian.clone(),
-                        None,
-                    );
-                    crate::content_policy::set_ward_content_policy(snapshot.content_policy);
-                    crate::content_policy::set_ward_content_notify(snapshot.content_notify);
-                    if let Some(guardian) = guardian {
-                        // § Screen time requires the Family page stay reachable
-                        // read-only while a lock is up, so a restored lock must
-                        // bring its explanation surface with it.
-                        views::sidebar::show_family_sidebar_row(&widgets.sidebar_list_box);
-                        widgets
-                            .supervised_indicator
-                            .set_label(&family::supervised_indicator(&guardian));
-                        widgets.supervised_indicator.set_visible(true);
-                    }
-                }
                 // The two GATED family surfaces are driven by one post-auth
                 // `fauna.family.status` read (family-safety.md § App surface:
                 // "Driven by fauna.family.status read at login"): the `family-tab`
@@ -4168,6 +4227,14 @@ pub fn handle_ui_message(
                 views::status::update_key_packages(&widgets.status_handles(), u64::from(*count));
             }
 
+            DataMessage::KeyPackageCountFailed { error } => {
+                // The Status page's MLS leg stays absent (`status.md` § State &
+                // data shape: `None` until the read resolves); the Encryption
+                // page says why on its own `error-message`.
+                tracing::warn!("fauna.conversations.keypackage.count: {error}");
+                crate::settings::encryption::show_count_error(error);
+            }
+
             DataMessage::MessagesLoaded {
                 conversation_id,
                 messages,
@@ -4824,6 +4891,13 @@ pub fn handle_ui_message(
                 {
                     fauna_client.fetch_bridges();
                 }
+                // A follow / unfollow made with no nest rests in the outbox
+                // (`account-offline-mutation.md` § The offline-mutation
+                // contract): the page error clears and no list changes — the
+                // bridges page paints only what the nest persisted.
+                if context == crate::client::BRIDGE_FOLLOW_QUEUED {
+                    clear_error_message(widgets);
+                }
                 if context == "plugin_install_opened" {
                     widgets.bridges_plugins.install_opened();
                 }
@@ -5119,7 +5193,25 @@ pub fn set_error_message(widgets: &WidgetHandles, message: &str) {
     if crate::settings::account_error_slot_is_held() {
         return;
     }
+    if is_transport_loss(message) {
+        return;
+    }
     crate::settings::render_error_label(&widgets.error_label, Some(message));
+}
+
+/// A "the connection to the nest was lost" result (`NestClientError::
+/// RpcDisconnected`'s text, after any `<kind>: ` prefix) never takes the
+/// app-wide banner — the display-boundary rule `ui/README.md` § *A
+/// cancellation is not an error* states for a cancellation, applied to the
+/// transport. The banner is sticky and app-wide, so a background read that
+/// failed while the nest was down (the settings shell's mount-time reads among
+/// them) would stand over every page the user opened afterwards, masking the
+/// page's own `error-message` — the per-affordance reason, `common.needs_nest`,
+/// that `account-offline-mutation.md` § The offline-mutation contract carries instead of
+/// "a global 'you are offline' banner". The caller's toast still shows it and
+/// the funnel above has logged it.
+fn is_transport_loss(message: &str) -> bool {
+    message.ends_with(crate::i18n::strings::error::protocol::DISCONNECTED)
 }
 
 /// Set the app-wide `warning-message` banner to `message` and make it visible.

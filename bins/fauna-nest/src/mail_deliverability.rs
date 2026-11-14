@@ -22,7 +22,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fauna_mail::deliverability::{
     self, DmarcMode, GMAIL_PROBE_MX_HOST, GMAIL_PROBE_MX_PORT, dnsbl_listed, dnsbl_query_name,
-    reverse_dns_ptr_name,
+    dnsbl_refused, reverse_dns_ptr_name,
 };
 use fauna_protocol::bridge_routing::{BlocklistServerResult, DiagnosticCheckResult};
 
@@ -543,6 +543,25 @@ pub async fn run_blocklist_self_check(
                 reason: String::new(),
                 error: String::new(),
             }),
+            LookupOutcome::Records(a) if dnsbl_refused(&a) => {
+                // 127.255.255.x: the DNSBL refused the query (open resolver,
+                // rate limit) — could not check, never a listing.
+                let why = match resolver.lookup(&query, "TXT").await {
+                    LookupOutcome::Records(txt) => txt.join(" "),
+                    _ => String::new(),
+                };
+                let error = if why.is_empty() {
+                    "could not check: the DNSBL refused the query".to_string()
+                } else {
+                    format!("could not check: the DNSBL refused the query — {why}")
+                };
+                out.push(BlocklistServerResult {
+                    server: server.clone(),
+                    listed: false,
+                    reason: String::new(),
+                    error,
+                });
+            }
             LookupOutcome::Records(a) => {
                 let listed = dnsbl_listed(&a);
                 let reason = if listed {
@@ -851,6 +870,26 @@ mod tests {
             .unwrap();
         assert!(barr.listed);
         assert_eq!(barr.reason, "Listed for spam pattern X");
+
+        // A refused query (127.255.255.254) is a could-not-check, not a listing.
+        r.set(
+            "7.113.0.203.zen.spamhaus.org",
+            "A",
+            rec(&["127.255.255.254"]),
+        );
+        r.set(
+            "7.113.0.203.zen.spamhaus.org",
+            "TXT",
+            rec(&["Error: open resolver"]),
+        );
+        let refused =
+            run_blocklist_self_check(&r, Some(ip), &servers, Some("zen.spamhaus.org")).await;
+        assert!(!refused[0].listed);
+        assert_eq!(
+            refused[0].error,
+            "could not check: the DNSBL refused the query — Error: open resolver"
+        );
+        r.set("7.113.0.203.zen.spamhaus.org", "A", LookupOutcome::Empty);
 
         // Force-refresh a single server.
         let one = run_blocklist_self_check(&r, Some(ip), &servers, Some("zen.spamhaus.org")).await;

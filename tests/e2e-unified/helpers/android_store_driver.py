@@ -35,7 +35,7 @@ import urllib.request
 from pathlib import Path
 
 from drivers.port_util import drain_pipes, find_free_port, popen_group_kwargs, reap_descendants_of
-from helpers import android_device, android_venue
+from helpers import android_device
 
 #: The app's store identity (``installers/android.md`` § Store identity).
 FAUNA_PACKAGE = "social.fauna.fauna"
@@ -52,10 +52,10 @@ DRIVER_DEVICE_PORT = 18510
 #: The AVD the witness needs (the venue's AVD is a ``google_apis`` image, which
 #: carries no Play Store).
 PLAY_AVD_NEED = (
-    "the fauna-e2e-play AVD (serial emulator-5556, an arm64 Google Play system "
+    "the fauna-e2e-play AVD (serial 127.0.0.1:18510, an arm64 Google Play system "
     "image, system-images;android-35;google_apis_playstore;arm64-v8a) with the "
     "Play Store signed in once to an account on the internal testers list; run "
-    "`just e2e-android-store-test --device-serial emulator-5556` "
+    "`just e2e-android-store-test --device-serial 127.0.0.1:18510` "
     "(feature-catalog.md § Implementation status today, how the Android "
     "store install is driven)"
 )
@@ -180,7 +180,6 @@ class StoreDriver:
     def __init__(self, apk: Path):
         self._apk = apk
         self._proc: subprocess.Popen | None = None
-        self._lease = None
         self._local_port: int | None = None
         self._log = None
 
@@ -194,11 +193,9 @@ class StoreDriver:
     def start(self) -> None:
         subprocess.run([*adb(), "install", "-r", "-t", str(self._apk)],
                        check=True, capture_output=True, timeout=120)
-        if android_device.adb_server():
-            self._lease = android_venue.lease_bridge_forward_port()
-            self._local_port = self._lease.port
-        else:
-            self._local_port = find_free_port()
+        # The forward listens where the adb server runs -- this machine, in the
+        # venue too (its server is ours, `helpers/android_emu.py`).
+        self._local_port = find_free_port()
         subprocess.run([*adb(), "forward", f"tcp:{self._local_port}", f"tcp:{DRIVER_DEVICE_PORT}"],
                        check=True, capture_output=True, timeout=30)
         self._proc = subprocess.Popen(
@@ -230,9 +227,6 @@ class StoreDriver:
             subprocess.run([*adb(), "forward", "--remove", f"tcp:{self._local_port}"],
                            capture_output=True, timeout=30)
             self._local_port = None
-        if self._lease:
-            self._lease.release()
-            self._lease = None
 
     # ── wire ────────────────────────────────────────────────────────────
 

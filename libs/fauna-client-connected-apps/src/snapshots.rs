@@ -7,6 +7,7 @@ use fauna_core::localized::LocalizedText;
 use serde::{Deserialize, Serialize};
 
 pub use fauna_atproto_settings_machine::{ConsentCardRow, ConsentSetRow};
+pub use fauna_client_pair::{TrustGrantRow, TrustHistoryRow, TrustLens};
 
 /// A row's credential class — the page's grouping key and badge
 /// (`third-party.md` § The roster model: "execution-form badge"). A principal
@@ -110,6 +111,30 @@ pub struct ConnectedAppRow {
     /// ([`crate::ConnectedAppsMachine::open_record`]).
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub oracle: Option<OracleSummaryRow>,
+    /// `Some` on a principal that attested a holder key, on a machine that
+    /// reads the owner's grant log, and only there: the keys the app holds
+    /// to the user's records (`connected-apps.md` § The trust facet and
+    /// history lens). `None` is no facet — never an empty one.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    #[serde(default)]
+    pub trust: Option<PrincipalTrust>,
+}
+
+/// A principal row's trust facet: the Nests row's Now / History lens over the
+/// principal's own grants (`fauna_client_capabilities::view_model::
+/// {principal_trust_facet, principal_history}`). No renew, revoke or review
+/// leaf — the row's one Revoke is the participant's revoke control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PrincipalTrust {
+    /// Which lens the row shows — [`crate::ConnectedAppsMachine::set_lens`],
+    /// Now by default.
+    pub lens: TrustLens,
+    /// The live grants, soonest-expiring first; empty is the explicit
+    /// *holds no keys* state. An expired grant stays listed.
+    pub grants: Vec<TrustGrantRow>,
+    /// Every event of those grants, most-recent-first, `Revoke`s included.
+    pub history: Vec<TrustHistoryRow>,
 }
 
 /// The oracle summary a served principal's row carries

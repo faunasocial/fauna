@@ -573,8 +573,14 @@ def _msix(tmp_path, arch="x64", manifest=None, extra=None):
         "App/fauna_ffi.dll": pe + b"".join(m + b"\x00" for m in _P2P_NATIVE),
         "fauna-sync-agent.exe": pe,
         "fauna_shell.dll": pe,
+        # Stand-ins: what is graded is where the files sit and that they are not
+        # empty, never their text (shipped-notices.md).
+        "LICENSE-MIT.txt": b"stand-in",
+        "LICENSE-APACHE.txt": b"stand-in",
+        "THIRD-PARTY-NOTICES.txt": b"stand-in",
     }
     entries.update(extra or {})
+    entries = {k: v for k, v in entries.items() if v is not None}
     path = tmp_path / f"Fauna-Store-{arch}.msix"
     with zipfile.ZipFile(path, "w") as z:
         for name, body in entries.items():
@@ -646,6 +652,14 @@ class TestStorePackageGrade:
     def test_debug_symbols_are_refused(self, builder, tmp_path):
         path = _msix(tmp_path, extra={"App/FaunaApp.pdb": b"symbols"})
         assert any(".pdb" in p for p in self._grade(builder, path))
+
+    @pytest.mark.parametrize("name", ["LICENSE-MIT.txt", "LICENSE-APACHE.txt", "THIRD-PARTY-NOTICES.txt"])
+    @pytest.mark.parametrize("body,word", [(None, "missing"), (b"", "empty")])
+    def test_a_package_without_its_licence_files_is_refused(self, builder, tmp_path, name, body, word):
+        """Every shipped binary carries the two licence texts and its notices file,
+        the Store package at its root (shipped-notices.md § Per channel)."""
+        problems = self._grade(builder, _msix(tmp_path, extra={name: body}))
+        assert any(name in p and word in p for p in problems), problems
 
     def test_the_automation_surface_is_refused(self, builder, tmp_path):
         """The packer refuses a test-flavour payload at staging; the grade re-reads

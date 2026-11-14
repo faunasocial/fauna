@@ -829,6 +829,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_complete_kids_no_joinable_nest()
+		})
+		if checksum != 770 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_complete_kids_no_joinable_nest: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_complete_probe_error()
 		})
 		if checksum != 12358 {
@@ -1180,6 +1189,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_is_kids()
+		})
+		if checksum != 51186 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_is_kids: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_is_loading()
 		})
 		if checksum != 30275 {
@@ -1194,6 +1212,15 @@ func uniffiCheckChecksums() {
 		if checksum != 20446 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_joining_nest_rules: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_kids_excises()
+		})
+		if checksum != 47078 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_kids_excises: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3928,6 +3955,11 @@ type OnboardingMachineInterface interface {
 	ClaimCodeSnapshot() ClaimCodeSnapshot
 	ClearError()
 	Complete(outcome HandleCheckOutcome, msgKey string, args map[string]string)
+	// The kids build's terminal handle-check line: no nest at `domain` the
+	// kid can join. The `local_no_nest` shape — a non-transient
+	// `ProbeError`, Continue off, no control checkbox — so no app shell
+	// matches a new outcome.
+	CompleteKidsNoJoinableNest(domain string)
 	CompleteProbeError(phase HandleCheckPhase, transient bool, cause string)
 	// [`Self::complete`], carrying the registered-probe's `first_sign_in` —
 	// written under the snapshot's lock, so the outcome and the fact are never
@@ -4164,6 +4196,8 @@ type OnboardingMachineInterface interface {
 	InviteError(ctx ErrorContext, transient bool, cause string) OnboardingStep
 	InviteRequestSnapshot() InviteRequestSnapshot
 	IsBuyableViaProvider(domain string) bool
+	// Whether this machine runs the kids build ([`Self::kids`]).
+	IsKids() bool
 	IsLoading() bool
 	// The nest's rules for the joining surface of the current step, in
 	// `lang`, or `None` when it shows none: on `invite_request`, and on
@@ -4173,6 +4207,12 @@ type OnboardingMachineInterface interface {
 	// document ([`fauna_client_policy::NestRulesSummary::is_shown`] — a
 	// document none of which applies here is shown, rules listed or not).
 	JoiningNestRules(lang string) *fauna_client_policy.NestRulesSummary
+	// Whether the kids build excises `outcome`: the three handle-check
+	// outcomes whose Continue sets a nest up (`DomainAvailable`,
+	// `RegisteredNoNest`) or claims one (`UnregisteredUnclaimedNest`).
+	// Joining by invite (`NestRunningUserUnregistered`) and signing in
+	// (`AlreadyOnNest`) are kept.
+	KidsExcises(outcome HandleCheckOutcome) bool
 	LocalNestReachable() bool
 	// Snapshot for the `nat_mode_choice` page. Pure read.
 	// Per `docs/goal/behavior/onboarding.md` § 3b-bis.
@@ -5548,6 +5588,20 @@ func (_self *OnboardingMachine) Complete(outcome HandleCheckOutcome, msgKey stri
 	})
 }
 
+// The kids build's terminal handle-check line: no nest at `domain` the
+// kid can join. The `local_no_nest` shape — a non-transient
+// `ProbeError`, Continue off, no control checkbox — so no app shell
+// matches a new outcome.
+func (_self *OnboardingMachine) CompleteKidsNoJoinableNest(domain string) {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_complete_kids_no_joinable_nest(
+			_pointer, FfiConverterStringINSTANCE.Lower(domain), _uniffiStatus)
+		return false
+	})
+}
+
 func (_self *OnboardingMachine) CompleteProbeError(phase HandleCheckPhase, transient bool, cause string) {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -6236,6 +6290,16 @@ func (_self *OnboardingMachine) IsBuyableViaProvider(domain string) bool {
 	}))
 }
 
+// Whether this machine runs the kids build ([`Self::kids`]).
+func (_self *OnboardingMachine) IsKids() bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_is_kids(
+			_pointer, _uniffiStatus)
+	}))
+}
+
 func (_self *OnboardingMachine) IsLoading() bool {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -6260,6 +6324,20 @@ func (_self *OnboardingMachine) JoiningNestRules(lang string) *fauna_client_poli
 			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_joining_nest_rules(
 				_pointer, FfiConverterStringINSTANCE.Lower(lang), _uniffiStatus),
 		}
+	}))
+}
+
+// Whether the kids build excises `outcome`: the three handle-check
+// outcomes whose Continue sets a nest up (`DomainAvailable`,
+// `RegisteredNoNest`) or claims one (`UnregisteredUnclaimedNest`).
+// Joining by invite (`NestRunningUserUnregistered`) and signing in
+// (`AlreadyOnNest`) are kept.
+func (_self *OnboardingMachine) KidsExcises(outcome HandleCheckOutcome) bool {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_kids_excises(
+			_pointer, FfiConverterHandleCheckOutcomeINSTANCE.Lower(outcome), _uniffiStatus)
 	}))
 }
 

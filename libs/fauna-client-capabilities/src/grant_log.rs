@@ -624,6 +624,15 @@ pub fn is_materialization_grant(scope: &[GrantEventScope]) -> bool {
 /// `!Send` handle.
 pub trait GrantEventSigner: fauna_core::MaybeSendSync {
     fn sign_grant_event(&self, event: GrantEvent) -> Result<GrantEvent, GrantEventSignError>;
+
+    /// The id a succession re-mint by this owner gives the replacement of
+    /// `old_grant_id` ([`crate::succession::remint_grant_id`]) — derived from
+    /// the owner's secret, which only this seam holds. It is how a gesture
+    /// naming a grant the re-mint has since retired (the Nests page's *Keep*,
+    /// pressed on a row painted before the retirement) reaches the row that
+    /// replaced it. Pure: an id that was never re-minted derives an id no row
+    /// carries, and deciding it is a no-op.
+    fn remint_replacement_id(&self, old_grant_id: &[u8; 16]) -> [u8; 16];
 }
 
 /// A [`GrantEventSigner`] could not sign (the `Display` of the underlying
@@ -658,6 +667,10 @@ impl GrantEventSigner for KeypairGrantEventSigner {
         event
             .sign(self.keypair.signing_key())
             .map_err(|e| GrantEventSignError::Sign(e.to_string()))
+    }
+
+    fn remint_replacement_id(&self, old_grant_id: &[u8; 16]) -> [u8; 16] {
+        crate::succession::remint_grant_id(self.keypair.secret_bytes(), old_grant_id)
     }
 }
 

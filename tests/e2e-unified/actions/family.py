@@ -3,6 +3,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
+from helpers.budgets import UI_SETTLE_S
+from helpers.waiting import wait_until
+
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
 
@@ -342,15 +345,6 @@ class FamilyActions:
         if not self.driver.is_visible("family-policy-screen-hint"):
             return ""
         return self.driver.get_text("family-policy-screen-hint")
-
-    def require_content_hint(self) -> None:
-        """Skip unless this app paints the editor's content-category honest
-        bound (``family-policy-content-hint``, user-approved 2026-10-16). tui
-        leads (2026-10-21), macos/ios (shared FaunaKit) 2026-10-24, web 2026-10-24, linux 2026-10-30,
-        windows 2026-11-08; android lifts the id with its family batch."""
-        from helpers.app_surface import require_surface
-
-        require_surface(self.driver, "family-policy-content-hint")
 
     def content_hint_text(self) -> str:
         if not self.driver.is_visible("family-policy-content-hint"):
@@ -804,11 +798,26 @@ class FamilyActions:
     # --- Graduation (reveal-then-confirm) ---
 
     def begin_graduate(self) -> None:
+        """Click Graduate and wait, up to UI_SETTLE_S, for the confirm step.
+
+        A deadline poll, never a fixed sleep (convention 14): the 0.3 s sleep
+        this replaced read the step before windows had revealed it, red alone
+        and green in-file (2026-11-10). Raises, self-diagnosing, if the step
+        never reveals."""
         self.driver.click("family-graduate-button")
-        time.sleep(0.3)
+        wait_until(
+            self.graduate_confirm_visible,
+            UI_SETTLE_S,
+            diagnose=lambda: (
+                "the graduate confirm step never revealed: "
+                f"{self.driver.diagnose('family-graduate-confirm-button')}"
+            ),
+        )
 
     def graduate_confirm_visible(self) -> bool:
-        return self.driver.is_visible("family-graduate-confirm-button")
+        # A scrolled read: the confirm step reveals under the ward's editor and
+        # can sit below the fold (windows' `is_visible` is `!IsOffscreen`).
+        return self.driver.is_visible_scrolled("family-graduate-confirm-button")
 
     def graduate_confirm_text(self) -> str:
         return self.driver.get_text("family-graduate-confirm-button")

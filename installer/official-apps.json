@@ -56,8 +56,7 @@
           "kind": "github-attestation",
           "label": "Build attestation of the download",
           "value": "faunasocial/fauna",
-          "status": "pending",
-          "pending": "No signed macOS release has been published yet.",
+          "status": "live",
           "source": ".github/workflows/release-macos.yml",
           "how_to_check": "Run `gh attestation verify Fauna-<version>.dmg --repo faunasocial/fauna`: it succeeds only for a download built by this repository's own release workflow."
         },
@@ -122,7 +121,7 @@
           "label": "Google Play listing",
           "value": null,
           "status": "pending",
-          "pending": "The app is in invitation-only internal testing on Google Play; its listing answers only to invited testers until the first public release.",
+          "pending": "The app is in invitation-only internal testing on Google Play; its listing answers only to invited testers until the app is released to everyone there.",
           "source": null,
           "how_to_check": "Until the listing is announced here, a Play entry presenting itself as Fauna Social's app is not ours."
         },
@@ -188,9 +187,9 @@
           "label": "Direct-download installer signature",
           "value": null,
           "status": "pending",
-          "pending": "The direct-download installer carries no Windows code signature until the SignPath Foundation's certificate for it is issued. Each release's installer is signed as a file with the release identity under Server and installers below, and Store installs are signed by the Store.",
+          "pending": "The direct-download installer carries no Windows code signature. Each release's installer is signed as a file with the release identity under Server and installers below, and Store installs are signed by the Store.",
           "source": null,
-          "how_to_check": "Verify the installer file with cosign against the release identity below rather than by its Windows signature."
+          "how_to_check": "Verify the installer file with cosign against the release identity below; it carries no Windows code signature to check."
         }
       ]
     },
@@ -220,7 +219,7 @@
     {
       "id": "tui",
       "label": "Terminal app",
-      "channel": "One archive per operating system and processor with each release (the terminal app, the sync agent and fauna-cli, the program an AI assistant runs to work in Fauna), signed with the same release identity as the server binaries; the macOS archives, once published, are also Developer ID-signed and notarized. The terminal app and fauna-cli are also included in the macOS package and the Windows installer.",
+      "channel": "One archive per operating system and processor with each release (the terminal app, the sync agent and fauna-cli, the program an AI assistant runs to work in Fauna). The Linux and Windows archives are signed with the same release identity as the server binaries; the macOS archives, published since 0.1.6, are Developer ID-signed and notarized and have a build attestation naming this repository, as the macOS download does. The terminal app and fauna-cli are also included in the Windows installer, and will be in the macOS package once it is published.",
       "identities": [
         {
           "kind": "tui-release",
@@ -228,7 +227,7 @@
           "value": "https://github.com/faunasocial/fauna/releases",
           "status": "live",
           "source": ".github/workflows/release.yml",
-          "how_to_check": "The archives for Linux and Windows are published with the pre-releases and releases under Server and installers below, signed with the same release identity; check each one with the command given there. There are no macOS archives yet; on a Mac, build the terminal app, its sync agent and fauna-cli from the source."
+          "how_to_check": "The archives for Linux and Windows are published with the pre-releases and releases under Server and installers below, signed with the same release identity; check each one with the command given there. The macOS archives are published with the pre-releases and releases since 0.1.6; run `gh attestation verify fauna-tui-<arch>-darwin.tar.gz --repo faunasocial/fauna`: it succeeds only for an archive built by this repository's own release workflow."
         }
       ]
     },
@@ -261,9 +260,9 @@
           "label": "Server container image signature",
           "value": null,
           "status": "pending",
-          "pending": "The signature on the server image at ghcr.io/faunasocial/nest is not listed here yet; the Test channel's image is signed, the Dev channel's development builds are not, and there is nothing on the Stable channel until the first Stable release is out.",
+          "pending": "The signature on the server image at ghcr.io/faunasocial/nest is not listed here yet; the Test and Stable channels' images are signed, the Dev channel's development builds are not.",
           "source": null,
-          "how_to_check": "The Test channel's image, and the Stable channel's once there is one, is verified with cosign against the release identity above; the Dev channel's development builds are not signed."
+          "how_to_check": "The Test and Stable channels' images are verified with cosign against the release identity above; the Dev channel's development builds are not signed."
         }
       ]
     }

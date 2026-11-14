@@ -756,6 +756,18 @@ pub struct FoldersAuthor<R: RpcRequester, G: FolderGroupCrypto> {
     /// runs it right after an enable of an unshared set succeeds. This crate
     /// holds no byte plane, so the walk is injected, never built here.
     served_converge: Option<std::sync::Arc<dyn fauna_core::nest_reseal::ServedSetConverge>>,
+    /// The take-over where no engine runs for the set (`succession-cut.md`
+    /// ruling (11)(l)) — `Some` when the face wired the seat's projection walk
+    /// ([`Self::with_succession_take_over`]), which a face does only for sets
+    /// no engine on its device is bound to; [`Self::take_over_succeeded_sets`]
+    /// runs it under this device's adoption markers at launch. Injected, as
+    /// the served walk is: this crate holds no byte plane.
+    take_over: Option<std::sync::Arc<dyn fauna_core::nest_reseal::SuccessionTakeOver>>,
+    /// Which sets an engine on this device holds (ruling (11)(l), *one
+    /// consumer per marker*) — asked before the take-over claims a marker
+    /// ([`Self::with_engine_bound_sets`]). `None` reads as "no set is bound":
+    /// web, where no engine runs.
+    engine_bound: Option<std::sync::Arc<dyn crate::EngineBoundSets>>,
     /// The owner's signed grant log (`fauna.state.succession-ledger`) the
     /// web-paywall grant's `Mint`, `Renew` and `Revoke` events are recorded in
     /// ([`Self::with_grant_log`]) — the log the Nests trust facet projects and
@@ -789,6 +801,8 @@ where
             group,
             commit_gate: None,
             served_converge: None,
+            take_over: None,
+            engine_bound: None,
             grant_log: None,
         }
     }
@@ -852,6 +866,31 @@ where
         converge: std::sync::Arc<dyn fauna_core::nest_reseal::ServedSetConverge>,
     ) -> Self {
         self.served_converge = Some(converge);
+        self
+    }
+
+    /// Wire the projection walk's take-over (see the `take_over` field) — the
+    /// face passes [`crate::succession_take_over`] over its own session and
+    /// the app's recording device. Ruling (11)(l) gives the walk a marker only
+    /// for a set with no engine binding on this device: a face where engines
+    /// can run wires [`Self::with_engine_bound_sets`] beside it; web, where
+    /// none runs, wires the walk alone.
+    pub fn with_succession_take_over(
+        mut self,
+        walk: std::sync::Arc<dyn fauna_core::nest_reseal::SuccessionTakeOver>,
+    ) -> Self {
+        self.take_over = Some(walk);
+        self
+    }
+
+    /// Wire the engine roster the take-over asks before it claims a marker
+    /// (see the `engine_bound` field) — a native face passes its engine
+    /// host's ([`crate::agent_bound_sets`] on a desktop).
+    pub fn with_engine_bound_sets(
+        mut self,
+        roster: std::sync::Arc<dyn crate::EngineBoundSets>,
+    ) -> Self {
+        self.engine_bound = Some(roster);
         self
     }
 
@@ -1601,6 +1640,185 @@ where
                     error = %format!("{e:#}"),
                     "served-set walk did not run at launch; the next launch retries it"
                 ),
+            }
+        }
+        Ok(total)
+    }
+
+    /// **The take-over where no engine runs for the set** (`succession-cut.md`
+    /// ruling (11)(l)): for every set this account owns whose nonce lineage
+    /// holds one of this device's adoption markers, consume the marker
+    /// through the wired projection walk ([`Self::with_succession_take_over`]).
+    ///
+    /// Per marker, ruling (11)(d)'s terms through (l):
+    ///
+    /// - **The claim and the binding, in one write before any record.** An
+    ///   unclaimed marker's first pass reads the set's history heads (the walk
+    ///   records nothing doing so), then records the claim with those
+    ///   candidates ([`FolderKeyStore::record_adoption_walk`]) — from then on
+    ///   no engine is handed the marker ([`crate::adoption_markers_or_none`])
+    ///   and no later pass adopts a head outside them. A claim that cannot be
+    ///   written stops the set's pass before the walk records anything.
+    /// - **The spend, after a pass completes over them.** A pass that leaves
+    ///   nothing owed rewrites the claim spent; a spent marker is never walked
+    ///   again. A crash, a failed record or an owner-root head whose signer's
+    ///   retired root this device does not hold yet leaves it unspent, and the next launch retries only the
+    ///   bound candidates still undone.
+    ///
+    /// Only this device's markers license anything, and only owned sets are
+    /// read, so a member device and a marker-less device adopt nothing. No
+    /// walk wired, or no marker held, ⇒ no read at all. Per-set error
+    /// isolation, as the served walk's. Returns the summed tally.
+    pub async fn take_over_succeeded_sets(
+        &self,
+    ) -> AuthorResult<fauna_core::nest_reseal::TakeOverPass, R, G> {
+        let mut total = fauna_core::nest_reseal::TakeOverPass::default();
+        let Some(walk) = self.take_over.as_ref() else {
+            return Ok(total);
+        };
+        let markers = match self.custody.adoption_markers().await {
+            Ok(markers) => markers,
+            Err(e) => {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "succession take-over: this device's adoption markers are unreadable; \
+                     the next launch retries"
+                );
+                return Ok(total);
+            }
+        };
+        if markers.is_empty() {
+            return Ok(total);
+        }
+        let walks = match self.custody.adoption_walks().await {
+            Ok(walks) => walks,
+            Err(e) => {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "succession take-over: this device's adoption walks are unreadable; \
+                     the next launch retries"
+                );
+                return Ok(total);
+            }
+        };
+        let listed = self
+            .files
+            .list_wire()
+            .await
+            .map_err(FoldersAuthorError::Transport)?;
+        let cfg = self.custody.load().await.unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "folders custody unreadable; no set is taken over this pass"
+            );
+            Default::default()
+        });
+        let listed = custody::named_from_custody(listed.folders, &cfg);
+        // One consumer per marker: what this device's engines hold, read once
+        // before any claim. No roster wired reads as nothing bound (web);
+        // an unread one licenses no new claim this pass.
+        let holdings = match self.engine_bound.as_ref() {
+            None => Some(crate::EngineHoldings::default()),
+            Some(roster) => match roster.engine_holdings().await {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "succession take-over: this device's engine roster is unreadable; \
+                         no new marker is claimed this pass"
+                    );
+                    None
+                }
+            },
+        };
+        for set in listed
+            .iter()
+            .filter(|s| s.role.as_deref() != Some("member"))
+        {
+            let channel = crate::engine_binding::custody_channel_for(set, &cfg)
+                .ok()
+                .flatten();
+            let lineage = custody::set_lineage(&cfg, Some(set.name.as_str()), channel.as_ref());
+            let Some(marker) = markers
+                .iter()
+                .find(|m| lineage.retired.iter().any(|r| r.nonce == **m))
+                .copied()
+            else {
+                continue;
+            };
+            let claimed = walks.iter().find(|w| w.marker() == Some(marker));
+            if claimed.is_some_and(|w| w.spent) {
+                continue;
+            }
+            let folder = fauna_core::log_redact::log_folder_name(&set.name);
+            let candidates = match claimed {
+                Some(w) => w.candidates.clone(),
+                None => {
+                    // An owned row's binding key is its own row id.
+                    let folder_ref = fauna_core::folder_keys::FolderRef::Local(set.id).to_wire();
+                    if !holdings
+                        .as_ref()
+                        .is_some_and(|h| h.walk_may_claim(Some(&folder_ref), &marker))
+                    {
+                        continue;
+                    }
+                    let candidates = match walk.history_heads(&set.name).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(
+                                %folder,
+                                error = %format!("{e:#}"),
+                                "succession take-over could not read the set's heads; \
+                                 the next launch retries"
+                            );
+                            continue;
+                        }
+                    };
+                    let claim = crate::key_reader::AdoptionWalk {
+                        nonce: fauna_protocol::ByteBuf::from(marker.to_vec()),
+                        candidates: candidates.clone(),
+                        spent: false,
+                    };
+                    if let Err(e) = self.custody.record_adoption_walk(claim).await {
+                        tracing::warn!(
+                            %folder,
+                            error = %format!("{e:#}"),
+                            "succession take-over could not claim the adoption marker; \
+                             nothing is taken over this pass"
+                        );
+                        continue;
+                    }
+                    candidates
+                }
+            };
+            let pass = match walk.take_over(&set.name, &candidates).await {
+                Ok(pass) => pass,
+                Err(e) => {
+                    tracing::warn!(
+                        %folder,
+                        error = %format!("{e:#}"),
+                        "succession take-over did not run; the next launch retries it"
+                    );
+                    continue;
+                }
+            };
+            total.rerecorded += pass.rerecorded;
+            total.skipped += pass.skipped;
+            total.owed += pass.owed;
+            if pass.owed == 0 {
+                let spent = crate::key_reader::AdoptionWalk {
+                    nonce: fauna_protocol::ByteBuf::from(marker.to_vec()),
+                    candidates,
+                    spent: true,
+                };
+                if let Err(e) = self.custody.record_adoption_walk(spent).await {
+                    tracing::warn!(
+                        %folder,
+                        error = %format!("{e:#}"),
+                        "succession take-over could not record the spend; the next launch \
+                         re-walks the bound candidates and records nothing new"
+                    );
+                }
             }
         }
         Ok(total)
@@ -2771,6 +2989,20 @@ where
                 )
             }
             Err(e) => tracing::warn!("folders: envelope convergence failed at launch: {e}"),
+        }
+
+        // The take-over where no engine runs for the set (`succession-cut.md`
+        // ruling (11)(l)): after the reconcile's re-mint wrote the marker and
+        // the envelopes carry the live nonce the re-signed records name.
+        match self.take_over_succeeded_sets().await {
+            Ok(pass) if pass != Default::default() => tracing::info!(
+                rerecorded = pass.rerecorded,
+                skipped = pass.skipped,
+                owed = pass.owed,
+                "folders: the succession take-over ran at launch"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("folders: the succession take-over failed at launch: {e}"),
         }
 
         // Launch-time served-set walk (`webdav-server.md` § Key model (c)):
@@ -4814,6 +5046,12 @@ mod tests {
             }
             crate::key_reader::FolderKeyReader::load(self).await
         }
+        async fn adoption_markers(&self) -> anyhow::Result<Vec<[u8; 32]>> {
+            self.custody.adoption_markers().await
+        }
+        async fn adoption_walks(&self) -> anyhow::Result<Vec<crate::key_reader::AdoptionWalk>> {
+            self.custody.adoption_walks().await
+        }
     }
 
     impl FakeNest {
@@ -4868,6 +5106,13 @@ mod tests {
                 }
             }
             self.custody.merge(replica).await
+        }
+
+        async fn record_adoption_walk(
+            &self,
+            walk: crate::key_reader::AdoptionWalk,
+        ) -> anyhow::Result<()> {
+            self.custody.record_adoption_walk(walk).await
         }
 
         async fn settle_removal(
@@ -8357,6 +8602,324 @@ mod tests {
         // The entry point itself sums the tally over the sets it could walk.
         let tally = block_on(a.converge_served_sets()).expect("converge");
         assert_eq!(tally.resealed, 1, "the unsynced set is warned, not fatal");
+    }
+
+    /// A take-over walk double (`succession-cut.md` ruling (11)(l)): answers
+    /// `heads` as the set's history heads and records every call; each pass
+    /// re-records what it is handed and owes `owed`.
+    #[derive(Default)]
+    struct RecordingTakeOver {
+        heads: Vec<fauna_core::nest_reseal::TakeOverCandidate>,
+        owed: Mutex<usize>,
+        read: Mutex<Vec<String>>,
+        passes: Mutex<Vec<(String, Vec<fauna_core::nest_reseal::TakeOverCandidate>)>>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::nest_reseal::SuccessionTakeOver for RecordingTakeOver {
+        async fn history_heads(
+            &self,
+            folder: &str,
+        ) -> anyhow::Result<Vec<fauna_core::nest_reseal::TakeOverCandidate>> {
+            self.read.lock().unwrap().push(folder.to_string());
+            Ok(self.heads.clone())
+        }
+
+        async fn take_over(
+            &self,
+            folder: &str,
+            bound: &[fauna_core::nest_reseal::TakeOverCandidate],
+        ) -> anyhow::Result<fauna_core::nest_reseal::TakeOverPass> {
+            self.passes
+                .lock()
+                .unwrap()
+                .push((folder.to_string(), bound.to_vec()));
+            let owed = *self.owed.lock().unwrap();
+            Ok(fauna_core::nest_reseal::TakeOverPass {
+                rerecorded: bound.len() - owed,
+                skipped: 0,
+                owed,
+            })
+        }
+    }
+
+    /// An owned set "docs" the predecessor minted under nonce `[1; 32]`, cut
+    /// to `[2; 32]` on this device; `marker` says whether this device's
+    /// re-mint wrote the adoption marker.
+    fn cut_set(nest: &FakeNest, marker: bool) {
+        let own = ActorKeypair::from_secret([0xA0; 32]).actor_id();
+        block_on(crate::key_reader::update(&nest.custody, |cfg| {
+            custody::record_created_set(cfg, "docs", [1; 32], Some(ActorId([0xB0; 32])), 10);
+        }))
+        .unwrap();
+        if marker {
+            block_on(crate::key_reader::FolderKeyStore::record_adoption_marker(
+                &nest.custody,
+                [1; 32],
+            ))
+            .unwrap();
+        }
+        block_on(crate::key_reader::update(&nest.custody, |cfg| {
+            custody::remint_owned_entries(cfg, &own, &[[1; 32]], 20, || [2; 32])
+        }))
+        .unwrap();
+        nest.list_summaries
+            .lock()
+            .unwrap()
+            .push(fauna_protocol::folders::FolderSummary {
+                name: "docs".into(),
+                role: Some("owner".into()),
+                set_nonce: Some(fauna_protocol::ByteBuf::from(vec![2; 32])),
+                ..Default::default()
+            });
+    }
+
+    fn walks_of(nest: &FakeNest) -> Vec<crate::key_reader::AdoptionWalk> {
+        block_on(crate::key_reader::FolderKeyReader::adoption_walks(
+            &nest.custody,
+        ))
+        .unwrap()
+    }
+
+    /// Ruling (11)(l): the launch pass claims this device's marker with the
+    /// candidates its first pass saw, BEFORE the walk records anything, takes
+    /// them over, and spends the marker; a second launch walks nothing. The
+    /// claimed marker is handed to no engine.
+    #[test]
+    fn the_launch_pass_claims_binds_takes_over_and_spends_the_marker() {
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, true);
+        let walk = Arc::new(RecordingTakeOver {
+            heads: vec![("aa".into(), 4), ("bb".into(), 7)],
+            ..Default::default()
+        });
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone());
+
+        block_on(a.resume_pending_removals()).expect("the launch pass");
+        assert_eq!(*walk.read.lock().unwrap(), vec!["docs".to_string()]);
+        assert_eq!(
+            *walk.passes.lock().unwrap(),
+            vec![("docs".to_string(), walk.heads.clone())],
+            "one pass over exactly the bound candidates"
+        );
+        assert_eq!(
+            walks_of(&nest),
+            vec![crate::key_reader::AdoptionWalk {
+                nonce: fauna_protocol::ByteBuf::from(vec![1; 32]),
+                candidates: walk.heads.clone(),
+                spent: true,
+            }],
+            "claimed with its candidates, then spent"
+        );
+        assert!(
+            block_on(crate::adoption_markers_or_none(&nest.custody)).is_empty(),
+            "the claimed marker is no engine's"
+        );
+
+        let again = block_on(a.take_over_succeeded_sets()).expect("the next launch");
+        assert_eq!(again, Default::default());
+        assert_eq!(
+            walk.passes.lock().unwrap().len(),
+            1,
+            "a spent marker is not walked"
+        );
+    }
+
+    /// A pass that leaves heads owed keeps the marker unspent; the next pass
+    /// re-walks the candidates bound at the first, never re-reads the heads
+    /// (a head served afterwards is never adopted).
+    #[test]
+    fn an_owed_pass_leaves_the_marker_unspent_and_the_next_retries_only_the_bound() {
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, true);
+        let walk = Arc::new(RecordingTakeOver {
+            heads: vec![("aa".into(), 4)],
+            owed: Mutex::new(1),
+            ..Default::default()
+        });
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone());
+
+        let first = block_on(a.take_over_succeeded_sets()).expect("first pass");
+        assert_eq!(first.owed, 1);
+        assert!(!walks_of(&nest)[0].spent, "owed: unspent");
+
+        *walk.owed.lock().unwrap() = 0;
+        let second = block_on(a.take_over_succeeded_sets()).expect("second pass");
+        assert_eq!(second.rerecorded, 1);
+        assert_eq!(walk.read.lock().unwrap().len(), 1, "the heads read once");
+        assert_eq!(
+            walk.passes.lock().unwrap()[1].1,
+            vec![("aa".to_string(), 4)],
+            "the bound candidates, again"
+        );
+        assert!(walks_of(&nest)[0].spent, "completed: spent");
+    }
+
+    /// No marker on this device (another device cut; a member) ⇒ nothing is
+    /// read, claimed or adopted, and no walk wired ⇒ nothing at all.
+    #[test]
+    fn a_marker_less_device_adopts_nothing() {
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, false);
+        let walk = Arc::new(RecordingTakeOver {
+            heads: vec![("aa".into(), 4)],
+            ..Default::default()
+        });
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone());
+        assert_eq!(
+            block_on(a.take_over_succeeded_sets()).unwrap(),
+            Default::default()
+        );
+        assert!(walk.read.lock().unwrap().is_empty());
+        assert!(walk.passes.lock().unwrap().is_empty());
+        assert!(walks_of(&nest).is_empty());
+
+        // A member's row of a set under a marker is never the owner's to take.
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, true);
+        nest.list_summaries.lock().unwrap()[0].role = Some("member".into());
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone());
+        assert_eq!(
+            block_on(a.take_over_succeeded_sets()).unwrap(),
+            Default::default()
+        );
+        assert!(
+            walk.passes.lock().unwrap().is_empty(),
+            "a member adopts nothing"
+        );
+    }
+
+    /// What this device's engines hold, as a face's roster reports it; `None`
+    /// is a roster the face could not read.
+    struct FakeHoldings(Option<crate::EngineHoldings>);
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl crate::EngineBoundSets for FakeHoldings {
+        async fn engine_holdings(&self) -> anyhow::Result<crate::EngineHoldings> {
+            self.0
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("the agent did not answer"))
+        }
+    }
+
+    fn holdings(bound: &[&str], engaged: &[[u8; 32]]) -> Arc<FakeHoldings> {
+        Arc::new(FakeHoldings(Some(crate::EngineHoldings {
+            bound: bound.iter().map(|s| s.to_string()).collect(),
+            engaged: engaged.iter().copied().collect(),
+        })))
+    }
+
+    /// Ruling (11)(l), *one consumer per marker*: a set an engine on this
+    /// device is bound to (`cut_set`'s row is `local:0`) is the engine's —
+    /// the walk reads, claims and adopts nothing, and the marker stays the
+    /// engine-keys resolve's to hand on.
+    #[test]
+    fn a_set_an_engine_on_this_device_is_bound_to_is_never_claimed() {
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, true);
+        let walk = Arc::new(RecordingTakeOver {
+            heads: vec![("aa".into(), 4)],
+            ..Default::default()
+        });
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone())
+            .with_engine_bound_sets(holdings(&["local:0"], &[]));
+
+        assert_eq!(
+            block_on(a.take_over_succeeded_sets()).unwrap(),
+            Default::default()
+        );
+        assert!(walk.read.lock().unwrap().is_empty(), "nothing read");
+        assert!(walk.passes.lock().unwrap().is_empty(), "nothing adopted");
+        assert!(walks_of(&nest).is_empty(), "nothing claimed");
+        assert_eq!(
+            block_on(crate::adoption_markers_or_none(&nest.custody)),
+            vec![[1; 32]],
+            "the marker stays the engine's"
+        );
+    }
+
+    /// An owned set no engine on this device is bound to (the roster names
+    /// another set) is claimed, taken over and spent under the predicate.
+    #[test]
+    fn a_set_no_engine_on_this_device_is_bound_to_is_claimed() {
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, true);
+        let walk = Arc::new(RecordingTakeOver {
+            heads: vec![("aa".into(), 4)],
+            ..Default::default()
+        });
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone())
+            .with_engine_bound_sets(holdings(&["local:9"], &[]));
+
+        let pass = block_on(a.take_over_succeeded_sets()).unwrap();
+        assert_eq!(pass.rerecorded, 1);
+        assert_eq!(walks_of(&nest).len(), 1, "claimed");
+        assert!(walks_of(&nest)[0].spent, "and spent");
+    }
+
+    /// An engine that recorded `Begun` (or `Spent`) for the marker's nonce is
+    /// never joined, even for a set it is no longer bound to.
+    #[test]
+    fn a_marker_an_engine_has_begun_is_never_joined() {
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, true);
+        let walk = Arc::new(RecordingTakeOver {
+            heads: vec![("aa".into(), 4)],
+            ..Default::default()
+        });
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone())
+            .with_engine_bound_sets(holdings(&[], &[[1; 32]]));
+
+        assert_eq!(
+            block_on(a.take_over_succeeded_sets()).unwrap(),
+            Default::default()
+        );
+        assert!(walk.passes.lock().unwrap().is_empty(), "never joined");
+        assert!(walks_of(&nest).is_empty(), "never claimed");
+    }
+
+    /// A roster the face cannot read claims nothing new — an unread binding
+    /// may be an engine's — but a marker the walk already claimed is its own
+    /// and is finished.
+    #[test]
+    fn an_unread_roster_claims_nothing_new_and_finishes_a_claimed_walk() {
+        let nest = Arc::new(FakeNest::default());
+        cut_set(&nest, true);
+        let walk = Arc::new(RecordingTakeOver {
+            heads: vec![("aa".into(), 4)],
+            ..Default::default()
+        });
+        let unread = Arc::new(FakeHoldings(None));
+        let a = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone())
+            .with_engine_bound_sets(unread.clone());
+        assert_eq!(
+            block_on(a.take_over_succeeded_sets()).unwrap(),
+            Default::default()
+        );
+        assert!(walks_of(&nest).is_empty(), "nothing claimed unread");
+
+        // Claimed (and left owed) by a pass that could read the roster.
+        *walk.owed.lock().unwrap() = 1;
+        let claimer = author(nest.clone(), FakeGroup::with_members(&[]))
+            .with_succession_take_over(walk.clone())
+            .with_engine_bound_sets(holdings(&[], &[]));
+        block_on(claimer.take_over_succeeded_sets()).unwrap();
+        assert!(!walks_of(&nest)[0].spent);
+
+        *walk.owed.lock().unwrap() = 0;
+        let pass = block_on(a.take_over_succeeded_sets()).unwrap();
+        assert_eq!(pass.rerecorded, 1, "the claimed walk is finished");
+        assert!(walks_of(&nest)[0].spent);
     }
 
     /// The sets and keys the last-provisioned `WebdavKeysBlob` carries.

@@ -70,6 +70,9 @@ export function ensureWasm(): Promise<void> {
       // anything reads the registry through this chunk (identity-store.ts).
       registerIdentityStoreChunk(mod);
       wasmModule = mod;
+      // A test build re-arms a held outbox drain before anything can run a
+      // pass on this fresh instance — see `OUTBOX_DRAIN_HOLD_STORAGE_KEY`.
+      if (__FAUNA_E2E_AUTOMATION__) reapplyOutboxDrainHold(mod);
       // This chunk hosts the session-start critical-alert sweep's registry
       // (`src/critical_alerts.rs` — `runCriticalAlertSweep` in `src/rpc.rs`
       // posts to it) — wire it into the shared shell store the moment the
@@ -177,10 +180,11 @@ export async function actorsServedByAnotherTab(actorIds: readonly string[]): Pro
   return await wasm().actorsServedByAnotherTab([...actorIds]);
 }
 /** Why a remove-account refuses, or `null` when it may proceed. */
-export type RemoveAccountBlock = 'this_tab' | 'other_tab' | null;
+export type RemoveAccountBlock = 'this_tab' | 'other_tab' | 'carry_owed' | null;
 /** Remove-account's question, in the ruling's order: `'this_tab'` when
  *  `actorId` is `servedHere` (this tab's signed-in actor), else `'other_tab'`
- *  when another tab holds its role. */
+ *  when another tab holds its role, else `'carry_owed'` when it is a retired
+ *  identity whose outbox this browser has not carried to its successor yet. */
 export async function removeAccountBlock(
   actorId: string,
   servedHere: string | null | undefined,
@@ -225,6 +229,14 @@ export async function accountEnrolledDeviceRow(): Promise<string | null> {
 export async function accountEscrowHolders(): Promise<string[] | null> {
   if (!wasmModule) return null;
   return (await wasmModule.accountEscrowHolders()) ?? null;
+}
+/** The keyless-posture marker (`devices.md` § Custody facet piece 1) for each
+ *  roster row's enrolled principal, in order — `true` paints
+ *  `device-keyless-posture-badge`. Every unknown answers `false` (no badge),
+ *  so a page without a runtime simply paints none. */
+export async function accountKeylessPosture(principals: (string | null)[]): Promise<boolean[]> {
+  if (!wasmModule) return principals.map(() => false);
+  return await wasmModule.accountKeylessPosture(principals);
 }
 /** The let-go's clock face: the shared line's mint date, rendered in JS
  *  because wasm has no OS timezone database (`fauna-wasm`'s
@@ -328,6 +340,57 @@ export async function accountEscrowWrapCoordinates(): Promise<unknown> {
 export async function accountPumpNow(): Promise<void> {
   if (!wasmModule) return;
   await wasmModule.accountPumpNow();
+}
+/** e2e-only: a `ForTest` export by name, THROWING on a production bundle
+ *  (which compiles the e2e seams out) — the outbox drain pokes' shared lookup. */
+async function outboxTestExport(name: string): Promise<(...args: unknown[]) => unknown> {
+  await ensureWasm();
+  const fn = (wasm() as unknown as Record<string, unknown>)[name];
+  if (typeof fn !== 'function') {
+    throw new Error(
+      `${name} is absent: this SPA is running the PRODUCTION wasm flavor, which ` +
+        'compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  return fn as (...args: unknown[]) => unknown;
+}
+/** e2e-only: this tab's app drain loop rung now
+ *  (`fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW`); fire-and-forget. */
+export async function appOutboxDrainNow(): Promise<void> {
+  (await outboxTestExport('appOutboxDrainNowForTest'))();
+}
+/** The `sessionStorage` slot that carries the e2e outbox drain hold across a
+ *  full document navigation. The hold itself is a static in the wasm module
+ *  (`fauna_account_plane::outbox::set_outbox_drain_hold`), and web's
+ *  succession ceremony ends in a page load, which builds a fresh instance with
+ *  the hold cleared — so the carried intent drained before the journey
+ *  released it. `sessionStorage` for the reason `#lib/generation-e2e` gives:
+ *  it survives the navigation, is per-tab, and dies with the tab. */
+const OUTBOX_DRAIN_HOLD_STORAGE_KEY = 'fauna_e2e_outbox_drain_hold';
+/** e2e-only: re-arm the held drain on a freshly initialised wasm module, from
+ *  `ensureWasm`, before any pass runs on it. A storage-denied context leaves
+ *  the hold off, which the journey's own held-read assert then catches. */
+function reapplyOutboxDrainHold(mod: unknown): void {
+  let held = false;
+  try {
+    held = sessionStorage.getItem(OUTBOX_DRAIN_HOLD_STORAGE_KEY) === '1';
+  } catch {
+    return;
+  }
+  const fn = (mod as Record<string, unknown>).setOutboxDrainHoldForTest;
+  if (held && typeof fn === 'function') (fn as (held: boolean) => void)(true);
+}
+/** e2e-only: set or clear this tab's in-process outbox drain hold
+ *  (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`), remembered for the tab so a page
+ *  load in between keeps it (`OUTBOX_DRAIN_HOLD_STORAGE_KEY`). */
+export async function setOutboxDrainHold(held: boolean): Promise<void> {
+  try {
+    if (held) sessionStorage.setItem(OUTBOX_DRAIN_HOLD_STORAGE_KEY, '1');
+    else sessionStorage.removeItem(OUTBOX_DRAIN_HOLD_STORAGE_KEY);
+  } catch {
+    // Storage denied: the hold still holds until the next page load.
+  }
+  (await outboxTestExport('setOutboxDrainHoldForTest'))(held);
 }
 /** The Nests page's restore gesture — `accountRestoreFromCustodian`, the
  *  shared `RestoreFromCustodian` command run by this tab's runtime; the raw
@@ -576,6 +639,38 @@ export function paintedErrorsObserveForTest(ids: string[], texts: string[]): voi
  *  `null` where this bundle has no leg. */
 export function paintedErrorsForTest(): unknown {
   const fn = coreTestExport('paintedErrorsForTest');
+  return fn ? JSON.parse((fn as () => string)()) : null;
+}
+
+/** Record one painted frame's measured id-bearing text elements in the shared
+ *  `painted_text_area` record — see `#lib/e2e-painted-text-area`. A pane of
+ *  `NaN`×`NaN` is "no boxed ancestor". A no-op where the bundle has no leg. */
+export function paintedTextAreaObserveForTest(frame: {
+  ids: string[];
+  texts: string[];
+  widths: number[];
+  heights: number[];
+  paneWidths: number[];
+  paneHeights: number[];
+  depths: number[];
+}): void {
+  const fn = coreTestExport('paintedTextAreaObserveForTest');
+  if (!fn) return;
+  (fn as (...args: unknown[]) => void)(
+    frame.ids,
+    frame.texts,
+    Float64Array.from(frame.widths),
+    Float64Array.from(frame.heights),
+    Float64Array.from(frame.paneWidths),
+    Float64Array.from(frame.paneHeights),
+    Uint32Array.from(frame.depths),
+  );
+}
+
+/** The `painted_text_area` observable (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`),
+ *  or `null` where this bundle has no leg. */
+export function paintedTextAreaForTest(): unknown {
+  const fn = coreTestExport('paintedTextAreaForTest');
   return fn ? JSON.parse((fn as () => string)()) : null;
 }
 
@@ -1183,16 +1278,15 @@ export function classifyLinkInput(
   return JSON.parse(wasm().classifyLinkInput(raw));
 }
 
-/** Whether a grant row's scope marks it a **bounded** (content-sealing-epochs)
- *  mail grant, via the shared `fauna_client_pair::trust_scope_is_bounded_mail_grant`
- *  (`encryption-at-rest.md` § Capability tiering, flip-checklist line 6). The
- *  Nests page's honest-bound copy (`nest-trust-grant-bound-note`) switches on
- *  this — never re-derive the (class, kind, tier) check in TypeScript
- *  (priority #2). Requires `ensureWasm()` first (sync). */
-export function isBoundedMailGrant(
+/** A grant row's honest-bound note (`nest-trust-grant-bound-note`), via the
+ *  shared `fauna_client_pair::grant_bound_note`: the materialization,
+ *  bounded-mail or standing regime, picked in shared Rust (`nests.md` §
+ *  Honest bound) — never re-derive the (class, kind, tier) check in
+ *  TypeScript (priority #2). Requires `ensureWasm()` first (sync). */
+export function grantBoundNote(
   scope: { class: string; kind: string | null; tier: string | null }[],
-): boolean {
-  return wasm().isBoundedMailGrant(scope);
+): LocalizedText {
+  return wasm().grantBoundNote(scope) as LocalizedText;
 }
 
 // ── nest-trust label maps (`fauna_client_pair::{grant_scope_labels,
@@ -1228,17 +1322,67 @@ export function backupStatusLabel(s: string): LocalizedText {
   return wasm().backupStatusLabel(s) as LocalizedText;
 }
 
-/** A mint-picker option's use case → its localized label
- *  (`nest-trust-mint-scope-select`); the paywalled option names WHICH tier via
- *  the `{tier}` named placeholder. `o` is the full `TrustMintOption`, not just
- *  its `use_case`/`tier`. */
-export function mintOptionLabel(o: {
+/** A mint-picker option as serde carries it (`fauna_client_pair::TrustMintOption`). */
+export type TrustMintOptionShape = {
   use_case: string;
   tier: string | null;
   scope: { class: string; kind: string | null; tier: string | null }[];
   holder_candidates: string[];
-}): LocalizedText {
+};
+
+/** A mint-picker option's use case → its localized label
+ *  (`nest-trust-mint-scope-select`); the paywalled option names WHICH tier via
+ *  the `{tier}` named placeholder. `o` is the full `TrustMintOption`, not just
+ *  its `use_case`/`tier`. */
+export function mintOptionLabel(o: TrustMintOptionShape): LocalizedText {
   return wasm().mintOptionLabel(o) as LocalizedText;
+}
+
+/** `fauna_client_pair::mint_option_note` — the note the mint flow shows
+ *  before the confirm for this option (`nest-trust-mint-materialize-note`, the
+ *  materialization options' honesty copy), or `null` when it carries none. */
+export function mintOptionNote(o: TrustMintOptionShape): LocalizedText | null {
+  return (wasm().mintOptionNote(o) ?? null) as LocalizedText | null;
+}
+
+/** `fauna_client_pair::mint_option_default_duration` — the duration the mint
+ *  flow pre-selects for this option, given the row's `mint_default_duration`
+ *  (a materialization option pre-selects the standard window). */
+export function mintOptionDefaultDuration(
+  o: TrustMintOptionShape,
+  rowDefault: TrustGrantDuration,
+): TrustGrantDuration {
+  return wasm().mintOptionDefaultDuration(o, rowDefault) as TrustGrantDuration;
+}
+
+/** A third-party principal's grant or History scope, one label per publisher
+ *  and mode — `fauna_client_pair::principal_scope_labels`; the page joins the
+ *  resolved labels with `"; "`. */
+export function principalScopeLabels(
+  scope: { class: string; kind: string | null; tier: string | null }[],
+  folder: TrustFolder | null | undefined,
+): LocalizedText[] {
+  return wasm().principalScopeLabels(scope, folder ?? null) as LocalizedText[];
+}
+
+/** A principal's grant liveness word — `fauna_client_pair::trust_status_label`
+ *  with `canRenew = false` (*Expired — the app will ask again*). */
+export function principalStatusLabel(l: string): LocalizedText {
+  return wasm().trustStatusLabel(l, false) as LocalizedText;
+}
+
+/** The honest-bound note on a principal's live key — the shared
+ *  `fauna_client_pair::principal_grant_bound_note`: the standing wording in
+ *  the app's voice, "disconnecting" for the row's one revoke
+ *  (`connected-apps.md` § The trust facet and history lens → *The Now lens*). */
+export function principalGrantBoundNote(): LocalizedText {
+  return wasm().principalGrantBoundNote() as LocalizedText;
+}
+
+/** A History row's line — `fauna_client_pair::history_line_text` over the
+ *  caller's resolved `scope` and `when`. */
+export function historyLineText(kind: string, scope: string, when: string): LocalizedText {
+  return wasm().historyLineText(kind, scope, when) as LocalizedText;
 }
 
 /** A grant's mint duration — the shared `TrustGrantDuration` serde names. */
@@ -3853,6 +3997,9 @@ export interface CueTrackerHandle {
     wallNowMs: number,
   ): CueExposure[];
   drainAll(wallNowMs: number): CueExposure[];
+  /** The feed selection the list shows now (`WasmFeedManager.cueSelectionKey`);
+   *  its change drains every exposure — `CueTracker::note_selection`. */
+  noteSelection(key: string, wallNowMs: number): CueExposure[];
   /** An inline player's progress reading (seconds) — `CueTracker::note_played`. */
   notePlayed(postId: string, position: number, duration: number): void;
   /** Whether the post's inline player is engaged — `CueTracker::note_playing`. */
@@ -5275,6 +5422,27 @@ export function postCardGate(post: {
     post.reposted_room_label ?? undefined,
   ) as { tier: string; room_label: string | null } | null | undefined;
   return gate ?? null;
+}
+
+/** Which arm of the own-post Nostr advertisement verb pair the ⋯ overflow
+ *  offers — the shared `fauna_feed::PostSummary::nostr_advertise_verb`
+ *  (`monetization.md` § The Nostr advertisement of a sold post → *What the
+ *  author sees and agrees to*), never a page-side copy. `null` = neither.
+ *  `canAdvertise` = the build's `zaps` member AND the nest's capability AND
+ *  the confirm sentence in the catalog. Sync, like `postCardGate`. */
+export function postNostrAdvertiseVerb(
+  post: { author: string; gated_tier?: string | null; nostr_advertised_at?: number | null },
+  viewer: string,
+  canAdvertise: boolean,
+): 'advertise' | 'stop_advertising' | null {
+  const verb = wasm().postNostrAdvertiseVerb(
+    post.author,
+    post.gated_tier ?? undefined,
+    post.nostr_advertised_at ?? undefined,
+    viewer,
+    canAdvertise,
+  ) as 'advertise' | 'stop_advertising' | null | undefined;
+  return verb ?? null;
 }
 
 /** The home a post's own bytes are fetched from — the shared

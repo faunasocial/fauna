@@ -32,32 +32,36 @@ func scheduleDraftsAutosave(
     }
 }
 
-/// The leave-flush twin of `scheduleDraftsAutosave` — the shared body behind
-/// `ConversationsVM.flushDraftsNow` and `FeedVM.flushDraftsNow`
-/// (`reserved-folders.md` § The leave-flush promise: "leaving the app never
-/// loses the compose input the debounced autosave has not yet caught").
+/// The leave-flush twin of `scheduleDraftsAutosave` — the shared catch-and-log
+/// body behind `ConversationsVM.flushDraftsNow`, `FeedVM.flushDraftsNow` and
+/// `EventsVM.flushDraftsNow` (`reserved-folders.md` § The leave-flush promise:
+/// "leaving the app never loses the compose input the debounced autosave has
+/// not yet caught").
 ///
 /// Cancelling the pending debounced task is the caller's own act (it owns the
-/// `draftsSaveTask` handle); this runs the save the cancelled task would have
-/// run, immediately and without the sleep. `saveIfChanged` keeps its two
-/// no-ops — the pre-restore launch gate and the unchanged-snapshot compare —
-/// so a quiet leave costs one cheap snapshot compare and no round trip, which
-/// is what lets both macOS's bounded quit gate and iOS's background-task
-/// extension fold it in unconditionally.
+/// `draftsSaveTask` handle), and so is capturing what the door found: each
+/// rail's `save` is its own fauna-ffi leave face —
+/// `FfiDraftsSync.saveConversationsOnLeave`, `FfiFeedManager.saveDraftsOnLeave`,
+/// `FfiEventDraftsSync.saveDraftsOnLeave` — fed the snapshot (and, for
+/// conversations, the identity epoch) the caller read synchronously at the
+/// door, before any teardown. The face is the whole body in shared Rust
+/// (`DraftsSync::save_on_leave`): with the save gate open it is the plain
+/// changed-only save, so a quiet leave costs one snapshot compare and no round
+/// trip; with the gate still shut — a door in the first seconds of a session,
+/// before the launch load has succeeded — it makes one read of its own, fills
+/// the rail as the launch restore would, then saves.
 ///
 /// Best-effort by the same reasoning as the debounced path: a leave door must
-/// not hang or throw on an unreachable nest, and whatever the debounce already
-/// landed is still there for the next restore. `EventsVM.flushDraftsNow` is the
-/// deliberate near-miss this does not cover, for the same reasons
-/// `scheduleDraftsAutosave` does not cover its scheduler.
+/// not hang or throw on an unreachable nest (the session-teardown door bounds
+/// the whole flush with `boundedLeaveFlush`), and whatever the debounce already
+/// landed is still there for the next restore.
 @MainActor
 func flushDraftsAutosave(
-    sync: FfiDraftsSync,
     logTarget: String,
-    snapshotBytes: () -> Data
+    save: () async throws -> Void
 ) async {
     do {
-        _ = try await sync.saveIfChanged(snapshot: snapshotBytes())
+        try await save()
     } catch {
         logMessage(level: .info, target: logTarget,
                    message: "[drafts] leave-flush failed (transient): \(error)")

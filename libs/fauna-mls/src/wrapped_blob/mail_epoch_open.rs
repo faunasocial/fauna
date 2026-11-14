@@ -10,9 +10,10 @@
 use zeroize::Zeroizing;
 
 use super::{
-    MAIL_EPOCH_PUBLISH_HORIZON, MLKEM768_DECAPS_KEY_LEN, MailRecordEnvelope, RecordKind,
-    UnwrapError, derive_recipient_mail_epoch_capability_secret_from_root, mail_sealing_epoch_of,
-    unseal_record, unseal_record_hybrid,
+    MAIL_EPOCH_PUBLISH_HORIZON, MASTER_MAIL_CHUNK_LEN, MAX_MASTER_MAIL_GENERATIONS,
+    MLKEM768_DECAPS_KEY_LEN, MailRecordEnvelope, RecordKind, UnwrapError,
+    derive_recipient_mail_epoch_capability_secret_from_root, mail_sealing_epoch_of, unseal_record,
+    unseal_record_hybrid,
 };
 
 /// Open an already-decoded sealed [`MailRecordEnvelope`] with a
@@ -87,6 +88,70 @@ pub fn unseal_record_with_derived_key(
              x25519∥mlkem_dk secrets), got {other}"
         ))),
     }
+}
+
+/// Whether `key` is a **master-key** `content.read{mail}` payload
+/// ([`derive_master_mail_capability_payload`](super::derive_master_mail_capability_payload)):
+/// a non-zero multiple of [`MASTER_MAIL_CHUNK_LEN`] with at most
+/// [`MAX_MASTER_MAIL_GENERATIONS`] chunks. The cap keeps it apart from the
+/// bounded `k × 2432` form (`76 × 2464 = 77 × 2432` is the first shared length).
+fn is_master_mail_payload(key: &[u8]) -> bool {
+    !key.is_empty()
+        && key.len().is_multiple_of(MASTER_MAIL_CHUNK_LEN)
+        && key.len() / MASTER_MAIL_CHUNK_LEN <= MAX_MASTER_MAIL_GENERATIONS
+}
+
+/// Open a sealed mail [`MailRecordEnvelope`] with a `content.read{mail}` grant
+/// key — the ONE grant-holder open every holder site calls (the nest's
+/// materializer, the Rust holder crate's callers, the Go drain through the FFI
+/// door), ruled in `capability-grants.md` § Capability tiering →
+/// *Content-sealing epochs* → *What a master-key mail wrap conveys*.
+///
+/// `record_unix_secs` is the record's seal instant (`stored_at`; `0` =
+/// unknown). Dispatch is on the key's length, master form first:
+///
+/// - a **master-key** payload (`k × 2464`, `k ≤ 64`; each chunk a
+///   generation's standing secret then its mail-epoch root, newest first) runs
+///   [`open_mail_epoch_chain`] over the chunks' roots — generations walked
+///   newest first, the payload carrying no retirement instants — with every
+///   chunk's standing secret as the standing step, so it opens epoch-sealed
+///   and standing-sealed mail of every generation it carries;
+/// - anything else is [`unseal_mail_record_with_derived_key`] as it stands
+///   (32-byte classical, a standing `2432`, a bounded `k × 2432` epoch wrap,
+///   or a pre-ruling 2432-byte master wrap, which opens standing mail alone).
+///
+/// # Errors
+///
+/// A master-key payload that opens nothing is [`UnwrapError::HpkeFailed`];
+/// otherwise as [`unseal_mail_record_with_derived_key`].
+pub fn open_mail_record_with_grant_key(
+    envelope: &MailRecordEnvelope,
+    key: &[u8],
+    record_unix_secs: u64,
+) -> Result<Vec<u8>, UnwrapError> {
+    if !is_master_mail_payload(key) {
+        return unseal_mail_record_with_derived_key(envelope, key);
+    }
+    const STANDING_LEN: usize = 32 + MLKEM768_DECAPS_KEY_LEN;
+    let (chunks, _) = key.as_chunks::<MASTER_MAIL_CHUNK_LEN>();
+    let roots: Zeroizing<Vec<[u8; 32]>> = Zeroizing::new(
+        chunks
+            .iter()
+            .map(|c| {
+                let mut r = [0u8; 32];
+                r.copy_from_slice(&c[STANDING_LEN..]);
+                r
+            })
+            .collect(),
+    );
+    let root_refs: Vec<&[u8; 32]> = roots.iter().collect();
+    let standing = |env: &MailRecordEnvelope| {
+        chunks
+            .iter()
+            .find_map(|c| unseal_mail_record_with_derived_key(env, &c[..STANDING_LEN]).ok())
+    };
+    open_mail_epoch_chain(envelope, &root_refs, &[], record_unix_secs, standing)
+        .ok_or(UnwrapError::HpkeFailed)
 }
 
 /// The content-sealing-epochs § 4 MSEK-holder trial-decrypt chain against an
@@ -463,5 +528,118 @@ mod tests {
                 body
             );
         }
+    }
+
+    // ── The master-key mail payload (`capability-grants.md` § Capability
+    // tiering → *Content-sealing epochs* → *What a master-key mail wrap
+    // conveys*, ruled 2026-11-13) ──
+
+    /// Two generations' master payload, newest first: `[new, old]` MSEKs.
+    fn two_generation_master() -> ([u8; 32], [u8; 32], Zeroizing<Vec<u8>>) {
+        let new = [0xD1; 32];
+        let old = [0xD2; 32];
+        let payload = crate::wrapped_blob::derive_master_mail_capability_payload(&new, &[old]);
+        (new, old, payload)
+    }
+
+    #[test]
+    fn a_master_payload_opens_an_epoch_record_of_the_current_generation() {
+        let (new, _old, payload) = two_generation_master();
+        let e = 2_950;
+        let kp = derive_recipient_epoch_xwing_keypair_from_root(&derive_mail_epoch_root(&new), e);
+        let body = b"epoch-sealed under the current generation";
+        let env = seal_to_recipient_xwing(body, &kp.public).unwrap();
+        let opened = open_mail_record_with_grant_key(&env, &payload, instant_in_epoch(e))
+            .expect("the master payload derives the current generation's epoch key");
+        assert_eq!(opened.as_slice(), body);
+        assert!(
+            unseal_mail_record_with_derived_key(&env, &payload[..2432]).is_err(),
+            "the pre-ruling standing secret alone cannot open epoch mail"
+        );
+    }
+
+    #[test]
+    fn a_master_payload_opens_an_epoch_record_of_a_prior_generation() {
+        let (_new, old, payload) = two_generation_master();
+        let e = 2_700;
+        let env = sealed_under_epoch(&derive_mail_epoch_root(&old), e, b"prior generation");
+        let opened = open_mail_record_with_grant_key(&env, &payload, instant_in_epoch(e))
+            .expect("the prior generation's root opens its epoch record");
+        assert_eq!(opened.as_slice(), b"prior generation");
+    }
+
+    #[test]
+    fn a_master_payload_opens_standing_records_of_every_generation() {
+        use crate::wrapped_blob::derive_recipient_xwing_keypair;
+        let (new, old, payload) = two_generation_master();
+        for msek in [new, old] {
+            let kp = derive_recipient_xwing_keypair(&msek);
+            let env = seal_to_recipient_xwing(b"standing", &kp.public).unwrap();
+            for t in [0, 1_700_000_000] {
+                assert_eq!(
+                    open_mail_record_with_grant_key(&env, &payload, t).unwrap(),
+                    b"standing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_master_payload_does_not_open_a_generation_it_does_not_carry() {
+        use crate::wrapped_blob::derive_recipient_xwing_keypair;
+        let (_new, _old, payload) = two_generation_master();
+        let stranger = [0xD3; 32];
+        let e = 2_950;
+        let epoch_env = sealed_under_epoch(&derive_mail_epoch_root(&stranger), e, b"x");
+        let standing_env =
+            seal_to_recipient_xwing(b"x", &derive_recipient_xwing_keypair(&stranger).public)
+                .unwrap();
+        for env in [&epoch_env, &standing_env] {
+            assert!(matches!(
+                open_mail_record_with_grant_key(env, &payload, instant_in_epoch(e)),
+                Err(UnwrapError::HpkeFailed)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_77_chunk_bounded_payload_is_read_as_bounded_not_master() {
+        // 77 × 2432 = 76 × 2464: past the 64-generation cap, so the bounded
+        // chunk-trial reads it, and its last chunk still opens its epoch.
+        use crate::wrapped_blob::derive_recipient_mail_epoch_capability_secret_from_root;
+        assert_eq!(77 * 2432, 76 * MASTER_MAIL_CHUNK_LEN);
+        let e = 3_333;
+        let root = derive_mail_epoch_root(&[0xD4; 32]);
+        let mut payload = Vec::new();
+        for g in 0u8..76 {
+            payload.extend_from_slice(&derive_recipient_mail_epoch_capability_secret_from_root(
+                &derive_mail_epoch_root(&[g; 32]),
+                e,
+            ));
+        }
+        payload.extend_from_slice(&derive_recipient_mail_epoch_capability_secret_from_root(
+            &root, e,
+        ));
+        let env = sealed_under_epoch(&root, e, b"bounded");
+        assert_eq!(
+            open_mail_record_with_grant_key(&env, &payload, instant_in_epoch(e)).unwrap(),
+            b"bounded"
+        );
+    }
+
+    #[test]
+    fn the_master_payload_keeps_the_newest_64_generations() {
+        let msek = [0xE0; 32];
+        let priors: Vec<[u8; 32]> = (0u8..70).map(|g| [g; 32]).collect();
+        let payload = crate::wrapped_blob::derive_master_mail_capability_payload(&msek, &priors);
+        assert_eq!(
+            payload.len(),
+            MAX_MASTER_MAIL_GENERATIONS * MASTER_MAIL_CHUNK_LEN
+        );
+        let e = 10;
+        let kept = sealed_under_epoch(&derive_mail_epoch_root(&priors[62]), e, b"kept");
+        let dropped = sealed_under_epoch(&derive_mail_epoch_root(&priors[63]), e, b"dropped");
+        assert!(open_mail_record_with_grant_key(&kept, &payload, instant_in_epoch(e)).is_ok());
+        assert!(open_mail_record_with_grant_key(&dropped, &payload, instant_in_epoch(e)).is_err());
     }
 }

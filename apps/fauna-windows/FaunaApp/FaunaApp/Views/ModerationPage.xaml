@@ -55,8 +55,11 @@
                                         <!-- content-label-badge: icon + category label + action, styled
                                              entirely from the shared content_label_style map (icon + accent
                                              colour) — no hard-coded category strings/colours. Its HelpText
-                                             packs the row's `confidence` / `action` facts (moderation.md
-                                             § Element IDs → Queue row facts; ModerationViewModel.BadgeAttributes). -->
+                                             packs the row's `confidence` / `action` facts, and a delivered
+                                             row's `issuer` (moderation.md § Element IDs → Queue row facts;
+                                             ModerationViewModel.BadgeAttributes). The action line carries the
+                                             shared `issued_by` suffix on a row another nest delivered
+                                             (ModerationViewModel.ActionLine). -->
                                         <StackPanel Orientation="Horizontal" Spacing="6"
                                                     AutomationProperties.AutomationId="content-label-badge"
                                                     AutomationProperties.Name="{Binding CategoryLabel}"
@@ -65,7 +68,7 @@
                                             <TextBlock Text="{Binding CategoryLabel}"
                                                        Foreground="{Binding CategoryAccent, Converter={StaticResource HexBrush}}"
                                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                            <TextBlock Text="{Binding ActionLabel}" Opacity="0.6"
+                                            <TextBlock Text="{Binding ActionLine}" Opacity="0.6"
                                                        VerticalAlignment="Center" />
                                         </StackPanel>
                                         <TextBlock Opacity="0.6" FontSize="12" TextTrimming="CharacterEllipsis">

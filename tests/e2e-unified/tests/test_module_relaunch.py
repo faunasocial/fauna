@@ -193,3 +193,43 @@ def test_every_driver_declares_what_its_log_says_after_a_relaunch():
         "silently). Every control that reads the app's own log as evidence "
         "depends on this answer — see drivers/base.py::log_scope_across_relaunch."
     )
+
+
+# ── persistent_app crosses the boundary too ─────────────────────────────────
+
+def test_persistent_app_is_module_scoped_over_a_session_layer(request):
+    # The boundary needs a fixture instance per module; the app parametrization
+    # stays at session scope so a run still groups by app.
+    fm = request.session._fixturemanager
+    (wrapper,) = fm.getfixturedefs("persistent_app", request.node)[-1:]
+    assert wrapper.scope == "module"
+    assert "_persistent_session_app" in wrapper.argnames
+    (session_layer,) = fm.getfixturedefs("_persistent_session_app", request.node)[-1:]
+    assert session_layer.scope == "session"
+    assert session_layer.params, "the app parametrization moved off the session layer"
+
+
+def test_persistent_app_relaunches_at_each_module_boundary(request):
+    """The REAL fixture function, driven module by module: the session's first
+    module pays nothing, a new module relaunches, and the boundary record is the
+    one ``app`` shares (``_e2e_last_module`` on the driver)."""
+    import types
+
+    fm = request.session._fixturemanager
+    func = fm.getfixturedefs("persistent_app", request.node)[-1].func
+    driver = _Driver()
+    layer = types.SimpleNamespace(driver=driver)
+
+    def enter(module_name):
+        req = types.SimpleNamespace(module=types.SimpleNamespace(__name__=module_name))
+        gen = func(request=req, _persistent_session_app=layer)
+        assert next(gen) is layer
+
+    enter("tests.test_a")
+    assert driver.recover_calls == 0
+    enter("tests.test_b")
+    assert driver.recover_calls == 1
+    assert driver._e2e_last_module == "tests.test_b"
+    # An `app` test in the same module sees no second boundary.
+    assert mr.at_module_boundary(driver, "tests.test_b") is None
+    assert driver.recover_calls == 1

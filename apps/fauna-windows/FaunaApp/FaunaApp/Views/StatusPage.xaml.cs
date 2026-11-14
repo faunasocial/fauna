@@ -21,10 +21,17 @@ namespace FaunaApp.Views;
 public sealed partial class StatusPage : Page
 {
     private StatusViewModel? _viewModel;
+    // The served account's material, read through the registry on every access — the
+    // identity cell's one paint source (its server-data cache).
+    private ISessionAccount? _account;
 
     public StatusPage()
     {
         this.InitializeComponent();
+        // The cache's writer — a launch's verify reply, or the session's identity follow —
+        // moved the identity: repaint the cell in place (raised off the UI thread).
+        Loaded += (_, _) => SelfDisplayHandle.Moved += OnIdentityMoved;
+        Unloaded += (_, _) => SelfDisplayHandle.Moved -= OnIdentityMoved;
         // A relay reply folded while this page is up repaints the region section in
         // place (RegionPlaneHost raises off the UI thread — marshal back).
         Loaded += (_, _) => RegionPlaneHost.Changed += OnRegionChanged;
@@ -40,11 +47,37 @@ public sealed partial class StatusPage : Page
 
     private void OnNestRulesChanged() => DispatcherQueue.TryEnqueue(PaintNestRules);
 
+    private void OnIdentityMoved() => DispatcherQueue.TryEnqueue(PaintIdentityCell);
+
+    /// <summary>
+    /// The identity cell (<c>settings.md</c> § Layout &amp; flow item 1):
+    /// <c>settings-handle-label</c> — the account's own <c>handle@domain</c>, the shared
+    /// <c>display_handle</c> — and <c>settings-tier-label</c>, the bare tier, both from the
+    /// account registry's server-data cache (<see cref="IdentityCell"/>), never the quota
+    /// reply. A row with no value is collapsed with its caption: absent, not empty.
+    /// </summary>
+    private void PaintIdentityCell()
+    {
+        var cell = _account is null ? null : IdentityCell.Read(_account);
+        PaintRow(HandleCaption, HandleText, cell?.Handle);
+        PaintRow(TierCaption, TierText, cell?.Tier);
+    }
+
+    private static void PaintRow(TextBlock caption, TextBlock value, string? text)
+    {
+        var visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
+        value.Text = text ?? "";
+        value.Visibility = visibility;
+        caption.Visibility = visibility;
+    }
+
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
         if (e.Parameter is ServiceClients clients)
         {
+            _account = clients.Account;
+            PaintIdentityCell();
             _viewModel = new StatusViewModel(
                 clients.Nest,
                 clients.Rpc!,
@@ -139,7 +172,8 @@ public sealed partial class StatusPage : Page
         VersionText.Text = _viewModel.SyncVersion ?? "--";
         UptimeText.Text = ValueFormat.DurationSecs(_viewModel.SyncUptimeSecs);
         ActorIdText.Text = _viewModel.ActorId ?? "--";
-        HandleText.Text = _viewModel.Handle ?? "--";
+        // Re-read on every load and refresh: the cache may have moved since the last paint.
+        PaintIdentityCell();
 
         // Sync summary
         var syncConnected = _viewModel.SyncConnected;

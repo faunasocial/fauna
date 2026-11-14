@@ -153,7 +153,17 @@ def _send_and_report(seats, reason, note, before_send=None):
     words = f"appealbody{token}"
 
     author_seat.app.moderation.navigate()
-    assert not author_seat.app.has_error()
+    # A deadline poll, not an instant read: web's queue shares the Privacy page,
+    # which paints `error-message` (the inbox mode "has not loaded" copy) for as
+    # long as that page's first read is out — and on a seat that has just
+    # bootstrapped a room the read queues behind the room's own traffic. A read
+    # that never lands still fails here, naming what the page showed.
+    _poll(
+        lambda: not author_seat.app.has_error(),
+        _PAGE_BUDGET_S,
+        "the author's queue opens cleanly before the message",
+        diagnose=lambda: f"error-message: {author_seat.app.error_text()!r}\n{seat_story(author_seat)}",
+    )
     baseline = (
         author_seat.app.moderation.correction_count(),
         author_seat.app.moderation.appeal_count(),

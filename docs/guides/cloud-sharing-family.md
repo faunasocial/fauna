@@ -108,10 +108,22 @@ Two things are worth knowing about a folder shared this way:
 - **Leaving one is not available yet.** The person who started the share is the
   one who can remove someone from it.
 
-⏳ *This first version sets the folder up on both sides without copying its
-files across — the two of you end up sharing the same folder, and it is listed
-and readable in principle, but the contents do not transfer yet. That piece is
-still being built. Sharing through your nest is the way to move files today.*
+**Putting files in it.** Once the folder is listed, each of you picks where it
+lives on your own device: open its row in **Folders**, type a path into
+**Location path** and press **Add location** (**Bind Location** in the Windows
+and Mac apps). From then on, a file either of
+you adds there reaches the other person's copy straight from your device. Your
+nest plays no part in this, so it does not need to be running or reachable. In
+turn, nothing moves unless both apps are open, **Peer transfers** is on for
+both devices, and your two devices can reach each other. The same local network you used for the exchange is the sure way.
+
+**When you both save the same file.** If the two of you change the same file
+before either change has reached the other, the later save stands on both
+devices — even in a text file, the two are not merged. The earlier save is not
+thrown away. With no nest involved there is no version history to keep it in,
+so it stays on the device of the person who made it, and the file appears on
+that person's conflict review list in **Folders**. Pressing **Use the other
+version** there brings their version back, and it then stands on both devices.
 
 ### When your devices fetch from each other
 
@@ -129,9 +141,7 @@ opens no connection for other devices to reach — it neither hands files out no
 any of your devices off from any other; only the device itself turns back on.
 The **Folders** page shows a **Peer transfers**
 section: one line saying whether this device is currently serving your shared
-folders to other members, and below it a row for each folder and person the
-app fetched from lately — what moved, and whether it is receiving, up to
-date, still waiting to be admitted, or limited by a usage rule. Your nest
+folders to other members, and below it a row for each folder and person the app tried to fetch from most recently — what moved, and whether it is receiving, up to date, still waiting to be admitted, or limited by a usage rule. A row also tells you when the app could not reach that person's device — it is switched off, say, or on a network this one cannot reach — or when the connection was lost part-way; either way the app tries again by itself. Your nest
 stays the always-on copy: device-to-device fetching is a shortcut in front of
 it, never a replacement, and everything arrives with the same encryption and
 the same membership checks as it would through the nest.
@@ -169,7 +179,7 @@ photos, feeds. Not a "family member" sub-account: the real thing.
   sees their own usage; over-quota writes are refused cleanly (nothing is
   silently deleted).
 - **Privacy holds inside the family too.** Every nest stores members' files encrypted with their own keys — the admin manages space and membership, not what is in those files. You can evict an account, but apart from a member's profile, which is public by design, you cannot read what is in it. A member can loosen that for their own data, and you cannot do it for them: by publishing to everyone — a post, or a folder they make public — by serving a folder over WebDAV or putting one behind a paywall, by linking an account on another network, by connecting a standard mail, calendar, contacts or file app (the nest can open their mail, calendar and address book with that app's password, and only for its signed-in session), or by giving the nest permission to read some of their data — saying yes to **Trust this box?** when they join, later from their own Settings → Nests, or subscribing to a community labeler that reads their mail — revocable whenever they like, and never an admin-wide switch. Mail and messages the nest passes to and from email and other networks arrive readable and are stored encrypted as they land, and a group may choose to be a community room, which its home nest can read. And someone who can open a member's message or restricted post can attach its text to a report, which the admins can then read. The nest also sees what any server that delivers messages must: who each member is connected to — their contacts, whom they follow, the groups they're in — and when and how much they send. And when a member's app shows a preview of a link that stands on a line of its own, in a post or a message, it asks the nest to fetch that link, so the nest learns the link's address (see [Who can see what](who-can-see-what.md#link-previews-and-shared-media)).
-- **Leaving the admin chair aside**, members manage themselves: their own devices, their own mail settings, their own shares. Admin powers are about membership and resources — invite, set tier, suspend, evict — plus the rules you publish for your nest and withholding a single item someone reported or the law obliges you to remove, always with a notice in its place (see [Moderation, honestly](nest-for-friends-and-family.md#moderation-honestly)); none of them opens what a member keeps encrypted. An eviction is never sudden: the member is warned and can export their data until their access ends, two weeks later; about four weeks after the warning, their account and everything in it are deleted, unless you cancel it first.
+- **Leaving the admin chair aside**, members manage themselves: their own devices, their own mail settings, their own shares. Admin powers are about membership and resources — invite, set tier, suspend, evict — plus one family act, taking over a child's guardianship yourself when you must (see [Kids on the nest](nest-for-friends-and-family.md#kids-on-the-nest)), and the rules you publish for your nest and withholding a single item someone reported or the law obliges you to remove, always with a notice in its place (see [Moderation, honestly](nest-for-friends-and-family.md#moderation-honestly)); none of them opens what a member keeps encrypted. An eviction is never sudden: the member is warned and can export their data until their access ends, two weeks later; about four weeks after the warning, their account and everything in it are deleted, unless you cancel it first.
 
 The same machinery gives you [friend-hosted backup guests](cloud-backup.md#friend-hosted-backup-you-hold-mine-ill-hold-yours):
 a "member" whose tier allows storage only.
@@ -178,7 +188,9 @@ a "member" whose tier allows storage only.
 
 The model: **supervised accounts**. A household admits a child's account with
 a **guardianship link** to a parent's account — a relationship between two
-accounts, deliberately *not* a power of the admin role. From the Family page in
+accounts, deliberately *not* a power of the admin role. The one exception: an
+admin can take the guardianship over themself, from the child's row on the
+admin **Users** page, and is then the guardian like any other. From the Family page in
 any app, the guardian sets who can reach the child (enforced by the nest, which goes by who is writing, never by what they wrote: new contacts need guardian approval, cold email from unknown senders can be held for review or rejected, and strangers on other nests can be kept from initiating contact at all), reviews a queue of pending
 approvals, and can pre-approve a contact directly. The child always sees a
 permanent "this account is supervised" notice — supervision is never silent —
@@ -331,7 +343,7 @@ A separate app for children under 13, limited to contacts their guardian approve
 | WebDAV credentialed access for non-Fauna tools | **Available** (server + the per-folder toggle on every app) — see [sync guide](cloud-sync.md#where-this-stands-today) |
 | Public website hosting of a folder | **Available** — set a folder you own to **Public**, turn on **"Serve this folder as your website"** on its row, and switch on **Publish my website** in Settings → Web |
 | Share links for people without Fauna (expiring, revocable; private files carry their key in the link) | **Available** — **Share a link** on a file in Media |
-| Share a folder with someone sitting next to you, with no nest involved | **Being built** — the whole exchange works on your local network, and the folder is set up on both sides; **the files themselves do not copy across yet** |
+| Share a folder with someone sitting next to you, with no nest involved | **Available** — the exchange works on your local network; each of you picks where the folder lives, files go straight between your two devices while both apps are open and **Peer transfers** is on for both devices, and a save that lost to the other person's can be brought back from the conflict review list. Naming the folder is still being built, and leaving it is not available yet |
 | Collaborative documents (Spaces, viewer/editor) | **Planned** — designed, unbuilt |
 | Multi-user nest: invite codes/requests, tiers-as-quotas (enforced), eviction | **Available** on all seven apps |
 | Per-member privacy from the admin (files stored encrypted with each member's own keys, apart from a member's profile and what they make public) | **Available** |

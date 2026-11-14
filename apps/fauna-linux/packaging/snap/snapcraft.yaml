@@ -1,7 +1,7 @@
 name: fauna
 # The product version — must equal the root Cargo.toml [workspace.package]
 # version (product-version.md; version-lockstep merge gate).
-version: '0.1.6'
+version: '0.1.7'
 summary: Decentralized social communication
 description: |
   End-to-end encrypted messaging, group chat, calendar, file sync,
@@ -47,3 +47,11 @@ parts:
       craftctl default
       cargo build --release -p fauna-sync-agent
       install -Dm755 target/release/fauna-sync-agent $CRAFT_PART_INSTALL/bin/fauna-sync-agent
+      # Fauna's two licence texts and the app's notices file
+      # (shipped-notices.md § Per channel). Run `just linux-desktop-notices`
+      # before snapcraft: the generator needs the host's package cache, so the
+      # file is written outside the build and reaches it through `source: .`;
+      # missing, this step fails the build.
+      install -Dm644 LICENSE-MIT $CRAFT_PART_INSTALL/share/doc/fauna-desktop/LICENSE-MIT
+      install -Dm644 LICENSE-APACHE $CRAFT_PART_INSTALL/share/doc/fauna-desktop/LICENSE-APACHE
+      install -Dm644 build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES $CRAFT_PART_INSTALL/share/doc/fauna-desktop/THIRD-PARTY-NOTICES

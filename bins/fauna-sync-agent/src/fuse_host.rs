@@ -95,6 +95,9 @@ pub(crate) struct Reach {
     _dir: std::fs::File,
     mount_point: PathBuf,
     path: PathBuf,
+    /// The view refuses every mutating request (a reader's presence root —
+    /// [`Self::read_only`]).
+    read_only: bool,
 }
 
 impl Reach {
@@ -103,17 +106,45 @@ impl Reach {
     /// agent's leftover; a live root's guard unmounts before its engine is
     /// rebuilt), or the descriptor lands on a FUSE view instead of the directory.
     pub(crate) fn open(sync_root: &Path) -> Result<Self> {
-        let dir = std::fs::File::open(sync_root)
-            .with_context(|| format!("opening the bound directory {}", sync_root.display()))?;
+        Self::open_backing(sync_root, sync_root)
+    }
+
+    /// Open `backing` as the directory a view mounted at `mount_point` stands
+    /// on — a **presence root** (`on-demand-files-linux.md` § Linux FUSE
+    /// binding, the presence-root bullet): the backing is a private directory
+    /// in the agent's per-account state dir and the mount point is
+    /// `$HOME/Fauna/<display name>`, so unmounted the presence path is an
+    /// empty directory. Mount-over ([`Self::open`]) is the case where the two
+    /// are one path. Open it while no mount of this binding is on `backing`.
+    pub(crate) fn open_backing(backing: &Path, mount_point: &Path) -> Result<Self> {
+        let dir = std::fs::File::open(backing)
+            .with_context(|| format!("opening the root's directory {}", backing.display()))?;
         if !dir.metadata()?.is_dir() {
-            bail!("{} is not a directory", sync_root.display());
+            bail!("{} is not a directory", backing.display());
         }
         let path = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
         Ok(Self {
             _dir: dir,
-            mount_point: sync_root.to_path_buf(),
+            mount_point: mount_point.to_path_buf(),
             path,
+            read_only: false,
         })
+    }
+
+    /// This root's view is a **reader's**: mounted `ro`, and its filesystem
+    /// answers `EROFS` to every mutating request (§ Linux FUSE binding, the
+    /// presence-root bullet). Reads, listings and hydrations are unchanged —
+    /// a hydration writes the backing through the driving loop, never through
+    /// the view.
+    #[must_use]
+    pub(crate) fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Is the view a reader's ([`Self::read_only`])?
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// The underlying directory, by descriptor. Never canonicalize it: that
@@ -123,7 +154,7 @@ impl Reach {
         &self.path
     }
 
-    /// The path the user bound — where the mount goes.
+    /// Where the mount goes — the path the user bound, or a presence path.
     pub(crate) fn mount_point(&self) -> &Path {
         &self.mount_point
     }
@@ -217,6 +248,7 @@ fn mount_with(
     let closing = Arc::new(AtomicBool::new(false));
     let fs = FuseRoot(Arc::new(Root {
         reach: reach.path().to_path_buf(),
+        read_only: reach.is_read_only(),
         cmd_tx,
         closing: Arc::clone(&closing),
         uid: root_meta.uid(),
@@ -235,6 +267,9 @@ fn mount_with(
         MountOption::Subtype(SUBTYPE.to_string()),
         MountOption::DefaultPermissions,
     ];
+    if reach.is_read_only() {
+        config.mount_options.push(MountOption::RO);
+    }
     config.mount_options.extend(extra);
     let session = fuser::spawn_mount(fs, reach.mount_point(), &config).with_context(|| {
         format!(
@@ -452,6 +487,22 @@ pub(crate) fn ghost_mount_points(mountinfo: &str, locations: &[PathBuf]) -> Vec<
     found
 }
 
+/// The mounts of this binding directly under `presence_dir` (`$HOME/Fauna`) —
+/// the presence roots' leftovers. The boot sweep runs before the presence plan
+/// can be read (it reads the nest), so it cannot name the presence paths one by
+/// one; every presence root lives one level under this directory, and nothing
+/// else of this binding does unless the user bound a location there, which the
+/// sweep clears as a leftover too.
+pub(crate) fn ghost_presence_mount_points(mountinfo: &str, presence_dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for (_, mount_point) in binding_mounts(mountinfo) {
+        if mount_point.parent() == Some(presence_dir) && !found.contains(&mount_point) {
+            found.push(mount_point);
+        }
+    }
+    found
+}
+
 /// Every mount of this binding in a `/proc/self/mountinfo` text, as
 /// `(mount id, mount point)`, in the table's order (a later line is a later
 /// mount).
@@ -501,12 +552,20 @@ fn unescape_mountinfo(raw: &str) -> String {
 /// an `auto_unmount` that could not run leaves behind. The linux twin of the
 /// windows ghost-registration sweep. Returns how many it unmounted. Blocking (a
 /// file read and one helper process per ghost).
-pub(crate) fn sweep_ghost_mounts(locations: &[PathBuf]) -> usize {
+pub(crate) fn sweep_ghost_mounts(locations: &[PathBuf], presence_dir: Option<&Path>) -> usize {
     let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
         return 0;
     };
+    let mut ghosts = ghost_mount_points(&mountinfo, locations);
+    if let Some(dir) = presence_dir {
+        for mount_point in ghost_presence_mount_points(&mountinfo, dir) {
+            if !ghosts.contains(&mount_point) {
+                ghosts.push(mount_point);
+            }
+        }
+    }
     let mut swept = 0;
-    for mount_point in ghost_mount_points(&mountinfo, locations) {
+    for mount_point in ghosts {
         match std::process::Command::new(FUSERMOUNT)
             .arg("-uz")
             .arg(&mount_point)
@@ -786,6 +845,10 @@ struct FuseRoot(Arc<Root>);
 struct Root {
     /// The underlying directory ([`Reach::path`]).
     reach: PathBuf,
+    /// A reader's view ([`Reach::read_only`]): every mutating request answers
+    /// `EROFS`. The `ro` mount makes the kernel refuse most of them before they
+    /// arrive; this is the filesystem's own word for any that do.
+    read_only: bool,
     cmd_tx: UnboundedSender<HydrationCommand>,
     closing: Arc<AtomicBool>,
     /// Owner of the bound directory — reported as the owner of every placeholder.
@@ -1354,6 +1417,11 @@ impl Filesystem for FuseRoot {
             return reply.error(Errno::ENOENT);
         };
         let flags = flags.0;
+        if self.0.read_only
+            && (flags & libc::O_ACCMODE != libc::O_RDONLY || flags & libc::O_TRUNC != 0)
+        {
+            return reply.error(Errno::EROFS);
+        }
         match std::fs::symlink_metadata(self.0.underlying(&rel)) {
             Ok(_) => return self.0.reply_open(&rel, flags, reply),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1415,6 +1483,9 @@ impl Filesystem for FuseRoot {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        if self.0.read_only {
+            return reply.error(Errno::EROFS);
+        }
         let Some(file) = self.0.file(fh) else {
             return reply.error(Errno::EBADF);
         };
@@ -1494,6 +1565,9 @@ impl Filesystem for FuseRoot {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        if self.0.read_only {
+            return reply.error(Errno::EROFS);
+        }
         let Some(rel) = self.0.rel_of(ino) else {
             return reply.error(Errno::ENOENT);
         };
@@ -1556,6 +1630,9 @@ impl Filesystem for FuseRoot {
         flags: i32,
         reply: ReplyCreate,
     ) {
+        if self.0.read_only {
+            return reply.error(Errno::EROFS);
+        }
         let (Some(parent_rel), Some(name)) = (self.0.rel_of(parent), name.to_str()) else {
             return reply.error(Errno::ENOENT);
         };
@@ -1603,6 +1680,9 @@ impl Filesystem for FuseRoot {
         umask: u32,
         reply: ReplyEntry,
     ) {
+        if self.0.read_only {
+            return reply.error(Errno::EROFS);
+        }
         let (Some(parent_rel), Some(name)) = (self.0.rel_of(parent), name.to_str()) else {
             return reply.error(Errno::ENOENT);
         };
@@ -1632,6 +1712,9 @@ impl Filesystem for FuseRoot {
     /// (`HydrationCommand::Unlink` → `handle_delete`) — the ONE way a
     /// placeholder is deleted on this root.
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if self.0.read_only {
+            return reply.error(Errno::EROFS);
+        }
         let (Some(parent_rel), Some(name)) = (self.0.rel_of(parent), name.to_str()) else {
             return reply.error(Errno::ENOENT);
         };
@@ -1673,6 +1756,9 @@ impl Filesystem for FuseRoot {
     /// Remove a directory — refused while placeholder rows remain under it,
     /// since those are files the user has not deleted.
     fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if self.0.read_only {
+            return reply.error(Errno::EROFS);
+        }
         let (Some(parent_rel), Some(name)) = (self.0.rel_of(parent), name.to_str()) else {
             return reply.error(Errno::ENOENT);
         };
@@ -1705,6 +1791,9 @@ impl Filesystem for FuseRoot {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
+        if self.0.read_only {
+            return reply.error(Errno::EROFS);
+        }
         let (Some(parent_rel), Some(name), Some(newparent_rel), Some(newname)) = (
             self.0.rel_of(parent),
             name.to_str(),
@@ -1809,7 +1898,11 @@ impl Filesystem for FuseRoot {
         _target: &Path,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EPERM);
+        reply.error(if self.0.read_only {
+            Errno::EROFS
+        } else {
+            Errno::EPERM
+        });
     }
 
     fn link(
@@ -1820,7 +1913,11 @@ impl Filesystem for FuseRoot {
         _newname: &OsStr,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EPERM);
+        reply.error(if self.0.read_only {
+            Errno::EROFS
+        } else {
+            Errno::EPERM
+        });
     }
 
     fn mknod(
@@ -1833,7 +1930,11 @@ impl Filesystem for FuseRoot {
         _rdev: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EPERM);
+        reply.error(if self.0.read_only {
+            Errno::EROFS
+        } else {
+            Errno::EPERM
+        });
     }
 }
 
@@ -1869,6 +1970,29 @@ mod tests {
                 PathBuf::from("/home/u/With Space")
             ],
         );
+    }
+
+    /// The presence roots' leftovers are this binding's mounts ONE level under
+    /// the presence directory: not another filesystem's there, not one deeper,
+    /// not the directory itself.
+    #[test]
+    fn presence_ghosts_are_this_bindings_mounts_directly_under_the_presence_dir() {
+        let mountinfo = "\
+29 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw
+820 29 0:80 / /home/u/Fauna/docs\\040(alice) ro,nosuid,nodev,relatime - fuse.fauna fauna-sync-agent ro,user_id=1000,group_id=1000
+821 29 0:81 / /home/u/Fauna/team rw,nosuid,nodev,relatime - fuse.fauna fauna-sync-agent rw,user_id=1000,group_id=1000
+822 29 0:82 / /home/u/Fauna/sshed rw,nosuid,nodev,relatime - fuse.sshfs host:/x rw,user_id=1000,group_id=1000
+823 29 0:83 / /home/u/Fauna/team/deeper rw,nosuid,nodev,relatime - fuse.fauna fauna-sync-agent rw,user_id=1000,group_id=1000
+824 29 0:84 / /home/u/Fauna rw,nosuid,nodev,relatime - fuse.fauna fauna-sync-agent rw,user_id=1000,group_id=1000
+";
+        assert_eq!(
+            ghost_presence_mount_points(mountinfo, Path::new("/home/u/Fauna")),
+            vec![
+                PathBuf::from("/home/u/Fauna/docs (alice)"),
+                PathBuf::from("/home/u/Fauna/team"),
+            ],
+        );
+        assert!(ghost_presence_mount_points(MOUNTINFO, Path::new("/home/u/Fauna")).is_empty());
     }
 
     #[test]

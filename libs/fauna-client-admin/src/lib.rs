@@ -1523,6 +1523,13 @@ pub struct AdminUserRowControls {
     /// `is_admin` row; the nest, not the client, refuses the last-superadmin
     /// case (`fauna.admin.conflict`, surfaced on `admin-users-action-error`).
     pub remove_admin: bool,
+    /// `admin-users-take-over-button` — the admin's one family act on a
+    /// supervised account: become its guardian at once (`fauna.family.transfer`
+    /// to self; `family-safety.md` § App surface → *Admin take-over*). Offered
+    /// on a row supervised by someone other than the viewing admin, whatever
+    /// the row's lifecycle state; the nest's admissibility check stays the only
+    /// enforcer.
+    pub take_over: bool,
 }
 
 /// Read a row's lifecycle state off the wire projection.
@@ -1569,7 +1576,11 @@ pub fn admin_user_lifecycle(user: &AdminUser) -> AdminUserLifecycle {
 ///   reached deletion, the nest refuses restore from there, and the role would
 ///   only hold the deletion (the finalize refuses an admin). Remove-admin stays:
 ///   it is what lets a held deletion complete.
-pub fn admin_user_row_controls(user: &AdminUser) -> AdminUserRowControls {
+/// - **Take-over splits purely on the guardian**, with no lifecycle crossing:
+///   a supervised row whose guardian is not `viewer` (the viewing admin's raw
+///   actor id) offers it; an unsupervised row, or one the viewer already
+///   guards, does not (`family-safety.md` § App surface → *Admin take-over*).
+pub fn admin_user_row_controls(user: &AdminUser, viewer: &[u8]) -> AdminUserRowControls {
     let lifecycle = admin_user_lifecycle(user);
     let cut_off_allowed = !user.is_admin;
     AdminUserRowControls {
@@ -1585,7 +1596,24 @@ pub fn admin_user_row_controls(user: &AdminUser) -> AdminUserRowControls {
         ),
         make_admin: !user.is_admin && lifecycle != AdminUserLifecycle::Deleting,
         remove_admin: user.is_admin,
+        take_over: user
+            .guardian
+            .as_ref()
+            .is_some_and(|g| g.actor_id.as_ref() != viewer),
     }
+}
+
+/// The text a supervised row's `admin-users-supervised-by` names its guardian
+/// by (`family-safety.md` § App surface → *Admin take-over*): the guardian's
+/// handle, falling back to the full actor hex for a handle-less account — the
+/// same fallback as [`admin_picker_option`]. `None` on an unsupervised row.
+pub fn admin_user_guardian_label(user: &AdminUser) -> Option<String> {
+    user.guardian
+        .as_ref()
+        .map(|g| match g.handle.as_deref().filter(|h| !h.is_empty()) {
+            Some(handle) => handle.to_string(),
+            None => fauna_core::format::hex_full(g.actor_id.as_ref()),
+        })
 }
 
 /// The option text an admin picker offers for `user` (`admin.md` § 2 → *What
@@ -3811,7 +3839,7 @@ mod tests {
 
     #[test]
     fn active_user_offers_both_entry_points_and_no_restore() {
-        let c = admin_user_row_controls(&row(None, false));
+        let c = admin_user_row_controls(&row(None, false), &[]);
         assert_eq!(
             c,
             AdminUserRowControls {
@@ -3820,6 +3848,7 @@ mod tests {
                 restore: false,
                 make_admin: true,
                 remove_admin: false,
+                take_over: false,
             }
         );
     }
@@ -3830,7 +3859,7 @@ mod tests {
         // second suspend is a no-op; evict is not an entry point from here.
         // Make-admin still stands — granting the role to a suspended user is
         // deliberate (their own restore control isn't withdrawn by it).
-        let c = admin_user_row_controls(&row(Some("suspended"), false));
+        let c = admin_user_row_controls(&row(Some("suspended"), false), &[]);
         assert_eq!(
             c,
             AdminUserRowControls {
@@ -3839,6 +3868,7 @@ mod tests {
                 restore: true,
                 make_admin: true,
                 remove_admin: false,
+                take_over: false,
             }
         );
     }
@@ -3849,7 +3879,7 @@ mod tests {
     /// admin would have to fully restore an abuse-in-progress user first.
     #[test]
     fn mid_eviction_warning_user_can_still_be_suspended_immediately() {
-        let c = admin_user_row_controls(&row(Some("warning"), false));
+        let c = admin_user_row_controls(&row(Some("warning"), false), &[]);
         assert_eq!(
             c,
             AdminUserRowControls {
@@ -3858,6 +3888,7 @@ mod tests {
                 restore: true,
                 make_admin: true,
                 remove_admin: false,
+                take_over: false,
             }
         );
     }
@@ -3868,13 +3899,14 @@ mod tests {
     /// row that got there keeps remove-admin, which is what completes it.
     #[test]
     fn deleting_row_offers_no_restore_and_no_make_admin() {
-        let c = admin_user_row_controls(&row(Some("deleting"), false));
+        let c = admin_user_row_controls(&row(Some("deleting"), false), &[]);
         assert_eq!(c, AdminUserRowControls::default());
-        let c = admin_user_row_controls(&row(Some("deleting"), true));
+        let c = admin_user_row_controls(&row(Some("deleting"), true), &[]);
         assert_eq!(
             c,
             AdminUserRowControls {
                 remove_admin: true,
+                take_over: false,
                 ..Default::default()
             }
         );
@@ -3885,7 +3917,7 @@ mod tests {
         // The nest answers `fauna.admin.conflict` on both, so offering either
         // would be a dead button (admin.md § 2: remove the role first). It does
         // offer remove-admin, never make-admin (already admin).
-        let c = admin_user_row_controls(&row(None, true));
+        let c = admin_user_row_controls(&row(None, true), &[]);
         assert_eq!(
             c,
             AdminUserRowControls {
@@ -3894,6 +3926,7 @@ mod tests {
                 restore: false,
                 make_admin: false,
                 remove_admin: true,
+                take_over: false,
             }
         );
     }
@@ -3902,7 +3935,7 @@ mod tests {
     /// them: restore stays reachable (`common.md` § Client-state recoverability).
     #[test]
     fn suspended_admin_can_still_be_restored() {
-        let c = admin_user_row_controls(&row(Some("suspended"), true));
+        let c = admin_user_row_controls(&row(Some("suspended"), true), &[]);
         assert!(c.restore, "restore must survive the admin guard");
         assert!(!c.suspend);
         assert!(!c.evict);
@@ -3921,7 +3954,7 @@ mod tests {
             admin_user_lifecycle(&row(Some("some_future_state"), false)),
             AdminUserLifecycle::EvictionPending
         );
-        let c = admin_user_row_controls(&row(Some("some_future_state"), false));
+        let c = admin_user_row_controls(&row(Some("some_future_state"), false), &[]);
         assert_eq!(
             c,
             AdminUserRowControls {
@@ -3930,6 +3963,7 @@ mod tests {
                 restore: true,
                 make_admin: true,
                 remove_admin: false,
+                take_over: false,
             }
         );
     }
@@ -3940,8 +3974,53 @@ mod tests {
     /// UX, never a wrong authorization decision — the nest is the sole enforcer.
     #[test]
     fn default_is_admin_false_degrades_to_offering_the_controls() {
-        let c = admin_user_row_controls(&AdminUser::default());
+        let c = admin_user_row_controls(&AdminUser::default(), &[]);
         assert!(c.suspend && c.evict);
+    }
+
+    // ── Admin take-over (family-safety.md § App surface → Admin take-over) ──
+
+    fn supervised(eviction_status: Option<&str>, guardian: u8) -> AdminUser {
+        AdminUser {
+            guardian: Some(admin::AdminUserGuardian {
+                actor_id: ByteBuf::from(vec![guardian; 32]),
+                ..Default::default()
+            }),
+            ..row(eviction_status, false)
+        }
+    }
+
+    #[test]
+    fn take_over_is_offered_on_a_row_another_actor_guards_in_every_lifecycle_state() {
+        let viewer = [0xAA; 32];
+        for state in [None, Some("warning"), Some("suspended"), Some("deleting")] {
+            let c = admin_user_row_controls(&supervised(state, 0x22), &viewer);
+            assert!(c.take_over, "offered on {state:?}");
+        }
+    }
+
+    #[test]
+    fn take_over_is_not_offered_to_the_ward_s_own_guardian_or_on_an_unsupervised_row() {
+        let viewer = [0xAA; 32];
+        assert!(!admin_user_row_controls(&supervised(None, 0xAA), &viewer).take_over);
+        assert!(!admin_user_row_controls(&row(None, false), &viewer).take_over);
+    }
+
+    #[test]
+    fn guardian_label_prefers_the_handle_and_falls_back_to_full_hex() {
+        let mut u = supervised(None, 0x22);
+        assert_eq!(
+            admin_user_guardian_label(&u),
+            Some(fauna_core::format::hex_full(&[0x22; 32]))
+        );
+        u.guardian.as_mut().unwrap().handle = Some("parent".to_string());
+        assert_eq!(admin_user_guardian_label(&u).as_deref(), Some("parent"));
+        u.guardian.as_mut().unwrap().handle = Some(String::new());
+        assert_eq!(
+            admin_user_guardian_label(&u),
+            Some(fauna_core::format::hex_full(&[0x22; 32]))
+        );
+        assert_eq!(admin_user_guardian_label(&row(None, false)), None);
     }
 
     // ── Picker option text (admin.md § 2 → What identifies a user in an

@@ -250,6 +250,10 @@ exe_suffix := if os() == "windows" { ".exe" } else { "" }
 # so several checkouts on one machine queue instead of competing for it. The
 # script is the maintainers' own and is not part of this tree: without it every
 # `slot_*` variable below is the empty string and the recipe line runs directly.
+# After `android-emu-probe` reads the venue down: the host reporter's view of
+# which leg is down (the adb server, the tunnel, each emulator), read from the
+# core broker. Degrades to nothing where scripts/_venue.py is absent.
+venue_host_view := if path_exists(justfile_directory() / "scripts/_venue.py") == "true" { py + " scripts/_venue.py --host-view" } else { "true" }
 slot_build :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --" } else { "" }
 # The debug SwiftPM builds (swift test, mac-debug, the FaunaiOS typecheck) emit no
 # dSYM: SwiftPM's default dwarf format writes a ~0.9 GB dSYM per linked product
@@ -1179,7 +1183,22 @@ _web-impl:
 # `just wasm` does not produce (a test recipe's, a retired chunk's).
 web-manifest: wasm i18n-generate providers-generate
     just _web-impl
+    just web-notices
     {{py}} scripts/web-asset-manifest.py write apps/fauna-web/build --static apps/fauna-web/static
+
+# The web app's licence files (shipped-notices.md § Per channel, the Web app
+# row): LICENSE-MIT.txt, LICENSE-APACHE.txt (the repository's files, byte for
+# byte) and the generated THIRD-PARTY-NOTICES.txt for the runtime npm packages
+# and the WebAssembly chunks' crate graph, written beside the entry page of a
+# built SPA tree. The Dockerfile's `web-notices` stage writes the same three into
+# the image's tree, so a hosted tree, the image's and a verifier's rebuild agree.
+# A generator refusal fails the recipe; only its verdict lines are printed — the
+# generated file is dependency-authored text, never opened.
+web-notices tree="apps/fauna-web/build":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{py}} scripts/shipped-notices.py web-app '{{tree}}/THIRD-PARTY-NOTICES.txt'
+    just shipped-licences '{{tree}}' .txt
 
 # Rebuild the commit a published `asset-manifest.json` names — from a CLEAN
 # clone of this repository, never this working tree — and compare every file
@@ -1208,6 +1227,11 @@ web-verify manifest:
         exit 2
     fi
     just --justfile "$work/src/justfile" --working-directory "$work/src" web
+    # A tree built since the web app carried its licence files lists them; an
+    # older manifest does not, and its commit has no recipe for them.
+    if grep -q '"THIRD-PARTY-NOTICES.txt"' "$manifest"; then
+        just --justfile "$work/src/justfile" --working-directory "$work/src" web-notices
+    fi
     {{py}} scripts/web-asset-manifest.py check "$manifest" "$work/src/apps/fauna-web/build" --repo "$work/src"
 
 # Does one dependency compile to the same bytes twice? Builds `-p <crate>` alone
@@ -1505,6 +1529,7 @@ site:
         --source docs/features \
         --source installer/official-apps.json \
         --source installer/downloads.json \
+        --source Cargo.toml \
         --source scripts/check-site-urls.py \
         -- just _site-impl
 
@@ -2211,7 +2236,7 @@ e2e-tui-artifact-test *ARGS:
 # test.fauna.build from the staging box's kept identity file
 # (tests/e2e-unified/helpers/store_install_account.py).
 # The device is the fauna-e2e-play AVD on host.
-# Usage: just e2e-android-store-test --device-serial emulator-5556
+# Usage: just e2e-android-store-test --device-serial 127.0.0.1:18510
 [linux]
 e2e-android-store-test *ARGS:
     pytest tests/e2e-unified/tests/artifact/test_android_store_install.py --client-artifact --app android -v {{ARGS}}
@@ -3372,6 +3397,7 @@ fuse-live-test-check:
         exit 1
     fi
     {{slot_build}} cargo test --locked -p fauna-sync-agent --features fuse-live --lib fuse_ -- --test-threads=2
+    {{slot_build}} cargo test --locked -p fauna-sync-agent --features fuse-live,tier3-nest --test presence_root_tier3
 
 # CHECK-tier, NIGHTLY-cadence gate (merge-gate-check.md § Merge-gate check) — the only
 # gate anywhere that RUNS fauna-nest's lib test suite. Every other gate on any path
@@ -3655,31 +3681,51 @@ android-store-driver:
 # `AuthKey_<id>.p8` plus a one-line `issuer`). Exit 3 = no key on this box,
 # 2 = App Store Connect refused (its reply verbatim on stderr).
 # `test_ios_export_compliance_live.py` holds the pin to the newest code.
+# The reader is `scripts/asc/export-compliance.swift`, run after the shared
+# `scripts/asc/common.swift` (credential, token, GET) on the interpreter's stdin.
 # Usage: just ios-export-compliance
 #        just ios-export-compliance --bundle-id social.fauna.faunakids
 [macos]
 ios-export-compliance *ARGS:
-    xcrun swift scripts/asc-export-compliance.swift {{ARGS}}
+    cat scripts/asc/common.swift scripts/asc/export-compliance.swift | xcrun swift - {{ARGS}}
+
+# The iOS app's builds in App Store Connect, read through the same key and
+# printed as JSON, newest upload first: each build's number, version string,
+# `processingState` (PROCESSING / FAILED / INVALID / VALID), upload date and
+# expiry, its TestFlight `internalBuildState` / `externalBuildState`, and the
+# beta groups that hold it (installers/ios.md § Implementation status today;
+# store-review.md § The states — the reading behind an `uploaded` row).
+# Read-only, no third-party code; a 403 on a TestFlight sub-resource prints as
+# "not readable by this key's role", never a failed read. Exit codes as
+# `ios-export-compliance`. `--fixture <file>` replays recorded replies
+# (`test_asc_store_builds_parse.py`).
+# Usage: just ios-store-builds
+#        just ios-store-builds --limit 3
+[macos]
+ios-store-builds *ARGS:
+    cat scripts/asc/common.swift scripts/asc/store-builds.swift | xcrun swift - {{ARGS}}
 
 # The iOS App Store build — and, with `upload`, the upload — as one command
-# (installers/ios.md § Upload mechanics, steps 1–3). A clean scratch clone of
-# the PUBLIC repository at tag `v<version>` in `target/ios-store-<version>/`
-# (never the private tree — release-integrity.md § Release signing), that
-# clone's `apple-ffi-store-safe`, the signed Release archive of `Fauna-iOS`
-# with the two excision flags, `-exportArchive` with the tracked export-only
-# options, every bundle verified and the `.ipa`'s sha256 printed. `upload`
-# then sends the archive through the exporter's upload destination with a
-# SCRATCH options copy and the App Store Connect key (read as
-# `ios-export-compliance` reads it), and PRINTS the `just store-review` lines
-# for the session to run from the console reading. Refuses a dirty or non-tag
-# clone and a tree whose MARKETING_VERSION is not `<version>`. Output and logs:
-# `target/ios-store-<version>.out/`. The cold FFI build takes ~30 min — run it
-# detached (scripts/detached-run.py). Pinned by test_ios_store_upload_pins.py.
+# (installers/ios.md § Upload mechanics; installers/store-review.md § The store
+# legs, *How the iOS store app is signed*), in the two halves the release
+# workflow calls. `build`: a clean scratch clone of the PUBLIC repository at tag
+# `v<version>` in `target/ios-store-<version>/` (never the private tree —
+# release-integrity.md § Release signing; `--tree DIR` names a clean checkout
+# instead), its `apple-ffi-store-safe`, and the UNSIGNED Release archive of
+# `Fauna-iOS` with the two excision flags. `sign`: the tree's own signer
+# (`scripts/ios-store-sign.py`) signs it bundle by bundle with the distribution
+# identity and the App Store profiles (`--profiles-dir`, else Xcode's), packages
+# the `.ipa` and reads every bundle back. `export` (the default) runs both;
+# `upload` then hands the package to `xcrun altool --upload-package` with the
+# App Store Connect key and PRINTS the `just store-review` lines for the session
+# to run from the console reading. Output and logs: `target/ios-store-<version>.out/`
+# (`--out DIR`). The cold FFI build takes ~30 min — run it detached
+# (scripts/detached-run.py). Pinned by test_ios_store_upload_pins.py.
 # Usage: just ios-store-upload 0.1.6
 #        just ios-store-upload 0.1.6 upload
 [macos]
-ios-store-upload version mode="export":
-    bash scripts/ios-store-upload.sh "{{version}}" "{{mode}}"
+ios-store-upload version mode="export" *args:
+    bash scripts/ios-store-upload.sh "{{version}}" "{{mode}}" {{args}}
 
 # The iOS store driver: an XCUITest runner bundle of its own
 # (`apps/fauna-apple/StoreDriver/`, bundle id `social.fauna.storedriver`) that
@@ -3715,43 +3761,80 @@ ios-store-driver mode="signed":
             -derivedDataPath "$out" \
             "${sign[@]}"
 
-# Print the SSH tunnel command for the android e2e run venue (testing.md
-# § Default app and nest mode → Android's run venue): the one command the
-# emulator's machine runs to dial this one, with every forward generated from
-# the venue's port constants (tests/e2e-unified/helpers/android_venue.py) so the
-# tunnel and the harness cannot disagree about a port. Prints only — it runs
-# nothing and opens nothing. `login` and `address` are this machine's, as the
+# The android e2e run venue (testing.md § Default app and nest mode → A2 amended
+# — the design; the owner's steps and checks are in the venue's setup
+# notes). Every block below is generated from the venue's constants in
+# tests/e2e-unified/helpers/android_emu.py, is paste-safe (`(`, `set -e`, short lines,
+# `)`), and opens with a guard naming the account it is for. They print only.
+#
+# The by-hand tunnel (step 7), for the venue account: remote forwards only, one
+# per emulator's adbd. `login` and `address` are this machine's, as the
 # emulator's machine dials them; both default to what this machine reports.
 android-tunnel-spec login="" address="":
-    @{{py}} tests/e2e-unified/helpers/android_venue.py "{{login}}" "{{address}}"
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --tunnel "{{login}}" "{{address}}"
 
-# Print the script that makes the android e2e venue standing: three launchd user
-# agents on the emulator's machine (adb server, headless emulator, the tunnel
-# above), each RunAtLoad + KeepAlive, so the venue is up after every restart with
-# nobody acting. Generated from the same port
-# constants as the tunnel. Prints only; the user runs it on the emulator's machine.
-android-venue-agents login="" address="":
-    @{{py}} tests/e2e-unified/helpers/android_venue.py --agents "{{login}}" "{{address}}"
+# The block writing the venue adb key's PUBLIC half into the venue account's
+# ~/.android/adbkey.pub, ending on its checksum line (step 4, check C4a).
+android-emu-adbkey:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --adbkey
 
-# Is the android emulator up? One line — `emulator up: … serves emulator-5554` or
-# `emulator down: <which leg>` — asked of the tunnelled adb server through the
-# harness's own adb prefix (`-L tcp:127.0.0.1:18509`, which never starts a local
-# server). Exit 0 when up, 1 otherwise. Cheap: one `adb devices`, 5 s at most.
-android-venue-probe *flags:
-    @{{py}} tests/e2e-unified/helpers/android_venue.py --probe {{flags}}
+# The block making the tunnel key in the venue account and printing its public
+# half and the address it dials this machine from (step 6).
+android-emu-key address="":
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --key "{{address}}"
 
-# Print the script that installs the FOURTH venue agent: the Play-image AVD
-# fauna-e2e-play headless on port 5556 (the store-install witness), RunAtLoad +
-# KeepAlive. Its own recipe, never part of android-venue-agents: the owner runs
-# it on the emulator's machine only AFTER the one windowed Play sign-in boot
-# (an AVD runs in one instance).
-# `just android-venue-probe --play` then reads emulator-5556. Prints only.
-android-venue-play-agent:
-    @{{py}} tests/e2e-unified/helpers/android_venue.py --play-agent
+# Writes the ONE authorized_keys line for the tunnel key on THIS machine,
+# replacing any earlier venue line, and prints check C6's count (step 6).
+android-emu-authorize key address:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --authorize "{{key}}" "{{address}}"
+
+# The admin block installing the venue's launchd daemons (step 8): both
+# emulators and the tunnel; `--no-tunnel`, `--no-emulator`, `--no-play` leave a
+# job out and remove its daemon (the fallback of a failed C1 or C9).
+android-emu-daemons *flags:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --daemons {{flags}}
+
+# The fallback of the amended design (not the retired first shape that used this
+# name): the block, for the venue account's Terminal inside its own login
+# session, installing `--tunnel` (C1 failed), `--emulator` and/or `--play` (C9
+# failed) as user agents of that account. Run `android-emu-daemons --no-<job>`
+# first; the venue is then down after a restart until that login.
+android-emu-agents *flags:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --agents {{flags}}
+
+# The admin block for check C1: a throwaway daemon of the venue account dials
+# this machine's SSH port with the system's nc, its exit code read, removed.
+android-emu-netcheck address="":
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --netcheck "{{address}}"
+
+# The venue account's block for the Play AVD's one windowed sign-in (step 5):
+# refuses while a venue tunnel runs, fetches and SHA-1-checks the Play image when
+# missing, unpacks it with ditto, boots the AVD with a window. Installs nothing.
+android-emu-play-setup:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --play-setup
+
+# The admin block reading what listens on the emulator's machine (C11, C12).
+android-emu-listeners:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --listeners
+
+# Installs and starts the venue adb server on THIS machine, the user unit
+# fauna-android-emu-adb.service (127.0.0.1:18508, the venue key through
+# ADB_VENDOR_KEYS), making the venue key pair once.
+android-emu-adb-server:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --adb-server
+
+# Is the android emulator up? One line — `emulator up: … serves 127.0.0.1:18509`
+# or `emulator down: <which leg>` (the venue adb server, a refused tunnel leg, an
+# unauthorized device, a booting one) — after `adb connect`ing each leg on the
+# venue server through the harness's own adb prefix. Exit 0 when up, 1 otherwise.
+android-emu-probe *flags:
+    @{{py}} tests/e2e-unified/helpers/android_emu.py --probe {{flags}} || { rc=$?; {{venue_host_view}}; exit $rc; }
 
 # Build Android release APK
 android-release: android-ffi i18n-generate providers-generate
+    @just _android-notices release
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleRelease
+    @just _android-notices-check release
 
 # Build the Play upload artifact — a release **AAB**, not an APK.
 #
@@ -3818,10 +3901,12 @@ _android-bundle variant:
     export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-arm64}"
     VARIANT="{{variant}}"
     TASK="bundle${VARIANT^}"
+    just _android-notices "$VARIANT"
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android "$TASK"
 
     AAB="apps/fauna-android/app/build/outputs/bundle/$VARIANT/app-$VARIANT.aab"
     [ -f "$AAB" ] || { echo "ERROR: no bundle at $AAB" >&2; exit 1; }
+    {{py}} scripts/android-package-notices.py "$AAB"
 
     WORK="$(mktemp -d "{{tmp_root}}/android-bundle-check.XXXXXX")"
     trap 'rm -rf "$WORK"' EXIT
@@ -3862,6 +3947,54 @@ _android-bundle variant:
         echo "android-bundle: UNSIGNED (no signing.properties on this machine)  $AAB"
     fi
 
+# The licence files every shipping Android package carries in its `assets/`
+# (shipped-notices.md § Per channel, the Android row): LICENSE-MIT and
+# LICENSE-APACHE from the repository root, byte for byte, and THIRD-PARTY-NOTICES
+# generated for this build type's own closure — its FFI flavor's crate graph and
+# the runtime classpath Gradle resolves for it (`:app:dependencies
+# --configuration <buildtype>RuntimeClasspath`, a report, no plugin). Staged into
+# `app/build/shipped-notices/<buildtype>/assets`, which the build type's source
+# set in `app/build.gradle.kts` names as an assets directory; the directory is
+# emptied first, so a refused generator leaves nothing stale behind and fails the
+# recipe before Gradle packages. The notices file is dependency-authored text:
+# read the generator's verdict lines, never the file. Every shipping recipe runs
+# this before Gradle and checks the built package's entry list after it. The
+# NDK drivers `android-ffi` links with must be on PATH: the generator finds the
+# NDK's sysroot notice through them, and fails without it.
+# Pinned by scripts/test_android_shipped_notices.py.
+_android-notices buildtype:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-arm64}"
+    BUILDTYPE="{{buildtype}}"
+    case "$BUILDTYPE" in
+        release) ARTIFACT=android-release ;;
+        foss) ARTIFACT=android-foss ;;
+        storeSafe) ARTIFACT=android-store-safe ;;
+        storeNoPayments) ARTIFACT=android-store-no-payments ;;
+        kids) ARTIFACT=android-kids ;;
+        *) echo "ERROR: _android-notices: no shipping build type '$BUILDTYPE'" >&2; exit 2 ;;
+    esac
+    DIR="apps/fauna-android/app/build/shipped-notices/$BUILDTYPE"
+    rm -rf "$DIR"
+    mkdir -p "$DIR/assets"
+    {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android --console=plain \
+        :app:dependencies --configuration "${BUILDTYPE}RuntimeClasspath" > "$DIR/runtime-classpath.txt"
+    {{py}} scripts/shipped-notices.py "$ARTIFACT" "$DIR/assets/THIRD-PARTY-NOTICES"
+    cp LICENSE-MIT LICENSE-APACHE "$DIR/assets/"
+    echo "android-notices: staged LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-NOTICES for $BUILDTYPE"
+
+# The built APK of a shipping build type carries the three licence files in its
+# `assets/` — its entry list read, never a file's text (scripts/android-package-notices.py).
+_android-notices-check buildtype:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BUILDTYPE="{{buildtype}}"
+    DIR="apps/fauna-android/app/build/outputs/apk/$BUILDTYPE"
+    PKG="$(ls "$DIR"/app-"$BUILDTYPE"*.apk 2>/dev/null | head -n 1 || true)"
+    [ -n "$PKG" ] || { echo "ERROR: no $BUILDTYPE APK under $DIR" >&2; exit 1; }
+    {{py}} scripts/android-package-notices.py "$PKG"
+
 # Build the store-safe (payments-excised) Android APK — the android leg of the
 # App-Store escape hatch (dynamic-features.md § The App-Store escape hatch).
 #
@@ -3870,14 +4003,18 @@ _android-bundle variant:
 # and strips the payments renders, which is how the element ids leave the dex —
 # the FFI's absence alone only removes the glue.
 android-store-safe: android-ffi-store-safe i18n-generate providers-generate
+    @just _android-notices storeSafe
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleStoreSafe
+    @just _android-notices-check storeSafe
 
 # Build the store-no-payments Android APK — the second store flavor
 # (dynamic-features.md § The App-Store escape hatch → *The store flavors*):
 # `assembleStoreNoPayments` is `storeSafe`'s twin with `BuildConfig.P2P_SHARE =
 # true` and the built ceremony glue, over the `store-safe,p2p-share` FFI.
 android-store-no-payments: android-ffi-store-no-payments i18n-generate providers-generate
+    @just _android-notices storeNoPayments
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleStoreNoPayments
+    @just _android-notices-check storeNoPayments
 
 # Build the Fauna Kids APK (family-safety.md § The account age band, the
 # kids-app bullet; installers/android.md § Goal): the `kids` build type —
@@ -3889,7 +4026,9 @@ android-store-no-payments: android-ffi-store-no-payments i18n-generate providers
 # `if (!BuildConfig.KIDS)` render, which is how the excised surfaces' element
 # ids leave the dex — the FFI's absence alone only removes the glue.
 android-kids: android-ffi-kids i18n-generate providers-generate
+    @just _android-notices kids
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleKids
+    @just _android-notices-check kids
 
 # Build the F-Droid / direct-download APK (installers/android.md § Release
 # channels): the `foss` build type — `release` minus every proprietary Google
@@ -3897,7 +4036,9 @@ android-kids: android-ffi-kids i18n-generate providers-generate
 # shims live only on the Play-distributed build types). Same production
 # `fauna-ffi` flavor as `android-release`, staged under `src/foss/`.
 android-foss: android-ffi-foss i18n-generate providers-generate
+    @just _android-notices foss
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleFoss
+    @just _android-notices-check foss
 
 # The `foss` witness: the assembled APK's dex must name NO Play, Play-services
 # or Firebase class (`com.google.android.play`, `com.google.android.gms`,
@@ -4261,6 +4402,9 @@ _android-ffi-bindgen target_dir stage_java stage_jni abis="all" profile_dir="rel
     {{slot_build}} cargo run -p fauna-ffi --bin uniffi-bindgen generate \
         --library "$TARGET_DIR/aarch64-linux-android/$PROFILE_DIR/libfauna_ffi.so" \
         --language kotlin --out-dir "$STAGE_JAVA/"
+    # uniffi 0.31.2 reads the u16 checksums as Int; restore the 16-bit reads
+    # (scripts/kotlin-checksum-width.py says why, and when to drop this).
+    {{py}} scripts/kotlin-checksum-width.py "$STAGE_JAVA/"
     # Copy .so files to jniLibs — only the ABIs this run actually built. An
     # `arm64` run (the store-safe witness) must NOT copy the other three: they
     # are whatever flavor built them last, and staging a payments-carrying
@@ -4502,6 +4646,30 @@ _android-host-ffi-stage:
     cargo run -p fauna-ffi --bin uniffi-bindgen generate \
         --library "$TARGET_DIR/debug/libfauna_ffi.so" \
         --language kotlin --out-dir apps/fauna-android/app/src/debug/java/
+    # uniffi 0.31.2 reads the u16 checksums as Int; restore the 16-bit reads
+    # (scripts/kotlin-checksum-width.py says why, and when to drop this).
+    {{py}} scripts/kotlin-checksum-width.py apps/fauna-android/app/src/debug/java/
+
+# The release variant's Kotlin bindings (src/release/java), generated from a
+# HOST `fauna-ffi` built with the release flavor's features (`android-ffi`'s
+# `_android-ffi-flavor release ""` → `--features file-provider-host`, no
+# `test-helpers`) — enough to COMPILE the release variant and its unit tests
+# without the NDK cross-compile, the same host-.so route
+# `_android-host-ffi-stage` takes for debug. Writes no jniLibs: nothing here
+# packages or runs a release build.
+_android-host-ffi-stage-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps 2>/dev/null | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo target)}"
+    cargo build -p fauna-ffi --features file-provider-host
+    rm -rf apps/fauna-android/app/src/release/java/uniffi \
+           apps/fauna-android/app/src/release/java/com/fauna/ffi
+    cargo run -p fauna-ffi --bin uniffi-bindgen generate \
+        --library "$TARGET_DIR/debug/libfauna_ffi.so" \
+        --language kotlin --out-dir apps/fauna-android/app/src/release/java/
+    {{py}} scripts/kotlin-checksum-width.py apps/fauna-android/app/src/release/java/
 
 _android-host-test-impl *ARGS:
     #!/usr/bin/env bash
@@ -4511,7 +4679,11 @@ _android-host-test-impl *ARGS:
     just _android-host-ffi-stage
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android :app:testDebugUnitTest {{ARGS}}
 
-# Compile-only gate for android's `src/test/` source set — the android sibling of `windows-cs-test-compile`
+# Compile-only gate for android's `src/test/` source set, for BOTH variants: `src/test/` is compiled by debug and release
+# alike, so a unit test there that calls debug-only code (`src/debug/`'s
+# TestAgent) passes the debug compile and breaks `testReleaseUnitTest`, which a
+# Gradle bump round's release pass runs — such a
+# test belongs in `src/testDebug/`. The android sibling of `windows-cs-test-compile`
 # (merge-gate-check-win.md § Merge-gate check (win)). `:app:compileDebugUnitTestKotlin`
 # is a fraction of `testDebugUnitTest`'s cost (no Robolectric execution) and
 # catches exactly the class this gate exists for: a UniFFI record field-add
@@ -4529,8 +4701,15 @@ _android-unit-test-compile-check-impl:
     set -euo pipefail
     export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
     export ANDROID_HOME="$HOME/android-sdk"
+    # Release bindings first, debug last: both stages write the one host
+    # `libfauna_ffi.so`, and `android-host-test` expects the debug-featured one.
+    just _android-host-ffi-stage-release
     just _android-host-ffi-stage
+    # One variant per invocation: together, `org.gradle.parallel` compiles both
+    # variants' main sources at once in the one Kotlin daemon and overruns its
+    # 3g heap (measured 2026-11-13: OutOfMemoryError in both compileXKotlin).
     {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android :app:compileDebugUnitTestKotlin
+    {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android :app:compileReleaseUnitTestKotlin
 
 # The android FFI seam-diff PAIR check, on a host-target pair — the merge-gate
 # check's stand-in for the pair `_android-ffi-bindgen` runs only on a release
@@ -5963,6 +6142,13 @@ _mac-app-impl:
     mkdir -p "$APP/Contents/Resources"
     cp apps/fauna-apple/Fauna-macOS/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
+    # The licence texts and the app's notices file, staged the same way and for
+    # the same reason as the icon — after the build, before signing seals the
+    # bundle (shipped-notices.md § Per channel, the macOS `.app` row). The notices
+    # cover the app's FFI library and the bundled sync agent (the manifest's
+    # `macos-app`); the `.dmg` and the `.pkg` inherit them with the app.
+    just shipped-notices-stage macos-app "$APP/Contents/Resources"
+
     # What xcodebuild owes us, asserted rather than assumed: a silent regression
     # in any of these ships an app that launches but has no extension, no
     # auto-start at sign-in (the `SMAppService.agent` plist —
@@ -5970,7 +6156,9 @@ _mac-app-impl:
     for want in Contents/MacOS/Fauna Contents/Info.plist Contents/PkgInfo \
                 Contents/Library/LaunchAgents/social.fauna.FaunaMacOS.plist \
                 Contents/PlugIns/Fauna-FileProvider.appex \
-                Contents/PlugIns/Fauna-FileProviderUI.appex; do
+                Contents/PlugIns/Fauna-FileProviderUI.appex \
+                Contents/Resources/LICENSE-MIT Contents/Resources/LICENSE-APACHE \
+                Contents/Resources/THIRD-PARTY-NOTICES; do
         [ -e "$APP/$want" ] || { echo "assembled bundle is missing $want" >&2; exit 1; }
     done
 
@@ -6071,14 +6259,16 @@ mac-dmg-package:
     codesign --sign "$FAUNA_SIGN_IDENTITY" --timestamp "$DMG_PATH"
 
     echo "==> Notarizing..."
-    xcrun notarytool submit "$DMG_PATH" "${NOTARY_AUTH[@]}" --wait
+    # Every call to Apple goes through apple-retry.sh: a dropped connection is common
+    # and both calls are safe to repeat (the script says why).
+    ./installer/macos/apple-retry.sh xcrun notarytool submit "$DMG_PATH" "${NOTARY_AUTH[@]}" --wait
 
     echo "==> Stapling..."
-    xcrun stapler staple "$DMG_PATH"
+    ./installer/macos/apple-retry.sh xcrun stapler staple "$DMG_PATH"
     # The app inside was notarized as part of the .dmg submission (one ticket per
     # cdhash), so its own ticket exists and staples onto the bundle — a copy
     # dragged out of the .dmg then passes Gatekeeper offline too.
-    xcrun stapler staple "$APP_PATH"
+    ./installer/macos/apple-retry.sh xcrun stapler staple "$APP_PATH"
 
     # The .sha256 names the bare file, as release.yml's SHA256SUMS does: it is
     # published beside the .dmg, so `shasum -c` runs where both were downloaded.
@@ -6115,7 +6305,7 @@ mac-tui-archive suffix dir:
     fi
     DIR="{{dir}}"
     NAME="fauna-tui-{{suffix}}"
-    for f in fauna-tui fauna-sync-agent fauna-cli install.sh; do
+    for f in fauna-tui fauna-sync-agent fauna-cli install.sh LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES; do
         [ -f "$DIR/$f" ] || { echo "$DIR/$f not found — stage the archive with apps/fauna-tui/packaging/assemble-archive.sh first" >&2; exit 1; }
     done
     mkdir -p build
@@ -6140,7 +6330,7 @@ mac-tui-archive suffix dir:
     ZIP="build/$NAME.notarize.zip"
     rm -f "$ZIP"
     ditto -c -k --keepParent "$STAGE" "$ZIP"
-    xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
+    ./installer/macos/apple-retry.sh xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
     rm -f "$ZIP"
 
     TAR="build/$NAME.tar.gz"
@@ -7784,7 +7974,7 @@ _tui-store-safe-check-impl:
     # `compose-sell-`) also cover ids outside the plane. Hand-listed here until
     # the catalog entry lands with the last family's gates (that section says why
     # the entry comes last).
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' 'feed-post-sale-price-'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" != "0" ]; then
             echo "ERROR: the store-safe fauna-tui flavor still carries $n '$pat' occurrence(s)." >&2
@@ -7822,7 +8012,7 @@ _tui-store-safe-check-impl:
     # → *The store flavors*): the complement plus `p2p-share`. Both directions,
     # because an absence-only column would pass on a build that had fallen back
     # to store-safe — the flavor this one exists to differ from.
-    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending')
+    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' 'feed-post-sale-price-')
     NO_PAYMENTS_PRESENT=('offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.')
     {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui --no-default-features --features store-safe,p2p-share
     built "$BIN"
@@ -7851,7 +8041,7 @@ _tui-store-safe-check-impl:
     # match nothing — a renamed id would read as a successful excision.
     {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui
     built "$BIN"
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' 'feed-post-sale-price-'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT fauna-tui flavor carries no '$pat' — the store-safe" >&2
@@ -8220,6 +8410,18 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
     cp -r "$PUBLISH_DIR/." "$STAGE/App/"
     cp "$CARGO_OUT/fauna-sync-agent.exe" "$STAGE/"
     cp "$CARGO_OUT/fauna_shell.dll" "$STAGE/"
+    # The three licence files at the package root (shipped-notices.md § Per
+    # channel, the Microsoft Store row): the repository's two, and the notices
+    # the generator writes for this flavour's closure, after the publish whose
+    # restore wrote the project.assets.json its NuGet leg reads. The packer
+    # refuses a payload without them; a generator that refuses fails here.
+    case "$FLAVOR" in
+        store-no-payments) NOTICES_ARTIFACT=windows-store ;;
+        store-safe)        NOTICES_ARTIFACT=windows-store-safe ;;
+        full)              NOTICES_ARTIFACT=windows-store-full ;;
+    esac
+    just shipped-licences "$STAGE" .txt
+    {{py}} scripts/shipped-notices.py "$NOTICES_ARTIFACT" "$STAGE/THIRD-PARTY-NOTICES.txt" --target "$TARGET"
 
     # 5. Pack. The packer refuses a payload missing its native core or carrying
     #    the automation surface; this recipe never opts out of either.
@@ -8373,7 +8575,10 @@ _windows-store-safe-check-impl:
         'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' \
         'compose-sell-price' 'compose-sell-subscribers-free' \
         'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' \
-        'gated-post-purchase-pending')
+        'feed-post-sale-price-')
+    # `feed-post-sale-price-` (a sold post's Change price… dialog) is a true
+    # prefix, every id under it in the plane. windows renders none of it yet;
+    # its default column still reads it, from the `#if PAYMENTS` constants.
     # The UniFFI faces the shell would call — the C# twin of web's wasm exports.
     PAY_FACE_PATS=('FfiPaymentsClient' 'PaymentsKnownKinds' 'PaymentsWebhookUrl' 'FfiNostrZapSignerClient' 'FfiZapSignerEntry')
     # Criterion 2 — kind strings, which live in the native cdylib, never in the C#.
@@ -10275,32 +10480,40 @@ mail-bridge-release: mail-bridge-ffi
     {{slot_build}} go -C bins/fauna-bridges build -trimpath -ldflags '-s -w' -o $(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')/release/fauna-mail-bridge ./cmd/fauna-mail-bridge
 
 # Build the Windows Go mail-bridge (MDA: CalDAV + IMAP) — cgo-linked with llvm-mingw.
-# Staged DLLs land beside the exe in target/; Track 2 wires them into the MSI Bridge
-# feature. Mechanism + toolchain prereqs: `_windows-go-cgo-build` below.
+# Staged DLLs land beside the exe in target/, where release.yml takes all three
+# for the MSI Bridge feature. Mechanism + toolchain prereqs: `_windows-go-cgo-build`
+# below.
 windows-mail-bridge-build rust_target="aarch64-pc-windows-gnullvm" go_arch="arm64" profile="release":
     #!/usr/bin/env bash
     set -euo pipefail
     just _windows-go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge.exe" "{{rust_target}}" "{{go_arch}}" "{{profile}}" ""
     # Convention 15 witness on the artifact — the same check the Unix
     # `mail-bridge-build` makes, since a windows-only build path is exactly where
-    # a seam rides into a shipped binary unnoticed.
-    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS; do
-        if grep -a -q -- "$lit" target/fauna-mail-bridge.exe; then
-            echo "ERROR: the production fauna-mail-bridge.exe carries the e2e seam '$lit' (convention 15)" >&2
+    # a seam rides into a shipped binary unnoticed: the Go seams on the exe,
+    # fauna-mail's Rust ones on the fauna_ffi.dll staged beside it (the one it
+    # loads, and the one release.yml packs into the MSI).
+    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS FAUNA_MAIL_E2E_RESOLVER FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS; do
+        if grep -a -q -- "$lit" target/fauna-mail-bridge.exe target/fauna_ffi.dll; then
+            echo "ERROR: the production fauna-mail-bridge.exe or its fauna_ffi.dll carries the e2e seam '$lit' (convention 15)" >&2
             exit 1
         fi
     done
 
-# The e2e flavor of the Windows mail bridge (`fauna_e2e_fixtures`), at its own
-# DISTINCT path — the twin of the Unix `mail-bridge-build-e2e`, which
-# `mail_bridge_e2e_binary` builds on Windows.
+# The e2e flavor of the Windows mail bridge — the twin of the Unix
+# `mail-bridge-build-e2e`, which `mail_bridge_e2e_binary` builds on Windows: the
+# Go seams (`fauna_e2e_fixtures`) in the exe, fauna-mail's in the seam-carrying
+# fauna_ffi.dll (`mail-ffi-e2e-slot`) it links, both staged in
+# target/mail-bridge-e2e/ — a directory of its own, so the shipped exe in
+# target/ can never load this dll nor this exe the shipped one.
 windows-mail-bridge-build-e2e rust_target="aarch64-pc-windows-gnullvm" go_arch="arm64":
     #!/usr/bin/env bash
     set -euo pipefail
-    just _windows-go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge-e2e.exe" "{{rust_target}}" "{{go_arch}}" "release" "fauna_e2e_fixtures"
-    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS; do
-        if ! grep -a -q -- "$lit" target/fauna-mail-bridge-e2e.exe; then
-            echo "ERROR: the e2e fauna-mail-bridge.exe is missing the seam '$lit' the tag should compile in" >&2
+    just _windows-go-cgo-build "./cmd/fauna-mail-bridge" "fauna-mail-bridge-e2e.exe" "{{rust_target}}" "{{go_arch}}" "release" "fauna_e2e_fixtures" mail-ffi-e2e-slot
+    # The gate must switch BOTH ways, or the production witness above proves
+    # nothing about the mechanism: each literal in the exe or the dll beside it.
+    for lit in FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS FAUNA_MAIL_E2E_RESOLVER FAUNA_MAIL_E2E_VERIFY_DEADLINE_MS; do
+        if ! grep -a -q -- "$lit" target/mail-bridge-e2e/fauna-mail-bridge-e2e.exe target/mail-bridge-e2e/fauna_ffi.dll; then
+            echo "ERROR: the e2e fauna-mail-bridge.exe and its fauna_ffi.dll are missing the seam '$lit' the e2e flavor should compile in" >&2
             exit 1
         fi
     done
@@ -10356,19 +10569,33 @@ windows-atproto-bridge-build-e2e rust_target="aarch64-pc-windows-gnullvm" go_arc
         fi
     done
 
-# Shared implementation of the four Windows Go/cgo build recipes above: sources
-# `_windows-go-cgo-env` (below — the cargo step, the one feature set and the cgo
+# Shared implementation of the five Windows Go/cgo build recipes above: sources
+# `_windows-go-cgo-env` (below — the cargo step, the feature sets and the cgo
 # env, with the why in its header) and runs `go build -o` over {{cmd}}, staging
 # the runtime DLLs beside the exe. Its go-TEST sibling, sourcing the same env,
 # is `mail-bridge-test-win-cgo`.
-_windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
+#
+# `ffi_slot` is the dll flavor the exe links (`_windows-go-cgo-env`'s, the same
+# argument the Unix `_go-cgo-build` takes), and it decides where the exe and its
+# dlls are staged: the loader resolves fauna_ffi.dll from the exe's own
+# directory, so two flavors in one directory would be one dll. The shipped
+# flavor stages in target/ — what release.yml and the MSI take; the e2e mail
+# bridge's seam-carrying flavor in target/mail-bridge-e2e/, which no shipped
+# path names.
+_windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags ffi_slot="mail-ffi-slot":
     #!/usr/bin/env bash
     set -euo pipefail
+    case "{{ffi_slot}}" in
+        mail-ffi-slot) STAGE="$(pwd)/target" ;;
+        mail-ffi-e2e-slot) STAGE="$(pwd)/target/mail-bridge-e2e" ;;
+        *) echo "_windows-go-cgo-build: unknown ffi_slot '{{ffi_slot}}'" >&2; exit 2 ;;
+    esac
+    mkdir -p "$STAGE"
     ENV_FILE="$(mktemp)"
-    just _windows-go-cgo-env "{{rust_target}}" "{{go_arch}}" "{{profile}}" >"$ENV_FILE"
+    just _windows-go-cgo-env "{{rust_target}}" "{{go_arch}}" "{{profile}}" "{{ffi_slot}}" >"$ENV_FILE"
     . "$ENV_FILE"
     rm -f "$ENV_FILE"
-    OUT="$(pwd)/target/{{out_name}}"
+    OUT="$STAGE/{{out_name}}"
     # Strip the Go binary (-s: symbol table, -w: DWARF) for dist builds — ~50%
     # smaller exe; dev (release) keeps symbols for debugging.
     GOLDFLAGS=""
@@ -10383,7 +10610,7 @@ _windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
     # re-check (refuse mode, build-slot-pool.md § Cross-pool acquisition order ->
     # the warm pass) refused it on every cycle. --stamp, not the exe, carries
     # freshness (a no-op `go build` need not rewrite its output). Every target and
-    # profile writes the same target/{{out_name}} (a release attempt builds arm64
+    # profile writes the same $STAGE/{{out_name}} (a release attempt builds arm64
     # then amd64 into it), so the build drops EVERY other stamp for this out_name
     # (`.exe` ends the prefix, so the prod and e2e atproto stamps never match each
     # other's glob) — a stale arm64 stamp would otherwise read fresh over an amd64
@@ -10401,9 +10628,10 @@ _windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
     # process-wide PATH, which `mail-bridge-test-win-cgo` uses and a shipped exe
     # must not depend on), which is why the output lives in target/ next to its
     # DLLs rather than in bins/fauna-bridges/ like the Unix flavors.
-    # The copies stay UNCONDITIONAL and outside the gate: fauna_ffi.dll and
-    # libunwind.dll are shared by all four exes and both architectures, so another
-    # recipe's build can replace them while this exe's stamp still reads fresh.
+    # The copies stay UNCONDITIONAL and outside the gate: a stage dir's
+    # fauna_ffi.dll and libunwind.dll are shared by every exe staged there and by
+    # both architectures, so another recipe's build can replace them while this
+    # exe's stamp still reads fresh.
     # libunwind.dll is the TARGET's runtime: llvm-mingw keeps one per target triple
     # under <root>/<triple>/bin/ on every host, while <root>/bin/ holds the host
     # arch's copy only on a Windows host (none on a Linux one — Linux's
@@ -10411,19 +10639,72 @@ _windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
     MINGW_BIN="$(dirname "$(command -v "$CC_BIN")")"
     UNWIND="$(dirname "$MINGW_BIN")/${CC_BIN%-clang}/bin/libunwind.dll"
     [ -f "$UNWIND" ] || UNWIND="$MINGW_BIN/libunwind.dll"
-    cp "$REL/fauna_ffi.dll" "$(pwd)/target/"
-    cp "$UNWIND" "$(pwd)/target/"
-    echo "Built $OUT (+ staged fauna_ffi.dll, libunwind.dll in target/)"
+    # Staged through `scripts/win-stage-dll.sh`, never a bare `cp`: a bridge or
+    # helper exe already running from target/ keeps both dlls mapped, and a plain
+    # copy over a mapped image dies `Device or resource busy` — every later run in
+    # this checkout then lost its mail_bridge_binary prebuild though nothing had
+    # changed. The script leaves identical bytes alone and renames a changed
+    # one aside before copying.
+    bash scripts/win-stage-dll.sh "$REL/fauna_ffi.dll" "$STAGE/fauna_ffi.dll"
+    bash scripts/win-stage-dll.sh "$UNWIND" "$STAGE/libunwind.dll"
+    # The toolchain's own licence file (its root LICENSE.TXT) beside the dll, for
+    # the MSI's notices: the windows-msi artifact names libunwind as a bundled
+    # component whose licence file is llvm-mingw/LICENSE.TXT in this directory
+    # (installer/shipped-notices.toml), and the release's assembly job has no
+    # toolchain to take it from. Copied, never read; a toolchain without one
+    # stages none, and the MSI's notices run then fails naming the missing file.
+    LICENCE="$(dirname "$MINGW_BIN")/LICENSE.TXT"
+    mkdir -p "$STAGE/llvm-mingw"
+    if [ -f "$LICENCE" ]; then
+        cp "$LICENCE" "$STAGE/llvm-mingw/LICENSE.TXT"
+    else
+        rm -f "$STAGE/llvm-mingw/LICENSE.TXT"
+        echo "warning: no LICENSE.TXT at the llvm-mingw root ($(dirname "$MINGW_BIN")); the MSI's notices will refuse" >&2
+    fi
+    # The mingw-w64 runtime's licence files, for the same notices: the gnullvm
+    # link puts mingw-w64's startup objects and the static part of its C runtime
+    # into the exe and its dll, and the windows-msi artifact names that runtime as
+    # a bundled component whose files are llvm-mingw/mingw32/COPYING* in this
+    # directory. llvm-mingw keeps them per target triple, in
+    # <root>/<triple>/share/mingw32/ (the same bytes for every triple of a
+    # release). Copied, never read; a toolchain without them stages none, and the
+    # MSI's notices run then fails naming the missing file.
+    MINGW_LICENCES="$(dirname "$MINGW_BIN")/${CC_BIN%-clang}/share/mingw32"
+    rm -rf "$STAGE/llvm-mingw/mingw32"
+    if compgen -G "$MINGW_LICENCES/COPYING*" >/dev/null; then
+        mkdir -p "$STAGE/llvm-mingw/mingw32"
+        cp "$MINGW_LICENCES"/COPYING* "$STAGE/llvm-mingw/mingw32/"
+    else
+        echo "warning: no mingw-w64 licence files in $MINGW_LICENCES; the MSI's notices will refuse" >&2
+    fi
+    echo "Built $OUT (+ staged fauna_ffi.dll, libunwind.dll and the toolchain's licence files beside it)"
 
-# The cargo step + cgo environment every Windows Go/cgo recipe shares — the four
+# The cargo step + cgo environment every Windows Go/cgo recipe shares — the five
 # build recipes through `_windows-go-cgo-build`, and `mail-bridge-test-win-cgo`
 # directly. Builds the gnullvm fauna_ffi.dll, then PRINTS a sourceable env on
 # stdout: the cgo exports (GOOS, GOARCH, CGO_ENABLED, CC, CGO_CFLAGS,
-# CGO_LDFLAGS) plus two plain variables, `REL` (the profile dir holding
+# CGO_LDFLAGS) plus two plain variables, `REL` (the flavor-private slot holding
 # fauna_ffi.dll and its import lib) and `CC_BIN`. Callers write it to a file and
 # source it — the `mail-ffi-slot` idiom, because a failing `just … >file` stops
 # `set -e` where `eval "$(just …)"` would sail on — so everything the cargo step
 # itself prints goes to stderr.
+#
+# `ffi_slot` picks the dll FLAVOR, by the Unix slot recipe that names it:
+# `mail-ffi-slot` (the shipped `labeler` build, profile-keyed — every caller but
+# one) or `mail-ffi-e2e-slot` (plus fauna-ffi's `mail-bridge-e2e`, fauna-mail's
+# inbound-verification seams; release only), which only
+# `windows-mail-bridge-build-e2e` links. Both flavors build into ONE cargo
+# output dir, `$TARGET_DIR/<triple>/<profile>/`, so neither is read from there:
+# each is copied into its slot under the triple
+# (`<triple>/release/mail-bridge-ffi/labeler[-e2e]/`), and REL is that copy —
+# the `mail-ffi-slot` header at the top of this file says why a shared output
+# path is the "whichever built last owns the file" trap. The copy is not inside
+# the gated command, as on Unix: that command stays a bare slot-wrapped `cargo`,
+# the form build-slot's compile-cache front recognises
+# (test_win_kache_wrapper_scope.py). It runs instead only on the branch where
+# this recipe's own gate, probed with `--check`, decided to build — never as a
+# separate gate over the shared dir, which would import whatever flavor built
+# last.
 #
 # win/CI ONLY (needs Go + llvm-mingw + the *-pc-windows-gnullvm Rust target; the
 # target is NOT in rust-toolchain.toml's `targets`, so a pin bump drops it and it
@@ -10436,10 +10717,11 @@ _windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
 # `.cargo/config.toml` pins both halves (the gnullvm linker + cc-rs CC/CXX/AR
 # keys, and the MSVC crt-static rustflags).
 #
-# ⚠ ONE feature set, ONE place. `--no-default-features --features labeler` must
-# stay in lockstep with `mail-bridge-ffi`: --no-default-features matches the
-# committed libs/fauna-mail-go bindings' (store-safe-less) symbol set, and
-# --features labeler re-enables the community-labeler WASM executor
+# ⚠ ONE feature set per flavor, ONE place. The shipped arm's `labeler` must stay
+# in lockstep with `mail-bridge-ffi` and the e2e arm's with
+# `mail-bridge-ffi-e2e` (a tier_1 pin compares them): --no-default-features
+# matches the committed libs/fauna-mail-go bindings' (store-safe-less) symbol
+# set, and `labeler` re-enables the community-labeler WASM executor
 # (run_wasm_labeler_score + mail_to_labeler_input_bare +
 # build_signed_labeler_metadata, which the seal-helper's `publish-labeler` mode
 # wraps) that --no-default-features alone would drop. This line used to be
@@ -10452,7 +10734,7 @@ _windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
 #
 # The committed libs/fauna-mail-go bindings are platform-agnostic and consumed
 # as-is (regen happens on Linux/macOS/CI via `just mail-bridge-ffi`).
-_windows-go-cgo-env rust_target go_arch profile:
+_windows-go-cgo-env rust_target go_arch profile ffi_slot="mail-ffi-slot":
     #!/usr/bin/env bash
     set -euo pipefail
     # Artifact/flavor build: per-invocation feature resolution, never
@@ -10478,25 +10760,64 @@ _windows-go-cgo-env rust_target go_arch profile:
     # linked nothing there (`unable to find library -lfauna_ffi`, the first
     # release rehearsal, 2026-10-21); on Windows and the runner both resolve to ./target.
     TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps 2>/dev/null | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo "$(pwd)/target")}"
-    REL="$TARGET_DIR/{{rust_target}}/$PROFILE_DIR"
+    # cargo's own output dir — shared by both flavors — and the flavor's private
+    # slot under the triple (the header says why).
+    CARGO_OUT="$TARGET_DIR/{{rust_target}}/$PROFILE_DIR"
+    FFI_SLOT_FILE="$(mktemp)"
+    case "{{ffi_slot}}" in
+        mail-ffi-slot)
+            FEATURES=labeler
+            just mail-ffi-slot {{profile}} >"$FFI_SLOT_FILE"
+            ;;
+        mail-ffi-e2e-slot)
+            FEATURES=labeler,mail-bridge-e2e
+            if [ "{{profile}}" != release ]; then
+                echo "_windows-go-cgo-env: the e2e dll flavor is release only, not '{{profile}}'" >&2
+                rm -f "$FFI_SLOT_FILE"
+                exit 2
+            fi
+            just mail-ffi-e2e-slot >"$FFI_SLOT_FILE"
+            ;;
+        *)
+            echo "_windows-go-cgo-env: unknown ffi_slot '{{ffi_slot}}'" >&2
+            rm -f "$FFI_SLOT_FILE"
+            exit 2
+            ;;
+    esac
+    REL="$TARGET_DIR/{{rust_target}}/$(cat "$FFI_SLOT_FILE")"
+    rm -f "$FFI_SLOT_FILE"
+    # The slot's leaf names the flavor (`labeler`, `labeler-e2e`): the stamp
+    # carries it, so one flavor's stamp never vouches for the other's slot.
+    FLAVOR="${REL##*/}"
     # The cargo step is freshness-gated OUTSIDE the build slot (a warm tree must
     # not queue — build-machine-resources.md § Build/e2e slot locks), mirroring
     # `mail-bridge-ffi`'s composition and `_windows-ffi-flavor`'s vendor-source
     # note (below). --stamp, not the .dll, carries freshness (a cargo no-op
-    # leaves the .dll untouched). Stamped on BOTH {{rust_target}} AND
-    # {{profile}} — a single-axis stamp would read "fresh" across a
+    # leaves the .dll untouched); the --targets are the PRIVATE copies, so
+    # deleting one forces the rebuild. Stamped on {{rust_target}}, {{profile}}
+    # AND the flavor — a single-axis stamp would read "fresh" across a
     # release<->dist switch and serve the wrong-profile .dll (the class
     # `_windows-ffi-flavor`'s own flavor guard exists to prevent one level up).
     # libs/fauna-mail-go excluded: it is this pipeline's own downstream
     # output, not a cargo input. Bare cargo is correct in the wrapped command
     # (the Git-Bash link.exe shadow only bites the MSVC linker; gnullvm uses
     # aarch64-w64-mingw32-clang). Its output goes to stderr: stdout is the env.
-    {{py}} scripts/build-if-stale.py --label "windows-go-cgo-ffi-{{rust_target}}-{{profile}}" \
-        --stamp "$(pwd)/target/windows-go-cgo-ffi-{{rust_target}}-{{profile}}.stamp" \
-        --target "$REL/fauna_ffi.dll" \
-        --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
-        --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
-        -- {{slot_build}} cargo build --locked -p fauna-ffi --profile {{profile}} --no-default-features --features labeler --target {{rust_target}} >&2
+    GATE=(--label "windows-go-cgo-ffi-$FLAVOR-{{rust_target}}-{{profile}}"
+        --stamp "$(pwd)/target/windows-go-cgo-ffi-$FLAVOR-{{rust_target}}-{{profile}}.stamp"
+        --target "$REL/fauna_ffi.dll" --target "$REL/libfauna_ffi.dll.a"
+        --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml
+        --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*')
+    if ! {{py}} scripts/build-if-stale.py --check -q "${GATE[@]}" >&2; then
+        {{py}} scripts/build-if-stale.py "${GATE[@]}" \
+            -- {{slot_build}} cargo build --locked -p fauna-ffi --profile {{profile}} --no-default-features --features "$FEATURES" --target {{rust_target}} >&2
+        # Through the rename-aside stager, never a bare `cp`: `mail-bridge-test-win-cgo`
+        # runs its test exes against this slot (on PATH), and a copy over a mapped
+        # dll dies `Device or resource busy`. The cgo link needs the import lib
+        # only; the staticlib cargo writes beside it is not copied.
+        mkdir -p "$REL"
+        bash scripts/win-stage-dll.sh "$CARGO_OUT/fauna_ffi.dll" "$REL/fauna_ffi.dll" >&2
+        bash scripts/win-stage-dll.sh "$CARGO_OUT/libfauna_ffi.dll.a" "$REL/libfauna_ffi.dll.a" >&2
+    fi
     INCLUDES=""
     for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$(pwd)/$d"; done
     printf 'export GOOS=windows GOARCH=%q CGO_ENABLED=1\n' "{{go_arch}}"
@@ -10746,6 +11067,24 @@ windows-service-build crate features="":
         --exclude '*/target/*' --exclude '*/bin/*' --exclude '*/obj/*' \
         -- {{slot_build}} bash -c "cmd //c \"scripts\\cargo-win.cmd build -p {{crate}} $FEATURE_ARGS\""
 
+# The dev fleet's sweep of the cfapi TEST sync roots a killed test run leaves
+# registered, filter and shell (`fauna_cfapi::test_roots`) — the win merge-gate
+# check's pass runs it with no session (merge-gate-check-win.md § Merge-gate
+# check (win), *The cfapi test-root sweep*). Builds the debug example (the module
+# is compiled out of a release artifact) under a focus slot and runs it once:
+# one `cfapi test-root sweep:` line on stdout; exit 1 only when a test root's
+# unregister failed or the sweep could not read the registry. `wait` is how many
+# seconds it waits for a live test's lock before it skips.
+cfapi-test-root-sweep wait="10":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) ;;
+        *) echo "cfapi test-root sweep: skipped — windows only"; exit 0 ;;
+    esac
+    {{slot_focus}} bash -c "cmd //c \"scripts\\cargo-win.cmd build --locked -p fauna-cfapi --example sweep_leftover_test_roots\"" >&2
+    target/debug/examples/sweep_leftover_test_roots.exe "{{wait}}"
+
 # The four Rust crates the MSI ships for a Windows target, at the release profile:
 # the sync agent, the two machine-service exes (FaunaNest, FaunaBridge — one per
 # virtual account) and the shell-extension cdylib. Each crate is its OWN cargo
@@ -10934,10 +11273,11 @@ cli-debug: i18n-generate providers-generate
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
         -- {{slot_build_crate}} cargo build -p fauna-cli-device --features e2e-agent
 
-# Build fauna-linux release binary (+ the sync agent it spawns — see linux-debug).
+# Build fauna-linux release binary (+ the sync agent it spawns — see linux-debug),
+# and write the app's notices file every packaging copies (`linux-desktop-notices`).
 # `release.yml` builds the released desktop binary with this recipe; `target` as
 # for `nest`.
-linux-release target="": i18n-generate providers-generate
+linux-release target="": i18n-generate providers-generate (linux-desktop-notices target)
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo build --locked -p fauna-linux -p fauna-sync-agent --release {{ if target == "" { "" } else { "--target " + target } }}
 
 # Run fauna-linux debug build
@@ -10961,7 +11301,7 @@ linux-uninstall:
 # disposable repo-root copy instead of polluting the tracked source dir (a
 # symlink let them leak through and, once, got silently replaced by a plain
 # directory mid-build, breaking dh_installdocs's debian/control lookup).
-linux-deb: i18n-generate providers-generate
+linux-deb: i18n-generate providers-generate linux-desktop-notices
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf debian
@@ -10973,11 +11313,11 @@ linux-deb: i18n-generate providers-generate
 # installs the repo's pinned rustup toolchain itself — builds since 2026-07-14.
 # In a sandboxed tool environment add --disable-rofiles-fuse; see
 # docs/goal/architecture/installers/linux-desktop.md § Flatpak)
-linux-flatpak: i18n-generate providers-generate
+linux-flatpak: i18n-generate providers-generate linux-desktop-notices
     flatpak-builder --force-clean build-flatpak apps/fauna-linux/packaging/flatpak/social.fauna.fauna.yml
 
 # Install Flatpak locally for testing
-linux-flatpak-install: i18n-generate providers-generate
+linux-flatpak-install: i18n-generate providers-generate linux-desktop-notices
     flatpak-builder --user --install --force-clean build-flatpak apps/fauna-linux/packaging/flatpak/social.fauna.fauna.yml
 
 # Run the locally installed Flatpak
@@ -10985,7 +11325,7 @@ linux-flatpak-run:
     flatpak run social.fauna.fauna
 
 # Export Flatpak to a .flatpak bundle file for distribution
-linux-flatpak-bundle: i18n-generate providers-generate
+linux-flatpak-bundle: i18n-generate providers-generate linux-desktop-notices
     flatpak-builder --force-clean --repo=flatpak-repo build-flatpak apps/fauna-linux/packaging/flatpak/social.fauna.fauna.yml
     flatpak build-bundle flatpak-repo fauna-linux.flatpak social.fauna.fauna
 
@@ -11283,7 +11623,7 @@ kache-launcher-install:
 # instead of the web SPA. `spa_security_headers.rs` tested the mount MECHANISM
 # and never that the artifact configures it.
 entrypoint-test:
-    {{slot_tier_1}} pytest tests/docker/test_entrypoint_overlay.py -q
+    {{slot_tier_1}} pytest tests/docker/test_entrypoint_overlay.py tests/docker/test_cargo_content_freshness.py -q
 
 # Every shipped test suite that no other entry point runs — the tests a public
 # clone carries and, until this recipe existed, had no documented way to run.
@@ -11352,9 +11692,12 @@ shipped-suite-test:
         tests/scripts/test_cross_client.py tests/scripts/test_door_deploy_receive.py \
         tests/scripts/test_duplication_report.py \
         tests/scripts/test_features_catalog.py tests/scripts/test_features_lint.py \
+        tests/scripts/test_msstore_submit.py \
         tests/scripts/test_site_link_spacing.py tests/scripts/test_check_site_urls.py \
         tests/scripts/test_textual_clones.py tests/scripts/test_ui_show.py -q
-    pytest tests/docker/test_entrypoint_overlay.py -q
+    pytest tests/docker/test_entrypoint_overlay.py tests/docker/test_cargo_content_freshness.py -q
+    pytest scripts/test_shipped_notices.py scripts/test_shipped_notices_channels.py \
+        scripts/test_android_shipped_notices.py -q
 
 # Payments-excision spine (tier_1, merge-gate-check.md § Accepted gaps item (8)):
 # `ui.yaml`'s gated_features: catalog stays consistent with the per-app store-safe
@@ -11532,6 +11875,112 @@ features-prune *ARGS:
 [positional-arguments]
 store-review *args:
     {{py}} scripts/store-review.py "$@"
+
+# The notices generator: write one shipped artifact's THIRD-PARTY-NOTICES from
+# its own dependency closure (installer/shipped-notices.toml names each artifact
+# and its roots) and print the verdict lines — per ecosystem the components, the
+# files copied, the fallbacks, the files left out, the ids refused. The written
+# file is dependency-authored text: read the verdict lines, never the file.
+# `--set go.binary=<path>` names an input the manifest's default path does not
+# hold. Owner: shipped-notices.md § How the notices file is produced.
+[positional-arguments]
+shipped-notices artifact out *args:
+    {{py}} scripts/shipped-notices.py "$@"
+
+# Fauna's two licence texts, byte for byte the repository's, into `dir`: what
+# every shipped binary channel carries beside its notices file
+# (shipped-notices.md § The rule). `ext` = `.txt` where the platform needs it
+# (Windows). release.yml's publish job stages the once-per-release pair with it.
+shipped-licences dir ext="":
+    mkdir -p "{{dir}}"
+    cp LICENSE-MIT "{{dir}}/LICENSE-MIT{{ext}}"
+    cp LICENSE-APACHE "{{dir}}/LICENSE-APACHE{{ext}}"
+
+# The three files one artifact carries, staged into `dir` in one step: Fauna's
+# two licence texts (`shipped-licences`) and the artifact's own notices file,
+# written by the generator for `artifact` (a name in installer/shipped-notices.toml).
+# What the Apple channels call where their row of shipped-notices.md § Per
+# channel puts the files: `mac-app` into the app's `Contents/Resources/`,
+# installer/macos/build.sh into the `.pkg`'s documentation component,
+# scripts/ios-store-upload.sh into the archived iOS app. A generator that
+# refuses fails the caller's build. Extra arguments go to the generator
+# (`--set go.binary=<path>`).
+[positional-arguments]
+shipped-notices-stage artifact dir *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifact="$1" dir="$2"
+    shift 2
+    just shipped-licences "$dir"
+    {{py}} scripts/shipped-notices.py "$artifact" "$dir/THIRD-PARTY-NOTICES" "$@"
+
+# The Linux desktop app's notices file, at the one path every packaging of it
+# copies from (install.sh, the Debian package's rules, the Flatpak and Snap
+# manifests, the AppImage's AppDir): `build/shipped-notices/linux-desktop/`
+# (shipped-notices.md § Per channel, the Linux desktop row). A dependency of
+# every recipe that builds or packages the app, so no packaging reaches for a
+# file that was never written; a generator that refuses fails the build. The
+# file is resolved for the triple the app is built for: `target`, as for
+# `linux-release`, else the host's (every packaging builds natively).
+linux-desktop-notices target="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    triple="{{target}}"
+    [ -n "$triple" ] || triple="$(rustc -vV | sed -n 's/^host: //p')"
+    {{py}} scripts/shipped-notices.py linux-desktop build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES --target "$triple"
+
+# The Windows MSI's three licence files into `dir`, the directory every MSI
+# build hands WiX as `-d NoticesDir=<dir>/` (Notices.wxs installs them under
+# INSTALLFOLDER; shipped-notices.md § Per channel, the Windows MSI row):
+# LICENSE-MIT.txt and LICENSE-APACHE.txt, the repository's own, and the
+# THIRD-PARTY-NOTICES.txt the generator writes for the windows-msi artifact,
+# resolved for `arch`'s own triples (its MSVC binaries and the mail bridge's
+# gnullvm library), as one MSI ships one arch. release.yml's assembly job and
+# the test fixture (test_installer.py::_build_msi) both run it, after the app's
+# publish (the NuGet leg reads the project.assets.json the publish's restore
+# writes, and the runtime packs read off the published app's deps.json) and with
+# the mail bridge built: `bridge` is where this build put it,
+# `just windows-mail-bridge-build`'s target/ by default (a linked module the
+# module cache lacks, the generator fetches inside the bridge's module,
+# go.sum-checked), and its directory holds what the build staged beside it —
+# libunwind.dll and the toolchain's licence files (its own, and the mingw-w64
+# runtime's the gnullvm link puts into the bridge), the manifest's bundled
+# components. A generator that refuses fails the MSI build.
+windows-msi-notices dir arch="arm64" bridge="target/fauna-mail-bridge.exe":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{arch}}" in
+        arm64) CPU=aarch64 ;;
+        x64)   CPU=x86_64 ;;
+        *) echo "windows-msi-notices: arch must be arm64 or x64, got '{{arch}}'" >&2; exit 2 ;;
+    esac
+    just shipped-licences "{{dir}}" .txt
+    {{py}} scripts/shipped-notices.py windows-msi "{{dir}}/THIRD-PARTY-NOTICES.txt" --set "go.binary={{bridge}}" \
+        --set "bundled.dir=$(dirname "{{bridge}}")" \
+        --target "$CPU-pc-windows-msvc" --target "$CPU-pc-windows-gnullvm"
+
+# The notices gate: every deny.toml allowlist id has its fallback text under
+# supply-chain/licence-texts/ (matching SOURCE.toml's checksum), every manifest
+# artifact names a row of shipped-notices.md § Per channel. Parse-only, stdlib.
+shipped-notices-check:
+    {{py}} scripts/shipped-notices.py --check
+
+# The notices generator's own tests, over fixture closures.
+shipped-notices-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v pytest >/dev/null 2>&1; then
+        echo "shipped-notices-test: SKIPPED — no pytest on PATH (see the machine setup guide)"
+        exit 0
+    fi
+    {{slot_tier_1}} pytest scripts/test_shipped_notices.py scripts/test_shipped_notices_channels.py -q
+
+# Fetch the fallback licence texts (one per deny.toml allowlist id) from the SPDX
+# licence-list data at the commit pinned in the script, check each against its
+# git blob id and record its checksum in supply-chain/licence-texts/SOURCE.toml.
+# Prints names and checksums only: the texts are third-party text.
+licence-texts-fetch:
+    {{py}} scripts/fetch-licence-texts.py
 
 # Mode 5 (testing.md convention 7): informational inventory of PlatformDriver
 # capability predicates (supports_unclean_kill and friends) each leaf app

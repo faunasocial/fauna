@@ -103,9 +103,7 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     # android added 2026-10-31 at MODULE level, NOT RUN
-    # (the android device venue is down). The variant nest's port now comes from
-    # `android_venue.nest_port` (`unclaimed_caldav_nest`), so the driver's
-    # `require_tunnelled_nest_port` accepts it; android drives the same
+    # (the android device venue is down). Android drives the same
     # `calendar-item` / `select_calendar` legs as `test_events.py`.
     pytest.mark.android,
 ]

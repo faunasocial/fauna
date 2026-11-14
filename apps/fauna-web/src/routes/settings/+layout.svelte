@@ -3,6 +3,7 @@
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
   import AppShellFrame from '#lib/components/AppShellFrame.svelte';
+  import ConnectionStatusIndicator from '#lib/components/ConnectionStatusIndicator.svelte';
 
   // The Settings shell is a vertical **sidebar-swap** (settings.md § Navigation
   // model, ratified 2026-06-03 — the same shape as the admin shell): while in
@@ -112,6 +113,9 @@
     <span class="label">{t.settings.exit_settings}</span>
   </a>
   <div class="settings-title">{t.common.settings}</div>
+  <!-- The ui.yaml GLOBAL `connection-status` element: this rail is a
+       sidebar-SWAP, so the root sidebar's indicator is gone while it shows. -->
+  <ConnectionStatusIndicator />
   <div class="settings-links">
     {#each railEntries as entry}
       <a

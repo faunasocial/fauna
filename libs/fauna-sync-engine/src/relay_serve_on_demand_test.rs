@@ -96,7 +96,7 @@ impl Replica {
         );
         engine.set_serve_body(Arc::new(OnDemandBodySource::new(
             kept.clone(),
-            cache.clone(),
+            Some(cache.clone()),
             SyncDb::open(&db_path).unwrap(),
         )));
         Self {
@@ -224,4 +224,66 @@ async fn a_kept_root_write_serves() {
     )
     .unwrap();
     assert_every_key_serves(&replica.engine, &sealed).await;
+}
+
+/// Apple's File Provider replica (`relay-serving.md` § Relay serving →
+/// *Apple's File Provider replica*): the OS owns the hydrated tree, the
+/// engine's root is the extension's staging root, and the serve reads it
+/// through the default bound-tree body source — no on-demand source is set.
+/// A body the seat itself staged and recorded serves from the staging root
+/// alone (the store's chunks are cleared first); a row another seat wrote,
+/// which the OS may have fetched into its own tree but which has no staged
+/// copy, answers none — no dataless check is owed, the engine never opens the
+/// OS's tree.
+#[tokio::test]
+async fn a_staging_root_replica_serves_what_it_staged_and_declines_a_row_with_no_staged_copy() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+    let elsewhere = bytes_of(31);
+    let theirs = recorded_elsewhere(&server, &store, "theirs.bin", &elsewhere).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let staging = dir.path().join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let engine = test_sync_engine_over_db(
+        &server.uri(),
+        staging.clone(),
+        owner(),
+        SyncDb::open(dir.path().join("fsid-staging.db")).unwrap(),
+    );
+
+    // Another seat's file: only its row here, and nothing staged.
+    engine
+        .db()
+        .upsert_entry(
+            "theirs.bin",
+            None,
+            Some(ContentHash::of_raw(&elsewhere)),
+            Some(theirs.manifest_hash),
+            SyncState::Placeholder,
+            0,
+            1,
+            elsewhere.len() as i64,
+            1,
+            None,
+        )
+        .unwrap();
+    engine.stamp_own_head_for_test("theirs.bin");
+
+    // This seat's own write, staged in the staging root and recorded.
+    let mine = bytes_of(37);
+    std::fs::write(staging.join("mine.bin"), &mine).unwrap();
+    engine.upload_file("mine.bin").await.expect("upload");
+    let sealed = crate::seal::seal_blob(
+        &mine,
+        Some((
+            BackupKey::from_bytes(OWNER_KEY).convergent_chunk_root(),
+            None,
+        )),
+    )
+    .unwrap();
+
+    store.chunks.lock().unwrap().clear();
+    assert_every_key_serves(&engine, &sealed).await;
+    assert_no_key_serves(&engine, &theirs).await;
 }

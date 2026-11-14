@@ -72,7 +72,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
+| web | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
 | linux | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
 | windows | 🚧 unbuilt | 0.1.5-dev+4d41bfdd.dirty standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
@@ -95,18 +95,18 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 7 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 8 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_on_a_foreign_post_reaches_its_home_nest_and_the_outcome_returns` — requires `federated-report-sheet` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_an_account_hides_everything_it_wrote` — requires `content-policy-show-again-button` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_reporting_an_account_hides_everything_it_wrote` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_report_reaches_the_admin_queue_and_the_outcome_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_the_reported_author_is_told_nothing` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_report_changes_nothing_for_anyone_but_the_reporter` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_reporter_is_rate_limited_and_holds_one_open_report_per_subject` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_supervised_accounts_report_needs_no_guardian` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_forwarded_report_names_no_reporter_and_its_outcome_comes_back` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_report_reaches_a_home_nest_that_was_down_once_it_is_back` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_nest_refuses_a_forwarded_report_about_a_subject_it_does_not_host` | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_forwarded_report_names_no_reporter_and_its_outcome_comes_back` | nest (linux): passed |
-| 20 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_withdrawing_a_report_deletes_its_note_and_excerpt_on_both_nests` | nest (linux): passed |
-| 21 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_deleting_the_reporters_account_withdraws_open_reports_and_keeps_resolved_ones` | nest (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_reported_account_is_hidden_and_shown_again_on_every_own_device` — requires `content-policy-show-again-button` (not built: windows, android-kids, ios-kids) | web (linux): failed, windows (windows): skipped, macos (macos): passed, tui (linux): passed, tui (windows): passed |
-| 23 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_hidden_post_is_shown_again_from_its_placeholder` — requires `content-policy-show-again-button` (not built: windows, android-kids, ios-kids) | web (linux): passed, windows (windows): skipped, macos (macos): passed, tui (linux): passed, tui (windows): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_the_reported_author_is_told_nothing` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_report_changes_nothing_for_anyone_but_the_reporter` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_reporter_is_rate_limited_and_holds_one_open_report_per_subject` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_supervised_accounts_report_needs_no_guardian` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_forwarded_report_names_no_reporter_and_its_outcome_comes_back` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_report_reaches_a_home_nest_that_was_down_once_it_is_back` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_nest_refuses_a_forwarded_report_about_a_subject_it_does_not_host` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_a_forwarded_report_names_no_reporter_and_its_outcome_comes_back` | nest (linux): passed, nest (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_withdrawing_a_report_deletes_its_note_and_excerpt_on_both_nests` | nest (linux): passed, nest (macos): passed |
+| 21 | nest | `tests/e2e-unified/tests/api/test_abuse_reporting.py::test_deleting_the_reporters_account_withdraws_open_reports_and_keeps_resolved_ones` | nest (linux): passed, nest (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_reported_account_is_hidden_and_shown_again_on_every_own_device` | web (linux): passed, windows (windows): skipped, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 23 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_a_hidden_post_is_shown_again_from_its_placeholder` | web (linux): passed, windows (windows): skipped, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

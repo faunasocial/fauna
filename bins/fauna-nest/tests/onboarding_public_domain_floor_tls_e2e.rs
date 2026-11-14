@@ -70,6 +70,11 @@ async fn public_domain_handle_reaches_claim_path_over_floor_tls() {
         )])),
     );
     m.seed_identity("01".repeat(32));
+    // The regular app's claim path, whatever this build's features: the nest's
+    // `--all-features` test build compiles `fauna-ffi-core`'s `kids-floor`, which
+    // turns on the machine's kids input, and the kids app has no claim path
+    // (`account-age-band.md` § The account age band, the kids-app bullet).
+    m.set_kids_for_test(false);
     m.set_current_handle("you@example.com".into());
 
     m.start_handle_check("you@example.com".into()).await;

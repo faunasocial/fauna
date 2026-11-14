@@ -1622,7 +1622,17 @@ async fn recover_from_escrow<B, R>(
     .await
     {
         Ok(p) => report.generation_escrow_recovery = Some(p),
-        Err(e) => push_step_error(report, format!("generation escrow recovery: {e:#}"), &e),
+        Err(e) => {
+            // `report.errors` reaches no log, and while the holder is a
+            // standing source of an unkeyed hold this failure is what keeps
+            // the read gate refusing — the gate's own line names the source,
+            // only this line names why it never answered (measured 2026-11-11:
+            // a fresh desktop seat held 90 s with `holder=true` and nothing to
+            // say whether the door failed). Info, not warn: offline is the
+            // expected cause and the next pass asks again.
+            tracing::info!("generation escrow recovery failed this pass: {e:#}");
+            push_step_error(report, format!("generation escrow recovery: {e:#}"), &e);
+        }
     }
 }
 

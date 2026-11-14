@@ -176,6 +176,42 @@ pub async fn save_event_draft<R: RpcRequester>(
     sync.save_if_changed(&snapshot).await.map(|_| ())
 }
 
+/// The events rail's leave-door save (`docs/goal/behavior/reserved-folders.md`
+/// § The leave-flush promise): [`save_event_draft`], first opening a save gate
+/// the launch load has not lifted yet with [`DraftsSync::load_for_leave`]'s one
+/// read — the shared [`DraftsSync::save_on_leave`] with this rail's FILL rule
+/// ([`EventDrafts::fill`], the one the launch restore applies): when the form
+/// holds nothing the user authored and a draft rests on the nest, the form
+/// takes it, so there is nothing to save and the resting draft is never
+/// overwritten with an empty one.
+pub async fn leave_save_event_draft<R: RpcRequester>(
+    sync: &DraftsSync<R>,
+    draft: EventDrafts,
+) -> Result<(), DraftsClientError<R::Error>> {
+    let captured = draft.snapshot_bytes();
+    sync.save_on_leave(captured, move |resting| draft.filled_snapshot(&resting))
+        .await
+        .map(|_| ())
+}
+
+impl EventDrafts {
+    // Kept beside `leave_save_event_draft`, its one shared caller; the other
+    // methods live in the impl above.
+    /// The leave door's fill of this rail (`fauna_client_drafts::DraftsSync::save_on_leave`):
+    /// the live form, [`Self::fill`]ed from the `resting` blob the door's read
+    /// found, as snapshot bytes — the resting draft's own bytes when the form
+    /// was untouched, so nothing is written over it. An undecodable resting
+    /// blob fills nothing: the form as the user left it is saved, as the launch
+    /// restore leaves it unfilled. The apps whose form state lives outside
+    /// this type (tui's events page) hand it a copy at the door.
+    pub fn filled_snapshot(mut self, resting: &[u8]) -> Vec<u8> {
+        if let Ok(restored) = Self::restore_from_bytes(resting) {
+            self.fill(restored);
+        }
+        self.snapshot_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +401,72 @@ mod tests {
         assert_eq!(restored.dtend, "");
         assert_eq!(restored.description, "");
         assert_eq!(restored.location, "");
+    }
+
+    /// A drafts sync for the events rail over a shared in-memory nest.
+    fn events_sync(
+        nest: &std::sync::Arc<fauna_client_drafts::testing::MemoryDraftsNest>,
+    ) -> DraftsSync<fauna_client_drafts::testing::SharedDraftsNest> {
+        DraftsSync::new(
+            fauna_client_drafts::testing::SharedDraftsNest(nest.clone()),
+            &fauna_core::identity::ActorKeypair::from_secret([9u8; 32]),
+            fauna_protocol::drafts::RAIL_EVENTS,
+        )
+    }
+
+    /// Rest `draft` on the nest from another device of the same identity.
+    fn rest_from_another_device(
+        nest: &std::sync::Arc<fauna_client_drafts::testing::MemoryDraftsNest>,
+        draft: EventDrafts,
+    ) {
+        use fauna_client_testkit::block_on;
+        let other = events_sync(nest);
+        block_on(other.load()).unwrap();
+        assert!(block_on(other.save_if_changed(&draft.snapshot_bytes())).unwrap());
+    }
+
+    /// The leave door's untouched-form branch: a shut gate, an event draft
+    /// resting on the nest and a form the user never typed into (whitespace
+    /// is not authorship) — the resting draft is never overwritten.
+    #[test]
+    fn a_leave_save_of_an_untouched_form_keeps_the_resting_draft() {
+        use fauna_client_testkit::block_on;
+        let nest = std::sync::Arc::default();
+        rest_from_another_device(&nest, sample());
+        let puts_before = *nest.puts.lock().unwrap();
+
+        let leaving = events_sync(&nest);
+        let untouched = EventDrafts {
+            summary: "  ".into(),
+            ..EventDrafts::default()
+        };
+        block_on(leave_save_event_draft(&leaving, untouched)).unwrap();
+
+        assert_eq!(*nest.puts.lock().unwrap(), puts_before, "nothing written");
+        let reader = events_sync(&nest);
+        let rest = block_on(reader.load()).unwrap().expect("a draft rests");
+        assert_eq!(EventDrafts::restore_from_bytes(&rest).unwrap(), sample());
+    }
+
+    /// The leave door's typed branch: a shut gate and a form the user typed
+    /// into — one read, then the form is saved over the resting draft.
+    #[test]
+    fn a_leave_save_of_a_typed_form_over_a_shut_gate_saves_it() {
+        use fauna_client_testkit::block_on;
+        let nest = std::sync::Arc::default();
+        rest_from_another_device(
+            &nest,
+            EventDrafts {
+                summary: "an older event".into(),
+                ..EventDrafts::default()
+            },
+        );
+
+        let leaving = events_sync(&nest);
+        block_on(leave_save_event_draft(&leaving, sample())).unwrap();
+
+        let reader = events_sync(&nest);
+        let rest = block_on(reader.load()).unwrap().expect("a draft rests");
+        assert_eq!(EventDrafts::restore_from_bytes(&rest).unwrap(), sample());
     }
 }

@@ -211,6 +211,34 @@ def test_recipe_stages_its_own_payload_and_packs_from_it():
     )
 
 
+def test_recipe_stages_the_licence_files_with_its_flavours_own_notices():
+    """The package root carries LICENSE-MIT.txt, LICENSE-APACHE.txt and the notices
+    of this flavour's closure (shipped-notices.md § Per channel, the Microsoft
+    Store row), written after the publish whose restore wrote project.assets.json."""
+    import tomllib
+
+    code = "\n".join(_code_lines(_recipe_body(_RECIPE)))
+    assert 'just shipped-licences "$STAGE" .txt' in code
+    # one package per arch: its notices are resolved for the triple it builds
+    assert re.search(r'shipped-notices\.py "\$NOTICES_ARTIFACT" "\$STAGE/THIRD-PARTY-NOTICES\.txt" --target "\$TARGET"', code)
+    assert code.index("just windows-app-publish") < code.index("shipped-notices.py") < code.index("build-store-package.py")
+    arms = dict(re.findall(r"^\s*([\w-]+)\)\s+NOTICES_ARTIFACT=([\w-]+)\s*;;", code, re.M))
+    assert set(arms) == {"full", "store-safe", "store-no-payments"}, arms
+    artifacts = tomllib.loads((_REPO / "installer" / "shipped-notices.toml").read_text(encoding="utf-8"))["artifact"]
+    for flavour, artifact in arms.items():
+        assert artifacts[artifact]["channel"] == "Microsoft Store package (MSIX)", (flavour, artifact)
+    assert len(set(arms.values())) == 3, "two flavours share one closure's notices"
+
+
+@pytest.mark.parametrize("missing", ["LICENSE-MIT.txt", "LICENSE-APACHE.txt", "THIRD-PARTY-NOTICES.txt"])
+def test_stage_refuses_a_payload_without_its_licence_files(packer, tmp_path, missing):
+    files = {k: v for k, v in _CLEAN.items() if k != missing}
+    root = _payload(tmp_path / "payload", files)
+    with pytest.raises(SystemExit) as exc:
+        packer._stage(str(tmp_path / "pack"), str(root), "<Package/>")
+    assert missing in str(exc.value)
+
+
 @pytest.mark.parametrize("arch,rid", [("arm64", "win-arm64"), ("x64", "win-x64")])
 def test_recipe_handles_both_store_architectures(arch, rid):
     code = "\n".join(_code_lines(_recipe_body(_RECIPE)))
@@ -295,6 +323,9 @@ _CLEAN = {
         data=b"Self::clear_for_test\0inject_inbound_for_test\0"),
     "fauna-sync-agent.exe": b"MZ agent",
     "fauna_shell.dll": b"MZ shell",
+    "LICENSE-MIT.txt": b"stand-in",
+    "LICENSE-APACHE.txt": b"stand-in",
+    "THIRD-PARTY-NOTICES.txt": b"stand-in",
 }
 _TEST_AGENT_DLL = b"MZ\0FaunaApp.Testing\0TestAgent\0PaintedErrorObserver\0"
 

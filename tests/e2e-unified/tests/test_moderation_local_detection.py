@@ -1,4 +1,4 @@
-"""Tier_3 two-driven-client FaunaMls **local-detection** proof on ``--client linux``.
+"""Tier_3 two-driven-client FaunaMls **local-detection** proof.
 
 The encrypted-mode social-content moderation signal, end-to-end through two real
 GUI apps over a real nest: **alice** sends a spammy MLS conversation message;
@@ -23,9 +23,11 @@ empty-queue contract), so the server ``fauna.moderation.actions`` queue is empty
 
 Two legs, one contract:
 
-* **linux** (``test_local_spam_detection_surfaces_in_moderation_queue``) — two real GUI
-  apps: alice's linux GUI sends, bob's linux GUI receives. Uses the
-  client-matched second-real-client fixture (``second_real_faunamls_app``).
+* **two real engines** (``test_local_spam_detection_surfaces_in_moderation_queue``) —
+  two real GUI apps of the same client: alice's sends, bob's receives. Uses the
+  client-matched second-real-client fixture (``second_real_faunamls_app``), so it
+  runs on every app the ``moderation-queue-second-real-engine`` surface lists
+  (linux, tui, macos, ios, windows).
 * **web** (``test_web_local_spam_detection_surfaces_in_moderation_queue``) — bob's web
   SPA is the only real GUI engine; the *sender* is a throwaway engine driven via the
   ``mls-group-gen`` helper (the pattern ``test_fauna_mls_web_receive.py`` established,
@@ -79,6 +81,7 @@ SPAM_BODY = "BUY NOW!!! CLICK HERE for FREE MONEY!!! Limited time — act now!!!
 @pytest.mark.tui
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.real_conversations
 @pytest.mark.feature("moderation-queue")
 def test_local_spam_detection_surfaces_in_moderation_queue(
@@ -97,7 +100,7 @@ def test_local_spam_detection_surfaces_in_moderation_queue(
     wait_until(
         lambda: conv_api.keypackage_count(port, bob, bob["actor_id_hex"]) >= 1,
         MLS_HANDSHAKE_S,
-        diagnose=lambda: "bob's linux/tui engine never published a key package",
+        diagnose=lambda: "bob's GUI engine never published a key package",
     )
 
     # ── alice resolves bob by actor id and sends a spammy message — the real

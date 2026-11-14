@@ -67,6 +67,7 @@ from helpers.windows_toast import registered_identity, toast_history
 
 pytestmark = [
     pytest.mark.tier_3,
+    pytest.mark.windows,
     # The nest's presence and dispatch reads are test-hooks surfaces, and the
     # agent dials the nest from this machine: a nest this harness built and
     # started here.

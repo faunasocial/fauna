@@ -959,6 +959,125 @@ def test_windows_remove_account_shrinks_switcher_live(
         driver.teardown()
 
 
+def _frame(driver, element_id, index=0, *, scope=None):
+    """The bridge's window-space ``(x, y, w, h)`` for one element, or ``None``
+    when it answers no frame (``drivers/base.py::assert_on_screen``'s contract)."""
+    raw = driver.get_attr(element_id, "frame", index, scope=scope)
+    if not raw:
+        return None
+    try:
+        x, y, w, h = (float(p) for p in raw.split(","))
+    except ValueError:
+        return None
+    return x, y, w, h
+
+
+def test_windows_switcher_row_controls_are_wholly_on_screen_at_the_default_window(
+    nest_instance, windows_app_path, request
+):
+    """Every control on a switcher row is on screen at the app's 600-DIP default
+    window (``docs/goal/architecture/apps/windows.md`` § App Entry, *Window
+    sizing*: every page works at the 600-DIP minimum).
+
+    The Settings content pane gives a switcher row about 209 DIP there. Its
+    second line held the re-auth toggle, the LABELLED "Open in new window" button
+    and, on a non-active row, "Remove": more than the row has, so the horizontal
+    line ran past the row's edge and the row clipped what did not fit. Every
+    other test still passed, because they reach these buttons through UIA Invoke,
+    which works on a clipped control, and none read where the control is. So
+    this one reads it: on every row, each control the row carries is visible
+    (windows' ``is_visible`` is ``!IsOffscreen``, so a control clipped wholly
+    off the row reads false), its frame lies inside its row's frame, and no
+    control ends on the row's clip edge (a partly clipped control's rect is cut
+    there). Measured red on the labelled layout (2026-11-10): Remove read
+    ``visible=False`` with a 0×0 frame, and the open-in-new-window button ended
+    exactly on the clip edge.
+
+    Both rows are read, the active one too (toggle and the open-in-new-window
+    button, no Remove), and ``account-remove-button`` is asserted present on the
+    non-active row, so a fix that hid it would not pass.
+    """
+    seed, _user_actor, _other_actor = _seed_two_accounts(nest_instance, second="user")
+
+    driver = create_driver("windows")
+    driver.launch({
+        "app_path": windows_app_path,
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+    })
+    try:
+        driver.wait_for_state(
+            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=60
+        )
+        _wait_switcher_count(driver, 2, timeout=45)
+
+        list_frame = _frame(driver, SWITCHER_LIST)
+        findings = []
+        readings = []
+        for index, controls in (
+            (0, (REQUIRE_CONFIRM_TOGGLE, OPEN_NEW_INSTANCE_BUTTON)),
+            (1, (REQUIRE_CONFIRM_TOGGLE, OPEN_NEW_INSTANCE_BUTTON, REMOVE_BUTTON)),
+        ):
+            scope = f"{SWITCHER_ITEM}[{index}]"
+            row = _frame(driver, SWITCHER_ITEM, index)
+            readings.append(f"row {index} frame={row}")
+            if row is None:
+                findings.append(f"row {index} answers no frame")
+                continue
+            rx, ry, rw, rh = row
+            frames = {}
+            for control in controls:
+                count = driver.count(control, scope=scope)
+                visible = driver.is_visible(control, scope=scope)
+                frame = _frame(driver, control, scope=scope)
+                readings.append(
+                    f"  {control}: count={count} visible={visible} frame={frame}"
+                )
+                if count != 1:
+                    findings.append(f"row {index} carries {count} {control}, want 1")
+                    continue
+                if not visible:
+                    findings.append(
+                        f"row {index}'s {control} is not on screen (IsOffscreen)"
+                    )
+                    continue
+                if frame is None or frame[2] < 1 or frame[3] < 1:
+                    findings.append(f"row {index}'s {control} has no area: {frame}")
+                    continue
+                x, y, w, h = frame
+                if x < rx or y < ry or x + w > rx + rw or y + h > ry + rh:
+                    findings.append(
+                        f"row {index}'s {control} {frame} leaves its row {row}"
+                    )
+                    continue
+                frames[control] = frame
+            # A PARTLY clipped control is visible and inside its row: WinUI cuts its
+            # UIA rect at the row's clip edge, so it reads as a smaller control that
+            # fits. Its signature is ending ON that edge (measured: the labelled
+            # open-in-new-window button read x 416..565, the row 344..577, the
+            # toggle — the line's first control — at 356). The row Button's
+            # horizontal padding is symmetric, so the clip edge sits as far inside
+            # the row's right side as the line's first control sits inside its left.
+            toggle = frames.get(REQUIRE_CONFIRM_TOGGLE)
+            if toggle is not None:
+                clip_edge = rx + rw - (toggle[0] - rx)
+                for control, (x, _y, w, _h) in frames.items():
+                    if x + w >= clip_edge - 0.5:
+                        findings.append(
+                            f"row {index}'s {control} ends at x={x + w:g}, on the "
+                            f"row's clip edge ({clip_edge:g}), where a clipped "
+                            "control's rect is cut"
+                        )
+        assert not findings, (
+            "a switcher row's controls must be wholly on screen at the default "
+            f"window: {'; '.join(findings)}\n"
+            f"list frame={list_frame}\n" + "\n".join(readings)
+        )
+    finally:
+        driver.teardown()
+
+
 @pytest.mark.feature("multiple-accounts")
 def test_windows_require_confirm_gates_switch_decline_then_approve(
     nest_instance, windows_app_path, request
@@ -1484,6 +1603,17 @@ def test_windows_open_as_new_instance_spawns_a_bound_sibling(
 # `test_account_switcher_tui.py`; linux ports: `test_account_switcher_linux.py`.
 # ---------------------------------------------------------------------------
 
+#: The ceiling over a remove-account gesture that follows a switch away from
+#: the identity removed — every budget the product itself may spend, in order
+#: (convention 14: a ceiling over the product's own, never a guessed clock; a
+#: green run returns the moment the row is gone). The windows barrier over the
+#: switch's still-running stop (`AccountRuntimeStops.StopBudget`, 30 s); the
+#: gesture's wait for a store a lapsed stop left closing
+#: (`CLOSING_STORES_BUDGET`, 15 s); the nest half
+#: (`REMOVED_ACCOUNT_RETIRE_BUDGET`, 10 s); that wait again, for the nest
+#: half's own runtime (15 s); and the erase itself.
+REMOVE_GESTURE_CEILING_S = 30 + 15 + 10 + 15 + 10
+
 AUTOSTART_TOGGLE = "settings-autostart-toggle"
 GENERAL_PAGE_NAV = {
     "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "general"}]}
@@ -1607,19 +1737,25 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
 
         _wait_switcher_count(driver, 2, timeout=45)
         driver.click(REMOVE_BUTTON, scope=f"{SWITCHER_ITEM}[1]")
+        # The row goes only when the WHOLE gesture returns, and the erase is its
+        # last step — so the gesture's own completion is the state to wait on
+        # (convention 14), never the scope directories against a guessed clock.
+        # Not re-navigating is what makes it the gesture's: a re-navigation
+        # rebuilds the list from the registry, which drops the entry before
+        # the nest half and the erase run.
+        _wait_live_switcher_count(driver, 1, timeout=REMOVE_GESTURE_CEILING_S)
         index = _wait_registry_index(driver, 1, timeout=30)
         assert [a["actor_id"] for a in index["accounts"]] == [user_actor], (
             f"only the removed identity may leave the registry; got {index!r}"
         )
 
-        wait_until(
-            lambda: not any(d.exists() for d in other_dirs),
-            RPC_ROUNDTRIP_S,
-            diagnose=lambda: (
-                "the removed identity's scope survived under: "
-                f"{[str(d) for d in other_dirs if d.exists()]}; app error: "
-                f"{_app_error(driver)!r}"
-            ),
+        survivors = [str(d) for d in other_dirs if d.exists()]
+        assert not survivors, (
+            "the gesture returned, so its erase ran — yet the removed identity's "
+            f"scope survived under: {survivors}; app error: {_app_error(driver)!r}. "
+            "The app log names why: an `os error 32` erase line after an "
+            "`[account-runtime] … still closing` warning is a store a lapsed stop "
+            "had not closed"
         )
         assert user_scope.is_dir(), (
             "removing the other identity must leave the remaining identity's data "

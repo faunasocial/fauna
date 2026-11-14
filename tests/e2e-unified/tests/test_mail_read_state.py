@@ -48,7 +48,9 @@ from helpers.waiting import wait_until
 
 # tui leads (the default app set); linux shares the same session loop and the
 # second-device fixture, and is listed so its sweep carries the witness too. The
-# web marks sit on the tests, not the module.
+# web, android and windows marks sit on the tests, not the module: windows
+# carries the restart and two-device journeys, while the mail-client journey
+# (outcome 20) is not lifted there yet.
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
@@ -95,6 +97,7 @@ def _wait_unread(app, nonce: str, expected: int, *, what: str, bridge_log) -> No
 
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("email-in-conversations")
 def test_a_mail_nobody_opened_is_still_unread_after_a_restart(
     logged_in_app, mail_bridge_mta, nest_instance, test_user
@@ -126,6 +129,7 @@ def test_a_mail_nobody_opened_is_still_unread_after_a_restart(
 
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("email-in-conversations")
 def test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read(
     request, logged_in_app, android_other_device_seat, mail_bridge_mta, nest_instance,

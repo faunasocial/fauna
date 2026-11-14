@@ -76,6 +76,10 @@ public final class FeedVM {
     /// `hydrate` takes `api` as a parameter rather than storing one itself
     /// (mirroring `ContentPolicyStore.refresh(api:)`).
     public private(set) var api: APIClient?
+    /// The nest's `nostr-advertise` capability, read once per session when an
+    /// own post's ⋯ menu first opens (`nil` = unread; a failed read stays
+    /// unread so the next open retries). Dropped by ``reset()``.
+    public private(set) var nostrAdvertiseSupported: Bool?
     private var observerBox: FeedObserverBox?
     private var searchTask: Task<Void, Never>?
     private var _observerTick: UInt64 = 0
@@ -300,6 +304,7 @@ public final class FeedVM {
         roomPostObservedManager = nil
         roomPostObserverBox = nil
         api = nil
+        nostrAdvertiseSupported = nil
         configuredSecret = nil
         configuringSecret = nil
         isReconfiguring = false
@@ -474,16 +479,19 @@ public final class FeedVM {
     /// `ConversationsVM.flushDraftsNow` exactly (`flushDraftsAutosave`,
     /// `ViewModels/DraftsAutosave.swift`).
     ///
-    /// Cancels the debounced task first so the two cannot both fire, then runs
-    /// the save it would have run. A no-op when no `draftsSync`/`manager` is
-    /// attached (pre-configure / E2E), which is what lets the leave doors call
-    /// it unconditionally.
+    /// Cancels the debounced task first so the two cannot both fire, then saves
+    /// through the rail's leave face, `FfiFeedManager.saveDraftsOnLeave`, with
+    /// the snapshot read at the door — so a door taken before the launch load
+    /// has lifted the save gate still saves, by one read of its own. A no-op
+    /// when no `draftsSync`/`manager` is attached (pre-configure / E2E), which
+    /// is what lets the leave doors call it unconditionally.
     public func flushDraftsNow() async {
         draftsSaveTask?.cancel()
         draftsSaveTask = nil
         guard let sync = draftsSync, let manager else { return }
-        await flushDraftsAutosave(sync: sync, logTarget: "fauna.feed.drafts") {
-            manager.draftsSnapshotBytes()
+        let captured = manager.draftsSnapshotBytes()
+        await flushDraftsAutosave(logTarget: "fauna.feed.drafts") {
+            _ = try await manager.saveDraftsOnLeave(sync: sync, captured: captured)
         }
     }
 
@@ -723,7 +731,7 @@ public final class FeedVM {
 
     /// Write ``clientErrorMessage`` unconditionally — for a writer whose whole
     /// call frame is synchronous, so there is no account-switch window between
-    /// capture and write to guard against (`openPaymentURL`'s `setError`,
+    /// capture and write to guard against (`PostUnlockOfferTeaser.pay`'s unsafe-link refusal,
     /// `ComposeAttachButton`'s picker-open/cancel failures).
     public func setClientErrorMessage(_ message: String?) {
         clientErrorMessage = message
@@ -1414,6 +1422,18 @@ public final class FeedVM {
     public func buyUnlockOffer(postId: String) async throws -> Bool? {
         try await manager?.buyUnlockOffer(postId: postId)
     }
+    /// The sold post's external checkout (`gated-post-payment-link`) — the
+    /// manager's `pay_unlock_offer`: the subscribe to the resolved offer's tier
+    /// goes FIRST (across nests at the post's home), then the checkout URL the
+    /// shared rule composed, bound to the buyer's actor, comes back to hand to
+    /// the OS (`monetization.md` § Pillar 3 → *Buyer↔actor binding (Q4)*, the
+    /// Q13 rules (1) and (2)). `nil` = nothing to open (no resolved offer or
+    /// link, the caller's own post, an unsafe link — nothing subscribed then);
+    /// throws when the subscribe is refused, and nothing opens. Mirrors tui
+    /// `feed::Op::PayUnlockOffer`.
+    public func payUnlockOffer(postId: String) async throws -> String? {
+        try await manager?.payUnlockOffer(postId: postId)
+    }
     /// Reveal a post's blocked remote images (D3 — render-model.md § D3). The manager flips its
     /// in-memory per-post reveal set and re-emits the snapshot with `RemoteImage.revealed = true`
     /// for that post (covering both the list card and the detail, which read the same snapshot
@@ -1855,6 +1875,48 @@ public final class FeedVM {
     public func deletePost(_ postId: String) async {
         try? await manager?.deletePost(postId: postId)
     }
+
+    #if !FAUNA_EXCISE_PAYMENTS
+    /// Read the nest's `nostr-advertise` capability once (a failed read stays
+    /// unread). The generation guard drops a landing that crossed an account
+    /// switch.
+    public func readNostrAdvertiseSupported() async {
+        guard nostrAdvertiseSupported == nil, let api else { return }
+        let generation = managerGeneration
+        guard let supported = try? await api.nostrAdvertiseSupported() else { return }
+        guard generation == managerGeneration else { return }
+        nostrAdvertiseSupported = supported
+    }
+
+    /// `fauna.nostr.advertise.set`, then a feed re-read so the post's
+    /// `nostrAdvertisedAt` flips. A refusal lands in the feed's error slot.
+    public func advertisePostOnNostr(_ postId: String) async {
+        guard let api else { return }
+        let generation = managerGeneration
+        do {
+            try await api.nostrAdvertisePost(postId: postId)
+            await manager?.refreshCurrentFeed()
+        } catch {
+            guard let text = DisplayError.message(error) else { return }
+            landClientErrorMessage(
+                generation: generation, message: L.nostrAdvertise.errorAdvertise(message: text))
+        }
+    }
+
+    /// `fauna.nostr.advertise.clear`, then a feed re-read.
+    public func stopAdvertisingPostOnNostr(_ postId: String) async {
+        guard let api else { return }
+        let generation = managerGeneration
+        do {
+            try await api.nostrClearAdvertisement(postId: postId)
+            await manager?.refreshCurrentFeed()
+        } catch {
+            guard let text = DisplayError.message(error) else { return }
+            landClientErrorMessage(
+                generation: generation, message: L.nostrAdvertise.errorStop(message: text))
+        }
+    }
+    #endif
 
     /// Through the manager (`FfiFeedManager.interact`), not the raw
     /// `APIClient.interactWithPost` — same rule as `deletePost` above. The

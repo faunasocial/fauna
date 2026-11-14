@@ -7,6 +7,9 @@ guide: docs/guides/own-your-mail.md § Turning mail on
 absences:
   android-kids: "docs/goal/behavior/account-age-band.md § The account age band"
   ios-kids: "docs/goal/behavior/account-age-band.md § The account age band"
+  linux (outcome 28): "docs/goal/architecture/security.md § On-screen secret exposure"
+  web (outcome 28): "docs/goal/architecture/security.md § On-screen secret exposure"
+  tui (outcome 28): "docs/goal/architecture/security.md § On-screen secret exposure"
 ---
 
 ## What a user gets
@@ -96,13 +99,13 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
-| linux | ⚠ partial | |
+| web | ✅ full | |
+| linux | ✅ full | |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
-| tui | ⚠ partial | |
+| tui | ✅ full | 0.1.6-dev+b536197e standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -125,7 +128,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 5 | app | `tests/e2e-unified/tests/test_mail_auto_enable_first_setup.py::test_non_admin_first_setup_auto_mints_and_imap_logs_in` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/platform/docker/test_mail_client_ui_enable_docker.py::test_linux_ui_enable_mail_boots_docker_bridge` — requires `mail-client-ui-enable-docker-drive` (test harness) (not built: windows, macos, ios, android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_mail_serving_toggle.py::test_serve_here_toggle_defaults_on_and_writes_through_to_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_mail_settings_caldav_only.py::test_caldav_only_mail_settings_render_gate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_status_line_reads_off_then_up_to_date_and_syncing_while_a_change_runs` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_an_interrupted_rotation_is_shown_and_one_tap_finishes_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_settings_controls.py::test_credential_row_shows_name_kind_created_and_a_copyable_login` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -146,5 +149,6 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 25 | app | `tests/e2e-unified/tests/test_mail_submission_token_refresh.py::test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_mail_credentials.py::test_calendar_written_before_a_key_rotation_still_opens` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_mail_unavailable_without_scanners_ui.py::test_both_mail_pages_render_a_box_that_cannot_enable_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_mail_app_password_suppresses_capture_until_hidden_or_left` | macos (macos): passed, ios (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_screen_capture_suppression.py::test_a_revealed_mail_app_password_suppresses_capture_until_hidden_or_left` | windows (windows): passed, macos (macos): passed, ios (macos): passed |
+| 28 | app | absent by design on web, linux, tui | — |
 <!-- features-render:end -->

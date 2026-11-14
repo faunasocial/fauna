@@ -83,6 +83,7 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="120" />
@@ -106,12 +107,27 @@
                             FontSize="10" Padding="4,2" Click="CopyActorId_Click"
                             ToolTipService.ToolTip="{loc:Localize Key=common/copy}" />
 
-                    <TextBlock Grid.Row="3" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=common/handle}" />
-                    <TextBlock Grid.Row="3" Grid.Column="1" x:Name="HandleText" Text="--" />
+                    <!-- The identity cell (settings.md § Layout & flow item 1): the
+                         account's own address and its tier, painted from the account
+                         registry's server-data cache (PaintIdentityCell) — on the first
+                         frame, with no fetch, and kept while the nest is unreachable.
+                         The ids sit on the VALUES; each row (caption included) is
+                         collapsed — absent, not empty — while the cache holds no handle. -->
+                    <TextBlock Grid.Row="3" Grid.Column="0" x:Name="HandleCaption" Opacity="0.7"
+                               Visibility="Collapsed" Text="{loc:Localize Key=common/handle}" />
+                    <TextBlock Grid.Row="3" Grid.Column="1" x:Name="HandleText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsHandleLabel}"
+                               Visibility="Collapsed" IsTextSelectionEnabled="True" />
 
-                    <TextBlock Grid.Row="4" Grid.Column="0" x:Name="NestUrlLabel" Opacity="0.7" />
-                    <TextBlock Grid.Row="4" Grid.Column="1" x:Name="NestUrlText" Text="--" IsTextSelectionEnabled="True" />
-                    <Button Grid.Row="4" Grid.Column="2" x:Name="StatusNodeUrlCopyButton"
+                    <TextBlock Grid.Row="4" Grid.Column="0" x:Name="TierCaption" Opacity="0.7"
+                               Visibility="Collapsed" Text="{loc:Localize Key=common/tier}" />
+                    <TextBlock Grid.Row="4" Grid.Column="1" x:Name="TierText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsTierLabel}"
+                               Visibility="Collapsed" />
+
+                    <TextBlock Grid.Row="5" Grid.Column="0" x:Name="NestUrlLabel" Opacity="0.7" />
+                    <TextBlock Grid.Row="5" Grid.Column="1" x:Name="NestUrlText" Text="--" IsTextSelectionEnabled="True" />
+                    <Button Grid.Row="5" Grid.Column="2" x:Name="StatusNodeUrlCopyButton"
                             AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusNodeUrlCopyBtn}"
                             Content="&#xE8C8;" FontFamily="Segoe MDL2 Assets"
                             FontSize="10" Padding="4,2" Click="CopyNestUrl_Click"

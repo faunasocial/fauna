@@ -41,6 +41,8 @@ mod read_gate;
 #[cfg(feature = "rpc-glue")]
 pub mod served_reseal;
 pub mod snapshots;
+#[cfg(feature = "rpc-glue")]
+pub mod succession_take_over;
 
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use blob_uploader::FakeMediaBlobUploader;

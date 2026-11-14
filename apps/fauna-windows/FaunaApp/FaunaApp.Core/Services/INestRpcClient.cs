@@ -912,6 +912,13 @@ internal interface INestRpcClient
     /// state — no nest round trip — but kept on the seam so a VM test fakes it.</summary>
     Task<string[]> HideReportedAsync(string id);
 
+    /// <summary>The reporter's show-again (moderation.md § Corollary — the reporter's
+    /// hide is theirs to undo): remove <paramref name="id"/> from the owner's stored
+    /// hidden-content list and return the whole list. The removal is a stamped
+    /// tombstone of the account's own rows, so it reaches the owner's other devices
+    /// too; the report itself is never withdrawn.</summary>
+    Task<string[]> UnhideReportedAsync(string id);
+
     /// <summary>The owner's stored hidden-content list (what their reports hid).</summary>
     Task<string[]> LoadHiddenContentAsync();
 
@@ -2307,11 +2314,20 @@ internal interface INestRpcClient
     /// was removed.</summary>
     Task<bool> PaymentsProvidersRemoveAsync(string kind);
 
-    /// <summary><c>fauna.payments.claims.redeem</c> — bind a post-payment claim
-    /// <paramref name="code"/> to the calling actor; the entitlement lands
-    /// through Pillar 1's grant queue. Typed errors:
-    /// <c>fauna.payments.claim_{not_found,already_redeemed,voided}</c>.</summary>
-    Task<FfiClaimRedeemReply> PaymentsClaimsRedeemAsync(string code);
+    /// <summary><c>fauna.payments.claims.redeem</c> through the shared
+    /// <c>PaymentsClient::claims_redeem_across_nests</c> — bind a post-payment claim
+    /// <paramref name="code"/> to the calling actor; the entitlement lands through
+    /// Pillar 1's grant queue. With <paramref name="authorHomeUrl"/> naming the
+    /// creator's home nest the redeem relays the caller's signed intent there
+    /// (<c>monetization.md</c> § Pillar 3 → <i>Which nest an in-app redeem binds
+    /// on</i>); <c>null</c>/blank is the plain redeem on this nest, which never
+    /// reads the author slot. <paramref name="authorId"/> is the creator whose code
+    /// it is; <c>null</c> fills the slot with the caller's own id (the convention
+    /// for a door that has no creator in hand — Settings → Subscriptions). Typed
+    /// errors: <c>fauna.payments.claim_{not_found,already_redeemed,voided,admits_elsewhere}</c>,
+    /// <c>peer_nest_outdated</c>.</summary>
+    Task<FfiClaimRedeemReply> PaymentsClaimsRedeemAcrossNestsAsync(
+        string code, byte[]? authorId, string? authorHomeUrl);
 
     /// <summary><c>fauna.payments.claims.mint</c> — the author mints a claim code
     /// manually (§5), for a no-API provider already paid out-of-band. Always
@@ -2329,6 +2345,18 @@ internal interface INestRpcClient
     /// to the tier). Idempotent; returns the void's stamp (micros). Typed error:
     /// <c>fauna.payments.claim_not_found</c>.</summary>
     Task<ulong> PaymentsClaimsVoidAsync(string code);
+
+    /// <summary>The <c>subscription-offer-payment-link</c> gesture (the shared
+    /// <c>subscriptions_subscribe_and_checkout</c>; <c>monetization.md</c> § Pillar 3 →
+    /// Buyer↔actor binding (Q4), the Q13 rules (1) and (2)): subscribe this viewer to
+    /// <paramref name="tier"/> of <paramref name="authorId"/> FIRST — across nests when
+    /// <paramref name="homeNestUrl"/> is non-blank, the <see cref="SubscriptionSubscribeAsync"/>
+    /// dispatch — then return the subscribe's reply plus the checkout URL the shared
+    /// rule composed from <paramref name="paymentUrl"/> (bound to the buyer's actor).
+    /// <c>null</c> — and no subscribe — for a URL the shared safety guard refuses; a
+    /// refused subscribe throws and opens nothing.</summary>
+    Task<FfiCheckoutOpen?> SubscriptionSubscribeAndCheckoutAsync(
+        byte[] authorId, string tier, string paymentUrl, string? homeNestUrl);
 
 #endif   // PAYMENTS
 

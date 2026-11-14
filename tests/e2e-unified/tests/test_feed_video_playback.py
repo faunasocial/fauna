@@ -43,7 +43,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import app_name, require_surface
+from helpers.app_surface import app_name
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -535,7 +535,6 @@ def test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy(
     from drivers.port_util import find_free_port
 
     name = app_name(app.driver)
-    require_surface(app.driver, "proxied-video-playback")
     nest = bridged_video_nest
     # The remote outlives this leg (module scope), and in a two-app run the
     # previous app's leg already fetched the same path: judge only what this

@@ -107,3 +107,91 @@ def test_after_closing_datatemplate_scope_reverts_to_outer():
     v = lint.find_unscoped_xbind_violations(xaml)
     assert len(v) == 1
     assert "Inner" in v[0].expression
+
+
+# --- the second rule: an x:Bind naming its DataTemplate's own root element ---------
+# The XAML compiler holds a template's root element as a WeakReference, and an
+# x:Bind naming that root generates a call passing the WeakReference where the
+# element is wanted: CS1503 in the generated .g.cs, so the app does not compile
+# (Controls/PostCardTemplates.xaml's PostMediaImageTemplate, 2026-11-13).
+
+
+def _roots(xaml):
+    return lint.find_root_name_xbind_violations(xaml)
+
+
+def test_xbind_naming_the_templates_root_is_flagged():
+    xaml = """
+    <DataTemplate x:Key="T" x:DataType="local:Row">
+        <Button x:Name="RootButton" Visibility="Collapsed">
+            <Image local:Bind.Target="{x:Bind RootButton, Mode=OneTime}" />
+        </Button>
+    </DataTemplate>
+    """
+    v = _roots(xaml)
+    assert len(v) == 1
+    assert v[0].element == "Image"
+    assert v[0].attribute == "local:Bind.Target"
+    assert "RootButton" in v[0].expression
+
+
+def test_xbind_naming_a_root_bound_by_name_attribute_or_in_a_call_is_flagged():
+    xaml = """
+    <DataTemplate x:DataType="local:Row">
+        <Grid Name="RootGrid">
+            <TextBlock Text="{x:Bind local:Fmt.Of(RootGrid.ActualWidth)}" />
+        </Grid>
+    </DataTemplate>
+    """
+    assert len(_roots(xaml)) == 1
+
+
+def test_xbind_naming_an_element_below_the_root_is_ok():
+    xaml = """
+    <DataTemplate x:DataType="local:Row">
+        <Grid>
+            <Button x:Name="InnerButton" />
+            <Image local:Bind.Target="{x:Bind InnerButton, Mode=OneTime}" />
+        </Grid>
+    </DataTemplate>
+    """
+    assert _roots(xaml) == []
+
+
+def test_a_member_sharing_the_roots_name_after_a_dot_is_ok():
+    xaml = """
+    <DataTemplate x:DataType="local:Row">
+        <Button x:Name="Title">
+            <TextBlock Text="{x:Bind Item.Title}" />
+        </Button>
+    </DataTemplate>
+    """
+    assert _roots(xaml) == []
+
+
+def test_each_nested_datatemplate_has_its_own_root():
+    xaml = """
+    <DataTemplate x:DataType="local:Outer">
+        <StackPanel x:Name="OuterRoot">
+            <ItemsControl>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:Inner">
+                        <Border x:Name="InnerRoot">
+                            <TextBlock Tag="{x:Bind OuterRoot}" />
+                            <TextBlock Tag="{x:Bind InnerRoot}" />
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock Tag="{x:Bind OuterRoot}" />
+        </StackPanel>
+    </DataTemplate>
+    """
+    v = _roots(xaml)
+    # the inner template's binding to its own root, and the outer template's to its
+    # own; the inner template's x:Bind OuterRoot names no root of ITS template.
+    assert [x.expression for x in v] == ["{x:Bind InnerRoot}", "{x:Bind OuterRoot}"]
+
+
+def test_the_repository_holds_no_xbind_naming_a_templates_root():
+    assert lint.scan_repo_roots() == []

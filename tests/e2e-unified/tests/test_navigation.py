@@ -41,8 +41,9 @@ PAGES = [
 # a shared `settings` page element + the iOS page landmark per ui.yaml notes),
 # present on every app (linux: status.rs sets it). `settings-handle-label` is
 # a required settings element since 2026-11-08 (the identity cell, settings.md
-# § Layout & flow item 1) but is not yet painted on every app — tui and linux
-# lack it until the identity-cell lift lands — so it is not the landmark.
+# § Layout & flow item 1), painted on all 7 apps — but absent, by design, while
+# the account registry's cache holds no handle, which a state-protocol login
+# need not have filled yet — so it is not the landmark.
 _LANDMARKS = {
     "settings": "account-settings-link",
 }

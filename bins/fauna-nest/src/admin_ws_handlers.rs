@@ -101,6 +101,7 @@ use fauna_protocol::admin::{
     AdminUserEvictRequest,
     AdminUserGetReply,
     AdminUserGetRequest,
+    AdminUserGuardian,
     AdminUserSuspendRequest,
     AdminUserUpdateRequest,
     AdminUsersListReply,
@@ -157,7 +158,14 @@ use crate::bridge_method_allowlist::require_permission_default as require_permis
 /// and [`get_handler`] (single read). `is_admin` is resolved from
 /// `admin_actor_ids` so the client can decline to offer the lifecycle controls
 /// the nest refuses on an admin (`admin.md` § 2 → *Cutting a user off*).
-fn user_to_wire(u: UserRow, mail_serving_enabled: bool, is_admin: bool) -> AdminUser {
+/// `guardian` names a supervised account's guardian (`family-safety.md`
+/// § App surface → *Admin take-over*).
+fn user_to_wire(
+    u: UserRow,
+    mail_serving_enabled: bool,
+    is_admin: bool,
+    guardian: Option<AdminUserGuardian>,
+) -> AdminUser {
     let eviction = (!u.eviction_status.is_empty()).then(|| AdminEviction {
         status: u.eviction_status,
         reason: u.eviction_reason,
@@ -182,23 +190,59 @@ fn user_to_wire(u: UserRow, mail_serving_enabled: bool, is_admin: bool) -> Admin
         eviction,
         mail_serving_enabled,
         is_admin,
+        guardian,
         extra: Default::default(),
     }
 }
 
-/// Resolve a `UserRow`'s read-only serving + admin-role flags from the batch
-/// reads the list-style handlers do once per page (no N-query fan-out).
-fn user_to_wire_with_overrides(
-    u: UserRow,
-    overrides: &std::collections::HashMap<[u8; 32], bool>,
-    admins: &std::collections::HashSet<Vec<u8>>,
-) -> AdminUser {
+/// A guardianship link (guardian id + its handle, blank folded to absent) →
+/// the wire `AdminUserGuardian`.
+fn guardian_to_wire(actor_id: Vec<u8>, handle: Option<String>) -> AdminUserGuardian {
+    AdminUserGuardian {
+        actor_id: ByteBuf::from(actor_id),
+        handle: handle.filter(|h| !h.is_empty()),
+        extra: Default::default(),
+    }
+}
+
+/// The batch reads the list-style handlers do once per page (no N-query
+/// fan-out): the mail-serving overrides, the admin set and every
+/// guardianship link with its guardian's handle.
+struct UserPageReads {
+    serving: std::collections::HashMap<[u8; 32], bool>,
+    admins: std::collections::HashSet<Vec<u8>>,
+    guardians: std::collections::HashMap<Vec<u8>, (Vec<u8>, Option<String>)>,
+}
+
+async fn user_page_reads(state: &AppState) -> Result<UserPageReads, RpcError> {
+    Ok(UserPageReads {
+        serving: state
+            .db
+            .list_mail_serving_overrides()
+            .await
+            .map_err(internal)?,
+        admins: admin_actor_set(state).await?,
+        guardians: state
+            .db
+            .list_guardians_with_handles()
+            .await
+            .map_err(internal)?,
+    })
+}
+
+/// Resolve a `UserRow`'s read-only serving, admin-role and guardian fields
+/// from the page's batch reads.
+fn user_to_wire_with_overrides(u: UserRow, reads: &UserPageReads) -> AdminUser {
     let serving = <[u8; 32]>::try_from(u.actor_id.as_slice())
         .ok()
-        .and_then(|id| overrides.get(&id).copied())
+        .and_then(|id| reads.serving.get(&id).copied())
         .unwrap_or(true);
-    let is_admin = admins.contains(&u.actor_id);
-    user_to_wire(u, serving, is_admin)
+    let is_admin = reads.admins.contains(&u.actor_id);
+    let guardian = reads
+        .guardians
+        .get(&u.actor_id)
+        .map(|(g, h)| guardian_to_wire(g.clone(), h.clone()));
+    user_to_wire(u, serving, is_admin, guardian)
 }
 
 /// The set of actors holding the admin role, as one batch read — the companion
@@ -548,17 +592,13 @@ fn list_handler() -> RpcHandler {
             // Read-only IMAP/CalDAV-serving audit indicator (admin.md § Users;
             // mail-settings.md § Local IMAP/CalDAV-serving toggle): one batch read
             // (the override table holds only actors who opted out) resolves the
-            // per-row flag — no N-query fan-out.
-            let serving_overrides = state
-                .db
-                .list_mail_serving_overrides()
-                .await
-                .map_err(internal)?;
-            let admins = admin_actor_set(&state).await?;
+            // per-row flag — no N-query fan-out; the admin set and the
+            // guardianship links ride the same per-page batch.
+            let reads = user_page_reads(&state).await?;
             encode_reply(&AdminUsersListReply {
                 users: users
                     .into_iter()
-                    .map(|u| user_to_wire_with_overrides(u, &serving_overrides, &admins))
+                    .map(|u| user_to_wire_with_overrides(u, &reads))
                     .collect(),
                 total,
                 extra: Default::default(),
@@ -589,8 +629,23 @@ fn get_handler() -> RpcHandler {
                 .map_err(internal)?
                 .unwrap_or(true);
             let is_admin = state.db.is_admin(&target).await.map_err(internal)?;
+            let guardian = match state.db.get_guardian_of(&target).await.map_err(internal)? {
+                Some(link) => {
+                    let handle = match <[u8; 32]>::try_from(link.guardian_actor_id.as_slice()) {
+                        Ok(gid) => state
+                            .db
+                            .get_user(&gid)
+                            .await
+                            .map_err(internal)?
+                            .and_then(|g| g.handle),
+                        Err(_) => None,
+                    };
+                    Some(guardian_to_wire(link.guardian_actor_id, handle))
+                }
+                None => None,
+            };
             encode_reply(&AdminUserGetReply {
-                user: user_to_wire(user, serving, is_admin),
+                user: user_to_wire(user, serving, is_admin, guardian),
                 extra: Default::default(),
             })
         })
@@ -1066,16 +1121,11 @@ fn evictions_list_handler() -> RpcHandler {
             let _req: AdminEvictionsListRequest = decode(&payload).map_err(malformed)?;
 
             let users = state.db.list_evictions().await.map_err(internal)?;
-            let serving_overrides = state
-                .db
-                .list_mail_serving_overrides()
-                .await
-                .map_err(internal)?;
-            let admins = admin_actor_set(&state).await?;
+            let reads = user_page_reads(&state).await?;
             encode_reply(&AdminEvictionsListReply {
                 evictions: users
                     .into_iter()
-                    .map(|u| user_to_wire_with_overrides(u, &serving_overrides, &admins))
+                    .map(|u| user_to_wire_with_overrides(u, &reads))
                     .collect(),
                 extra: Default::default(),
             })

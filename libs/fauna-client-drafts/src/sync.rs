@@ -75,7 +75,7 @@ pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(1500);
 /// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise): a slow
 /// or unreachable nest must not hang quitting or signing out. Each rail is
 /// bounded on its own, so one rail's timeout never costs another its save.
-/// tui and web read it here; windows' teardown flush still carries its own
+/// tui, web and linux read it here; windows' teardown flush still carries its own
 /// 5 s budget.
 pub const LEAVE_FLUSH_BUDGET: Duration = Duration::from_secs(3);
 
@@ -324,6 +324,69 @@ impl<R: RpcRequester> DraftsSync<R> {
         Ok(loaded)
     }
 
+    /// **The leave door's own read, when the launch load has not landed yet**
+    /// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise). A
+    /// leave door that finds the save gate shut would otherwise save nothing:
+    /// the launch load is retried on a backoff of minutes, and a door taken in
+    /// the first seconds of a session — on a loaded box, or the first boot
+    /// after a web reload — would drop the edit still inside the debounce.
+    ///
+    /// One attempt, never the retry schedule: a leave door is bounded
+    /// (`LEAVE_FLUSH_BUDGET`) and must not wait on a backoff. A load that
+    /// lands lifts the gate and records the baseline exactly as
+    /// [`load`](Self::load) does, so safety property 1 holds unchanged — the
+    /// door saves only over drafts it has read. The caller FILLS its rail from
+    /// the returned bytes (the same fill every rail's launch restore applies),
+    /// then snapshots and calls [`save_if_changed`](Self::save_if_changed).
+    ///
+    /// `Ok(None)` means there is nothing to fill: the gate was already open (no
+    /// read is made) or the rail is empty on the nest. An error leaves the gate
+    /// shut, and the caller goes on without the save.
+    pub async fn load_for_leave(&self) -> Result<Option<Vec<u8>>, DraftsClientError<R::Error>> {
+        if self.state.lock().unwrap().loaded {
+            return Ok(None);
+        }
+        let loaded = self
+            .client
+            .load_with_predecessors(&self.rail, &self.predecessors)
+            .await?;
+        let mut st = self.state.lock().unwrap();
+        // A launch load that landed while this read was in flight already set
+        // the baseline; either answer is the nest's state before any save.
+        st.loaded = true;
+        st.last_saved = loaded.clone();
+        Ok(loaded)
+    }
+
+    /// **The leave door's save, one body for every rail and every app**
+    /// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise):
+    /// [`load_for_leave`](Self::load_for_leave), then
+    /// [`save_if_changed`](Self::save_if_changed).
+    ///
+    /// `captured` is the rail's snapshot as the door found it. When the read
+    /// hands back a resting draft, `fill` gets it and returns the snapshot to
+    /// save instead: the rail's own FILL rule applied to the live compose (the
+    /// one its launch restore applies), then re-snapshotted. An untouched
+    /// composer takes the resting draft, so the snapshot equals what rests and
+    /// nothing is written; a composer the user typed into keeps their text and
+    /// is saved. With the gate already open, or nothing resting, `fill` is
+    /// never called and `captured` is saved as it is.
+    ///
+    /// The caller bounds the whole call by
+    /// [`LEAVE_FLUSH_BUDGET`](crate::LEAVE_FLUSH_BUDGET); a failed read is
+    /// returned and nothing is saved (the gate stays shut).
+    pub async fn save_on_leave(
+        &self,
+        captured: Vec<u8>,
+        fill: impl FnOnce(Vec<u8>) -> Vec<u8>,
+    ) -> Result<bool, DraftsClientError<R::Error>> {
+        let snapshot = match self.load_for_leave().await? {
+            Some(resting) => fill(resting),
+            None => captured,
+        };
+        self.save_if_changed(&snapshot).await
+    }
+
     /// Seal + persist `snapshot` for this rail **iff** a launch [`load`](Self::load)
     /// has completed *and* `snapshot` differs from the last persisted bytes.
     /// Returns `Ok(true)` when it wrote, `Ok(false)` when skipped — the pre-load
@@ -354,74 +417,10 @@ impl<R: RpcRequester> DraftsSync<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{MemoryDraftsNest as FakeNest, SharedDraftsNest as SharedNest};
     use fauna_client_testkit::block_on;
-    use fauna_protocol::drafts::{
-        GetDraftsReply, GetDraftsRequest, KIND_GET, KIND_PUT, PutDraftsReply, PutDraftsRequest,
-    };
-    use serde_bytes::ByteBuf;
-    use std::collections::HashMap;
+    use fauna_protocol::drafts::KIND_GET;
     use std::sync::Arc;
-
-    /// Stateful in-memory fake nest (a `path → opaque sealed blob` map), shared
-    /// behind an `Arc` so two `DraftsSync` instances can model two devices of one
-    /// identity. Mirrors `store::tests::FakeDraftsNest`.
-    #[derive(Default)]
-    struct FakeNest {
-        stored: Mutex<HashMap<String, Vec<u8>>>,
-        puts: Mutex<u32>,
-    }
-
-    struct SharedNest(Arc<FakeNest>);
-
-    impl RpcRequester for SharedNest {
-        type Error = std::convert::Infallible;
-        async fn request<Req, Reply>(
-            &self,
-            kind: &'static str,
-            payload: Req,
-        ) -> Result<Reply, Self::Error>
-        where
-            Req: serde::Serialize,
-            Reply: serde::de::DeserializeOwned,
-        {
-            let bytes = fauna_protocol::encode_canonical(&payload).expect("encode request");
-            let reply = match kind {
-                KIND_PUT => {
-                    let req: PutDraftsRequest =
-                        fauna_protocol::decode_strict(&bytes).expect("decode put");
-                    *self.0.puts.lock().unwrap() += 1;
-                    self.0
-                        .stored
-                        .lock()
-                        .unwrap()
-                        .insert(req.path, req.blob.into_vec());
-                    fauna_protocol::encode_canonical(&PutDraftsReply {
-                        ok: true,
-                        extra: Default::default(),
-                    })
-                }
-                KIND_GET => {
-                    let req: GetDraftsRequest =
-                        fauna_protocol::decode_strict(&bytes).expect("decode get");
-                    let blob = self
-                        .0
-                        .stored
-                        .lock()
-                        .unwrap()
-                        .get(&req.path)
-                        .cloned()
-                        .map(ByteBuf::from);
-                    fauna_protocol::encode_canonical(&GetDraftsReply {
-                        blob,
-                        extra: Default::default(),
-                    })
-                }
-                other => panic!("unexpected kind {other}"),
-            }
-            .expect("encode reply");
-            Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"))
-        }
-    }
 
     fn keypair() -> ActorKeypair {
         ActorKeypair::from_secret([7u8; 32])
@@ -713,5 +712,127 @@ mod tests {
         let (result, waits) = load_recording_waits(&s, &LAUNCH_LOAD_RETRY_DELAYS);
         assert!(matches!(result, Err(DraftsClientError::Seal(_))));
         assert!(waits.is_empty(), "a seal failure must not wait: {waits:?}");
+    }
+
+    /// **A leave door taken before the launch load landed reads once, then
+    /// saves** — the defect this pins: web's account switch, taken seconds
+    /// after the feed opened, found the gate shut and saved nothing.
+    #[test]
+    fn a_leave_load_opens_a_shut_gate_and_hands_back_what_rests() {
+        let nest = Arc::new(FakeNest::default());
+        let other = sync(nest.clone());
+        block_on(other.load()).unwrap();
+        block_on(other.save_if_changed(b"from device B")).unwrap();
+
+        let s = sync(nest.clone());
+        assert_eq!(
+            block_on(s.load_for_leave()).unwrap().as_deref(),
+            Some(b"from device B".as_slice()),
+            "the caller fills its rail from what rests before it snapshots"
+        );
+        assert!(block_on(s.save_if_changed(b"typed before the launch load")).unwrap());
+        assert!(nest.stored.lock().unwrap().contains_key("conversations"));
+    }
+
+    /// The leave read is one attempt: a door is bounded, so a transport
+    /// failure is returned at once and the gate stays shut — nothing is saved
+    /// over drafts this session never read.
+    #[test]
+    fn a_leave_load_lost_to_the_transport_is_one_attempt_and_keeps_the_gate_shut() {
+        let nest = Arc::new(FakeNest::default());
+        let flaky = FlakyNest::new(nest.clone(), u32::MAX);
+        let s = DraftsSync::new(&flaky, &keypair(), "conversations");
+        assert!(matches!(
+            block_on(s.load_for_leave()),
+            Err(DraftsClientError::Transport(_))
+        ));
+        assert_eq!(flaky.gets.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!block_on(s.save_if_changed(b"would clobber")).unwrap());
+        assert_eq!(*nest.puts.lock().unwrap(), 0);
+    }
+
+    /// An open gate needs no read: the leave door goes straight to the save.
+    #[test]
+    fn a_leave_load_on_an_open_gate_reads_nothing() {
+        let nest = Arc::new(FakeNest::default());
+        let flaky = FlakyNest::new(nest.clone(), 0);
+        let s = DraftsSync::new(&flaky, &keypair(), "conversations");
+        block_on(s.load()).unwrap();
+        assert_eq!(block_on(s.load_for_leave()).unwrap(), None);
+        assert_eq!(flaky.gets.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Seed `nest` with `bytes` resting on the conversations rail, as another
+    /// device of the same identity would leave them.
+    fn seed_resting(nest: &Arc<FakeNest>, bytes: &[u8]) {
+        let other = sync(nest.clone());
+        block_on(other.load()).unwrap();
+        assert!(block_on(other.save_if_changed(bytes)).unwrap());
+    }
+
+    /// A shut gate, a draft resting on the nest and an untouched composer: the
+    /// fill takes the resting draft, so nothing is written over it.
+    #[test]
+    fn a_leave_save_over_a_shut_gate_never_overwrites_a_resting_draft_with_an_untouched_one() {
+        let nest = Arc::new(FakeNest::default());
+        seed_resting(&nest, b"resting");
+        let puts_before = *nest.puts.lock().unwrap();
+
+        let s = sync(nest.clone());
+        let wrote = block_on(s.save_on_leave(b"".to_vec(), |resting| resting)).unwrap();
+        assert!(
+            !wrote,
+            "an untouched composer that took the resting draft saves nothing"
+        );
+        assert_eq!(*nest.puts.lock().unwrap(), puts_before);
+    }
+
+    /// A shut gate and a typed edit: one read, then the fill keeps the user's
+    /// text and it is saved.
+    #[test]
+    fn a_leave_save_over_a_shut_gate_saves_a_typed_edit_after_one_read() {
+        let nest = Arc::new(FakeNest::default());
+        seed_resting(&nest, b"resting");
+        let flaky = FlakyNest::new(nest.clone(), 0);
+        let s = DraftsSync::new(&flaky, &keypair(), "conversations");
+
+        let mut filled_from = None;
+        let wrote = block_on(s.save_on_leave(b"typed".to_vec(), |resting| {
+            filled_from = Some(resting);
+            b"typed".to_vec()
+        }))
+        .unwrap();
+        assert!(wrote);
+        assert_eq!(filled_from.as_deref(), Some(b"resting".as_slice()));
+        assert_eq!(flaky.gets.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let reader = sync(nest.clone());
+        assert_eq!(
+            block_on(reader.load()).unwrap().as_deref(),
+            Some(b"typed".as_slice())
+        );
+    }
+
+    /// An open gate saves the captured snapshot and never calls the fill.
+    #[test]
+    fn a_leave_save_over_an_open_gate_saves_the_capture_without_a_fill() {
+        let nest = Arc::new(FakeNest::default());
+        seed_resting(&nest, b"resting");
+        let s = sync(nest.clone());
+        block_on(s.load()).unwrap();
+        let wrote = block_on(s.save_on_leave(b"typed".to_vec(), |_| {
+            panic!("an open gate has nothing to fill from")
+        }))
+        .unwrap();
+        assert!(wrote);
+    }
+
+    /// A read lost to the transport saves nothing: the gate stays shut.
+    #[test]
+    fn a_leave_save_whose_read_fails_saves_nothing() {
+        let nest = Arc::new(FakeNest::default());
+        let flaky = FlakyNest::new(nest.clone(), u32::MAX);
+        let s = DraftsSync::new(&flaky, &keypair(), "conversations");
+        assert!(block_on(s.save_on_leave(b"typed".to_vec(), |r| r)).is_err());
+        assert_eq!(*nest.puts.lock().unwrap(), 0);
     }
 }

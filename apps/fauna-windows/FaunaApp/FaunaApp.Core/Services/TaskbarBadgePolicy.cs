@@ -34,29 +34,68 @@ public static class TaskbarBadgePolicy
 /// a WinRT round trip. The first observation always pushes — even a zero — so a badge
 /// left behind by a previous run of the app (the OS keeps a badge across process
 /// exits, which is what makes it a widget) is reconciled to this session's truth.
+///
+/// <para><b>One account at a time.</b> The badge belongs to the signed-in account, and
+/// an actor change — a sign-out, a switch, a factory reset — ends it
+/// (<see cref="EndAccount"/>): the count it showed is cleared, a reading the outgoing
+/// account's reader still has in flight is dropped (it carries the
+/// <see cref="Generation"/> it was built under, which no longer matches), and the next
+/// account's first reading always pushes, so a switch to an account with the same
+/// number still repaints it. That is what keeps a switch or sign-out from ever leaving
+/// the previous account's count on the taskbar (common.md § Home-screen widget; the
+/// twin of apple's and android's <c>WidgetUnreadPublisher.clear</c>).</para>
 /// </summary>
 public sealed class TaskbarBadgeTracker
 {
     private uint? _lastPushed;
+    private long _generation;
     private readonly object _lock = new();
 
     /// <summary>
-    /// Whether <paramref name="unreadTotal"/> must be pushed to the OS: true on the
-    /// first call and whenever the total differs from the last pushed one; false for
-    /// a repeat of the current badge. Records the value as pushed when it returns
-    /// true.
+    /// The account the badge belongs to now — a number that moves at every
+    /// <see cref="EndAccount"/>. A reader of the unread fold takes it when it is built
+    /// (one per conversations manager, and so one per account) and hands it back with
+    /// every reading.
     /// </summary>
-    public bool ShouldPush(uint unreadTotal)
+    public long Generation
+    {
+        get { lock (_lock) { return _generation; } }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="unreadTotal"/>, read under <paramref name="generation"/>,
+    /// must be pushed to the OS: false for a reading of an account that has since ended,
+    /// whatever its number; otherwise true on the account's first reading and whenever
+    /// the total differs from the last pushed one, false for a repeat of the current
+    /// badge. Records the value as pushed when it returns true.
+    /// </summary>
+    public bool ShouldPush(uint unreadTotal, long generation)
     {
         lock (_lock)
         {
+            if (generation != _generation) return false;
             if (_lastPushed == unreadTotal) return false;
             _lastPushed = unreadTotal;
             return true;
         }
     }
 
-    /// <summary>The last total handed to the OS, or <c>null</c> before the first push.</summary>
+    /// <summary>
+    /// The signed-in account ended: every reading taken for it is dropped from now on,
+    /// and the next account's first reading always pushes. The caller clears the OS
+    /// badge in the same step.
+    /// </summary>
+    public void EndAccount()
+    {
+        lock (_lock)
+        {
+            _generation++;
+            _lastPushed = null;
+        }
+    }
+
+    /// <summary>The last total handed to the OS, or <c>null</c> before the account's
+    /// first push.</summary>
     public uint? LastPushed
     {
         get { lock (_lock) { return _lastPushed; } }

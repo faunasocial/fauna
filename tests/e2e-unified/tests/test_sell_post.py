@@ -569,7 +569,6 @@ def test_sell_post_existing_subscriber_reads_it_free(app, request, sell_nest):
     `drain_auto_approvals`' background poll or by §2's approve, whichever comes
     first → the subscriber's detail-open UNSEALS. Readability through the UI,
     never a rank integer."""
-    app.subscriptions.require_sell_post_seller_fanout_leg_supported()
 
     admin_sk = _as_signing_key(sell_nest["admin"]["signing_key"])
     seller = create_actor_and_register(

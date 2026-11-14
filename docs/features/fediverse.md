@@ -127,7 +127,7 @@ Stamped 2026-11-07 at ac836c937b.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_activitypub_live.py::test_activitypub_live_serving_surface` | linux (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_activitypub_live.py::test_activitypub_live_serving_surface` | linux (linux): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/live/test_activitypub_federation_live.py::test_activitypub_federation_live_three_party` | linux (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_reply_to_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_quote_of_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |

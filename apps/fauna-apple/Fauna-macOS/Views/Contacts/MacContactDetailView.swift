@@ -87,10 +87,6 @@ struct MacContactDetailView: View {
                         .padding(8)
                     }
                 }
-
-                if let error = vm.errorMessage {
-                    ErrorBanner(message: error)
-                }
             }
             .padding()
         }

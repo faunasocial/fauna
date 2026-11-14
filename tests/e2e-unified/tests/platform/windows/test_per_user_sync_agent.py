@@ -233,7 +233,9 @@ def test_serving_agent_adopts_the_agent_already_serving_its_data_dir(
     data_dir.mkdir()
 
     with running_agent(sync_agent_binary, pipe, data_dir, tmp_path / "launch.log") as launch:
-        with serving_agent(sync_agent_binary, pipe, data_dir, tmp_path / "fixture.log") as spawned:
+        with serving_agent(
+            sync_agent_binary, pipe, data_dir, tmp_path / "fixture.log", launch_env=None
+        ) as spawned:
             assert spawned is None, "an agent already serving the dir must be adopted, not raced"
             assert ipc.pipe_server_pid(pipe) == launch.pid
         # Adopted, so not ours to stop: the launch's agent still serves.
@@ -252,7 +254,9 @@ def test_serving_agent_refuses_an_agent_serving_a_different_data_dir(
 
     with running_agent(sync_agent_binary, pipe, theirs, tmp_path / "theirs.log"):
         with pytest.raises(AgentNotServingError) as refused:
-            with serving_agent(sync_agent_binary, pipe, ours, tmp_path / "ours.log"):
+            with serving_agent(
+                sync_agent_binary, pipe, ours, tmp_path / "ours.log", launch_env=None
+            ):
                 pytest.fail("adopted an agent whose state lives in another dir")
         assert str(theirs) in str(refused.value), str(refused.value)
 
@@ -264,6 +268,8 @@ def test_serving_agent_spawns_when_nothing_serves_the_pipe(sync_agent_binary, tm
     data_dir = tmp_path / "fresh"
     data_dir.mkdir()
 
-    with serving_agent(sync_agent_binary, pipe, data_dir, tmp_path / "fresh.log") as spawned:
+    with serving_agent(
+        sync_agent_binary, pipe, data_dir, tmp_path / "fresh.log", launch_env=None
+    ) as spawned:
         assert spawned is not None
         assert ipc.pipe_server_pid(pipe) == spawned.pid

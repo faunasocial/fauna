@@ -1,6 +1,6 @@
 ---
 slug: kids-app
-title: kids-app
+title: Fauna Kids
 section: family and personalization
 goal: docs/goal/behavior/account-age-band.md § The account age band
 guide: docs/guides/cloud-sharing-family.md § A family on one nest
@@ -17,7 +17,15 @@ absences:
 
 ## What a user gets
 
-This text is being written and will appear here once it has been reviewed.
+Fauna Kids is a planned app for a child whose account a guardian supervises; it
+is not yet available anywhere. It is the Fauna app for Android and iOS with the
+open parts left out of the build itself: no feed, no searching for people you do
+not know, no bridges to other networks, no publishing to the web, no payments
+and no outside apps. A link in a message opens nothing, pictures from elsewhere
+are never shown, another person's profile opens only once they are a confirmed
+contact, and the four content categories a guardian can block stay blocked
+whatever anyone sets. A child joins the family's nest by invite. An account
+nobody supervises is told so and can only sign out.
 
 ## Coverage contract
 
@@ -55,11 +63,11 @@ Stamped 2026-11-08 at 485892afca.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_kids_app.py::test_an_unsupervised_account_is_told_why_and_can_only_sign_out` | ios-kids (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_kids_app.py::test_the_app_keeps_conversations_contacts_folders_calendar_family_and_settings_only` | ios-kids (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_kids_app.py::test_a_link_in_a_message_is_plain_text_with_no_preview_card` | ios-kids (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_kids_app.py::test_a_profile_opens_only_from_a_confirmed_contact_with_no_follow_or_tiers` | ios-kids (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_kids_app.py::test_a_remote_picture_stays_a_placeholder_with_no_way_to_fetch_it` | ios-kids (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_kids_app.py::test_signing_in_never_offers_to_set_up_a_nest` | ios-kids (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/test_kids_app.py::test_the_four_content_categories_stay_blocked_whatever_the_guardian_set` | ios-kids (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_kids_app.py::test_an_unsupervised_account_is_told_why_and_can_only_sign_out` | ios (macos): skipped, ios-kids (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_kids_app.py::test_the_app_keeps_conversations_contacts_folders_calendar_family_and_settings_only` | ios (macos): skipped, ios-kids (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_kids_app.py::test_a_link_in_a_message_is_plain_text_with_no_preview_card` | ios (macos): skipped, ios-kids (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_kids_app.py::test_a_profile_opens_only_from_a_confirmed_contact_with_no_follow_or_tiers` | ios (macos): skipped, ios-kids (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_kids_app.py::test_a_remote_picture_stays_a_placeholder_with_no_way_to_fetch_it` | ios (macos): skipped, ios-kids (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_kids_app.py::test_signing_in_never_offers_to_set_up_a_nest` | ios (macos): skipped, ios-kids (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_kids_app.py::test_the_four_content_categories_stay_blocked_whatever_the_guardian_set` | ios (macos): skipped, ios-kids (macos): passed |
 <!-- features-render:end -->

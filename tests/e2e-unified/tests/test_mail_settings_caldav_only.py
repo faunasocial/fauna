@@ -179,13 +179,16 @@ def test_caldav_only_mail_settings_render_gate(dedicated_no_mail_app, dedicated_
     # The shared credential-management section renders on
     # `credential_management_reachable` (= caldav_enabled here), NOT on `enabled`
     # — a CalDAV-only actor still needs to see/rotate the one bridge credential
-    # their calendar app authenticates with.
-    assert driver.is_visible("mail-settings-add-credential-button"), (
+    # their calendar app authenticates with. `is_visible_scrolled`: the port read
+    # above scrolled the panel down to the MUA block (windows centres a scroll
+    # target), which can leave these two above the fold, and windows answers
+    # `is_visible` from UIA IsOffscreen.
+    assert driver.is_visible_scrolled("mail-settings-add-credential-button"), (
         "mail-settings-add-credential-button gates on credential_management_"
         "reachable (caldav_enabled counts), not on enabled alone — see "
         "mail-settings.md § Element IDs"
     )
-    assert driver.is_visible("mail-settings-keys-info"), (
+    assert driver.is_visible_scrolled("mail-settings-keys-info"), (
         "mail-settings-keys-info must render — the credential-management "
         "section is reachable via caldav_enabled"
     )
@@ -232,10 +235,24 @@ def test_a_bare_account_mints_its_first_credential_from_add_credential(
     )
     _add_first_credential(app, _BARE_ACCOUNT_PASSWORD)
     app.driver.wait_for("mail-settings-mua-caldav-host", timeout=20.0)
-    assert app.mail_settings.enabled_toggle_state() == "off", (
+    # A calendar-only credential is not an email enable, so the toggle is never
+    # `on`. Which of its two other states it reads is the BOX's: `off` where the
+    # box could enable mail, `unavailable` (beside its notice) where it cannot —
+    # the docker CalDAV-only venue wires no content scanners (an MTA-free box
+    # scans no inbound SMTP), so the image declares them absent and refuses the
+    # mail enable (`mail-settings.md` § Layout & flow), while standalone's venue
+    # starts the fakes. The release image's run read `unavailable` here.
+    toggle = app.mail_settings.enabled_toggle_state()
+    assert toggle in ("off", "unavailable"), (
         "a calendar-only credential is not an email enable: the toggle must stay "
-        f"off, but reads {app.mail_settings.enabled_toggle_state()!r}"
+        f"off (or unavailable on a box that cannot enable mail), but reads {toggle!r}"
     )
+    if toggle == "unavailable":
+        assert app.driver.is_visible_scrolled("mail-settings-unavailable-notice"), (
+            "the toggle reads unavailable, so the box declared it cannot enable "
+            "mail — mail-settings-unavailable-notice must stand beside it "
+            "(mail-settings.md § Layout & flow)"
+        )
 
     sign_in_round_trip(
         f"https://127.0.0.1:{handle.caldav_port}",

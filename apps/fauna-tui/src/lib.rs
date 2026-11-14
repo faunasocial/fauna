@@ -392,6 +392,10 @@ async fn run(
             // registered and painted through one door, so a tallied error is an
             // error the user saw (`fauna_e2e_agent::PAINTED_ERRORS_KEY`).
             app.painted_errors.observe(registry.texts());
+            // The room this frame's layout gave each id-bearing text — read
+            // from the same page geometry the registry's `in-viewport` reads
+            // (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`).
+            app.painted_text_area.observe(page.laid_out_text());
             agent.publish(&app, None);
         }
 

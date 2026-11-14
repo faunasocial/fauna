@@ -15,6 +15,10 @@
 //! [`crate::pipe_transport::PipeSecurity::for_owner`] grants the pipe, and the
 //! one the Windows OpenSSH client accepts on a private key. As there, there is
 //! deliberately no parameter to widen it.
+//!
+//! [`copy_dacl`] is the other half of a unix file's mode: a file rewritten
+//! through a temp sibling keeps the DACL its owner gave the old one, whatever
+//! that is — it grants nobody the old file did not.
 
 use std::path::Path;
 
@@ -92,6 +96,124 @@ pub fn restrict_to_owner(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Give `to` the DACL `from` carries — its ACEs, and whether it is PROTECTED
+/// (nothing inherited from its parent) — the windows twin of copying a unix
+/// file's mode onto its replacement. For a file rewritten through a temp
+/// sibling and a rename: the rename keeps the temp file's own DACL, so copying
+/// the old file's onto it first keeps the admin's choice. An unprotected DACL is
+/// set unprotected, so its inherited ACEs come again from `to`'s parent — the
+/// same ones, for a sibling in the same directory.
+///
+/// As [`restrict_to_owner`], this by-path set asks for no data access, so it
+/// lands on a file held open with no sharing.
+pub fn copy_dacl(from: &Path, to: &Path) -> Result<()> {
+    unsafe {
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let err = GetNamedSecurityInfoW(
+            &HSTRING::from(from.as_os_str()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl),
+            None,
+            &mut sd,
+        );
+        if err.0 != 0 {
+            anyhow::bail!(
+                "GetNamedSecurityInfoW on {} failed: error {}",
+                from.display(),
+                err.0
+            );
+        }
+        // `dacl` points into `sd`, freed below whatever the outcome.
+        let set = (|| -> Result<()> {
+            let mut control: u16 = 0;
+            let mut revision: u32 = 0;
+            GetSecurityDescriptorControl(sd, &mut control, &mut revision)
+                .context("GetSecurityDescriptorControl")?;
+            let protection = if control & SE_DACL_PROTECTED.0 != 0 {
+                PROTECTED_DACL_SECURITY_INFORMATION
+            } else {
+                UNPROTECTED_DACL_SECURITY_INFORMATION
+            };
+            let set = SetNamedSecurityInfoW(
+                &HSTRING::from(to.as_os_str()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | protection,
+                None,
+                None,
+                Some(dacl),
+                None,
+            );
+            if set.0 != 0 {
+                anyhow::bail!(
+                    "SetNamedSecurityInfoW on {} failed: error {}",
+                    to.display(),
+                    set.0
+                );
+            }
+            Ok(())
+        })();
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        set
+    }
+}
+
+/// `path`'s DACL in SDDL (`D:P(A;;FA;;;S-1-5-…)`), its protection flag included
+/// — the form in which two files' DACLs compare equal exactly when they grant the
+/// same, inherited or not. The auto-inheritance bookkeeping flags (`AI`, `AR`) are
+/// dropped: they record how the system propagated the ACEs, not what they grant,
+/// and a by-path set marks `AI` where a freshly created file carries none
+/// (measured 2026-11-13: the same inherited ACEs read `D:AI(…)` after
+/// [`copy_dacl`] and `D:(…)` on the file it copied from).
+pub fn dacl_sddl(path: &Path) -> Result<String> {
+    unsafe {
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let err = GetNamedSecurityInfoW(
+            &HSTRING::from(path.as_os_str()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            &mut sd,
+        );
+        if err.0 != 0 {
+            anyhow::bail!(
+                "GetNamedSecurityInfoW on {} failed: error {}",
+                path.display(),
+                err.0
+            );
+        }
+        let mut text = PWSTR::null();
+        let converted = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            None,
+        );
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        converted.context("ConvertSecurityDescriptorToStringSecurityDescriptorW")?;
+        let sddl = text.to_string();
+        let _ = LocalFree(Some(HLOCAL(text.0 as *mut _)));
+        let sddl = sddl.context("the DACL's SDDL is not UTF-16")?;
+        Ok(without_auto_inherit_flags(&sddl))
+    }
+}
+
+/// `D:<flags>(ace)…` with `AI` and `AR` taken out of the flags (see [`dacl_sddl`]).
+fn without_auto_inherit_flags(sddl: &str) -> String {
+    let Some(rest) = sddl.strip_prefix("D:") else {
+        return sddl.to_string();
+    };
+    let (flags, aces) = rest.split_at(rest.find('(').unwrap_or(rest.len()));
+    format!("D:{}{aces}", flags.replace("AI", "").replace("AR", ""))
 }
 
 /// Whether `path`'s DACL grants the current process's token user and no other
@@ -200,5 +322,65 @@ mod tests {
         let file = sub.join("config");
         std::fs::write(&file, b"").unwrap();
         assert!(is_owner_only(&file).unwrap());
+    }
+
+    /// A copied DACL is the source's own, protection included, both ways: a
+    /// protected owner-only grant lands on a file that inherited a wider one,
+    /// and an unprotected inherited DACL lands back on a file that was
+    /// restricted. Red-verify: without the copy each target keeps its own DACL,
+    /// so the beside-controls hold and the equality asserts red.
+    #[test]
+    fn a_copied_dacl_is_the_source_files_own_protected_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let narrowed = dir.path().join("narrowed");
+        let inheriting = dir.path().join("inheriting");
+        std::fs::write(&narrowed, b"").unwrap();
+        std::fs::write(&inheriting, b"").unwrap();
+        restrict_to_owner(&narrowed).unwrap();
+        let narrowed_sddl = dacl_sddl(&narrowed).unwrap();
+        let inheriting_sddl = dacl_sddl(&inheriting).unwrap();
+        assert_ne!(
+            narrowed_sddl, inheriting_sddl,
+            "beside-control: the two files must start with different DACLs"
+        );
+        assert!(narrowed_sddl.starts_with("D:P"), "{narrowed_sddl}");
+        assert!(!inheriting_sddl.starts_with("D:P"), "{inheriting_sddl}");
+
+        // Protected onto inherited.
+        let onto_inheriting = dir.path().join("onto-inheriting");
+        std::fs::write(&onto_inheriting, b"").unwrap();
+        copy_dacl(&narrowed, &onto_inheriting).unwrap();
+        assert_eq!(dacl_sddl(&onto_inheriting).unwrap(), narrowed_sddl);
+        assert!(is_owner_only(&onto_inheriting).unwrap());
+
+        // Unprotected onto restricted: it inherits from the directory again.
+        let onto_narrowed = dir.path().join("onto-narrowed");
+        std::fs::write(&onto_narrowed, b"").unwrap();
+        restrict_to_owner(&onto_narrowed).unwrap();
+        copy_dacl(&inheriting, &onto_narrowed).unwrap();
+        assert_eq!(dacl_sddl(&onto_narrowed).unwrap(), inheriting_sddl);
+    }
+
+    /// The bookkeeping flags go, the protection flag and every ACE stay.
+    #[test]
+    fn the_sddl_comparison_form_drops_only_the_auto_inherit_flags() {
+        let ace = "(A;ID;FA;;;SY)";
+        assert_eq!(
+            without_auto_inherit_flags(&format!("D:AI{ace}")),
+            format!("D:{ace}")
+        );
+        assert_eq!(
+            without_auto_inherit_flags(&format!("D:PAI{ace}")),
+            format!("D:P{ace}")
+        );
+        assert_eq!(
+            without_auto_inherit_flags(&format!("D:PARAI{ace}")),
+            format!("D:P{ace}")
+        );
+        assert_eq!(
+            without_auto_inherit_flags(&format!("D:{ace}")),
+            format!("D:{ace}")
+        );
+        assert_eq!(without_auto_inherit_flags("D:P"), "D:P");
     }
 }

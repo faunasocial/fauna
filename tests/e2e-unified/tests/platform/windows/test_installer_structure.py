@@ -119,6 +119,26 @@ def msi_db():
         yield db
 
 
+# The three licence files Notices.wxs installs: component id → file name.
+NOTICE_COMPONENTS = {
+    "LicenseMitTxt": "LICENSE-MIT.txt",
+    "LicenseApacheTxt": "LICENSE-APACHE.txt",
+    "ThirdPartyNoticesTxt": "THIRD-PARTY-NOTICES.txt",
+}
+
+
+def _require_msi_built_after(source):
+    """A leg pinning what `source` added reads an MSI built after it. The MSI is a
+    per-checkout build output (the elevated `test_installer.py` rebuilds it), and
+    one built before the source landed would read as this leg's red though nothing
+    regressed — so it skips, naming the stale build."""
+    repo = _get_repo_root()
+    msi = os.path.join(repo, "build", "installer", "Fauna-Setup-arm64.msi")
+    if os.path.getmtime(msi) < os.path.getmtime(os.path.join(repo, source)):
+        pytest.skip(f"the MSI at {msi} was built before {source}; "
+                    "the elevated installer suite (test_installer.py) rebuilds it")
+
+
 def _product_version(msi_db):
     """The MSI ProductVersion (Property table) — the source the version-stamped shell
     DLL filename must track (Path 1)."""
@@ -258,10 +278,26 @@ class TestComponentMappings:
         assert "DataDirRegistry" in fc["Nest"]
 
     def test_terminal_app_has_tui_and_cli(self, msi_db):
-        """TerminalApp ships the terminal app and the cli app's device shell and
-        nothing else (TerminalApp.wxs; installers/tui.md § Decisions, decision 4)."""
+        """TerminalApp ships the terminal app and the cli app's device shell, and
+        beside them only the licence files every top-level feature carries
+        (TerminalApp.wxs; installers/tui.md § Decisions, decision 4)."""
+        _require_msi_built_after("apps/fauna-windows/installer/Notices.wxs")
         fc = self._feature_components(msi_db)
-        assert fc["TerminalApp"] == {"FaunaTuiExe", "FaunaCliExe"}
+        assert fc["TerminalApp"] == {"FaunaTuiExe", "FaunaCliExe"} | set(NOTICE_COMPONENTS)
+
+    def test_every_top_level_feature_carries_the_licence_files(self, msi_db):
+        """Every feature is deselectable, so the three licence files ride each
+        top-level one (Notices.wxs): whichever subset an install takes — the
+        headless `ADDLOCAL=Nest` included — installs them (shipped-notices.md
+        § Per channel, the Windows MSI row)."""
+        _require_msi_built_after("apps/fauna-windows/installer/Notices.wxs")
+        fc = self._feature_components(msi_db)
+        top = {f for (f,) in msi_db.query(
+            "SELECT Feature FROM Feature WHERE Feature_Parent IS NULL")}
+        assert top, "the MSI has no top-level feature"
+        for feature in sorted(top):
+            missing = set(NOTICE_COMPONENTS) - fc.get(feature, set())
+            assert not missing, f"top-level feature {feature} does not carry {sorted(missing)}"
 
     def test_bridge_has_bridge_exe(self, msi_db):
         fc = self._feature_components(msi_db)
@@ -324,6 +360,25 @@ class TestFileTable:
 
     def test_sync_exe_present(self, msi_db):
         assert "fauna-sync-agent.exe" in self._files(msi_db)
+
+    def test_the_licence_files_sit_in_installfolder_and_are_not_empty(self, msi_db):
+        """LICENSE-MIT.txt, LICENSE-APACHE.txt and THIRD-PARTY-NOTICES.txt beside
+        the binaries (shipped-notices.md § Per channel, the Windows MSI row), each
+        with a size: read from the File table, never the text — the notices file
+        is dependency-authored."""
+        _require_msi_built_after("apps/fauna-windows/installer/Notices.wxs")
+        rows = msi_db.query(
+            "SELECT `File`.`FileName`, `File`.`FileSize`, `File`.`Component_`, "
+            "`Component`.`Directory_` FROM `File`, `Component` "
+            "WHERE `File`.`Component_` = `Component`.`Component`")
+        by_component = {comp: (raw.split("|")[-1], size, directory)
+                        for raw, size, comp, directory in rows}
+        for comp, name in NOTICE_COMPONENTS.items():
+            assert comp in by_component, f"{name}: no {comp} component in the File table"
+            got_name, size, directory = by_component[comp]
+            assert got_name == name, f"{comp} installs {got_name}, not {name}"
+            assert directory == "INSTALLFOLDER", f"{name} lands in {directory}, not INSTALLFOLDER"
+            assert int(size or 0) > 0, f"{name} is empty in the built MSI"
 
     def test_tui_exe_present(self, msi_db):
         """The terminal app rides the MSI as its signed Windows form

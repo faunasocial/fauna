@@ -234,7 +234,7 @@ class EventDraftsHost internal constructor(
      *  cannot mix actors. `null` when there is nothing to flush. */
     fun captureLeaveFlush(): (suspend () -> Unit)? {
         val (s, d) = synchronized(this) { (sync ?: return null) to (lastEdited ?: return null) }
-        return { s.saveDrafts(d.summary, d.dtstart, d.dtend, d.description, d.location) }
+        return { s.saveDraftsOnLeave(d) }
     }
 
     /** The leave-flush (`reserved-folders.md` § The leave-flush promise, the
@@ -258,7 +258,7 @@ class EventDraftsHost internal constructor(
         scope.launch {
             if (synchronized(this@EventDraftsHost) { generation != mine }) return@launch
             try {
-                s.saveDrafts(d.summary, d.dtstart, d.dtend, d.description, d.location)
+                s.saveDraftsOnLeave(d)
             } catch (e: Exception) {
                 ShellLog.d("EventDrafts", "leave-flush event draft failed: ${e.message}")
             }

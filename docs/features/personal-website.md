@@ -69,7 +69,7 @@ Stamped 2026-11-07 at b844c771f6.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
 | linux | ⚠ partial | 0.1.5-dev+db30f58d.dirty standalone |
-| windows | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
+| windows | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+ede1a6ab standalone |
 | android |  no run recorded | |
@@ -103,5 +103,5 @@ Stamped 2026-11-07 at b844c771f6.
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py::test_a_user_site_never_shadows_the_mounted_spa_at_app` | nest (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_a_members_script_is_never_given_a_wider_scope` | nest (linux): passed, nest (macos): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_web_render_atomicity.py::test_a_visitor_sees_the_whole_old_site_or_the_whole_new_one_and_a_withdrawn_site_goes_dark` | — |
-| 14 | nest | `tests/e2e-unified/tests/api/test_web_render_atomicity.py::test_a_post_that_receives_a_moderation_label_leaves_the_published_site` | — |
+| 14 | nest | `tests/e2e-unified/tests/api/test_web_render_atomicity.py::test_a_post_that_receives_a_moderation_label_leaves_the_published_site` | nest (linux): passed |
 <!-- features-render:end -->

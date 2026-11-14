@@ -320,7 +320,7 @@ async fn bind_location(
         Replica::OnDemand => (
             Arc::new(OnDemandBodySource::new(
                 watch_dir.clone(),
-                dir.join("cache"),
+                Some(dir.join("cache")),
                 fauna_sync_engine::db::SyncDb::open(&db_path).unwrap(),
             )),
             Landing::OnDemand {

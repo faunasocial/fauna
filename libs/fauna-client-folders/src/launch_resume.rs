@@ -128,6 +128,18 @@ pub struct FolderRemovalResume {
     /// The account's attested predecessor ids, handed to the served-set walk
     /// ([`crate::served_set_converge`]); empty falls back on the statement walk.
     predecessors: Vec<[u8; 32]>,
+    /// The owner chain's retired roots, each paired with the actor that held
+    /// it (`AccountRegistry::predecessor_backup_keys_by_actor`), handed to the
+    /// projection walk's owner-root re-seal ([`crate::succession_take_over`]).
+    /// Empty (the default) re-seals no owner-root head: each stays owed, the
+    /// walk's own reading of a signer it cannot place.
+    predecessor_keys: Vec<(fauna_core::identity::ActorId, fauna_core::crypto::BackupKey)>,
+    /// This device's engine roster (`succession-cut.md` ruling (11)(l), *one
+    /// consumer per marker*). `Some` beside a recording device wires the
+    /// projection walk's take-over into the pass, claiming a marker only for
+    /// a set no engine here is bound to ([`FoldersAuthor::with_engine_bound_sets`]);
+    /// `None` runs no take-over — a native face never wires the walk blind.
+    engine_bound: Option<Arc<dyn crate::EngineBoundSets>>,
     /// Set once this hook has started the served-blob follower — shared
     /// with the detached leg's copy, so a seat follows custody once.
     following: Arc<std::sync::atomic::AtomicBool>,
@@ -152,6 +164,8 @@ impl FolderRemovalResume {
             grant_log,
             recording_device: None,
             predecessors: Vec::new(),
+            predecessor_keys: Vec::new(),
+            engine_bound: None,
             following: Arc::default(),
         }
     }
@@ -162,6 +176,25 @@ impl FolderRemovalResume {
     /// lookup. Empty (the default) keeps the statement-walk fallback.
     pub fn with_predecessors(mut self, predecessors: Vec<[u8; 32]>) -> Self {
         self.predecessors = predecessors;
+        self
+    }
+
+    /// Hand the owner chain's retired roots, paired with their actors
+    /// (`AccountRegistry::predecessor_backup_keys_by_actor`), to the
+    /// projection walk's owner-root re-seal (see the `predecessor_keys` field).
+    pub fn with_predecessor_keys(
+        mut self,
+        keys: Vec<(fauna_core::identity::ActorId, fauna_core::crypto::BackupKey)>,
+    ) -> Self {
+        self.predecessor_keys = keys;
+        self
+    }
+
+    /// Hand this device's engine roster to the pass, wiring the projection
+    /// walk's take-over beside the served-set walk (see the `engine_bound`
+    /// field) — on a desktop [`crate::agent_bound_sets`].
+    pub fn with_engine_bound_sets(mut self, roster: Arc<dyn crate::EngineBoundSets>) -> Self {
+        self.engine_bound = Some(roster);
         self
     }
 
@@ -189,6 +222,8 @@ impl FolderRemovalResume {
             grant_log: Arc::clone(&self.grant_log),
             recording_device: self.recording_device.clone(),
             predecessors: self.predecessors.clone(),
+            predecessor_keys: self.predecessor_keys.clone(),
+            engine_bound: self.engine_bound.clone(),
             following: Arc::clone(&self.following),
         };
         let backend = Arc::downgrade(&backend);
@@ -246,9 +281,21 @@ impl FolderRemovalResume {
                 Arc::clone(&self.nest),
                 &ActorKeypair::from_secret(*self.seed),
                 Arc::clone(&self.custody) as Arc<dyn crate::FolderKeyReader>,
-                device_id,
+                device_id.clone(),
                 self.predecessors.clone(),
             ));
+            if let Some(roster) = self.engine_bound.clone() {
+                author = author
+                    .with_succession_take_over(crate::succession_take_over(
+                        Arc::clone(&self.nest),
+                        &ActorKeypair::from_secret(*self.seed),
+                        Arc::clone(&self.custody) as Arc<dyn crate::FolderKeyReader>,
+                        device_id,
+                        self.predecessors.clone(),
+                        self.predecessor_keys.clone(),
+                    ))
+                    .with_engine_bound_sets(roster);
+            }
         }
 
         // Seeded before the pass's own blob reconcile, so a sibling's serve

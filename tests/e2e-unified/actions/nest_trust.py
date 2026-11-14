@@ -49,26 +49,6 @@ class NestTrustActions:
 
         require_surface(self.driver, "backup-destination-trust-rows")
 
-    def require_retained_generations_supported(self) -> None:
-        """Skip unless this app renders retained-generation rows (e2e
-        convention 7 — the platform check lives in the action layer, not the
-        test body).
-
-        tui is the lead app for this facet (testing.md § Default app and
-        nest mode) and renders it in direct Rust with no FFI hop; linux
-        carries the same shared projection. macos/ios joined 2026-08-02 (one
-        shared FaunaKit view, `LinkedNestsView.swift`'s `GenerationItemView`),
-        web landed 2026-08-02 too (`NestsSection.svelte` — no shared-Rust/wasm
-        work owed, the projection already crossed the wasm boundary on tui's
-        landing), and windows landed 2026-08-24 (`Controls/NestsPanel.xaml`'s
-        `nest-trust-generation-item`, the last of 7 shells). android also
-        renders it (`LinkedNestsScreen.kt`) but is excluded below anyway —
-        its e2e is host-emulator-gated fleet-wide, same as every other
-        android test."""
-        from helpers.app_surface import require_surface
-
-        require_surface(self.driver, "retained-generation-rows")
-
     def lens_toggle_present(self, timeout: float = 8.0) -> bool:
         """True once a nest row's Now/History lens toggle is on screen."""
         try:
@@ -178,6 +158,30 @@ class NestTrustActions:
 
     MAIL_LABEL = S.nests.mint_option_mail
     CALENDAR_LABEL = S.nests.mint_option_calendar
+    MATERIALIZE_MAIL_LABEL = S.nests.mint_option_materialize_mail
+    MATERIALIZE_CALENDAR_LABEL = S.nests.mint_option_materialize_calendar
+    MATERIALIZE_CARD_LABEL = S.nests.mint_option_materialize_card
+
+    def require_materialize_note_supported(self) -> None:
+        """Skip unless this app renders the materialization option's mint-time
+        note (e2e convention 7 — the surface registry decides)."""
+        from helpers.app_surface import require_surface
+
+        require_surface(self.driver, "nest-trust-mint-materialize-note")
+
+    def mint_note_text(self, index: int = 0) -> str:
+        """The open mint form's mint-time note (`nest-trust-mint-materialize-note`,
+        CONDITIONAL — rendered before the confirm only while the picked option
+        carries one); empty when absent."""
+        if self.driver.is_absent("nest-trust-mint-materialize-note"):
+            return ""
+        return self.driver.get_text(
+            "nest-trust-mint-materialize-note", index=index
+        ) or ""
+
+    def mint_note_absent(self, window: float = 1.0) -> bool:
+        """True iff the mint-time note reads ABSENT for the whole `window`."""
+        return self._absent_throughout("nest-trust-mint-materialize-note", window)
 
     def mint_button_present(self, timeout: float = 8.0) -> bool:
         """True once the mint affordance (`nest-trust-grant-mint-button`) is on
@@ -415,20 +419,6 @@ class NestTrustActions:
 
     # ── restore from a custodian nest (nests.md § Trust facet — restore from
     # a custodian nest): the page-level form and its outcome notice.
-
-    def require_custody_restore_supported(self) -> None:
-        """Skip unless this app renders the restore-from-a-custodian form
-        (`nests-custody-restore-*`) — tui leads, linux, web, macOS, iOS and
-        windows follow (iOS shares macOS's FaunaKit view; android's surfaces
-        are Robolectric-verified, with no device run venue; the app set is the
-        surface registry's, e2e convention 7). On web the full
-        cold-device journey still skips at the custody ceremony, a declared
-        absence there (`ui/devices.md` § Where logic lives);
-        `test_custody_restore_honest_arms.py` needs none."""
-        d = self.driver
-        from helpers.app_surface import require_surface
-
-        require_surface(d, "nests-custody-restore")
 
     def restore_from_custodian(self, address: str) -> None:
         """Reveal the form, type `address`, submit — the typed-address entry

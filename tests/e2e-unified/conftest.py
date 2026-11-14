@@ -51,6 +51,7 @@ from common import (
     create_actor_and_register,
     get_repo_root,
 )
+from common.elevation import take_elevated_temproot
 
 _repo_root = get_repo_root()
 
@@ -258,8 +259,17 @@ def _create_ephemeral_simulator(*, golden_wait_s: float | None = None) -> str | 
     may be making it): the warm pass waits, a seat first asked for inside a
     test waits briefly and then creates.
 
-    Deleted at process exit via `atexit`. Returns the new UDID, or None on any
-    probe/create failure (caller falls back to a shared pre-existing sim).
+    Inside the verify drain, whose turns run many pytest processes in a row,
+    the drain's park (`helpers/sim_park.py`) comes first: a device an earlier
+    process of the turn handed back, still booted and reset, is LEASED and
+    renamed after this process, and its boot is skipped (`_E2E_LEASED`) — a
+    seat boots once a drain turn, not once a process (mac-simulator-hold.md §
+    Per-core tokens, *The e2e lane's simulator boot*, the park sentence).
+
+    At process exit via `atexit`: handed back to the park when one is open,
+    else deleted (`_park_or_delete_simulator`). Returns the new UDID, or None
+    on any probe/create failure (caller falls back to a shared pre-existing
+    sim).
     """
     info = _find_ios_runtime_and_devicetype()
     if not info:
@@ -269,10 +279,19 @@ def _create_ephemeral_simulator(*, golden_wait_s: float | None = None) -> str | 
     # <pid>-<seat>: the pid is what the mac session-startup reclaim probes for liveness; the seat
     # number keeps one process's several devices (second seat, N seats) distinct.
     name = f"fauna-e2e-ios-{os.getpid()}-{len(_E2E_SIMULATORS) + 1}"
-    udid = _clone_ios_golden(
-        name, runtime, devicetype, runtime_version, device_name,
-        wait_s=_IOS_GOLDEN_WARM_WAIT_S if golden_wait_s is None else golden_wait_s,
-    )
+    park = sim_park.park_dir()
+    udid = sim_park.lease(park, runtime, devicetype, name) if park else None
+    if udid is not None:
+        # Still booted from an earlier process of the drain's turn: its boot is
+        # skipped (`_boot_simulator_held` reads `_E2E_LEASED`).
+        print(f"[sim-park] {name}: leased {udid}, booted, from the drain's park — no boot",
+              flush=True)
+        _E2E_LEASED.add(udid)
+    else:
+        udid = _clone_ios_golden(
+            name, runtime, devicetype, runtime_version, device_name,
+            wait_s=_IOS_GOLDEN_WARM_WAIT_S if golden_wait_s is None else golden_wait_s,
+        )
     if udid is None:
         res = subprocess.run(
             ["xcrun", "simctl", "create", name, devicetype, runtime],
@@ -282,9 +301,29 @@ def _create_ephemeral_simulator(*, golden_wait_s: float | None = None) -> str | 
             print(f"simctl create failed (rc={res.returncode}): {res.stderr.strip()}")
             return None
         udid = res.stdout.strip()
-    atexit.register(_delete_simulator, udid)
+    atexit.register(_park_or_delete_simulator, udid, runtime, devicetype)
     register_simulator(udid)
     return udid
+
+
+#: The devices `_create_ephemeral_simulator` leased from the drain's park and
+#: whose boot is still to be skipped: `_boot_simulator_held` takes a UDID out
+#: at its first call, so a later re-check of a device found shut down boots it
+#: held, as any other.
+_E2E_LEASED: set[str] = set()
+
+
+def _park_or_delete_simulator(udid: str, runtime: str, devicetype: str) -> None:
+    """At exit: hand the device back to the drain's park, booted and reset
+    (`helpers/sim_park.py`), when one is open — else shut it down and delete
+    it, as every run outside the drain does."""
+    park = sim_park.park_dir()
+    if park is not None:
+        from drivers.ios import BUNDLE_ID, KIDS_BUNDLE_ID
+
+        if sim_park.park(park, udid, runtime, devicetype, (BUNDLE_ID, KIDS_BUNDLE_ID)):
+            return
+    _delete_simulator(udid)
 
 
 #: The golden device's name begins with this, and with nothing Job C's
@@ -987,6 +1026,7 @@ def get_available_apps() -> list[str]:
 # (build-system.md § Build/e2e slot locks; testing.md § point 9).
 
 from helpers import helper_bins as _helper_bins  # noqa: E402
+from helpers import sim_park  # noqa: E402
 from helpers.ios_app_bundle import (  # noqa: E402
     KIDS_SWIFT_FLAGS,
     SIMULATOR_BUILD_ARGS,
@@ -1633,25 +1673,15 @@ def _make_nest(nest_binary, tmp_path_factory, label="nest", unclaimed=False,
     § Default app and nest mode, ruling (3)).
     """
     from drivers.port_util import find_free_port
-    from helpers import android_venue
     tmp_dir = str(tmp_path_factory.mktemp(label))
-    # `find_free_port()` in every run but an android venue run, where the port
-    # is leased from the range the venue's tunnel carries — the only ports the
-    # device can reach (`helpers/android_venue.nest_port`).
     if port is None:
-        port, release_port = android_venue.nest_port(find_free_port)
-    else:
-        release_port = lambda: None  # the stopped nest that owned it releases it
-    try:
-        nest = start_nest(nest_binary, tmp_dir, port=port, unclaimed=unclaimed,
-                          claim_domain=claim_domain,
-                          handle_domain_seed=handle_domain_seed,
-                          serve_tls=serve_tls, dial_host=dial_host,
-                          extra_env=extra_env, cors_origins=cors_origins,
-                          static_dir=static_dir)
-    except BaseException:
-        release_port()
-        raise
+        port = find_free_port()
+    nest = start_nest(nest_binary, tmp_dir, port=port, unclaimed=unclaimed,
+                      claim_domain=claim_domain,
+                      handle_domain_seed=handle_domain_seed,
+                      serve_tls=serve_tls, dial_host=dial_host,
+                      extra_env=extra_env, cors_origins=cors_origins,
+                      static_dir=static_dir)
     # Whether `/app/` answers with an SPA build — a contract key every mode
     # publishes, so a test observing the bundled web app reads the fact rather
     # than assuming the tier_3 shape (the image always bundles one).
@@ -1664,7 +1694,6 @@ def _make_nest(nest_binary, tmp_path_factory, label="nest", unclaimed=False,
         except subprocess.TimeoutExpired:
             nest["proc"].kill()
             nest["proc"].wait()
-        release_port()
 
     return _as_nest_handle(nest), cleanup
 
@@ -2623,7 +2652,7 @@ class _DockerProvider(_OptionAwareProvider):
         keyword-only so they cannot arrive through `**kwargs` and be graded as
         options; pinned by `test_nest_mode_axis.py` to the one caller.
         """
-        from helpers import android_venue, nest_mode as nest_mode_mod
+        from helpers import nest_mode as nest_mode_mod
         from common.nest import nest_id_from_data_dir
         from drivers.port_util import find_free_port
         from drivers.port_util import find_free_ports
@@ -2757,9 +2786,7 @@ class _DockerProvider(_OptionAwareProvider):
         last_error = None
         log_stream = None
         for attempt in range(2):
-            # A leased venue port in an android venue run, `find_free_port()`
-            # otherwise — the same seam as the standalone provider.
-            port, release_port = android_venue.nest_port(find_free_port)
+            port = find_free_port()
             name = f"{_DOCKER_LEGACY_PREFIX}{port}"
             started = False
             try:
@@ -2816,7 +2843,6 @@ class _DockerProvider(_OptionAwareProvider):
                     log_stream = None
                 if started:
                     remove_container(name)
-                release_port()
                 if attempt == 0 and _is_port_bind_collision(exc):
                     last_error = exc
                     continue
@@ -2971,7 +2997,6 @@ class _DockerProvider(_OptionAwareProvider):
             # so a rerun's --basetemp wipe succeeds (contents kept).
             reclaim_data_dir(data_dir, image)
             _drop_scanners()
-            release_port()
 
         return _as_nest_handle(nest), cleanup
 
@@ -3754,10 +3779,12 @@ def _apply_bridge_ffi_env(env: dict, binary: str | None = None) -> None:
     Unix: the FFI lib is the flavor-private slot `just mail-bridge-ffi` owns
     (justfile's `mail-ffi-slot`, always the `release` profile here — the e2e
     harness never builds `dist`); set `LD_LIBRARY_PATH` defensively (the binary
-    carries an rpath, but some shells strip RUNPATH). Windows: `just
-    windows-mail-bridge-build` stages the gnullvm `fauna_ffi.dll` *beside* the
-    `.exe` in `target/`, and the Windows loader searches the executable's own
-    directory first — so no env wiring is needed (and `LD_LIBRARY_PATH` is
+    carries an rpath, but some shells strip RUNPATH). Windows: each recipe
+    stages its flavor's gnullvm `fauna_ffi.dll` *beside* its `.exe` — the
+    shipped one in `target/`, the e2e bridge's seam-carrying one with
+    `fauna-mail-bridge-e2e.exe` in `target/mail-bridge-e2e/` — and the Windows
+    loader searches the executable's own directory first, so `binary` alone
+    picks the flavor and no env wiring is needed (`LD_LIBRARY_PATH` is
     meaningless there). Mutates `env` in place.
     """
     if _IS_WINDOWS:
@@ -3835,8 +3862,11 @@ def _ensure_mail_bridge_e2e_built() -> str:
 
     A distinct memo key and path from `_ensure_mail_bridge_built`: this binary
     carries the mail bridge's harness seams (the shorter pre-auth deadline,
-    `FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS`), which convention 15 compiles out of
-    the shipped flavor — so it can never collapse onto `mail-bridge-binary`.
+    `FAUNA_MAIL_E2E_PREAUTH_DEADLINE_MS`, in the binary; fauna-mail's
+    verification resolver and deadline in the cdylib it loads), which
+    convention 15 compiles out of the shipped flavor — so it can never collapse
+    onto `mail-bridge-binary`. On Windows it is staged with its own
+    `fauna_ffi.dll` in `target/mail-bridge-e2e/`, never beside the shipped one.
     """
 
     def build():
@@ -3846,7 +3876,7 @@ def _ensure_mail_bridge_e2e_built() -> str:
                 ["just", "windows-mail-bridge-build-e2e"],
                 cwd=_repo_root, check=True,
             )
-            return str(_repo_root / "target" / "fauna-mail-bridge-e2e.exe")
+            return str(_repo_root / "target" / "mail-bridge-e2e" / "fauna-mail-bridge-e2e.exe")
         subprocess.run(
             ["just", "mail-bridge-build-e2e"],
             cwd=_repo_root, check=True,
@@ -3977,7 +4007,9 @@ def mail_bridge_e2e_binary(_generated_files_fresh):
     """Build the e2e FLAVOR of fauna-mail-bridge once per session, at
     COLLECTION time (`just mail-bridge-build-e2e` →
     `bins/fauna-bridges/fauna-mail-bridge-e2e`; win:
-    `just windows-mail-bridge-build-e2e` → `target/fauna-mail-bridge-e2e.exe`).
+    `just windows-mail-bridge-build-e2e` →
+    `target/mail-bridge-e2e/fauna-mail-bridge-e2e.exe`, its own `fauna_ffi.dll`
+    beside it).
 
     **Any test that sets a `FAUNA_MAIL_E2E_*` seam requests THIS fixture** —
     the shipped flavor (`mail_bridge_binary`) ignores them by construction
@@ -8348,8 +8380,9 @@ class DockerMailVenueHandle(MailVenueHandle):
     standalone fixture reads them from the nest).
     None of them is *silently* absent: they are simply not attributes here, so a
     test reading one gets an `AttributeError` naming this class — and, before it
-    could ever get that far, a collection-time exclusion, since the four test
-    functions that read them are pinned in `helpers/nest_surface.py`'s
+    could ever get that far, a collection-time exclusion, since the test
+    functions that read them — in their own body or through a module helper the
+    handle is passed to — are pinned in `helpers/nest_surface.py`'s
     `MAIL_VENUE_HOST_AFFORDANCE_READERS` and excluded from this mode by name.
     """
 
@@ -9397,7 +9430,6 @@ def unclaimed_caldav_nest(
     pkill/killall).
     """
     from drivers.port_util import find_free_port
-    from helpers import android_venue
     from helpers.stub_mx import StubMX
     from fakes.fake_clamd import FakeClamd
     from fakes.fake_rspamd import FakeRspamd
@@ -9408,10 +9440,7 @@ def unclaimed_caldav_nest(
         # ── Allocate the nest port up front so the `ip` handle domain (the
         # nest's own loopback authority) can be computed BEFORE start, mirroring
         # `cross_nest_foreign`'s `authority = f"127.0.0.1:{port}"` pattern.
-        # `find_free_port()` in every run but an android venue run, where the
-        # port is leased from the range the venue's tunnel carries
-        # (`helpers/android_venue.nest_port`).
-        port, release_port = android_venue.nest_port(find_free_port)
+        port = find_free_port()
         # All three arms are `handle_domain_seed` values, and it is the
         # `unclaimed=True` below that decides that — not the shape of the value.
         # The domained claim needs a claim of the HARNESS's to ride on, and this
@@ -9432,23 +9461,18 @@ def unclaimed_caldav_nest(
             )
 
         tmp_dir = str(tmp_path_factory.mktemp(f"caldav-variant-{address_type}"))
-        try:
-            nest = start_nest(
-                nest_binary, tmp_dir, port=port, unclaimed=True,
-                handle_domain_seed=handle_domain,
-            )
-        except BaseException:
-            release_port()
-            raise
+        nest = start_nest(
+            nest_binary, tmp_dir, port=port, unclaimed=True,
+            handle_domain_seed=handle_domain,
+        )
 
-        def _nest_cleanup(_nest=nest, _release=release_port):
+        def _nest_cleanup(_nest=nest):
             _nest["proc"].terminate()
             try:
                 _nest["proc"].wait(timeout=10)
             except subprocess.TimeoutExpired:
                 _nest["proc"].kill()
                 _nest["proc"].wait()
-            _release()
 
         cleanups.append(("nest", _nest_cleanup))
 
@@ -10087,7 +10111,7 @@ def _activate_real_faunamls(app, *, context):
 
 def _launch_second_real_faunamls_app(
     request, real_faunamls_app, nest_instance, test_user, *, suppress_push, fixture_name,
-    bob=None,
+    bob=None, native_seat=None,
 ):
     """Shared body behind ``second_real_faunamls_app`` /
     ``second_real_faunamls_app_push_only`` — everything except the one env var
@@ -10130,6 +10154,15 @@ def _launch_second_real_faunamls_app(
         # launch-gated branch below (real_conversations, not a runtime
         # toggle), like macos/ios.
         app_name = "windows"
+    elif (alice.driver.is_web() or alice.driver.is_android()) and native_seat is not None:
+        # A web or android alice with a bob on ANOTHER native app. web: the
+        # journeys whose second seat does something web declares absent (the
+        # custody accept — `ui/devices.md` § Where logic lives) seat bob on the
+        # named native app instead of skipping, so web's own half (the owner's
+        # mint) is still witnessed. android: one emulator runs one instance of
+        # the app, so bob — a friend on his own device — takes the named seat,
+        # the way `android_other_device_seat` seats alice's other device.
+        app_name = native_seat
     else:
         pytest.skip(
             "two-driven-client native receive proofs run on the direct-Rust "
@@ -10303,6 +10336,22 @@ def second_real_faunamls_app(request, real_faunamls_app, nest_instance, test_use
     yield from _launch_second_real_faunamls_app(
         request, real_faunamls_app, nest_instance, test_user,
         suppress_push=True, fixture_name="second_real_faunamls_app",
+    )
+
+
+@pytest.fixture
+def custody_host_seat(request, real_faunamls_app, nest_instance, test_user):
+    """``second_real_faunamls_app`` for the custody journeys' HOST (bob) — the
+    same seat on the same client as alice, except that a **web** alice gets a
+    **tui** bob: the custody accept is native-only (``ui/devices.md`` § Where
+    logic lives), so web's half of the ceremony — the owner's mint — is
+    witnessed against a native friend instead of being skipped; an **android**
+    alice gets a tui bob too, since one emulator runs one app instance. Yields
+    ``(bob_app, bob_actor)``."""
+    yield from _launch_second_real_faunamls_app(
+        request, real_faunamls_app, nest_instance, test_user,
+        suppress_push=True, fixture_name="custody_host_seat",
+        native_seat="tui",
     )
 
 
@@ -10521,7 +10570,7 @@ def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
                 for bob_app, bob in _launch_second_real_faunamls_app(
                     request, alice_app, custodian, alice,
                     suppress_push=True, fixture_name="two_nest_custody_rig",
-                    bob=bob,
+                    bob=bob, native_seat="tui",
                 ):
                     yield {
                         "home": home,
@@ -10725,19 +10774,20 @@ def succession_member_app(request, succeedable_app, nest_instance):
         driver = alice_app.driver.open_twin_page()
         node_url = request.getfixturevalue("spa_url")
     else:
-        config = _build_app_config(app_name, nest_instance, request)
-        if KIDS_PARENT.get(app_name, app_name) == "ios":
-            second_udid = _get_ios_second_seat_udid()
-            if second_udid is None:
-                pytest.skip("could not allocate a second iOS simulator for bob's seat")
-            config["udid"] = second_udid
-        # windows: bob's login would otherwise re-provision ALICE's session-wide
-        # agent with his identity (the last login wins the shared pipe) — the
-        # collision `_own_windows_share_seat_agent`'s docstring measured. A no-op
-        # on every other app, whose private HOME already isolates the agent.
-        _own_windows_share_seat_agent(app_name, config, request)
-        driver = create_driver(app_name)
-        driver.launch(config)
+        # The share fixtures' own seat launcher, so bob gets every per-app
+        # isolation they do — the second iOS simulator, windows' own agent pipe
+        # (`_own_windows_share_seat_agent`) — AND the apple render preflight,
+        # which is what keeps the login below from racing the launch. Without
+        # it, measured on iOS 2026-11-11: bob's launch read the keychain only
+        # after `set_state` had stored his session, so the app signed itself
+        # in on its production path AND the patch logged him in again — two
+        # full `start()`s, two ConversationsSessions, and the folder share
+        # never reached his Folders page (titles=[] in all three member-seat
+        # reds). The preflight waits until the launch has rendered, i.e. has
+        # already found no stored session, so exactly one login runs.
+        driver = _launch_fresh_share_driver(
+            app_name, nest_instance, request, second_seat=True
+        )
         node_url = nest_instance["url"]
     try:
         secret_hex = bob["signing_key"].encode().hex()
@@ -10796,8 +10846,8 @@ def _second_seat_config(app_name, nest_instance, request):
     elif KIDS_PARENT.get(app_name, app_name) == "ios":
         # A second concurrently-live iOS app cannot share device A's simulator
         # (`launch()`'s own uninstall+install would tear A's app down), so the
-        # extra seat takes the second-seat simulator, as bob's seat does.
-        second_udid = _get_ios_second_seat_udid()
+        # extra seat claims a simulator no other seat of this test holds.
+        second_udid = _claim_ios_extra_seat_udid(request)
         if second_udid is None:
             pytest.skip("could not allocate a second iOS simulator for the extra seat")
         config["udid"] = second_udid
@@ -10812,6 +10862,11 @@ def _second_seat_config(app_name, nest_instance, request):
         # surviving store (`alice_second_device`'s docstring). Explicit, not inherited: the two-device
         # claim must not rest on a driver default a future change could alter.
         config["data_dir"] = tempfile.mkdtemp(prefix="fauna-e2e-alice-device-b-")
+        # …and its own sync agent, under an `isolated_sync_agent` run: the
+        # session pin names one pipe, so device B's login would otherwise
+        # re-provision device A's agent with B's device id, and the two devices'
+        # bound folders would run as one (`_own_windows_share_seat_agent`).
+        _own_windows_share_seat_agent(app_name, config, request)
 
     return config
 
@@ -11257,8 +11312,8 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
     drain+apply half.
 
     **android inverts the seats, by name, never by reinterpreting ``app``.** The
-    android venue provisions ONE emulator (`testing.md` § Default app and nest
-    mode → *Android's run venue*), and a second concurrently-live android app on
+    android emulator provisions ONE emulator (`testing.md` § Default app and nest
+    mode → *Android's emulator placement*), and a second concurrently-live android app on
     it is not available (one package per device), so carol — the asserted seat,
     the one that must be android on the android column — takes the session
     android ``app`` itself, re-pointed at the CalDAV-only nest
@@ -11435,7 +11490,7 @@ def _launch_fresh_share_driver(
 
     config = _build_app_config(app_name, nest, request)
     if second_seat and KIDS_PARENT.get(app_name, app_name) == "ios":
-        second_udid = _get_ios_second_seat_udid()
+        second_udid = _claim_ios_extra_seat_udid(request)
         if second_udid is None:
             pytest.skip("could not allocate a second iOS simulator for the recipient seat")
         config["udid"] = second_udid
@@ -13177,6 +13232,14 @@ def _boot_simulator_held(
     not one of them)."""
     from drivers.ios import boot_and_wait_until_usable
 
+    if udid in _E2E_LEASED:
+        # Leased booted from the drain's park seconds ago: `bootstatus -b`
+        # returns at once, and no grant is waited for a boot that never runs.
+        _E2E_LEASED.discard(udid)
+        boot_and_wait_until_usable(udid)
+        print(f"[sim-boot] {udid}: leased from the park, already booted — no boot, no grant",
+              flush=True)
+        return
     mod = _build_slot_module()
     pool = getattr(mod, "SIM_BOOT_POOL", None) if mod is not None else None
     enabled = getattr(mod, "sim_boot_enabled", None) if mod is not None else None
@@ -13354,6 +13417,37 @@ def _get_ios_seat_udid(ordinal: int, *, in_test: bool = True) -> str | None:
             _boot_simulator_held(udid, in_test=in_test)
         _ios_extra_seat_udids[ordinal] = udid
     return _ios_extra_seat_udids[ordinal]
+
+
+def _claim_ios_extra_seat_udid(request) -> str | None:
+    """The simulator for one more concurrently-live iOS seat of THIS test — the
+    lowest seat ordinal ≥ 1 no other seat of the test has claimed, through
+    `_get_ios_seat_udid`. `None` when that device cannot be had (the caller
+    skips).
+
+    Every launcher of an extra seat claims here, never `_get_ios_second_seat_udid`
+    directly: two of them used to take ordinal 1 each, and the second launch's
+    uninstall+install tore the first seat's app down mid-test. Measured on iOS
+    2026-11-11: the succession member seat (bob) and the stolen seat
+    (`helpers/succession_file_door.py::stolen_seat`) both landed on the second
+    simulator, so bob's bridge died ("BRIDGE DEAD … Connection refused") the
+    moment the thief's seat launched, and the file the thief wrote never
+    reached him. The claims live on the test item, so they reset per test, as
+    the devices' own per-launch reinstall does.
+    """
+    node = getattr(request, "node", None)
+    taken = getattr(node, "_fauna_ios_seat_ordinals", None)
+    if taken is None:
+        taken = set()
+        try:
+            node._fauna_ios_seat_ordinals = taken
+        except Exception:  # no item to hang the claims on — first claim wins
+            pass
+    ordinal = 1
+    while ordinal in taken:
+        ordinal += 1
+    taken.add(ordinal)
+    return _get_ios_seat_udid(ordinal)
 
 
 def _prewarm_ios_seat(ordinal: int) -> None:
@@ -13721,6 +13815,24 @@ def _build_via_just(recipe: str, what: str) -> None:
                 f"contention with another concurrent build)",
                 flush=True,
             )
+            # On windows a running exe or loaded dll cannot be replaced, only
+            # renamed: a second run from this checkout (or a seat started
+            # earlier in this one) holding an output fails both attempts the
+            # same way, so free each output the first attempt named before the
+            # retry — the holder keeps its renamed image, as a replaced binary
+            # does on linux and mac (helpers/win_held_outputs.py).
+            from helpers.win_held_outputs import move_aside_held_outputs
+
+            target_roots = [Path(_repo_root) / "target"]
+            if os.environ.get("CARGO_TARGET_DIR"):
+                target_roots.append(Path(os.environ["CARGO_TARGET_DIR"]))
+            for held in move_aside_held_outputs(recent, target_roots):
+                print(
+                    f"[build] {held} is held by a running process (a windows "
+                    f"image cannot be replaced, only renamed) — moved it aside "
+                    f"so the retry can write it",
+                    flush=True,
+                )
 
     sections = []
     for i, (rc, recent) in enumerate(failed_attempts, start=1):
@@ -14223,7 +14335,7 @@ def _relaunch_trusting_nest(driver, nest_instance: dict) -> None:
 
     Before any of that, a DEVICE app (android) is given the nest's port: the
     device reaches a nest only as its own loopback through an ``adb reverse``
-    (`testing.md` § Default app and nest mode → *Android's run venue*,
+    (`testing.md` § Default app and nest mode → *Android's emulator placement*,
     constraint 3), and a nest started after the launch was never reversed.
     Every re-point seam calls this function, so it is the one place that opens
     it — on every call, relaunch or not (``ensure_reverse`` is idempotent).
@@ -15124,6 +15236,52 @@ def isolated_sync_agent_data_dir(tmp_path_factory):
     return str(d)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _release_windows_sync_roots_at_session_end(request, tmp_path_factory):
+    """On windows, release the cloud-files sync roots this session's tests bound
+    under its base temp, once its apps and agents are gone — the teardown that
+    lets pytest remove those dirs (`testing.md` § Test temp-dir hygiene).
+
+    A windows on-demand binding makes the bound folder a cfapi sync root, and the
+    agent keeps both registrations when its process stops — by design, so a
+    service restart re-connects (`cfapi_host.rs`, `TeardownMode::KeepUnlessMarked`).
+    Every test binding a folder under its ``tmp_path`` therefore left a root the
+    run could not delete: pytest renamed each such numbered dir to ``garbage-*``
+    and every later run on the box warned on it (40 of them on 2026-11-10).
+
+    Autouse and session-scoped, so its teardown runs after every other session
+    fixture's — ``_driver_cache``'s app kill, which takes the app-spawned agent
+    with it, included — and the release judges each root by the filter's own
+    provider status: a root whose provider is still connected (an agent that
+    outlived its app) is watched for 30 s, then left, named, for the dev
+    machines' temp-dir sweep. Scoped to
+    THIS session's base temp, so another run's roots are never in reach. The
+    order is the product's full teardown: provider gone, filter, then shell
+    (`helpers/windows_cfapi.release_sync_roots`).
+    """
+    if sys.platform != "win32":
+        yield
+        return
+    base = tmp_path_factory.getbasetemp()
+    yield
+    from helpers.windows_cfapi import release_sync_roots
+
+    try:
+        result = release_sync_roots(base, wait_s=30.0)
+    except OSError as exc:
+        lines = [f"[sync-roots] the release under {base} failed: {exc}"]
+    else:
+        lines = [f"[sync-roots] released {p}" for p in result.released]
+        lines += [f"[sync-roots] released {p}; its shell entry kept: {why}" for p, why in result.shell_kept]
+        lines += [f"[sync-roots] left {p}: {why}" for p, why in result.spared]
+    reporter = request.config.pluginmanager.getplugin("terminalreporter")
+    for line in lines:
+        if reporter is not None:
+            reporter.write_line(line)
+        else:
+            print(line, flush=True)
+
+
 #: **The 2026-09-21 ruling, BUILT 2026-09-22.** `e2e-conventions.md` convention 10
 #: (windows axis (a)) RULES that a windows e2e launch drives its own isolated
 #: agent by default, and this is where that default lives: the app's gate keys on
@@ -15311,6 +15469,16 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
         _apply_release_feed_env(env, request)
         _apply_acme_pebble_env(env, request)
         _apply_apple_opener_env(env, request)
+        node = getattr(request, "node", None)
+        if node is not None and node.get_closest_marker("ios_file_provider_app"):
+            # The seat installs the appex-embedding app (`_ios_seat_app_path`),
+            # so the app's File Provider domain reconcile — skipped on every
+            # other e2e launch, domains being device-global — runs here: a
+            # share the seat accepts registers its domain on this seat's own
+            # simulator, and the next plain seat's uninstall takes it away
+            # (`FaunaE2E.fileProviderReconcile`; `p2p-shared-set-build.md`
+            # § Phone peers — design, decision 5).
+            env["FAUNA_E2E_FILE_PROVIDER_RECONCILE"] = "1"
         return {
             "url": nest_instance["url"],
             "app_path": _ios_seat_app_path(ios_setup, request),
@@ -15643,13 +15811,11 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # real process env via android.system.Os.setenv before any auto-login
             # can assemble the account runtime -- see _apply_r14_trust_env's
             # docstring.
-            # _apply_real_conversations_env also sets FAUNA_CONV_POLL_SECS,
-            # which is NOT forwarded to android yet (the shared Rust
-            # start_receive_loop reads it via std::env::var, which cannot be
-            # set for an already-launched android process this way) -- the e2e
-            # receive loop still works, just on the 30s production poll
-            # instead of the 2s test cadence. Untested empirically (no android
-            # e2e has ever run against a real device); verify on the emulator host.
+            # _apply_real_conversations_env also sets FAUNA_CONV_POLL_SECS (the
+            # shared receive loop's 2 s backstop cadence, read via std::env
+            # when the session's loop starts at login): it rides the same
+            # DNS_E2E_ENV_KEYS list and Os.setenv door as the DNS seams below
+            # (pinned by test_android_launch_harness.py).
             # FAUNA_DNS_PROVIDER_FAKE / FAUNA_DNS_RECHECK_SECS (the admin DNS
             # page's fake provider and compressed re-check clock, as ios/macos
             # above) ARE forwarded: BridgeHttpServer's DNS_E2E_ENV_KEYS puts
@@ -15665,16 +15831,16 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             config["environment"] = env
             # Nest ports the driver opens an `adb reverse` for, so the device's
             # own 127.0.0.1:<port> IS the nest (testing.md § Default app and nest
-            # mode → Android's run venue, constraint 3). `url`'s port is read by
+            # mode → Android's emulator placement, constraint 3). `url`'s port is read by
             # the driver itself; this list is for the ADDITIONAL nests of a
             # multi-nest run that are known at launch time. A nest started after
             # the app launched takes `AndroidBridgeDriver.ensure_reverse`.
             # Pebble's ACME directory rides the same list: the app's order
             # reaches it only as the device's own loopback, and in a venue run
-            # its port is a lease on the tunnelled range like a nest's
-            # (`helpers/acme_pebble.lease_directory_port`). The seed's fake name
-            # server rides it too: it is published to loopback on a lease of
-            # its own (`lease_name_server_port`), and the propagation probe's
+            # its port is a free port like a nest's
+            # (`helpers/acme_pebble.free_directory_port`). The seed's fake name
+            # server rides it too: it is published to loopback on a free port
+            # of its own (`free_name_server_port`), and the propagation probe's
             # TCP retry is what crosses the TCP-only reverse
             # (`e2e-automation-surface-gating.md` § The ACME directory seed →
             # *The name server's reach*).
@@ -15817,15 +15983,39 @@ def web_api_url(request):
 
 
 @pytest.fixture(scope="session", params=get_available_apps())
-def persistent_app(request, _driver_cache):
-    """A single app instance for the entire test session.
+def _persistent_session_app(request, _driver_cache):
+    """The session-long ActionLayer behind ``persistent_app``, one per app.
 
-    Uses the session-scoped driver cache. Tests use driver.set_state()
-    to set up preconditions instead of reinstalling.
+    It carries the app parametrization at SESSION scope, so pytest still groups
+    a run's ``persistent_app`` tests by app across modules (and the node ids stay
+    ``test_x[<app>]``); the module boundary is ``persistent_app``'s own."""
+    yield ActionLayer(_driver_cache(request.param))
+
+
+@pytest.fixture(scope="module")
+def persistent_app(request, _persistent_session_app):
+    """The session's app instance, carried across the tests of ONE module.
+
+    Uses the session-scoped driver cache. Tests use driver.set_state() to set
+    up preconditions instead of reinstalling, and no per-test ``reset()`` runs:
+    state set by one test of a module is the next one's to build on. Across
+    modules it does not carry — convention 10 (`e2e-launch-isolation.md`): the
+    app is cold-relaunched at every module boundary through
+    `helpers/module_relaunch.py`, sharing the driver's boundary record with the
+    ``app`` fixture, so a module starts against the baseline it would see run
+    alone and never inherits another module's sign-in or navigation. Pinned by
+    ``tests/test_module_relaunch.py``.
     """
-    app_name = request.param
-    driver = _driver_cache(app_name)
-    layer = ActionLayer(driver)
+    from helpers import module_relaunch
+
+    layer = _persistent_session_app
+    outcome = module_relaunch.at_module_boundary(
+        layer.driver, request.module.__name__ if request.module else None
+    )
+    if outcome is not None:
+        from helpers.app_surface import app_name
+
+        print(f"[e2e] {app_name(layer.driver)}: {outcome}")
     yield layer
 
 
@@ -16021,7 +16211,9 @@ def _attach_app_log_section(item, report):
     uses — by fixture VALUE, so it rides every driver-bearing test whatever built
     the driver, including the seven modules that shadow the conftest `app`. Then
     one labelled section per seat a launcher fixture started in the test body
-    (`app_log_section.launched_drivers`), which no fixture value names directly.
+    (`app_log_section.launched_drivers`), which no fixture value names directly,
+    and one per seat a fixture yields inside an `(app, actor)` pair
+    (`app_log_section.paired_seat_drivers`) — each driver once.
 
     Every failure mode here is swallowed: a diagnostic that can break the run it
     was only meant to explain gets switched off and never switched back on.
@@ -16034,9 +16226,13 @@ def _attach_app_log_section(item, report):
         section = app_log_section.build(driver)
         if section is not None:
             report.sections.append(section)
-        for label, seat in app_log_section.launched_drivers(funcargs):
-            if seat is driver:
+        reported = [driver]
+        seats = app_log_section.launched_drivers(funcargs)
+        seats += app_log_section.paired_seat_drivers(funcargs)
+        for label, seat in seats:
+            if any(seat is seen for seen in reported):
                 continue
+            reported.append(seat)
             section = app_log_section.build(seat, label=label)
             if section is not None:
                 report.sections.append(section)
@@ -16236,20 +16432,16 @@ def kept_login_app(request, persistent_app, nest_instance, test_user):
     sees that (``_kept_login_holds``) and signs in again — so a mistake costs one
     sign-in, never a wrong actor.
 
-    The module-boundary relaunch still applies (`helpers/module_relaunch.py`): a
-    run never carries state in from another module.
+    The module-boundary relaunch still applies (``persistent_app`` performs it,
+    `helpers/module_relaunch.py`), and a run never carries a sign-in in from
+    another module — on a driver whose relaunch is a declared absence too: the
+    first ``kept_login_app`` test of each module signs in afresh.
     """
-    from helpers import module_relaunch
-
     driver = persistent_app.driver
-    outcome = module_relaunch.at_module_boundary(
-        driver, request.node.module.__name__ if request.node.module else None
-    )
-    if outcome is not None:
-        from helpers.app_surface import app_name
-
-        print(f"[e2e] {app_name(driver)}: {outcome}")
-    if outcome is None and _kept_login_holds(driver, nest_instance, test_user):
+    module = request.node.module.__name__ if request.node.module else None
+    first_of_module = getattr(driver, "_e2e_kept_login_module", None) != module
+    driver._e2e_kept_login_module = module
+    if not first_of_module and _kept_login_holds(driver, nest_instance, test_user):
         # The landing a fresh sign-in lands on, without the sign-in.
         driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
         return persistent_app
@@ -16912,42 +17104,13 @@ def _install_harness_ca_leaf(nest, ca) -> None:
 
 def _skip_if_lan_self_dial_is_broken(url: str) -> None:
     """Preflight the box's ability to complete a TLS handshake against its own
-    LAN IP before trusting any test result built on ``spki_pinned_nest``.
-
-    On macOS the cause is the application firewall, which filters a flow dialled
-    on the box's own address although the packets never leave it, and does not
-    filter loopback: the TCP connect succeeds, and then a HELD flow times the
-    handshake out while a BLOCKED one dies with ``ssl.SSLEOFError`` client-side
-    and ``Socket is not connected (os error 57)`` server-side, between
-    ``accept()`` and the first read. Measured 2026-10-30/31 from `socketfilterfw`'s
-    own log, which is also what this skip reads; the 2026-08 reading of this as a
-    kqueue quirk of tokio's accept fell because its one control, a blocking Python
-    server, ran under a Python the firewall lists as allowed. This is
-    a box property, not an app property (`app_surface.skip_environment`'s own
-    charter): never silently hide it as a green, nor let it masquerade as a
-    per-app regression on every future baseline.
+    LAN IP before trusting any test result built on ``spki_pinned_nest``. The
+    check and its skip are shared with every LAN-dialled witness:
+    ``helpers.macos_firewall.skip_if_lan_self_dial_is_broken`` (the application
+    firewall on macOS, measured 2026-10-30/31 from `socketfilterfw`'s own log).
     """
-    host, port = _split_authority(url)
-    try:
-        ctx = ssl._create_unverified_context()
-        with socket.create_connection((host, port), timeout=10) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host):
-                pass
-    except OSError as e:
-        from helpers.app_surface import skip_environment
-        from helpers.macos_firewall import inbound_flow_note
-        cause = inbound_flow_note("fauna-nest") or (
-            "the application firewall logged no refusal, so the cause is not known"
-        )
-        skip_environment(
-            f"this box cannot complete a TLS handshake against its own LAN IP "
-            f"({host}:{port}): {e!r} — {cause}"
-        )
-
-
-def _split_authority(url: str) -> tuple:
-    host, _, port = url.split("://", 1)[1].rpartition(":")
-    return host, int(port)
+    from helpers.macos_firewall import skip_if_lan_self_dial_is_broken
+    skip_if_lan_self_dial_is_broken(url)
 
 
 def _assert_pin_branch_authority(url: str) -> None:
@@ -17111,13 +17274,25 @@ def _login_app_as(app, request, nest_instance, user, spa_url_fixture="spa_url",
 
         expected = user["actor_id_hex"]
         seen = wait_live_actor_id(app, expected)
+        if expected.lower() not in seen.lower():
+            from helpers.diagnostics import launch_log_lines
+
+            # Read before the assert, never inside its message: the message is
+            # built only on failure, but a reader fault must not replace it.
+            launch_lines = launch_log_lines(app)
+        else:
+            launch_lines = ""
         assert expected.lower() in seen.lower(), (
             f"the login as the dedicated actor never reached the LIVE session: "
             f"account-actor-id={seen!r}, expected {expected!r}. The app is still "
             f"running as the PREVIOUS test's actor, so every caller-scoped read "
             f"below is answered correctly and EMPTY for that actor — which reads "
             f"as a broken feature rather than a dropped login "
-            f"(e2e-conventions.md convention 11)."
+            f"(e2e-conventions.md convention 11). "
+            f"An EMPTY id means the page shows no live identity at all (a boot "
+            f"that came up signed out, or one never connected), not one still "
+            f"running as the previous actor; the page's launch log says:"
+            f"{launch_lines}"
         )
         # Restore the landing the session patch asked for; the barrier above
         # left the app on a Settings sub-page.
@@ -17543,7 +17718,10 @@ def _bound_location_media(request, app, nest_instance, tmp_path):
             "this launch pinned no agent `--data-dir` (`FAUNA_E2E_SYNC_AGENT_DATA_DIR`); "
             "the test must carry `isolated_sync_agent` (convention 10)"
         )
-        with serving_agent(exe, pipe_path, agent_data_dir, tmp_path / "agent-spawn.log"):
+        with serving_agent(
+            exe, pipe_path, agent_data_dir, tmp_path / "agent-spawn.log",
+            launch_env=app.driver.launch_environment(),
+        ):
             yield _arrange()
         return
 
@@ -17976,24 +18154,25 @@ def pytest_addoption(parser):
                           "shared-box rule → The disposable-box declaration.")
     parser.addoption("--device-serial", action="store", default=None,
                      help="Which android device this run drives, as `adb devices` prints "
-                          "its serial (e.g. --device-serial emulator-5554). Run-level and "
+                          "its serial (e.g. --device-serial 127.0.0.1:18509, the venue's). Run-level and "
                           "single-valued, the `--app`/`--nest` shape: a harness input, never "
                           "product configuration. Reaches BOTH the availability probe and the "
                           "driver, so a box with two devices attached cannot probe one and "
                           "drive the other. Omit it to use whichever device is attached. "
                           "E2E_DEVICE_SERIAL is the env equivalent. "
-                          "See testing.md § Default app and nest mode → Android's run venue.")
+                          "See testing.md § Default app and nest mode → Android's emulator placement.")
     parser.addoption("--adb-server", action="store", default=None,
                      help="The adb server an android run drives, as adb's own socket spec "
                           "with an explicit loopback host (e.g. --adb-server "
-                          "tcp:127.0.0.1:18509): a server ALREADY RUNNING at the far end of "
-                          "the venue's tunnel, reached as a pure client on every adb call. "
-                          "Run-level, a harness input like --device-serial, and it reaches "
-                          "the availability probe as well as the driver; with it set the "
-                          "bridge forward and every nest take fixed ports the tunnel "
-                          "carries (`just android-tunnel-spec`). Omit it for a local adb "
-                          "server. E2E_ADB_SERVER is the env equivalent. "
-                          "See testing.md § Default app and nest mode → Android's run venue.")
+                          "tcp:127.0.0.1:18508, the android emulator's own server on this "
+                          "machine): a server ALREADY RUNNING, reached as a pure client on "
+                          "every adb call. The venue's device is attached to it by `adb "
+                          "connect` before the probe. Run-level, a harness input like "
+                          "--device-serial, and it reaches the availability probe as well "
+                          "as the driver; ports still come from find_free_port(), since "
+                          "every forward and reverse lands on this machine. Omit it for a "
+                          "local adb server. E2E_ADB_SERVER is the env equivalent. "
+                          "See testing.md § Default app and nest mode → Android's emulator placement.")
     parser.addoption("--strict-nest", action="store_true", default=False,
                      help="The `--strict-app` twin for the nest axis: turn every UNBUILT "
                           "mode-support skip into a failure, so a per-mode coverage claim is "
@@ -18104,7 +18283,12 @@ def pytest_configure(config):
     unbuilt/absent/environment helpers run inside action classes, and
     `_make_nest` is called by ~17 fixtures — so this is the one place either
     flag can be handed over.
+
+    First of all, an elevated run on windows takes a temp root of its own, before
+    anything makes a temp dir (`common/elevation.py`; testing.md § Test temp-dir
+    hygiene).
     """
+    take_elevated_temproot(config)
     from helpers import app_deaths, app_surface, nest_mode as nest_mode_mod, nest_surface
 
     _install_proof_hook(config)
@@ -18632,6 +18816,8 @@ def pytest_runtest_setup(item):
     if breach:
         pytest.exit(breach, returncode=3)
     _run_tests_started += 1
+    # The held failure's mark: the word's setup-start sample (helpers/pass_hold).
+    _pass_hold_sample(item.nodeid)
 
     from helpers import feature_ledger, nest_surface
     from helpers.fixture_closure import real_fixture_closure
@@ -18678,8 +18864,82 @@ def pytest_fixture_setup(fixturedef, request):
         feature_ledger.leave_fixture_setup(fixturedef.argname)
 
 
+#: The held failure's mark (helpers/pass_hold; mac-simulator-hold.md § Per-core
+#: tokens, *A red under the hold is no red*): which items of a tester run saw the
+#: schedule word `held`, and which of their failures were marked.
+_PASS_HOLD_MARKS = None
+#: The word's reader, resolved once per session: build-slot.py's
+#: `_gate_check_schedule` over the machine's slot dir — the one reading of the word,
+#: never fence.json parsed a second way. None where the slot tool is absent.
+_PASS_HOLD_READER: list = []
+
+
+def _pass_hold_reader():
+    if not _PASS_HOLD_READER:
+        reader = None
+        try:
+            mod = _build_slot_module()
+            if mod is not None and hasattr(mod, "_gate_check_schedule"):
+                def reader(mod=mod):
+                    return mod._gate_check_schedule(mod._slot_dir())[0]
+        except Exception:  # noqa: BLE001 - no reader is no hold
+            reader = None
+        _PASS_HOLD_READER.append(reader)
+    return _PASS_HOLD_READER[0]
+
+
+def _pass_hold_marks():
+    """The session's marks, or None outside a tester run (helpers/pass_hold.enabled)."""
+    global _PASS_HOLD_MARKS
+    from helpers import pass_hold
+
+    if not pass_hold.enabled():
+        return None
+    if _PASS_HOLD_MARKS is None:
+        _PASS_HOLD_MARKS = pass_hold.HeldMarks()
+    return _PASS_HOLD_MARKS
+
+
+def _pass_hold_sample(nodeid) -> None:
+    """One sample of the word for an item — its setup start, its call start."""
+    marks = _pass_hold_marks()
+    if marks is None:
+        return
+    from helpers import pass_hold
+
+    marks.sample(nodeid, pass_hold.read_word(_pass_hold_reader()))
+
+
+def _pass_hold_mark(report) -> bool:
+    """Whether the item's outcome is withheld: its failure came while the word read
+    `held` (sampled once more here). The first marked report prints the one
+    `[e2e-held] <key>` line the check scripts read, and drops what the item's
+    earlier phases noted in the last-green directory."""
+    marks = _pass_hold_marks()
+    if marks is None:
+        return False
+    if marks.is_marked(report.nodeid):
+        return True
+    if not report.failed:
+        return False
+    from helpers import last_green, pass_hold
+
+    if not marks.judge(report.nodeid, True, pass_hold.read_word(_pass_hold_reader())):
+        return False
+    last_green.withhold(report.nodeid)
+    print(f"\n{pass_hold.mark_line(last_green.key_of(report.nodeid))}", flush=True)
+    return True
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item):
+    """The word's call-start sample (helpers/pass_hold)."""
+    _pass_hold_sample(item.nodeid)
+
+
 def pytest_runtest_logreport(report):
     _warm_only_mid_run_refusal(report)
+    held = _pass_hold_mark(report)
     if report.outcome == "skipped" and getattr(report, "wasxfail", None) is None:
         _skip_reasons.setdefault(report.nodeid, _skip_reason(report))
     outcome = None
@@ -18703,12 +18963,15 @@ def pytest_runtest_logreport(report):
         # output for a skip, and a whole leg skipping once read as nothing.
         if outcome == "skipped":
             _baseline_results[report.nodeid]["reason"] = _skip_reason(report)
-    _last_green_note(report, outcome)
+    if not held:
+        _last_green_note(report, outcome)
     if outcome == "error":
         _print_live_reason(report, "ERROR")
     elif outcome == "failed":
         _print_live_reason(report, "FAILED")
-    if outcome is not None or report.when == "teardown":
+    # A failure the pass hold marked records nothing: no ledger record, no
+    # last-green outcome (helpers/pass_hold).
+    if not held and (outcome is not None or report.when == "teardown"):
         _feature_ledger_note(report, outcome)
 
 
@@ -18721,7 +18984,18 @@ def _last_green_note(report, outcome):
 
     last_green.note(report.nodeid, duration=getattr(report, "duration", 0.0) or 0.0,
                     outcome=outcome,
-                    skip_class=feature_ledger.skip_class_this_test() if outcome == "skipped" else None)
+                    skip_class=feature_ledger.skip_class_this_test() if outcome == "skipped" else None,
+                    why=_failure_text(report) if outcome in ("failed", "error") else None)
+
+
+def _failure_text(report):
+    """A red report's crash text for the directory — the record is the only place a
+    flaky red's failure survives the next run's log. Never fatal."""
+    try:
+        crash = getattr(report.longrepr, "reprcrash", None)
+        return (getattr(crash, "message", None) or str(report.longrepr) or "").strip() or None
+    except Exception:  # noqa: BLE001 - diagnostics never fail a run
+        return None
 
 
 def _write_last_green(session, exitstatus=None):
@@ -18862,21 +19136,49 @@ def _write_feature_ledger(session):
     # reads, and it has to say this artifact was tested at this commit whatever the
     # tests themselves reported. Pre-1.0 the gate asks that the run happened and was
     # recorded, not that it was green everywhere (§ Goal) — so the row lands on a red
-    # run too, and the matrix beside it is the honest label on the release.
+    # run too, and the matrix beside it is the honest label on the release. But a run
+    # that ran no test (a collection refusal, exit 4) is no run at all, and the record
+    # carries the publish-gate entries its SHAs need — both decided in
+    # `release_gate.record_candidate`, the one home of the candidate's record.
     if not _feature_run.get("candidate"):
         return
     try:
-        path = feature_ledger.record_release(
-            version=_feature_run["version"], commit=_feature_run["commit"],
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+        import release_gate  # noqa: PLC0415 — the release train's own module
+
+        # A correction run upserts the VERSION's row with one `corrections` entry,
+        # its exclusions read off this collection's own gate verdicts — every rule
+        # each gated test met (release-table.md § Release-candidate run).
+        correction = None
+        if _feature_run.get("carried"):
+            from helpers import nest_surface
+
+            gated: dict = {}
+            for hit in nest_surface.gate_hits():
+                if hit.repo_id and hit.all_rules:
+                    gated.setdefault(hit.repo_id, []).extend(hit.all_rules)
+            correction = {"carried": _feature_run["carried"], "gated": gated}
+        path, added, exempted = release_gate.record_candidate(
+            version=_feature_run["version"],
+            commit=_feature_run.get("version_commit") or _feature_run["commit"],
             image_digest=_feature_run["image_digest"], image=_feature_run.get("image"),
-            public_commit=_feature_run.get("public_commit"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"\nrelease table: NOT written ({exc}) — `just release-tag` will refuse "
-              f"until this run is recorded")
+            public_commit=_feature_run.get("public_commit"),
+            tests_run=len(_baseline_results), correction=correction)
+    except (OSError, ValueError, StopIteration, ImportError, json.JSONDecodeError) as exc:
+        print(f"\nrelease table: NOT written ({type(exc).__name__}: {exc}) — "
+              f"`just release-tag` will refuse until this run is recorded")
+        return
+    if path is None:
+        print("\nrelease table: NOT written — this candidate run ran no test, so it is "
+              "no candidate run (feature-catalog.md § Release-candidate run)")
         return
     print(f"release table: recorded {_feature_run['version']} @ "
-          f"{_feature_run['commit'][:12]} / {_feature_run['image_digest']} in "
-          f"{path.name} — commit it, then `just release-tag`.")
+          f"{(_feature_run.get('version_commit') or _feature_run['commit'])[:12]}"
+          + (f" (a correction run carrying {len(_feature_run['carried'])} main "
+             f"commit(s))" if _feature_run.get("carried") else "")
+          + f" / {_feature_run['image_digest']} in "
+          f"{path.name}, with {len(added)} publish allowlist and {len(exempted)} "
+          f"identifier-ratchet entries — commit them together, then `just release-tag`.")
 
 
 def _write_nest_gates(session):
@@ -19190,6 +19492,19 @@ _WARM_KEPT_MEMO_KEYS = frozenset({"ios-setup"})
 _SESSION_SETUP_BUILDERS = frozenset({
     "_get_ios_setup", "_prewarm_ios_seat", "_prewarm_ios_fp_seat", "_recheck_ios_simulators",
 })
+
+#: The session-setup jobs that CREATE AND BOOT a simulator (every seat kind).
+#: A device belongs to the pytest process that made it: `atexit` deletes it at
+#: that process's exit. So the tester's warm step (`PREWARM_ONLY_ENV`), its own
+#: process, skips these, since every device it booted would be gone before the
+#: shard ran, and the shard (`WARM_ONLY_ENV`) runs them BEFORE it takes its
+#: lane (`_boot_seats_before_lane`): one process boots every seat, holding no
+#: lane, as a single-process run's warm pass does (mac-simulator-hold.md
+#: § Implementation status today, *Seats and the warm step*). Inside the
+#: verify drain the park outlives the process (`helpers/sim_park.py`): the
+#: shard's seat jobs lease what an earlier request's process handed back,
+#: booted, and boot only what the park lacks.
+_SEAT_BOOT_BUILDERS = frozenset({"_get_ios_setup", "_prewarm_ios_seat", "_prewarm_ios_fp_seat"})
 
 #: Wall seconds spent in `_SESSION_SETUP_BUILDERS` jobs by this process, summed
 #: over every `_prebuild_binaries` pass (read as a delta by `_timed_prebuild`).
@@ -19613,6 +19928,14 @@ def pytest_collection_finish(session):
         # Tag the slot notes so `build-slot.py --status`, grants.jsonl and
         # `slot-waits.py` name the long holder AND why it holds the lane.
         cmd = [f"{cmd[0]} {_long_lane_tag(warrant)}"] + cmd[1:]
+    if warm_only:
+        # The shard's seats, before its lane: the warm step booted none
+        # (`_SEAT_BOOT_BUILDERS`), so no lane is ever held through a boot.
+        refused = _boot_seats_before_lane(session, mod)
+        if refused:
+            print(f"{WARM_ONLY_REFUSAL} — {len(refused)} build(s) a seat would have compiled: "
+                  f"{'; '.join(r[:120] for r in refused)}", file=sys.stderr, flush=True)
+            pytest.exit("binaries not warm (warm-only run)", returncode=pytest.ExitCode.INTERRUPTED)
     hold = _new_hold(apps)
     held = _acquire_lanes(mod, e2e_pool, long_lane, cmd)
     _E2E_SLOT = (mod, held, hold)
@@ -20086,6 +20409,44 @@ def _prebuild_in_hold_refusing(session, mod) -> list[str]:
     return []
 
 
+def _boot_seats_before_lane(session, mod) -> list[str]:
+    """The shard's seat pass (`WARM_ONLY_ENV`), BEFORE its lane: every
+    `_SEAT_BOOT_BUILDERS` job of the run, each boot under its `sim_boot` grant
+    with no bound on the wait, holding no lane — the devices the warm step,
+    another process, did not boot (`_SEAT_BOOT_BUILDERS`). In refuse mode, like
+    the in-hold re-check: a seat job that reaches a cold build (the app it
+    boots) is refused, and the returned commands end the shard before it takes
+    its lane. Then the builds it replayed are forgotten, as the warm pass
+    forgets its own, so the in-hold re-check reads them on disk again; the
+    devices stay (`_WARM_KEPT_MEMO_KEYS` and the seat tables), and the in-hold
+    pass only looks at them (`_recheck_ios_simulators`). Nothing to boot, nothing
+    printed."""
+    jobs = [job for job in _prebuild_jobs(session) if job[1] in _SEAT_BOOT_BUILDERS]
+    if not jobs:
+        return []
+    _phase("seats", "booting the run's simulators before the e2e lane, holding no e2e slot")
+    marker_fd, marker = tempfile.mkstemp(prefix="e2e-refused-seats-", suffix=".txt")
+    os.close(marker_fd)
+    os.environ[mod.REFUSE_BUILD_ENV] = marker
+    try:
+        _run_prebuild_jobs(jobs, prewarm=True)
+    finally:
+        os.environ.pop(mod.REFUSE_BUILD_ENV, None)
+        try:
+            refused = [line for line in open(marker, encoding="utf-8").read().splitlines()
+                       if line.strip()]
+        except OSError:
+            refused = []
+        try:
+            os.unlink(marker)
+        except OSError:
+            pass
+    for key, (kind, _value) in list(_BINARY_BUILD_MEMO.items()):
+        if kind == "ok" and key not in _WARM_KEPT_MEMO_KEYS:
+            del _BINARY_BUILD_MEMO[key]
+    return refused
+
+
 def _arm_warm_only_guard(mod) -> None:
     """A warm-only run's tree was found warm: keep refuse mode on for the rest of
     the run, around each tier_2/3/4 test (`pytest_runtest_protocol`), with a
@@ -20347,9 +20708,15 @@ _CROSS_APP_FIXTURE_APPS = {
     # The user's other computer on a viewer column (web and the mobiles make no
     # index pin and never build): `test_task_delegation.py::_Seats` launches tui.
     "delegation_seats": "tui",
-    # alice's fleet seat and bob, launched only on the web column (the
-    # ceremony is a web absence; `_custody_rig_on_a_fleet_seat`).
-    "two_nest_custody_rig": {"web": "tui"},
+    # alice's other device in windows' taskbar-badge outcome-4 journey
+    # (`test_home_screen_widget_taskbar_badge.py`): a tui seat, because a second
+    # windows seat would run under the same lent identity and push its own count
+    # onto the badge the test reads.
+    "badge_other_device": "tui",
+    # alice's fleet seat and bob, launched on the web column (the ceremony is
+    # a web absence; `_custody_rig_on_a_fleet_seat`), and bob alone on the
+    # android column (one emulator runs one app instance; `native_seat`).
+    "two_nest_custody_rig": {"web": "tui", "android": "tui"},
     # The linux seat that fills the mailbox on web's mail-export archive column
     # (web cannot start a fresh import; `test_mail_export_archive.py`).
     "mail_export_import_seat": {"web": "linux"},
@@ -20488,7 +20855,7 @@ def _prebuild_app_set(session, requested: set) -> set:
 #: test_e2e_binary_prebuild.py::test_every_fixture_that_boots_a_second_ios_seat_is_prewarmed.
 _IOS_SECOND_SEAT_FIXTURES = frozenset({
     "second_real_faunamls_app", "second_real_faunamls_app_push_only",
-    "domainless_second_real_faunamls_app", "two_nest_custody_rig",
+    "domainless_second_real_faunamls_app", "two_nest_custody_rig", "custody_host_seat",
     "alice_second_device", "alice_builder_seats", "succession_member_app",
     "caldav_mailbox_less_attendee_app", "caldav_mailbox_less_organizer_app",
     "media_member", "android_other_device_seat",
@@ -20509,7 +20876,7 @@ _IOS_SECOND_SEAT_FIXTURES = frozenset({
 #: test knows, so the warm pass boots this many.
 _IOS_ROOM_SEATS = 3
 _IOS_PARAM_RE = re.compile(r"(?<![A-Za-z0-9_])ios(?![A-Za-z0-9_])")
-_ROOM_SEAT_MODULES: dict[str, bool] = {}
+_ROOM_SEAT_MODULES: dict[str, str] = {}  # module path → source text
 
 
 def _item_is_ios(item) -> bool:
@@ -20521,20 +20888,24 @@ def _item_is_ios(item) -> bool:
     return bool(bracket) and _IOS_PARAM_RE.search(params) is not None
 
 
-def _item_launches_room_seats(item) -> bool:
-    """Whether `item`'s module launches room seats (it names
-    `helpers.room_seats`) — read off the module's source once per file, since
-    the seats are launched by a helper no fixture closure shows."""
+def _item_module_names(item, needle: str) -> bool:
+    """Whether `item`'s module source names `needle` — read once per file, for
+    seats launched by a helper no fixture closure shows."""
     path = str(getattr(item, "fspath", None) or getattr(item, "path", None) or "")
     if not path:
         return False
     if path not in _ROOM_SEAT_MODULES:
         try:
-            text = Path(path).read_text(encoding="utf-8")
+            _ROOM_SEAT_MODULES[path] = Path(path).read_text(encoding="utf-8")
         except OSError:
-            text = ""
-        _ROOM_SEAT_MODULES[path] = "room_seats" in text
-    return _ROOM_SEAT_MODULES[path]
+            _ROOM_SEAT_MODULES[path] = ""
+    return needle in _ROOM_SEAT_MODULES[path]
+
+
+def _item_launches_room_seats(item) -> bool:
+    """Whether `item`'s module launches room seats (it names
+    `helpers.room_seats`)."""
+    return _item_module_names(item, "room_seats")
 
 
 def _ios_seats_needed(session) -> int:
@@ -20550,8 +20921,15 @@ def _ios_seats_needed(session) -> int:
     for item in session.items:
         if not _item_is_ios(item):
             continue
-        if seats < 2 and _real_fixture_closure(item) & _IOS_SECOND_SEAT_FIXTURES:
+        closure = _real_fixture_closure(item)
+        if seats < 2 and closure & _IOS_SECOND_SEAT_FIXTURES:
             seats = 2
+        # The succession journeys that seat a member AND a thief: bob on one
+        # extra device, the stolen seat (`stolen_seat`, a helper no closure
+        # shows) on another — each claims its own (`_claim_ios_extra_seat_udid`).
+        if (seats < 3 and "succession_member_app" in closure
+                and _item_module_names(item, "stolen_seat")):
+            seats = 3
         if seats < _IOS_ROOM_SEATS and _item_launches_room_seats(item):
             seats = _IOS_ROOM_SEATS
     return seats
@@ -20819,8 +21197,13 @@ def _run_prebuild_jobs(jobs, *, prewarm: bool) -> None:
     `_NOT_PREWARMED_BUILDERS`). A failure is printed and memoized by the builder,
     never raised; a session-setup builder's time is charged to the hold."""
     global _PREBUILD_SETUP_S, _PREBUILD_TARGET_STATE
+    prewarm_only = prewarm and bool(os.environ.get(PREWARM_ONLY_ENV))
     for label, builder, args in jobs:
         if prewarm and builder in _NOT_PREWARMED_BUILDERS:
+            continue
+        if prewarm_only and builder in _SEAT_BOOT_BUILDERS:
+            # The warm step's own process would delete the device at its exit
+            # (`_SEAT_BOOT_BUILDERS`); the shard boots it before its lane.
             continue
         if _PREBUILD_TARGET_STATE is None:
             # The target's state when the run's first job starts: every job's
@@ -21364,9 +21747,10 @@ _CLIENT_INDEPENDENT_FILES = {
     "test_android_cleartext_debug_only.py",  # convention 15 tier_1 source-set scan of the android cleartext policy — no driver/app
     "test_android_device_serial.py",  # tier_1 pins for the run-level android device axis — no driver/app
     "test_android_driver_adb.py",  # tier_1 adb command-line pins against a fake adb — no driver/app/device
-    "test_android_venue.py",  # tier_1 pins for the android venue's fixed ports, leases and tunnel spec — no driver/app
+    "test_android_emu.py",  # tier_1 pins for the android emulator's constants, generated blocks and probe — no driver/app
     "test_windows_driver_infobar_text.py",  # tier_1 pins of the windows driver's InfoBar-text strip against a canned read — no driver/app
     "test_win_kache_wrapper_scope.py",  # tier_1 pins of win's dev-loop-only kache wiring (cargo-win-kache.cmd + build-slot.py _kache_env) — no driver/app
+    "test_win_pass_exit_watch.py",  # tier_1 pins of the Windows gate-check pass's exit watch — no driver/app
     "test_mac_kache_wrapper_scope.py",  # tier_1 pins of mac's dev-loop kache decision (build-slot.py _kache_env) — no driver/app
     "test_linux_kache_wrapper_scope.py",  # tier_1 pins of the Linux dev-loop kache decision, the bwrap launcher and its live egress witness — no driver/app
     "test_kache_prebuild_report.py",  # tier_1 pins of the prebuild's kache line (build-slot.py kache_report_line) — no driver/app
@@ -21798,9 +22182,14 @@ def _apply_feature_axis(config, items) -> None:
     mode = nest_mode_mod.run_mode()
     candidate = bool(config.getoption("release_candidate"))
     public_commit = None
+    version_commit, carried = commit, []
     if candidate:
-        refusal, public_commit = feature_ledger.release_candidate_verdict(
+        check = feature_ledger.release_candidate_check(
             mode, public_clone=config.getoption("public_clone", default=None))
+        refusal, public_commit = check.refusal, check.public_commit
+        # A correction tree (release-table.md § Release-candidate run): the row is
+        # keyed on the version's commit beneath the carried main commits.
+        version_commit, carried = check.commit or commit, list(check.carried)
         if refusal:
             raise pytest.UsageError(
                 "--release-candidate refused: " + refusal
@@ -21828,6 +22217,10 @@ def _apply_feature_axis(config, items) -> None:
         # A public build's own commit, recorded beside the digest; the row stays
         # keyed on `commit`, the private HEAD its Sync-Point names.
         "public_commit": public_commit,
+        # The release row's key and a correction tree's carried main commits —
+        # `commit` itself and none for the two older candidate shapes.
+        "version_commit": version_commit,
+        "carried": carried,
         "dirt": dirt,
         "dirty": dirty,
         "stamp": feature_ledger.stamp(version, commit, str(mode),

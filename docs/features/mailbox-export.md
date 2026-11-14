@@ -119,7 +119,7 @@ Stamped 2026-11-07 at b844c771f6.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+8db3ccfd.dirty standalone |
+| web | ✅ full | 0.1.5-dev+fb3b5657 standalone |
 | linux | ⚠ partial | 0.1.5-dev+fb3b5657 standalone |
 | windows | ⚠ partial | 0.1.2-dev+15642c38.dirty standalone |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
@@ -179,5 +179,5 @@ Stamped 2026-11-07 at b844c771f6.
 | 40 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_offers_three_formats_with_mbox_chosen` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 40 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_strip_removes_transit_headers_and_keeps_the_senders` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 41 | app | `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 42 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_discarded_on_another_device_disappears_from_this_wizard_too` | tui (linux): passed, tui (macos): passed |
+| 42 | app | `tests/e2e-unified/tests/test_mail_export.py::test_mail_export_discarded_on_another_device_disappears_from_this_wizard_too` | web (linux): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

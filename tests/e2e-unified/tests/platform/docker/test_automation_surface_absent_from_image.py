@@ -16,7 +16,7 @@ real artifact, and it is the only place in the suite that can.
 
 Cheap by construction — one `docker run --rm --entrypoint /bin/sh`, no nest boot,
 no claim, no browser. The SPA the image serves lives at `/usr/share/fauna-web`
-(`Dockerfile`'s `COPY --from=web-builder … /usr/share/fauna-web/`; the entrypoint
+(`Dockerfile`'s `COPY --from=web-export /web-tree/ /usr/share/fauna-web/`; the entrypoint
 reconciles `[nest].static_dir` to it on every boot).
 """
 

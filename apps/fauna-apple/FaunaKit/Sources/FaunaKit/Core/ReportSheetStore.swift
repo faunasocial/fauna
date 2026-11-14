@@ -11,7 +11,7 @@ import Observation
 /// Every decision is shared Rust's (`fauna_client_moderation::report` over
 /// UniFFI): the reason list, the submit gate, the include-text rule and the
 /// words come from ``view``; the request is built from the sheet by the shared
-/// `report_request` inside `abuse_report_submit`. This type only sequences the
+/// `report_request` inside `abuse_report_submit_or_queue`. This type only sequences the
 /// follow-ups, exactly as web's `ReportHost.svelte` and tui's `report.rs` do:
 /// submit → `knocks_block(author)` when ticked → the reporter-side hide → the
 /// stored list into the render inputs. A failed send keeps the sheet open; a
@@ -90,17 +90,19 @@ public final class ReportSheetStore {
         guard let api, let sent = target, view?.canSubmit == true, !sending else { return }
         sending = true
         let draft = form
-        let reply: FfiReportSent
+        let reply: FfiReportSent?
         do {
-            reply = try await api.moderationClient().abuseReportSubmit(target: sent, form: draft)
+            // Sent now, or queued in the device outbox with no nest (`nil`).
+            reply = try await api.moderationClient().abuseReportSubmitOrQueue(target: sent, form: draft)
         } catch {
             // The sheet stays open for a retry.
             errorMessage = renderLocalizedText(reportFailed(error: String(describing: error)))
             sending = false
             return
         }
-        var followup: String?
-        if draft.blockAuthor, let author = sent.author {
+        let outcome = Self.outcome(of: reply, draft: draft, target: sent)
+        var followup = outcome.notice
+        if let author = outcome.blockAuthor {
             do {
                 try await api.blockKnock(actorId: "", peerId: author)
             } catch {
@@ -114,10 +116,42 @@ public final class ReportSheetStore {
                 followup = followup ?? "hide: \(error)"
             }
         }
-        status = renderLocalizedText(reply.acknowledgement)
+        status = outcome.status
         errorMessage = followup ?? ""
         sending = false
         target = nil
+    }
+
+    /// What a send's outcome makes the sheet do, before the hide (which lands
+    /// either way — it is local).
+    struct SubmitOutcome: Equatable {
+        /// The `report-status` line.
+        let status: String
+        /// The author to block now — only a SENT report with the box ticked.
+        let blockAuthor: String?
+        /// The `error-message` line the outcome itself sets (`nil`: none).
+        let notice: String?
+    }
+
+    /// Fold a send's reply into ``SubmitOutcome``. Sent (`reply != nil`) → the
+    /// nest's acknowledgement, and a ticked block is tried. Queued with no nest
+    /// (`nil`) → the shared `report_queued` line (it names no nest, since none
+    /// answered), and a ticked block is NOT tried — it needs the nest — with
+    /// the shared `report_block_not_sent` notice saying so
+    /// (account-offline-mutation.md § Implementation status today, the
+    /// knock-accept and abuse-report composers). Mirrors tui's
+    /// `Outcome::Queued` and android's `ReportSheetStore.submit`.
+    static func outcome(of reply: FfiReportSent?, draft: FfiReportForm,
+                        target: FfiReportTarget) -> SubmitOutcome {
+        let ticked = draft.blockAuthor ? target.author : nil
+        guard let reply else {
+            return SubmitOutcome(
+                status: renderLocalizedText(reportQueued()),
+                blockAuthor: nil,
+                notice: ticked.map { _ in renderLocalizedText(reportBlockNotSent()) })
+        }
+        return SubmitOutcome(status: renderLocalizedText(reply.acknowledgement),
+                             blockAuthor: ticked, notice: nil)
     }
 
     /// The reporter's show-again (`moderation.md` § Corollary — the reporter's

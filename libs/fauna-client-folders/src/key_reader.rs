@@ -53,6 +53,17 @@ pub trait FolderKeyReader: fauna_core::MaybeSendSync {
         Ok(Vec::new())
     }
 
+    /// This device's **adoption walks** (`succession-cut.md` ruling (11)(l),
+    /// *One consumer per marker*): the markers the identity app's projection
+    /// walk has claimed, each with the candidates its first pass bound and
+    /// whether the marker is spent. A marker named here is the walk's, never
+    /// an engine's ([`crate::adoption_markers_or_none`] drops it). Device-local
+    /// like the markers; a source that keeps no device-local state answers
+    /// none.
+    async fn adoption_walks(&self) -> anyhow::Result<Vec<AdoptionWalk>> {
+        Ok(Vec::new())
+    }
+
     /// When the host of this device's sync engine last asked for the set at
     /// `channel_id` to have its content-key envelope re-fetched
     /// ([`Self::request_refetch`]), in microseconds — `None` when it never
@@ -224,6 +235,15 @@ pub trait FolderKeyStore: FolderKeyReader {
         anyhow::bail!("this folder-key custody store keeps no device-local adoption marker")
     }
 
+    /// Record `walk` — the claim of the marker it names, written with the
+    /// candidates before the walk's first record, then rewritten spent once a
+    /// pass leaves nothing owed (ruling (11)(l)). Replaces any walk under the
+    /// same nonce; durable when this answers. A store that keeps no
+    /// device-local state refuses, and the walk does not run.
+    async fn record_adoption_walk(&self, _walk: AdoptionWalk) -> anyhow::Result<()> {
+        anyhow::bail!("this folder-key custody store keeps no device-local adoption walk")
+    }
+
     /// The identity this custody serves — the one whose device mints a
     /// set's nonce here, which the create helper records as the entry's
     /// `minted_by` (ruling (11)(a)). `None` when the store cannot say: the
@@ -279,6 +299,68 @@ pub fn decode_adoption_markers(bytes: Option<&[u8]>) -> anyhow::Result<Vec<[u8; 
         .collect()
 }
 
+/// One claimed adoption marker (`succession-cut.md` ruling (11)(l)): the
+/// nonce the marker names, the take-over candidates the projection walk's
+/// first pass bound (path hash, head seq), and whether a pass has completed
+/// over them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdoptionWalk {
+    pub nonce: fauna_protocol::ByteBuf,
+    pub candidates: Vec<fauna_core::nest_reseal::TakeOverCandidate>,
+    pub spent: bool,
+}
+
+/// One walk's stored form: `(nonce, candidates, spent)`.
+type StoredAdoptionWalk = (
+    fauna_protocol::ByteBuf,
+    Vec<fauna_core::nest_reseal::TakeOverCandidate>,
+    bool,
+);
+
+impl AdoptionWalk {
+    /// The marker this walk claims, when its nonce is 32 bytes.
+    pub fn marker(&self) -> Option<[u8; 32]> {
+        <[u8; 32]>::try_from(self.nonce.as_slice()).ok()
+    }
+}
+
+/// The replica-local meta key this device's adoption walks rest under — one
+/// row, the canonical encoding of the list ([`encode_adoption_walks`]),
+/// beside [`ADOPTION_MARKERS_META_KEY`] and as device-local.
+pub const ADOPTION_WALKS_META_KEY: &str = "folder_keys/adoption_walks";
+
+/// The stored form of the walk list.
+pub fn encode_adoption_walks(walks: &[AdoptionWalk]) -> anyhow::Result<Vec<u8>> {
+    let wire: Vec<StoredAdoptionWalk> = walks
+        .iter()
+        .map(|w| (w.nonce.clone(), w.candidates.clone(), w.spent))
+        .collect();
+    Ok(fauna_core::encoding::canonical_encode(&wire)?)
+}
+
+/// [`encode_adoption_walks`]'s inverse; an absent row is no walk.
+pub fn decode_adoption_walks(bytes: Option<&[u8]>) -> anyhow::Result<Vec<AdoptionWalk>> {
+    let Some(bytes) = bytes else {
+        return Ok(Vec::new());
+    };
+    Ok(
+        fauna_core::encoding::canonical_decode::<Vec<StoredAdoptionWalk>>(bytes)?
+            .into_iter()
+            .map(|(nonce, candidates, spent)| AdoptionWalk {
+                nonce,
+                candidates,
+                spent,
+            })
+            .collect(),
+    )
+}
+
+/// `walks` with `walk` in place of any walk under the same nonce.
+pub fn upsert_adoption_walk(walks: &mut Vec<AdoptionWalk>, walk: AdoptionWalk) {
+    walks.retain(|w| w.nonce != walk.nonce);
+    walks.push(walk);
+}
+
 /// Load → mutate → merge: the one read-modify-write every custody writer runs.
 /// Answers the joined custody and what `edit` returned. No CAS and no retry —
 /// the store's join is the conflict resolution. The read is the write's own
@@ -323,6 +405,8 @@ struct MemoryCustody {
     settled: Vec<FolderPendingRemoval>,
     /// The device-local adoption markers ([`FolderKeyStore::record_adoption_marker`]).
     markers: Vec<[u8; 32]>,
+    /// The device-local adoption walks ([`FolderKeyStore::record_adoption_walk`]).
+    walks: Vec<AdoptionWalk>,
     /// [`FolderKeyStore::minting_identity`].
     identity: Option<fauna_core::identity::ActorId>,
     /// The device-local re-fetch requests ([`FolderKeyReader::request_refetch`]).
@@ -377,6 +461,10 @@ impl FolderKeyReader for MemoryFolderKeyStore {
         Ok(self.inner.lock().expect("custody lock").markers.clone())
     }
 
+    async fn adoption_walks(&self) -> anyhow::Result<Vec<AdoptionWalk>> {
+        Ok(self.inner.lock().expect("custody lock").walks.clone())
+    }
+
     async fn refetch_requested_at(&self, channel_id: &[u8; 32]) -> anyhow::Result<Option<u64>> {
         let inner = self.inner.lock().expect("custody lock");
         Ok(inner.refetch_requests.get(channel_id).copied())
@@ -419,6 +507,12 @@ impl FolderKeyStore for MemoryFolderKeyStore {
         if !inner.markers.contains(&replaced) {
             inner.markers.push(replaced);
         }
+        Ok(())
+    }
+
+    async fn record_adoption_walk(&self, walk: AdoptionWalk) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().expect("custody lock");
+        upsert_adoption_walk(&mut inner.walks, walk);
         Ok(())
     }
 

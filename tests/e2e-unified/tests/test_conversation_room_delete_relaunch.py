@@ -56,6 +56,7 @@ from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.connection import wait_until_online
 from helpers.conversations_restart import wait_replica_settled
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seats/room_seat_pair are pytest fixtures adopted by import
+    bubble_texts,
     MEMBERSHIP_BUDGET_S,
     MESSAGE_BUDGET_S,
     bootstrap_room,
@@ -92,11 +93,6 @@ pytestmark = [
 ROSTER_KIND = "fauna.conversations.room.list_roster"
 
 
-def _bubble_texts(seat) -> list[str]:
-    d = seat.app.driver
-    return [d.get_text("dm-message-text", index=i) or "" for i in range(d.count("dm-message-text"))]
-
-
 def _live_index(seat, needle: str, *, sender=None) -> int:
     """With ``seat``'s room open, wait for a live bubble carrying ``needle``
     and return its index among the live bubbles — also its
@@ -104,13 +100,13 @@ def _live_index(seat, needle: str, *, sender=None) -> int:
     text nor a ⋯."""
     texts = wait_for(
         f"a bubble carrying {needle!r} painting",
-        lambda: _bubble_texts(seat),
+        lambda: bubble_texts(seat),
         lambda ts: any(needle in t for t in ts),
         MESSAGE_BUDGET_S,
         diagnose=lambda: seat_story(seat)
         + (
             f"\n-- the sender --\nerror={sender.app.error_text()!r} "
-            f"bubbles={_bubble_texts(sender)!r}\n{seat_story(sender)}"
+            f"bubbles={bubble_texts(sender)!r}\n{seat_story(sender)}"
             if sender is not None
             else ""
         ),
@@ -122,7 +118,7 @@ def _wait_tombstoned(seat, needle: str, tombstones: int, *, what: str) -> None:
     d = seat.app.driver
     wait_for(
         what,
-        lambda: (d.count("dm-message-deleted"), _bubble_texts(seat)),
+        lambda: (d.count("dm-message-deleted"), bubble_texts(seat)),
         lambda seen: seen[0] >= tombstones and not any(needle in t for t in seen[1]),
         MESSAGE_BUDGET_S,
         diagnose=lambda: f"{seat_story(seat)}\n{d.diagnose('dm-message-deleted')}",
@@ -251,8 +247,8 @@ def test_a_community_rooms_own_delete_reaction_and_admin_delete_reach_every_seat
     assert not founder.app.has_error(), founder.app.error_text()
     for seat, who in ((founder, "founder's own"), (member, "author's")):
         _wait_tombstoned(seat, target, 2, what=f"the founder's delete tombstoning on the {who} seat")
-    assert any(kept in t for t in _bubble_texts(member)), (
-        f"only the deleted messages went: {_bubble_texts(member)!r}"
+    assert any(kept in t for t in bubble_texts(member)), (
+        f"only the deleted messages went: {bubble_texts(member)!r}"
     )
     for seat in (founder, member):
         assert not seat.app.has_error(), seat.app.error_text()
@@ -365,10 +361,10 @@ def test_a_community_rooms_delete_parked_at_quit_is_applied_after_the_relaunch(
         fconv.send_in_open_thread(after)
         _live_index(member, after, sender=founder)
         wait_for_refused_rpc(port, ROSTER_KIND)
-        assert any(target in t for t in _bubble_texts(member)), (
+        assert any(target in t for t in bubble_texts(member)), (
             "precondition: with the policy-version read refused the member's "
             "device cannot rank the founder's delete, so the target must still "
-            f"paint there: {_bubble_texts(member)!r}\n"
+            f"paint there: {bubble_texts(member)!r}\n"
             f"{seat_element(member, 'dm-message-deleted')}"
         )
         _quit_pinned(member, nest_instance, room_id)

@@ -3078,8 +3078,12 @@ fn build_post_card_body(
             let pay = gtk::Button::with_label(subscriptions::PAYMENT_URL);
             pay.add_css_class("flat");
             crate::testid::set_test_id(&pay, ids::GATED_POST_PAYMENT_LINK);
+            crate::offline_gate::declare_wire_kind(&pay, "fauna.subscriptions.subscribe");
             let error_label = error_label.clone();
-            pay.connect_clicked(move |btn| {
+            let m = Arc::clone(manager);
+            let rt = rt.clone();
+            let pid = post.post_id.clone();
+            pay.connect_clicked(move |_| {
                 // The payment link is nest/author-supplied; refuse to open a
                 // non-https scheme via the shared `fauna_core::subscription::
                 // is_safe_payment_url` guard (F-CL2 anti-phishing-redirect
@@ -3092,10 +3096,27 @@ fn build_post_card_body(
                     );
                     return;
                 }
-                gtk::UriLauncher::new(&url).launch(
-                    btn.root().and_downcast::<gtk::Window>().as_ref(),
-                    gtk::gio::Cancellable::NONE,
-                    |_| {},
+                // Subscribe to the offer's tier first (at the post's home when
+                // remote), then open the checkout the shared reference rule
+                // composes (`monetization.md` § Pillar 3 → *Buyer↔actor
+                // binding (Q4)*, the Q13 rules (1) and (2); tui's
+                // `Op::PayUnlockOffer`). A refused subscribe opens nothing.
+                let m = Arc::clone(&m);
+                let pid = pid.clone();
+                let error_label = error_label.clone();
+                crate::async_helper::spawn_with_snapshot(
+                    &rt,
+                    move || async move { m.pay_unlock_offer(pid).await },
+                    move |result: Option<Result<String, String>>| match result {
+                        Some(Ok(url)) => crate::url_opener::open(&url),
+                        // Nothing to open (no resolved offer or link, an own
+                        // post): the link renders only with the offer.
+                        None => {}
+                        Some(Err(msg)) => crate::settings::render_error_label(
+                            &error_label,
+                            Some(&feed::error_buy_unlock(&msg)),
+                        ),
+                    },
                 );
             });
             top_line.append(&pay);
@@ -3488,6 +3509,7 @@ fn build_post_actions_button(
     // fallback DOES early-return past this point — linux always builds both
     // halves).
     build_web_publish_verbs(&menu, &popover, post, client, manager, rt, error_label);
+    build_nostr_advertise_verbs(&menu, &popover, post, client, manager, rt, error_label);
 
     // Own-post delete (feed.md § State & data shape → Post deletion, IDs
     // user-approved 2026-07-16) — a destructive two-step inside the same
@@ -3812,6 +3834,234 @@ fn build_web_publish_verbs(
         });
     }
     menu.append(&unpublish_btn);
+}
+
+thread_local! {
+    /// The nest's `nostr-advertise` capability, read once per session when an
+    /// own post's ⋯ menu first builds (tui's `FeedState::nostr_advertise`).
+    /// `None` = not read yet: no `Advertise` verb rather than one that may only
+    /// ever refuse. A failed read stays `None`, so the next build asks again.
+    static NOSTR_ADVERTISE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// One capability read in flight at a time, however many cards build.
+    static NOSTR_ADVERTISE_READING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The consequence sentence of the advertise confirm step — a public text
+/// (`nostr_advertise.confirm_body` in an `app-strings-public` region, reached
+/// only through its public-texts round), read at run time: while the catalog
+/// lacks it the verb is not offered (tui's `advertise_confirm_body`).
+fn advertise_confirm_body() -> Option<&'static str> {
+    crate::i18n::strings::lookup("nostr_advertise.confirm_body")
+}
+
+/// Whether this build and this nest can advertise at all: the `zaps` member
+/// compiled in, the capability read and present, and the confirm sentence in
+/// the catalog. The withdrawal never needs this.
+fn can_advertise() -> bool {
+    cfg!(feature = "zaps")
+        && NOSTR_ADVERTISE.with(std::cell::Cell::get) == Some(true)
+        && advertise_confirm_body().is_some()
+}
+
+/// Read the capability once, then re-read the feed so every open card
+/// repaints its verb pair with the answer.
+fn ensure_nostr_advertise_read(
+    client: &Rc<FaunaClient>,
+    manager: &Arc<LinuxFeedManager>,
+    rt: &Handle,
+) {
+    if NOSTR_ADVERTISE.with(std::cell::Cell::get).is_some()
+        || NOSTR_ADVERTISE_READING.with(|r| r.replace(true))
+    {
+        return;
+    }
+    let nest = client.nest_rpc().clone();
+    let m = Arc::clone(manager);
+    let rt2 = rt.clone();
+    crate::async_helper::spawn_with_snapshot(
+        rt,
+        move || async move {
+            fauna_client_nostr::NostrContentClient::new(nest)
+                .advertise_supported()
+                .await
+                .ok()
+        },
+        move |supported: Option<bool>| {
+            NOSTR_ADVERTISE_READING.with(|r| r.set(false));
+            if let Some(supported) = supported {
+                NOSTR_ADVERTISE.with(|c| c.set(Some(supported)));
+                // Only a present capability changes what the cards paint.
+                if supported {
+                    rt2.spawn(async move {
+                        m.refresh_current_feed().await;
+                    });
+                }
+            }
+        },
+    );
+}
+
+/// The own-post Nostr advertisement verb pair and its confirm step
+/// (`monetization.md` § The Nostr advertisement of a sold post → *What the
+/// author sees and agrees to*; IDs in ui.yaml's `feed-post-actions-menu`).
+/// Presence is the shared `PostSummary::nostr_advertise_verb`, never
+/// re-derived here. *Stop advertising* is one tap; *Advertise* arms the confirm
+/// step in place — the delete verb's shape — which states the consequence and
+/// is the only door to the act. Reference painter: tui's
+/// `nostr_advertise_verbs`.
+fn build_nostr_advertise_verbs(
+    menu: &gtk::Box,
+    popover: &gtk::Popover,
+    post: &PostSummary,
+    client: &Rc<FaunaClient>,
+    manager: &Arc<LinuxFeedManager>,
+    rt: &Handle,
+    error_label: &gtk::Label,
+) {
+    use crate::i18n::strings::nostr_advertise as t;
+    let Some(viewer) = client.actor_id() else {
+        return;
+    };
+    if viewer == post.author {
+        ensure_nostr_advertise_read(client, manager, rt);
+    }
+    let Some(verb) = post.nostr_advertise_verb(&viewer, can_advertise()) else {
+        return;
+    };
+    match verb {
+        fauna_feed::NostrAdvertiseVerb::StopAdvertising => {
+            let btn = gtk::Button::with_label(t::STOP);
+            btn.add_css_class("flat");
+            crate::testid::set_test_id(&btn, ids::FEED_POST_STOP_ADVERTISING_NOSTR_BUTTON);
+            crate::offline_gate::declare_wire_kind(&btn, "fauna.nostr.advertise.clear");
+            let m = Arc::clone(manager);
+            let c = Rc::clone(client);
+            let rt = rt.clone();
+            let pid = post.post_id.clone();
+            let pop = popover.clone();
+            let error_label = error_label.clone();
+            btn.connect_clicked(move |_| {
+                pop.popdown();
+                dispatch_nostr_advertise(&m, &c, &rt, pid.clone(), false, &error_label);
+            });
+            menu.append(&btn);
+        }
+        fauna_feed::NostrAdvertiseVerb::Advertise => {
+            // `can_advertise` held, so the sentence is in the catalog.
+            let Some(body) = advertise_confirm_body() else {
+                return;
+            };
+            let btn = gtk::Button::with_label(t::ADVERTISE);
+            btn.add_css_class("flat");
+            crate::testid::set_test_id(&btn, ids::FEED_POST_ADVERTISE_NOSTR_BUTTON);
+
+            let step = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            step.set_visible(false);
+            let title = gtk::Label::new(Some(t::CONFIRM_TITLE));
+            title.set_halign(gtk::Align::Start);
+            title.add_css_class("heading");
+            crate::testid::set_test_id(&title, ids::ADVERTISE_NOSTR_CONFIRM_DIALOG);
+            step.append(&title);
+            step.append(&chrome_label(body));
+            let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let confirm = gtk::Button::with_label(t::CONFIRM);
+            confirm.add_css_class("suggested-action");
+            crate::testid::set_test_id(&confirm, ids::ADVERTISE_NOSTR_CONFIRM_BUTTON);
+            // Only the CONFIRM declares — arming the step issues nothing.
+            crate::offline_gate::declare_wire_kind(&confirm, "fauna.nostr.advertise.set");
+            let cancel = gtk::Button::with_label(crate::i18n::strings::common::CANCEL);
+            cancel.add_css_class("flat");
+            crate::testid::set_test_id(&cancel, ids::ADVERTISE_NOSTR_CANCEL_BUTTON);
+            actions.append(&confirm);
+            actions.append(&cancel);
+            step.append(&actions);
+
+            {
+                let btn2 = btn.clone();
+                let step = step.clone();
+                btn.connect_clicked(move |_| {
+                    btn2.set_visible(false);
+                    step.set_visible(true);
+                });
+            }
+            {
+                let btn2 = btn.clone();
+                let step2 = step.clone();
+                cancel.connect_clicked(move |_| {
+                    step2.set_visible(false);
+                    btn2.set_visible(true);
+                });
+            }
+            {
+                let m = Arc::clone(manager);
+                let c = Rc::clone(client);
+                let rt = rt.clone();
+                let pid = post.post_id.clone();
+                let pop = popover.clone();
+                let error_label = error_label.clone();
+                confirm.connect_clicked(move |_| {
+                    pop.popdown();
+                    dispatch_nostr_advertise(&m, &c, &rt, pid.clone(), true, &error_label);
+                });
+            }
+            menu.append(&btn);
+            menu.append(&step);
+        }
+    }
+}
+
+/// `fauna.nostr.advertise.set` (`advertise`) or `.clear`, then a re-read of
+/// the feed so the card's `nostr_advertised_at` — and with it the pair —
+/// repaints from the nest's answer. A typed refusal (not sold, no price, no
+/// linked key, no custodial key) lands on `error-message` as the nest worded it.
+fn dispatch_nostr_advertise(
+    manager: &Arc<LinuxFeedManager>,
+    client: &Rc<FaunaClient>,
+    rt: &Handle,
+    post_id: String,
+    advertise: bool,
+    error_label: &gtk::Label,
+) {
+    use crate::i18n::strings::nostr_advertise as t;
+    let m = Arc::clone(manager);
+    let nest = client.nest_rpc().clone();
+    let error_label = error_label.clone();
+    crate::async_helper::spawn_with_snapshot(
+        rt,
+        move || async move {
+            let nostr = fauna_client_nostr::NostrContentClient::new(nest);
+            let result = if advertise {
+                #[cfg(feature = "zaps")]
+                {
+                    nostr
+                        .advertise_post(post_id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| t::error_advertise(&e.to_string()))
+                }
+                #[cfg(not(feature = "zaps"))]
+                {
+                    let _ = post_id;
+                    Ok(())
+                }
+            } else {
+                nostr
+                    .clear_advertisement(post_id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| t::error_stop(&e.to_string()))
+            };
+            if result.is_ok() {
+                m.refresh_current_feed().await;
+            }
+            result
+        },
+        move |result: Result<(), String>| {
+            if let Err(msg) = result {
+                crate::settings::render_error_label(&error_label, Some(&msg));
+            }
+        },
+    );
 }
 
 /// A plain dim-label line — the GTK analogue of `Element::chrome`: visible

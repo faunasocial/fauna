@@ -34,6 +34,7 @@ fn row(key: &str, class: &str, name: &str) -> ConnectedAppRow {
         mail: None,
         signer_burned: false,
         oracle: None,
+        trust: None,
     }
 }
 
@@ -60,6 +61,7 @@ fn mail_row(id: &str, name: &str, revoked: bool) -> ConnectedAppRow {
         }),
         signer_burned: false,
         oracle: None,
+        trust: None,
     }
 }
 
@@ -91,6 +93,7 @@ fn request(id_hex: &str, code: &str, name: Option<&str>) -> ConsentCardRow {
         sets: vec![],
         ends: None,
         install: None,
+        folder_picker: None,
     }
 }
 
@@ -240,6 +243,164 @@ fn attr<'a>(el: &'a Element, key: &str) -> Option<&'a str> {
 
 fn has(els: &[Element], id: &str) -> bool {
     els.iter().any(|e| e.id == id)
+}
+
+// ── The trust facet (connected-apps.md § The trust facet and history lens) ──
+
+const FACET_LEAVES: [&str; 7] = [
+    ids::NEST_TRUST_VIEW_NOW,
+    ids::NEST_TRUST_VIEW_HISTORY,
+    ids::NEST_TRUST_GRANT_LIST,
+    ids::NEST_TRUST_EMPTY,
+    ids::NEST_TRUST_GRANT_ITEM,
+    ids::NEST_TRUST_HISTORY_LIST,
+    ids::NEST_TRUST_HISTORY_ITEM,
+];
+
+fn ext_grant(lasts_until: i64, liveness: fauna_client_pair::TrustLiveness) -> TrustGrantRow {
+    TrustGrantRow {
+        grant_id: vec![7; 16],
+        holder: vec![9; 32],
+        scope: vec![
+            fauna_client_pair::TrustScope {
+                class: "content.read".into(),
+                kind: Some("ext.example.com.notes".into()),
+                tier: None,
+            },
+            fauna_client_pair::TrustScope {
+                class: "content.write".into(),
+                kind: Some("ext.example.com.notes".into()),
+                tier: None,
+            },
+        ],
+        lasts_until,
+        liveness,
+        unattested: false,
+        folder: None,
+    }
+}
+
+fn faceted(lens: TrustLens, grants: Vec<TrustGrantRow>) -> ConnectedAppRow {
+    let history = grants
+        .iter()
+        .map(|g| TrustHistoryRow {
+            grant_id: g.grant_id.clone(),
+            holder: g.holder.clone(),
+            kind: fauna_client_pair::TrustEventKind::Mint,
+            scope: g.scope.clone(),
+            window_start: 0,
+            window_end: g.lasts_until,
+            at: 1_700_000_000,
+            folder: None,
+        })
+        .collect();
+    ConnectedAppRow {
+        trust: Some(PrincipalTrust {
+            lens,
+            grants,
+            history,
+        }),
+        ..row("principal:01", class::DEVICE, "Notes")
+    }
+}
+
+/// No facet leaf at all on a row with no facet — absent, never an empty state.
+#[test]
+fn a_row_with_no_facet_paints_no_trust_leaf() {
+    let app = app_with(|s| s.principals = vec![row("principal:01", class::DEVICE, "Notes")]);
+    let els = els(&app);
+    for id in FACET_LEAVES {
+        assert!(!has(&els, id), "{id} must be absent");
+    }
+}
+
+/// A keyed principal with no live key paints the lens pair and the empty
+/// state, and no grant list.
+#[test]
+fn a_facet_with_no_key_paints_the_empty_state() {
+    let app = app_with(|s| s.principals = vec![faceted(TrustLens::Now, Vec::new())]);
+    let els = els(&app);
+    assert!(has(&els, ids::NEST_TRUST_VIEW_NOW) && has(&els, ids::NEST_TRUST_VIEW_HISTORY));
+    assert_eq!(find(&els, ids::NEST_TRUST_EMPTY).text, t::TRUST_EMPTY);
+    assert!(!has(&els, ids::NEST_TRUST_GRANT_LIST));
+}
+
+/// The grant row's leaves: the publisher and the kind name verbatim, read and
+/// write, lasts-until, the liveness, the bound note — all inside the item,
+/// with no renew or revoke of its own; an expired key says the app asks again.
+#[test]
+fn a_grant_row_names_publisher_kinds_and_its_liveness() {
+    let app = app_with(|s| {
+        s.principals = vec![faceted(
+            TrustLens::Now,
+            vec![ext_grant(
+                4_000_000_000,
+                fauna_client_pair::TrustLiveness::Expired,
+            )],
+        )]
+    });
+    let els = els(&app);
+    let scope = find(&els, ids::NEST_TRUST_GRANT_SCOPE);
+    assert_eq!(
+        scope.text,
+        t::trust_scope_ext_rw("example.com", "\"notes\"")
+    );
+    assert_eq!(
+        scope.path.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(),
+        [ids::CONNECTED_APPS_ITEM, ids::NEST_TRUST_GRANT_ITEM]
+    );
+    assert!(
+        find(&els, ids::NEST_TRUST_GRANT_LASTS_UNTIL)
+            .text
+            .starts_with(nest_t::LASTS_UNTIL)
+    );
+    assert_eq!(
+        find(&els, ids::NEST_TRUST_GRANT_STATUS).text,
+        t::TRUST_STATUS_EXPIRED
+    );
+    assert_eq!(
+        find(&els, ids::NEST_TRUST_GRANT_BOUND_NOTE).text,
+        t::TRUST_BOUND_NOTE
+    );
+    for id in [
+        ids::NEST_TRUST_GRANT_RENEW,
+        ids::NEST_TRUST_GRANT_REVOKE,
+        ids::NEST_TRUST_GRANT_UNATTESTED_MARK,
+        ids::NEST_TRUST_GRANT_KEEP_BUTTON,
+    ] {
+        assert!(!has(&els, id), "{id} never renders on a principal row");
+    }
+    assert!(has(&els, ids::CONNECTED_APPS_ITEM_REVOKE));
+}
+
+/// The lens toggles the leaf set: History paints the timeline and no grant,
+/// Now the grant and no timeline; the toggle dispatches by row key.
+#[test]
+fn the_lens_toggles_the_leaf_set() {
+    let grants = || {
+        vec![ext_grant(
+            4_000_000_000,
+            fauna_client_pair::TrustLiveness::Active,
+        )]
+    };
+    let history = els(&app_with(|s| {
+        s.principals = vec![faceted(TrustLens::History, grants())]
+    }));
+    assert!(has(&history, ids::NEST_TRUST_HISTORY_LIST));
+    let line = &find(&history, ids::NEST_TRUST_HISTORY_ITEM).text;
+    assert!(line.contains("\"notes\""), "{line}");
+    assert!(!has(&history, ids::NEST_TRUST_GRANT_ITEM));
+
+    let now = els(&app_with(|s| {
+        s.principals = vec![faceted(TrustLens::Now, grants())]
+    }));
+    assert!(has(&now, ids::NEST_TRUST_GRANT_ITEM));
+    assert!(!has(&now, ids::NEST_TRUST_HISTORY_LIST));
+    assert!(matches!(
+        &find(&now, ids::NEST_TRUST_VIEW_HISTORY).role,
+        crate::element::Role::Button(Gesture::Settings(Action::ConnectedAppsSetLens { key, history: true }))
+            if key == "principal:01"
+    ));
 }
 
 #[test]
@@ -1219,4 +1380,265 @@ fn an_oracle_summary_without_a_detail_reads_bare() {
             t::oracle_latest_bare(&when(0), "Post public posts as you"),
         ]
     );
+}
+
+/// A served row's open control opens its record: closed, the row carries only
+/// the control; open and read, the list newest first — each operation in the
+/// shared words with its class as a value, scoped within the row — or the
+/// empty state; another row's record paints nothing on this one
+/// (`connected-apps.md` § Layout & flow, region 3).
+#[test]
+fn a_served_row_opens_its_record_newest_first_and_only_on_that_row() {
+    use fauna_client_connected_apps::{OracleOpRow, OracleRecord, OracleSummaryRow};
+    let served = |key: &str, name: &str| ConnectedAppRow {
+        oracle: Some(OracleSummaryRow {
+            ops_in_window: 2,
+            requests_served: 2,
+            last_op: None,
+        }),
+        ..row(key, class::DEVICE, name)
+    };
+    let op = |at: i64, cls: &str, detail: &str| OracleOpRow {
+        at_millis: at,
+        class: cls.into(),
+        words: verbatim("Sign in to a service"),
+        detail: verbatim(detail),
+    };
+    let closed = app_with(|s| {
+        s.principals = vec![
+            served("principal:01", "A"),
+            row("principal:02", class::DEVICE, "Quiet"),
+            // An app-password session's row carries the summary but no record.
+            served("session:abc", "Session"),
+        ]
+    });
+    let e = els(&closed);
+    let opens: Vec<_> = e
+        .iter()
+        .filter(|el| el.id == ids::CONNECTED_APPS_ORACLE_OPEN)
+        .collect();
+    assert_eq!(
+        opens.len(),
+        1,
+        "only the served principal row carries the control"
+    );
+    assert_eq!(opens[0].path[0].1, 0);
+    assert_eq!(opens[0].text, t::ORACLE_OPEN);
+    assert!(!has(&e, ids::CONNECTED_APPS_ORACLE_LIST));
+
+    let open = app_with(|s| {
+        s.principals = vec![served("principal:01", "A"), served("principal:02", "B")];
+        s.record = Some(OracleRecord {
+            key: "principal:02".into(),
+            loaded: true,
+            ops: vec![
+                op(1_700_000_200_000, "atproto.service_auth", "did:web:x a.b"),
+                op(1_700_000_100_000, "nostr.sign_event", "1"),
+            ],
+        });
+    });
+    let e = els(&open);
+    let opens: Vec<_> = e
+        .iter()
+        .filter(|el| el.id == ids::CONNECTED_APPS_ORACLE_OPEN)
+        .collect();
+    assert_eq!(
+        opens[0].text,
+        t::ORACLE_OPEN,
+        "row A's record is not the open one"
+    );
+    assert_eq!(opens[1].text, t::ORACLE_CLOSE);
+    let list = find(&e, ids::CONNECTED_APPS_ORACLE_LIST);
+    assert_eq!(list.path[0].0, ids::CONNECTED_APPS_ITEM);
+    assert_eq!(list.path[0].1, 1, "the list sits within the open row");
+    let ops: Vec<_> = e
+        .iter()
+        .filter(|el| el.id == ids::CONNECTED_APPS_ORACLE_OP)
+        .collect();
+    assert_eq!(ops.len(), 2);
+    assert!(ops[0].text.contains("did:web:x a.b"), "{}", ops[0].text);
+    assert!(
+        ops[0].text.starts_with(&when(1_700_000_200_000)),
+        "{}",
+        ops[0].text
+    );
+    assert_eq!(attr(ops[0], "class"), Some("atproto.service_auth"));
+    assert_eq!(attr(ops[1], "class"), Some("nostr.sign_event"));
+    assert!(!has(&e, ids::CONNECTED_APPS_ORACLE_EMPTY));
+
+    let empty = app_with(|s| {
+        s.principals = vec![served("principal:01", "A")];
+        s.record = Some(OracleRecord {
+            key: "principal:01".into(),
+            loaded: true,
+            ops: vec![],
+        });
+    });
+    let e = els(&empty);
+    assert!(has(&e, ids::CONNECTED_APPS_ORACLE_LIST));
+    assert_eq!(
+        find(&e, ids::CONNECTED_APPS_ORACLE_EMPTY).text,
+        t::ORACLE_EMPTY
+    );
+
+    // Before the read returns, neither the list nor the empty state paints.
+    let reading = app_with(|s| {
+        s.principals = vec![served("principal:01", "A")];
+        s.record = Some(OracleRecord {
+            key: "principal:01".into(),
+            loaded: false,
+            ops: vec![],
+        });
+    });
+    let e = els(&reading);
+    assert!(!has(&e, ids::CONNECTED_APPS_ORACLE_LIST));
+    assert!(!has(&e, ids::CONNECTED_APPS_ORACLE_EMPTY));
+}
+
+/// The control toggles: on a row whose record is not the open one it opens
+/// that row's; on the open one it closes it.
+#[test]
+fn the_record_control_opens_then_closes_through_the_machine() {
+    use fauna_client_connected_apps::OracleRecord;
+    let key = "principal:01".to_string();
+    let mut app = app_with(|s| s.principals = vec![row("principal:01", class::DEVICE, "A")]);
+    match super::super::apply_local(&mut app, Action::ConnectedAppsToggleRecord(key.clone())) {
+        Some(super::super::Op::ConnectedApps { gesture, .. }) => {
+            assert_eq!(gesture, ConnectedAppsGesture::OpenRecord(key.clone()))
+        }
+        other => panic!("expected the open op, got {}", other.is_some()),
+    }
+    app.settings
+        .connected_apps
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .record = Some(OracleRecord {
+        key: key.clone(),
+        loaded: true,
+        ops: vec![],
+    });
+    match super::super::apply_local(&mut app, Action::ConnectedAppsToggleRecord(key)) {
+        Some(super::super::Op::ConnectedApps { gesture, .. }) => {
+            assert_eq!(gesture, ConnectedAppsGesture::CloseRecord)
+        }
+        other => panic!("expected the close op, got {}", other.is_some()),
+    }
+}
+
+// ── The card's folder picker (`connected-apps-request-folder`) ──────────────
+
+fn folder_request(
+    options: &[(i64, &str)],
+    chosen: Option<i64>,
+    none: Option<&str>,
+) -> ConsentCardRow {
+    ConsentCardRow {
+        folder_picker: Some(fauna_atproto_settings_machine::FolderPicker {
+            options: options
+                .iter()
+                .map(|(id, name)| fauna_atproto_settings_machine::FolderOption {
+                    id: *id,
+                    name: (*name).into(),
+                })
+                .collect(),
+            chosen,
+            none_eligible: none.map(LocalizedText::key),
+        }),
+        ..request("abcd", "ABC-DEF", Some("Example App"))
+    }
+}
+
+fn approve(els: &[Element]) -> &Element {
+    find(els, ids::CONNECTED_APPS_REQUEST_APPROVE)
+}
+
+/// A bare folder card paints the picker inside the card — the folders' ids as
+/// the option keys, their names as the labels — and its Approve stays
+/// disabled until a folder is chosen; Decline never waits on it.
+#[test]
+fn a_bare_folder_card_paints_the_picker_and_holds_approve_until_a_choice() {
+    let app = app_with(|s| {
+        s.requests = vec![folder_request(&[(9, "notes"), (42, "photos")], None, None)]
+    });
+    let els = els(&app);
+    let picker = find(&els, ids::CONNECTED_APPS_REQUEST_FOLDER);
+    assert!(
+        picker
+            .path
+            .iter()
+            .any(|(p, _)| p == ids::CONNECTED_APPS_REQUEST_CARD),
+        "the picker is scoped within its card"
+    );
+    assert_eq!(picker.text, "", "nothing is chosen until the user chooses");
+    match &picker.role {
+        crate::element::Role::Select { options, .. } => assert_eq!(options, &["9", "42"]),
+        _ => panic!("the picker is a real select"),
+    }
+    assert_eq!(attr(picker, "options"), Some(r#"["notes","photos"]"#));
+    assert!(!approve(&els).enabled, "no choice, no approve");
+    assert!(find(&els, ids::CONNECTED_APPS_REQUEST_DECLINE).enabled);
+
+    let app = app_with(|s| {
+        s.requests = vec![folder_request(
+            &[(9, "notes"), (42, "photos")],
+            Some(42),
+            None,
+        )]
+    });
+    let els = super::connected_apps_elements(&app.settings);
+    assert_eq!(find(&els, ids::CONNECTED_APPS_REQUEST_FOLDER).text, "42");
+    assert!(approve(&els).enabled, "a chosen folder enables the approve");
+}
+
+/// A card no folder can be chosen on says why in its own text and cannot be
+/// approved.
+#[test]
+fn a_card_with_no_eligible_folder_says_why_and_cannot_be_approved() {
+    let app = app_with(|s| {
+        s.requests = vec![folder_request(
+            &[],
+            None,
+            Some("atproto_settings.consent_folder_none_deposit"),
+        )]
+    });
+    let els = els(&app);
+    let card = find(&els, ids::CONNECTED_APPS_REQUEST_CARD);
+    assert!(card.text.contains(card_t::CONSENT_FOLDER_NONE_DEPOSIT));
+    assert!(!approve(&els).enabled);
+}
+
+/// An ordinary card paints no picker and its Approve is live.
+#[test]
+fn an_ordinary_card_paints_no_picker() {
+    let app = app_with(|s| s.requests = vec![request("abcd", "ABC-DEF", None)]);
+    let els = els(&app);
+    assert!(!has(&els, ids::CONNECTED_APPS_REQUEST_FOLDER));
+    assert!(approve(&els).enabled);
+}
+
+/// Choosing an option sends the card's consent id and the folder's row id to
+/// the machine; a key that is no row id sends nothing.
+#[test]
+fn choosing_a_folder_sends_the_cards_consent_id_and_the_row_id() {
+    let mut app = app_with(|s| s.requests = vec![folder_request(&[(42, "photos")], None, None)]);
+    let action = Action::ConnectedAppsSetFolder {
+        card: 0,
+        id: "42".into(),
+    };
+    match super::super::apply_local(&mut app, action) {
+        Some(super::super::Op::ConnectedApps { gesture, .. }) => assert_eq!(
+            gesture,
+            ConnectedAppsGesture::SetFolder {
+                consent_id_hex: "abcd".into(),
+                id: 42,
+            }
+        ),
+        other => panic!("expected the set-folder op, got {}", other.is_some()),
+    }
+    let bad = Action::ConnectedAppsSetFolder {
+        card: 0,
+        id: "photos".into(),
+    };
+    assert!(super::super::apply_local(&mut app, bad).is_none());
 }

@@ -150,6 +150,10 @@ DRIVER_FACTORY_IMPORTS = frozenset({
     # a driver obtained through a SIBLING TEST MODULE's helper is a door this
     # closure cannot see, and the re-key journey read as launching no app.
     ("helpers.tui_headless_store", "headless_launch"),
+    # The device that outlives its box (the dead-saved-nest recovery journeys
+    # and "retiring keeps the recovery key"): the seat launches the app's
+    # driver itself, a process per launch or one reloaded tab.
+    ("helpers.box_recovery_launch", "SurvivingSeat"),
     # The seat rounds' whole setup (nest, account, set, `start_seats`), adopted
     # by import from its home module by journeys that need two seats of one
     # account (the linux on-demand hydrate journey) — the same door as above.

@@ -21,3 +21,9 @@ fauna-core.workspace = true
 fauna-ipc.workspace = true
 fauna-sync-engine.workspace = true
 anyhow.workspace = true
+
+# `register-shell` / `unregister-shell`: the shell extension's own per-user
+# registration (`fauna_shell::per_user`), so the harness's run-scoped registration
+# writes exactly the keys the MSI's machine-wide one does.
+[target.'cfg(windows)'.dependencies]
+fauna-shell-ext = { path = "../shell-ext" }

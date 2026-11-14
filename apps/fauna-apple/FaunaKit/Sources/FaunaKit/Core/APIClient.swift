@@ -493,8 +493,14 @@ public class APIClient {
         try await contactsClient().knocksList().map(Knock.init(ffi:))
     }
 
-    public func acceptKnock(actorId: String, peerId: String) async throws {
-        try await contactsClient().knocksAccept(peerId: peerId)
+    /// `fauna.knocks.accept` through the shared offline-mutation composer
+    /// (`FfiContactsClient::knocks_accept_or_queue`): with the nest connected
+    /// the accept is sent; with none it queues in the device's outbox, scoped
+    /// to the sender, and drains when the nest is back. Returns `true` when it
+    /// queued (account-offline-mutation.md § Implementation status today, the
+    /// knock-accept and abuse-report composers).
+    public func acceptKnockOrQueue(actorId: String, peerId: String) async throws -> Bool {
+        try await contactsClient().knocksAcceptOrQueue(peerId: peerId)
     }
 
     public func blockKnock(actorId: String, peerId: String) async throws {
@@ -954,14 +960,20 @@ public class APIClient {
         try await emailClient().filtersList()
     }
 
-    @discardableResult
-    public func createEmailFilter(name: String, rules: [FfiEmailFilterRule],
+    /// `fauna.email.filters.create` through the shared offline-mutation
+    /// composer (`FfiEmailClient::filters_create_or_queue`): with the nest
+    /// connected the create is sent; with none it queues in the device's
+    /// outbox, scoped to the rule's name, and drains when the nest is back.
+    /// Returns `true` when it queued — the rule then has no server id yet
+    /// (account-offline-mutation.md § Implementation status today, the
+    /// filter-create composer).
+    public func createEmailFilterOrQueue(name: String, rules: [FfiEmailFilterRule],
                            combination: String, action: FfiEmailFilterAction,
-                           priority: Int, continueOnMatch: Bool = false) async throws -> Int64 {
-        try await emailClient().filtersCreate(name: name, rules: rules,
-                                              combination: combination, action: action,
-                                              priority: Int32(priority),
-                                              continueOnMatch: continueOnMatch)
+                           priority: Int, continueOnMatch: Bool = false) async throws -> Bool {
+        try await emailClient().filtersCreateOrQueue(name: name, rules: rules,
+                                                     combination: combination, action: action,
+                                                     priority: Int32(priority),
+                                                     continueOnMatch: continueOnMatch)
     }
 
     /// A fresh fetch (not the cached list row) — the edit form pre-populates
@@ -1180,15 +1192,16 @@ public class APIClient {
         try await listBridgeFollows(bridgeId: Self.nostrBridgeId).map(NostrFollow.init(bridge:))
     }
 
-    // `relayHints` is retained for caller-signature stability but unused: apple's
-    // generic bridge-follow path does not carry `extra` (the sole caller passes nil).
-    public func addNostrFollow(pubkey: String, petname: String?,
-                        relayHints: [String]?) async throws {
-        try await addBridgeFollow(bridgeId: Self.nostrBridgeId, followId: pubkey, petname: petname)
+    /// The Nostr page's follow through the bridges follow composer
+    /// (``addBridgeFollowOrQueue(bridgeId:followId:petname:)``); `true` = queued.
+    public func addNostrFollowOrQueue(pubkey: String, petname: String?) async throws -> Bool {
+        try await addBridgeFollowOrQueue(bridgeId: Self.nostrBridgeId, followId: pubkey,
+                                         petname: petname)
     }
 
-    public func removeNostrFollow(npub: String) async throws {
-        try await removeBridgeFollow(bridgeId: Self.nostrBridgeId, followId: npub)
+    /// The Nostr page's unfollow through the bridges follow composer; `true` = queued.
+    public func removeNostrFollowOrQueue(npub: String) async throws -> Bool {
+        try await removeBridgeFollowOrQueue(bridgeId: Self.nostrBridgeId, followId: npub)
     }
 
     // MARK: - Nostr Connect (bunker)
@@ -1268,6 +1281,33 @@ public class APIClient {
     @discardableResult
     public func nostrZapSignersRemove(signerPubkey: String) async throws -> Bool {
         try await nostrZapSignersClient().remove(signerPubkey: signerPubkey)
+    }
+
+    // MARK: - Nostr advertisement of a sold post
+
+    // The own-post ⋯ overflow's *Advertise on Nostr* / *Stop advertising* verb
+    // pair (`monetization.md` § The Nostr advertisement of a sold post). The
+    // advertise impl block is `zaps`-gated in the FFI, so the same
+    // `FAUNA_EXCISE_PAYMENTS` condition excises these.
+
+    /// Whether the nest advertises the `nostr-advertise` capability — the
+    /// `can_advertise` input of `postNostrAdvertiseVerb` (with the build's own
+    /// `zaps` member, i.e. this block compiling at all).
+    public func nostrAdvertiseSupported() async throws -> Bool {
+        try await ensureNestConnected().nostrAdvertise().advertiseSupported()
+    }
+
+    /// `fauna.nostr.advertise.set` — the nest's typed refusals arrive as the
+    /// error's text.
+    @discardableResult
+    public func nostrAdvertisePost(postId: String) async throws -> UInt64 {
+        try await ensureNestConnected().nostrAdvertise().advertisePost(postId: postId)
+    }
+
+    /// `fauna.nostr.advertise.clear` — `false` when it was not advertised.
+    @discardableResult
+    public func nostrClearAdvertisement(postId: String) async throws -> Bool {
+        try await ensureNestConnected().nostrAdvertise().clearAdvertisement(postId: postId)
     }
 
     #endif
@@ -1456,7 +1496,7 @@ public class APIClient {
     ///
     /// **The dropped WS-RPC client is disconnected, not just nil-ed.** A cached
     /// `nestClient` always has a running reconnect supervisor
-    /// (`ensureNestConnected` caches only after `connect()` succeeds), and
+    /// (`ensureNestConnected` caches only after `ensureConnected()` started it), and
     /// dropping the reference does not stop it — no `Drop` impl, and the
     /// supervisor task holds its own `Arc`s (`libs/fauna-client/src/client.rs`,
     /// the 2026-08-22 leaked-socket incident). Nil-ing alone left the outgoing
@@ -1613,13 +1653,36 @@ public class APIClient {
     /// Set by ``retire()``; ``ensureNestConnected()`` refuses from then on.
     private var retired = false
 
+    /// Whether ``retire()`` has run — every later call through this client is
+    /// refused ("this session was torn down"). A retired client can still name
+    /// the successor as its ``boundActorIdHex`` (a re-point lands on the
+    /// outgoing session's client too), so a caller about to spend a one-shot
+    /// obligation reads this as well as the seat: measured on iOS 2026-11-10,
+    /// the succession kit's discharge passed its seat check on the torn-down
+    /// session's client and burned all five mint attempts on it.
+    public var isRetired: Bool { retired }
+
+    /// The session's client, its reconnect supervisor running — never a wait for
+    /// the socket. A long-lived app session takes the supervised connect
+    /// (`ensureConnected`, `transport-connection.md` § Connection lifecycle → *A
+    /// caller that must know the nest answered says so*), as the windows session
+    /// client does: it throws only on a refusal no retry clears, a nest that did
+    /// not answer leaves the supervisor retrying, and each request made meanwhile
+    /// waits for the connection within its own deadline. The one-call
+    /// `connect()` this used to take waited up to 30 s and, with the nest
+    /// unreachable, threw and dropped the client — so every call of an offline
+    /// launch, the account runtime's start included, failed, and the
+    /// account-store runtime that needs no connection was never hosted
+    /// (`account-client-lifecycle.md` § The first listing: a never-listed replica
+    /// answered "the account runtime is not running" for the
+    /// `common.needs_nest` refusal).
     private func ensureNestConnected() async throws -> FfiNestClient {
         if let nestClient { return nestClient }
         guard !retired else { throw APIError.ffiError("WS-RPC connection: this session was torn down") }
         guard let secret else { throw APIError.ffiError("No secret for WS-RPC connection") }
         let stillThisActor = sameActorSince()
         let client = try FfiNestClient(nestUrl: nodeUrl.absoluteString, secret: hex_to_data(secret))
-        try await client.connect()
+        try await client.ensureConnected()
         guard !retired else {
             await client.disconnect()
             throw APIError.ffiError("WS-RPC connection: this session was torn down while connecting")
@@ -1687,14 +1750,53 @@ public class APIClient {
     /// `ensureNestConnected()` rather than a cached-only read: the account plane
     /// is one of the surfaces that must exist from the first instant of an
     /// authenticated session, and every other post-auth hook here opens the
-    /// socket the same lazy way.
+    /// socket the same lazy way. It never waits for the socket, so a launch with
+    /// the nest unreachable hosts the runtime too — the store opens, and a
+    /// never-listed replica refuses its reads until the first listing at the
+    /// reconnect (`account-client-lifecycle.md` § The first listing).
+    ///
+    /// **A retired client starts nothing.** The runtime is a process global, so
+    /// a client whose session was torn down (`stopAccountRuntime*`, reached only
+    /// through `FaunaClient.shutdown()`) must never start one again: a launch's
+    /// `start()` still awaiting its client when a session patch retires it would
+    /// otherwise start afterwards and replace the INCOMING client's runtime,
+    /// leaving every handle that client's conversations session took pointing at
+    /// a runtime that is gone ("account runtime is shut down" — a community room
+    /// that cannot persist its group-reception keypair). The check sits after
+    /// the client await, the one suspension inside this call.
     public func startAccountRuntime(
         appDataDir: String, storeContainer: FfiStoreContainer?, ownDeviceId: Data?,
         deviceLabel: String, accounts: FfiAccountRegistry?
     ) async throws {
-        try await ensureNestConnected().startAccountRuntime(
+        guard !isAccountRuntimeRetired else { return }
+        let nest = try await ensureNestConnected()
+        guard !isAccountRuntimeRetired else {
+            logMessage(
+                level: .info, target: "fauna.accounts",
+                message: "[account-runtime] start skipped: this client was retired while "
+                    + "it connected, and the runtime belongs to the session that replaced it")
+            return
+        }
+        try await nest.startAccountRuntime(
             appDataDir: appDataDir, storeContainer: storeContainer,
             ownDeviceId: ownDeviceId, deviceLabel: deviceLabel, accounts: accounts)
+    }
+
+    /// Set once, by either `stopAccountRuntime*`, and never cleared: a client's
+    /// teardown is for a session that is not coming back (`FaunaClient.shutdown()`).
+    /// Locked because `startAccountRuntime` reads it after a suspension, off the
+    /// main actor that sets it.
+    private let accountRuntimeRetiredLock = NSLock()
+    private var accountRuntimeRetired = false
+    private var isAccountRuntimeRetired: Bool {
+        accountRuntimeRetiredLock.lock()
+        defer { accountRuntimeRetiredLock.unlock() }
+        return accountRuntimeRetired
+    }
+    private func retireAccountRuntime() {
+        accountRuntimeRetiredLock.lock()
+        accountRuntimeRetired = true
+        accountRuntimeRetiredLock.unlock()
     }
 
     // EXCISED BY `FAUNA_EXCISE_P2P_SHARE`: the store-safe FFI exports no share plane
@@ -1710,14 +1812,25 @@ public class APIClient {
     /// runtime's store and the conversations session — so a caller needs no ordering
     /// against either; it refuses with an error only when one never lands.
     /// `ensureNestConnected()` for the same reason `startAccountRuntime` uses it.
+    ///
+    /// `access` is the replica host's two seams: `agentReplicaAccess` on macOS (the
+    /// sync agent hosts the replica), `foreignReplicaAccess` on iOS (the File
+    /// Provider extension does — `FileProviderReplicaHosts`).
     public func startSharePlane(
-        ownerSecret: Data, provisioner: FfiSyncAgentProvisioner, spoolDir: String,
+        ownerSecret: Data, access: FfiReplicaAccess, spoolDir: String,
         listener: FfiSharePlaneListener
     ) async throws {
-        // The desktop arm of the replica access: the sync agent hosts the replica.
         try await ensureNestConnected().startSharePlane(
-            ownerSecret: ownerSecret, access: agentReplicaAccess(provisioner: provisioner),
-            spoolDir: spoolDir, listener: listener)
+            ownerSecret: ownerSecret, access: access, spoolDir: spoolDir, listener: listener)
+    }
+
+    /// Stop the share plane — iOS's background edge (`p2p-shared-set-build.md`
+    /// § Phone peers — design, decision 2): the driver ends and the seat unbinds
+    /// before this returns, so a suspended app holds no socket. No socket is
+    /// opened for it: a client that never connected runs no plane.
+    public func stopSharePlane() async {
+        guard let nestClient else { return }
+        await nestClient.stopSharePlane()
     }
 
     #endif
@@ -1733,6 +1846,9 @@ public class APIClient {
     /// socket never installed a runtime through it either, so the no-op is
     /// correct rather than a gap.
     public func stopAccountRuntime() async {
+        // Before the no-socket return: a client that has not connected YET may
+        // still be inside `startAccountRuntime`, and must not start it after this.
+        retireAccountRuntime()
         guard let nestClient else { return }
         await nestClient.stopAccountRuntime()
         // The teardown forgot the share plane's cell with the session it belonged to
@@ -1756,6 +1872,7 @@ public class APIClient {
     /// **Deliberately does NOT `ensureNestConnected()`**, same reasoning as
     /// `stopAccountRuntime()` above.
     public func stopAccountRuntimeForSignOut() async {
+        retireAccountRuntime()
         guard let nestClient else { return }
         await nestClient.stopAccountRuntimeForSignOut()
         // Same as `stopAccountRuntime()` above: the plane's cell went with the runtime.
@@ -1863,6 +1980,17 @@ public class APIClient {
     public func accountPumpNow() async -> Bool {
         guard let nestClient else { return false }
         return await nestClient.accountPumpNow()
+    }
+
+    /// The app's foreground signal for the account runtime — the FFI's
+    /// `setAccountRuntimeForeground`: `false` stands the same-account peer
+    /// leg down before it returns (a suspended phone holds no socket), `true`
+    /// binds it again (`account-sync-plane.md` § Wormability walk, rule 5).
+    /// Phones only: a Mac app is not suspended and keeps its leg. With no
+    /// client yet there is no runtime to signal.
+    public func setAccountRuntimeForeground(_ foreground: Bool) async {
+        guard let nestClient else { return }
+        await nestClient.setAccountRuntimeForeground(foreground: foreground)
     }
 
     /// Restore from the custodian NEST at `url` (`nests.md` § Trust facet —
@@ -3933,6 +4061,28 @@ public class APIClient {
         try await ensureNestConnected().payments().claimsRedeem(code: code)
     }
 
+    /// The redeem gesture across nests — shared Rust
+    /// `PaymentsClient::claims_redeem_across_nests` (`monetization.md`
+    /// § Pillar 3 → *Which nest an in-app redeem binds on*), the one call shape
+    /// both redeem doors use: the OTHER profile Tiers tab names the viewed
+    /// creator and the page's actor home (the value the follow carries), so a
+    /// code minted on the creator's own nest redeems there under this actor's
+    /// signed intent; the `subscription-settings` pair passes `nil` home, the
+    /// plain local redeem, which never reads `authorIdHex`. Typed
+    /// `fauna.payments.claim_*` refusals (`claim_admits_elsewhere` included)
+    /// surface through `DisplayError` as the settings pair's do.
+    @discardableResult
+    public func redeemPaymentClaimAcrossNests(
+        code: String, authorIdHex: String, authorHomeUrl: String?
+    ) async throws -> FfiClaimRedeemReply {
+        guard let secret else { throw APIError.ffiError("No secret for claim redeem") }
+        return try await ensureNestConnected().payments().claimsRedeemAcrossNests(
+            code: code,
+            redeemerSecret: hex_to_data(secret),
+            authorId: hex_to_data(authorIdHex),
+            authorHomeUrl: authorHomeUrl)
+    }
+
     /// `fauna.payments.claims.mint` — manually mint a claim code for `tier`
     /// (§5 of the profile Tiers tab; provider is always `"manual"` — a
     /// webhook-minted code never reaches this path). `validUntil` is an
@@ -4113,9 +4263,14 @@ public class APIClient {
 
     /// `fauna.subscriptions.offers.list` — another author's offered tiers
     /// (ascending by rank). The OTHER-profile read; distinct from the SELF
-    /// `tiers.list` (which is bearer-scoped to the caller's own tiers).
-    public func subscriptionOffersList(authorIdHex: String) async throws -> [FfiTierItem] {
-        try await ensureNestConnected().subscriptions().offersList(authorId: hex_to_data(authorIdHex))
+    /// `tiers.list` (which is bearer-scoped to the caller's own tiers). Read
+    /// through the shared `offers_list_across_nests` from `home`, the page's
+    /// actor-home slot: `nil` reads this nest, another nest's URL relays the read
+    /// to the author's home through this nest (`subscriptions.md` § Pillar 1 →
+    /// *The offers browse across nests*).
+    public func subscriptionOffersList(authorIdHex: String, home: String?) async throws -> [FfiTierItem] {
+        try await ensureNestConnected().subscriptions().offersListAcrossNests(
+            authorId: hex_to_data(authorIdHex), home: home)
     }
 
     /// `fauna.subscriptions.status.get` — the caller's current subscription state
@@ -4145,6 +4300,29 @@ public class APIClient {
             subscriberSecret: hex_to_data(secret),
             authorId: hex_to_data(authorIdHex),
             tier: tier,
+            homeNestUrl: homeNestUrl)
+    }
+
+    /// The payment-link gesture (`subscription-offer-payment-link`) — the native
+    /// twin of `SubscriptionsClient::subscribe_and_checkout` over the shared
+    /// `subscriptions_subscribe_and_checkout`: the subscribe to `tier` goes first,
+    /// through the same across-nests dispatch as ``subscriptionSubscribe`` (so
+    /// `homeNestUrl` is the page's actor-home slot), then the checkout URL the
+    /// shared rule composes comes back bound to the buyer's actor
+    /// (`monetization.md` § Pillar 3 → *Buyer↔actor binding (Q4)*, the Q13 rules
+    /// (1) and (2)). `nil` — and no subscribe — for a URL the safety guard
+    /// refuses; a refused subscribe throws and nothing is to be opened. Mirrors
+    /// tui `profile::Op::Subscribe { checkout: Some(url), .. }`.
+    public func subscriptionSubscribeAndCheckout(
+        authorIdHex: String, tier: String, paymentUrl: String, homeNestUrl: String?
+    ) async throws -> FfiCheckoutOpen? {
+        guard let secret else { throw APIError.ffiError("No secret for subscribe") }
+        return try await subscriptionsSubscribeAndCheckout(
+            nest: try await ensureNestConnected(),
+            subscriberSecret: hex_to_data(secret),
+            authorId: hex_to_data(authorIdHex),
+            tier: tier,
+            paymentUrl: paymentUrl,
             homeNestUrl: homeNestUrl)
     }
 
@@ -5395,12 +5573,24 @@ public class APIClient {
         try await bridgesClient().refuseFollowRequest(bridgeId: bridgeId, id: id)
     }
 
-    public func addBridgeFollow(bridgeId: String, followId: String, petname: String?) async throws {
-        try await bridgesClient().addFollow(bridgeId: bridgeId, id: followId, petname: petname, extra: nil)
+    /// `fauna.bridges.add_follow` through the shared offline-mutation composer
+    /// (`FfiBridgesClient::add_follow_or_queue`): with the nest connected the
+    /// follow is sent; with none it queues in the device's outbox, scoped to
+    /// the followed account, and drains when the nest is back. Returns `true`
+    /// when it queued — the account is then not on the nest's list until the
+    /// drain, so the caller changes no list (account-offline-mutation.md
+    /// § Implementation status today, the bridges follow composer).
+    public func addBridgeFollowOrQueue(bridgeId: String, followId: String,
+                                       petname: String?) async throws -> Bool {
+        try await bridgesClient().addFollowOrQueue(bridgeId: bridgeId, id: followId,
+                                                   petname: petname, extra: nil)
     }
 
-    public func removeBridgeFollow(bridgeId: String, followId: String) async throws {
-        try await bridgesClient().removeFollow(bridgeId: bridgeId, followId: followId)
+    /// `fauna.bridges.remove_follow` sent now or queued with no nest — the same
+    /// contract as ``addBridgeFollowOrQueue(bridgeId:followId:petname:)``.
+    /// `true` = queued: the account stays on the nest's list until the drain.
+    public func removeBridgeFollowOrQueue(bridgeId: String, followId: String) async throws -> Bool {
+        try await bridgesClient().removeFollowOrQueue(bridgeId: bridgeId, followId: followId)
     }
 
     // The admin's hosted plugins (`fauna.plugins.{list,install,uninstall}`):
