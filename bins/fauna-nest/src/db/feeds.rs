@@ -1179,6 +1179,7 @@ impl CacheDb {
                 source,
                 score: None,
                 web_slug: None,
+                nostr_advertised_at: None,
                 labels: Vec::new(),
                 home_nest_url: None,
                 home_nest_actor_id: None,
@@ -1233,6 +1234,7 @@ impl CacheDb {
         for result in &mut results {
             result.labels = project_content_labels(&conn, &result.post_id)?;
             result.web_slug = project_web_slug(&conn, &result.post_id, &result.author)?;
+            result.nostr_advertised_at = project_nostr_advertised_at(&conn, &result.post_id)?;
         }
 
         Ok(results)
@@ -1676,6 +1678,7 @@ impl CacheDb {
                 source,
                 score: Some(score),
                 web_slug: None,
+                nostr_advertised_at: None,
                 labels: Vec::new(),
                 home_nest_url: None,
                 home_nest_actor_id: None,
@@ -1730,6 +1733,7 @@ impl CacheDb {
         for result in &mut results {
             result.labels = project_content_labels(&conn, &result.post_id)?;
             result.web_slug = project_web_slug(&conn, &result.post_id, &result.author)?;
+            result.nostr_advertised_at = project_nostr_advertised_at(&conn, &result.post_id)?;
         }
 
         Ok(results)
@@ -1923,6 +1927,7 @@ impl CacheDb {
                 source,
                 score: None,
                 web_slug: None,
+                nostr_advertised_at: None,
                 labels: Vec::new(),
                 home_nest_url: None,
                 home_nest_actor_id: None,
@@ -1977,6 +1982,7 @@ impl CacheDb {
         for result in &mut results {
             result.labels = project_content_labels(&conn, &result.post_id)?;
             result.web_slug = project_web_slug(&conn, &result.post_id, &result.author)?;
+            result.nostr_advertised_at = project_nostr_advertised_at(&conn, &result.post_id)?;
         }
 
         Ok(results)
@@ -2035,6 +2041,33 @@ pub(crate) fn project_web_slug(
         .context("query web-publish slug")?;
     match rows.next() {
         Some(row) => Ok(row.context("read web-publish slug")?),
+        None => Ok(None),
+    }
+}
+
+/// Project a post's Nostr advertisement flag — `content_meta.nostr_advertised_at`
+/// (`monetization.md` § The Nostr advertisement of a sold post → *The flag at
+/// rest*). `None` = not advertised, or no `content_meta` row.
+///
+/// Drives the wire `FeedPostItem.nostr_advertised_at`, from which the apps pick
+/// the arm of the own-post verb pair after a reload. A negative stamp (never
+/// written by `advertise.set`) folds to `None` rather than wrapping.
+pub(crate) fn project_nostr_advertised_at(
+    conn: &rusqlite::Connection,
+    post_id: &[u8],
+) -> Result<Option<u64>> {
+    let mut stmt = conn
+        .prepare_cached("SELECT nostr_advertised_at FROM content_meta WHERE content_id = ?1")
+        .context("prepare nostr-advertised lookup")?;
+    let mut rows = stmt
+        .query_map(rusqlite::params![post_id], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .context("query nostr-advertised flag")?;
+    match rows.next() {
+        Some(row) => Ok(row
+            .context("read nostr-advertised flag")?
+            .and_then(|t| u64::try_from(t).ok())),
         None => Ok(None),
     }
 }

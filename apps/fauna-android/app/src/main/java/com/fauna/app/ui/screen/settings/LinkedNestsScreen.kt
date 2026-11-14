@@ -44,7 +44,10 @@ import uniffi.fauna_client_pair.TrustRestoreOutcome
 import uniffi.fauna_client_pair.TrustScope
 import uniffi.fauna_client_pair.backupStatusLabel
 import uniffi.fauna_client_pair.grantScopeLabels
+import uniffi.fauna_client_pair.grantBoundNote
+import uniffi.fauna_client_pair.mintOptionDefaultDuration
 import uniffi.fauna_client_pair.mintOptionLabel
+import uniffi.fauna_client_pair.mintOptionNote
 import uniffi.fauna_client_pair.statusLabel
 import social.fauna.generated.Ids
 
@@ -1160,20 +1163,11 @@ private fun GrantItem(
                 modifier = Modifier.testTag(Ids.NEST_TRUST_GRANT_STATUS),
             )
             // REQUIRED honest-bound copy (nests.md § Honest bound) — never
-            // over-promise. A bounded (content-sealing-epochs) mail grant gets the
-            // stronger, crypto-bounded wording WITH the honest INFO-A caveat; every
-            // other kind/regime keeps the standing trust-until-revoke wording
-            // (flip-checklist line 6). Never re-derive the (class, kind, tier)
-            // check here — the shared predicate is the single source of truth
+            // over-promise. The regime (materialization, bounded mail, standing)
+            // is picked by the shared `grant_bound_note`, never re-derived here
             // (priority #2).
             Text(
-                stringResource(
-                    if (uniffi.fauna_client_pair.trustScopeIsBoundedMailGrant(grant.scope)) {
-                        R.string.nests_bound_note_bounded_mail
-                    } else {
-                        R.string.nests_bound_note_standing
-                    },
-                ),
+                resolveLocalized(context, grantBoundNote(grant.scope)).orEmpty(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.NEST_TRUST_GRANT_BOUND_NOTE),
@@ -1272,6 +1266,10 @@ private fun MintFlow(
                             text = { Text(resolveLocalized(context, mintOptionLabel(option)).orEmpty()) },
                             onClick = {
                                 selected = option
+                                // A new pick pre-selects that option's default
+                                // window (the shared `mint_option_default_duration`
+                                // — a view is standing by nature).
+                                duration = mintOptionDefaultDuration(option, defaultDuration)
                                 holderPick =
                                     if (option.holderCandidates.size > 1) option.holderCandidates.first() else null
                                 scopeExpanded = false
@@ -1345,6 +1343,19 @@ private fun MintFlow(
                         )
                     }
                 }
+            }
+
+            // The picked option's mint-time note (the shared `mint_option_note`
+            // — the materialization options' honesty copy), read BEFORE the
+            // confirm: `capability-grants.md` § Capability tiering → *The
+            // materialization grant* (f). Absent, not empty, for an option that
+            // carries none.
+            chosen?.let { mintOptionNote(it) }?.let { note ->
+                Text(
+                    resolveLocalized(context, note).orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.NEST_TRUST_MINT_MATERIALIZE_NOTE),
+                )
             }
 
             Button(

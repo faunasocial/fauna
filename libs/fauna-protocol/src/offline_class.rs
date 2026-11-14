@@ -344,6 +344,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.subscriptions.key_blob.rotate", OnlineOnly);
     m.insert("fauna.subscriptions.mine.list", Read);
     m.insert("fauna.subscriptions.offers.list", Read);
+    // The relay of `offers.list` to an author's home nest — it needs the live
+    // nest↔nest leg; this nest stores no remote tier to fall back on.
+    m.insert("fauna.subscriptions.offers.list_remote", OnlineOnly);
     m.insert("fauna.subscriptions.post_unlock.get", Read);
     m.insert("fauna.subscriptions.requests.approve", OfflineQueued);
     m.insert("fauna.subscriptions.requests.list", Read);

@@ -179,8 +179,16 @@ public struct RecoveryKitSection: View {
     /// is already correct, so its section mounts once with the right client,
     /// while iOS's persistent TabView has no such gate (the same asymmetry behind
     /// this row's first two defects).
+    ///
+    /// The client INSTANCE is part of the key too: a rebuilt session hands the
+    /// environment a new `APIClient` bound to the same successor, and the old
+    /// one is retired. Keyed on actors alone, the section hydrated once on the
+    /// retired client, deferred its discharge there
+    /// (`RecoveryKitVM.dischargeOwedSuccessionKit`) and never re-fired for the
+    /// live one (measured on iOS 2026-11-10: no fresh kit, ever).
     private var hydrateKey: String {
-        "\(sessionActorIdHex ?? "-")|\(client?.api.boundActorIdHex ?? "no-client")"
+        let instance = client.map { "\(ObjectIdentifier($0.api).hashValue)" } ?? "no-client"
+        return "\(sessionActorIdHex ?? "-")|\(client?.api.boundActorIdHex ?? "no-client")|\(instance)"
     }
 
     /// Read the chain, then discharge an owed successor kit if this session is

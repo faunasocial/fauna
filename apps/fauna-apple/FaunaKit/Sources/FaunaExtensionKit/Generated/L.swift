@@ -1204,6 +1204,10 @@ public enum L {
                     "No nest is running at \(domain). Start a nest there, then check again."
                 }
 
+                public static func kidsNoJoinableNest(domain: String) -> String {
+                    "There is no nest at \(domain) you can join. Ask for an invite to a nest that is already set up."
+                }
+
                 public static func alreadyOnNestHandleMatches(handle: String) -> String {
                     "Welcome back, \(handle)."
                 }
@@ -1617,6 +1621,8 @@ public enum L {
         }
 
         public static let composeSellPriceInvalid = "Enter a smaller price"
+
+        public static let composeSellPriceNotWhole = "Enter the price as a whole number of sats"
 
         public static let composeSellRankUnavailable = "Could not check your tiers to price this post — try again"
 
@@ -3011,6 +3017,18 @@ public enum L {
         public static let consentApproveButton = "Approve"
 
         public static let consentDenyButton = "Deny"
+
+        public static let consentFolderLabel = "Folder:"
+
+        public static let consentFolderPrompt = "Choose a folder"
+
+        public static let consentFolderNoneDeposit = "None of your folders can receive files from an app — each keeps only its file list on your nest. Let one folder store its files on your nest first."
+
+        public static let consentFolderNoneRead = "None of your folders is shared with apps for reading. Turn on serving for a folder first."
+
+        public static let consentFolderNoneBoth = "None of your folders can both receive files from an app and be read by one. Use a folder that stores its files on your nest and is served."
+
+        public static let consentFolderUnreadable = "Your folders could not be read just now, so none can be chosen. Try again in a moment."
 
         public static func errorRefresh(message: String) -> String {
             "Failed to load app credentials: \(message)"
@@ -5607,7 +5625,7 @@ public enum L {
 
             public static let toggle = "Back up identity to iCloud Keychain"
 
-            public static let footer = "When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place."
+            public static let footer = "When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy yet. Adding a device and your recovery kit remain the main ways to have your identity in more than one place."
         }
 
         public static let checkForUpdates = "Check for Updates"
@@ -5987,6 +6005,8 @@ public enum L {
 
             public static let stateHeld = "Waiting behind a change that was not sent"
 
+            public static let stateHeldCarry = "Waiting for the conversation to move to your new identity"
+
             public static let stateUnsent = "Not sent"
 
             public static let reasonUnknownKind = "This version of the app cannot send this change"
@@ -5998,6 +6018,8 @@ public enum L {
             public static let reasonMlsNotAMember = "You are no longer a member of this conversation"
 
             public static let reasonMlsSendFailed = "The message could not be sent"
+
+            public static let reasonMlsAttachmentMissing = "An attachment of this message is no longer on this device"
 
             public static func reasonFallback(code: String) -> String {
                 "Your nest refused this change (\(code))"
@@ -6252,6 +6274,8 @@ public enum L {
 
         public static let removeAccountBlockedThisWindow = "Not removed — this window is using that account. Close this window, then remove the account from another one."
 
+        public static let removeAccountBlockedCarryOwed = "Not removed — this account still has changes waiting to move to your new identity. Sign in as your new identity and send or discard them first."
+
         public static func switchRefusedNoSecret(account: String) -> String {
             "Not switched — this device can no longer sign in as \(account): its secret key is missing here. You are still on the identity you were using. To use \(account) here again, add it back with its secret key or recovery kit."
         }
@@ -6410,6 +6434,12 @@ public enum L {
 
         public static let scopeMail = "Mail — and the spam-filter model and training history derived from it"
 
+        public static let scopeMaterializeMail = "Keeps your mail searchable"
+
+        public static let scopeMaterializeCalendar = "Keeps your calendar searchable"
+
+        public static let scopeMaterializeCard = "Keeps your contacts searchable"
+
         public static let scopeCalendar = "Calendar"
 
         public static let scopeCard = "Contacts"
@@ -6457,6 +6487,12 @@ public enum L {
         public static let grantKeepButton = "Keep"
 
         public static let boundNoteStanding = "On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation."
+
+        public static let boundNoteMaterializeMail = "On an honest nest, revoking deletes this nest's searchable copy of your mail and its key, and stops it reading more. It cannot un-see what was already read."
+
+        public static let boundNoteMaterializeCalendar = "On an honest nest, revoking deletes this nest's searchable copy of your calendar and its key, and stops it reading more. It cannot un-see what was already read."
+
+        public static let boundNoteMaterializeCard = "On an honest nest, revoking deletes this nest's searchable copy of your contacts and its key, and stops it reading more. It cannot un-see what was already read."
 
         public static let boundNoteBoundedMail = "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it."
 
@@ -6523,6 +6559,18 @@ public enum L {
         public static let mintScopePlaceholder = "Choose what to trust it with…"
 
         public static let mintOptionMail = "Read and filter my mail — and the spam-filter model and training history derived from it"
+
+        public static let mintOptionMaterializeMail = "Keep my mail searchable on this nest"
+
+        public static let mintOptionMaterializeCalendar = "Keep my calendar searchable on this nest"
+
+        public static let mintOptionMaterializeCard = "Keep my contacts searchable on this nest"
+
+        public static let mintMaterializeNote = "While this is on, this nest can read your mail and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your mail — it cannot undo what a hostile nest already read."
+
+        public static let mintMaterializeCalendarNote = "While this is on, this nest can read your calendar and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your calendar — it cannot undo what a hostile nest already read."
+
+        public static let mintMaterializeCardNote = "While this is on, this nest can read your contacts and keeps a searchable copy of them on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your contacts — it cannot undo what a hostile nest already read."
 
         public static let mintOptionCalendar = "Read my calendar"
 
@@ -6754,6 +6802,40 @@ public enum L {
 
         public static func errorPaywallLink(message: String) -> String {
             "Failed to create paywall link: \(message)"
+        }
+    }
+
+    public enum nostrAdvertise {
+        public static let advertise = "Advertise on Nostr"
+
+        public static let stop = "Stop advertising on Nostr"
+
+        public static let confirmTitle = "Advertise this post on Nostr?"
+
+        public static let confirm = "Advertise"
+
+        public static let confirmBody = "Your post's public teaser and its price will be published to your nest's relay and to your Nostr relays. Anyone on Nostr can read them, and a zap of at least that price whose receipt is signed by one of your zap signers can buy the post for the person who sent it. If you stop advertising, the note is deleted from your nest's relay and, while your nest holds your Nostr key, your Nostr relays are asked to delete their copies, but some may keep them."
+
+        public static func errorAdvertise(message: String) -> String {
+            "Failed to advertise the post on Nostr: \(message)"
+        }
+
+        public static func errorStop(message: String) -> String {
+            "Failed to stop advertising the post on Nostr: \(message)"
+        }
+    }
+
+    public enum salePrice {
+        public static let button = "Change price…"
+
+        public static let title = "Change price"
+
+        public static func errorLoad(message: String) -> String {
+            "Failed to read the post's price: \(message)"
+        }
+
+        public static func errorSave(message: String) -> String {
+            "Failed to change the price: \(message)"
         }
     }
 
@@ -7298,7 +7380,7 @@ public enum L {
     public enum archiveImport {
         public static let title = "Import from other services"
 
-        public static let description = "Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest."
+        public static let description = "Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest."
 
         public static let unavailable = "Importing needs a session that holds your identity key; this one does not."
 
@@ -8018,6 +8100,20 @@ public enum L {
             public static let makeAdmin = "Make Admin"
 
             public static let removeAdmin = "Remove Admin"
+
+            public static func supervisedBy(guardian: String) -> String {
+                "Supervised by \(guardian)"
+            }
+
+            public static let takeOver = "Take over"
+
+            public static func takeOverConfirmSummary(ward: String, guardian: String) -> String {
+                "Take over supervision of \(ward) from \(guardian)? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page."
+            }
+
+            public static let takeOverConfirm = "Confirm take-over"
+
+            public static let takeOverCancel = "Cancel"
 
             public static let prevPage = "Previous"
 
@@ -11013,11 +11109,11 @@ public enum L {
         public static let redeem = "Redeem"
 
         public static func claimDeliveryDm(code: String) -> String {
-            "Thank you for your purchase. Your claim code is \(code). To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
+            "Thank you for your purchase. Your claim code is \(code). To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
         }
 
         public static func claimDeliveryDmLink(code: String, url: String) -> String {
-            "Thank you for your purchase. Your claim code is \(code). Enter it at \(url) to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
+            "Thank you for your purchase. Your claim code is \(code). Enter it at \(url) to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
         }
 
         public static let offerStatusNone = "Not subscribed"
@@ -11263,7 +11359,7 @@ public enum L {
         }
 
         public enum nostr {
-            public static let notLinked = "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first."
+            public static let notLinked = "This needs a linked Nostr key, and none is linked for you. Link one on the Nostr page first."
 
             public static let noCustodialKey = "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page."
 
@@ -11273,7 +11369,7 @@ public enum L {
 
             public static let notSold = "Only a post you sell can be advertised on Nostr. Sell this post first."
 
-            public static let noAskingPrice = "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it."
+            public static let noAskingPrice = "This post has no asking price, so a zap could not buy it and it can't be advertised. To advertise a post you sell, choose Sell this post… when you write it and give it an asking price in sats."
         }
 
         public enum nest {
@@ -11284,6 +11380,16 @@ public enum L {
 
         public enum backup {
             public static let writerSeatHeld = "This destination already keeps your account's backup from another box. Nothing was added."
+        }
+
+        public enum payments {
+            public static let claimNotFound = "No claim matches this code. Check it and try again."
+
+            public static let claimAlreadyRedeemed = "This code has already been used."
+
+            public static let claimVoided = "This code was cancelled by the creator and can no longer be used."
+
+            public static let claimAdmitsElsewhere = "This code is a membership of the creator's nest. Use it as an invite code when you join that nest. It has not been used."
         }
 
         public enum federation {
@@ -11463,6 +11569,8 @@ public enum L {
         public static let recoveryPriorKitMismatch = "That kit does not match the one currently registered for this identity."
 
         public static let recoveryKitForAnotherAccount = "That recovery kit belongs to a different account, not this one. Nothing was changed."
+
+        public static let recoveryKitMintedElsewhere = "The window that replaced this identity is creating its new recovery kit and will show it there."
 
         public static func recoveryPriorEscrowUnreadable(reason: String) -> String {
             "Your existing recovery data could not be read (\(reason)), so replacing it now would destroy it. Try again from a device and connection that can read it."
@@ -12036,6 +12144,20 @@ public enum L {
             "Most recent, \(time): \(operation)"
         }
 
+        public static let oracleOpen = "Show what Fauna did for this app"
+
+        public static let oracleClose = "Hide what Fauna did for this app"
+
+        public static func oracleOp(time: String, operation: String, detail: String) -> String {
+            "\(time) · \(operation) — \(detail)"
+        }
+
+        public static func oracleOpBare(time: String, operation: String) -> String {
+            "\(time) · \(operation)"
+        }
+
+        public static let oracleEmpty = "Nothing recorded for this app yet"
+
         public static let blockedHeading = "Blocked apps"
 
         public static let blockedHint = "Requests from these apps are never shown to you."
@@ -12083,6 +12205,20 @@ public enum L {
         public static func installSetting(label: String, kind: String) -> String {
             "\(label) (\(kind))"
         }
+
+        public static func trustScopeExtRw(publisher: String, kinds: String) -> String {
+            "Keys to your records published by \(publisher): \(kinds) — read and write"
+        }
+
+        public static func trustScopeExtRo(publisher: String, kinds: String) -> String {
+            "Keys to your records published by \(publisher): \(kinds) — read only"
+        }
+
+        public static let trustStatusExpired = "Expired — the app will ask again if it needs them"
+
+        public static let trustEmpty = "This app holds no keys to your records"
+
+        public static let trustBoundNote = "On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect."
     }
 
     public enum shareLink {
@@ -12891,8 +13027,13 @@ private enum _LFlat {
         "admin.users_page.section_users": "Users",
         "admin.users_page.serving_disabled": "Not serving",
         "admin.users_page.serving_here": "Serving here",
+        "admin.users_page.supervised_by": "Supervised by {guardian}",
         "admin.users_page.suspend": "Suspend",
         "admin.users_page.suspend_default_reason": "Suspended by admin",
+        "admin.users_page.take_over": "Take over",
+        "admin.users_page.take_over_cancel": "Cancel",
+        "admin.users_page.take_over_confirm": "Confirm take-over",
+        "admin.users_page.take_over_confirm_summary": "Take over supervision of {ward} from {guardian}? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page.",
         "admin.users_page.title": "Users",
         "admin.users_page.total": "{count} users total",
         "admin.users_page.user_count": "{count} users",
@@ -12936,7 +13077,7 @@ private enum _LFlat {
         "archive_import.category_threads": "Message threads",
         "archive_import.confirm_summary_fmt": "{records} records · about {bytes} to upload",
         "archive_import.confirm_title": "Step 4 — Confirm",
-        "archive_import.description": "Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.",
+        "archive_import.description": "Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.",
         "archive_import.done_summary_fmt": "{imported} imported · {skipped} skipped",
         "archive_import.done_summary_links_fmt": "{imported} imported · {skipped} skipped · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post",
         "archive_import.done_summary_unplaced_fmt": "{imported} imported · {skipped} skipped · {count} comments could not be placed under a post",
@@ -13006,6 +13147,12 @@ private enum _LFlat {
         "atproto_settings.consent_code": "Confirmation code: {code}",
         "atproto_settings.consent_code_hint": "Approve only if your browser is showing this same code.",
         "atproto_settings.consent_deny_button": "Deny",
+        "atproto_settings.consent_folder_label": "Folder:",
+        "atproto_settings.consent_folder_none_both": "None of your folders can both receive files from an app and be read by one. Use a folder that stores its files on your nest and is served.",
+        "atproto_settings.consent_folder_none_deposit": "None of your folders can receive files from an app — each keeps only its file list on your nest. Let one folder store its files on your nest first.",
+        "atproto_settings.consent_folder_none_read": "None of your folders is shared with apps for reading. Turn on serving for a folder first.",
+        "atproto_settings.consent_folder_prompt": "Choose a folder",
+        "atproto_settings.consent_folder_unreadable": "Your folders could not be read just now, so none can be chosen. Try again in a moment.",
         "atproto_settings.consent_heading": "An app wants to sign in as you",
         "atproto_settings.consent_scopes_heading": "It is asking to:",
         "atproto_settings.consent_set_heading": "Some of that comes from “{title}” ({nsid}):",
@@ -13718,8 +13865,13 @@ private enum _LFlat {
         "connected_apps.never_used": "Never used",
         "connected_apps.not_connected": "Not connected right now",
         "connected_apps.open_ended": "Until you disconnect it",
+        "connected_apps.oracle_close": "Hide what Fauna did for this app",
+        "connected_apps.oracle_empty": "Nothing recorded for this app yet",
         "connected_apps.oracle_latest": "Most recent, {time}: {operation} — {detail}",
         "connected_apps.oracle_latest_bare": "Most recent, {time}: {operation}",
+        "connected_apps.oracle_op": "{time} · {operation} — {detail}",
+        "connected_apps.oracle_op_bare": "{time} · {operation}",
+        "connected_apps.oracle_open": "Show what Fauna did for this app",
         "connected_apps.oracle_ops": "Fauna acted for this app {count} times in the current window",
         "connected_apps.oracle_ops_one": "Fauna acted for this app once in the current window",
         "connected_apps.oracle_requests": "{count} requests answered in all",
@@ -13742,6 +13894,11 @@ private enum _LFlat {
         "connected_apps.signer_pending": "Waiting to connect…",
         "connected_apps.signer_revoked": "Access revoked — connect this signer app again with a new connection",
         "connected_apps.title": "Connected apps",
+        "connected_apps.trust_bound_note": "On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect.",
+        "connected_apps.trust_empty": "This app holds no keys to your records",
+        "connected_apps.trust_scope_ext_ro": "Keys to your records published by {publisher}: {kinds} — read only",
+        "connected_apps.trust_scope_ext_rw": "Keys to your records published by {publisher}: {kinds} — read and write",
+        "connected_apps.trust_status_expired": "Expired — the app will ask again if it needs them",
         "connected_apps.unblock": "Allow requests again",
         "connected_apps.unnamed": "Unnamed app",
         "connected_apps.verbatim": "{text}",
@@ -14328,12 +14485,16 @@ private enum _LFlat {
         "error.folders.residency_blocked_by_website": "This folder is served as a website, which needs its content on the nest. Turn off website serving first, then choose Metadata only.",
         "error.nest.outdated": "This nest is running an outdated version and must be updated before you can connect.",
         "error.nest.schema_mismatch": "This nest's database does not match its software version and must be updated.",
-        "error.nostr.no_asking_price": "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.",
+        "error.nostr.no_asking_price": "This post has no asking price, so a zap could not buy it and it can't be advertised. To advertise a post you sell, choose Sell this post… when you write it and give it an asking price in sats.",
         "error.nostr.no_custodial_key": "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.",
         "error.nostr.no_relays_configured": "You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.",
-        "error.nostr.not_linked": "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.",
+        "error.nostr.not_linked": "This needs a linked Nostr key, and none is linked for you. Link one on the Nostr page first.",
         "error.nostr.not_sold": "Only a post you sell can be advertised on Nostr. Sell this post first.",
         "error.nostr.replies_off": "Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.",
+        "error.payments.claim_admits_elsewhere": "This code is a membership of the creator's nest. Use it as an invite code when you join that nest. It has not been used.",
+        "error.payments.claim_already_redeemed": "This code has already been used.",
+        "error.payments.claim_not_found": "No claim matches this code. Check it and try again.",
+        "error.payments.claim_voided": "This code was cancelled by the creator and can no longer be used.",
         "error.profile.handle_cooldown": "That handle was released recently and can't be taken yet. Choose a different one, or try again later.",
         "error.profile.handle_taken": "That handle already belongs to someone else on your nest. Choose a different one.",
         "error.protocol.cancelled": "The request was cancelled.",
@@ -14391,6 +14552,7 @@ private enum _LFlat {
         "errors.recovery_identity_unreadable": "This session's identity secret is unreadable: {detail}",
         "errors.recovery_invalid_nonce": "That recovery request has expired or was already used. Please try again.",
         "errors.recovery_kit_for_another_account": "That recovery kit belongs to a different account, not this one. Nothing was changed.",
+        "errors.recovery_kit_minted_elsewhere": "The window that replaced this identity is creating its new recovery kit and will show it there.",
         "errors.recovery_kit_not_current": "This is not your most recently created recovery kit. Enter your newest kit instead.",
         "errors.recovery_malformed": "The nest sent back something unexpected: {detail}",
         "errors.recovery_no_escrow": "The copy of your secret key that only this recovery kit opens is not stored, so the kit cannot recover this account right now.",
@@ -14717,6 +14879,7 @@ private enum _LFlat {
         "feed.compose_room_no_key": "This device does not hold the key for that room yet",
         "feed.compose_sell_account_not_ready": "Your account is still loading on this device — try again in a moment",
         "feed.compose_sell_price_invalid": "Enter a smaller price",
+        "feed.compose_sell_price_not_whole": "Enter the price as a whole number of sats",
         "feed.compose_sell_rank_unavailable": "Could not check your tiers to price this post — try again",
         "feed.compose_sell_tier_unavailable": "Could not set up this sale — try again",
         "feed.create.add_factor": "Add Factor",
@@ -15479,6 +15642,9 @@ private enum _LFlat {
         "nests.backup_status_unreachable": "Could not reach this destination",
         "nests.blessed_toggle": "Keep this box's trust renewed",
         "nests.bound_note_bounded_mail": "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it.",
+        "nests.bound_note_materialize_calendar": "On an honest nest, revoking deletes this nest's searchable copy of your calendar and its key, and stops it reading more. It cannot un-see what was already read.",
+        "nests.bound_note_materialize_card": "On an honest nest, revoking deletes this nest's searchable copy of your contacts and its key, and stops it reading more. It cannot un-see what was already read.",
+        "nests.bound_note_materialize_mail": "On an honest nest, revoking deletes this nest's searchable copy of your mail and its key, and stops it reading more. It cannot un-see what was already read.",
         "nests.bound_note_standing": "On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation.",
         "nests.capabilities_label": "Syncs:",
         "nests.capability_account_replica": "encrypted copy of your account settings",
@@ -15530,8 +15696,14 @@ private enum _LFlat {
         "nests.mint_duration_one_off": "For a few hours",
         "nests.mint_duration_standard": "For 90 days",
         "nests.mint_holder_placeholder": "Which service on this nest?",
+        "nests.mint_materialize_calendar_note": "While this is on, this nest can read your calendar and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your calendar — it cannot undo what a hostile nest already read.",
+        "nests.mint_materialize_card_note": "While this is on, this nest can read your contacts and keeps a searchable copy of them on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your contacts — it cannot undo what a hostile nest already read.",
+        "nests.mint_materialize_note": "While this is on, this nest can read your mail and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your mail — it cannot undo what a hostile nest already read.",
         "nests.mint_option_calendar": "Read my calendar",
         "nests.mint_option_mail": "Read and filter my mail — and the spam-filter model and training history derived from it",
+        "nests.mint_option_materialize_calendar": "Keep my calendar searchable on this nest",
+        "nests.mint_option_materialize_card": "Keep my contacts searchable on this nest",
+        "nests.mint_option_materialize_mail": "Keep my mail searchable on this nest",
         "nests.mint_option_paywalled": "Serve paywalled posts — {tier}",
         "nests.mint_scope_placeholder": "Choose what to trust it with…",
         "nests.nest_to_link": "Nest to link",
@@ -15545,6 +15717,9 @@ private enum _LFlat {
         "nests.scope_labeler_labels": "Write labels for community labeler {labeler}",
         "nests.scope_mail": "Mail — and the spam-filter model and training history derived from it",
         "nests.scope_mail_labeler": "Mail — only to run community labeler {labeler} over it",
+        "nests.scope_materialize_calendar": "Keeps your calendar searchable",
+        "nests.scope_materialize_card": "Keeps your contacts searchable",
+        "nests.scope_materialize_mail": "Keeps your mail searchable",
         "nests.scope_posts": "Posts",
         "nests.scope_posts_tier": "Posts — {tier}",
         "nests.scope_spam_labels": "Write spam labels",
@@ -15634,6 +15809,13 @@ private enum _LFlat {
         "nostr.zap_signers.remove": "Stop trusting",
         "nostr.zap_signers.title": "Zap signers",
         "nostr.zap_signers.unnamed": "Unnamed signer",
+        "nostr_advertise.advertise": "Advertise on Nostr",
+        "nostr_advertise.confirm": "Advertise",
+        "nostr_advertise.confirm_body": "Your post's public teaser and its price will be published to your nest's relay and to your Nostr relays. Anyone on Nostr can read them, and a zap of at least that price whose receipt is signed by one of your zap signers can buy the post for the person who sent it. If you stop advertising, the note is deleted from your nest's relay and, while your nest holds your Nostr key, your Nostr relays are asked to delete their copies, but some may keep them.",
+        "nostr_advertise.confirm_title": "Advertise this post on Nostr?",
+        "nostr_advertise.error_advertise": "Failed to advertise the post on Nostr: {message}",
+        "nostr_advertise.error_stop": "Failed to stop advertising the post on Nostr: {message}",
+        "nostr_advertise.stop": "Stop advertising on Nostr",
         "notifications.clear_all": "Clear all",
         "notifications.default_body": "New notification",
         "notifications.dismiss": "Dismiss",
@@ -15788,6 +15970,7 @@ private enum _LFlat {
         "onboarding.handle_check.outcome.domain_available_priced": "{domain} is available — registration about {price}.",
         "onboarding.handle_check.outcome.domain_available_unpriced": "{domain} appears to be available for purchase.",
         "onboarding.handle_check.outcome.format_invalid": "Handle format must be user@domain or user.domain (with localhost or IP also accepted).",
+        "onboarding.handle_check.outcome.kids_no_joinable_nest": "There is no nest at {domain} you can join. Ask for an invite to a nest that is already set up.",
         "onboarding.handle_check.outcome.local_no_nest": "No nest is running at {domain}. Start a nest there, then check again.",
         "onboarding.handle_check.outcome.registered_no_nest": "{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain.",
         "onboarding.handle_check.outcome.tld_invalid": "{tld} is not a TLD that can be registered.",
@@ -16324,6 +16507,10 @@ private enum _LFlat {
         "rule_editor.verdict.block": "Block",
         "rule_editor.verdict.collapse": "Hide behind a warning",
         "rule_editor.verdict_label": "Verdict",
+        "sale_price.button": "Change price…",
+        "sale_price.error_load": "Failed to read the post's price: {message}",
+        "sale_price.error_save": "Failed to change the price: {message}",
+        "sale_price.title": "Change price",
         "search_page.all": "All",
         "search_page.badge_contact": "Contact",
         "search_page.badge_draft": "Draft",
@@ -16482,7 +16669,7 @@ private enum _LFlat {
         "settings.general_page.theme_subtitle": "Choose the application colour scheme",
         "settings.general_page.update_available": "{version} available",
         "settings.general_page.version": "Version",
-        "settings.icloud_backup.footer": "When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.",
+        "settings.icloud_backup.footer": "When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy yet. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.",
         "settings.icloud_backup.title": "iCloud Backup",
         "settings.icloud_backup.toggle": "Back up identity to iCloud Keychain",
         "settings.identity_export.desc": "Show a QR code that another device can scan to import your identity.",
@@ -16736,6 +16923,7 @@ private enum _LFlat {
         "settings.recovery_kit.unreadable_status_undated": "{rows} items of your account data cannot be read by any device signed in to your account, and no copy of their key is stored. If one of your devices has not been signed in for a while, it may still be able to read them — sign in there first. Otherwise you can let them go to free the space they take.",
         "settings.recovery_kit.veto": "Cancel The Pending Replacement",
         "settings.recovery_kit.veto_failed": "Could not cancel the pending replacement: {message}",
+        "settings.remove_account_blocked_carry_owed": "Not removed — this account still has changes waiting to move to your new identity. Sign in as your new identity and send or discard them first.",
         "settings.remove_account_blocked_other_window": "Not removed — another Fauna window is using that account on this device. Close it, then remove the account again.",
         "settings.remove_account_blocked_this_window": "Not removed — this window is using that account. Close this window, then remove the account from another one.",
         "settings.rule_type": "Rule type",
@@ -16779,12 +16967,14 @@ private enum _LFlat {
         "settings.unsent_changes.kind_post_interaction": "Interaction on a post",
         "settings.unsent_changes.kind_unlike": "Removed like on a post",
         "settings.unsent_changes.reason_fallback": "Your nest refused this change ({code})",
+        "settings.unsent_changes.reason_mls_attachment_missing": "An attachment of this message is no longer on this device",
         "settings.unsent_changes.reason_mls_no_channel": "The conversation could not be found",
         "settings.unsent_changes.reason_mls_not_a_member": "You are no longer a member of this conversation",
         "settings.unsent_changes.reason_mls_send_failed": "The message could not be sent",
         "settings.unsent_changes.reason_undecodable": "This change could not be read",
         "settings.unsent_changes.reason_unknown_kind": "This version of the app cannot send this change",
         "settings.unsent_changes.state_held": "Waiting behind a change that was not sent",
+        "settings.unsent_changes.state_held_carry": "Waiting for the conversation to move to your new identity",
         "settings.unsent_changes.state_unsent": "Not sent",
         "settings.unsent_changes.state_waiting": "Waiting to send",
         "settings.up_to_date": "Up to date",
@@ -16933,8 +17123,8 @@ private enum _LFlat {
         "subscriptions.auto_approve": "Auto-approve",
         "subscriptions.cancel": "Cancel",
         "subscriptions.claim_code": "Claim code",
-        "subscriptions.claim_delivery_dm": "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.",
-        "subscriptions.claim_delivery_dm_link": "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.",
+        "subscriptions.claim_delivery_dm": "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.",
+        "subscriptions.claim_delivery_dm_link": "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.",
         "subscriptions.claim_status_redeemed": "Redeemed",
         "subscriptions.claim_status_unredeemed": "Unredeemed",
         "subscriptions.claim_status_voided": "Voided",

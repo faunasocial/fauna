@@ -702,6 +702,13 @@ mod tests {
                 .sign(self.0.signing_key())
                 .map_err(|e| grant_log::GrantEventSignError::Sign(e.to_string()))
         }
+
+        fn remint_replacement_id(&self, old_grant_id: &[u8; 16]) -> [u8; 16] {
+            fauna_client_capabilities::succession::remint_grant_id(
+                self.0.secret_bytes(),
+                old_grant_id,
+            )
+        }
     }
 
     const HOLDER_PUBKEY: [u8; 32] = [7u8; 32];

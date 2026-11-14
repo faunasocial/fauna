@@ -328,6 +328,10 @@ mod tests {
             // Its profile twin: the 2026-08-17 decline of any anonymous
             // profile read stands (`identity-succession.md` § Don't do these).
             "fauna.profile.get_remote",
+            // The offers browse relay: it too makes this nest dial a
+            // caller-named home (`subscriptions.md` § Pillar 1 → *The offers
+            // browse across nests*).
+            "fauna.subscriptions.offers.list_remote",
             "fauna.spam.get_preferences",
             "fauna.conversations.channel.send",
             "fauna.protocol.echo",

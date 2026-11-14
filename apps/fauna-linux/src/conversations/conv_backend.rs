@@ -1,6 +1,6 @@
 //! Linux runtime wiring for the shared fauna-native conversations receive path.
 //!
-//! At login (AuthSuccess) this builds a [`ConversationsSession`]
+//! At login (SessionEstablished) this builds a [`ConversationsSession`]
 //! (`libs/fauna-conversations`) over linux's existing singleton
 //! [`ConversationsManager`] (`conversations::host::manager()` — the surface the
 //! GTK UI + the e2e helpers observe), registers the real FaunaMls + SMTP +
@@ -112,7 +112,7 @@ pub type LinuxChainWitness = fauna_client_recovery::ChainWitness<
 >;
 
 /// Build the shared conversations session at login and start the unified receive
-/// loop. Called once per AuthSuccess from `app.rs`.
+/// loop. Called once per SessionEstablished from `app.rs`.
 ///
 /// `self_address` is the logged-in `<handle>@<domain>` (the FaunaMls self-handle
 /// and the SMTP `From:`); it seeds the session's live self-address cell,
@@ -290,7 +290,7 @@ pub fn start_conversations_session(
     }
     // Register the query-side resolver on the process-wide `SearchManager`
     // (`crate::search::host`, built in `build_main_window` — always live by
-    // AuthSuccess) — the local-arm twin of `set_index_builder_launcher` just
+    // SessionEstablished) — the local-arm twin of `set_index_builder_launcher` just
     // below, wiring backend 2's query side the way tui's `attach_local_index`
     // does. A **resolver**, not an arm: registering is synchronous and always
     // possible, so it does not need to wait on the MSEK the way minting an arm
@@ -312,7 +312,7 @@ pub fn start_conversations_session(
     // off the same kept `Arc` the resolver registration above already needed —
     // tui's `session.rs` (right after its own `attach_local_index` call) is the
     // template; the process-wide `crate::feed::host` slot is linux's twin of
-    // tui's `app.feed.manager`, live by `AuthSuccess` (`build_main_window`
+    // tui's `app.feed.manager`, live by `SessionEstablished` (`build_main_window`
     // calls `feed::host::init` before any login can complete).
     if let Some(feed_manager) = crate::feed::host::manager() {
         feed_manager.set_post_index_observer(index_launcher.own_post_observer());
@@ -728,10 +728,14 @@ async fn wire_mls_state_sync(
     manager: Weak<ConversationsManager>,
     sync: Arc<MlsStateSync>,
 ) {
+    let handles = (backend.clone(), manager.clone(), Arc::clone(&sync));
     match orchestration::restore_and_wire_with_retry(sync, backend, manager).await {
-        RestoreRetryEnd::Wired(restored) => tracing::info!(
-            "mls-sync: cross-device plane wired ({restored} channel(s) restored from replica)"
-        ),
+        RestoreRetryEnd::Wired(restored) => {
+            tracing::info!(
+                "mls-sync: cross-device plane wired ({restored} channel(s) restored from replica)"
+            );
+            register_pre_succession_flush(handles.0, handles.1, handles.2);
+        }
         RestoreRetryEnd::Failed(e) => {
             tracing::warn!("mls-sync: replica load failed ({e}); staying single-device")
         }
@@ -739,6 +743,30 @@ async fn wire_mls_state_sync(
             tracing::debug!("mls-sync: session dropped during launch retry")
         }
     }
+}
+
+/// Make the wired plane reachable by identity for the succession ceremony's
+/// awaited flush before its submit (`fauna_client_mls_sync::leave_flush`;
+/// `succession-aftermath.md` § Re-key scope → *The predecessor's replica is
+/// flushed before the submit*). linux's autosave is its own glib debounce, so
+/// the shared launcher never registers it; the entry is the plane itself and
+/// the flush runs the shared snapshot + save off whatever thread awaits it.
+/// Registered at the wire, as the launcher's is: before it the save gate is
+/// shut and a flush would land nothing.
+fn register_pre_succession_flush(
+    backend: Weak<FaunaMlsBackend>,
+    manager: Weak<ConversationsManager>,
+    sync: Arc<MlsStateSync>,
+) {
+    let (Some(backend), Some(manager)) = (backend.upgrade(), manager.upgrade()) else {
+        return;
+    };
+    fauna_client_mls_sync::leave_flush::register_live_plane(
+        backend.engine().identity_actor_id(),
+        &manager,
+        &backend,
+        sync,
+    );
 }
 
 /// Re-drive every crash-staged folder member removal at launch — linux's leg
@@ -771,6 +799,9 @@ async fn resume_folder_removals(
     )
     .with_recording_device(crate::sync::device_id().ok().map(hex::encode))
     .with_predecessors(crate::attested_predecessor_ids_for_secret_hex(secret_hex))
+    // The projection walk's take-over for a set the agent binds no location to
+    // (`succession-cut.md` ruling (11)(l)).
+    .with_engine_bound_sets(fauna_client_folders::agent_bound_sets())
     .run(session.backend())
     .await;
 }
@@ -867,7 +898,7 @@ fn arm_replica_debounce(
 // for every app (no mock-gate), so these just need the runtime handle the
 // session build stashed.
 
-/// Whether the conversations session has been built (set at AuthSuccess by
+/// Whether the conversations session has been built (set at SessionEstablished by
 /// [`start_conversations_session`]). The tier_3 round-trip polls
 /// `data.conv_real_backend_active` until this is true before driving a real send.
 pub fn is_e2e_real_active() -> bool {
@@ -902,7 +933,7 @@ fn e2e_runtime() -> Option<tokio::runtime::Handle> {
     ACTIVE_SESSION.lock().unwrap().runtime.clone()
 }
 
-/// The active [`ConversationsSession`] (the one started at AuthSuccess), if any.
+/// The active [`ConversationsSession`] (the one started at SessionEstablished), if any.
 /// The organizer scheduling dispatch (`client::invite_to_event`) clones it to back
 /// the mailbox-less WS-RPC iMIP rail (`NestImipDispatch` →
 /// `ConversationsSession::deliver_scheduling_imip`); `None` only before login /
@@ -1201,7 +1232,7 @@ fn page_error() -> Result<(), String> {
 /// deliberately *preserves* backends). Every same-account re-login therefore
 /// asked for a lock its own predecessor still held and was told
 /// `ServedElsewhere` — "your conversations are open in another instance" about
-/// an instance that was this one — and `app.rs`'s `AuthSuccess` arm dutifully
+/// an instance that was this one — and `app.rs`'s `SessionEstablished` arm dutifully
 /// armed the honest standing refusal, leaving the conversations page blank over
 /// a live engine.
 ///

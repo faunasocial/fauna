@@ -822,9 +822,6 @@ def test_reporting_an_account_hides_everything_it_wrote(logged_in_app, nest_inst
     # placeholder of the hidden account offers to show the ACCOUNT again, and
     # one press on any of them brings back everything it wrote. The feed lists
     # newest first, so the account's two seeds are the top two cards.
-    # An app that has not built the show-again button declares it here: the
-    # hide above is witnessed on it either way.
-    require_surface(app.driver, "content-policy-show-again-button")
     card = "post-card[0]"
     _poll(
         lambda: app.driver.count("content-policy-show-again-button", scope=card) > 0,
@@ -851,7 +848,6 @@ def test_a_hidden_post_is_shown_again_from_its_placeholder(logged_in_app, nest_i
     persisted un-hide through the shared `unhide_reported`, never the
     session-local reveal; the report itself stays filed)."""
     app = logged_in_app
-    require_surface(app.driver, "content-policy-show-again-button")
     _, actor = _other_actor(nest_instance)
     token = uuid.uuid4().hex[:10]
     text = f"show again target {token}"
@@ -914,7 +910,6 @@ def test_a_reported_account_is_hidden_and_shown_again_on_every_own_device(
     hide list at sign-in, so B proves the hide travelled with the account, and
     A — never re-signed-in — proves the un-hide reaches a device already open."""
     app = logged_in_app
-    require_surface(app.driver, "content-policy-show-again-button")
     app.profile.require_state_protocol_actor_nav_supported()
     other, actor = _other_actor(nest_instance)
     token = uuid.uuid4().hex[:10]

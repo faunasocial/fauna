@@ -55,13 +55,13 @@ Stamped 2026-11-07 at b844c771f6.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| linux | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
-| windows | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| web | ⚠ partial | 0.1.6-dev+aa0b8e99 standalone |
+| linux | ⚠ partial | 0.1.5-dev+8b69d25b.dirty standalone |
+| windows | ⚠ partial | 0.1.6 docker |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| ios | ✅ full | 0.1.6 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.6-dev+94702c5c standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -85,6 +85,6 @@ Stamped 2026-11-07 at b844c771f6.
 | 9 | app | `tests/e2e-unified/tests/test_contacts_edge_actions.py::test_each_contact_row_says_where_the_relationship_stands` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_delivered_message_confirms_an_accepted_contact_with_no_confirm_call` | nest (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_contact_overlay.py::test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_a_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 12 | app | `tests/e2e-unified/tests/test_contacts_cross_nest_knock.py::test_a_contact_row_opens_the_profile_their_own_nest_serves` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
-| 13 | app | `tests/e2e-unified/tests/test_contacts_roster_handle_display.py::test_a_roster_contact_is_named_by_handle_on_their_profile_header_and_member_chip` | tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_contacts_cross_nest_knock.py::test_a_contact_row_opens_the_profile_their_own_nest_serves` | web (linux): passed, linux (linux): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_contacts_roster_handle_display.py::test_a_roster_contact_is_named_by_handle_on_their_profile_header_and_member_chip` | ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

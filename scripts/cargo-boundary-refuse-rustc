@@ -1,0 +1,31 @@
+#!/bin/bash
+# The outside half's RUSTC_WRAPPER: `cargo test`, `cargo bench` and `cargo run`
+# compile inside the cargo boundary and run their program outside it, the
+# outside cargo expected to find every unit Fresh. A source edited while the
+# inside half compiled makes a unit stale, and the outside cargo would compile it
+# again — outside the boundary, with the network, where the compile cache's own
+# sandbox shows rustc no checkout (`couldn't find file …/lib.rs`). So the helper
+# (`scripts/cargo-boundary.py`, `argv`) runs the outside half with this file as
+# RUSTC_WRAPPER: cargo's probes (`-vV`, `--print …`) pass to the real rustc; any
+# compile writes the crate's name to the marker FAUNA_CARGO_BOUNDARY_STALE names,
+# says so in one line and fails, and the helper's line compiles again inside.
+# Switching the wrapper keeps a unit Fresh (cargo's fingerprint keys on the
+# compiler's reported version, not the wrapper's path).
+# Owner: docs/goal/architecture/build-compile-boundary.md § Implementation status
+# today (the shims), the outside half's paragraph.
+set -u
+for a in "$@"; do
+    case "$a" in
+        -vV|-V|--version|--print|--print=*) exec "$@" ;;
+    esac
+done
+crate="a unit" prev=""
+for a in "$@"; do
+    [ "$prev" = "--crate-name" ] && crate="$a"
+    prev="$a"
+done
+if [ -n "${FAUNA_CARGO_BOUNDARY_STALE:-}" ]; then
+    printf '%s\n' "$crate" >> "$FAUNA_CARGO_BOUNDARY_STALE"
+fi
+echo "[cargo-boundary] $crate went stale between the compile and the run (a source changed mid-build) — compiling again inside" >&2
+exit 1

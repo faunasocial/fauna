@@ -160,6 +160,39 @@ pub struct FfiAdminUser {
     /// (`fauna.admin.conflict`); the shared decision is
     /// `fauna_client_admin::admin_user_row_controls`, so no client re-derives it.
     pub is_admin: bool,
+    /// A supervised account's current guardian; `None` on an unsupervised row
+    /// (`family-safety.md` § App surface → *Admin take-over*). Additive
+    /// 2026-11-14.
+    #[uniffi(default = None)]
+    pub guardian: Option<FfiAdminUserGuardian>,
+}
+
+/// FFI mirror of [`fauna_protocol::admin::AdminUserGuardian`].
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiAdminUserGuardian {
+    /// Raw 32-byte actor id of the guardian.
+    pub actor_id: Vec<u8>,
+    /// The guardian's handle; `None` for a handle-less account.
+    pub handle: Option<String>,
+}
+
+impl From<fauna_protocol::admin::AdminUserGuardian> for FfiAdminUserGuardian {
+    fn from(g: fauna_protocol::admin::AdminUserGuardian) -> Self {
+        FfiAdminUserGuardian {
+            actor_id: g.actor_id.to_vec(),
+            handle: g.handle,
+        }
+    }
+}
+
+impl From<FfiAdminUserGuardian> for fauna_protocol::admin::AdminUserGuardian {
+    fn from(g: FfiAdminUserGuardian) -> Self {
+        fauna_protocol::admin::AdminUserGuardian {
+            actor_id: fauna_protocol::ByteBuf::from(g.actor_id),
+            handle: g.handle,
+            ..Default::default()
+        }
+    }
 }
 
 impl From<AdminUser> for FfiAdminUser {
@@ -176,6 +209,7 @@ impl From<AdminUser> for FfiAdminUser {
             eviction: u.eviction.map(Into::into),
             mail_serving_enabled: u.mail_serving_enabled,
             is_admin: u.is_admin,
+            guardian: u.guardian.map(Into::into),
         }
     }
 }
@@ -199,6 +233,10 @@ pub struct FfiAdminUserRowControls {
     pub make_admin: bool,
     /// `admin-users-remove-admin-button` — revoke the admin role.
     pub remove_admin: bool,
+    /// `admin-users-take-over-button` — become a supervised account's
+    /// guardian at once (`family-safety.md` § App surface → *Admin take-over*).
+    #[uniffi(default = false)]
+    pub take_over: bool,
 }
 
 impl From<fauna_client_admin::AdminUserRowControls> for FfiAdminUserRowControls {
@@ -209,6 +247,7 @@ impl From<fauna_client_admin::AdminUserRowControls> for FfiAdminUserRowControls 
             restore: c.restore,
             make_admin: c.make_admin,
             remove_admin: c.remove_admin,
+            take_over: c.take_over,
         }
     }
 }
@@ -218,8 +257,15 @@ impl From<fauna_client_admin::AdminUserRowControls> for FfiAdminUserRowControls 
 /// to render. Do NOT re-derive this from `FfiAdminUser.eviction`/`is_admin`
 /// client-side; call this instead (see the doc comment on
 /// [`FfiAdminUserRowControls`]).
-#[uniffi::export]
-pub fn admin_user_row_controls(user: FfiAdminUser) -> FfiAdminUserRowControls {
+///
+/// `viewer` is the viewing admin's raw actor id, which the take-over offer
+/// keys on; absent, no take-over is offered (the conservative reading until
+/// an app renders the control).
+#[uniffi::export(default(viewer = None))]
+pub fn admin_user_row_controls(
+    user: FfiAdminUser,
+    viewer: Option<Vec<u8>>,
+) -> FfiAdminUserRowControls {
     let wire = AdminUser {
         eviction: user.eviction.map(|e| AdminEviction {
             status: e.status,
@@ -231,9 +277,33 @@ pub fn admin_user_row_controls(user: FfiAdminUser) -> FfiAdminUserRowControls {
             ..Default::default()
         }),
         is_admin: user.is_admin,
+        guardian: user.guardian.map(Into::into),
         ..Default::default()
     };
-    fauna_client_admin::admin_user_row_controls(&wire).into()
+    let Some(viewer) = viewer else {
+        let controls = fauna_client_admin::admin_user_row_controls(
+            &AdminUser {
+                guardian: None,
+                ..wire
+            },
+            &[],
+        );
+        return controls.into();
+    };
+    fauna_client_admin::admin_user_row_controls(&wire, &viewer).into()
+}
+
+/// `fauna_client_admin::admin_user_guardian_label` over the FFI boundary —
+/// the text a supervised row's `admin-users-supervised-by` names its guardian
+/// by (handle, full-hex fallback); `None` on an unsupervised row
+/// (`family-safety.md` § App surface → *Admin take-over*).
+#[uniffi::export]
+pub fn admin_user_guardian_label(user: FfiAdminUser) -> Option<String> {
+    let wire = AdminUser {
+        guardian: user.guardian.map(Into::into),
+        ..Default::default()
+    };
+    fauna_client_admin::admin_user_guardian_label(&wire)
 }
 
 /// `fauna_client_admin::admin_picker_option` over the FFI boundary — the

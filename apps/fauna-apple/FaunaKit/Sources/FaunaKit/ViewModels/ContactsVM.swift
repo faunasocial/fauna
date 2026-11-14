@@ -113,13 +113,25 @@ public class ContactsVM {
     public func acceptKnock(peerId: String) async {
         guard let api, let actorId else { return }
         do {
-            try await api.acceptKnock(actorId: actorId, peerId: peerId)
+            let queued = try await api.acceptKnockOrQueue(actorId: actorId, peerId: peerId)
             guard self.api === api else { return }   // the in-flight clause
-            await refresh()
+            if settleKnockAccept(peerId: peerId, queued: queued) { await refresh() }
         } catch {
             guard self.api === api else { return }
             errorMessage = DisplayError.http(error)
         }
+    }
+
+    /// Settle one accept's outcome; returns whether the page re-reads. Sent
+    /// (`queued == false`) → re-read from the nest, as after every mutation
+    /// here. Queued with no nest → the accepted knock leaves the local list and
+    /// no roster row is added: the nest's read after the drain is the word, and
+    /// there is no nest to read now. Mirrors tui's `Outcome::KnockQueued`,
+    /// android's `ContactsVM.acceptKnock` and FamilyVM's `settleDecision`.
+    func settleKnockAccept(peerId: String, queued: Bool) -> Bool {
+        guard queued else { return true }
+        knocks.removeAll { $0.sender == peerId }
+        return false
     }
 
     public func blockKnock(peerId: String) async {

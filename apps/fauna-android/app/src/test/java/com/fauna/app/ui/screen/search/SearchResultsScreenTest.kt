@@ -2,6 +2,7 @@ package com.fauna.app.ui.screen.search
 
 import androidx.navigation.NavController
 import org.junit.Test
+import org.mockito.Mockito.inOrder
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.verifyNoInteractions
@@ -151,5 +152,22 @@ class SearchResultsScreenTest {
         onOpen.invoke()
 
         verify(nav).navigate("media/file/42/a+b%2Fc")
+    }
+
+    @Test
+    fun eventOpensTheEventDetailRouteByItsUidHashOverTheEventsPage() {
+        val nav = navController()
+        val conv = conversationsManager()
+
+        val onOpen = openSearchResult(SearchNav.Event(uidHash = "a b/c"), nav, conv)
+        checkNotNull(onOpen)
+        onOpen.invoke()
+
+        // The Events page first, so Back from the detail lands there (tui's
+        // and ios's shape), then the detail keyed by the encoded uid_hash.
+        val order = inOrder(nav)
+        order.verify(nav).navigate("events")
+        order.verify(nav).navigate("event/a+b%2Fc")
+        verifyNoInteractions(conv)
     }
 }

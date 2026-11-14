@@ -25,6 +25,15 @@ import pytest
 from drivers.base import PlatformDriver
 
 
+def _probe(read) -> str:
+    """One diagnostic reading; a probe that throws says so instead of masking
+    the assertion it explains (convention 6)."""
+    try:
+        return repr(read())
+    except Exception as e:  # noqa: BLE001 — diagnostics must not mask the assert
+        return f"(unreadable: {type(e).__name__}: {e})"
+
+
 class CustodyActions:
     """The custody facet's row families and gestures (tui-led, 2026-08-16/17)."""
 
@@ -39,10 +48,12 @@ class CustodyActions:
         tui (2026-08-16/17), linux, windows and macOS + iOS (all 2026-09-28;
         apple through the shared FaunaKit ``DevicesContent``) and android
         (2026-10-08, ``DevicesScreen.kt``) render pieces 1 + 3 and the mint with
-        live controls. web is a DECLARED absence: accept, the mint and
-        set-budget/stop are gated on capabilities web lacks (devices.md § Where
-        logic lives). Piece 2 (owner-side render, ``custody-holder-card``) is
-        built on all seven apps."""
+        live controls. web is a DECLARED absence: accept and set-budget/stop
+        are gated on capabilities web lacks (devices.md § Where logic lives).
+        The mint alone — the owner's side — is built on web too (2026-11-11):
+        a journey that needs only it asks :meth:`require_mint_supported`.
+        Piece 2 (owner-side render, ``custody-holder-card``) is built on all
+        seven apps."""
         if not self.driver.is_web():
             return
         from helpers.app_surface import declared_absence
@@ -52,6 +63,15 @@ class CustodyActions:
             capability="custody ceremony (accept, mint, set-budget/stop)",
             doc="ui/devices.md § Where logic lives",
         )
+
+    def require_mint_supported(self) -> None:
+        """Skip unless this app can run the OWNER's side of the ceremony —
+        the ``custody-mint-*`` flow (convention 7). Built on all seven apps:
+        the six native ones with the whole ceremony, web (2026-11-11,
+        ``DevicesSection.svelte`` over its conversations rail) with the mint
+        and the owner's drive pass but not the host's accept, so no app skips
+        today; a regressed shell declares its absence HERE."""
+        return
 
     def require_holder_rows_supported(self) -> None:
         """Skip unless this app renders piece 2 — the owner-side
@@ -152,6 +172,7 @@ class CustodyActions:
         "My nest" in the target select, then accept — the accept binds the
         host's PINNED nest identity and the ceremony drive deposits the
         custody-hosting row on the host's own nest."""
+        from helpers.waiting import wait_until
         from i18n.strings import S
 
         self.driver.select(
@@ -159,7 +180,25 @@ class CustodyActions:
             S.devices.custody_offer_target_nest,
             index=index,
         )
+        # What the select painted just before the accept: a re-render that
+        # dropped the choice binds the DEVICE, and the hosting row then never
+        # reaches the nest — read it now, report it only on a timeout.
+        target = _probe(lambda: self.driver.get_text(
+            "custody-offer-target-select", index=index))
+        before = self.offer_count()
         self.driver.click("custody-offer-accept-button", index=index)
+        # Completion-anchored (convention 14): an accepted offer leaves the
+        # consent surface (`custody_offers` keeps only rows with no accept),
+        # so the card count falling is the accept having landed.
+        wait_until(
+            lambda: self.offer_count() < before, 60.0, interval=0.5,
+            diagnose=lambda: (
+                f"the accept of offer {index} never landed: offer cards "
+                f"{_probe(self.offer_count)} (were {before}); the target select "
+                f"painted {target} at the click; error surface "
+                f"{_probe(lambda: self.driver.get_text('error-message'))}"
+            ),
+        )
 
     def decline_offer(self, index: int = 0) -> None:
         self.driver.click("custody-offer-decline-button", index=index)

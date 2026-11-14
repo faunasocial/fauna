@@ -17,6 +17,7 @@
     shortId,
     accountEnrollmentNotice,
     accountEnrolledDeviceRow,
+    accountKeylessPosture,
   } from '#lib/wasm';
   import { sessionDevicesMachine } from '#lib/devices-session';
   import {
@@ -25,6 +26,7 @@
     custodyRevoke,
   } from '#lib/wasm-folders';
   import { custodyHeldBytesText, custodyReceiptStatusText } from '#lib/custody';
+  import { conversationsManagerIfReady, getConversationsManager } from '#lib/conversations';
   import { getDeviceId } from '#lib/device-id';
   import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
@@ -72,11 +74,13 @@
   // page's own edge — the web twin of linux's `connect_map` hydrate and
   // android's `DevicesVM.loadCustodyFacet`.
   //
-  // Piece 2 ONLY. Pieces 1 (keyless-posture badge) and 3 (the held-for-others
-  // card with its budget input and stop control) both need the W3 (account-data-plane.md § Workstreams) account
-  // store, which has no wasm twin — and `devices.md` defines piece 3's card AS
-  // those two controls, so rendering it with them disabled would contradict the
-  // ratified text and offer controls that cannot succeed.
+  // Piece 2 here; piece 1 (the keyless-posture badge) rides the roster card
+  // below, read off this tab's account runtime (`loadAccountFacts`). Piece 3
+  // (the held-for-others card with its budget input and stop control) is not
+  // rendered: those controls write the custody registry row, a capability web
+  // lacks (`devices.md` § Where logic lives) — and `devices.md` defines piece
+  // 3's card AS those two controls, so rendering it with them disabled would
+  // contradict the ratified text and offer controls that cannot succeed.
   let custodyRows = $state<CustodyHolderRowView[]>([]);
   // A custody whose accept bound the host's NEST belongs to the Nests page's
   // `nest-trust-custody-*` family — one custody never renders in both places
@@ -120,12 +124,102 @@
     await loadCustody();
   }
 
+  // ── Offer initiation — the mint (devices.md § Custody facet, `custody-mint-*`) ──
+  //
+  // The owner asks a friend to hold encrypted copies. The ceremony rides an
+  // existing 1:1 conversation, so the host options ARE the 1:1 conversations
+  // — derived by the SAME shared fold the native apps run, over this tab's
+  // conversations rail (`custodyMintCandidatesJson`). v1 = Account scope with
+  // the default window; the REQUIRED floor copy renders before the confirm.
+  // Every refusal (no conversation, a pair never offered, the store not up)
+  // is the shared act's own string, routed to `error-message` (convention 11).
+  // tui's `CustodyMintOpen` / `CustodyMintConfirm` are the reference.
+  interface MintCandidate {
+    host: number[];
+    channel_hex: string;
+    label: string;
+  }
+  let mintOpen = $state(false);
+  let mintCandidates = $state<MintCandidate[]>([]);
+  let mintSelected = $state<number | null>(null);
+
+  async function openMint(): Promise<void> {
+    const id = $identity;
+    if (!id) return;
+    let candidates: MintCandidate[] = [];
+    try {
+      const mgr = await getConversationsManager();
+      candidates = mgr.custodyMintCandidatesJson(id.secretHex) as MintCandidate[];
+    } catch (e) {
+      console.warn('custody mint: no conversations rail', e);
+    }
+    if (candidates.length === 0) {
+      // No 1:1 conversation to ride — say so and stay closed, never an
+      // empty picker.
+      error = t.devices.custody_mint_no_contacts;
+      return;
+    }
+    error = '';
+    mintCandidates = candidates;
+    mintSelected = null;
+    mintOpen = true;
+  }
+
+  function cancelMint(): void {
+    mintOpen = false;
+    mintSelected = null;
+  }
+
+  async function confirmMint(): Promise<void> {
+    const id = $identity;
+    const picked = mintSelected === null ? undefined : mintCandidates[mintSelected];
+    if (!id || !picked) return;
+    mintOpen = false;
+    mintSelected = null;
+    let err: string | null;
+    try {
+      const mgr = await getConversationsManager();
+      err = await mgr.custodyMint(id.secretHex, Uint8Array.from(picked.host), picked.channel_hex);
+    } catch (e) {
+      err = e instanceof Error ? e.message : String(e);
+    }
+    error = err ?? '';
+    // The pending row joins the holder group on this refold.
+    await loadCustody();
+  }
+
+  // One drive pass on the page's load edge, so a friend's accept and the
+  // receipt converge while the owner looks (devices.md § Where logic lives),
+  // then a refold to paint what it moved. A tab with no conversations rail
+  // yet skips it — the rail's own ceremony-moved edge drives once it lands.
+  async function driveCustody(): Promise<void> {
+    const id = $identity;
+    const mgr = conversationsManagerIfReady();
+    if (!id || !mgr) return;
+    await mgr.custodyDrive(id.secretHex);
+    await loadCustody();
+  }
+
   // The standing refusal of this browser's enrollment — the tier device cap
   // (`ui/devices.md` § State & data shape): the one rendered sentence, read
   // off the account runtime on every hydrate. Not a gesture error: it stays up
   // until the slot no longer records it, and a roster gesture's own error wins
   // while that stands.
   let enrollmentNotice = $state<string | null>(null);
+
+  // Piece 1's keyless-posture marker (`devices.md` § Custody facet), per
+  // enrolled principal: derived from the account store's keyed principals at
+  // the resolved tip through the shared `keyless_posture` rule — never stored
+  // or asked. A principal absent here paints no badge (the fail-safe).
+  let keylessPrincipals = $state<Set<string>>(new Set());
+
+  async function loadKeylessPosture(): Promise<void> {
+    const principals = (snap?.devices ?? []).map((d) => d.principal ?? null);
+    const posture = await accountKeylessPosture(principals);
+    keylessPrincipals = new Set(
+      principals.filter((p, i): p is string => p !== null && posture[i] === true),
+    );
+  }
 
   function paintError(): void {
     const gesture = snap?.error ? resolveLocalized(snap.error) : '';
@@ -140,6 +234,7 @@
       accountEnrolledDeviceRow(),
     ]);
     paintError();
+    await loadKeylessPosture();
   }
 
   function applySnapshot(): void {
@@ -173,6 +268,7 @@
       // failure here degrades to "no custodians shown" rather than an empty
       // page — the roster is what this page is for.
       void loadCustody();
+      void driveCustody().catch((e) => console.warn('custody drive:', e));
       void loadAccountFacts();
       // Periodic re-read so a device registered out-of-band shows up — and
       // the enrollment's standing refusal comes down once a pass clears it.
@@ -310,6 +406,11 @@
               <!-- Slice F guardian-enrolled-device marker (family-safety.md § Full
                    visibility): the ward's own list renders it (transparency by
                    construction); absent on an unsupervised account. -->
+              <!-- Piece 1 (`devices.md` § Custody facet): this device's
+                   principal holds no generation key at the resolved tip. -->
+              {#if device.principal && keylessPrincipals.has(device.principal)}
+                <span class="badge keyless-badge" data-testid={IDS.DEVICE_KEYLESS_POSTURE_BADGE}>{t.devices.keyless_posture_badge}</span>
+              {/if}
               {#if device.guardian_marked}
                 <span class="badge guardian-badge" data-testid={IDS.DEVICE_GUARDIAN_MARK_BADGE}>{t.devices.guardian_marked_badge}</span>
               {/if}
@@ -490,6 +591,55 @@
       </div>
     </section>
   {/if}
+
+  <!-- Offer initiation — the mint (`custody-mint-*`, devices.md § Custody
+       facet). Always offered: the button answers "no one to ask yet" on
+       `error-message` rather than hiding, as on tui. -->
+  <section class="section">
+    <div class="device-actions">
+      <button
+        class="btn btn-small"
+        data-testid={IDS.CUSTODY_MINT_BUTTON}
+        onclick={openMint}
+      >{t.devices.custody_mint_button}</button>
+    </div>
+    {#if mintOpen}
+      <div class="custody-mint">
+        <label>
+          {t.devices.custody_mint_host_label}
+          <select
+            data-testid={IDS.CUSTODY_MINT_HOST_SELECT}
+            value={mintSelected === null ? '' : String(mintSelected)}
+            onchange={(e) => {
+              const v = (e.currentTarget as HTMLSelectElement).value;
+              mintSelected = v === '' ? null : Number(v);
+            }}
+          >
+            <option value="" disabled>{t.devices.custody_mint_host_placeholder}</option>
+            {#each mintCandidates as c, i}
+              <option value={String(i)}>{c.label}</option>
+            {/each}
+          </select>
+        </label>
+        <!-- REQUIRED floor copy before the confirm: what the custodian will
+             see — the shape, never the content. -->
+        <p class="device-meta" data-testid={IDS.CUSTODY_MINT_FLOOR_NOTE}>{t.devices.custody_mint_floor}</p>
+        <div class="device-actions">
+          <button
+            class="btn btn-small"
+            data-testid={IDS.CUSTODY_MINT_CONFIRM_BUTTON}
+            disabled={mintSelected === null}
+            onclick={confirmMint}
+          >{t.devices.custody_mint_confirm}</button>
+          <button
+            class="btn btn-small"
+            data-testid={IDS.CUSTODY_MINT_CANCEL_BUTTON}
+            onclick={cancelMint}
+          >{t.common.cancel}</button>
+        </div>
+      </div>
+    {/if}
+  </section>
 {/if}
 
 <style>

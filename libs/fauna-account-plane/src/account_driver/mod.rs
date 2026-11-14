@@ -163,7 +163,7 @@ pub use enrollment::{
 pub use handle::{
     AccountStoreHandle, GroupCeremonyAuthority, HolderWalk, HolderWalkSeat, LedgerIdentity,
     PumpCycles, PumpCyclesView, RUNTIME_GONE, SecondConnection, SecondConnectionClose,
-    ServeStoreFacts, ServeStoreSeat,
+    ServeStoreFacts, ServeStoreSeat, unsent_changes_of,
 };
 pub use handle_source::{
     ACCOUNT_HANDLE_WAIT, AccountHandleSource, AccountMailImportSourceStore, AccountMailStore,
@@ -566,6 +566,13 @@ pub struct DriverConfig {
     /// ([`fauna_client_sync::SELF_REGISTER_LABEL`]), which the app's own
     /// labeled register later supersedes.
     pub enrollment_device_label: Option<String>,
+    /// Whether the app host is in the foreground when the driver is minted —
+    /// the [`crate::host_legs::ForegroundSeat`] starts from it, so the first
+    /// assembly's prologue pass already reads a phone's real place and a
+    /// start out of front binds no peer leg at all (`p2p-shared-set-build.md`
+    /// § Phone peers — design, decision 2). `true` for every host that never
+    /// leaves the foreground: the desktops, tui, the agent, web and tests.
+    pub foreground: bool,
 }
 
 /// What one assembly resolved, borrowed for one [`AccountDriver::serve`]: the
@@ -1031,6 +1038,10 @@ pub struct AccountDriver {
     /// The handle's serve-store facts (the seat is shared) — the native
     /// host seats each assembly's through [`Self::serve_store_seat`].
     serve_store: handle::ServeStoreSeat,
+    /// The app host's foreground signal (the seat is shared with the handle)
+    /// — the native host hands it to each assembly's legs through
+    /// [`Self::foreground_seat`].
+    foreground: crate::host_legs::ForegroundSeat,
     config: DriverConfig,
 }
 
@@ -1050,6 +1061,7 @@ impl AccountDriver {
         let first_listings = Arc::new(FirstListings::default());
         let grant_registered = Arc::new(watch::channel(false).0);
         let serve_store = handle::ServeStoreSeat::default();
+        let foreground = crate::host_legs::ForegroundSeat::starting(config.foreground);
         let ledger_identity = fauna_core::hex32::decode(&config.actor_id_hex)
             .ok()
             .map(|id| {
@@ -1078,6 +1090,7 @@ impl AccountDriver {
             escrow_recovery_memo: EscrowRecoveryMemo::default(),
             grant_registered: Arc::clone(&grant_registered),
             serve_store: serve_store.clone(),
+            foreground: foreground.clone(),
             config,
         };
         let handle = AccountStoreHandle {
@@ -1091,6 +1104,7 @@ impl AccountDriver {
             ledger_identity,
             holder_walk: HolderWalkSeat::default(),
             serve_store,
+            foreground,
         };
         (driver, handle)
     }
@@ -1100,6 +1114,13 @@ impl AccountDriver {
     /// this driver was minted with.
     pub fn serve_store_seat(&self) -> handle::ServeStoreSeat {
         self.serve_store.clone()
+    }
+
+    /// The app host's foreground signal, shared with every clone of the
+    /// handle this driver was minted with — what the native host's peer leg
+    /// reads at its ensure step ([`crate::host_legs::PeerLegPass::Backgrounded`]).
+    pub fn foreground_seat(&self) -> crate::host_legs::ForegroundSeat {
+        self.foreground.clone()
     }
 
     /// The writer a pass of this driver found removed on the fleet plane —
@@ -1174,6 +1195,9 @@ impl AccountDriver {
             grant_registered,
             // Seated by the host before serve; nothing in the loop reads it.
             serve_store: _,
+            // Handed to the host's legs before serve; the loop reads only the
+            // command that follows a change (`Cmd::SetForeground`).
+            foreground: _,
             config: settings,
         } = self;
         let first_listings: &FirstListings = first_listings;
@@ -2185,6 +2209,37 @@ impl AccountDriver {
                                     cycles.owe_holder_pass();
                                 }
                             }
+                        }
+                        // The host stopped a runtime of this store this one
+                        // displaced, so the singleton it held is free. A
+                        // non-holder fires its backstop tick now, whose arm is
+                        // the one re-election path (the agent's keep-out, the
+                        // win's catch-up pass, a refusal's quiet continue);
+                        // waiting for the tick itself left an installed
+                        // runtime unpumped for the whole backstop — an hour on
+                        // every app host (`account-runtime.md` § Multi-instance
+                        // concurrency → *A supersession hands the engine role
+                        // over*). A holder has nothing to take.
+                        Cmd::EngineRoleVacated => {
+                            if !role.is_holder() {
+                                backstop.set(fauna_sleep::sleep(Duration::ZERO));
+                            }
+                        }
+                        // The app host left the foreground: the legs come down
+                        // here, between passes, as the yield's do — the
+                        // listener GONE before the answer, so a shell that
+                        // awaits this before its process is suspended leaves
+                        // no socket bound. The seat already reads background,
+                        // so every later pass binds nothing; a return needs no
+                        // work here (the next pass binds).
+                        Cmd::SetForeground { foreground, reply } => {
+                            if !foreground {
+                                legs.stand_down().await;
+                                tracing::info!(
+                                    "account runtime: the app left the foreground — legs stood down"
+                                );
+                            }
+                            let _ = reply.send(());
                         }
                         Cmd::Shutdown { reply } => {
                             // Carried out to the host, NOT answered here: the

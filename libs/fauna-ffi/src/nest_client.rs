@@ -80,9 +80,9 @@ use crate::feed_client::FfiFeedClient;
 use crate::folders_client::FfiFoldersClient;
 use crate::inbox_client::FfiInboxClient;
 use crate::moderation_client::FfiModerationClient;
-use crate::nostr_client::FfiNostrBunkerClient;
 #[cfg(feature = "zaps")]
 use crate::nostr_client::FfiNostrZapSignerClient;
+use crate::nostr_client::{FfiNostrAdvertiseClient, FfiNostrBunkerClient};
 use crate::notifications_client::FfiNotificationsClient;
 #[cfg(feature = "payments")]
 use crate::payments_client::FfiPaymentsClient;
@@ -1589,6 +1589,14 @@ impl FfiNestClient {
     /// signer) over this connection.
     pub fn nostr_bunker(&self) -> Arc<FfiNostrBunkerClient> {
         FfiNostrBunkerClient::from_nest(Arc::clone(&self.nest))
+    }
+
+    /// Typed-call client for the Nostr advertisement of a sold post
+    /// (`fauna.nostr.advertise.{set,clear}` + the `nostr-advertise`
+    /// capability read — monetization.md § The Nostr advertisement of a sold
+    /// post) over this connection. Ungated: `set` is gated inside it.
+    pub fn nostr_advertise(&self) -> Arc<FfiNostrAdvertiseClient> {
+        FfiNostrAdvertiseClient::from_nest(Arc::clone(&self.nest))
     }
 
     /// Typed-call client for the `fauna.notifications.*` kinds (list /
@@ -3326,6 +3334,23 @@ impl FfiNestClient {
     /// Additive beside the switch-shaped stop (2026-09-14).
     pub async fn stop_account_runtime_for_sign_out(&self) {
         crate::account_runtime::teardown(fauna_client_account_runtime::StopReason::SignOut).await;
+    }
+
+    /// The app's **foreground signal** for the account runtime — a phone
+    /// shell (iOS's scene phase, android's lifecycle owner) calls it with
+    /// `false` when the app leaves the foreground and `true` when it returns
+    /// (`account-sync-plane.md` § Wormability walk, rule 5;
+    /// `p2p-shared-set-build.md` § Phone peers — design, decision 2). Leaving
+    /// stands the same-account peer leg down — its listener and dial pass gone
+    /// — before this returns, so a suspended process holds no socket; every
+    /// pass while backgrounded binds nothing. Returning runs one pass, which
+    /// binds again. Remembered process-wide, so a runtime that starts while
+    /// the app is backgrounded starts stood down. A desktop shell never calls
+    /// it: a Mac or PC app is not suspended, and the leg stays.
+    ///
+    /// Safe with no runtime installed (the signal is kept for the next one).
+    pub async fn set_account_runtime_foreground(&self, foreground: bool) {
+        crate::account_runtime::set_foreground(foreground).await;
     }
 
     /// The Devices page's **standing enrollment notice** — the sentence to

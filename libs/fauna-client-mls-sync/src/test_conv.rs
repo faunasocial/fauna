@@ -80,6 +80,12 @@ pub(crate) struct FakeConvNest {
     // deliberately NOT refused: that asymmetry is the point — the app send is
     // accepted while the Commit in front of it is not.
     refuse_commits: Mutex<bool>,
+    // When set, the NEXT `Commit` send is appended and then answered with a
+    // transport fault — the reply lost after the nest accepted it.
+    lose_next_commit_reply: Mutex<bool>,
+    // When set, the NEXT `Commit` send is answered with a transport fault and
+    // NOT appended — the request never reached the nest.
+    drop_next_commit_send: Mutex<bool>,
 }
 
 impl FakeConvNest {
@@ -98,6 +104,18 @@ impl FakeConvNest {
     /// unstage).
     pub(crate) fn refuse_commits(&self) {
         *self.refuse_commits.lock().unwrap() = true;
+    }
+
+    /// Append the next `Commit` send, then answer it with a transport fault:
+    /// the nest accepted it and the reply was lost.
+    pub(crate) fn lose_next_commit_reply(&self) {
+        *self.lose_next_commit_reply.lock().unwrap() = true;
+    }
+
+    /// Answer the next `Commit` send with a transport fault without appending
+    /// it: the request never reached the nest.
+    pub(crate) fn drop_next_commit_send(&self) {
+        *self.drop_next_commit_send.lock().unwrap() = true;
     }
 
     fn alloc_seq(&self) -> i64 {
@@ -232,6 +250,13 @@ impl FakeConvNest {
                 message: "only the folder channel's claimant may append a Commit envelope".into(),
             });
         }
+        if is_commit && std::mem::take(&mut *self.drop_next_commit_send.lock().unwrap()) {
+            return Err(ConvRpcError::transient(
+                "connection reset before the request was sent",
+            ));
+        }
+        let lose_reply =
+            is_commit && std::mem::take(&mut *self.lose_next_commit_reply.lock().unwrap());
         if let Some(expect) = expect_no_commit_since {
             let high = self
                 .commit_high
@@ -260,6 +285,11 @@ impl FakeConvNest {
             .entry(channel_id_hex)
             .or_default()
             .push((seq, envelope));
+        if lose_reply {
+            return Err(ConvRpcError::transient(
+                "connection reset before the reply arrived",
+            ));
+        }
         Ok(seq)
     }
 

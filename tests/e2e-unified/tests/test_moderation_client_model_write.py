@@ -22,10 +22,13 @@ and only decrypted content is classified/trainable. The client-side train uses
 the SAME text the classifier saw (``ConversationsManager::message_body``), the
 one plaintext position in encrypted mode (`content-scoring.md`).
 
-The two-real-client tests run on **tui and linux** — the two apps carrying
-the real-engine ``second_real_faunamls_app`` fixture (tui is the lead app since
+The two-real-client tests run on the apps carrying the real-engine
+``second_real_faunamls_app`` fixture and a standalone moderation queue — the
+``moderation-queue-second-real-engine`` surface (tui is the lead app since
 2026-08-01, `testing.md` § Default app and nest mode; linux was the original
-1d-surface lead). The single-client mark-as-spam witness at the bottom
+1d-surface lead): the sealed-model correction on linux, tui, macos, ios and
+windows, the mark-as-spam undo round-trip on linux and tui (each test's marks
+say which). The single-client mark-as-spam witness at the bottom
 (``test_mark_as_spam_trains_sealed_model``) needs no second engine, so it
 speaks for every app whose automation surface carries ``inject_inbound``:
 tui, linux, web, windows, macos, ios and android (android's debug TestAgent
@@ -107,6 +110,7 @@ def _wait_stored_model(db_path: str, actor_id_hex: str, until, timeout: float = 
 @pytest.mark.tui
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.real_conversations
 @pytest.mark.feature("moderation-queue")
 def test_train_correction_writes_sealed_model_at_rest(
@@ -137,7 +141,7 @@ def test_train_correction_writes_sealed_model_at_rest(
     wait_until(
         lambda: conv_api.keypackage_count(port, bob, bob["actor_id_hex"]) >= 1,
         MLS_HANDSHAKE_S,
-        diagnose=lambda: "bob's linux/tui engine never published a key package",
+        diagnose=lambda: "bob's GUI engine never published a key package",
     )
 
     def deliver_and_correct(body: str, expect_snippet: str) -> None:

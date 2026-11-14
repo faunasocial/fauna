@@ -212,11 +212,12 @@ public static class AccountStateDir
         // hypothetical: an open handle makes a file undeletable, measured three
         // times in one week. The `catch` below is for a HARD failure only.
         //
-        // The paint is `App.SignOutHandler` → `ClearCredentialNamespace`, which
-        // captures this return and hands it, with the credential read-back, to
-        // `SignOutResidueSurface.Record` — recorded under `Base` so it outlives
-        // the process, and painted as `identity_choice`'s `sign-out-residue`
-        // view (`OnboardingViewModel.SignOutResidue`).
+        // Its one caller is the e2e reset/logout arms' wipe
+        // (`App.ClearCredentialNamespace`), which discards it: a real sign-out
+        // erases through the one sign-out routine instead
+        // (`SignOutResidueSurface.Finish`), whose residue is recorded under
+        // `Base` so it outlives the process and painted as `identity_choice`'s
+        // `sign-out-residue` view (`OnboardingViewModel.SignOutResidue`).
         //
         // ⚠ Member names below are the GENERATED ones, and they are neither
         // PascalCase nor collections: `uniffi-bindgen-cs` emits a positional record

@@ -1,4 +1,5 @@
-"""tier_1: the windows driver's `get_text` drops the InfoBar's severity-icon chrome.
+"""tier_1: the windows driver's `get_text` and `get_texts` drop the InfoBar's
+severity-icon chrome.
 
 WinUI's InfoBar aggregates its severity glyph's accessible name ("Error icon") into
 the text UIA reads off the message element, so `get_text("error-message")` came back
@@ -53,3 +54,22 @@ def test_only_a_leading_icon_name_is_dropped(monkeypatch):
 
 def test_an_empty_read_stays_empty(monkeypatch):
     assert _reading(monkeypatch, "").get_text("error-message") == ""
+
+
+def _bulk_reading(monkeypatch, raw):
+    monkeypatch.setattr(
+        HttpBridgeDriver, "get_texts", lambda self, element_id, *, scope=None: raw
+    )
+    return object.__new__(WindowsBridgeDriver)
+
+
+def test_the_bulk_read_drops_the_icon_as_the_single_read_does(monkeypatch):
+    # `get_texts` is a speed-up of `[get_text(id, i) …]`, never a behaviour change
+    # (`PlatformDriver.get_texts`): the bridge's bulk route reads the same
+    # aggregated text, so it needs the same strip, or a helper reading the whole
+    # `error-message` column grades a refusal painted in exactly the right words
+    # as absent.
+    raw = [f"Error icon {MESSAGE}", MESSAGE, "", f"{MESSAGE} (the Error icon was shown)"]
+    assert _bulk_reading(monkeypatch, raw).get_texts("error-message") == [
+        MESSAGE, MESSAGE, "", f"{MESSAGE} (the Error icon was shown)",
+    ]

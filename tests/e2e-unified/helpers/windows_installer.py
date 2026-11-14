@@ -14,7 +14,6 @@ from __future__ import annotations
 import glob
 import os
 import subprocess
-import sys
 
 #: The staged flavor the installer's publish bundles: the test flavor at the
 #: `release` profile. The installed product is driven through the e2e agent, so
@@ -30,6 +29,14 @@ RELEASE_TEST_FLAVOR = "win-arm64:release:test-helpers"
 #: bins' registry, never named here crate by crate.
 SOURCE_PATTERNS = [
     "apps/fauna-windows/installer/*.wxs",
+    # The wizard's strings and its licence page: words the MSI shows.
+    "apps/fauna-windows/installer/*.wxl",
+    "apps/fauna-windows/installer/*.rtf",
+    # The licence files the MSI carries (Notices.wxs) and what writes its notices.
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "installer/shipped-notices.toml",
+    "scripts/shipped-notices.py",
     "apps/fauna-windows/*/Cargo.toml",
     "apps/fauna-windows/*/src/**/*.rs",
     "apps/fauna-windows/FaunaApp/FaunaApp/*.csproj",
@@ -63,12 +70,11 @@ def workspace_inputs() -> tuple[tuple[str, ...], list[str]]:
 
 
 def is_admin() -> bool:
-    """Whether this process is elevated — the installer suite's skip condition."""
-    if sys.platform != "win32":
-        return False
-    import ctypes
+    """Whether this process is elevated — the installer suite's skip condition, read
+    from the one definition every pytest root's temp-root choice uses too."""
+    from common.elevation import is_elevated
 
-    return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    return is_elevated()
 
 
 def _git_ignored(paths):
@@ -181,6 +187,45 @@ def release_ffi_dll(repo: str) -> str:
     return os.path.join(
         repo, "target", "release", "windows-ffi", "win-arm64", "test-helpers", "fauna_ffi.dll",
     )
+
+
+#: The MSI's bundled components (installer/shipped-notices.toml, the windows-msi
+#: artifact's `bundled` table), as many as its notices run must list, and how
+#: many licence files the build stages for them: libunwind.dll's (the
+#: toolchain's own licence) and the mingw-w64 runtime's the gnullvm link puts
+#: into the mail bridge (its five licence files). A component added to the
+#: manifest changes these with it — the tier_1 pin reads both.
+MSI_BUNDLED_COMPONENTS = 2
+MSI_BUNDLED_FILES = 6
+
+
+def msi_notices_faults(lines, rid: str = "win-arm64") -> list[str]:
+    """What the MSI's notices run (`just windows-msi-notices`) left out of the
+    closure, read off the generator's verdict lines alone — the notices file is
+    dependency-authored text no test opens (shipped-notices.md § How the
+    notices file is produced). Three parts no library list of the restore
+    names are owed in every MSI's file (§ Per channel, the Windows MSI row): the
+    runtime packs the self-contained publish copied, read off that runtime's
+    deps.json; the .NET app host FaunaApp.exe is, for that runtime; and the
+    bundled components — the Bridge feature's libunwind.dll and the mingw-w64
+    runtime linked into the mail bridge — with every licence file their build
+    staged copied. Empty = all present."""
+    import re
+
+    lines = list(lines)
+    faults = []
+    packs = [m for m in (re.match(rf"shipped-notices: nuget runtime packs from FaunaApp\.deps\.json \(\S*/{re.escape(rid)}\): (\d+)$", ln) for ln in lines) if m]
+    if not packs or int(packs[-1].group(1)) == 0:
+        faults.append(f"no runtime pack read off the {rid} publish's FaunaApp.deps.json: the .NET runtime is missing from the notices")
+    if not any(re.match(rf"shipped-notices: nuget app host Microsoft\.NETCore\.App\.Host\.{re.escape(rid)}@\S+ \(", ln) for ln in lines):
+        faults.append(f"the .NET app host for {rid} (FaunaApp.exe is its launcher) is not in the notices")
+    bundled = (rf"shipped-notices: windows-msi bundled: components={MSI_BUNDLED_COMPONENTS} "
+               rf"files-copied={MSI_BUNDLED_FILES} fallbacks=0 left-out=0 refused=0$")
+    if not any(re.match(bundled, ln) for ln in lines):
+        faults.append("libunwind.dll and the mingw-w64 runtime are not in the notices with every licence file their build staged copied")
+    if not any(re.match(r"shipped-notices: windows-msi OK ", ln) for ln in lines):
+        faults.append("the generator printed no OK verdict for windows-msi")
+    return faults
 
 
 def require_release_test_flavor(repo: str) -> None:

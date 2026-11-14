@@ -923,9 +923,13 @@ def test_admin_dns_row_shows_where_catch_all_and_role_addresses_go(
     # Open the page afresh: nothing below is the picker remembering a click.
     _reopen_dns_page(admin_app)
 
+    last_read: dict = {}
+
     def row_reads_back():
         names = admin_app.admin.dns_domain_names()
         if domain not in names:
+            last_read.clear()
+            last_read["rows"] = names
             return None
         i = names.index(domain)
         shown = {
@@ -937,6 +941,8 @@ def test_admin_dns_row_shows_where_catch_all_and_role_addresses_go(
                 "admin-dns-domain-role-address-postmaster-select", index=i
             ),
         }
+        last_read.clear()
+        last_read.update(shown)
         ok = (
             shown["catch-all"] == option
             and shown["abuse"] == option
@@ -949,7 +955,8 @@ def test_admin_dns_row_shows_where_catch_all_and_role_addresses_go(
         RPC_ROUNDTRIP_S,
         diagnose=lambda: (
             f"{domain!r}'s row does not show where its mail goes: expected the "
-            f"catch-all and abuse@ on {option!r}, postmaster@ on the admin default"
+            f"catch-all and abuse@ on {option!r}, postmaster@ on the admin default "
+            f"({S.admin.dns.role_address_admin_default!r}); last read {last_read!r}"
         ),
     )
 

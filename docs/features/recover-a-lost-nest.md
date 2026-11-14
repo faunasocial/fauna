@@ -53,13 +53,13 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+5a9a5fa8 standalone |
-| linux | ⚠ partial | 0.1.5-dev+5a9a5fa8 standalone |
-| windows | ⚠ partial | 0.1.5-dev+5a9a5fa8 standalone |
-| macos | ⚠ partial | 0.1.5-dev+5a9a5fa8 standalone |
-| ios | ⚠ partial | 0.1.5-dev+56c8dd96.dirty standalone |
+| web | ✅ full | 0.1.6-dev+3aeb19b0 standalone |
+| linux | ⚠ partial | 0.1.6-dev+f2a8f7b9 standalone |
+| windows | ⚠ partial | 0.1.6 docker |
+| macos | ⚠ partial | 0.1.6 docker |
+| ios | ✅ full | 0.1.5-dev+56c8dd96.dirty standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+5a9a5fa8 standalone |
+| tui | ✅ full | 0.1.6-dev+3bf78261.dirty standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -74,8 +74,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 2 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_box_recovery.py::test_rebuilt_box_readopts_custodied_seed_identity` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_box_recovery.py::test_claim_handoff_seed_derives_to_nest_info_identity` | nest (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_every_kind_comes_back_onto_the_rebuilt_one` | tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_every_kind_comes_back_from_a_surviving_nest` | web (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_every_kind_comes_back_onto_the_rebuilt_one` | windows (windows): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_every_kind_comes_back_from_a_surviving_nest` | web (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_launch_recover_button_appears_when_the_saved_nest_is_dead` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_a_rotated_away_identity_is_never_offered_for_recovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_box_recovery_seed_custody.py::test_an_unconfirmed_custody_warns_the_admin_in_the_shared_words` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |

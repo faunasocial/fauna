@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The consumer-side claim-redemption input of Settings → Subscriptions
-  (monetization.md § Pillar 3 Q4 — the universal fallback binding).
+  The consumer-side claim-redemption pair (monetization.md § Pillar 3 Q4 — the
+  universal fallback binding), one control for both redeem doors: Settings →
+  Subscriptions (this nest) and another actor's profile Tiers tab (that creator's
+  home — profile.md § Layout & flow → Another's profile).
 
   ⚠ A payments render, so it lives under Views/Payments/ and nowhere else: the whole
   directory is dropped from Page and Compile when `/p:FaunaExcisePayments=true`, which is
   the only construct that removes an AutomationId literal from the artifact (XAML has
   no preprocessor). See PaymentsAuthorSections.xaml's header for the full statement,
-  and note the same rule about markup references — SettingsSubscriptionsPage hosts
-  this through a ContentControl, never by naming the type.
+  and note the same rule about markup references — SettingsSubscriptionsPage and
+  ProfilePage host this through a ContentControl, never by naming the type.
 -->
 <UserControl
     x:Class="FaunaApp.Views.Payments.ClaimRedeemPanel"
@@ -18,7 +20,7 @@
     xmlns:ids="using:FaunaApp.UiIds">
 
     <!-- Paste a post-payment claim code → the entitlement binds to this actor and
-         lands as a queued grant in the subscriptions list above. -->
+         lands as a queued grant (a pending row / a Pending offer badge). -->
     <StackPanel Spacing="8">
         <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
                    Text="{loc:Localize Key=subscriptions/redeem_claim_title}" />

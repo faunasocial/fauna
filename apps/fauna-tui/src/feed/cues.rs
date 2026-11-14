@@ -146,6 +146,13 @@ impl CueCapture {
         )
     }
 
+    /// The feed selection the list shows now
+    /// ([`fauna_feed::FeedSnapshot::cue_selection_key`]); its change drains
+    /// every exposure (`fauna_feed::CueTracker::note_selection`).
+    pub fn note_selection(&mut self, key: &str, wall_now_ms: u64) -> Vec<CueObservation> {
+        self.tracker.note_selection(key, wall_now_ms)
+    }
+
     /// Everything tracked has left — the quit path's drain.
     pub fn drain(&mut self, wall_now_ms: u64) -> Vec<CueObservation> {
         self.showing = false;
@@ -250,19 +257,26 @@ pub fn sample_frame(app: &mut App, page: &PaintedPage, tx: &UnboundedSender<UiMe
     let Some(manager) = app.feed.manager.clone() else {
         return;
     };
-    let window: Option<Vec<String>> = list_on_screen(app).then(|| {
-        manager
-            .snapshot()
-            .posts
-            .iter()
-            .map(|p| p.post_id.clone())
-            .collect()
+    // Off the list nothing is tracked (its leave edge drained it), so the
+    // selection is read only while the list shows.
+    let shown: Option<(String, Vec<String>)> = list_on_screen(app).then(|| {
+        let snapshot = manager.snapshot();
+        let ids = snapshot.posts.iter().map(|p| p.post_id.clone()).collect();
+        (snapshot.cue_selection_key(), ids)
     });
     let wall_now_ms = app.feed.cue_capture.wall_now_ms();
-    let finished = app
-        .feed
-        .cue_capture
-        .sample(window.as_deref().map(|ids| (page, ids)), wall_now_ms);
+    // A feed switch ends every exposure before the new feed is measured — a
+    // post both feeds hold keeps its card in place, so the list never leaves.
+    let mut finished = match &shown {
+        Some((key, _)) => app.feed.cue_capture.note_selection(key, wall_now_ms),
+        None => Vec::new(),
+    };
+    let window = shown.map(|(_, ids)| ids);
+    finished.extend(
+        app.feed
+            .cue_capture
+            .sample(window.as_deref().map(|ids| (page, ids)), wall_now_ms),
+    );
     emit(&manager, finished, tx, app.session_generation);
 }
 

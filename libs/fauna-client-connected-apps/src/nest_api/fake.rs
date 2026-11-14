@@ -44,6 +44,8 @@ pub enum FakeCall {
 #[derive(Debug, Default)]
 struct Inner {
     calls: Vec<FakeCall>,
+    /// The folder each `resolve_consent` carried, in call order.
+    resolved_folders: Vec<Option<i64>>,
     principals: Vec<PrincipalInfo>,
     /// Each principal's oracle record, by principal id, newest first.
     ops: Vec<(Vec<u8>, Vec<OracleOp>)>,
@@ -96,6 +98,10 @@ impl FakeConnectedAppsNestApi {
     }
     pub fn calls(&self) -> Vec<FakeCall> {
         self.inner.lock().unwrap().calls.clone()
+    }
+    /// The folder each `resolve_consent` carried, in call order.
+    pub fn resolved_folders(&self) -> Vec<Option<i64>> {
+        self.inner.lock().unwrap().resolved_folders.clone()
     }
     pub fn set_principals(&self, rows: Vec<PrincipalInfo>) {
         self.inner.lock().unwrap().principals = rows;
@@ -244,9 +250,10 @@ impl ConnectedAppsNestApi for FakeConnectedAppsNestApi {
         &self,
         consent_id: Vec<u8>,
         approved: bool,
-        _folder: Option<i64>,
+        folder: Option<i64>,
     ) -> Result<bool, ConnectedAppsApiError> {
         let mut g = self.record(FakeCall::ResolveConsent(consent_id.clone(), approved));
+        g.resolved_folders.push(folder);
         if g.fail_all {
             return Err(transient());
         }

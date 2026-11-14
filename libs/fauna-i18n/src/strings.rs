@@ -1268,6 +1268,11 @@ pub mod onboarding {
                 format!("No nest is running at {domain}. Start a nest there, then check again.")
             }
 
+            pub const KIDS_NO_JOINABLE_NEST: &str = "There is no nest at {domain} you can join. Ask for an invite to a nest that is already set up.";
+            pub fn kids_no_joinable_nest(domain: &str) -> String {
+                format!("There is no nest at {domain} you can join. Ask for an invite to a nest that is already set up.")
+            }
+
             pub const ALREADY_ON_NEST_HANDLE_MATCHES: &str = "Welcome back, {handle}.";
             pub fn already_on_nest_handle_matches(handle: &str) -> String {
                 format!("Welcome back, {handle}.")
@@ -1718,6 +1723,8 @@ pub mod feed {
     }
 
     pub const COMPOSE_SELL_PRICE_INVALID: &str = "Enter a smaller price";
+
+    pub const COMPOSE_SELL_PRICE_NOT_WHOLE: &str = "Enter the price as a whole number of sats";
 
     pub const COMPOSE_SELL_RANK_UNAVAILABLE: &str = "Could not check your tiers to price this post — try again";
 
@@ -3207,6 +3214,18 @@ pub mod atproto_settings {
     pub const CONSENT_APPROVE_BUTTON: &str = "Approve";
 
     pub const CONSENT_DENY_BUTTON: &str = "Deny";
+
+    pub const CONSENT_FOLDER_LABEL: &str = "Folder:";
+
+    pub const CONSENT_FOLDER_PROMPT: &str = "Choose a folder";
+
+    pub const CONSENT_FOLDER_NONE_DEPOSIT: &str = "None of your folders can receive files from an app — each keeps only its file list on your nest. Let one folder store its files on your nest first.";
+
+    pub const CONSENT_FOLDER_NONE_READ: &str = "None of your folders is shared with apps for reading. Turn on serving for a folder first.";
+
+    pub const CONSENT_FOLDER_NONE_BOTH: &str = "None of your folders can both receive files from an app and be read by one. Use a folder that stores its files on your nest and is served.";
+
+    pub const CONSENT_FOLDER_UNREADABLE: &str = "Your folders could not be read just now, so none can be chosen. Try again in a moment.";
 
     pub const ERROR_REFRESH: &str = "Failed to load app credentials: {message}";
     pub fn error_refresh(message: &str) -> String {
@@ -6066,7 +6085,7 @@ pub mod settings {
 
         pub const TOGGLE: &str = "Back up identity to iCloud Keychain";
 
-        pub const FOOTER: &str = "When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.";
+        pub const FOOTER: &str = "When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy yet. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.";
     }
 
     pub const CHECK_FOR_UPDATES: &str = "Check for Updates";
@@ -6468,6 +6487,8 @@ pub mod settings {
 
         pub const STATE_HELD: &str = "Waiting behind a change that was not sent";
 
+        pub const STATE_HELD_CARRY: &str = "Waiting for the conversation to move to your new identity";
+
         pub const STATE_UNSENT: &str = "Not sent";
 
         pub const REASON_UNKNOWN_KIND: &str = "This version of the app cannot send this change";
@@ -6479,6 +6500,8 @@ pub mod settings {
         pub const REASON_MLS_NOT_A_MEMBER: &str = "You are no longer a member of this conversation";
 
         pub const REASON_MLS_SEND_FAILED: &str = "The message could not be sent";
+
+        pub const REASON_MLS_ATTACHMENT_MISSING: &str = "An attachment of this message is no longer on this device";
 
         pub const REASON_FALLBACK: &str = "Your nest refused this change ({code})";
         pub fn reason_fallback(code: &str) -> String {
@@ -6740,6 +6763,8 @@ pub mod settings {
 
     pub const REMOVE_ACCOUNT_BLOCKED_THIS_WINDOW: &str = "Not removed — this window is using that account. Close this window, then remove the account from another one.";
 
+    pub const REMOVE_ACCOUNT_BLOCKED_CARRY_OWED: &str = "Not removed — this account still has changes waiting to move to your new identity. Sign in as your new identity and send or discard them first.";
+
     pub const SWITCH_REFUSED_NO_SECRET: &str = "Not switched — this device can no longer sign in as {account}: its secret key is missing here. You are still on the identity you were using. To use {account} here again, add it back with its secret key or recovery kit.";
     pub fn switch_refused_no_secret(account: &str) -> String {
         format!("Not switched — this device can no longer sign in as {account}: its secret key is missing here. You are still on the identity you were using. To use {account} here again, add it back with its secret key or recovery kit.")
@@ -6905,6 +6930,12 @@ pub mod nests {
 
     pub const SCOPE_MAIL: &str = "Mail — and the spam-filter model and training history derived from it";
 
+    pub const SCOPE_MATERIALIZE_MAIL: &str = "Keeps your mail searchable";
+
+    pub const SCOPE_MATERIALIZE_CALENDAR: &str = "Keeps your calendar searchable";
+
+    pub const SCOPE_MATERIALIZE_CARD: &str = "Keeps your contacts searchable";
+
     pub const SCOPE_CALENDAR: &str = "Calendar";
 
     pub const SCOPE_CARD: &str = "Contacts";
@@ -6956,6 +6987,12 @@ pub mod nests {
     pub const GRANT_KEEP_BUTTON: &str = "Keep";
 
     pub const BOUND_NOTE_STANDING: &str = "On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation.";
+
+    pub const BOUND_NOTE_MATERIALIZE_MAIL: &str = "On an honest nest, revoking deletes this nest's searchable copy of your mail and its key, and stops it reading more. It cannot un-see what was already read.";
+
+    pub const BOUND_NOTE_MATERIALIZE_CALENDAR: &str = "On an honest nest, revoking deletes this nest's searchable copy of your calendar and its key, and stops it reading more. It cannot un-see what was already read.";
+
+    pub const BOUND_NOTE_MATERIALIZE_CARD: &str = "On an honest nest, revoking deletes this nest's searchable copy of your contacts and its key, and stops it reading more. It cannot un-see what was already read.";
 
     pub const BOUND_NOTE_BOUNDED_MAIL: &str = "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it.";
 
@@ -7029,6 +7066,18 @@ pub mod nests {
     pub const MINT_SCOPE_PLACEHOLDER: &str = "Choose what to trust it with…";
 
     pub const MINT_OPTION_MAIL: &str = "Read and filter my mail — and the spam-filter model and training history derived from it";
+
+    pub const MINT_OPTION_MATERIALIZE_MAIL: &str = "Keep my mail searchable on this nest";
+
+    pub const MINT_OPTION_MATERIALIZE_CALENDAR: &str = "Keep my calendar searchable on this nest";
+
+    pub const MINT_OPTION_MATERIALIZE_CARD: &str = "Keep my contacts searchable on this nest";
+
+    pub const MINT_MATERIALIZE_NOTE: &str = "While this is on, this nest can read your mail and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your mail — it cannot undo what a hostile nest already read.";
+
+    pub const MINT_MATERIALIZE_CALENDAR_NOTE: &str = "While this is on, this nest can read your calendar and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your calendar — it cannot undo what a hostile nest already read.";
+
+    pub const MINT_MATERIALIZE_CARD_NOTE: &str = "While this is on, this nest can read your contacts and keeps a searchable copy of them on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your contacts — it cannot undo what a hostile nest already read.";
 
     pub const MINT_OPTION_CALENDAR: &str = "Read my calendar";
 
@@ -7275,6 +7324,44 @@ pub mod web_publish {
     pub const ERROR_PAYWALL_LINK: &str = "Failed to create paywall link: {message}";
     pub fn error_paywall_link(message: &str) -> String {
         format!("Failed to create paywall link: {message}")
+    }
+}
+
+pub mod nostr_advertise {
+    pub const ADVERTISE: &str = "Advertise on Nostr";
+
+    pub const STOP: &str = "Stop advertising on Nostr";
+
+    pub const CONFIRM_TITLE: &str = "Advertise this post on Nostr?";
+
+    pub const CONFIRM: &str = "Advertise";
+
+    pub const CONFIRM_BODY: &str = "Your post's public teaser and its price will be published to your nest's relay and to your Nostr relays. Anyone on Nostr can read them, and a zap of at least that price whose receipt is signed by one of your zap signers can buy the post for the person who sent it. If you stop advertising, the note is deleted from your nest's relay and, while your nest holds your Nostr key, your Nostr relays are asked to delete their copies, but some may keep them.";
+
+    pub const ERROR_ADVERTISE: &str = "Failed to advertise the post on Nostr: {message}";
+    pub fn error_advertise(message: &str) -> String {
+        format!("Failed to advertise the post on Nostr: {message}")
+    }
+
+    pub const ERROR_STOP: &str = "Failed to stop advertising the post on Nostr: {message}";
+    pub fn error_stop(message: &str) -> String {
+        format!("Failed to stop advertising the post on Nostr: {message}")
+    }
+}
+
+pub mod sale_price {
+    pub const BUTTON: &str = "Change price…";
+
+    pub const TITLE: &str = "Change price";
+
+    pub const ERROR_LOAD: &str = "Failed to read the post's price: {message}";
+    pub fn error_load(message: &str) -> String {
+        format!("Failed to read the post's price: {message}")
+    }
+
+    pub const ERROR_SAVE: &str = "Failed to change the price: {message}";
+    pub fn error_save(message: &str) -> String {
+        format!("Failed to change the price: {message}")
     }
 }
 
@@ -7848,7 +7935,7 @@ pub mod mail_import {
 pub mod archive_import {
     pub const TITLE: &str = "Import from other services";
 
-    pub const DESCRIPTION: &str = "Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.";
+    pub const DESCRIPTION: &str = "Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.";
 
     pub const UNAVAILABLE: &str = "Importing needs a session that holds your identity key; this one does not.";
 
@@ -8604,6 +8691,22 @@ pub mod admin {
         pub const MAKE_ADMIN: &str = "Make Admin";
 
         pub const REMOVE_ADMIN: &str = "Remove Admin";
+
+        pub const SUPERVISED_BY: &str = "Supervised by {guardian}";
+        pub fn supervised_by(guardian: &str) -> String {
+            format!("Supervised by {guardian}")
+        }
+
+        pub const TAKE_OVER: &str = "Take over";
+
+        pub const TAKE_OVER_CONFIRM_SUMMARY: &str = "Take over supervision of {ward} from {guardian}? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page.";
+        pub fn take_over_confirm_summary(ward: &str, guardian: &str) -> String {
+            format!("Take over supervision of {ward} from {guardian}? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page.")
+        }
+
+        pub const TAKE_OVER_CONFIRM: &str = "Confirm take-over";
+
+        pub const TAKE_OVER_CANCEL: &str = "Cancel";
 
         pub const PREV_PAGE: &str = "Previous";
 
@@ -11819,14 +11922,14 @@ pub mod subscriptions {
 
     pub const REDEEM: &str = "Redeem";
 
-    pub const CLAIM_DELIVERY_DM: &str = "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.";
+    pub const CLAIM_DELIVERY_DM: &str = "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.";
     pub fn claim_delivery_dm(code: &str) -> String {
-        format!("Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.")
+        format!("Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.")
     }
 
-    pub const CLAIM_DELIVERY_DM_LINK: &str = "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.";
+    pub const CLAIM_DELIVERY_DM_LINK: &str = "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.";
     pub fn claim_delivery_dm_link(code: &str, url: &str) -> String {
-        format!("Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.")
+        format!("Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.")
     }
 
     pub const OFFER_STATUS_NONE: &str = "Not subscribed";
@@ -12085,7 +12188,7 @@ pub mod error {
     }
 
     pub mod nostr {
-        pub const NOT_LINKED: &str = "This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.";
+        pub const NOT_LINKED: &str = "This needs a linked Nostr key, and none is linked for you. Link one on the Nostr page first.";
 
         pub const NO_CUSTODIAL_KEY: &str = "Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.";
 
@@ -12095,7 +12198,7 @@ pub mod error {
 
         pub const NOT_SOLD: &str = "Only a post you sell can be advertised on Nostr. Sell this post first.";
 
-        pub const NO_ASKING_PRICE: &str = "This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.";
+        pub const NO_ASKING_PRICE: &str = "This post has no asking price, so a zap could not buy it and it can't be advertised. To advertise a post you sell, choose Sell this post… when you write it and give it an asking price in sats.";
     }
 
     pub mod nest {
@@ -12106,6 +12209,16 @@ pub mod error {
 
     pub mod backup {
         pub const WRITER_SEAT_HELD: &str = "This destination already keeps your account's backup from another box. Nothing was added.";
+    }
+
+    pub mod payments {
+        pub const CLAIM_NOT_FOUND: &str = "No claim matches this code. Check it and try again.";
+
+        pub const CLAIM_ALREADY_REDEEMED: &str = "This code has already been used.";
+
+        pub const CLAIM_VOIDED: &str = "This code was cancelled by the creator and can no longer be used.";
+
+        pub const CLAIM_ADMITS_ELSEWHERE: &str = "This code is a membership of the creator's nest. Use it as an invite code when you join that nest. It has not been used.";
     }
 
     pub mod federation {
@@ -12297,6 +12410,8 @@ pub mod errors {
     pub const RECOVERY_PRIOR_KIT_MISMATCH: &str = "That kit does not match the one currently registered for this identity.";
 
     pub const RECOVERY_KIT_FOR_ANOTHER_ACCOUNT: &str = "That recovery kit belongs to a different account, not this one. Nothing was changed.";
+
+    pub const RECOVERY_KIT_MINTED_ELSEWHERE: &str = "The window that replaced this identity is creating its new recovery kit and will show it there.";
 
     pub const RECOVERY_PRIOR_ESCROW_UNREADABLE: &str = "Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it.";
     pub fn recovery_prior_escrow_unreadable(reason: &str) -> String {
@@ -12927,6 +13042,22 @@ pub mod connected_apps {
         format!("Most recent, {time}: {operation}")
     }
 
+    pub const ORACLE_OPEN: &str = "Show what Fauna did for this app";
+
+    pub const ORACLE_CLOSE: &str = "Hide what Fauna did for this app";
+
+    pub const ORACLE_OP: &str = "{time} · {operation} — {detail}";
+    pub fn oracle_op(time: &str, operation: &str, detail: &str) -> String {
+        format!("{time} · {operation} — {detail}")
+    }
+
+    pub const ORACLE_OP_BARE: &str = "{time} · {operation}";
+    pub fn oracle_op_bare(time: &str, operation: &str) -> String {
+        format!("{time} · {operation}")
+    }
+
+    pub const ORACLE_EMPTY: &str = "Nothing recorded for this app yet";
+
     pub const BLOCKED_HEADING: &str = "Blocked apps";
 
     pub const BLOCKED_HINT: &str = "Requests from these apps are never shown to you.";
@@ -12979,6 +13110,22 @@ pub mod connected_apps {
     pub fn install_setting(label: &str, kind: &str) -> String {
         format!("{label} ({kind})")
     }
+
+    pub const TRUST_SCOPE_EXT_RW: &str = "Keys to your records published by {publisher}: {kinds} — read and write";
+    pub fn trust_scope_ext_rw(publisher: &str, kinds: &str) -> String {
+        format!("Keys to your records published by {publisher}: {kinds} — read and write")
+    }
+
+    pub const TRUST_SCOPE_EXT_RO: &str = "Keys to your records published by {publisher}: {kinds} — read only";
+    pub fn trust_scope_ext_ro(publisher: &str, kinds: &str) -> String {
+        format!("Keys to your records published by {publisher}: {kinds} — read only")
+    }
+
+    pub const TRUST_STATUS_EXPIRED: &str = "Expired — the app will ask again if it needs them";
+
+    pub const TRUST_EMPTY: &str = "This app holds no keys to your records";
+
+    pub const TRUST_BOUND_NOTE: &str = "On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect.";
 }
 
 pub mod share_link {
@@ -13586,6 +13733,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.handle_check.outcome.domain_available_inside_zone" => Some(onboarding::handle_check::outcome::DOMAIN_AVAILABLE_INSIDE_ZONE),
         "onboarding.handle_check.outcome.registered_no_nest" => Some(onboarding::handle_check::outcome::REGISTERED_NO_NEST),
         "onboarding.handle_check.outcome.local_no_nest" => Some(onboarding::handle_check::outcome::LOCAL_NO_NEST),
+        "onboarding.handle_check.outcome.kids_no_joinable_nest" => Some(onboarding::handle_check::outcome::KIDS_NO_JOINABLE_NEST),
         "onboarding.handle_check.outcome.already_on_nest_handle_matches" => Some(onboarding::handle_check::outcome::ALREADY_ON_NEST_HANDLE_MATCHES),
         "onboarding.handle_check.outcome.already_on_nest_handle_differs" => Some(onboarding::handle_check::outcome::ALREADY_ON_NEST_HANDLE_DIFFERS),
         "onboarding.handle_check.outcome.user_unregistered" => Some(onboarding::handle_check::outcome::USER_UNREGISTERED),
@@ -13737,6 +13885,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.compose_attachment_stale" => Some(feed::COMPOSE_ATTACHMENT_STALE),
         "feed.compose_attachment_missing" => Some(feed::COMPOSE_ATTACHMENT_MISSING),
         "feed.compose_sell_price_invalid" => Some(feed::COMPOSE_SELL_PRICE_INVALID),
+        "feed.compose_sell_price_not_whole" => Some(feed::COMPOSE_SELL_PRICE_NOT_WHOLE),
         "feed.compose_sell_rank_unavailable" => Some(feed::COMPOSE_SELL_RANK_UNAVAILABLE),
         "feed.compose_sell_account_not_ready" => Some(feed::COMPOSE_SELL_ACCOUNT_NOT_READY),
         "feed.compose_sell_tier_unavailable" => Some(feed::COMPOSE_SELL_TIER_UNAVAILABLE),
@@ -14311,6 +14460,12 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "atproto_settings.consent_set_heading_unnamed" => Some(atproto_settings::CONSENT_SET_HEADING_UNNAMED),
         "atproto_settings.consent_approve_button" => Some(atproto_settings::CONSENT_APPROVE_BUTTON),
         "atproto_settings.consent_deny_button" => Some(atproto_settings::CONSENT_DENY_BUTTON),
+        "atproto_settings.consent_folder_label" => Some(atproto_settings::CONSENT_FOLDER_LABEL),
+        "atproto_settings.consent_folder_prompt" => Some(atproto_settings::CONSENT_FOLDER_PROMPT),
+        "atproto_settings.consent_folder_none_deposit" => Some(atproto_settings::CONSENT_FOLDER_NONE_DEPOSIT),
+        "atproto_settings.consent_folder_none_read" => Some(atproto_settings::CONSENT_FOLDER_NONE_READ),
+        "atproto_settings.consent_folder_none_both" => Some(atproto_settings::CONSENT_FOLDER_NONE_BOTH),
+        "atproto_settings.consent_folder_unreadable" => Some(atproto_settings::CONSENT_FOLDER_UNREADABLE),
         "atproto_settings.error_refresh" => Some(atproto_settings::ERROR_REFRESH),
         "atproto_settings.error_mint" => Some(atproto_settings::ERROR_MINT),
         "atproto_settings.error_revoke" => Some(atproto_settings::ERROR_REVOKE),
@@ -15483,12 +15638,14 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.unsent_changes.kind_other" => Some(settings::unsent_changes::KIND_OTHER),
         "settings.unsent_changes.state_waiting" => Some(settings::unsent_changes::STATE_WAITING),
         "settings.unsent_changes.state_held" => Some(settings::unsent_changes::STATE_HELD),
+        "settings.unsent_changes.state_held_carry" => Some(settings::unsent_changes::STATE_HELD_CARRY),
         "settings.unsent_changes.state_unsent" => Some(settings::unsent_changes::STATE_UNSENT),
         "settings.unsent_changes.reason_unknown_kind" => Some(settings::unsent_changes::REASON_UNKNOWN_KIND),
         "settings.unsent_changes.reason_undecodable" => Some(settings::unsent_changes::REASON_UNDECODABLE),
         "settings.unsent_changes.reason_mls_no_channel" => Some(settings::unsent_changes::REASON_MLS_NO_CHANNEL),
         "settings.unsent_changes.reason_mls_not_a_member" => Some(settings::unsent_changes::REASON_MLS_NOT_A_MEMBER),
         "settings.unsent_changes.reason_mls_send_failed" => Some(settings::unsent_changes::REASON_MLS_SEND_FAILED),
+        "settings.unsent_changes.reason_mls_attachment_missing" => Some(settings::unsent_changes::REASON_MLS_ATTACHMENT_MISSING),
         "settings.unsent_changes.reason_fallback" => Some(settings::unsent_changes::REASON_FALLBACK),
         "settings.member_review_page.title" => Some(settings::member_review_page::TITLE),
         "settings.member_review_page.intro" => Some(settings::member_review_page::INTRO),
@@ -15600,6 +15757,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.sign_out_blocked_other_window" => Some(settings::SIGN_OUT_BLOCKED_OTHER_WINDOW),
         "settings.remove_account_blocked_other_window" => Some(settings::REMOVE_ACCOUNT_BLOCKED_OTHER_WINDOW),
         "settings.remove_account_blocked_this_window" => Some(settings::REMOVE_ACCOUNT_BLOCKED_THIS_WINDOW),
+        "settings.remove_account_blocked_carry_owed" => Some(settings::REMOVE_ACCOUNT_BLOCKED_CARRY_OWED),
         "settings.switch_refused_no_secret" => Some(settings::SWITCH_REFUSED_NO_SECRET),
         "settings.switch_refused" => Some(settings::SWITCH_REFUSED),
         "settings.account_list_full" => Some(settings::ACCOUNT_LIST_FULL),
@@ -15670,6 +15828,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nests.custody_restore_unchecked" => Some(nests::CUSTODY_RESTORE_UNCHECKED),
         "nests.trusted_to_read" => Some(nests::TRUSTED_TO_READ),
         "nests.scope_mail" => Some(nests::SCOPE_MAIL),
+        "nests.scope_materialize_mail" => Some(nests::SCOPE_MATERIALIZE_MAIL),
+        "nests.scope_materialize_calendar" => Some(nests::SCOPE_MATERIALIZE_CALENDAR),
+        "nests.scope_materialize_card" => Some(nests::SCOPE_MATERIALIZE_CARD),
         "nests.scope_calendar" => Some(nests::SCOPE_CALENDAR),
         "nests.scope_card" => Some(nests::SCOPE_CARD),
         "nests.scope_posts" => Some(nests::SCOPE_POSTS),
@@ -15690,6 +15851,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nests.grant_unattested_mark" => Some(nests::GRANT_UNATTESTED_MARK),
         "nests.grant_keep_button" => Some(nests::GRANT_KEEP_BUTTON),
         "nests.bound_note_standing" => Some(nests::BOUND_NOTE_STANDING),
+        "nests.bound_note_materialize_mail" => Some(nests::BOUND_NOTE_MATERIALIZE_MAIL),
+        "nests.bound_note_materialize_calendar" => Some(nests::BOUND_NOTE_MATERIALIZE_CALENDAR),
+        "nests.bound_note_materialize_card" => Some(nests::BOUND_NOTE_MATERIALIZE_CARD),
         "nests.bound_note_bounded_mail" => Some(nests::BOUND_NOTE_BOUNDED_MAIL),
         "nests.history_minted" => Some(nests::HISTORY_MINTED),
         "nests.history_renewed" => Some(nests::HISTORY_RENEWED),
@@ -15716,6 +15880,12 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nests.mint_button" => Some(nests::MINT_BUTTON),
         "nests.mint_scope_placeholder" => Some(nests::MINT_SCOPE_PLACEHOLDER),
         "nests.mint_option_mail" => Some(nests::MINT_OPTION_MAIL),
+        "nests.mint_option_materialize_mail" => Some(nests::MINT_OPTION_MATERIALIZE_MAIL),
+        "nests.mint_option_materialize_calendar" => Some(nests::MINT_OPTION_MATERIALIZE_CALENDAR),
+        "nests.mint_option_materialize_card" => Some(nests::MINT_OPTION_MATERIALIZE_CARD),
+        "nests.mint_materialize_note" => Some(nests::MINT_MATERIALIZE_NOTE),
+        "nests.mint_materialize_calendar_note" => Some(nests::MINT_MATERIALIZE_CALENDAR_NOTE),
+        "nests.mint_materialize_card_note" => Some(nests::MINT_MATERIALIZE_CARD_NOTE),
         "nests.mint_option_calendar" => Some(nests::MINT_OPTION_CALENDAR),
         "nests.mint_option_paywalled" => Some(nests::MINT_OPTION_PAYWALLED),
         "nests.mint_holder_placeholder" => Some(nests::MINT_HOLDER_PLACEHOLDER),
@@ -15812,6 +15982,17 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "web_publish.error_publish" => Some(web_publish::ERROR_PUBLISH),
         "web_publish.error_unpublish" => Some(web_publish::ERROR_UNPUBLISH),
         "web_publish.error_paywall_link" => Some(web_publish::ERROR_PAYWALL_LINK),
+        "nostr_advertise.advertise" => Some(nostr_advertise::ADVERTISE),
+        "nostr_advertise.stop" => Some(nostr_advertise::STOP),
+        "nostr_advertise.confirm_title" => Some(nostr_advertise::CONFIRM_TITLE),
+        "nostr_advertise.confirm" => Some(nostr_advertise::CONFIRM),
+        "nostr_advertise.confirm_body" => Some(nostr_advertise::CONFIRM_BODY),
+        "nostr_advertise.error_advertise" => Some(nostr_advertise::ERROR_ADVERTISE),
+        "nostr_advertise.error_stop" => Some(nostr_advertise::ERROR_STOP),
+        "sale_price.button" => Some(sale_price::BUTTON),
+        "sale_price.title" => Some(sale_price::TITLE),
+        "sale_price.error_load" => Some(sale_price::ERROR_LOAD),
+        "sale_price.error_save" => Some(sale_price::ERROR_SAVE),
         "mail_aliases.title" => Some(mail_aliases::TITLE),
         "mail_aliases.description" => Some(mail_aliases::DESCRIPTION),
         "mail_aliases.add_button" => Some(mail_aliases::ADD_BUTTON),
@@ -16341,6 +16522,11 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.users_page.suspend_default_reason" => Some(admin::users_page::SUSPEND_DEFAULT_REASON),
         "admin.users_page.make_admin" => Some(admin::users_page::MAKE_ADMIN),
         "admin.users_page.remove_admin" => Some(admin::users_page::REMOVE_ADMIN),
+        "admin.users_page.supervised_by" => Some(admin::users_page::SUPERVISED_BY),
+        "admin.users_page.take_over" => Some(admin::users_page::TAKE_OVER),
+        "admin.users_page.take_over_confirm_summary" => Some(admin::users_page::TAKE_OVER_CONFIRM_SUMMARY),
+        "admin.users_page.take_over_confirm" => Some(admin::users_page::TAKE_OVER_CONFIRM),
+        "admin.users_page.take_over_cancel" => Some(admin::users_page::TAKE_OVER_CANCEL),
         "admin.users_page.prev_page" => Some(admin::users_page::PREV_PAGE),
         "admin.users_page.next_page" => Some(admin::users_page::NEXT_PAGE),
         "admin.users_page.page_indicator" => Some(admin::users_page::PAGE_INDICATOR),
@@ -17674,6 +17860,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "error.nest.outdated" => Some(error::nest::OUTDATED),
         "error.nest.schema_mismatch" => Some(error::nest::SCHEMA_MISMATCH),
         "error.backup.writer_seat_held" => Some(error::backup::WRITER_SEAT_HELD),
+        "error.payments.claim_not_found" => Some(error::payments::CLAIM_NOT_FOUND),
+        "error.payments.claim_already_redeemed" => Some(error::payments::CLAIM_ALREADY_REDEEMED),
+        "error.payments.claim_voided" => Some(error::payments::CLAIM_VOIDED),
+        "error.payments.claim_admits_elsewhere" => Some(error::payments::CLAIM_ADMITS_ELSEWHERE),
         "error.federation.peer_nest_outdated" => Some(error::federation::PEER_NEST_OUTDATED),
         "error.protocol.unknown_kind" => Some(error::protocol::UNKNOWN_KIND),
         "error.protocol.malformed" => Some(error::protocol::MALFORMED),
@@ -17745,6 +17935,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "errors.recovery_prior_kit_required" => Some(errors::RECOVERY_PRIOR_KIT_REQUIRED),
         "errors.recovery_prior_kit_mismatch" => Some(errors::RECOVERY_PRIOR_KIT_MISMATCH),
         "errors.recovery_kit_for_another_account" => Some(errors::RECOVERY_KIT_FOR_ANOTHER_ACCOUNT),
+        "errors.recovery_kit_minted_elsewhere" => Some(errors::RECOVERY_KIT_MINTED_ELSEWHERE),
         "errors.recovery_prior_escrow_unreadable" => Some(errors::RECOVERY_PRIOR_ESCROW_UNREADABLE),
         "errors.recovery_group_ceremony" => Some(errors::RECOVERY_GROUP_CEREMONY),
         "registrar.step.title" => Some(registrar::step::TITLE),
@@ -17951,6 +18142,11 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.oracle_requests_one" => Some(connected_apps::ORACLE_REQUESTS_ONE),
         "connected_apps.oracle_latest" => Some(connected_apps::ORACLE_LATEST),
         "connected_apps.oracle_latest_bare" => Some(connected_apps::ORACLE_LATEST_BARE),
+        "connected_apps.oracle_open" => Some(connected_apps::ORACLE_OPEN),
+        "connected_apps.oracle_close" => Some(connected_apps::ORACLE_CLOSE),
+        "connected_apps.oracle_op" => Some(connected_apps::ORACLE_OP),
+        "connected_apps.oracle_op_bare" => Some(connected_apps::ORACLE_OP_BARE),
+        "connected_apps.oracle_empty" => Some(connected_apps::ORACLE_EMPTY),
         "connected_apps.blocked_heading" => Some(connected_apps::BLOCKED_HEADING),
         "connected_apps.blocked_hint" => Some(connected_apps::BLOCKED_HINT),
         "connected_apps.blocked_since" => Some(connected_apps::BLOCKED_SINCE),
@@ -17970,6 +18166,11 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.install_settings_heading" => Some(connected_apps::INSTALL_SETTINGS_HEADING),
         "connected_apps.install_settings_none" => Some(connected_apps::INSTALL_SETTINGS_NONE),
         "connected_apps.install_setting" => Some(connected_apps::INSTALL_SETTING),
+        "connected_apps.trust_scope_ext_rw" => Some(connected_apps::TRUST_SCOPE_EXT_RW),
+        "connected_apps.trust_scope_ext_ro" => Some(connected_apps::TRUST_SCOPE_EXT_RO),
+        "connected_apps.trust_status_expired" => Some(connected_apps::TRUST_STATUS_EXPIRED),
+        "connected_apps.trust_empty" => Some(connected_apps::TRUST_EMPTY),
+        "connected_apps.trust_bound_note" => Some(connected_apps::TRUST_BOUND_NOTE),
         "share_link.button" => Some(share_link::BUTTON),
         "share_link.create_title" => Some(share_link::CREATE_TITLE),
         "share_link.create_body" => Some(share_link::CREATE_BODY),

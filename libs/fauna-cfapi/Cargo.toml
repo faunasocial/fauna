@@ -5,6 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Compile `test_roots` (the dev fleet's test-root sweep and the names of the
+# mutexes the live tests hold) into a non-debug build. Debug builds have it
+# anyway; a consumer forwards this from its own `test-helpers`, never on the dep
+# line, so a plain `--release`/`dist` artifact carries no test-root rule.
+test-helpers = ["fauna-ipc/test-helpers"]
+
 [target.'cfg(windows)'.dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }

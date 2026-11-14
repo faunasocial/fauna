@@ -50,7 +50,7 @@ pytestmark = [pytest.mark.tier_2]
 @pytest.mark.ios
 # android renders through the same shared decision (`notification_text_for`)
 # and is compile-proved; no android e2e venue exists yet to run this leg
-# (`testing.md` § Default app and nest mode → *Android's run venue*).
+# (`testing.md` § Default app and nest mode → *Android's emulator placement*).
 @pytest.mark.android
 @pytest.mark.feature("notifications")
 def test_a_row_paints_its_localized_body_and_an_unknown_key_paints_the_summary(

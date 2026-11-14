@@ -22,7 +22,7 @@ struct BridgesSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                ForEach(Array(vm.bridges.enumerated()), id: \.offset) { index, bridge in
+                ForEach(Array(vm.bridges.enumerated()), id: \.element.id) { index, bridge in
                     bridgeSection(bridge, index: index)
                 }
             }

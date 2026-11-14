@@ -246,6 +246,51 @@ import Testing
             #expect(p.add.map(\.scopedId) == [scopedId(docs, b)])
         }
 
+        /// A group set, as the shared lister hands it (`group-set.md` § Build
+        /// design — the group set, decision 11 (a)): its `group:` ref, its
+        /// folded name, a seat by the membership, writable.
+        private let groupSet = PresenceSet(
+            name: "holiday", setName: "holiday", folderId: "group:\(String(repeating: "7a", count: 32))",
+            thisDeviceAccepts: true, role: .group, readOnly: false)
+
+        /// A group set joins the plan by default under the actor-scoped
+        /// identifier of its `group:` ref — the ref half percent-encoded
+        /// through the one encoder (`group%3A<hex>@<actor>`), which also names
+        /// its staging root — and its domain is writable.
+        @Test func aGroupSetIsADefaultOnWritablePresence() throws {
+            let dir = tempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let p = try plan([groupSet, docs], registered: [], actorHex: b, dir: dir)
+            let groupId = "group%3A\(String(repeating: "7a", count: 32))@\(b)"
+            #expect(scopedId(groupSet, b) == groupId)
+            #expect(Set(p.add.map(\.scopedId)) == [groupId, scopedId(docs, b)])
+            #expect(p.add.first { $0.scopedId == groupId }?.set.readOnly == false)
+            let identity = try #require(FileProviderDomainIdentity.parse(groupId))
+            #expect(identity.folderId == groupSet.folderId)
+            #expect(
+                identity.stagingRootRelativePath
+                    == "FileProvider/roots/\(b)/group%3A\(String(repeating: "7a", count: 32))")
+        }
+
+        /// The group-scope row's toggle turned off hides the group set — the
+        /// same store, keyed by the same scoped identifier — and removes the
+        /// domain it already had; a location binding (macOS) outranks it.
+        @Test func aGroupSetToggledOffOrBoundHasNoPresence() throws {
+            let dir = tempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let prefs = FfiOnDemandPrefsStore(path: dir.appendingPathComponent("prefs.json").path)
+            FileProviderDomainPrefs.setEnabled(false, domainId: scopedId(groupSet, b), store: prefs)
+            let off = try plan([groupSet], registered: [scopedId(groupSet, b)], actorHex: b, dir: dir)
+            #expect(off.add.isEmpty && off.keep.isEmpty)
+            #expect(off.remove.map(\.identifier) == [scopedId(groupSet, b)])
+
+            let other = tempDir()
+            defer { try? FileManager.default.removeItem(at: other) }
+            let bound = try plan(
+                [groupSet], registered: [], actorHex: b, dir: other, bound: [groupSet.folderId])
+            #expect(bound.add.isEmpty)
+        }
+
         /// The nudge finds a shared set's domain by the set's own name, never
         /// by the owner-qualified display name, and a push naming a set the
         /// account holds as its own AND as a member's share signals both —

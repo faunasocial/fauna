@@ -1213,6 +1213,32 @@ impl GroupRingMirrorKey {
     }
 }
 
+/// The **binding-record key** — what a set's binding record rests under in that
+/// set's own state DB (`on-demand-files-shared-sets.md` § Shared sets on a
+/// capability host, decision 2″ (2)): the last row and this set's custody slice
+/// a host read, so a host built cold with the nest unreachable can still build
+/// the set's engine. A sibling of [`GroupRingMirrorKey`] and [`ReplicaSealKey`]
+/// under its own domain-separation context, derived from the account's
+/// [`BackupKey`] — held where the store's own at-rest key is held, resting
+/// nowhere beside the data.
+#[derive(Clone)]
+pub struct BindingRecordKey(Zeroizing<[u8; 32]>);
+
+impl BindingRecordKey {
+    /// The record key for the account whose `BackupKey` is `backup`.
+    pub fn derive(backup: &BackupKey) -> BindingRecordKey {
+        BindingRecordKey(Zeroizing::new(blake3::derive_key(
+            "fauna set binding record key 2026-11-14",
+            backup.as_bytes(),
+        )))
+    }
+
+    /// The raw AEAD key — for the record's seal and open only.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// The app-side account replica's **local seal key** — what the store's opened
 /// state values rest under on disk (`account-replica-posture.md` § Local at-rest
 /// posture, the key-material-kinds paragraph).
@@ -1447,6 +1473,30 @@ pub fn unseal_kind_chunk<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision 2″ (2): the binding-record key is the account's, stable, and
+    /// domain-separated from its siblings under the same `BackupKey`.
+    #[test]
+    fn binding_record_key_is_a_separate_derivation_of_the_backup_key() {
+        let a = BackupKey::derive(&[0x01u8; 32]);
+        let b = BackupKey::derive(&[0x02u8; 32]);
+        assert_eq!(
+            BindingRecordKey::derive(&a).as_bytes(),
+            BindingRecordKey::derive(&a).as_bytes()
+        );
+        assert_ne!(
+            BindingRecordKey::derive(&a).as_bytes(),
+            BindingRecordKey::derive(&b).as_bytes()
+        );
+        assert_ne!(
+            BindingRecordKey::derive(&a).as_bytes(),
+            GroupRingMirrorKey::derive(&a).as_bytes()
+        );
+        assert_ne!(
+            BindingRecordKey::derive(&a).as_bytes(),
+            &*ReplicaSealKey::derive(&a).0
+        );
+    }
 
     // ── BackupKey derivation ──────────────────────────────────────────────────
 

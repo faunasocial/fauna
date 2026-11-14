@@ -305,7 +305,7 @@ def subs_author_app(request, app, subs_nest):
     The author seat is native: the env probe behind ``FAUNA_SUBS_POLL_SECS`` is
     native by construction (a browser has no environment — ``author_poll_secs()``).
     tui (the lead), linux, macos, windows and ios launch the second seat (iOS on a
-    second simulator); a web subscriber gets a tui author.
+    second simulator); a web or android subscriber gets a tui author.
     """
     from conftest import _build_app_config
     from drivers import create_driver
@@ -335,6 +335,11 @@ def subs_author_app(request, app, subs_nest):
         # the SUBSCRIBER here — the pump under test runs on the author's side.
         # (A web author pumps at the e2e agent's 2 s cadence on its own,
         # `subscriptionsAuthor.ts` → `pollIntervalMs()`.)
+        app_name = "tui"
+    elif subscriber_driver.is_android():
+        # One emulator runs one instance of the app, so the author — another
+        # person on another device — takes the lead native seat, as the custody
+        # host does (`_launch_second_real_faunamls_app`'s `native_seat`).
         app_name = "tui"
     else:
         require_surface(subscriber_driver, "author-seat-pump-cadence")
@@ -420,7 +425,6 @@ def test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_act
     fixture gates to tui (lead) + linux.
     """
     subscriber_app = app
-    subscriber_app.profile.require_other_profile_offers_browse_supported()
     author_app, author = subs_author_app
     author_id = author["actor_id_bytes"]
 
@@ -529,7 +533,6 @@ def test_ui_subscribe_publishes_pq_hybrid_encapsulation_key(app, subs_nest):
     machinery above is unnecessary).
     """
     subscriber_app = app
-    subscriber_app.profile.require_other_profile_offers_browse_supported()
 
     admin_sk = _as_signing_key(subs_nest["admin"]["signing_key"])
     author = create_actor_and_register(

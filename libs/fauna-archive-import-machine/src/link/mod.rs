@@ -744,13 +744,27 @@ impl ArchiveLinks {
                 Ok(true)
             }
             ArchiveSignal::LinkDecline { .. } => {
-                if !matches!(current, Some(PairState::Offered | PairState::Asked)) {
-                    return Ok(false);
+                match current {
+                    Some(PairState::Offered | PairState::Asked) => {
+                        upsert_pair(&mut loaded.state, sender, platform, now, |p| {
+                            p.state = PairState::Declined;
+                        });
+                        clear_awaiting(&mut loaded.state, sender, platform);
+                    }
+                    // A no to the question our own `Announce` raised: we hold
+                    // no pair yet, so store the decline — else the contact's
+                    // later `Announce` would ask us a settled question
+                    // (outcome 51: neither side asks again).
+                    None => loaded.state.pairs.push(new_pair(
+                        sender,
+                        platform,
+                        PairState::Declined,
+                        None,
+                        false,
+                        now,
+                    )),
+                    _ => return Ok(false),
                 }
-                upsert_pair(&mut loaded.state, sender, platform, now, |p| {
-                    p.state = PairState::Declined;
-                });
-                clear_awaiting(&mut loaded.state, sender, platform);
                 Ok(true)
             }
             ArchiveSignal::Unlink { .. } => {

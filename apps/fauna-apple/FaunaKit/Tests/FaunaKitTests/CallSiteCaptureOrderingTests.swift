@@ -171,7 +171,8 @@ private func cueCalls(
         recordObservation: recordObservation,
         flushCues: {},
         sample: { _, _, _, _, _, _ in [] },
-        drainAll: drainAll)
+        drainAll: drainAll,
+        noteSelection: { _ in [] })
 }
 
 private let anObservation = CueObservation(
@@ -210,6 +211,16 @@ private let anObservation = CueObservation(
 @Test func unlockTeaserBuyCapturesItsGenerationBeforeTheAwait() async {
     await expectFeedSiteCapturesBeforeAwait { vm, call in
         await PostUnlockOfferTeaser.buy(vm: vm) { try await call.park() }
+    }
+}
+
+@MainActor
+@Test func unlockTeaserPaymentLinkCapturesItsGenerationBeforeTheAwait() async {
+    await expectFeedSiteCapturesBeforeAwait { vm, call in
+        await PostUnlockOfferTeaser.pay(
+            vm: vm, paymentUrl: "https://buy.stripe.com/test_abc",
+            checkout: { try await call.parkThenThrow() },
+            open: { _ in })
     }
 }
 

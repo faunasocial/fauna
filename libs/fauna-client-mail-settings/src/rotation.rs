@@ -113,7 +113,19 @@ pub(crate) async fn start_rotation(
         machine.mail_store().revoke(credential_id.clone()).await?;
     }
 
-    drive_rotation_loop(machine, new_msek).await
+    drive_rotation_loop(machine, new_msek, DeploymentFlip::Assert).await
+}
+
+/// Whether a first-enable's step 4 may flip the deployment-wide mail
+/// subsystem on. The page's own gestures (Enable, Resume) and the claim that
+/// chose email assert it; the lost-mailbox restore run from the connect-time
+/// refresh or the hydrate never does — the deployment flag is the admin's
+/// choice on the box and is never re-asserted from a user's custody
+/// (`mail-credentials.md` § A nest that lost the mailbox, rule 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeploymentFlip {
+    Assert,
+    Leave,
 }
 
 /// Entry point for `MailSettingsAction::ResumeRotation`. Reads the
@@ -122,6 +134,16 @@ pub(crate) async fn start_rotation(
 /// (defensive — the per-app UI is expected to only surface the
 /// "Resume?" banner when the sentinel is set).
 pub(crate) async fn resume_rotation(machine: &MailSettingsMachine) -> Result<(), DispatchError> {
+    resume_rotation_with(machine, DeploymentFlip::Assert).await
+}
+
+/// [`resume_rotation`] with the deployment flip chosen by the caller — the
+/// lost-mailbox restore's door onto a carried sentinel
+/// ([`MailSettingsMachine::restore_lost_mailbox`]).
+pub(crate) async fn resume_rotation_with(
+    machine: &MailSettingsMachine,
+    flip: DeploymentFlip,
+) -> Result<(), DispatchError> {
     let rows = machine.mail_store().load_rows().await?;
     let Some(sentinel) = rows.state.as_ref().and_then(|s| s.pending_rotation.clone()) else {
         return Ok(());
@@ -130,7 +152,7 @@ pub(crate) async fn resume_rotation(machine: &MailSettingsMachine) -> Result<(),
     // nest, between its write and `start_rotation`'s publish): publish it
     // before the loop's first nest write, as the start does.
     machine.mail_store().publish().await?;
-    drive_rotation_loop(machine, sentinel.new_msek).await
+    drive_rotation_loop(machine, sentinel.new_msek, flip).await
 }
 
 /// First-enable — the fresh arm of `EnableMail` — run as the **degenerate
@@ -201,7 +223,7 @@ pub(crate) async fn first_enable(
     // stands, resumable.
     machine.mail_store().publish().await?;
 
-    drive_rotation_loop(machine, msek).await
+    drive_rotation_loop(machine, msek, DeploymentFlip::Assert).await
 }
 
 /// Steps (d)–(f) of the rotation flow under the sentinel's `new_msek`;
@@ -210,6 +232,7 @@ pub(crate) async fn first_enable(
 async fn drive_rotation_loop(
     machine: &MailSettingsMachine,
     new_msek: SecretArray32,
+    flip: DeploymentFlip,
 ) -> Result<(), DispatchError> {
     let rows = machine.mail_store().load_rows().await?;
     machine.set_snapshot_from(&rows);
@@ -336,7 +359,10 @@ async fn drive_rotation_loop(
                     .provision_submission_token(&row.credential_id, &wrap_credential(row)?)
                     .await?;
             }
-            machine.turn_mail_subsystem_on().await?;
+            match flip {
+                DeploymentFlip::Assert => machine.turn_mail_subsystem_on().await?,
+                DeploymentFlip::Leave => machine.nest().set_actor_mail_enabled(true).await?,
+            }
         }
     }
 
@@ -476,13 +502,16 @@ async fn drive_rotation_loop(
     machine.refresh_snapshot().await?;
 
     // The MSEK swap is durably committed and the sentinel cleared. Best-effort
-    // heal of any outstanding bounded mail grants across the retired generation
-    // (design § 5 amendment 2026-07-19): re-wrap each grant's window under the
-    // post-rotation generation set and drive an equal-end renew. Log-only — a
-    // failed heal never fails the rotation (§ 3 degradation posture; the grant
-    // heals at its next renew). The early exit inside covers the common
-    // no-bounded-grants path with no discovery RPC.
-    machine.heal_outstanding_bounded_grants().await;
+    // heal of every outstanding grant the rotation leaves short: a bounded mail
+    // grant's window re-wrapped under the post-rotation generation set (design
+    // § 5 amendment 2026-07-19), and a master-key mail, calendar or card grant's
+    // one standing wrap rebuilt with the new generation first and replaced in
+    // place (`capability-grants.md` § Capability tiering → *What a master-key
+    // mail wrap conveys*) — each an equal-end renew. Log-only — a failed heal
+    // never fails the rotation (§ 3 degradation posture; the grant heals at its
+    // next renew or re-mint). The early exit inside covers the common
+    // no-grants path with no discovery RPC.
+    machine.heal_outstanding_grants_after_rotation().await;
 
     // The rotation is done only once the nest's state plane holds it: the
     // swap, the outgoing generation's row and the cleared sentinel reach the

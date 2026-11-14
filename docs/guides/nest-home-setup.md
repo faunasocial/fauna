@@ -73,7 +73,7 @@ mkdir -p /opt/fauna
 
 ## Step 5 — Write the nest's setup file
 
-There is no Stable release of the nest software yet. Until the first one is out, the **Stable** image this file names has nothing in it, so a machine set up this way has nothing to start; a numbered release is published on the **Test** channel, and the **Dev** channel's development builds are published. The file below is the shape the release will have.
+The **Stable** image this file names holds the nest software's released versions; a numbered release is published on the **Test** channel, and the **Dev** channel's development builds are published.
 
 Open a new, empty file:
 
@@ -265,7 +265,7 @@ warning that its identity changed.
 (`hostname -I`), and that you're on the same network. There's no remote access
 by design.
 
-**Nothing starts.** Re-run the `up -d` command and read what it prints. Until the first Stable release is out, it is because there is no Stable image to download yet (see Step 5); otherwise it's usually a typo in the setup file or a full disk.
+**Nothing starts.** Re-run the `up -d` command and read what it prints. It's usually a typo in the setup file or a full disk.
 
 ---
 

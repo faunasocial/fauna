@@ -47,6 +47,7 @@ import com.fauna.app.R
 import com.fauna.app.core.ContentPolicyInputs
 import com.fauna.app.core.RegionPlaneHost
 import com.fauna.app.core.RegionSubject
+import com.fauna.app.core.UrlOpener
 import com.fauna.app.core.post
 import com.fauna.app.ui.components.GuardianReason
 import com.fauna.app.ui.components.NestBlockWitness
@@ -74,6 +75,7 @@ import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
+import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.viewmodel.FeedVM
 import com.fauna.ffi.adminBlockNotice
 import com.fauna.ffi.classifySources
@@ -546,6 +548,15 @@ internal fun PostActionsMenu(
     onUnpublishWeb: () -> Unit = {},
     onCopyWebLink: () -> Unit = {},
     onCopyPaywallLink: () -> Unit = {},
+    // The own-post Nostr advertisement pair (`monetization.md` § The Nostr
+    // advertisement of a sold post → *What the author sees and agrees to*):
+    // [nostrAdvertiseVerb] is the shared `post_nostr_advertise_verb` arm the
+    // caller resolved, [advertiseConfirmBody] the catalog's public consequence
+    // sentence the confirm step states. `null` paints neither.
+    nostrAdvertiseVerb: uniffi.fauna_feed.NostrAdvertiseVerb? = null,
+    advertiseConfirmBody: String? = null,
+    onAdvertiseNostr: () -> Unit = {},
+    onStopAdvertisingNostr: () -> Unit = {},
     // The report verb (moderation.md § User-initiated reporting → *App surface*):
     // `feed-post-report-button` paints only on ANOTHER author's post, and only
     // when the caller built a report target for it; it opens the shared sheet
@@ -563,6 +574,9 @@ internal fun PostActionsMenu(
     // feed-post-delete-button reveals feed-post-delete-confirm-button. Reset
     // when the menu closes so it always reopens at the first step.
     var confirmingDelete by remember { mutableStateOf(false) }
+    // *Advertise* arms its confirm step in place, the delete verb's shape;
+    // reset with the menu so it always reopens at the first step.
+    var confirmingAdvertise by remember { mutableStateOf(false) }
 
     Box {
         IconButton(
@@ -580,6 +594,7 @@ internal fun PostActionsMenu(
             onDismissRequest = {
                 expanded = false
                 confirmingDelete = false
+                confirmingAdvertise = false
             },
             modifier = Modifier.testTag(Ids.FEED_POST_ACTIONS_MENU),
         ) {
@@ -680,6 +695,62 @@ internal fun PostActionsMenu(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                         )
                     }
+                }
+            }
+
+            // The Nostr advertisement pair: *Stop advertising* is one tap;
+            // *Advertise* arms the confirm step, which states the consequence
+            // and is the only door to the act.
+            if (isOwn) {
+                when (nostrAdvertiseVerb) {
+                    uniffi.fauna_feed.NostrAdvertiseVerb.STOP_ADVERTISING -> DropdownMenuItem(
+                        text = { Text(stringResource(R.string.nostr_advertise_stop)) },
+                        onClick = {
+                            expanded = false
+                            onStopAdvertisingNostr()
+                        },
+                        modifier = Modifier.testTag(Ids.FEED_POST_STOP_ADVERTISING_NOSTR_BUTTON),
+                    )
+                    uniffi.fauna_feed.NostrAdvertiseVerb.ADVERTISE -> if (advertiseConfirmBody != null) {
+                        if (!confirmingAdvertise) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.nostr_advertise_advertise)) },
+                                onClick = { confirmingAdvertise = true },
+                                modifier = Modifier.testTag(Ids.FEED_POST_ADVERTISE_NOSTR_BUTTON),
+                            )
+                        } else {
+                            Column(
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .testTag(Ids.ADVERTISE_NOSTR_CONFIRM_DIALOG),
+                            ) {
+                                Text(
+                                    stringResource(R.string.nostr_advertise_confirm_title),
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+                                Text(
+                                    advertiseConfirmBody,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.nostr_advertise_confirm)) },
+                                onClick = {
+                                    expanded = false
+                                    confirmingAdvertise = false
+                                    onAdvertiseNostr()
+                                },
+                                modifier = Modifier.testTag(Ids.ADVERTISE_NOSTR_CONFIRM_BUTTON),
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.common_cancel)) },
+                                onClick = { confirmingAdvertise = false },
+                                modifier = Modifier.testTag(Ids.ADVERTISE_NOSTR_CANCEL_BUTTON),
+                            )
+                        }
+                    }
+                    null -> Unit
                 }
             }
 
@@ -1168,7 +1239,28 @@ internal fun PostCard(
                         if (isOwnPost) vm.ensureWebOrigin()
                         val webLinkOrigin by vm.webLinkOrigin.collectAsState()
                         val webLinkCopied by vm.webLinkCopied.collectAsState()
+                        // The Nostr advertisement pair's inputs: the session's
+                        // one capability read (fired by the first own-post
+                        // menu), and the confirm step's public sentence, read
+                        // from the catalog at run time — absent until its
+                        // public-texts round lands, and then no *Advertise*.
+                        if (isOwnPost) vm.ensureNostrAdvertise()
+                        val nostrAdvertiseSupported by vm.nostrAdvertiseSupported.collectAsState()
+                        val advertiseConfirmBody = advertiseConfirmBody()
+                        val menuContext = LocalContext.current
                         PostActionsMenu(
+                            nostrAdvertiseVerb = vm.nostrAdvertiseVerbFor(post, nostrAdvertiseSupported, advertiseConfirmBody),
+                            advertiseConfirmBody = advertiseConfirmBody,
+                            onAdvertiseNostr = {
+                                vm.advertisePostOnNostr(post.postId) {
+                                    menuContext.getStringFmt(R.string.nostr_advertise_error_advertise, it)
+                                }
+                            },
+                            onStopAdvertisingNostr = {
+                                vm.stopAdvertisingPostOnNostr(post.postId) {
+                                    menuContext.getStringFmt(R.string.nostr_advertise_error_stop, it)
+                                }
+                            },
                             isOwn = isOwnPost,
                             markedVerb = markedVerb,
                             onTrainVerbTapped = { verb ->
@@ -2000,7 +2092,10 @@ fun FeedLinkPreviewCards(document: RenderDocument, vm: FeedVM) {
  * anti-phishing-redirect) fires on CLICK, not on visibility — a non-https
  * url still shows the button, matching every reference app; a refusal shows
  * `subscriptions_unsafe_payment_url` on the same banner [buyUnlockOffer]
- * failures use. The RENDER is gated on [BuildConfig.PAYMENTS] (the price-and-route
+ * failures use, and sends nothing. A safe link runs [FeedVM.payUnlockOffer]:
+ * the subscribe to the offer's tier goes first, then the checkout URL the
+ * shared rule composes opens through [UrlOpener] (a refused subscribe shows
+ * `feed_error_buy_unlock` and opens nothing). The RENDER is gated on [BuildConfig.PAYMENTS] (the price-and-route
  * class, dynamic-features.md § Platform-family surface excision): the price,
  * the payment link and the buy button state a price or route money, so the
  * storeSafe build paints none of them. The glue
@@ -2037,7 +2132,6 @@ fun PostUnlockOfferTeaser(
         return
     }
     val context = LocalContext.current
-    val uriHandler = LocalUriHandler.current
     val appMessages = LocalAppMessages.current
     Text(
         text = offer.priceHint.orEmpty(),
@@ -2049,7 +2143,11 @@ fun PostUnlockOfferTeaser(
         TextButton(
             onClick = {
                 if (isSafePaymentUrl(url)) {
-                    uriHandler.openUri(url)
+                    // Subscribe to the offer's tier first, then open the
+                    // checkout the shared rule composes, through the app's one
+                    // opener (`monetization.md` § Pillar 3 → *Buyer↔actor
+                    // binding (Q4)*; tui's `Op::PayUnlockOffer`).
+                    vm.payUnlockOffer(postId) { checkout -> UrlOpener.open(context, checkout) }
                 } else {
                     appMessages.showError(context.getString(R.string.subscriptions_unsafe_payment_url))
                 }
@@ -2596,4 +2694,21 @@ internal fun BridgeSubscribeDialog(
             ) { Text(stringResource(R.string.common_cancel)) }
         },
     )
+}
+
+/**
+ * The consequence sentence of the Nostr advertise confirm step — a public text
+ * (it states what the act guarantees), so it reaches the catalog only through
+ * its public-texts round, as `nostr_advertise.confirm_body` in an
+ * `app-strings-public` region. Read at run time: while the generated resources
+ * lack it the verb is not offered (tui's `advertise_confirm_body`).
+ */
+@Composable
+internal fun advertiseConfirmBody(): String? {
+    val context = LocalContext.current
+    return remember(context) {
+        @Suppress("DiscouragedApi")
+        val id = context.resources.getIdentifier("nostr_advertise_confirm_body", "string", context.packageName)
+        if (id == 0) null else context.getString(id)
+    }
 }

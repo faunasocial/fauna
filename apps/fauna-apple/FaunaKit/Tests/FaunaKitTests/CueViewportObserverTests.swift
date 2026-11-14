@@ -168,24 +168,6 @@ private func reduced(_ marks: [[String: CueCardMark]]) -> [String: CueCardMark] 
 // every unrelated field the shared snapshot grows. The end-to-end path is
 // covered by the tier_3 dwell test instead.
 
-// MARK: - A feed switch ends every exposure
-
-@Test func everyFeedSelectionHasItsOwnKey() {
-    let keys = [
-        CueViewportObserver.selectionKey(feedId: nil, trending: false, imported: nil),
-        CueViewportObserver.selectionKey(feedId: "a", trending: false, imported: nil),
-        CueViewportObserver.selectionKey(feedId: "b", trending: false, imported: nil),
-        CueViewportObserver.selectionKey(feedId: nil, trending: true, imported: nil),
-        CueViewportObserver.selectionKey(feedId: nil, trending: false, imported: "facebook"),
-        CueViewportObserver.selectionKey(feedId: nil, trending: false, imported: "instagram"),
-    ]
-    #expect(Set(keys).count == keys.count)
-}
-
-@Test func aSwitchIsReadOnlyBetweenTwoDifferentSelections() {
-    // A run's first sample never drains: nothing it tracks came from another feed.
-    #expect(!CueViewportObserver.feedSwitched(from: nil, to: "feed:a"))
-    #expect(!CueViewportObserver.feedSwitched(from: "feed:a", to: "feed:a"))
-    #expect(CueViewportObserver.feedSwitched(from: "feed:a", to: "local"))
-    #expect(CueViewportObserver.feedSwitched(from: "local", to: "feed:a"))
-}
+// A feed switch ends every exposure through the shared
+// `FfiCueTracker.noteSelection`; the key's spelling and the first-sample and
+// same-key rules are unit-proven in Rust (`fauna-feed`, `fauna-ffi`).

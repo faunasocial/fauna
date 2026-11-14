@@ -42,12 +42,16 @@ agent hosts an on-demand root behind the per-binding switch: tui and the linux
 app on a linux host (the FUSE root), the windows app on a windows host (cfapi).
 macOS is marked and declared unbuilt (the ``on-demand-replica-serve-seat``
 surface): a bound location there is always-resident by design and apple's
-on-demand replica is the File Provider extension, another process that serves
-no sibling yet (relay-serving.md § Which seats hold). A macOS trio held through
-the agent alone would pass vacuously — a's agent runs no engine for a set it
-shows only through the extension, so its "nothing" says nothing about a
-placeholder. The leg lands with the extension's seat, through the set-level
-``folder-on-demand-toggle``. The phones are excused on the catalog page.
+on-demand replica is the File Provider extension, another process, whose
+host runs its own relay seat (relay-serving.md § Which seats hold → *Apple's
+File Provider replica*). A macOS trio held through the agent alone would pass
+vacuously — a's agent runs no engine for a set it shows only through the
+extension, so its "nothing" says nothing about a placeholder — and the app's
+domain reconcile registers no domain in the e2e launch, so the toggle cannot
+stand one up either. The extension's seat has a witness of its own, driving a
+signed bundle's domain as the read-path platform test does:
+``tests/platform/macos/test_file_provider_relay_seat_macos.py``. The phones
+are excused on the catalog page.
 
 On linux the seat trees sit under ``/tmp`` whatever ``TMPDIR`` says
 (``helpers.folder_content.mountable_location``'s reason: the confined
@@ -93,9 +97,9 @@ pytestmark = [
     # (on-demand-files.md), so a tui there has no switch to flip and its trio
     # would fail at the bound row, saying nothing about a placeholder. Declared
     # for the whole witness (convention 7's fourth skip kind). The `macos` mark
-    # stays so the macos column keeps citing the declared-unbuilt surface; its
-    # arm is another seat (the File Provider extension, another process) and
-    # lands as a witness of its own, with its own host platform.
+    # stays so the macos column keeps citing the surface; its arm is another
+    # seat (the File Provider extension, another process), witnessed by
+    # tests/platform/macos/test_file_provider_relay_seat_macos.py.
     pytest.mark.host_platform("linux", "windows"),
 ]
 

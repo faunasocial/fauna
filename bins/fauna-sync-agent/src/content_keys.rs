@@ -432,12 +432,25 @@ fn held_with_group_sets(
     Some(resolved)
 }
 
-/// Every group scope a binding names (`group-set.md` § Build design — the
-/// group set, decision 7): no nest row names a group set, so the bindings do.
+/// Every group scope a binding or a served presence root names (`group-set.md`
+/// § Build design — the group set, decision 7): no nest row names a group set,
+/// so the bindings and the presence plan do (`on-demand-files-shared-sets.md`
+/// § Shared sets on a capability host, decision 3d).
 async fn bound_group_scopes(state: &SyncServiceState) -> Vec<[u8; 32]> {
-    let config = state.config.read().await;
-    crate::engine_driver::plan_engines(&config)
+    let bound = {
+        let config = state.config.read().await;
+        crate::engine_driver::plan_engines(&config)
+    };
+    // Read after the config lock is released: the snapshot's own lock is a
+    // plain one, never held across an await.
+    let presence = state
+        .presence_serving
+        .lock()
+        .map(|planned| planned.clone())
+        .unwrap_or_default();
+    bound
         .into_iter()
+        .chain(presence)
         .filter_map(|m| match m.folder_ref {
             FolderRef::Group(scope) => Some(scope),
             _ => None,
@@ -665,6 +678,17 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: watch::Receiver<boo
         Arc<fauna_client::NestClient>,
         tokio::sync::broadcast::Receiver<PushEvent>,
     )> = None;
+    // The presence plan (`crate::presence_roots`) reads custody too — a set
+    // shared with the account is planned only once custody keys it — and the
+    // account's held group sets off the mounted store, so it re-plans on this
+    // task's custody edges: the store mount coming up (after one pass of the
+    // runtime, so the store's first listing has landed — a provision's
+    // reconcile runs before the mount, and a member with no bound set has no
+    // pending key to make the re-read walk), a custody nudge, a changed
+    // resolution, and the backstop. That re-plan wakes this task again only
+    // when the plan itself changed.
+    let mut store_was_mounted = false;
+    let mut replan = false;
     loop {
         let changed = tokio::select! {
             _ = shutdown.changed() => return,
@@ -673,6 +697,20 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: watch::Receiver<boo
         if changed && let Err(e) = crate::engine_driver::reconcile_resolved(&state).await {
             tracing::warn!(error = %e, "content keys: reconcile after a re-resolve failed");
         }
+        let store_mounted = state
+            .mounted_store
+            .lock()
+            .ok()
+            .is_some_and(|held| held.is_some());
+        if store_mounted && !store_was_mounted {
+            walk_mounted_store(&state).await;
+            replan = true;
+        }
+        store_was_mounted = store_mounted;
+        if changed || replan {
+            crate::presence_roots::spawn_reconcile(&state);
+        }
+        replan = false;
 
         // (Re)subscribe to the current connection's pushes.
         let provisioned = state.capability.read().await.is_some();
@@ -717,7 +755,16 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: watch::Receiver<boo
             tokio::select! {
                 _ = shutdown.changed() => return,
                 () = state.content_keys_wake.notified() => break,
-                () = &mut backstop => break,
+                () = &mut backstop => {
+                    // An owner's grant or demotion moves only the member's
+                    // row, which no push names and a reader's presence root
+                    // (no uploads, so no refresh edge) never reads: the
+                    // backstop's re-plan is the edge that remounts it with no
+                    // app running (`on-demand-files-linux.md`, the
+                    // presence-root bullet).
+                    replan = true;
+                    break;
+                }
                 changed = async {
                     match store_change.as_mut() {
                         Some(watch) => watch.changed().await,
@@ -738,6 +785,7 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: watch::Receiver<boo
                 } => match event {
                     Ok(event) if is_custody_nudge(&event) => {
                         await_runtime_walk(&state).await;
+                        replan = true;
                         break;
                     }
                     Ok(_) => {}

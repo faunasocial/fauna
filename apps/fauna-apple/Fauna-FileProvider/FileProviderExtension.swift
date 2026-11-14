@@ -48,12 +48,22 @@ import os
 /// `.notAuthenticated` rather than serving — the extension never fabricates content.
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     let domain: NSFileProviderDomain
-    private let host: FfiFileProviderHost?
+    fileprivate let host: FfiFileProviderHost?
     /// The engine's staging root for this set (bytes land here before `ingest`).
     private let rootDir: URL?
     /// The in-session live-refresh tick (see `startRefreshTick`), cancelled on
     /// `invalidate()`.
     private var refreshTask: Task<Void, Never>?
+    #if os(iOS)
+        /// The relay lease's door, vended to the app (see
+        /// `supportedServiceSources`); built on first ask. Not excisable.
+        fileprivate var leaseSource: RelayLeaseServiceSource?
+    #endif
+    #if os(iOS) && !FAUNA_EXCISE_P2P_SHARE
+        /// The share plane's ingest door, vended to the app (see
+        /// `supportedServiceSources`); built on first ask.
+        fileprivate var shareSource: ShareIngestServiceSource?
+    #endif
 
     private static let log = Logger(subsystem: "social.fauna.fileprovider", category: "extension")
 
@@ -279,6 +289,23 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         let rel = Self.rel(for: itemIdentifier)
         Task {
             do {
+                // The kept root answers first (`p2p-shared-set-build.md` § Phone
+                // peers — design, decision 3): a body a peer landed in the
+                // staging root the nest cannot serve, or staged bytes that are
+                // the recorded head. The host decides which staged bytes may be
+                // handed over (`lookup_body`); a stale staged copy is not.
+                if let kept = try await host.lookupBody(rel: rel) {
+                    let tmp = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString)
+                    try FileManager.default.copyItem(at: URL(fileURLWithPath: kept), to: tmp)
+                    let readOnly = await FileProviderItemCapabilities.isReadOnly(host)
+                    guard let meta = try await host.item(rel: rel) else {
+                        throw NSFileProviderError(.noSuchItem)
+                    }
+                    completionHandler(tmp, FileProviderItem(ffi: meta, readOnly: readOnly), nil)
+                    progress.completedUnitCount = 1
+                    return
+                }
                 // Bounded-memory hydrate (`fetch_to_path`): Rust writes the
                 // decrypted plaintext straight to the temp URL, so no file ever
                 // crosses UniFFI as one buffer (the iOS appex memory cap; also
@@ -334,12 +361,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     }
 
     /// Bytes for a rel that must be re-ingested at a new path (rename): prefer the
-    /// staged copy, else hydrate from the nest (a rename of a never-hydrated
-    /// placeholder still needs bytes — `serve_rename` re-ingests under the new rel).
+    /// staged copy the host vouches for (`lookup_body` — never a staged copy the
+    /// nest's head moved past), else hydrate from the nest (a rename of a
+    /// never-hydrated placeholder still needs bytes — `serve_rename` re-ingests
+    /// under the new rel).
     private func stagedOrFetchedBytes(rel: String, host: FfiFileProviderHost) async throws -> Data {
-        if let rootDir {
-            let staged = rootDir.appendingPathComponent(rel)
-            if let data = try? Data(contentsOf: staged) { return data }
+        if let kept = try await host.lookupBody(rel: rel),
+            let data = try? Data(contentsOf: URL(fileURLWithPath: kept))
+        {
+            return data
         }
         return try await host.fetch(rel: rel).bytes
     }
@@ -661,6 +691,149 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return FileProviderEnumerator(container: containerItemIdentifier, host: host, domain: domain)
     }
 }
+
+// MARK: - The extension's service doors (iOS)
+
+#if os(iOS)
+    /// The extension vends its doors to its app, offered on every item; the
+    /// app asks for them on the domain's root: the relay lease's
+    /// (`RelayLeaseService`; `relay-serving.md` § Relay serving → *Apple's
+    /// File Provider replica*, point (2)) — the seat serves only while the app
+    /// in front holds it — and, unless excised, the share plane's ingest door
+    /// (`ShareIngestService`; `p2p-shared-set-build.md` § Phone peers —
+    /// design, decision 3): the app runs the plane, this process is the set's
+    /// one writer.
+    extension FileProviderExtension: NSFileProviderServicing {
+        func supportedServiceSources(
+            for _: NSFileProviderItemIdentifier,
+            completionHandler: @escaping ([NSFileProviderServiceSource]?, Error?) -> Void
+        ) -> Progress {
+            let progress = Progress(totalUnitCount: 1)
+            if let host {
+                var sources: [NSFileProviderServiceSource] = [relayLeaseSource(host: host)]
+                #if !FAUNA_EXCISE_P2P_SHARE
+                    sources.append(shareIngestSource(host: host))
+                #endif
+                completionHandler(sources, nil)
+            } else {
+                completionHandler([], nil)
+            }
+            progress.completedUnitCount = 1
+            return progress
+        }
+
+        /// This instance's lease source, built once.
+        fileprivate func relayLeaseSource(host: FfiFileProviderHost) -> RelayLeaseServiceSource {
+            if let leaseSource { return leaseSource }
+            let source = RelayLeaseServiceSource(host: host)
+            leaseSource = source
+            return source
+        }
+    }
+#endif
+
+// MARK: - The share plane's ingest door (iOS)
+
+#if os(iOS) && !FAUNA_EXCISE_P2P_SHARE
+
+    /// The service source: one anonymous listener per extension instance,
+    /// whose connections each export a [ShareIngestDoor] over this domain's
+    /// host.
+    final class ShareIngestServiceSource: NSObject, NSFileProviderServiceSource,
+        NSXPCListenerDelegate
+    {
+        private let door: ShareIngestDoor
+        private lazy var listener: NSXPCListener = {
+            let listener = NSXPCListener.anonymous()
+            listener.delegate = self
+            listener.resume()
+            return listener
+        }()
+
+        init(door: ShareIngestDoor) {
+            self.door = door
+        }
+
+        var serviceName: NSFileProviderServiceName { ShareIngestService.serviceName }
+
+        func makeListenerEndpoint() throws -> NSXPCListenerEndpoint {
+            listener.endpoint
+        }
+
+        func listener(_: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection)
+            -> Bool
+        {
+            connection.exportedInterface = ShareIngestService.interface()
+            connection.exportedObject = door
+            connection.resume()
+            return true
+        }
+    }
+
+    /// The door itself: the host's `shareIngest` on the page, then the
+    /// enumerator signalled so Files lists what landed.
+    final class ShareIngestDoor: NSObject, FaunaShareIngestService {
+        private let host: FfiFileProviderHost
+        private let domain: NSFileProviderDomain
+
+        init(host: FfiFileProviderHost, domain: NSFileProviderDomain) {
+            self.host = host
+            self.domain = domain
+        }
+
+        func shareIngest(
+            provenActorHex: String, rows: [Data], spoolDir: String,
+            reply: @escaping (Data?, String?) -> Void
+        ) {
+            let (host, domain) = (self.host, self.domain)
+            Task {
+                do {
+                    let outcome = try await host.shareIngest(
+                        provenActorHex: provenActorHex, rows: rows, spoolDir: spoolDir)
+                    let encoded = ShareIngestReply(outcome)
+                    if encoded.changedTheTree {
+                        for container in FileProviderWorkingSetFeed.containersToSignal(changed: true) {
+                            try? await NSFileProviderManager(for: domain)?
+                                .signalEnumerator(for: container)
+                        }
+                    }
+                    reply(try encoded.encoded(), nil)
+                } catch {
+                    reply(nil, String(describing: error))
+                }
+            }
+        }
+
+        /// A group set's review row's *use the other version*: the host's
+        /// engine writes the retained bytes as a local edit, then Files is
+        /// told the tree moved.
+        func restoreRetainedVersion(conflictId: Int64, reply: @escaping (String?) -> Void) {
+            let (host, domain) = (self.host, self.domain)
+            Task {
+                do {
+                    try await host.restoreRetainedVersion(conflictId: conflictId)
+                    for container in FileProviderWorkingSetFeed.containersToSignal(changed: true) {
+                        try? await NSFileProviderManager(for: domain)?
+                            .signalEnumerator(for: container)
+                    }
+                    reply(nil)
+                } catch {
+                    reply(DisplayError.message(error) ?? String(describing: error))
+                }
+            }
+        }
+    }
+
+    extension FileProviderExtension {
+        /// This instance's service source, built once.
+        fileprivate func shareIngestSource(host: FfiFileProviderHost) -> ShareIngestServiceSource {
+            if let shareSource { return shareSource }
+            let source = ShareIngestServiceSource(door: ShareIngestDoor(host: host, domain: domain))
+            shareSource = source
+            return source
+        }
+    }
+#endif
 
 /// Drains the OS's materialized-item enumerator
 /// (`NSFileProviderManager.enumeratorForMaterializedItems`) into the full rel

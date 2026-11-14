@@ -147,6 +147,29 @@ export interface ConsentCardRow {
    *  into leaves by `composeRequestInstall` — this shell only reads the raw
    *  execution form off it. */
   install?: { execution_form: string; bind?: boolean } | null;
+  /** The card's one folder picker (`connected-apps-request-folder`) —
+   *  present exactly on a card carrying a bare folder-plane scope; `null` on
+   *  every other card. The shared machine composes and filters the options;
+   *  `setFolder` records the pick. */
+  folder_picker?: FolderPicker | null;
+}
+
+/** The consent card's folder picker (`consent_grant::folder_picker`). */
+export interface FolderPicker {
+  /** The eligible folders, by name, in name order. */
+  options: FolderOption[];
+  /** The chosen folder's row id; `null` until the user chooses — the card's
+   *  Approve stays disabled until then. */
+  chosen: number | null;
+  /** Why no folder can be chosen — set exactly when `options` is empty. */
+  none_eligible: LocalizedText | null;
+}
+
+/** One folder the picker offers: its row id (the option key, in decimal) and
+ *  the owner's name for it. */
+export interface FolderOption {
+  id: number;
+  name: string;
 }
 
 /** The verified D10 authoring delegation (`atproto-delegation-row`) — what

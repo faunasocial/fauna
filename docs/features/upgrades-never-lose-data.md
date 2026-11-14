@@ -4,6 +4,8 @@ title: Upgrades never lose your data
 section: your nest
 goal: docs/goal/architecture/version-compatibility.md § 1. The compatibility contract (absolute invariants)
 guide: docs/guides/install.md § What "alpha" means for you
+absences:
+  web (outcome 16): "docs/goal/architecture/version-compatibility.md § Dimension 1 — At-rest schema evolution (the nest DB + client-local stores)"
 ---
 
 ## What a user gets
@@ -68,6 +70,8 @@ Stamped 2026-10-01 at dc4b94e0f1.
 18. [nest] Upgrading your nest to a newer build keeps everything it already held; no upgrade removes data you cannot recreate — `docs/goal/architecture/version-compatibility.md` § I1 — Never destroy user-irrecoverable data (iron-clad)
    - (maintainer-only)
    - (maintainer-only)
+   - (maintainer-only)
+   - (maintainer-only)
 19. [nest] A nest tells apps which features it has as a short list of plain names, and lists none it does not have — `docs/goal/architecture/version-compatibility.md` § Dimension 3 — Version & capability negotiation
    - `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_nest_info_advertises_capability_set`
 20. [nest] When something you do with a person on another nest fails because their nest is too old for it, your nest says so in your language instead of failing with a raw error — `docs/goal/architecture/version-compatibility.md` § Dimension 5 — Federation across nest versions
@@ -79,12 +83,12 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+88622a93 standalone |
-| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.5-dev+7bab2ad3 standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+ab838565 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+7186912b standalone |
+| tui | ⚠ partial | 0.1.5-dev+7186912b standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -107,7 +111,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_old_binary_serves_new_db_with_extra_table` | nest (linux): passed, nest (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_newer_builds_index_tells_the_user_to_update_and_offers_nothing_else` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_malformed_index_reaches_the_floor_only_through_a_confirm_that_states_the_residual` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account` | linux (linux): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
 | 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance_windows.py::test_windows_start_over_refuses_on_error_message_while_another_instance_serves` | windows (windows): passed |
 | 8 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -120,9 +124,12 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web` | web (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 16 | app | `tests/e2e-unified/tests/test_mls_state_newer_build_tui.py::test_conversations_a_newer_build_saved_say_update_the_app_and_stay_untouched` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | absent by design on web | — |
 | 17 | nest | `tests/e2e-unified/tests/api/test_anonymous_version_surfaces.py::test_anonymous_version_answers_are_major_minor_and_only_health_tells_the_build` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 18 | nest | (maintainer-only) | nest (linux): passed, nest (macos): passed |
 | 18 | nest | (maintainer-only) | nest (linux): passed, nest (macos): passed |
+| 18 | nest | (maintainer-only) | — |
+| 18 | nest | (maintainer-only) | — |
 | 19 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_nest_info_advertises_capability_set` | nest (linux): passed, nest (macos): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_peer_nest_outdated_relay.py::test_send_to_a_too_old_home_nest_is_answered_peer_nest_outdated` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

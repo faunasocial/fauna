@@ -50,6 +50,9 @@
 //! app and that host would be sharing exactly the fields whose *absence* is the
 //! agent's contract, so the two stay separate on purpose.
 
+pub mod closing;
+use closing::within_or_hand_over;
+pub use closing::{CLOSING_STORES_BUDGET, ClosingStores, closing_stores};
 #[cfg(any(unix, windows))]
 pub mod conversations_door;
 pub mod deployment_seeds;
@@ -310,6 +313,9 @@ pub fn build_params(
         enrollment_device_label: device_label,
         linked_nests: Some(linked_nests),
         owed_nests: Some(owed_nests),
+        // In front: a desktop never leaves it, and a phone's ffi seeds the
+        // shell's last signal over this before it starts the runtime.
+        foreground: true,
     })
 }
 
@@ -785,8 +791,10 @@ pub enum StopOutcome {
     NothingToStop,
     /// Everything there was to stop is stopped; the scope is erasable.
     Stopped,
-    /// The budget lapsed with something still holding the store. The erase
-    /// proceeds anyway, and on windows it will fail with `os error 32`.
+    /// The budget lapsed with something still holding the store. The rest of
+    /// the stop goes on in [`closing_stores`]; an erase that waits on that set
+    /// meets a closed store, one that does not fails with `os error 32` on
+    /// windows.
     BudgetElapsed,
 }
 
@@ -819,7 +827,31 @@ pub enum StopOutcome {
 /// already-async FFI caller should not race the drain. The same division of
 /// labour as [`AccountRuntimeHost::take`], which hands back what to stop
 /// rather than stopping it.
+///
+/// # A lapse returns; the stop goes on
+///
+/// The budget bounds how long the CALLER waits, never how long the store
+/// stays open: on [`StopOutcome::BudgetElapsed`] the rest of the stop is
+/// handed to this process's [`closing_stores`], where it runs to its end —
+/// the settled half's shutdown, the in-flight half's settle and shutdown, the
+/// second connections — and an erase that must meet a closed store waits on
+/// that set ([`ClosingStores::closed`], under [`CLOSING_STORES_BUDGET`]).
+/// Dropping it instead left nothing that knew the store was still open
+/// (`closing`'s module docs).
 pub async fn stop_account_runtime(
+    settled: Option<AccountStoreHandle>,
+    pending: Option<PendingAssembly>,
+    budget: std::time::Duration,
+    reason: StopReason,
+) -> StopOutcome {
+    stop_account_runtime_into(closing_stores(), settled, pending, budget, reason).await
+}
+
+/// [`stop_account_runtime`], handing a lapse to `closing` — the process's set
+/// in production, a test's own in tests (the set is process-wide, and tests
+/// run side by side).
+async fn stop_account_runtime_into(
+    closing: &ClosingStores,
     settled: Option<AccountStoreHandle>,
     pending: Option<PendingAssembly>,
     budget: std::time::Duration,
@@ -864,24 +896,69 @@ pub async fn stop_account_runtime(
         }
         stopped_something
     };
-    match tokio::time::timeout(budget, stop).await {
-        Ok(false) => StopOutcome::NothingToStop,
-        Ok(true) => {
+    let late = |stopped: bool| async move {
+        if stopped {
+            tracing::info!(
+                "[account-runtime] the lapsed stop closed the account store; the scope is \
+                 erasable"
+            );
+        }
+    };
+    match within_or_hand_over(closing, budget, stop, late).await {
+        Some(false) => StopOutcome::NothingToStop,
+        Some(true) => {
             tracing::info!("[account-runtime] the account store stopped; the scope is erasable");
             StopOutcome::Stopped
         }
-        Err(_) => {
+        None => {
             // Loud, because silence here is exactly how the windows leak went
-            // unnoticed: the erase runs anyway, and the sweep reports what
-            // survives.
+            // unnoticed. The stop goes on in the closing set; an erase that
+            // waits on it meets a closed store, one that does not fails on
+            // windows and the sweep reports what survives.
             tracing::warn!(
-                "[account-runtime] the account store did not stop within {}s — erasing \
-                 anyway; a still-open store fails its remove_dir_all on windows (os error 32)",
+                "[account-runtime] the account store did not stop within {}s — the stop goes on \
+                 in the background; an erase that does not wait for it fails its remove_dir_all \
+                 on windows (os error 32)",
                 budget.as_secs()
             );
             StopOutcome::BudgetElapsed
         }
     }
+}
+
+/// Finish, in the background, a stop whose budget lapsed
+/// ([`StopOutcome::BudgetElapsed`]) — then hand the engine role over to
+/// whatever runtime `host` installed meanwhile.
+///
+/// The lapsed [`stop_account_runtime`] dropped its own future: the runtime
+/// it was stopping may still be draining a pass with the store's engine
+/// lock held, and the host's caller has already gone on — on an apple
+/// session patch or an account switch, straight to the next login's
+/// assembly. That assembly then finds the lock held and starts as a
+/// non-holder, and the slow runtime's exit tells no one, so the installed
+/// runtime pumped nothing — no device registration, no grant — until its
+/// backstop tick (`account-runtime.md` § Multi-instance concurrency → *A
+/// supersession hands the engine role over*). Here the stop is awaited to
+/// its end ([`stop_one`] again: a second stop of one runtime waits for the
+/// store thread's exit and a second retirement finds nothing to clear),
+/// and the installed runtime is then told the role is free. Pass the
+/// SETTLED half the teardown took; an in-flight half settles through its
+/// own `finish`, whose superseded arm already does both.
+///
+/// Requires a tokio context, as every native teardown caller has.
+pub fn finish_lapsed_stop<T: Send + 'static>(
+    host: &'static AccountRuntimeHost<T>,
+    store: AccountStoreHandle,
+    reason: StopReason,
+) {
+    tokio::spawn(async move {
+        stop_one(&store, reason).await;
+        tracing::info!(
+            "[account-runtime] the lapsed stop finished; the engine role is handed to the \
+             installed runtime, if any"
+        );
+        host.displaced_runtime_stopped().await;
+    });
 }
 
 /// How long the stop waits, once the runtime has shut down, for the second
@@ -1313,6 +1390,59 @@ mod tests {
             "the user asked to be signed out; the erase proceeds and says so"
         );
         drop(claim);
+    }
+
+    /// A lapse returns to the caller but does NOT drop the stop: the rest of
+    /// it — here, the wait for the assembly still in flight — goes on in the
+    /// closing set, and an erase waiting on that set resolves only once the
+    /// assembly has settled. Dropping it is the measured windows defect: the
+    /// barrier counted the teardown finished at the lapse and the erase met
+    /// the open store (`closing`'s module docs).
+    ///
+    /// Causal both ways (e2e convention 14): the claim is held across the
+    /// lapse, so the stop can only time out; the set can only drain once the
+    /// test drops the claim.
+    #[tokio::test]
+    async fn a_lapsed_stop_goes_on_in_the_closing_set() {
+        let closing = ClosingStores::new();
+        let host: AccountRuntimeHost = AccountRuntimeHost::new();
+        let claim = host.begin(());
+        let teardown = host.take(StopReason::AccountSwitch);
+
+        assert_eq!(
+            stop_account_runtime_into(
+                &closing,
+                teardown.settled,
+                teardown.pending,
+                std::time::Duration::from_millis(10),
+                StopReason::SignOut,
+            )
+            .await,
+            StopOutcome::BudgetElapsed,
+        );
+        assert_eq!(
+            closing.len(),
+            1,
+            "the lapsed stop must still be counted: the store it waits on may be open"
+        );
+
+        let erase = {
+            let closing = closing.clone();
+            tokio::spawn(async move {
+                closing
+                    .closed(std::time::Duration::from_secs(3600), "test")
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !erase.is_finished(),
+            "the erase waits while the assembly is in flight"
+        );
+
+        drop(claim); // the assembly settles (failed): nothing left holding the store
+        assert!(erase.await.unwrap());
+        assert!(closing.is_empty());
     }
 
     /// A host that never assembled anything reports nothing to stop — the

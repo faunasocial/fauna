@@ -451,24 +451,26 @@ class AccountStores @Inject constructor(
     /**
      * **The one routine** the sign-out's tail, the cold launch and Remove Again
      * run — shared Rust's finish over both roots and the account-store container:
-     * the serving question, the sync agent dismissed ([dismissAgent]; the
-     * gesture's own stop already did it), the wipe (the registry's own store,
+     * the serving question, the sync agent dismissed (every [caller] but the
+     * gesture, whose own stop already did it), the wipe (the registry's own store,
      * then [host]'s `secureStorage.clear()`), each recorded account's scopes and
      * shared-namespace slots, the residue re-sweep, the residue record written
-     * before the sign-out record clears (decisions 2–6). [written] is the
-     * gesture's [recordSignOut] answer, `null` elsewhere.
+     * before the sign-out record clears (decisions 2–6). [caller] is which of
+     * the three runs this is — while the registry names somebody only Remove
+     * Again re-sweeps the residue record, its paths only (decision 3). [written]
+     * is the gesture's [recordSignOut] answer, `null` elsewhere.
      *
      * Closes the open account-scoped handles first — deleting a SQLite file out
      * from under an open connection leaves it serving a deleted inode — but only
      * when a record is pending or this is the gesture: at a launch with nothing
      * to finish, the identity closers must not blank the live account's state.
-     * Blocking file I/O (and, with [dismissAgent], the agent's budget): call it
+     * Blocking file I/O (and, but for the gesture, the agent's budget): call it
      * off the main thread.
      */
     @Synchronized
     fun finishSignOut(
         host: com.fauna.ffi.FfiSignOutHost,
-        dismissAgent: Boolean,
+        caller: com.fauna.ffi.FfiFinishCaller,
         written: List<String>?,
     ): com.fauna.ffi.FfiSignOutFinish {
         if (written != null || com.fauna.ffi.signOutRecordPending(filesRoot.absolutePath)) {
@@ -482,7 +484,7 @@ class AccountStores @Inject constructor(
             // no raw lock, so there is no reflection of its own to put down.
             null,
             host,
-            dismissAgent,
+            caller,
             written,
         )
         if (outcome.refused) {

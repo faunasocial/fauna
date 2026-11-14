@@ -19,8 +19,14 @@
 
 import { registerE2eCommands, type E2eCommandHandler } from './e2e-commands';
 import { installPaintedErrorObserver } from './e2e-painted-errors';
+import { installPaintedTextAreaObserver } from './e2e-painted-text-area';
 import { setReconnectBackoffForTest } from './rpc';
-import { alertSweepWakeForTest, connectionReportsForTest, paintedErrorsForTest } from './wasm';
+import {
+  alertSweepWakeForTest,
+  connectionReportsForTest,
+  paintedErrorsForTest,
+  paintedTextAreaForTest,
+} from './wasm';
 
 const ACTIONS = ['alert_sweep_wake', 'reconnect_backoff'] as const;
 
@@ -38,15 +44,19 @@ const handler: E2eCommandHandler = async (action, payload) => {
   return null;
 };
 
-/** Claim the two commands, start the painted-error observer, and publish the
- *  two counters for `web-bridge/agent.js`'s state assembly. */
+/** Claim the two commands, start the painted-frame observers, and publish the
+ *  two counters and convention 17's `painted_text_area` record
+ *  (`#lib/e2e-painted-text-area`) for `web-bridge/agent.js`'s state assembly. */
 export function registerLoudSurfaceCommands(): void {
   registerE2eCommands(ACTIONS, handler);
   installPaintedErrorObserver();
+  installPaintedTextAreaObserver();
   const w = window as unknown as {
     __fauna_connectionReports?: () => unknown;
     __fauna_paintedErrors?: () => unknown;
+    __fauna_paintedTextArea?: () => unknown;
   };
   w.__fauna_connectionReports = connectionReportsForTest;
   w.__fauna_paintedErrors = paintedErrorsForTest;
+  w.__fauna_paintedTextArea = paintedTextAreaForTest;
 }

@@ -241,6 +241,18 @@ mod bindings {
             })
         }
 
+        /// Choose the folder (its row id) on the bare folder-plane request
+        /// card `consent_id_hex` (`connected-apps-request-folder`) — local,
+        /// no nest call; the card's Approve then carries it. `id` is an `f64`
+        /// on the JS side (a row id fits a double exactly), never a `bigint`.
+        #[wasm_bindgen(js_name = setFolder)]
+        pub fn set_folder(&self, consent_id_hex: String, id: f64) {
+            if id.fract() == 0.0 && id.abs() <= 9_007_199_254_740_991.0 {
+                #[allow(clippy::cast_possible_truncation)]
+                self.inner.set_folder(consent_id_hex, id as i64);
+            }
+        }
+
         /// "Never show requests from this app" for the request `consent_id_hex`.
         #[wasm_bindgen(js_name = blockRequest)]
         pub fn block_request(&self, consent_id_hex: String) -> js_sys::Promise {
@@ -271,6 +283,43 @@ mod bindings {
                 inner.set_external_apps_enabled(enabled).await;
                 Ok(JsValue::UNDEFINED)
             })
+        }
+
+        /// Show the History (`history = true`) or Now lens of the trust facet
+        /// on the row `key` — page-local, no nest call
+        /// (`connected-apps.md` § The trust facet and history lens → *Lens state*).
+        #[wasm_bindgen(js_name = setLens)]
+        pub fn set_lens(&self, key: String, history: bool) {
+            let lens = if history {
+                fauna_client_connected_apps::TrustLens::History
+            } else {
+                fauna_client_connected_apps::TrustLens::Now
+            };
+            self.inner.set_lens(key, lens);
+        }
+
+        /// Put every row back on its Now lens — a fresh visit's reset.
+        #[wasm_bindgen(js_name = resetLenses)]
+        pub fn reset_lenses(&self) {
+            self.inner.reset_lenses();
+        }
+
+        /// Open the roster row `key`'s per-operation record (the machine's
+        /// `open_record`: one open at a time, read on demand, never kept
+        /// beyond the page — `connected-apps.md` § Layout & flow, region 3).
+        #[wasm_bindgen(js_name = openRecord)]
+        pub fn open_record(&self, key: String) -> js_sys::Promise {
+            let inner = Arc::clone(&self.inner);
+            wasm_bindgen_futures::future_to_promise(async move {
+                inner.open_record(key).await;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
+        /// Close the open record.
+        #[wasm_bindgen(js_name = closeRecord)]
+        pub fn close_record(&self) {
+            self.inner.close_record();
         }
 
         /// Revoke the roster row `key` — the machine picks the verb.
@@ -307,6 +356,29 @@ mod bindings {
                 .unwrap_or_default()
         };
         let text = fauna_client_connected_apps::compose::roster_row_text_with(&row, &format);
+        serde_json::to_string(&text).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// One operation of an open record, composed once in shared Rust
+    /// (`compose::oracle_op_text_with`): takes one snapshot `record.ops` entry
+    /// (`OracleOpRow`) as JSON and `format_time` as [`roster_row_text_json`]
+    /// does, and returns its `ComposedText` as JSON. Throws on an entry that is
+    /// not an `OracleOpRow`.
+    #[wasm_bindgen(js_name = oracleOpTextJson)]
+    pub fn oracle_op_text_json(
+        op_json: &str,
+        format_time: &js_sys::Function,
+    ) -> Result<String, JsValue> {
+        let op: fauna_client_connected_apps::OracleOpRow = serde_json::from_str(op_json)
+            .map_err(|e| JsValue::from_str(&format!("not an oracle op row: {e}")))?;
+        let format = |ms: i64| {
+            format_time
+                .call1(&JsValue::NULL, &JsValue::from_f64(ms as f64))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default()
+        };
+        let text = fauna_client_connected_apps::compose::oracle_op_text_with(&op, &format);
         serde_json::to_string(&text).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 

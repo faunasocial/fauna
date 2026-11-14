@@ -499,8 +499,8 @@ async fn the_question_is_asked_once_and_a_no_is_final_on_both_sides() {
     deliver(&bob, &alice).await;
     assert_eq!(
         pair_state(&alice, &bob),
-        None,
-        "a decline to an announce leaves the announcer unasked"
+        Some(PairState::Declined),
+        "a decline to an announce settles the pair on the announcer's side too"
     );
 
     // A re-import announces again: Bob is not asked a second time.
@@ -510,6 +510,30 @@ async fn the_question_is_asked_once_and_a_no_is_final_on_both_sides() {
     assert_eq!(
         bob.links.answer_link(&alice.hex, &FB, true).await,
         Err(LinkError::NotAsked)
+    );
+}
+
+#[tokio::test]
+async fn a_declined_announce_is_never_asked_of_the_announcer_after_a_re_import() {
+    let (alice, bob) = alice_and_bob();
+    alice.links.announce_round(&FB).await.unwrap();
+    deliver(&alice, &bob).await;
+    bob.links.answer_link(&alice.hex, &FB, false).await.unwrap();
+    deliver(&bob, &alice).await;
+
+    // Bob imports again: his announce reaches Alice, who must not be asked a
+    // question Bob already answered no to (outcome 51).
+    bob.links.announce_round(&FB).await.unwrap();
+    deliver(&bob, &alice).await;
+    assert_eq!(pair_state(&alice, &bob), Some(PairState::Declined));
+    assert_eq!(
+        alice.links.answer_link(&bob.hex, &FB, true).await,
+        Err(LinkError::NotAsked)
+    );
+    alice.links.drive().await.unwrap();
+    assert!(
+        alice.wire.take().is_empty(),
+        "nothing is owed once declined"
     );
 }
 

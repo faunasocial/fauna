@@ -923,6 +923,11 @@ onboarding:
       domain_available_inside_zone: "Nothing is set up at {domain} yet. It sits inside {zone}: if you hold {zone}, continue and pick the DNS provider that hosts it. If not, you can register {domain} on the next page."
       registered_no_nest: "{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain."
       local_no_nest: "No nest is running at {domain}. Start a nest there, then check again."
+      # The kids build's terminal line in place of a set-up or claim offer (no
+      # nest, an available domain, an unclaimed nest): the kids app keeps
+      # onboarding only as joining a nest by invite (account-age-band.md, the
+      # kids-app bullet, item 4).
+      kids_no_joinable_nest: "There is no nest at {domain} you can join. Ask for an invite to a nest that is already set up."
       already_on_nest_handle_matches: "Welcome back, {handle}."
       already_on_nest_handle_differs: "You're already registered on {domain} as {old_handle}. Continue to log in as that handle (you can change it after)."
       user_unregistered: "There's a nest at {domain} but you're not registered. Request an invite or paste a code below."
@@ -1283,6 +1288,9 @@ feed:
   # convert is refused rather than clamped: a clamped price would be silently
   # unbuyable, and the author would never be told.
   compose_sell_price_invalid: Enter a smaller price
+  # The asking price is a whole number of sats — no decimal point, sign or
+  # separator (`fauna_client_subscriptions::parse_asking_price_sats`).
+  compose_sell_price_not_whole: Enter the price as a whole number of sats
   # The pay-per-view sell arm derives its rank from a fresh read of the
   # author's tiers and refuses when that read fails (fail closed —
   # monetization.md § Implementation status (2d)): a guessed rank could land
@@ -2365,6 +2373,17 @@ atproto_settings:
   consent_set_heading_unnamed: 'Some of that comes from {nsid}:'
   consent_approve_button: Approve
   consent_deny_button: Deny
+  # The card's folder picker (authorization-server.md § Consent → "The card
+  # chooses the folder"): an app asked to deposit into, or read, ONE of the
+  # user's folders without naming it — the user picks which. Only folders the
+  # request can actually use are offered; when none is, the card says why and
+  # cannot be approved.
+  consent_folder_label: 'Folder:'
+  consent_folder_prompt: Choose a folder
+  consent_folder_none_deposit: None of your folders can receive files from an app — each keeps only its file list on your nest. Let one folder store its files on your nest first.
+  consent_folder_none_read: None of your folders is shared with apps for reading. Turn on serving for a folder first.
+  consent_folder_none_both: None of your folders can both receive files from an app and be read by one. Use a folder that stores its files on your nest and is served.
+  consent_folder_unreadable: Your folders could not be read just now, so none can be chosen. Try again in a moment.
   error_refresh: 'Failed to load app credentials: {message}'
   error_mint: 'Failed to create the app credential: {message}'
   error_revoke: 'Failed to revoke the app credential: {message}'
@@ -4422,7 +4441,7 @@ settings:
     title: iCloud Backup
     toggle: Back up identity to iCloud Keychain
     # public-text: app-strings-public
-    footer: When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.
+    footer: When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy yet. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.
     # public-text-end: app-strings-public
   check_for_updates: Check for Updates
   up_to_date: Up to date
@@ -4648,12 +4667,14 @@ settings:
     kind_other: '{kind}'
     state_waiting: Waiting to send
     state_held: Waiting behind a change that was not sent
+    state_held_carry: Waiting for the conversation to move to your new identity
     state_unsent: Not sent
     reason_unknown_kind: This version of the app cannot send this change
     reason_undecodable: This change could not be read
     reason_mls_no_channel: The conversation could not be found
     reason_mls_not_a_member: You are no longer a member of this conversation
     reason_mls_send_failed: The message could not be sent
+    reason_mls_attachment_missing: An attachment of this message is no longer on this device
     reason_fallback: 'Your nest refused this change ({code})'
   # The PERMANENT half of the post-succession member review — ui.yaml page
   # `member_review`, a Settings sub-page (succession-aftermath.md § Propagation,
@@ -4838,6 +4859,10 @@ settings:
   # …and for the account THIS window is using (a window opened for one account
   # can list another as the device's active one): its own remedy.
   remove_account_blocked_this_window: 'Not removed — this window is using that account. Close this window, then remove the account from another one.'
+  # …and for a retired identity whose unsent changes have not moved to the
+  # identity that replaced it yet (succession-aftermath.md § Re-key scope, the
+  # device-local outbox row): removing it would erase them.
+  remove_account_blocked_carry_owed: 'Not removed — this account still has changes waiting to move to your new identity. Sign in as your new identity and send or discard them first.'
   # A switch refused at the point of no return (long-term-store.md § Multi-account
   # evolution, "Activating refuses an account it cannot launch as"). Selected by the
   # shared `fauna_client_accounts::switch_refused_copy`, never assembled by an app;
@@ -4965,6 +4990,9 @@ nests:
   # history — a crypto fact, so the grant-log consent copy says so.
   # public-text: app-strings-public
   scope_mail: Mail — and the spam-filter model and training history derived from it
+  scope_materialize_mail: Keeps your mail searchable
+  scope_materialize_calendar: Keeps your calendar searchable
+  scope_materialize_card: Keeps your contacts searchable
   # public-text-end: app-strings-public
   scope_calendar: Calendar
   scope_card: Contacts
@@ -5020,6 +5048,17 @@ nests:
     On an honest nest, revoking stops future access and re-acquisition. It cannot
     un-see what was already read, and does not yet block content arriving after
     revocation.
+  bound_note_materialize_mail: >-
+    On an honest nest, revoking deletes this nest's searchable copy of your mail
+    and its key, and stops it reading more. It cannot un-see what was already read.
+  bound_note_materialize_calendar: >-
+    On an honest nest, revoking deletes this nest's searchable copy of your
+    calendar and its key, and stops it reading more. It cannot un-see what was
+    already read.
+  bound_note_materialize_card: >-
+    On an honest nest, revoking deletes this nest's searchable copy of your
+    contacts and its key, and stops it reading more. It cannot un-see what was
+    already read.
   # public-text-end: app-strings-public
   # REQUIRED honest-bound copy for a BOUNDED mail grant (content-sealing epochs,
   # nest-trust-grant-bound-note) — the stronger, crypto-bounded wording nests.md
@@ -5110,6 +5149,24 @@ nests:
   # (same ruling as scope_mail above).
   # public-text: app-strings-public
   mint_option_mail: Read and filter my mail — and the spam-filter model and training history derived from it
+  mint_option_materialize_mail: Keep my mail searchable on this nest
+  mint_option_materialize_calendar: Keep my calendar searchable on this nest
+  mint_option_materialize_card: Keep my contacts searchable on this nest
+  mint_materialize_note: >-
+    While this is on, this nest can read your mail and keeps a searchable copy of
+    it on its disk. Anyone who can read this nest's disk can read that copy. On an
+    honest nest, turning it off deletes the copy and the nest's key to your mail —
+    it cannot undo what a hostile nest already read.
+  mint_materialize_calendar_note: >-
+    While this is on, this nest can read your calendar and keeps a searchable copy
+    of it on its disk. Anyone who can read this nest's disk can read that copy. On
+    an honest nest, turning it off deletes the copy and the nest's key to your
+    calendar — it cannot undo what a hostile nest already read.
+  mint_materialize_card_note: >-
+    While this is on, this nest can read your contacts and keeps a searchable copy
+    of them on its disk. Anyone who can read this nest's disk can read that copy.
+    On an honest nest, turning it off deletes the copy and the nest's key to your
+    contacts — it cannot undo what a hostile nest already read.
   # public-text-end: app-strings-public
   mint_option_calendar: Read my calendar
   mint_option_paywalled: 'Serve paywalled posts — {tier}'
@@ -5330,6 +5387,43 @@ web_publish:
   error_publish: 'Failed to publish post: {message}'
   error_unpublish: 'Failed to unpublish post: {message}'
   error_paywall_link: 'Failed to create paywall link: {message}'
+# The own-post Nostr advertisement verb pair on the feed's ⋯ overflow
+# (monetization.md § The Nostr advertisement of a sold post → What the author
+# sees and agrees to). The confirm step's consequence sentence, confirm_body,
+# is a public text (it states what the act guarantees — who can read the note,
+# what a zap can buy, what stopping cannot delete), so it sits in an
+# app-strings-public region; an app offers the Advertise verb only while the
+# catalog carries it.
+nostr_advertise:
+  advertise: Advertise on Nostr
+  stop: Stop advertising on Nostr
+  confirm_title: Advertise this post on Nostr?
+  confirm: Advertise
+  # public-text: app-strings-public
+  confirm_body: >-
+    Your post's public teaser and its price will be published to your nest's
+    relay and to your Nostr relays. Anyone on Nostr can read them, and a zap of
+    at least that price whose receipt is signed by one of your zap signers can
+    buy the post for the person who sent it. If you stop advertising, the note
+    is deleted from your nest's relay and, while your nest holds your Nostr
+    key, your Nostr relays are asked to delete their copies, but some may keep
+    them.
+  # public-text-end: app-strings-public
+  error_advertise: 'Failed to advertise the post on Nostr: {message}'
+  error_stop: 'Failed to stop advertising the post on Nostr: {message}'
+# The sold post's Change price… verb and dialog on the feed's ⋯ overflow
+# (monetization.md § The asking price → Re-pricing a sold post). The two fields
+# reuse the sell composer's placeholders — they are its twins. The note the
+# dialog shows on an advertised post, sale_price.advertised_note, states what
+# the edit does to the Nostr advertisement, so it is a public text and reaches
+# the catalog only through its public-texts round; until it does, an app does
+# not offer the verb on an advertised post (the author is told before saving,
+# or not offered the save).
+sale_price:
+  button: Change price…
+  title: Change price
+  error_load: "Failed to read the post's price: {message}"
+  error_save: 'Failed to change the price: {message}'
 mail_aliases:
   title: Aliases
   description: >-
@@ -5778,7 +5872,7 @@ archive_import:
   title: Import from other services
   # public-text: app-strings-public
   description: >-
-    Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.
+    Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.
   # public-text-end: app-strings-public
   unavailable: >-
     Importing needs a session that holds your identity key; this one does not.
@@ -6195,6 +6289,13 @@ admin:
     suspend_default_reason: Suspended by admin
     make_admin: Make Admin
     remove_admin: Remove Admin
+    # Admin take-over of a supervised account (family-safety.md § App surface
+    # → Admin take-over).
+    supervised_by: 'Supervised by {guardian}'
+    take_over: Take over
+    take_over_confirm_summary: 'Take over supervision of {ward} from {guardian}? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page.'
+    take_over_confirm: Confirm take-over
+    take_over_cancel: Cancel
     prev_page: Previous
     next_page: Next
     page_indicator: 'Page {current} of {pages}'
@@ -8369,8 +8470,8 @@ subscriptions:
   # claim-delivery). claim_delivery_dm carries exactly {code};
   # claim_delivery_dm_link exactly {code} and {url} (the post's web page).
   # public-text: app-strings-public
-  claim_delivery_dm: "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
-  claim_delivery_dm_link: "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
+  claim_delivery_dm: "Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs."
+  claim_delivery_dm_link: "Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs."
   # public-text-end: app-strings-public
   offer_status_none: Not subscribed
   offer_status_pending: Pending approval
@@ -8643,8 +8744,10 @@ error:
   nostr:
     # The door's four refusals (nostr.md § Replying to and quoting a nostr
     # note → *The door*), each naming what to change on the Nostr page.
-    # fauna.nostr.not_linked — no Nostr key is linked at all.
-    not_linked: This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.
+    # fauna.nostr.not_linked — no Nostr key is linked at all. Worded for both
+    # callers: the reply door (a reply to a Nostr post) and Advertise on Nostr
+    # (monetization.md § The Nostr advertisement of a sold post → The act).
+    not_linked: This needs a linked Nostr key, and none is linked for you. Link one on the Nostr page first.
     # fauna.nostr.no_custodial_key — the key is linked in a signing mode the
     # nest cannot sign with (remote / nip07); the remedy is a generated or
     # imported key.
@@ -8661,8 +8764,10 @@ error:
     # (monetization.md § The Nostr advertisement of a sold post → The act).
     not_sold: Only a post you sell can be advertised on Nostr. Sell this post first.
     # fauna.nostr.no_asking_price — the selling tier has no machine price, so
-    # no zap could ever buy it.
-    no_asking_price: This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.
+    # no zap could ever buy it. Public: it states a property of the act.
+    # public-text: app-strings-public
+    no_asking_price: This post has no asking price, so a zap could not buy it and it can't be advertised. To advertise a post you sell, choose Sell this post… when you write it and give it an asking price in sats.
+    # public-text-end: app-strings-public
   nest:
     # fauna.nest.outdated — the nest booted a degraded "needs-update" mode (it
     # cannot safely operate its newer at-rest DB). Actionable: update the nest.
@@ -8676,6 +8781,20 @@ error:
     # account's backup from another box, so adding it here was refused and
     # nothing was recorded (backup-destinations.md § Create, step 3).
     writer_seat_held: This destination already keeps your account's backup from another box. Nothing was added.
+  payments:
+    # fauna.payments.claim_not_found — the pasted claim code matches no claim
+    # on this nest (an unknown code and one the redeemer may not see answer
+    # alike). Actionable: check the code for a typo.
+    claim_not_found: No claim matches this code. Check it and try again.
+    # fauna.payments.claim_already_redeemed — the code was already used.
+    claim_already_redeemed: This code has already been used.
+    # fauna.payments.claim_voided — the creator voided the code.
+    claim_voided: This code was cancelled by the creator and can no longer be used.
+    # fauna.payments.claim_admits_elsewhere — a membership tier's claim code
+    # redeemed from another nest (monetization.md § Pillar 3 → Which nest an
+    # in-app redeem binds on): membership is joining the author's nest, where
+    # the code is an invite code. The code stays unredeemed.
+    claim_admits_elsewhere: This code is a membership of the creator's nest. Use it as an invite code when you join that nest. It has not been used.
   federation:
     # fauna.federation.peer_nest_outdated — a cross-nest relay reached a peer
     # nest that predates the required federation kind (S5 old-peer mapping,
@@ -8852,6 +8971,7 @@ errors:
   recovery_prior_kit_required: A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead.
   recovery_prior_kit_mismatch: That kit does not match the one currently registered for this identity.
   recovery_kit_for_another_account: That recovery kit belongs to a different account, not this one. Nothing was changed.
+  recovery_kit_minted_elsewhere: The window that replaced this identity is creating its new recovery kit and will show it there.
   recovery_prior_escrow_unreadable: 'Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it.'
   recovery_group_ceremony: 'Updating your groups failed: {detail}'
 registrar:
@@ -9182,6 +9302,14 @@ connected_apps:
   oracle_requests_one: 1 request answered in all
   oracle_latest: 'Most recent, {time}: {operation} — {detail}'
   oracle_latest_bare: 'Most recent, {time}: {operation}'
+  # The per-operation record behind the summary: the row's open control and
+  # the list it opens, newest first (connected-apps-oracle-*). {operation}
+  # and {detail} as above.
+  oracle_open: Show what Fauna did for this app
+  oracle_close: Hide what Fauna did for this app
+  oracle_op: '{time} · {operation} — {detail}'
+  oracle_op_bare: '{time} · {operation}'
+  oracle_empty: Nothing recorded for this app yet
   # The Blocked apps section — painted only while something is blocked.
   blocked_heading: Blocked apps
   blocked_hint: 'Requests from these apps are never shown to you.'
@@ -9208,6 +9336,23 @@ connected_apps:
   install_settings_heading: 'Settings:'
   install_settings_none: 'Settings: none'
   install_setting: '{label} ({kind})'
+  # The trust facet on a principal's row (connected-apps.md § The trust facet
+  # and history lens): the keys the app holds to the user's records. A kind
+  # an app published is named by its publisher and its name label verbatim, in
+  # quotes ({kinds} is already '"notes", "reading-list"'); trust vocabulary,
+  # never capability/grant (participants.md § Naming).
+  trust_scope_ext_rw: 'Keys to your records published by {publisher}: {kinds} — read and write'
+  trust_scope_ext_ro: 'Keys to your records published by {publisher}: {kinds} — read only'
+  # An expired key on a principal's row: nothing renews an app's trust; the
+  # app asks again on a consent card when it needs them.
+  trust_status_expired: Expired — the app will ask again if it needs them
+  # The Now lens with no live key (nest-trust-empty on a principal's row).
+  trust_empty: This app holds no keys to your records
+  # public-text: app-strings-public
+  # The required honest-bound copy on a principal's live key, in the app's
+  # voice: nests.md § Honest bound's standing-keyed wording (bound_note_standing).
+  trust_bound_note: On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect.
+  # public-text-end: app-strings-public
 # Browser-openable share links on the Media page (behavior/share-links.md; the
 # share-link-* ids, user-approved 2026-09-25).
 share_link:

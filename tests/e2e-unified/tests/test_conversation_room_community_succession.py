@@ -48,6 +48,7 @@ import secrets
 import pytest
 
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seat_pair are pytest fixtures adopted by import
+    bubble_texts,
     MESSAGE_BUDGET_S,
     WELCOME_BUDGET_S,
     found_community_room,
@@ -90,11 +91,6 @@ def _floor(port: int, reader: dict, room_id: str) -> dict[str, dict] | None:
     except Exception:
         return None
     return {m.get("principal"): m for m in roster.get("members", [])}
-
-
-def _bubble_texts(seat) -> list[str]:
-    d = seat.app.driver
-    return [d.get_text("dm-message-text", index=i) or "" for i in range(d.count("dm-message-text"))]
 
 
 @pytest.mark.feature("group-conversations")
@@ -180,7 +176,7 @@ def test_a_community_rooms_owner_takes_the_account_back_and_keeps_the_room(room_
     assert not member.app.has_error(), member.app.error_text()
     wait_for(
         "the member's post-ceremony message painting on the successor's seat",
-        lambda: _bubble_texts(founder),
+        lambda: bubble_texts(founder),
         lambda texts: any(after in t for t in texts),
         MESSAGE_BUDGET_S,
         diagnose=lambda: (
@@ -192,7 +188,7 @@ def test_a_community_rooms_owner_takes_the_account_back_and_keeps_the_room(room_
     assert not founder.app.has_error(), founder.app.error_text()
     wait_for(
         "the successor's message painting on the member's seat",
-        lambda: _bubble_texts(member),
+        lambda: bubble_texts(member),
         lambda texts: any(back in t for t in texts),
         MESSAGE_BUDGET_S,
         diagnose=lambda: f"{seat_story(member)}\n{seat_log(member, 'generation', 'room')}",

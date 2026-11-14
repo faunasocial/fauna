@@ -165,7 +165,7 @@ Stamped 2026-11-07 at ac836c937b.
 | 25 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_list_alias_hits_empty_for_owned_alias` | nest (linux): passed |
 | 25 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_list_alias_hits_owner_isolation` | nest (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_changing_an_address_threshold_never_refiles_delivered_mail` | nest (linux): passed, nest (macos): passed |
-| 27 | nest | `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_exact_alias_cap_enforced_from_put_alias_policy` | nest (linux): passed |
+| 27 | nest | `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_exact_alias_cap_enforced_from_put_alias_policy` | nest (linux): passed, nest (macos): passed |
 | 28 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_disposable_mints_capped_per_day` | nest (linux): passed |
 | 29 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_delete_confirm_relabels_the_button_before_deleting` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 30 | nest | `tests/e2e-unified/tests/api/test_mail_handle_alias_exclusion.py::test_no_alias_forwarder_or_list_can_take_a_handle` | nest (linux): passed |

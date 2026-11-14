@@ -496,48 +496,19 @@ fun EventsContent(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                         )
                     }
+                    // Rows that open the event's detail, where its RSVP trio lives —
+                    // the macOS shape. The trio itself sits on the agenda
+                    // `event-card` below; repeating its ids here would put two
+                    // `event-rsvp-*` sets in one view (convention 1) and break
+                    // the card's index alignment with `event-card-summary`.
                     items(invitedEvents) { event ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Text(event.summary, style = MaterialTheme.typography.titleSmall)
-                                Text(event.dtstart, style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Spacer(Modifier.height(8.dp))
-                                // Every RSVP re-PUTs the VEVENT after applying
-                                // PARTSTAT locally, so all three declare the
-                                // VEVENT-writer kind — one verdict, since they
-                                // issue one kind.
-                                val rsvpGate = faunaGate("fauna.bridges.put_event_ciphertext")
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button(
-                                        onClick = { onRsvp(event.id, RsvpResponse.GOING) },
-                                        enabled = rsvpGate.enabled,
-                                        modifier = Modifier.testTag(Ids.EVENT_RSVP_GOING)
-                                    ) {
-                                        Text(stringResource(R.string.events_rsvp_going))
-                                    }
-                                    OutlinedButton(
-                                        onClick = { onRsvp(event.id, RsvpResponse.INTERESTED) },
-                                        enabled = rsvpGate.enabled,
-                                        modifier = Modifier.testTag(Ids.EVENT_RSVP_INTERESTED)
-                                    ) {
-                                        Text(stringResource(R.string.events_rsvp_interested))
-                                    }
-                                    OutlinedButton(
-                                        onClick = { onRsvp(event.id, RsvpResponse.DECLINED) },
-                                        enabled = rsvpGate.enabled,
-                                        modifier = Modifier.testTag(Ids.EVENT_RSVP_DECLINE)
-                                    ) {
-                                        Text(stringResource(R.string.common_decline))
-                                    }
-                                }
-                                DisabledControlReasonText(rsvpGate.reason)
-                            }
-                        }
+                        ListItem(
+                            headlineContent = { Text(event.summary) },
+                            supportingContent = { Text(event.dtstart) },
+                            modifier = Modifier.padding(horizontal = 8.dp)
+                                .clickable { onOpenEvent(event.id) },
+                            colors = ListItemDefaults.colors(
+                                containerColor = MaterialTheme.colorScheme.surface))
                     }
                 }
 
@@ -550,6 +521,7 @@ fun EventsContent(
                 if (calendars.isNotEmpty()) {
                     when (calendarView) {
                         FfiCalendarViewMode.AGENDA -> {
+                            item { AgendaPanHeader(date = selectedDate, onDateChange = onSelectDate) }
                             if (isLoading && events.isEmpty()) {
                                 item {
                                     Box(modifier = Modifier.fillMaxWidth().padding(32.dp),
@@ -577,7 +549,13 @@ fun EventsContent(
                                 items(events) { event ->
                                     ListItem(
                                         headlineContent = { Text(event.summary, modifier = Modifier.testTag(Ids.EVENT_CARD_SUMMARY)) },
-                                        supportingContent = { Text(event.dtstart) },
+                                        supportingContent = {
+                                            Column {
+                                                Text(event.dtstart)
+                                                Spacer(Modifier.height(8.dp))
+                                                EventCardRsvpButtons(eventId = event.id, onRsvp = onRsvp)
+                                            }
+                                        },
                                         modifier = Modifier.testTag(Ids.EVENT_CARD).padding(horizontal = 8.dp)
                                             .clickable { onOpenEvent(event.id) },
                                         colors = ListItemDefaults.colors(

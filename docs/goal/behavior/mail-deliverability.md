@@ -102,7 +102,7 @@ Every 24 hours (timer-triggered, at 03:00 UTC plus a per-deployment offset insid
 
 The timer reads the mail clock and is restart-safe: the check is due once a daily moment has passed that no pass of the nest's own has covered, and the cover survives a restart because it is the newest diagnostics run the nest made itself (§ The mail health readout). A restart after the day's pass does not run it again, a nest that was down across its moment catches up when it comes back, and a fresh nest makes its first pass at the next moment, not at boot. A cover dated in the future (a clock that ran ahead and came back, or a store carried over from a test run with the mail clock moved) counts as now, so it never holds the pass, or the retention prunes riding it, past the next moment.
 
-The query is a standard DNSBL lookup: `<reversed-outbound-IP>.<dnsbl-suffix>` resolves to an A record (typically `127.0.0.2` for "listed") if the IP is listed, or NXDOMAIN if not listed. Counter `mail_outbound_self_blocklist_total{server="..."}` increments on each check.
+The query is a standard DNSBL lookup: `<reversed-outbound-IP>.<dnsbl-suffix>` resolves to an A record (typically `127.0.0.2` for "listed") if the IP is listed, or NXDOMAIN if not listed. An answer in `127.255.255.0/24` (Spamhaus's `.252`/`.254`/`.255`) is the DNSBL's error code for a query it refuses — an open or public resolver, a rate limit, a mistyped zone — never a listing: the row is the could-not-check state, carrying the DNSBL's own TXT explanation, and the readout's red ✗ stays for "listed" alone. Counter `mail_outbound_self_blocklist_total{server="..."}` increments on each check.
 
 ### Storage
 

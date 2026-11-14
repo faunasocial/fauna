@@ -324,6 +324,90 @@ async fn download_file_bytes_resolves_manifest_from_db() {
     );
 }
 
+/// **What an archive keeps of a file it never downloaded is the name, not a
+/// download** (`file-sync.md` § 4, *A delete a backup seat declined stays
+/// declined*): a backup seat that declines a peer's delete of a cloud-only
+/// placeholder keeps it a `Placeholder` — nothing is fetched by the decline — and
+/// the kept name still opens from the version the nest holds, after the place is
+/// set back to apply deletes and the log folds again.
+#[tokio::test]
+async fn a_backup_seat_s_kept_placeholder_still_hydrates_after_the_peer_s_delete() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_sync_engine(
+        &server.uri(),
+        watch.path().to_path_buf(),
+        Some(BackupKey::from_bytes([0x57u8; 32])),
+    );
+    let original: Vec<u8> = (0..90_000u32).map(|i| (i % 241) as u8).collect();
+    let rel = "archive/kept.bin";
+    let full = watch.path().join(rel);
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(&full, &original).unwrap();
+    engine.upload_file(rel).await.expect("upload_file");
+    let manifest_hash = store.last_manifest_hash.lock().unwrap().unwrap();
+    // Cloud-only here: the bytes are not on this disk, only the row.
+    std::fs::remove_file(&full).unwrap();
+    let file_hash = ContentHash::of_raw(&original);
+    engine
+        .db()
+        .upsert_entry(
+            rel,
+            Some(file_hash),
+            Some(file_hash),
+            Some(manifest_hash),
+            SyncState::Placeholder,
+            1,
+            1,
+            original.len() as i64,
+            1,
+            None,
+        )
+        .unwrap();
+    engine.stamp_own_head_for_test(rel);
+
+    engine.set_sync_mode(crate::config::SyncMode::Backup);
+    let log = [fauna_protocol::sync::SyncChange {
+        seq: 9,
+        path_hash: "path-hash-kept".to_string(),
+        manifest_hash: None,
+        change_type: "delete".to_string(),
+        created_at: 1_700_000_000_000,
+        path: Some(rel.to_string()),
+        device_id: Some("bb".repeat(32)),
+        ..Default::default()
+    }];
+    let fold = engine.record_placeholders_from_changes(&log).unwrap();
+    assert_eq!(fold.deleted.len(), 1);
+    let outcome = engine
+        .apply_folded_delete(&fold.deleted[0], |p| panic!("declined: {p:?}"))
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Kept);
+    assert!(!full.exists(), "the decline downloaded nothing");
+    assert_eq!(
+        engine.db().get_entry(rel).unwrap().unwrap().state,
+        SyncState::Placeholder,
+        "a kept cloud-only placeholder stays a placeholder"
+    );
+
+    engine.set_sync_mode(crate::config::SyncMode::Sync);
+    assert!(
+        engine
+            .record_placeholders_from_changes(&log)
+            .unwrap()
+            .deleted
+            .is_empty(),
+        "the declined delete is not offered again"
+    );
+    let bytes = engine.download_file_bytes(rel).await.expect("hydrates");
+    assert_eq!(
+        bytes, original,
+        "the kept name opens from the nest's version"
+    );
+}
+
 #[tokio::test]
 async fn download_file_bytes_serves_historical_version_after_repoint() {
     // Restore byte round-trip (Slice 2, engine level). A placeholder row

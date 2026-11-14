@@ -711,6 +711,110 @@ impl ProviderReplica {
             .iter()
             .any(|(k, _)| k.as_slice() == key.as_slice())
     }
+
+    /// What this snapshot holds for `channel`, read off a scratch store over
+    /// its own KV — nothing is restored into any engine.
+    pub fn channel_reading(&self, channel: &ChannelId) -> ChannelReading {
+        let key = channel.0.as_slice();
+        let Some((_, gid)) = self.group_ids.iter().find(|(c, _)| c.as_slice() == key) else {
+            return ChannelReading::NotListed;
+        };
+        let scratch = scratch_over(&self.values);
+        match MlsGroup::load(scratch.storage(), &GroupId::from_slice(gid)) {
+            Ok(Some(group)) => ChannelReading::AtEpoch(group.epoch().as_u64()),
+            _ => ChannelReading::Unexaminable,
+        }
+    }
+
+    /// **The account's answer to an own-leaf claim** (`devices.md`
+    /// § Cross-device MLS group-state sync, Rule 2 → *An own-leaf claim is the
+    /// account's replica's to answer*): whether the commit record at
+    /// `record_epoch` with wire hash `record_hash`, which names this
+    /// identity's leaf and is not this device's own staged pending, was made by
+    /// a device of this account. Asked of the fetched snapshot without
+    /// restoring it, so a forged claim swaps nothing and revokes nothing.
+    ///
+    /// *Ours*: the snapshot's state for the channel is past the record's
+    /// epoch, or at it with a staged pending stamped with the record's hash.
+    /// *Not ours*: the snapshot is seated as `identity` and at the record's
+    /// epoch with no such pending, behind it, or does not list the channel.
+    /// *No answer*: the snapshot's seating is not cleanly `identity`'s (the
+    /// same check [`Self::restore_into`] makes), or the channel's group will
+    /// not load out of it. The "no replica stored" and "the read failed"
+    /// answers are the fetching caller's, which holds those facts.
+    ///
+    /// Sound because a device of this account sends a commit only after the
+    /// commit gate's step 2 put a snapshot carrying it as the stamped pending,
+    /// and that snapshot stays carrying it until a state past its epoch
+    /// replaces it (the two premises the gate and the merge keep).
+    pub fn answer_own_leaf_claim(
+        &self,
+        identity: &ActorId,
+        channel: &ChannelId,
+        record_epoch: u64,
+        record_hash: [u8; 32],
+    ) -> OwnLeafAnswer {
+        if !self.seating_verdict(identity).is_clean() {
+            return OwnLeafAnswer::NoAnswer {
+                why: "the stored snapshot is not cleanly seated as this identity".into(),
+            };
+        }
+        match self.channel_reading(channel) {
+            ChannelReading::Unexaminable => OwnLeafAnswer::NoAnswer {
+                why: "the channel's group will not load out of the stored snapshot".into(),
+            },
+            ChannelReading::NotListed => OwnLeafAnswer::NotOurs {
+                why: "the account's snapshot does not hold the channel",
+            },
+            ChannelReading::AtEpoch(e) if e > record_epoch => OwnLeafAnswer::Ours,
+            ChannelReading::AtEpoch(e) if e == record_epoch => {
+                if self.pending_commit_hash(channel) == Some(record_hash) {
+                    OwnLeafAnswer::Ours
+                } else {
+                    OwnLeafAnswer::NotOurs {
+                        why: "the account's snapshot is at the record's epoch with no pending \
+                              stamped with its hash",
+                    }
+                }
+            }
+            ChannelReading::AtEpoch(_) => OwnLeafAnswer::NotOurs {
+                why: "the account's snapshot is behind the record's epoch",
+            },
+        }
+    }
+}
+
+/// What a snapshot holds for one channel ([`ProviderReplica::channel_reading`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelReading {
+    /// The snapshot does not list the channel.
+    NotListed,
+    /// Listed, but its group will not load out of the snapshot's own KV.
+    Unexaminable,
+    /// The group loads, at this epoch.
+    AtEpoch(u64),
+}
+
+/// The account's answer to an own-leaf claim — see
+/// [`ProviderReplica::answer_own_leaf_claim`] and, on the walk's seam,
+/// `fauna_conversations::backend::CommitGate::resync_channel`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnLeafAnswer {
+    /// A device of this account made the record: the replica was restored
+    /// (and its matching pending merged) by the gate that asked.
+    Ours,
+    /// The read completed and no device of this account made the record:
+    /// skip it like an intrinsically invalid one.
+    NotOurs {
+        /// Which of the not-ours readings applied, for the skip's log line.
+        why: &'static str,
+    },
+    /// The account could not answer this pass: stall before the record and ask
+    /// again on the next.
+    NoAnswer {
+        /// Why no answer was had, for the stall's log line.
+        why: String,
+    },
 }
 
 /// A scratch openMLS provider whose storage holds exactly `values` — the one
@@ -3379,5 +3483,74 @@ mod tests {
         }
         assert_eq!(device_a.list_groups().len(), 2);
         assert_eq!(device_b.list_groups().len(), 2);
+    }
+
+    /// `devices.md` § Cross-device MLS group-state sync, Rule 2 → *An own-leaf
+    /// claim is the account's replica's to answer*: the three answers, read off
+    /// the snapshot alone.
+    #[test]
+    fn an_own_leaf_claim_is_answered_from_the_snapshot_without_restoring_it() {
+        let alice = MlsEngine::new_in_memory(ActorKeypair::from_secret([1u8; 32])).unwrap();
+        let bob = MlsEngine::new_in_memory(ActorKeypair::from_secret([2u8; 32])).unwrap();
+        let bob_kps = bob.generate_key_packages(1).unwrap();
+        let (channel, welcome) = alice.create_group(&bob_kps).unwrap();
+        bob.join_from_welcome(welcome).unwrap();
+        let me = alice.identity_actor_id();
+        let epoch = alice.current_epoch(&channel).unwrap();
+        let some_record = [7u8; 32];
+
+        let settled = ProviderReplica::from_engine(&alice);
+        assert_eq!(
+            settled.channel_reading(&channel),
+            ChannelReading::AtEpoch(epoch)
+        );
+        assert!(matches!(
+            settled.answer_own_leaf_claim(&me, &channel, epoch, some_record),
+            OwnLeafAnswer::NotOurs { .. }
+        ));
+        assert!(matches!(
+            settled.answer_own_leaf_claim(&me, &channel, epoch + 1, some_record),
+            OwnLeafAnswer::NotOurs { .. }
+        ));
+        assert_eq!(
+            settled.answer_own_leaf_claim(&me, &channel, epoch - 1, some_record),
+            OwnLeafAnswer::Ours,
+            "a snapshot past the record's epoch answers ours"
+        );
+        let elsewhere = ChannelId([9u8; 32]);
+        assert_eq!(
+            settled.channel_reading(&elsewhere),
+            ChannelReading::NotListed
+        );
+        assert!(matches!(
+            settled.answer_own_leaf_claim(&me, &elsewhere, 0, some_record),
+            OwnLeafAnswer::NotOurs { .. }
+        ));
+
+        let commit = alice.self_update(&channel).unwrap();
+        let stamp = *blake3::hash(&commit).as_bytes();
+        let staged = ProviderReplica::from_engine(&alice);
+        assert_eq!(
+            staged.answer_own_leaf_claim(&me, &channel, epoch, stamp),
+            OwnLeafAnswer::Ours,
+            "at the record's epoch with a pending stamped with its hash"
+        );
+        assert!(matches!(
+            staged.answer_own_leaf_claim(&me, &channel, epoch, some_record),
+            OwnLeafAnswer::NotOurs { .. }
+        ));
+
+        assert!(
+            matches!(
+                staged.answer_own_leaf_claim(&bob.identity_actor_id(), &channel, epoch, stamp),
+                OwnLeafAnswer::NoAnswer { .. }
+            ),
+            "a snapshot seated as another identity answers nothing"
+        );
+        assert!(matches!(
+            ProviderReplica::unexaminable_for_test(channel)
+                .answer_own_leaf_claim(&me, &channel, epoch, stamp),
+            OwnLeafAnswer::NoAnswer { .. }
+        ));
     }
 }

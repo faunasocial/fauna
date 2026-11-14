@@ -118,7 +118,7 @@ func newDrainFixture(t *testing.T, reg *capability.Registry, worklists ...[]wsrp
 			}
 			return &wsrpc.FetchedCiphertext{EncryptedBody: sealed}, nil
 		},
-		openFn: func(envelope, key []byte) ([]byte, error) {
+		openFn: func(envelope, key []byte, sealUnix uint64) ([]byte, error) {
 			f.opened++
 			if len(key) != 32 {
 				return nil, errors.New("bad key")
@@ -502,9 +502,9 @@ func TestRescoreDrain_epochBoundedGrant_opensInWindowDarkPastHeldEpochs(t *testi
 			return &wsrpc.FetchedCiphertext{EncryptedBody: sealed, InternalDate: storedAt[content], StoredAt: storedAt[content]}, nil
 		},
 		// The REAL FFI opener — proves the cryptographic bound, not a fake.
-		openFn: func(envelope, key []byte) ([]byte, error) {
+		openFn: func(envelope, key []byte, sealUnix uint64) ([]byte, error) {
 			f.opened++
-			return mailfauna.OpenMailRecordWithKey(envelope, key)
+			return mailfauna.OpenMailRecordWithKey(envelope, key, sealUnix)
 		},
 		clamdFn: func(_ context.Context, _ string, _ []byte) (string, error) {
 			f.clamdRuns++
@@ -609,9 +609,9 @@ func TestRescoreDrain_importedMailClassifiesFromStoredAtNotInternalDate(t *testi
 				StoredAt: int64(102*week + 20),
 			}, nil
 		},
-		openFn: func(envelope, key []byte) ([]byte, error) {
+		openFn: func(envelope, key []byte, sealUnix uint64) ([]byte, error) {
 			f.opened++
-			return mailfauna.OpenMailRecordWithKey(envelope, key)
+			return mailfauna.OpenMailRecordWithKey(envelope, key, sealUnix)
 		},
 		clamdFn: func(_ context.Context, _ string, _ []byte) (string, error) {
 			return "stream: OK\x00", nil

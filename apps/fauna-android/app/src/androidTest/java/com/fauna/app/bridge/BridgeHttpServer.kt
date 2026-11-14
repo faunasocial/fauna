@@ -39,6 +39,11 @@ private val DNS_E2E_ENV_KEYS = listOf(
     // app-log's lowered size cap (`fauna_log::rolling::E2E_TOTAL_CAP_ENV`),
     // re-read by TestAgent.start once it is process env.
     "FAUNA_E2E_LOG_TOTAL_CAP_BYTES",
+    // The real-conversations receive loop's backstop cadence
+    // (`fauna-conversations` `poll_secs_override`, read via std::env when the
+    // session's receive loop starts at login) — conftest's
+    // `_apply_real_conversations_env` sets it beside the gate.
+    "FAUNA_CONV_POLL_SECS",
 )
 
 class BridgeHttpServer(

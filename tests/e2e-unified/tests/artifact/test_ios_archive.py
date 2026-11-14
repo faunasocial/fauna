@@ -280,7 +280,8 @@ def _installed_profiles() -> dict[str, dict]:
 
     Matched by NAME, never UUID: a profile's UUID changes every time it is
     regenerated (yearly, and whenever its App ID gains a capability), while the
-    name is what the project and the export options reference.
+    name is what the project and the export options reference. Each decoded
+    profile carries its file under the extra key `_path`.
     """
     root = Path.home() / "Library" / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles"
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -288,7 +289,7 @@ def _installed_profiles() -> dict[str, dict]:
     for path in sorted(root.glob("*.mobileprovision")) if root.is_dir() else []:
         prof = _decode_profile(path)
         if _TEAM_ID in prof.get("TeamIdentifier", []) and prof["ExpirationDate"] > now:
-            found.setdefault(prof["Name"], []).append(prof)
+            found.setdefault(prof["Name"], []).append({**prof, "_path": path})
     dupes = {name: len(v) for name, v in found.items() if len(v) > 1}
     if dupes:
         pytest.fail(f"more than one unexpired profile per name: {dupes} — Xcode's "
@@ -382,7 +383,11 @@ def test_the_exported_app_carries_what_upload_validation_demands(exported_ipa):
     assert (app / "AppIcon76x76@2x~ipad.png").is_file(), "no 152x152 iPad icon tier in the bundle"
     assert len(info.get("UISupportedInterfaceOrientations~ipad", [])) == 4, info.get(
         "UISupportedInterfaceOrientations~ipad")
-    assert info.get("UISupportedInterfaceOrientations"), "no iPhone orientations declared"
+    # The project sets INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone (no bare
+    # key), which the build writes under the per-device `~iphone` key.
+    assert info.get("UISupportedInterfaceOrientations~iphone"), (
+        "no iPhone orientations declared",
+        {k: v for k, v in info.items() if k.startswith("UISupportedInterfaceOrientations")})
     for rel in ("Fauna-iOS.app", "Fauna-iOS.app/PlugIns/Fauna-iOS-FileProvider.appex"):
         assert (exported_ipa / rel / "PrivacyInfo.xcprivacy").is_file(), (
             f"{rel} carries no privacy manifest")
@@ -442,3 +447,59 @@ def test_the_signed_app_carries_push_age_range_and_app_attest(exported_ipa):
     ents = _signed_entitlements(exported_ipa / "Fauna-iOS.app")
     got = {k: ents.get(k) for k in _APP_PROFILE_BACKED}
     assert got == _APP_PROFILE_BACKED, f"signed app entitlements {got}, want {_APP_PROFILE_BACKED}"
+
+
+# ---------------------------------------------------------------------------
+# The reference: the unsigned archive signed by the tree's own signer is held
+# equal to the exporter's signature, bundle by bundle (installers/store-review.md
+# § The store legs, *How the iOS store app is signed*).
+# ---------------------------------------------------------------------------
+
+_SIGNER = Path("scripts") / "ios-store-sign.py"
+
+
+@pytest.fixture(scope="module")
+def signer_ipa(ios_archive, signing_credentials, artifact_scratch) -> Path:
+    """The unsigned archive's app through `scripts/ios-store-sign.py`; its unzipped `Payload/`."""
+    app = next((ios_archive / "Products" / "Applications").glob("*.app"))
+    out = artifact_scratch / "Fauna-iOS-signer.ipa"
+    cmd = ["uv", "run", "--no-project", "python", str(get_repo_root() / _SIGNER),
+           "--app", str(app),
+           "--project", str(get_repo_root() / "apps" / "fauna-apple" / "Fauna.xcodeproj"),
+           "--identity", _DIST_IDENTITY, "--out", str(out)]
+    if (ios_archive / "Signatures").is_dir():
+        cmd += ["--signatures", str(ios_archive / "Signatures")]
+    for bundle_id, _ in _SIGNED_BUNDLES.values():
+        cmd += ["--profile", str(signing_credentials[_profile_name(bundle_id)]["_path"])]
+    run(*cmd, timeout=900)
+    unzipped = artifact_scratch / "Fauna-iOS-signer-ipa"
+    run("rm", "-rf", str(unzipped), check=False)
+    run("ditto", "-x", "-k", str(out), str(unzipped))
+    return unzipped / "Payload"
+
+
+def test_the_signer_signs_what_the_exporter_signs(signer_ipa, exported_ipa):
+    """Each bundle's signed entitlements, embedded profile and authority equal the export's."""
+    diffs = {}
+    for rel in _SIGNED_BUNDLES:
+        mine, theirs = _signed_entitlements(signer_ipa / rel), _signed_entitlements(exported_ipa / rel)
+        if mine != theirs:
+            diffs[rel] = {k: (mine.get(k), theirs.get(k)) for k in sorted(set(mine) | set(theirs))
+                          if mine.get(k) != theirs.get(k)}
+        assert _decode_profile(signer_ipa / rel / "embedded.mobileprovision")["UUID"] == \
+            _decode_profile(exported_ipa / rel / "embedded.mobileprovision")["UUID"], rel
+        info = run("codesign", "-dvv", str(signer_ipa / rel)).stderr
+        assert f"Authority={_DIST_IDENTITY}" in info, f"{rel}:\n{info}"
+    assert not diffs, f"signer vs exporter entitlements (signer, exporter): {diffs}"
+
+
+def test_the_signer_package_holds_what_the_export_holds(signer_ipa, exported_ipa):
+    """The two packages carry the same files outside the code signatures."""
+    def files(payload: Path) -> set[str]:
+        return {str(p.relative_to(payload)) for p in payload.rglob("*")
+                if p.is_file() and "_CodeSignature" not in p.parts}
+    mine, theirs = files(signer_ipa), files(exported_ipa)
+    assert mine == theirs, (
+        f"only the signer's: {sorted(mine - theirs)}; only the export's: {sorted(theirs - mine)}")
+    assert sorted(p.name for p in signer_ipa.parent.iterdir()) == \
+        sorted(p.name for p in exported_ipa.parent.iterdir()), "the packages' top-level entries differ"

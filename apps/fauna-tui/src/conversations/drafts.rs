@@ -65,6 +65,9 @@ impl DraftsHost for ConversationsManager {
     async fn restore_drafts_at(&self, epoch: u64, bytes: Vec<u8>) {
         ConversationsManager::restore_drafts_at(self, epoch, bytes).await
     }
+    fn fill_drafts_for_leave(&self, epoch: u64, bytes: &[u8]) -> Vec<u8> {
+        ConversationsManager::fill_drafts_for_leave(self, epoch, bytes)
+    }
 }
 
 /// The conversations compose rail's `__drafts` path (one combined blob, per

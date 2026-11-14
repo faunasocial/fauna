@@ -344,9 +344,12 @@ def _rule_6(pages: list, ledger: dict, registry: dict | None = None,
             records = ((ledger.get(app) or {}).get(page.slug) or {}).get("tests") or {}
             # A test now carries one record per platform (§ The ledger, *Platform
             # keying*); the declaration is stale if it passed on ANY of them. Only a
-            # MAPPED test speaks for the feature (a stale record is reported above).
+            # MAPPED test speaks for the feature (a stale record is reported above),
+            # and only one that can witness this column: a test marked for other apps
+            # records here as a helper seat (§ Cell semantics, the marked-witness
+            # rule — the cell render reads it the same way, `applicable`).
             passing = sorted(t for t, by_platform in records.items()
-                              if t in mapped
+                              if t in mapped and fc.applicable(t, app, app_marks)
                               and any(r.get("outcome") in fc.PASSING for r in by_platform.values()))
             if passing:
                 problems.append(
@@ -361,7 +364,7 @@ def _rule_6(pages: list, ledger: dict, registry: dict | None = None,
                 # Same evidence, one outcome wide: a witness OF THAT OUTCOME passed on
                 # the column excused from it.
                 passing = sorted(t for t in outcome.tests
-                                 if any(r.get("outcome") in fc.PASSING
+                                 if fc.applicable(t, app, app_marks) and any(r.get("outcome") in fc.PASSING
                                         for r in (records.get(t) or {}).values()))
                 if passing:
                     problems.append(

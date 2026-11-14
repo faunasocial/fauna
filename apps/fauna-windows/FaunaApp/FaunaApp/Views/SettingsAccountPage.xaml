@@ -82,21 +82,57 @@
                                     Margin="0,0,0,4"
                                     Click="AccountRow_Click"
                                     Tag="{x:Bind ActorId}">
+                                <!-- TWO LINES, EACH WITH ITS OWN COLUMNS: the account's
+                                     name (and the active mark) on the first, the row's
+                                     controls on the second. A `*` name column beside the
+                                     controls' `Auto` columns gets only what they leave,
+                                     and the Settings content pane at the app's 600-DIP
+                                     default window gives a row ~209 DIP: the re-auth
+                                     toggle, "Active" and the labelled open-in-new-window
+                                     button took all of it, so the active row painted NO
+                                     account name — found by convention 17's
+                                     `painted-text-has-area` on its first windows corpus,
+                                     2026-11-10 (`account-item-handle` given 0×18.6 DIP
+                                     in a 209×40 row), the class `Controls/ThreadHeader.xaml`
+                                     fixed the same way. Every id stays a descendant of the
+                                     row Button, so scoped queries are unchanged.
+
+                                     The second line's two buttons are ICONS, their label
+                                     carried by AutomationProperties.Name and a tooltip —
+                                     apple's and android's shape for the same two controls
+                                     (trash, new window). Labelled, they did not fit: in the
+                                     row's 209 DIP the toggle (52) and the labelled
+                                     open-in-new-window button (149, cut at the row's edge)
+                                     took everything, and a non-active row's Remove was laid
+                                     out wholly past the edge, clipped to 0×0 and offscreen
+                                     while UIA Invoke still clicked it (measured 2026-11-10;
+                                     `test_account_switcher_windows.py`'s
+                                     `…_wholly_on_screen_at_the_default_window` pins it). -->
+                                <StackPanel Spacing="4">
                                 <Grid ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
 
                                     <TextBlock Grid.Column="0"
                                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountItemHandle}"
                                                VerticalAlignment="Center"
+                                               TextWrapping="NoWrap"
                                                TextTrimming="CharacterEllipsis"
                                                Text="{x:Bind DisplayLabel}" />
 
+                                    <!-- Marks the active row. Rendered ONLY on the active
+                                         account, so a count of this id is how the e2e
+                                         asserts "exactly one active". -->
+                                    <TextBlock Grid.Column="1"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountItemActiveIndicator}"
+                                               VerticalAlignment="Center"
+                                               Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(IsActive)}"
+                                               Text="{loc:Localize Key=common/active}" />
+                                </Grid>
+
+                                <StackPanel Orientation="Horizontal" Spacing="8">
                                     <!-- Stage-2 per-account "require re-auth to activate"
                                          toggle (long-term-store.md § Per-account re-auth).
                                          Rendered on EVERY row, the active one included — the
@@ -109,7 +145,7 @@
                                          + the tooltip, matching apple's labelsHidden toggle.
                                          Name is also REQUIRED for FlaUI to see it, same rule
                                          as the DataTemplate root and the container list. -->
-                                    <ToggleSwitch Grid.Column="1"
+                                    <ToggleSwitch
                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountRequireConfirmToggle}"
                                                   AutomationProperties.Name="{loc:Localize Key=settings/account_page/require_confirm_toggle}"
                                                   ToolTipService.ToolTip="{loc:Localize Key=settings/account_page/require_confirm_toggle}"
@@ -120,15 +156,6 @@
                                                   IsOn="{x:Bind RequireConfirmToActivate}"
                                                   Toggled="RequireConfirm_Toggled"
                                                   Tag="{x:Bind ActorId}" />
-
-                                    <!-- Marks the active row. Rendered ONLY on the active
-                                         account, so a count of this id is how the e2e
-                                         asserts "exactly one active". -->
-                                    <TextBlock Grid.Column="2"
-                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountItemActiveIndicator}"
-                                               VerticalAlignment="Center"
-                                               Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(IsActive)}"
-                                               Text="{loc:Localize Key=common/active}" />
 
                                     <!-- "Open in new window" — the running instance's
                                          concurrent-instances affordance (account-scoping.md
@@ -142,24 +169,30 @@
                                          The child owns its whole binding outcome — nothing
                                          is pre-checked here, which is what keeps one gate
                                          instead of two that can drift. -->
-                                    <Button Grid.Column="3"
+                                    <!-- E8A7 = OpenInNewWindow. -->
+                                    <Button
                                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountOpenNewInstanceButton}"
                                             AutomationProperties.Name="{loc:Localize Key=settings/account_page/open_new_instance}"
                                             ToolTipService.ToolTip="{loc:Localize Key=settings/account_page/open_new_instance}"
                                             Click="AccountOpenNewInstance_Click"
                                             Tag="{x:Bind ActorId}"
-                                            Content="{loc:Localize Key=settings/account_page/open_new_instance}" />
+                                            FontFamily="Segoe MDL2 Assets"
+                                            Content="&#xE8A7;" />
 
                                     <!-- Non-active rows only: removing the ACTIVE account
-                                         would strand the session (long-term-store.md). -->
-                                    <Button Grid.Column="4"
+                                         would strand the session (long-term-store.md).
+                                         E74D = Delete (trash), apple's and android's glyph. -->
+                                    <Button
                                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountRemoveButton}"
                                             AutomationProperties.Name="{loc:Localize Key=common/remove}"
+                                            ToolTipService.ToolTip="{loc:Localize Key=common/remove}"
                                             Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(CanRemove)}"
                                             Click="AccountRemove_Click"
                                             Tag="{x:Bind ActorId}"
-                                            Content="{loc:Localize Key=common/remove}" />
-                                </Grid>
+                                            FontFamily="Segoe MDL2 Assets"
+                                            Content="&#xE74D;" />
+                                </StackPanel>
+                                </StackPanel>
                             </Button>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
@@ -172,8 +205,9 @@
 
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-            <!-- Identity section (handle + nest-url; the actor-id + quota live on
-                 the Status sub-page, settings.md § Navigation model). -->
+            <!-- Identity section (nest-url; the actor-id, the identity cell —
+                 settings-handle-label + settings-tier-label — and quota live on the
+                 Status sub-page, settings.md § Live-data placement). -->
             <StackPanel Spacing="12">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
                            Text="{loc:Localize Key=common/identity}" />
@@ -181,24 +215,15 @@
                 <Grid RowSpacing="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="120" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
 
-                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Opacity="0.7"
-                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsHandleLabel}"
-                               Text="{loc:Localize Key=common/handle}" />
+                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Opacity="0.7" Text="{loc:Localize Key=settings/nest_url}" />
                     <TextBlock
                         Grid.Row="0" Grid.Column="1"
-                        x:Name="HandleText"
-                        Text="--" />
-
-                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Opacity="0.7" Text="{loc:Localize Key=settings/nest_url}" />
-                    <TextBlock
-                        Grid.Row="1" Grid.Column="1"
                         x:Name="NestUrlText"
                         Text="--"
                         IsTextSelectionEnabled="True" />

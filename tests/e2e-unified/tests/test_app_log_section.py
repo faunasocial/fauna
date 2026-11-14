@@ -336,3 +336,34 @@ def test_a_launcher_that_explodes_never_breaks_the_primary_section():
 
     sections = _attach({"app": _FakeApp(_FakeDriver("primary")), "seats": _Broken()})
     assert [b for _, b in sections] == ["primary"]
+
+
+# ── Seats a fixture yields as an `(app, actor)` pair ────────────────────────
+# The two-seat succession fixtures (`succeedable_app`, `succession_member_app`)
+# yield `(ActionLayer, actor)` tuples, which the one-driver resolution above
+# cannot see into — so a red iOS member-seat run attached only the OWNER's log
+# while its whole question ("the shared set never appeared on M's Folders
+# page") was about the MEMBER's seat on the second simulator. Every driver held
+# in a tuple-valued fixture gets its own labelled section, once.
+
+
+def test_a_seat_yielded_inside_a_pair_gets_its_own_labelled_section():
+    owner = _FakeDriver("owner: folders=1")
+    member = _FakeDriver("member: folders=0")
+    sections = _attach({
+        "app": _FakeApp(owner),
+        "succeedable_app": (_FakeApp(owner), {"handle": "a"}),
+        "succession_member_app": (_FakeApp(member), {"handle": "m"}),
+    })
+    bodies = [body for _, body in sections]
+    assert sum("owner: folders=1" in b for b in bodies) == 1, bodies
+    [member_title] = [t for t, b in sections if "member: folders=0" in b]
+    assert "succession_member_app" in member_title
+
+
+def test_a_pair_holding_no_driver_adds_no_section():
+    sections = _attach({
+        "app": _FakeApp(_FakeDriver("primary")),
+        "test_user": ({"handle": "x"}, "secret"),
+    })
+    assert [b for _, b in sections] == ["primary"]

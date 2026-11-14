@@ -39,7 +39,7 @@
 //!   draft, bypassing the debounce, wired into `main.rs`'s
 //!   `connect_close_request` alongside the other two rails' own flush.
 //!
-//! Wired from the AuthSuccess handler beside the other two rails (`app.rs`) and,
+//! Wired from the SessionEstablished handler beside the other two rails (`app.rs`) and,
 //! like them, outside every engine/MLS gate: drafts seal under the owner's
 //! `BackupKey`, so nothing else failing may cost the user their unsent event.
 
@@ -137,7 +137,7 @@ thread_local! {
 /// Wire event-draft persistence for the just-authenticated actor: build the
 /// shared [`DraftsSync`] and kick the launch restore.
 ///
-/// Called from the AuthSuccess handler on the GTK main thread. A second login
+/// Called from the SessionEstablished handler on the GTK main thread. A second login
 /// (account switch / re-auth) replaces the rail wholesale, so the previous
 /// actor's draft is never saved under the new actor's key: the old `Rc` is
 /// dropped here and any timer still holding one saves into a `DraftsSync` that
@@ -376,24 +376,27 @@ pub fn clear() {
 /// through a separate slot: this module already owns the thread-local, and
 /// both it and `main.rs`'s close handler run on the GTK main thread.
 pub fn flush_now_blocking(bounded: bool) {
-    let Some((sync, snapshot)) = RAIL_STATE.with(|s| {
+    let Some((sync, draft)) = RAIL_STATE.with(|s| {
         let borrowed = s.borrow();
         let rail = borrowed.as_ref()?;
-        Some((
-            Arc::clone(&rail.sync),
-            rail.current.borrow().snapshot_bytes(),
-        ))
+        Some((Arc::clone(&rail.sync), rail.current.borrow().clone()))
     }) else {
         return;
     };
     crate::blocking_flush::run_bounded(
         async move {
-            if let Err(e) = sync.save_if_changed(&snapshot).await {
+            // The shared leave save (`reserved-folders.md` § The leave-flush
+            // promise): a door taken before the launch restore has lifted the
+            // save gate reads once and fills the form by the rail's own rule
+            // before saving, so the typed form is saved and an untouched one
+            // never overwrites a resting draft.
+            if let Err(e) = fauna_client_caldav::drafts::leave_save_event_draft(&sync, draft).await
+            {
                 tracing::warn!("event drafts: leave-flush failed: {e}");
             }
         },
-        std::time::Duration::from_millis(2_000),
-        std::time::Duration::from_millis(2_500),
+        fauna_client_drafts::LEAVE_FLUSH_BUDGET,
+        fauna_client_drafts::LEAVE_FLUSH_BUDGET + std::time::Duration::from_millis(500),
         bounded,
     );
 }
@@ -525,7 +528,7 @@ mod tests {
     }
 
     /// With no login installed, every door is a safe no-op rather than a panic:
-    /// the compose is reachable before AuthSuccess in tests and on the
+    /// the compose is reachable before SessionEstablished in tests and on the
     /// malformed-secret arm, and neither may take the app down.
     #[test]
     fn the_doors_are_inert_without_a_rail() {
@@ -580,7 +583,7 @@ mod tests {
                 "precondition: the compose dialog is on screen"
             );
 
-            // The switch, through the AuthSuccess entry point itself.
+            // The switch, through the SessionEstablished entry point itself.
             let nest = fauna_client::NestClient::new(
                 "http://127.0.0.1:1".to_string(),
                 ActorKeypair::generate(),

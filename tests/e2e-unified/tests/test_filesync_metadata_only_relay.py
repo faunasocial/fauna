@@ -44,18 +44,14 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.macos,
     pytest.mark.linux,
+    # A windows seat is a cfapi root: seat b's file arrives as a placeholder, and
+    # the test's read of it is the hydration the relay serves.
+    pytest.mark.windows,
 ]
-
-# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape: tui,
-# macOS and linux run it; the windows native leg below lands with its app's
-# trickle-down, and landing deletes its entry.
-OWED_SEATS: dict = {
-    "win32": {"native": "the windows leg of `local-folder-sync` has not landed"},
-}
 
 _SEAT_PAIRS = [
     pytest.param(pair, id=sync_seats.seat_set_param_id(pair))
-    for pair in sync_seats.seat_sets_for_platform(sys.platform, unbuilt=OWED_SEATS)
+    for pair in sync_seats.seat_sets_for_platform(sys.platform)
 ]
 
 # Ceilings a green run never pays (convention 14).

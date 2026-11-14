@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.ContentLabelEntry
 import uniffi.fauna_core.RenderBlock
+import com.fauna.app.payments.nostrAdvertisePost
 import uniffi.fauna_feed.AttachedFile
 import uniffi.fauna_feed.CueObservation
 import uniffi.fauna_feed.FactorWeightInput
@@ -323,6 +324,76 @@ class FeedVM @Inject constructor(
         }
     }
 
+    // ── The own-post Nostr advertisement pair (`monetization.md` § The Nostr
+    // advertisement of a sold post → *What the author sees and agrees to*;
+    // reference painter tui's `nostr_advertise_verbs`). ──
+
+    /**
+     * The nest's `nostr-advertise` capability, read once per session when an
+     * own post's menu first renders ([ensureNostrAdvertise]). `null` = unread:
+     * no *Advertise* verb rather than one that may only ever refuse. A failed
+     * read stays `null`, so the next render asks again.
+     */
+    private val _nostrAdvertiseSupported = MutableStateFlow<Boolean?>(null)
+    val nostrAdvertiseSupported: StateFlow<Boolean?> = _nostrAdvertiseSupported.asStateFlow()
+    private var nostrAdvertiseReading = false
+
+    fun ensureNostrAdvertise() {
+        if (_nostrAdvertiseSupported.value != null || nostrAdvertiseReading) return
+        nostrAdvertiseReading = true
+        viewModelScope.launch {
+            _nostrAdvertiseSupported.value =
+                runCatching { api.nestRpc().nostrAdvertise().advertiseSupported() }.getOrNull()
+            nostrAdvertiseReading = false
+        }
+    }
+
+    /**
+     * Which arm of the pair [post]'s ⋯ overflow offers — the shared
+     * `post_nostr_advertise_verb`, never re-derived here. `canAdvertise` is
+     * this build's `zaps` member AND the nest's capability AND [confirmBody]
+     * (the confirm step's public consequence sentence, read from the catalog
+     * at run time — until its public-texts round lands no app offers the act).
+     */
+    fun nostrAdvertiseVerbFor(
+        post: uniffi.fauna_feed.PostSummary,
+        supported: Boolean?,
+        confirmBody: String?,
+    ): uniffi.fauna_feed.NostrAdvertiseVerb? {
+        val viewer = ownActorIdHex() ?: return null
+        val canAdvertise = com.fauna.app.payments.NOSTR_ADVERTISE_BUILT && supported == true && confirmBody != null
+        return uniffi.fauna_feed.postNostrAdvertiseVerb(post, viewer, canAdvertise)
+    }
+
+    /**
+     * Nostr-advertisement failures — a separate channel like [deleteError]: a
+     * refusal (not sold, no price, no linked key, no custodial key) mutates no
+     * page state, and it MUST reach `error-message`. Carries the localized line.
+     */
+    private val _advertiseError = MutableStateFlow<String?>(null)
+    val advertiseError: StateFlow<String?> = _advertiseError.asStateFlow()
+
+    /** `fauna.nostr.advertise.set`, then a feed re-read so the card's
+     *  `nostrAdvertisedAt` — and with it the pair — repaints from the nest. */
+    fun advertisePostOnNostr(postId: String, errorText: (String) -> String) {
+        viewModelScope.launch {
+            _advertiseError.value = null
+            runCatching { api.nostrAdvertisePost(postId) }
+                .onFailure { _advertiseError.value = errorText(it.message ?: it.toString()) }
+            reload()
+        }
+    }
+
+    /** `fauna.nostr.advertise.clear` — one tap, then the same re-read. */
+    fun stopAdvertisingPostOnNostr(postId: String, errorText: (String) -> String) {
+        viewModelScope.launch {
+            _advertiseError.value = null
+            runCatching { api.nestRpc().nostrAdvertise().clearAdvertisement(postId) }
+                .onFailure { _advertiseError.value = errorText(it.message ?: it.toString()) }
+            reload()
+        }
+    }
+
     fun copyPostWebLink(postId: String, slug: String) = webPublishStore.copyWebLink(postId, slug)
 
     fun copyPostPaywallLink(postId: String, slug: String) = webPublishStore.copyPaywallLink(postId, slug)
@@ -572,6 +643,25 @@ class FeedVM @Inject constructor(
         }
     }
 
+    /** The sold post's payment link (`gated-post-payment-link`) — the shared
+     *  `pay_unlock_offer`: the subscribe to the offer's tier goes FIRST (across
+     *  nests at the post's home), then [open] receives the checkout URL the
+     *  shared rule composes, so the external checkout is bound to the buyer's
+     *  actor (`monetization.md` § Pillar 3 → *Buyer↔actor binding (Q4)*, the
+     *  Q13 rules (1) and (2); tui's `Op::PayUnlockOffer`). `null` opens nothing
+     *  (no resolved offer or link, an own post, an unsafe link); a refused
+     *  subscribe surfaces on [buyUnlockError] — the buy button's banner — and
+     *  opens nothing. The caller has already refused an unsafe URL and passes
+     *  the app's one opener ([com.fauna.app.core.UrlOpener]) as [open]. */
+    fun payUnlockOffer(postId: String, open: (String) -> Unit) {
+        val m = manager() ?: return
+        viewModelScope.launch {
+            runCatching { m.payUnlockOffer(postId) }
+                .onSuccess { url -> url?.let(open) }
+                .onFailure { _buyUnlockError.value = it.message ?: "buy failed" }
+        }
+    }
+
     /** Resolve link-preview metadata for [url] (render-model.md § D4) — calls
      *  `fauna.linkpreview.resolve` once per url (cached), folds the `Resolved`/`Failed`
      *  state onto the post document's `LinkPreview` block, and re-emits so the feed
@@ -675,6 +765,12 @@ class FeedVM @Inject constructor(
     /** The capture tracker of the current auth ([FeedManagerHost.cueTracker]),
      *  or null before the manager exists. */
     fun cueTracker(): FfiCueTracker? = host.manager()?.let { host.cueTracker(it) }
+
+    /** The feed selection the timeline shows now
+     *  ([FfiFeedManager.cueSelectionKey], the shared spelling), or null before
+     *  the manager exists — the key the cue capture hands
+     *  [FfiCueTracker.noteSelection] so a feed switch ends every exposure. */
+    fun cueSelectionKey(): String? = host.manager()?.cueSelectionKey()
 
     /** Force a put of any unsaved cues — the background / app-close flush. The
      *  cue put is debounced (`CUE_PUT_DEBOUNCE_S`), so without this the tail of

@@ -210,7 +210,7 @@ internal fun routeForStep(step: OnboardingStep): String = when (step) {
     OnboardingStep.NEST_PROVISIONING ->
         if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/nest-provisioning"
     OnboardingStep.DNS_POST_INSTRUCTIONS -> "onboarding/dns-post-instructions"
-    OnboardingStep.CLAIM_CODE -> "onboarding/claim-code"
+    OnboardingStep.CLAIM_CODE -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/claim-code"
     OnboardingStep.DONE -> "onboarding/handle-entry"  // unreachable; caller routes via WizardOutcome
     // Identity-recovery steps (onboarding.md § 1 Identity): the sign-up kit
     // offer (reached because OnboardingHost declares setRendersRecoveryKit)
@@ -227,7 +227,8 @@ internal fun routeForStep(step: OnboardingStep): String = when (step) {
     // The terminal admin-path step, reached directly on claim completion
     // (onboarding.md § 3b-bis; storage-modes.md — the storage-mode step that
     // used to precede it is retired).
-    OnboardingStep.NAT_MODE_CHOICE -> "onboarding/nat-mode-choice"
+    OnboardingStep.NAT_MODE_CHOICE ->
+        if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/nat-mode-choice"
 
     // box-recovery.md § Recovery UI (step 4) — Task E.
     OnboardingStep.NEST_RECOVERY -> "onboarding/nest-recovery"

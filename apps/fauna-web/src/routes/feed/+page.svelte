@@ -706,14 +706,20 @@
    *  restore FILLS*). Whitespace alone is not authorship. */
   function paintLateRestore() {
     if (!manager) return; // manager-gate-ok: restore-landed listener, not a user action
-    const untouched =
+    if (composerUntouched()) paintCompose(manager);
+  }
+
+  /** Whether the user has authored nothing into the composer. Whitespace alone
+   *  is not authorship. */
+  function composerUntouched(): boolean {
+    return (
       !composeBody.trim() &&
       !composeTags.trim() &&
       !gateTier &&
       !gateRoom &&
       !gatePreview.trim() &&
-      !sellSelected;
-    if (untouched) paintCompose(manager);
+      !sellSelected
+    );
   }
 
   // ── Per-post lazy augmentation (mirrors linux post_list.rs's render-time
@@ -1379,6 +1385,10 @@
       // BROWSER console — `logMessage` alone writes to the wasm log ring, which
       // no page renders and no e2e can read, so it would have left this exactly
       // as silent as no catch at all.
+      // Whether this is the page's first manager — the composer may have been
+      // typed into before any manager existed — or an actor change on a
+      // mounted page.
+      const firstForPage = manager === null;
       try {
         manager = await getFeedManager();
       } catch (e) {
@@ -1399,7 +1409,16 @@
       // launch restore is not awaited by `getFeedManager()` (its load retries a
       // lost read for minutes), so it may land after this read: the
       // `onFeedDraftRestored` door paints it then, into an untouched composer.
-      paintCompose(manager);
+      //
+      // One exception, the FILL rule at the page's own edge (feed.md
+      // § Persistence, *A restore FILLS*): text typed before the page's FIRST
+      // manager existed never reached it (`syncCompose` forwards through
+      // `manager?.`), so here it is handed over rather than painted over — and
+      // ahead of a leave door's flush waiting on the same build
+      // (`flushDraftsNow`). On an actor change the composer is the previous
+      // actor's and is painted over, as above.
+      if (firstForPage && !composerUntouched()) syncCompose();
+      else paintCompose(manager);
       // Hydrate the content-policy render state (guardian floor + own spam
       // thresholds) BEFORE the first feed load, so posts render with the right
       // verdict on their first paint (family-safety.md § Content policy).

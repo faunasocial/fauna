@@ -176,6 +176,44 @@ pub fn grant_bound_note(scope: JsValue) -> Result<JsValue, JsValue> {
     to_js(&fauna_client_pair::grant_bound_note(scope))
 }
 
+/// `fauna_client_pair::principal_grant_bound_note` — the honest-bound note on a
+/// principal's live key on a Connected apps row (`connected-apps.md` § The
+/// trust facet and history lens → *The Now lens*): the standing wording in the
+/// app's voice. A principal's keys are all standing-keyed, so it takes no scope.
+#[wasm_bindgen(js_name = principalGrantBoundNote)]
+pub fn principal_grant_bound_note() -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_pair::principal_grant_bound_note())
+}
+
+/// `fauna_client_pair::principal_scope_labels` — a third-party principal's
+/// grant row or History line scope (`connected-apps.md` § The trust facet and
+/// history lens → *The words rule for `ext.*` kinds*): one `LocalizedText` per
+/// publisher and mode; the page joins them with `"; "`.
+#[wasm_bindgen(js_name = principalScopeLabels)]
+pub fn principal_scope_labels(scope: JsValue, folder: JsValue) -> Result<JsValue, JsValue> {
+    let scope: Vec<fauna_client_pair::TrustScope> = from_js(scope)?;
+    let folder: Option<fauna_client_pair::TrustFolder> = from_js(folder)?;
+    to_js(&fauna_client_pair::principal_scope_labels(scope, folder))
+}
+
+/// `fauna_client_pair::trust_status_label` — a grant's liveness word; a
+/// principal's row passes `canRenew = false` (*Expired — the app will ask
+/// again*), the Nests row `true`.
+#[wasm_bindgen(js_name = trustStatusLabel)]
+pub fn trust_status_label(l: JsValue, can_renew: bool) -> Result<JsValue, JsValue> {
+    let l: fauna_client_pair::TrustLiveness = from_js(l)?;
+    to_js(&fauna_client_pair::trust_status_label(l, can_renew))
+}
+
+/// `fauna_client_pair::history_line_text` — a History row's line: the
+/// `history_*` template the event kind (`"Mint"`/`"Renew"`/`"Revoke"`) picks,
+/// over the caller's already-resolved `scope` and `when` strings.
+#[wasm_bindgen(js_name = historyLineText)]
+pub fn history_line_text(kind: JsValue, scope: &str, when: &str) -> Result<JsValue, JsValue> {
+    let kind: fauna_client_pair::TrustEventKind = from_js(kind)?;
+    to_js(&fauna_client_pair::history_line_text(kind, scope, when))
+}
+
 #[wasm_bindgen]
 pub struct WasmLinkedNestsMachine {
     inner: Rc<LinkedNestsMachine>,

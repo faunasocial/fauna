@@ -390,6 +390,29 @@ public class AccountSwitcherViewModelTests
         Assert.Equal(2, vm.Accounts.Count);
     }
 
+    /// <summary>The gesture's third answer: a retired identity whose outbox this device has
+    /// not carried to its successor yet is refused with the carry-owed line, and the list
+    /// stays as it was.</summary>
+    [Fact]
+    public async Task Remove_ARetiredIdentityWhoseCarryIsOwed_IsRefusedWithTheCarryOwedLine()
+    {
+        var line = new uniffi.fauna_core.LocalizedText(
+            "settings.remove_account_blocked_carry_owed", new Dictionary<string, string>());
+        var fake = new FakeAccountRegistry(
+            active: ActorA,
+            entries: new[] { FakeAccountRegistry.Entry(ActorA), FakeAccountRegistry.Entry(ActorB) });
+        var vm = new AccountSwitcherViewModel(
+            fake,
+            _ => Task.FromResult<FfiEraseRemoveBlocked?>(new FfiEraseRemoveBlocked.CarryOwed(line)));
+        vm.Refresh();
+
+        await vm.RemoveAsync(ActorB);
+
+        Assert.Empty(fake.Removed);
+        Assert.Equal(FaunaApp.Core.Services.Strings.Resolve(line), vm.ErrorMessage);
+        Assert.Equal(2, vm.Accounts.Count);
+    }
+
     // ── Require-confirm toggle ──
 
     /// <summary>The per-row <c>account-require-confirm-toggle</c> write path. Setting the

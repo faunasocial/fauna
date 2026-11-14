@@ -2189,7 +2189,7 @@ pub(crate) fn compose_err(
 }
 
 /// `true` when the composer queued the gesture, `false` when it was sent.
-fn queued(composed: fauna_protocol::offline_intent::Composed<()>) -> bool {
+pub(crate) fn queued(composed: fauna_protocol::offline_intent::Composed<()>) -> bool {
     matches!(
         composed,
         fauna_protocol::offline_intent::Composed::Queued(_)

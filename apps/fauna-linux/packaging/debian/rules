@@ -7,6 +7,12 @@
 # The build host needs rustup + the pinned toolchain already installed.
 CARGO_TARGET_DIR ?= target
 
+# dpkg-buildflags adds -flto=auto -ffat-lto-objects to CFLAGS; cargo builds the
+# C dependencies with them and links through `cc`, where gcc's lto1 hit an
+# internal compiler error (the first real build, fauna-sync-agent). Rust
+# does its own LTO, so the C-side one is switched off the standard Debian way.
+export DEB_BUILD_MAINT_OPTIONS = optimize=-lto
+
 %:
 	dh $@
 
@@ -22,6 +28,20 @@ override_dh_auto_install:
 	install -Dm755 $(CARGO_TARGET_DIR)/release/fauna-sync-agent debian/fauna-desktop/usr/bin/fauna-sync-agent
 	install -Dm644 apps/fauna-linux/packaging/social.fauna.fauna.desktop debian/fauna-desktop/usr/share/applications/social.fauna.fauna.desktop
 	install -Dm644 apps/fauna-linux/fauna.svg debian/fauna-desktop/usr/share/icons/hicolor/scalable/apps/fauna.svg
+	# Fauna's two licence texts and the app's notices file (shipped-notices.md
+	# § Per channel): written by `just linux-deb`'s dependency
+	# `linux-desktop-notices`; the build fails where it is missing. dh_installdocs
+	# installs debian/copyright beside them.
+	install -Dm644 LICENSE-MIT debian/fauna-desktop/usr/share/doc/fauna-desktop/LICENSE-MIT
+	install -Dm644 LICENSE-APACHE debian/fauna-desktop/usr/share/doc/fauna-desktop/LICENSE-APACHE
+	install -Dm644 build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES debian/fauna-desktop/usr/share/doc/fauna-desktop/THIRD-PARTY-NOTICES
+
+override_dh_compress:
+	# The licence texts and the notices file stay uncompressed, under the
+	# names the notices file's header gives them ("beside this file") and
+	# every other Linux packaging installs: debhelper would otherwise gzip
+	# each doc file over 4 KiB.
+	dh_compress -X LICENSE -X THIRD-PARTY-NOTICES
 
 override_dh_auto_clean:
 	# Deliberately NOT `cargo clean` — CARGO_TARGET_DIR may point at a large

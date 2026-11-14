@@ -232,13 +232,32 @@ pub fn reverse_dns_ptr_name(ip: IpAddr) -> String {
 /// Interpret a DNSBL A-record answer: listed iff any returned A is in
 /// `127.0.0.0/8` (the convention — the canonical "listed" is `127.0.0.2`, but
 /// providers return `127.0.0.x` sub-codes). NXDOMAIN / empty → not listed.
+/// `127.255.255.0/24` is NOT a listing: it is the DNSBL's error code for a
+/// query it refuses (open resolver, rate limit) — see [`dnsbl_refused`].
 pub fn dnsbl_listed(a_records: &[String]) -> bool {
     a_records.iter().any(|r| {
         r.trim()
             .parse::<Ipv4Addr>()
-            .map(|ip| ip.octets()[0] == 127)
+            .map(|ip| ip.octets()[0] == 127 && !is_dnsbl_refusal(ip))
             .unwrap_or(false)
     })
+}
+
+/// Whether a DNSBL answer is a refusal to answer (`127.255.255.x`: Spamhaus
+/// answers `.252`/`.254`/`.255` for a typo'd zone, an open resolver or an
+/// over-limit query) and carries no real listing — the check could not be made.
+pub fn dnsbl_refused(a_records: &[String]) -> bool {
+    !dnsbl_listed(a_records)
+        && a_records.iter().any(|r| {
+            r.trim()
+                .parse::<Ipv4Addr>()
+                .map(is_dnsbl_refusal)
+                .unwrap_or(false)
+        })
+}
+
+fn is_dnsbl_refusal(ip: Ipv4Addr) -> bool {
+    ip.octets()[..3] == [127, 255, 255]
 }
 
 #[cfg(test)]
@@ -397,6 +416,21 @@ mod tests {
         assert!(dnsbl_listed(&["127.0.0.2".to_string()]));
         assert!(dnsbl_listed(&["127.0.0.10".to_string()])); // sub-code
         assert!(!dnsbl_listed(&[])); // NXDOMAIN
+        // 127.255.255.x is a refused query (open resolver, rate limit), not a listing.
+        for refusal in ["127.255.255.252", "127.255.255.254", "127.255.255.255"] {
+            assert!(!dnsbl_listed(&[refusal.to_string()]), "{refusal}");
+            assert!(dnsbl_refused(&[refusal.to_string()]), "{refusal}");
+        }
+        assert!(!dnsbl_refused(&["127.0.0.2".to_string()]));
+        // A real listing alongside a refusal code is still a listing.
+        assert!(dnsbl_listed(&[
+            "127.255.255.254".to_string(),
+            "127.0.0.2".to_string()
+        ]));
+        assert!(!dnsbl_refused(&[
+            "127.255.255.254".to_string(),
+            "127.0.0.2".to_string()
+        ]));
         assert!(!dnsbl_listed(&["203.0.113.7".to_string()])); // non-loopback (shouldn't happen, but not "listed")
     }
 }

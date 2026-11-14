@@ -13,7 +13,7 @@
 
 ## One key, no account password
 
-Your Fauna identity is a cryptographic key pair, created on your device the first time you sign up — a key on your devices, not an account with anyone. The **secret** — shown to you at creation as a long hex string — is the private half. It leaves a device only when you move it yourself: by adding a device or exporting your identity, by turning on the iCloud Keychain backup on iPhone or Mac, or by making a recovery kit, which keeps a copy on your nest (and on a friend's nest, if one holds copies for you) encrypted so that only the kit can open it. Your device's own backup may also carry it, still locked — see [Where the key lives](#where-the-key-lives--and-where-you-should-put-a-copy). Your nest never holds the secret in a form it can use; it works with the public half. There is no account password, which means:
+Your Fauna identity is a cryptographic key pair, created on your device the first time you sign up — a key on your devices, not an account with anyone. The **secret** — shown to you at creation as a long hex string — is the private half. It leaves a device only when you move it yourself: by adding a device or exporting your identity, by turning on the iCloud Keychain backup on iPhone, or by making a recovery kit, which keeps a copy on your nest (and on a friend's nest, if one holds copies for you) encrypted so that only the kit can open it. Your device's own backup may also carry it, still locked — see [Where the key lives](#where-the-key-lives--and-where-you-should-put-a-copy). Your nest never holds the secret in a form it can use; it works with the public half. There is no account password, which means:
 
 - **No sign-in password to phish or leak.** Signing in proves you hold the key; no server stores a password that would let someone sign in as you.
 - **Nothing to reset.** No "forgot password" flow, no support desk that can be talked into handing over your account: nobody — not your nest's admin, not the people who make Fauna — can sign in as you or hand your identity to someone else. (An admin can still suspend or remove an account on their nest — see [What the nest admin can and can't do](#what-the-nest-admin-can-and-cant-do).)
@@ -27,12 +27,15 @@ changed in settings without touching your identity.
 
 On each device the app stores the secret in the platform's secure storage: the keychain on iPhone/Mac, the equivalent stores on Windows, Linux, and Android. **The web app has no such store, and neither does the terminal app on a server or over SSH, or on a computer whose system keyring is locked or not set up, so there the secret is kept encrypted with a passphrase you choose** (in a browser, in the browser's site storage) — the app asks you to choose it the first time it opens, and asks for it again at each launch (in a browser, once per session, as long as one Fauna tab stays open). Clearing the browser's site data still removes the secret from that browser, so you need the secret or your recovery kit somewhere else to sign back in; and a forgotten passphrase cannot be recovered: **Forgot the passphrase? Start over** on the unlock screen erases this browser's copy of your sign-in keys and nothing else, and you sign in again from another device where you're signed in, an exported copy of your key, or your recovery kit. In a browser and on a device that support it, with the web app opened at your nest's name over HTTPS rather than at a bare IP address, you can also choose **Add a passkey** under **Settings → Account → Credential store**: a passkey unlocks your encrypted sign-in keys with your device's screen lock or a security key, the passphrase keeps working, and it is still the way in if the passkey is removed or lost. Treat the web app as a window, not as the home of your only copy.
 
-On iPhone and Mac you can optionally turn on **Settings → Account → Back up
+On iPhone you can optionally turn on **Settings → Account → Back up
 identity to iCloud Keychain**. By default the app keeps your identity out of
 iCloud altogether; switch this on and iCloud Keychain keeps an
-encrypted copy, so a new iPhone or Mac restored from your Apple account already
-has your identity. It's a convenience — being signed in on a second device
-(below) is still the sturdier way to make sure you never lose access.
+encrypted copy, so a new iPhone restored from your Apple account already
+has your identity. The Mac app shows the same switch but cannot make the
+copy yet: turning it on leaves it off and says so. Once it can, your Mac and
+your iPhone on one Apple account will share the one copy. It's a convenience — being signed in on
+a second device (below) is still the sturdier way to make sure you never
+lose access.
 
 The app never sends your secret anywhere by itself — not into a backup, not
 into a sync between your devices. What your device's *own* backup does with
@@ -603,6 +606,8 @@ A few more things to expect afterwards:
 
 Other access you had granted comes across too: the app re-issues each grant under your new identity on its own, with the same expiry — a grant that had already expired stays expired. The mail app passwords, the Nostr connected apps and any unredeemed claim codes above are the exceptions, cut on purpose. And a folder you sell to subscribers on the web shows its visitors only the teaser until you set its paywall again.
 
+**Folders other people shared with you.** If someone who shared a folder with you takes their account back from a stolen secret, your copy may not be able to follow them to their new identity. The folder then reads **Shared by ‹name› · owner changed, ask them to share it again**. Your files stay where they are and stay readable. Ask them to share the folder with you again: their app no longer lists you among the people it is shared with, so sharing it again sends you a fresh invitation. Depending on how your app knows them, the folder takes the invitation on its own or shows it in **Shared with you** for you to **Accept**; either way it then catches up.
+
 ### Getting your account back after losing every device
 
 This is the day the kit exists for: no phone, no laptop, nothing signed in
@@ -721,7 +726,7 @@ Both sides manage this from **Settings → Devices**:
 | Secret stored in platform secure storage | **Available** — where a device has none (the web app; the terminal app on a server or over SSH, or on a computer whose system keyring is locked or not set up) the secret is encrypted with a passphrase you choose |
 | Re-display your secret from a signed-in device | **Available** |
 | QR identity export (scan to sign in a new device) | **Available** — hidden behind *Show QR Code*, with a warning while it is on screen |
-| Back up identity to iCloud Keychain (iPhone/Mac) | **Available** — off by default (your identity stays out of iCloud); opt in under Settings → Account |
+| Back up identity to iCloud Keychain | **Available** on iPhone — off by default (your identity stays out of iCloud); opt in under Settings → Account. **Planned** on Mac — the switch is there, but the Mac app cannot make the copy yet, so turning it on leaves it off and says so |
 | QR/URI import (paste or scan) | **Available** on all seven apps |
 | Create a recovery kit (Settings → Account) | **Available** on all seven apps. Creating it also stores the copy of your secret that only the kit opens |
 | Replace a lost kit using your secret key (30-day wait, loud warning) | **Available** on all seven apps |
@@ -736,7 +741,6 @@ Both sides manage this from **Settings → Devices**:
 | Two identities open side by side in separate windows | **Available** on Linux, macOS, Windows and in the terminal app — and in the browser, where separate tabs each keep their own identity |
 | Devices list with online status and removal | **Available** |
 | "This device" tag on your own device's row, reliable even on a computer where a different app already set up your account | **Available** |
-| Sole-source guard on device removal | **Available** |
 | Session list, revoke, revoke-all (Settings → Sessions) | **Available** |
 | Emergency lockout (no sign-in needed, locks for 24 hours) | **Available** |
 | Revocation kicks live connections immediately | **Available** |

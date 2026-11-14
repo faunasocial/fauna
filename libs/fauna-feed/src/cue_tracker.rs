@@ -209,6 +209,9 @@ pub struct CueTracker {
     /// ([`CueTracker::note_playing`]) — a media row of one is attended whatever
     /// its visible fraction.
     engaged: HashSet<String>,
+    /// The feed selection the last [`CueTracker::note_selection`] saw —
+    /// `None` before the first, so a capture never drains on its own start.
+    last_selection: Option<String>,
 }
 
 /// The two readings a frozen tracker uses in place of the ones the shell
@@ -234,6 +237,31 @@ impl CueTracker {
             last_probe: None,
             unread_played_pm: HashMap::new(),
             engaged: HashSet::new(),
+            last_selection: None,
+        }
+    }
+
+    /// Note the feed selection the list shows now — the key
+    /// [`FeedSnapshot::cue_selection_key`](crate::FeedSnapshot::cue_selection_key)
+    /// spells — and drain every exposure when it changed since the last call:
+    /// a feed switch ends every exposure, and is no scroll
+    /// (`engagement-cues.md` § Cue vocabulary & derivation, `WindowDropped`).
+    /// A post both feeds hold keeps its card in place across the switch, so
+    /// the geometry alone never ends it; the selection's own change does.
+    /// Call it before [`CueTracker::sample`] on every sample. The first call
+    /// never drains.
+    pub fn note_selection(&mut self, key: &str, wall_now_ms: u64) -> Vec<CueObservation> {
+        let switched = self
+            .last_selection
+            .as_deref()
+            .is_some_and(|prev| prev != key);
+        if self.last_selection.as_deref() != Some(key) {
+            self.last_selection = Some(key.to_string());
+        }
+        if switched {
+            self.drain_all(wall_now_ms)
+        } else {
+            Vec::new()
         }
     }
 
@@ -1467,6 +1495,35 @@ mod tests {
             assert_eq!(left[0].content_id, "q");
             assert_eq!(left[0].ended_by, ExposureEnd::WindowDropped);
         }
+    }
+
+    #[test]
+    fn a_feed_switch_ends_an_exposure_whose_card_never_moved() {
+        // A post both feeds hold keeps its card in place across the switch:
+        // the geometry never ends it, the selection's change does.
+        let mut t = hold();
+        assert!(
+            t.note_selection("local", 0).is_empty(),
+            "the first call never drains"
+        );
+        let rows = vec![row_at("p", 1000)];
+        tick(&mut t, rows.clone(), &["p"], 0);
+        tick(&mut t, rows.clone(), &["p"], 250);
+        assert!(
+            t.note_selection("local", 0).is_empty(),
+            "an unchanged selection drains nothing"
+        );
+        let left = t.note_selection("feed:ab", 0);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].content_id, "p");
+        assert_eq!(left[0].ended_by, ExposureEnd::Drained);
+        assert_eq!(left[0].dwell_ms_at_skip_visibility, 250);
+        // The reopened feed starts the post afresh: only its own dwell counts.
+        tick(&mut t, rows.clone(), &["p"], 1000);
+        tick(&mut t, rows, &["p"], 1250);
+        let again = t.note_selection("local", 0);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].dwell_ms_at_skip_visibility, 250);
     }
 
     #[test]

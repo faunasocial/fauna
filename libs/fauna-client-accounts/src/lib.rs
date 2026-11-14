@@ -52,8 +52,8 @@ pub use removed_account::RemovedAccountCredentials;
 mod erase_residue;
 pub use erase_residue::{
     EraseResidueCopy, EraseResidueView, remove_account_blocked_copy,
-    remove_account_served_here_copy, sign_out_blocked_copy, sign_out_residue_retry_blocked_copy,
-    start_over_blocked_copy,
+    remove_account_carry_owed_copy, remove_account_served_here_copy, sign_out_blocked_copy,
+    sign_out_residue_retry_blocked_copy, start_over_blocked_copy,
 };
 mod add_refusal;
 pub use add_refusal::add_refused_copy;
@@ -103,8 +103,8 @@ pub use instance_lock::{
 mod sole_instance;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sole_instance::{
-    EraseBlocked, RemoveAccountBlocked, actors_served_by_another_instance, remove_account_blocked,
-    remove_account_blocked_as, sign_out_blocked,
+    CarryOwed, EraseBlocked, RemoveAccountBlocked, actors_served_by_another_instance,
+    remove_account_blocked, remove_account_blocked_as, remove_account_carry_owed, sign_out_blocked,
 };
 
 /// The sign-out residue that outlives the process: its install-scoped record
@@ -132,7 +132,7 @@ mod sign_out_finish;
 mod sign_out_record;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign_out_finish::{
-    FinishHost, FinishSeat, SignOutFinish, finish_sign_out, finish_sign_out_with,
+    FinishCaller, FinishHost, FinishSeat, SignOutFinish, finish_sign_out, finish_sign_out_with,
 };
 
 pub use sign_out_record::{
@@ -646,6 +646,18 @@ pub struct AccountEntry {
     /// Additive at rest, omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub departed_devices: Vec<String>,
+    /// Whether this device has carried this retired identity's undrained
+    /// outbox into its successor's (`succession-aftermath.md` § Re-key scope,
+    /// the device-local outbox row) — set by
+    /// [`AccountRegistry::record_outbox_carried`] once the predecessor's
+    /// store reads back with no undrained intent, so no later pass opens it.
+    /// A device fact: this index is the device's own, and a row restored
+    /// out of the escrow container is built fresh, so a second successor
+    /// device never inherits another's `true` — each carries its own
+    /// predecessor store. Meaningful only on a row with
+    /// [`Self::succeeded_by`]; additive at rest, omitted while `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outbox_carried: bool,
     /// Unknown keys a newer build wrote — preserved verbatim across a rewrite.
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -663,6 +675,7 @@ impl AccountEntry {
             succeeded_by: None,
             succeeded_from: Vec::new(),
             departed_devices: Vec::new(),
+            outbox_carried: false,
             extra: BTreeMap::new(),
         }
     }
@@ -1940,6 +1953,46 @@ impl AccountRegistry {
         }
     }
 
+    /// **Remove Again's credential erase**: delete each key a sign-out
+    /// recorded as surviving, BY NAME, from this registry's own store, then
+    /// read them back from it and every auxiliary store as [`Self::reverify`]
+    /// does (`account-scoping.md` § Erasure follows scope → *the residue
+    /// surface*, rule 4). The wipe ([`Self::wipe_own`]) removes the index
+    /// first, so a slot whose delete was refused survives with no index entry
+    /// naming it, and nothing that enumerates through the index
+    /// ([`Self::clear_all`]) can reach it again; the record's own key list can.
+    ///
+    /// Never an auxiliary store: those slots are what a sibling app's live
+    /// store of the same account runs under, retried with the account's scopes
+    /// ([`Self::erase_account_aux_slots`]), never taken with the index
+    /// (decision 2) — and this registry's gate says nothing about a sibling.
+    ///
+    /// Runs behind the registry gate (decision 3: only while the registry names
+    /// nobody), and holds to it itself as well: a recorded key of an account
+    /// the index lists again, or the index while it lists anybody, is read
+    /// back and never deleted. A recorded wipe failure is kept.
+    pub fn erase_recorded(&self, sweep: CredentialSweep) -> CredentialSweep {
+        {
+            let _mutation = self.lock.acquire();
+            let listed = self
+                .store
+                .get(INDEX_KEY)
+                .and_then(|raw| serde_json::from_str::<AccountIndex>(&raw).ok())
+                .map(|idx| idx.accounts)
+                .unwrap_or_default();
+            let held = |key: &str| {
+                (key == INDEX_KEY && !listed.is_empty())
+                    || listed
+                        .iter()
+                        .any(|e| per_actor_keys(&e.actor_id).any(|k| k == key))
+            };
+            for key in sweep.survivors.iter().filter(|k| !held(k)) {
+                self.store.delete(key);
+            }
+        }
+        self.reverify(sweep)
+    }
+
     /// **The wipe** of a native sign-out: the index and every listed
     /// account's slots in **this registry's own store** — and nothing in an
     /// auxiliary namespace (`account-scoping.md` § Erasure follows scope →
@@ -2309,6 +2362,54 @@ impl AccountRegistry {
             self.write_index(&idx)?;
         }
         Ok(())
+    }
+
+    /// Record that this device carried `old_actor`'s undrained outbox into
+    /// its successor's — its store read back with nothing left
+    /// ([`AccountEntry::outbox_carried`]). A repeat writes nothing; an
+    /// unknown `old_actor` (the row removed meanwhile) is
+    /// [`AccountError::UnknownActor`].
+    pub fn record_outbox_carried(&self, old_actor: &str) -> Result<(), AccountError> {
+        let _mutation = self.lock.acquire();
+        let mut idx = self.writable_index()?;
+        let Some(pos) = idx.position(old_actor) else {
+            return Err(AccountError::UnknownActor(old_actor.to_string()));
+        };
+        if !idx.accounts[pos].outbox_carried {
+            idx.accounts[pos].outbox_carried = true;
+            self.write_index(&idx)?;
+        }
+        Ok(())
+    }
+
+    /// Whether `actor_id` is a retired identity whose outbox this device
+    /// still owes its successor (`succession-aftermath.md` § Re-key scope,
+    /// the device-local outbox row): its row names a successor and records
+    /// no carry. The remove-account refusal's registry half
+    /// ([`remove_account_carry_owed`]); an unknown actor owes nothing.
+    pub fn outbox_carry_owed(&self, actor_id: &str) -> bool {
+        self.index()
+            .accounts
+            .iter()
+            .find(|e| e.actor_id == actor_id)
+            .is_some_and(|e| e.succeeded_by.is_some() && !e.outbox_carried)
+    }
+
+    /// The predecessors of `actor_id` whose outbox this device still owes
+    /// it, each with the seed that opens its store at rest — the carry
+    /// leg's work list: [`Self::predecessor_seeds`]' walk, nearest hop
+    /// first, minus every row already carried.
+    pub fn outbox_carry_sources(&self, actor_id: &str) -> Vec<(String, [u8; 32])> {
+        let accounts = self.index().accounts;
+        self.predecessor_seeds(actor_id)
+            .into_iter()
+            .filter(|(hex, _)| {
+                accounts
+                    .iter()
+                    .find(|e| e.actor_id == *hex)
+                    .is_some_and(|e| !e.outbox_carried)
+            })
+            .collect()
     }
 
     /// The departed devices `actor_id`'s attested predecessors' rows record
@@ -3723,6 +3824,118 @@ mod tests {
             !after.is_clean(),
             "a failed wipe stays a residue after the read-back clears"
         );
+    }
+
+    /// A store that refuses the delete of one key until `release` — a locked
+    /// Credential Manager during the sign-out's wipe that unlocks before the
+    /// user presses Remove Again.
+    #[derive(Default)]
+    struct StuckKeyStore {
+        inner: InMemorySecretStore,
+        stuck: std::sync::Mutex<Option<String>>,
+    }
+
+    impl StuckKeyStore {
+        fn release(&self) {
+            *self.stuck.lock().unwrap() = None;
+        }
+    }
+
+    impl SecretStore for StuckKeyStore {
+        fn get(&self, key: &str) -> Option<String> {
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) {
+            self.inner.set(key, value);
+        }
+        fn delete(&self, key: &str) {
+            if self.stuck.lock().unwrap().as_deref() != Some(key) {
+                self.inner.delete(key);
+            }
+        }
+    }
+
+    /// The orphan this closes: the wipe deletes the index first, so a slot
+    /// whose delete was refused survives with nothing pointing at it.
+    /// `clear_all` enumerates through the index and cannot reach it;
+    /// `erase_recorded` deletes the recorded keys by name in the registry's own
+    /// store, and reads them back from it and the auxiliary stores — whose
+    /// slots it never deletes (a sibling app's live store may run under them).
+    #[test]
+    fn erase_recorded_reaches_a_key_the_wipe_orphaned() {
+        let store = Arc::new(StuckKeyStore::default());
+        let actor = seed_account(&store.inner, SECRET_A);
+        let aux = Arc::new(StuckKeyStore::default());
+        aux.inner.seed(&store_writer_key(&actor), "writer");
+        *store.stuck.lock().unwrap() = Some(secret_key(&actor));
+        *aux.stuck.lock().unwrap() = Some(store_writer_key(&actor));
+        let reg = AccountRegistry::new(store.clone())
+            .also_erasing(vec![aux.clone() as Arc<dyn SecretStore>]);
+
+        let mut recorded = reg.wipe_own();
+        for key in reg.erase_account_aux_slots(&actor).survivors {
+            recorded.survivors.push(key);
+        }
+        assert_eq!(
+            recorded.survivors,
+            vec![secret_key(&actor), store_writer_key(&actor)]
+        );
+        assert!(reg.list().is_empty(), "the index went first");
+
+        store.release();
+        aux.release();
+        assert_eq!(
+            reg.reverify(reg.clear_all()).survivors,
+            Vec::<String>::new(),
+            "clear_all reads no index, so it names nothing"
+        );
+        assert!(
+            store.get(&secret_key(&actor)).is_some(),
+            "and the orphaned seed is still on the device"
+        );
+
+        let after = reg.erase_recorded(recorded);
+        assert_eq!(after.survivors, vec![store_writer_key(&actor)]);
+        assert!(store.get(&secret_key(&actor)).is_none(), "the seed is gone");
+        assert!(
+            aux.get(&store_writer_key(&actor)).is_some(),
+            "a shared-namespace slot is retried with its scopes, never here"
+        );
+    }
+
+    /// A refusal that still holds is named again, and a recorded wipe failure
+    /// is kept — the read-back cannot see what such a store holds.
+    #[test]
+    fn erase_recorded_names_a_key_still_refused_and_keeps_a_wipe_failure() {
+        let store = Arc::new(super::tests_support::RefusingDeleteStore::default());
+        seed_account(&store.inner, SECRET_A);
+        let reg = AccountRegistry::new(store.clone());
+        let mut recorded = reg.wipe_own();
+        recorded.record_wipe_failure();
+
+        let after = reg.erase_recorded(recorded.clone());
+
+        assert_eq!(after.survivors, recorded.survivors);
+        assert!(after.wipe_failed);
+    }
+
+    /// Defence in depth behind the registry gate: a recorded key of an
+    /// account the registry names again, and the index while it names
+    /// anybody, are read back but never deleted.
+    #[test]
+    fn erase_recorded_never_deletes_a_listed_accounts_keys() {
+        let (reg, store) = registry();
+        let actor = reg.add_account(SECRET_A, None, None).unwrap();
+        let recorded = CredentialSweep {
+            survivors: vec![secret_key(&actor), INDEX_KEY.to_string()],
+            wipe_failed: false,
+        };
+
+        let after = reg.erase_recorded(recorded.clone());
+
+        assert_eq!(after.survivors, recorded.survivors);
+        assert!(store.get(&secret_key(&actor)).is_some());
+        assert_eq!(reg.list().len(), 1);
     }
 
     #[test]

@@ -89,13 +89,13 @@ Stamped 2026-11-07 at 925fa56976.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| macos | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| web | ✅ full | 0.1.5-dev+4854e578 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.5-dev+a73ed62e.dirty standalone |
+| macos | ✅ full | 0.1.6-dev+2f2257c1 standalone |
+| ios | ✅ full | 0.1.5-dev+f83e3033 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+cfe1a17b.dirty standalone |
+| tui | ✅ full | 0.1.6-dev+2f2257c1 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -131,7 +131,7 @@ Stamped 2026-11-07 at 925fa56976.
 | 24 | nest | `tests/e2e-unified/tests/api/test_personalization_sealed_at_rest.py::test_a_published_model_is_built_only_from_marked_public_posts` | nest (linux): passed, nest (macos): passed |
 | 25 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_pruned_list_labeler` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 26 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_a_topic_made_on_another_device_shows_on_an_open_personalization_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 27 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_a_topic_ranked_feed_keeps_paging_past_its_first_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 27 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_a_topic_ranked_feed_keeps_paging_past_its_first_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 28 | nest | `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_the_nest_refuses_a_text_model_below_the_document_floor_or_quoting_a_sentence` | nest (linux): passed |
 | 29 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

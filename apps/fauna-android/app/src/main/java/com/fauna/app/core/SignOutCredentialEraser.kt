@@ -2,7 +2,6 @@ package com.fauna.app.core
 
 import com.fauna.ffi.FfiAccountRegistry
 import com.fauna.ffi.FfiCredentialSweep
-import com.fauna.ffi.FfiResidueCredentialEraser
 import com.fauna.ffi.FfiSignOutHost
 
 /**
@@ -16,18 +15,16 @@ import com.fauna.ffi.FfiSignOutHost
  *   never the shared account-store namespace, whose slots ride with each
  *   account's scopes); this is the platform store's own wholesale reset,
  *   `secureStorage.clear()`, which shared Rust reads back after.
- * - [eraseCredentials] — the residue retry's credential erase: `clearAll`
+ * - [eraseCredentials] — the finish's credential re-erase (Remove Again, launch): `clearAll`
  *   deletes every per-actor slot and the index and reads back what it deleted;
  *   `secureStorage.clear()`; `reverifyErase` re-asks after it, so a key that
  *   reset took is not reported. Shared Rust reads the RECORDED keys back on top
  *   of this answer (the registry is empty by then).
- *
- * Also the [FfiResidueCredentialEraser] the residue face's older exports take.
  */
 class SignOutCredentialEraser(
     private val registry: FfiAccountRegistry,
     private val secureStorage: SecureStorage,
-) : FfiResidueCredentialEraser, FfiSignOutHost {
+) : FfiSignOutHost {
     override fun wipeOwnStore(): Boolean {
         // Best-effort and logged inside `clear()`; the read-back shared Rust
         // runs after this is the witness of what the reset left.

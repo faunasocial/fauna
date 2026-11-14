@@ -121,6 +121,18 @@ public final class OnboardingVM {
     /// tick), and until a re-sweep says otherwise the statement is still true.
     public var signOutResidue: (any SignOutResidueSurfacing)?
 
+    /// The residue `identity_choice` paints — `signOutResidue`, never over an
+    /// append-mode ("Add account") wizard: that user is signed in, and a
+    /// residue is only ever reported to a signed-out one (`account-scoping.md`
+    /// § Erasure follows scope, decision 3, the registry gate: no paint while
+    /// the registry names an account — the record waits, and the next
+    /// signed-out `identity_choice` paints it). Twin of tui's
+    /// `sign_out_residue_elements` `adding_account` gate.
+    /// - Parameter appending: the caller's live `appState.isAddingAccount`.
+    public func paintedSignOutResidue(appending: Bool) -> (any SignOutResidueSurfacing)? {
+        appending ? nil : signOutResidue
+    }
+
     /// Move a just-finished erase's residue off `session` onto this wizard —
     /// the one handover both app roots run, after a sign-out (the `onSignOut`
     /// hook) and after the unreadable-index start-over. Synchronous, before the
@@ -142,13 +154,13 @@ public final class OnboardingVM {
     /// (`retrySignOutResidue`).
     private var signOutResidueRetries: Task<Void, Never>?
 
-    /// The one sign-out routine Remove Again and the launch run
-    /// (`SignOutResidueSurface.finish` with the agent dismissed and no lock of
-    /// this process's own — the view is only ever up signed out, and a launch
-    /// holds none yet). The seam a unit test replaces.
+    /// The one sign-out routine Remove Again and the launch run, each as its
+    /// own caller (`SignOutResidueSurface.finish` with the agent dismissed and
+    /// no lock of this process's own — the view is only ever up signed out, and
+    /// a launch holds none yet). The seam a unit test replaces.
     @ObservationIgnored
-    public var signOutFinish: @Sendable () -> SignOutFinishOutcome = {
-        SignOutResidueSurface.finish(dismissAgent: true, written: nil)
+    public var signOutFinish: @Sendable (FfiFinishCaller) -> SignOutFinishOutcome = { caller in
+        SignOutResidueSurface.finish(caller: caller, written: nil)
     }
 
     /// Where the launch's sign-out finish stands (`launchMayProceed`). Once per
@@ -192,7 +204,7 @@ public final class OnboardingVM {
             launchFinish = .running
             let finish = signOutFinish
             Task { @MainActor in
-                let outcome = await Task.detached { finish() }.value
+                let outcome = await Task.detached { finish(.launch) }.value
                 // A sign-out that landed while the finish ran recorded the
                 // newer statement; it wins.
                 if self.signOutResidue == nil { self.signOutResidue = outcome.residue }
@@ -220,7 +232,7 @@ public final class OnboardingVM {
         let finish = signOutFinish
         let press = Task { @MainActor in
             await previous?.value
-            let outcome = await Task.detached { finish() }.value
+            let outcome = await Task.detached { finish(.removeAgain) }.value
             self.signOutResidue = outcome.residue
             if self.launchFinish == .failedClosed && !outcome.failsClosed {
                 self.launchFinish = .done

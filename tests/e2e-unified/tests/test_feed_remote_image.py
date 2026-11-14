@@ -19,12 +19,14 @@ this suite's cousin), so the blocked case here first proves the card and the ele
 are there.
 
 tier_3, because the point is the **positive** fetch→paint path and that needs bytes
-a real server actually serves. The remote url is this session's own nest:
-``GET /api/v1/blob/<hex>`` is unauthenticated and navigable
-(``bins/fauna-nest/src/blob_routes.rs``), so uploading a fixture PNG through the
-composer yields a real, reachable image url with no third-party host and no extra
-process — while remaining, to the client, an ordinary remote url it must be revealed
-before fetching.
+a real server actually serves. The remote is a plain-``http`` loopback server the
+test owns (``helpers.remote_media_server.RemoteMediaServer(tls=False)``, a thread,
+no extra process) serving the fixture PNG: a genuinely third-party host, whose
+request log witnesses that nothing is fetched before the reveal. It is deliberately
+NOT the session's own nest: in docker nest mode the nest serves only its
+self-signed floor cert, which the bare remote-image client
+(``fauna_client::remote_image``) rightly refuses, so a nest blob url painted in
+standalone mode (plain http) and stayed a placeholder under docker.
 
 tui is the app that can assert the paint headlessly: it renders the picture as
 half-block ``▀`` characters, so the picture IS the element's text. The GUI apps paint
@@ -84,25 +86,34 @@ def _unique(prefix: str) -> str:
 # wired to FeedManager::reveal_remote_images) but never got its marker in the
 # 2026-08-01/04 trickle-down
 @pytest.mark.feature("feed-images-and-video")
-def test_body_remote_image_is_blocked_until_revealed_then_paints(
-    logged_in_app, nest_instance
-):
+def test_body_remote_image_is_blocked_until_revealed_then_paints(logged_in_app):
     """Blocked → tap ``load-remote-content-button`` → the image loads and paints."""
     if not TEST_IMAGE.exists():
         pytest.skip("Test image fixture not found")
     app = logged_in_app
 
-    # A real, servable image url: upload the fixture through the composer (the
-    # ordinary user path), then address the stored blob by hash. To the client
-    # under test this is simply a remote `![]()` like any other.
-    carrier = _unique("remote-image-src")
-    app.feed.create_post_with_image(text=carrier, image_path=str(TEST_IMAGE))
-    blob_hash = app.feed.post_image_blob_hash_by_text(carrier)
-    assert len(blob_hash) == 64, (
-        f"expected a 64-hex blob hash for the uploaded fixture, got {blob_hash!r}; "
-        f"error={app.error_text()!r}"
+    from helpers.remote_media_server import RemoteMediaServer
+
+    # A real, servable third-party image url: a plain-http loopback server this
+    # test owns. Plain http, never the nest: in docker mode the nest serves only
+    # its self-signed floor cert, which the bare remote-image client rightly
+    # refuses — a nest blob url painted in standalone (plain http) and stayed a
+    # placeholder under docker. The server's request log is also the witness
+    # that nothing is fetched before the reveal.
+    remote = RemoteMediaServer(
+        "remote-image.test",
+        None,
+        {"/a-cat.png": (TEST_IMAGE.read_bytes(), "image/png")},
+        tls=False,
     )
-    url = f"{nest_instance['url']}/api/v1/blob/{blob_hash}"
+    try:
+        _run_journey(app, remote)
+    finally:
+        remote.close()
+
+
+def _run_journey(app, remote) -> None:
+    url = remote.url("/a-cat.png")
 
     text = _unique("remote-image")
     # The card renders the image as its alt text, so wait for the plain token.
@@ -131,6 +142,9 @@ def test_body_remote_image_is_blocked_until_revealed_then_paints(
             f"doc-remote-image text="
             f"{app.driver.get_text('doc-remote-image', scope=f'post-card[{i}]')!r}"
         )
+    assert remote.requests == [], (
+        f"a blocked remote image must not be requested; the remote saw {remote.requests!r}"
+    )
 
     # Reveal → the manager flips the block, the app fetches the url, the picture
     # lands. The reveal button clears because nothing is blocked any more.
@@ -148,5 +162,5 @@ def test_body_remote_image_is_blocked_until_revealed_then_paints(
             "a revealed remote image must PAINT its fetched bytes, not stay a "
             f"placeholder; doc-remote-image text="
             f"{app.driver.get_text('doc-remote-image', scope=f'post-card[{i}]')!r} "
-            f"error={app.error_text()!r}"
+            f"error={app.error_text()!r} remote requests={remote.requests!r}"
         )

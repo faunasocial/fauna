@@ -40,11 +40,13 @@ import {
   type ReportTarget,
   type ItemPlaceholder as RegionPlaceholderValue,
 } from './wasm';
+import { openUrl } from './open-url';
 import { paintableDecodedPost } from './feed-utils';
 import { quotedPostBlock, resolvingLinkPreviewUrls } from './document';
 import { contentRender, guardianReasonOf, setSpamMarked, showAgain, showAgainFor, spamMarkedIds } from './contentPolicy.svelte';
 import type { ShowAgain } from './wasm';
-import { markSpam, trainedTopicsList, unmarkSpam, webPaywallMintToken, webPublishSet, webPublishUnset, type TrainedTopicRow } from './rpc';
+import { markSpam, nostrAdvertisePost, nostrAdvertiseSupported, nostrClearAdvertisement, trainedTopicsList, unmarkSpam, webPaywallMintToken, webPublishSet, webPublishUnset, type TrainedTopicRow } from './rpc';
+import { postNostrAdvertiseVerb } from './wasm';
 import { bestEffortCopyToClipboard, siteLink } from './web-publish';
 import { hexToBytes } from './hex';
 import { toArrayBufferView } from './bytes';
@@ -94,6 +96,42 @@ export function authorName(p: any): string {
  *  (`moderation.md` § Per-row badge data path). `undefined` when unlabelled. */
 export function contentLabelFor(post: { labels?: ContentLabelEntry[] }): string | undefined {
   return contentLabelBadgeFor(post.labels);
+}
+
+/** The consequence sentence of the advertise confirm step — a public text
+ *  (`nostr_advertise.confirm_body` in an `app-strings-public` region, reached
+ *  only through its public-texts round), read at run time: while the catalog
+ *  lacks it the verb is not offered. */
+export function advertiseConfirmBody(): string | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body = (t as any).nostr_advertise?.confirm_body;
+  return typeof body === 'string' ? body : null;
+}
+
+// The nest's `nostr-advertise` capability (and this build's `zaps` member),
+// read once per session when an own post's menu first paints. `null` = unread;
+// a failed read stays unread so a later paint asks again.
+const nostrAdvertiseCap = $state<{ supported: boolean | null }>({ supported: null });
+
+// A plain flag, not `$state`: this runs from a card's template expression,
+// where Svelte forbids a state write — the read itself starts a microtask later.
+let nostrAdvertiseReading = false;
+
+function ensureNostrAdvertiseRead(): void {
+  if (nostrAdvertiseCap.supported !== null || nostrAdvertiseReading) return;
+  const secretHex = get(identity)?.secretHex;
+  if (!secretHex) return;
+  nostrAdvertiseReading = true;
+  queueMicrotask(() => {
+    nostrAdvertiseSupported(secretHex)
+      .then((yes) => { nostrAdvertiseCap.supported = yes; })
+      .catch(() => {})
+      .finally(() => { nostrAdvertiseReading = false; });
+  });
+}
+
+function canAdvertise(): boolean {
+  return nostrAdvertiseCap.supported === true && advertiseConfirmBody() !== null;
 }
 
 export type FeedPostHost = ReturnType<typeof createFeedPostHost>;
@@ -678,16 +716,32 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     }
   }
 
-  // The payment link is nest/author-supplied; refuse to open a non-https
-  // scheme (security.md § Transport trust) — the same check the profile
-  // page's subscription-offer-payment-link applies.
-  function openUnlockPaymentLink(url: string): void {
+  // The sold post's payment link (`gated-post-payment-link`; lifts tui's
+  // `Op::PayUnlockOffer`): the subscribe to the offer's tier goes first (at
+  // the post's home when remote), then the checkout URL the shared reference
+  // rule composes opens (monetization.md § Pillar 3 → Buyer↔actor binding
+  // (Q4), the Q13 rules (1) and (2)). The link is nest/author-supplied, so a
+  // non-https scheme is refused before anything is sent (security.md §
+  // Transport trust) — the same check the profile page's
+  // subscription-offer-payment-link applies. A refused subscribe opens nothing.
+  async function openUnlockPaymentLink(postId: string, url: string): Promise<void> {
     if (typeof window === 'undefined') return;
     if (!isSafeNavUrl(url)) {
       deps.setError(t.subscriptions.unsafe_payment_url);
       return;
     }
-    window.open(url, '_blank', 'noopener');
+    const manager = deps.manager();
+    if (!manager) { deps.setError(t.common.still_loading); return; }
+    try {
+      const checkout = (await manager.payUnlockOffer(postId)) as string | null | undefined;
+      // Nothing to open (no resolved offer or link, an own post).
+      if (checkout) openUrl(checkout);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      deps.setError(t.feed.error_buy_unlock({ message: msg }));
+    } finally {
+      refreshFeed();
+    }
   }
 
   /** Own-post delete (feed-post-delete-confirm-button; feed.md § State & data
@@ -735,6 +789,47 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       deps.setError(t.web_publish.error_unpublish({ message: msg }));
+    } finally {
+      refreshFeed();
+    }
+  }
+
+  // ── The own-post Nostr advertisement pair (monetization.md § The Nostr
+  //    advertisement of a sold post → *What the author sees and agrees to*;
+  //    reference painter tui's `nostr_advertise_verbs`). ──
+
+  /** Which arm the post's ⋯ overflow offers — the shared
+   *  `PostSummary::nostr_advertise_verb` over wasm. Reading it for an own
+   *  post starts the session's one capability read; until it answers the
+   *  `Advertise` arm is not offered (an unread capability shows no verb
+   *  rather than one that may only ever refuse). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function nostrAdvertiseVerbFor(post: any): 'advertise' | 'stop_advertising' | null {
+    const viewer = get(identity)?.actorId;
+    if (!viewer) return null;
+    if (post.author === viewer) ensureNostrAdvertiseRead();
+    return postNostrAdvertiseVerb(post, viewer, canAdvertise());
+  }
+
+  async function advertisePostOnNostr(postId: string): Promise<void> {
+    try {
+      await nostrAdvertisePost(get(identity)?.secretHex ?? '', postId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      deps.setError(t.nostr_advertise.error_advertise({ message: msg }));
+    } finally {
+      // The card's `nostr_advertised_at` drives the pair: repaint from the
+      // nest's own answer.
+      refreshFeed();
+    }
+  }
+
+  async function stopAdvertisingPostOnNostr(postId: string): Promise<void> {
+    try {
+      await nostrClearAdvertisement(get(identity)?.secretHex ?? '', postId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      deps.setError(t.nostr_advertise.error_stop({ message: msg }));
     } finally {
       refreshFeed();
     }
@@ -977,6 +1072,9 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     unpublishPostFromWeb,
     copyPostWebLink,
     copyPostPaywallLink,
+    nostrAdvertiseVerbFor,
+    advertisePostOnNostr,
+    stopAdvertisingPostOnNostr,
     augmentPost,
     resetAugmentation,
     destroy,

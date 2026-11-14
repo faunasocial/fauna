@@ -385,6 +385,103 @@ pub fn named_for_engine_host(rows: Vec<FolderSummary>, cfg: &FoldersConfig) -> V
         .collect()
 }
 
+/// The custody entries of ONE same-nest set — the slice of `cfg` its binding
+/// record carries (`on-demand-files-shared-sets.md` § Shared sets on a
+/// capability host, decision 2″ (1)): every entry the engine builder's readers
+/// touch for `summary` ([`resolve_engine_key_binding`],
+/// [`named_for_engine_host`], [`retired_serve_custody`], [`custody_served`],
+/// the set's nonce lineage and serve stamps), and never another set's entry.
+/// An entry belongs to the set by its custody channel (the set's MLS channel;
+/// for an owned set its serve pseudo-channel too), by the owner's own name for
+/// an owned set, or by a nonce of the set's lineage. No foreign record, no
+/// pending removal, no forked seat rides along: a same-nest resolution reads
+/// none of them.
+#[must_use]
+pub fn custody_slice_for_row(cfg: &FoldersConfig, summary: &FolderSummary) -> FoldersConfig {
+    let owned = summary.role.as_deref() != Some("member");
+    // An owned sealed row is named by hash from its owner's own entry.
+    let names: Vec<String> = if !owned {
+        Vec::new()
+    } else if summary.name.is_empty() {
+        cfg.sets
+            .iter()
+            .filter_map(|e| e.name.as_deref())
+            .filter(|n| summary.is_named(n))
+            .map(str::to_owned)
+            .collect()
+    } else {
+        vec![summary.name.clone()]
+    };
+    let mut channels: Vec<[u8; 32]> = Vec::new();
+    if let Some(gid) = summary.mls_group_id.as_deref()
+        && let Ok(raw) = hex::decode(gid)
+    {
+        channels.push(channel_id_for_group(&raw));
+    }
+    channels.extend(names.iter().map(|n| serve_custody_channel_id(n)));
+    let mut nonces: Vec<[u8; 32]> = Vec::new();
+    for name in names.iter().map(Some).chain(std::iter::once(None)) {
+        let mut row = summary.clone();
+        if let Some(n) = name {
+            row.name.clone_from(n);
+        }
+        let channel = custody_channel_for(&row, cfg).ok().flatten();
+        let lineage = crate::custody::set_lineage(
+            cfg,
+            owned.then_some(row.name.as_str()).filter(|n| !n.is_empty()),
+            channel.as_ref(),
+        );
+        nonces.extend(lineage.live);
+        nonces.extend(lineage.retired.iter().map(|r| r.nonce));
+    }
+    FoldersConfig {
+        sets: cfg
+            .sets
+            .iter()
+            .filter(|e| {
+                e.channel_id.is_some_and(|c| channels.contains(&c))
+                    || e.name.as_ref().is_some_and(|n| names.contains(n))
+                    || e.set_nonce.is_some_and(|n| nonces.contains(&n))
+            })
+            .cloned()
+            .collect(),
+        ..FoldersConfig::default()
+    }
+}
+
+/// The custody entries of ONE cross-nest set — its [`ForeignFolder`] record
+/// (the set's row) and the entries at its channel or of its nonce lineage —
+/// the slice its binding record carries (decision 2″ (1)).
+///
+/// [`ForeignFolder`]: fauna_core::data::ForeignFolder
+#[must_use]
+pub fn custody_slice_for_foreign(cfg: &FoldersConfig, channel: &[u8; 32]) -> FoldersConfig {
+    let lineage = crate::custody::set_lineage(cfg, None, Some(channel));
+    let nonces: Vec<[u8; 32]> = lineage
+        .live
+        .into_iter()
+        .chain(lineage.retired.iter().map(|r| r.nonce))
+        .collect();
+    FoldersConfig {
+        sets: cfg
+            .sets
+            .iter()
+            .filter(|e| {
+                e.channel_id.as_ref() == Some(channel)
+                    || e.set_nonce.is_some_and(|n| nonces.contains(&n))
+            })
+            .cloned()
+            .collect(),
+        foreign_sets: cfg
+            .foreign_sets
+            .iter()
+            .filter(|f| &f.channel_id == channel)
+            .cloned()
+            .collect(),
+        ..FoldersConfig::default()
+    }
+}
+
 /// Resolve the [`FolderEngineKeys`] for **every** `summary` from the holder's
 /// already-unsealed `cfg`, tagging each with its set identity — the same-nest half
 /// of [`crate::engine_keys::engine_keys_from`], which every engine-building host

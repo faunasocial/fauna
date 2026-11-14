@@ -88,7 +88,7 @@ Removing an account is deliberately a *timed* process, not a trapdoor:
    then suspension, then deletion.
 2. **Cancel Eviction** stops the process at any point until the deletion starts: same account, same keys, same data, no re-onboarding.
 
-The ladder also won't start on a child's guardian while the guardianship stands. On their Family page, the guardian can hand it to someone else with **Propose new guardian** (once that person accepts), or end it with **Graduate to full account**; after that the eviction can go ahead.
+The ladder also won't start on a child's guardian while the guardianship stands. On their Family page, the guardian can hand it to someone else with **Propose new guardian** (once that person accepts), or end it with **Graduate to full account**; or you can take it over yourself with **Take over** on the child's row under **Users** (see [Kids on the nest](#kids-on-the-nest)). Once every guardianship they hold is resolved one of these ways, the eviction can go ahead.
 
 The member is told. For the whole warning phase, their app shows a warning banner
 on every page that can't be dismissed. It says when their access ends, when their account and data will be deleted, the reason you gave, and that they can export everything from **Settings → Account → Export My Data** until access ends. To take their mailbox to another mail service in a standard format, they also use **Export mailbox**, among the mail pages in Settings. If you cancel the eviction, the banner goes away on its own the next time their app checks.
@@ -126,8 +126,14 @@ The real admin-side levers:
 
 Fauna's design for children is **supervised accounts**: a real, full account
 carrying a guardianship link to a parent's account — guardianship is a
-relationship between two accounts, deliberately *not* an admin power (you
-pick the guardian when admitting the child, and that's where your role ends).
+relationship between two accounts, deliberately *not* an admin power. You
+pick the guardian when admitting the child; after that, the one thing you can
+do is take the guardianship over yourself, say when the guardian is leaving the
+nest: the child's row under **Users** names their guardian, and
+**Take over**, then **Confirm take-over**, makes you the guardian at once. Any
+hand-over the guardian had proposed is withdrawn, and the child's account then
+appears on your own Family page, where you manage its settings, hand it on to
+someone else or graduate it.
 The guardian controls who can reach the child, can set content rules — by category, keywords or a labeler — that block flagged posts and messages or hide them behind a warning on the child's own device, and can set usable hours and a daily time budget that lock Fauna on the child's devices outside those hours or once the budget is spent. The model,
 its transparency rules, and its current honest status are covered in
 [Sharing files and running a family nest § Parental controls](cloud-sharing-family.md#parental-controls).

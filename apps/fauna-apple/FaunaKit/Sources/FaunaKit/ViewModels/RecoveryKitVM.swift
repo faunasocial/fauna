@@ -593,6 +593,19 @@ public class RecoveryKitVM {
                                 + "\(sessionActorIdHex) — flag kept for the next pass")
             return
         }
+        // The right seat on a dead client is the same deferral: the torn-down
+        // session's `APIClient` can name the successor too (a re-point reaches
+        // it), and every call through it is refused. Measured on iOS
+        // 2026-11-10: the claim passed the seat check above on the retired
+        // client and all five mints failed "this session was torn down". The
+        // live client re-hydrates the section (`RecoveryKitSection.hydrateKey`
+        // keys on the client instance), which answers this deferral.
+        guard api?.isRetired == false else {
+            logMessage(level: .info, target: "fauna.app",
+                       message: "[succession-kit] discharge deferred: the seat's client "
+                                + "was torn down — flag kept for the live client's pass")
+            return
+        }
         guard SuccessionHandoff.claimOwedKit(asSuccessor: sessionActorIdHex) else {
             logMessage(level: .info, target: "fauna.app",
                        message: "[succession-kit] discharge refused: "
@@ -662,6 +675,10 @@ public class RecoveryKitVM {
             logMessage(level: .warn, target: "fauna.app",
                        message: "[succession-kit] mint attempt \(attempt) of "
                                 + "\(Self.successionMintAttempts) showed nothing")
+            // A cancelled task's `Task.sleep` returns at once, so without this
+            // the remaining attempts fire back to back with no backoff (measured:
+            // four in one millisecond). Stop and re-arm; the next pass retries.
+            if Task.isCancelled { break }
             if attempt < Self.successionMintAttempts {
                 try? await Task.sleep(nanoseconds: Self.successionMintBackoffNs)
             }

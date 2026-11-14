@@ -83,6 +83,12 @@ public record DmMessageView(
     // instead of the family-policy sentence. From the same one
     // ContentPolicyCache.RenderFor call as ContentVerdict.
     bool Reported = false,
+    // The reporter's show-again beside that "You reported this" notice (moderation.md §
+    // Corollary — the reporter's hide is theirs to undo): the hidden ids one press of
+    // `content-policy-show-again-button` removes and the label naming the scope, from
+    // the shared fold over the same keys the Reported verdict matched (the plane record
+    // digest, the sender's actor id). Null unless the viewer's own report hid it.
+    ShowAgainOffer? ShowAgain = null,
     // Whether the ⋯ menu offers `dm-message-report-button`: a RECEIVED message with a
     // plane identity to report it against (mail and bridged messages have none).
     bool CanReport = false,
@@ -259,6 +265,12 @@ public sealed partial class DmMessageBubble : UserControl
     /// Reaches a human with authority, where mark-as-spam only trains the reporter's
     /// own model.</summary>
     public Action<DmMessageView>? ReportRequested;
+
+    /// <summary>Raised when the user presses <c>content-policy-show-again-button</c>
+    /// beside the reported placeholder (<see cref="DmMessageView.ShowAgain"/>;
+    /// moderation.md § Corollary — the reporter's hide is theirs to undo). The page runs
+    /// one persisted un-hide per id the offer names and re-binds.</summary>
+    public Action<DmMessageView>? ShowAgainRequested;
 
     /// <summary>Raised when the user taps <c>dm-message-withheld-badge</c> on their own
     /// withheld message (<see cref="DmMessageView.Withheld"/>; takedown-and-block.md §
@@ -516,6 +528,15 @@ public sealed partial class DmMessageBubble : UserControl
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContentBlockedPlaceholder, blockedText);
             ContentBlockedPlaceholder.Visibility = Visibility.Visible;
             PaintGuardianReason(msg.GuardianReason);
+            // The reporter's show-again, beside "You reported this" and only there
+            // (moderation.md § Corollary): the shared fold's label, Name beside Content.
+            if (msg.Reported && msg.ShowAgain is { } offer)
+            {
+                ShowAgainButton.Content = offer.Label;
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ShowAgainButton, offer.Label);
+                ShowAgainButton.IsEnabled = true;
+                ShowAgainButton.Visibility = Visibility.Visible;
+            }
             return;
         }
         // Muted-word collapse (moderation.md § Muted keywords;
@@ -547,7 +568,7 @@ public sealed partial class DmMessageBubble : UserControl
         // A live message: ensure the surfaces a prior withheld bind collapsed are
         // restored (bubbles are reused across Refresh re-binds).
         HidePlaceholders();
-        HeaderRow.Visibility = Visibility.Visible;
+        HeaderIdentity.Visibility = Visibility.Visible;
         BodyView.Visibility = Visibility.Visible;
         ActionsRow.Visibility = Visibility.Visible;
 
@@ -670,7 +691,11 @@ public sealed partial class DmMessageBubble : UserControl
     private void CollapseAllArms()
     {
         HidePlaceholders();
-        HeaderRow.Visibility = Visibility.Collapsed;
+        // The sender and badges go; the timestamp stays — it is the one child
+        // every arm paints (ui.yaml dm-message-bubble), and a withheld bubble is
+        // counted by it (a notice in a message's place is a timestamp with no
+        // dm-message-text).
+        HeaderIdentity.Visibility = Visibility.Collapsed;
         BodyView.Visibility = Visibility.Collapsed;
         QuoteCard.Visibility = Visibility.Collapsed;
         LinkPreviewCards.Children.Clear();
@@ -704,6 +729,7 @@ public sealed partial class DmMessageBubble : UserControl
         MutedRevealButton.Visibility = Visibility.Collapsed;
         ContentCollapsedPlaceholder.Visibility = Visibility.Collapsed;
         ContentRevealButton.Visibility = Visibility.Collapsed;
+        ShowAgainButton.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>Content label badge (spam/phishing/NSFW) — the highest-confidence entry
@@ -1456,6 +1482,18 @@ public sealed partial class DmMessageBubble : UserControl
         // the same page callback. Never reachable on a nest `block`.
         if (_message is not null)
             ContentRevealRequested?.Invoke(_message);
+    }
+
+    private void ShowAgainButton_Click(object sender, RoutedEventArgs e)
+    {
+        // A persisted un-hide (moderation.md § Corollary — the reporter's hide is theirs
+        // to undo), run by the page; disabled until the re-bind its result causes, so a
+        // double press cannot send twice.
+        if (_message is { ShowAgain: not null } msg)
+        {
+            ShowAgainButton.IsEnabled = false;
+            ShowAgainRequested?.Invoke(msg);
+        }
     }
 
     private void ContentRevealButton_Click(object sender, RoutedEventArgs e)

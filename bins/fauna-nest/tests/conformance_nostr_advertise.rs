@@ -627,3 +627,46 @@ async fn the_r_tag_follows_web_publication_and_the_site_origin() {
     assert_eq!(r_tag(&unpublished), None, "unpublished: the r tag is gone");
     assert!(flag(&h, &post).await.is_some(), "still advertised");
 }
+
+/// The feed read carries the flag (`FeedPostRow::nostr_advertised_at` → the
+/// wire `FeedPostItem.nostr_advertised_at`), so an app picks the arm of the
+/// own-post verb pair after a reload: `None` before the act, the act's time
+/// after it, `None` again once withdrawn (`monetization.md` § The Nostr
+/// advertisement of a sold post → *What the author sees and agrees to*).
+#[tokio::test]
+async fn the_feed_read_carries_the_advertised_flag() {
+    let h = harness().await;
+    let author = user(&h, 0x71).await;
+    link_payee_with_nsec(&h.state, author, Some(RELAYS)).await;
+    let post = sold_post(&h, author, "unlock-feed", 21_000).await;
+
+    let read = |h: &Harness| {
+        let db = h.state.db.clone();
+        async move {
+            db.query_feed_for_authors(
+                &[],
+                fauna_core::scoring::FilterCombination::All,
+                &[],
+                &[author.to_vec()],
+                None,
+                100,
+                fauna_nest::db::feeds::FeedAudience::OnBox,
+                fauna_nest::db::feeds::FeedLocality::NestWide,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let row_flag = |rows: &[fauna_nest::db::FeedPostRow]| {
+        rows.iter()
+            .find(|r| hex::encode(&r.post_id) == post)
+            .expect("the author's sold post is in their own feed read")
+            .nostr_advertised_at
+    };
+
+    assert_eq!(row_flag(&read(&h).await), None, "not advertised yet");
+    let at = set(&h, author, &post).await.unwrap().advertised_at;
+    assert_eq!(row_flag(&read(&h).await), Some(at));
+    clear(&h, author, &post).await.unwrap();
+    assert_eq!(row_flag(&read(&h).await), None, "withdrawn");
+}

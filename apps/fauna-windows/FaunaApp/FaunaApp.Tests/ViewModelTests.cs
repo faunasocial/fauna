@@ -776,7 +776,6 @@ public class StatusViewModelTests
 
         Assert.True(vm.NestAvailable);
         Assert.Equal("abc123", vm.ActorId);
-        Assert.Equal("alice", vm.Handle);
         Assert.Equal("1.0.0", vm.SyncVersion);
         Assert.Equal(3600UL, vm.SyncUptimeSecs);
         Assert.Equal(ConnectionState.Connected, vm.SyncConnectionState);

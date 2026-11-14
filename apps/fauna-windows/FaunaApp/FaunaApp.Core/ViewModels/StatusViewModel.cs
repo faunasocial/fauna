@@ -16,7 +16,8 @@ public partial class StatusViewModel : ViewModelBase
 {
     // ── Nest status ──
     [ObservableProperty] private string? _actorId;
-    [ObservableProperty] private string? _handle;
+    // No live handle here: the Status page's identity cell paints from the account
+    // registry's cache (IdentityCell; settings.md § Layout & flow item 1), never a read.
     [ObservableProperty] private bool _nestAvailable;
 
     // ── Sync status ──
@@ -118,7 +119,6 @@ public partial class StatusViewModel : ViewModelBase
                 {
                     var identity = await _rpc.GetIdentityAsync();
                     ActorId = identity?.ActorId;
-                    Handle = identity?.Handle;
                 }
             }
             catch

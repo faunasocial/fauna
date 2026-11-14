@@ -224,9 +224,9 @@ def selfclaim_nest(tmp_path_factory, run_seal_helper):
         yield nest
 
 
-# Not yet marked for the feature: the rule was built 2026-10-13, after the
-# newest image this machine holds, so the witness waits for an image built from
-# a tree that contains it (`docs/features/mail-abuse-refused.md` outcome 8).
+# Outcome 8 of `docs/features/mail-abuse-refused.md`: the venue of its own keeps
+# the per-IP message budget its probes spend away from every other outcome's.
+@pytest.mark.feature("mail-abuse-refused")
 def test_a_greeting_with_the_nests_own_name_is_refused(selfclaim_nest):
     """A sending server greeting with a domain this nest hosts mail for is
     refused `554 5.7.0` as an impersonation — even with the greeting-name

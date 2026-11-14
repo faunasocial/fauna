@@ -36,13 +36,13 @@ Stamped 2026-11-07 at b844c771f6.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| linux | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
-| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| web | ✅ full | 0.1.6-dev+8438e5ce standalone |
+| linux | ⚠ partial | 0.1.5-dev+0cfdd6c6 standalone |
+| windows | ⚠ partial | 0.1.5-dev+ccd7fba0.dirty standalone |
 | macos | ⚠ partial | 0.1.5-dev+76b81e1c standalone |
 | ios | ⚠ partial | 0.1.5-dev+76b81e1c standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| tui | ✅ full | 0.1.6-dev+8438e5ce standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -54,6 +54,6 @@ Stamped 2026-11-07 at b844c771f6.
 | 4 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_joining_shows_the_nests_rules_with_the_terms_notice` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_nest_rules_web_notice.py::test_the_public_web_pages_show_the_rules_notice_in_place_of_what_they_block` | nest (linux): passed, nest (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_rule_this_device_cannot_apply_is_listed_as_not_applied_at_joining_and_in_settings` | windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (macos): passed |
-| 8 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_nest_collapse_rule_folds_the_post_behind_a_reveal` | tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_rule_this_device_cannot_apply_is_listed_as_not_applied_at_joining_and_in_settings` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_nest_rules.py::test_a_nest_collapse_rule_folds_the_post_behind_a_reveal` | web (linux): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

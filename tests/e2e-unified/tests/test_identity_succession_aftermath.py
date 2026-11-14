@@ -1100,15 +1100,47 @@ def test_the_successor_is_asked_about_the_trust_it_inherited(app, grant_mint_nes
     )
 
     # ── Keep settles it, and settles it AT REST ────────────────────────────
+    # A standing error the page already showed (an unreachable destination's
+    # caption, say) is not the press's: only a NEW error ends the wait early.
+    error_before = app.error_text()
     app.nest_trust.keep_grant(0)
+    # First on the page Keep was pressed on: the press's own dispatch refreshes
+    # the facet, and its failure paints `error-message` on THIS page only, so a
+    # poll that leaves the page at once (`_raised` re-opens it) both loses the
+    # error and remounts the page under a dispatch still in flight. Waiting
+    # here is a deadline poll on the page's state, never a settle-sleep
+    # (convention 14).
+    wait_until(
+        lambda: not app.nest_trust.grant_unattested_mark_visible(0)
+        or app.error_text() not in ("", error_before),
+        _ADJUDICATION_S,
+        diagnose=lambda: (
+            "pressing Keep must settle that row's review mark on the page it "
+            "was pressed on (KeepGrant → keep_grant_mark records a Kept "
+            "verdict, then the machine's refresh re-folds the facet), but the "
+            f"row still reads {app.nest_trust.grant_unattested_mark_text(0)!r} "
+            f"and the page shows no new error (before the press: "
+            f"{error_before!r}); grants={app.nest_trust.grant_count()} "
+            f"keep={app.nest_trust.grant_keep_visible(0)}; aftermath log says "
+            f"{_aftermath_log(app)}"
+        ),
+    )
+    assert not app.nest_trust.grant_unattested_mark_visible(0), (
+        f"pressing Keep failed on the page: error={app.error_text()!r} "
+        f"(before the press: {error_before!r}); aftermath log says "
+        f"{_aftermath_log(app)}"
+    )
     wait_until(
         lambda: not _raised(),
         _ADJUDICATION_S,
         diagnose=lambda: (
-            "pressing Keep must settle that row's review mark (keep_grant_mark "
-            "records a Kept verdict and the facet re-folds), but the row still "
-            f"reads {app.nest_trust.grant_unattested_mark_text(0)!r}; "
-            f"error={app.error_text()!r}"
+            "the Keep settled the mark on the page it was pressed on, but a "
+            "fresh read of the Nests page raises it again — the Kept verdict "
+            "is not what the succession ledger holds at rest (a later raise "
+            "re-opened it, or the page renders a row the verdict did not "
+            "land on); the row reads "
+            f"{app.nest_trust.grant_unattested_mark_text(0)!r}; "
+            f"error={app.error_text()!r}; aftermath log says {_aftermath_log(app)}"
         ),
     )
     # Keep is not Revoke: the trust stays, and stays revocable forever after.
@@ -2251,7 +2283,7 @@ def test_the_successors_subscriber_tier_is_re_keyed(succeedable_app, nest_instan
 
     marked on all seven apps: android's author page (tiers tab, pending
     requests, approve) is built, so the journey runs there unchanged. The android
-    witness has not been run yet — it needs the android venue.
+    witness has not been run yet — it needs the android emulator.
     """
     from actions.api_actor import ApiActor
     from common.auth import create_actor_and_register
@@ -2632,9 +2664,17 @@ def test_mail_rules_from_before_the_recovery_are_flagged_to_keep_or_remove(
     )
 
     # ── The rule itself carries the mark, with Keep beside Delete ──────────
-    assert inherited_name in app.settings.filter_names(), (
-        "the rule must come across with the account before it can be judged; "
-        f"the list reads {app.settings.filter_names()!r}"
+    # Waited, not read once: the Account line counts the marks, and the list is
+    # a read of its own — no app promises it lands before the line does.
+    wait_until(
+        lambda: inherited_name in app.settings.filter_names(),
+        _FILTER_RAISE_S,
+        diagnose=lambda: (
+            "the rule must come across with the account before it can be "
+            f"judged; the list reads {app.settings.filter_names()!r}, error "
+            f"surface: {app.error_text()!r}\n  aftermath: {_aftermath_log(app)}"
+            f"\n  account plane: {_account_plane_log(app)}"
+        ),
     )
     # Waited, not read once: the list re-reads its marks on the visit that
     # filter_names() just made, and that read lands after the rows it repaints.

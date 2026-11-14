@@ -53,3 +53,34 @@ import Testing
     #expect(landed)
     #expect(vm.clientErrorMessage == "a paywall-link error")
 }
+
+// The own-post Nostr advertise verb pair (`monetization.md` § The Nostr
+// advertisement of a sold post). The presence rule itself is the shared Rust
+// `post_nostr_advertise_verb`, tested in `libs/fauna-feed`; a `PostSummary`
+// fixture is deliberately not built here (see `ActorScopeTests`), so these pin
+// the Swift-side inputs: no post ⇒ no verb, the catalog's confirm body reads
+// as the sentence, and the capability read stays unread without a session.
+#if !FAUNA_EXCISE_PAYMENTS
+@Test func noPostMeansNoNostrAdvertiseVerb() {
+    #expect(FeedPostActionsButton.nostrAdvertiseVerb(
+        post: nil, viewer: "aa", supported: true, confirmBody: "body") == nil)
+}
+
+@Test func theCatalogConfirmBodyReadsAsTheSentence() {
+    // `nostr_advertise.confirm_body` landed with the public-texts round, so
+    // the catalog answers the sentence, never the key itself — the verb's
+    // confirm step has its consequence sentence to show.
+    let body = FeedPostActionsButton.nostrConfirmBody
+    #expect(body != nil)
+    #expect(body != "nostr_advertise.confirm_body")
+}
+
+@MainActor
+@Test func theNostrCapabilityStaysUnreadWithoutASession() async {
+    let vm = FeedVM()
+    await vm.readNostrAdvertiseSupported()
+    #expect(vm.nostrAdvertiseSupported == nil)
+    vm.reset()
+    #expect(vm.nostrAdvertiseSupported == nil)
+}
+#endif

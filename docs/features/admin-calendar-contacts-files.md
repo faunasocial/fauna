@@ -57,13 +57,13 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+b64f0240 standalone |
-| linux | ✅ full | 0.1.5-dev+b64f0240 standalone |
-| windows | ⚠ partial | 0.1.5-dev+b64f0240 standalone |
-| macos | ✅ full | 0.1.5-dev+b64f0240 standalone |
-| ios | ✅ full | 0.1.5-dev+b64f0240 standalone |
+| web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| windows | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+b64f0240 standalone |
+| tui | ✅ full | 0.1.5-dev+2b0759a1 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -83,7 +83,7 @@ Stamped 2026-10-01 at 308c995169.
 | 6 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_switching_files_off_shuts_file_apps_out_of_members_files` | nest (linux): passed, nest (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_mail_keeps_working_with_calendar_switched_off` | nest (linux): passed, nest (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_admin_calendar.py::test_caldav_port_field_says_it_applies_where_apps_reach_the_nest_directly` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_caldav_admin_port_rebind.py::test_admin_caldav_port_change_rebinds_listener` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_caldav_admin_port_rebind.py::test_admin_caldav_port_change_rebinds_listener` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_admin_calendar.py::test_each_dav_switch_shows_the_nest_state` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_dav_enable_independence.py::test_an_explicit_dav_setting_is_what_the_nest_reports` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

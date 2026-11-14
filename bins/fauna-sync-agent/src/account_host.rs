@@ -813,6 +813,7 @@ fn runtime_params<R>(
         // app never made) keeps the placeholder, which the app's labeled
         // register supersedes (`devices.md` § Device names, rule (a)).
         enrollment_device_label: None,
+        foreground: true,
     }
 }
 

@@ -908,3 +908,61 @@ fn call_machine_method_dispatches_set_captured_dns_credential() {
         "the injected secret field bag rides verbatim to captured_dns_credential"
     );
 }
+
+/// A refused DNS verify returns the provider's own text, not a generic
+/// credentials line: an app that shows the RETURNED error (web's verify button)
+/// must name the address Namecheap wants allowlisted, the same text the
+/// snapshot's error carries (`docs/features/set-up-a-nest-from-the-app.md`
+/// outcome 13; `provisioning/registry.md` § Proxy boundary).
+#[tokio::test]
+async fn verify_dns_refusal_returns_the_providers_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<ApiResponse Status="ERROR" xmlns="http://api.namecheap.com/xml.response">
+  <Errors><Error Number="1011150">Invalid request IP: 203.0.113.7</Error></Errors>
+</ApiResponse>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let mut urls = std::collections::HashMap::new();
+    urls.insert("dns".to_string(), server.uri());
+    let observer: Arc<dyn OnboardingObserver> = CountingObserver::new();
+    let m = OnboardingMachine::with_nest_api_and_provider_base_urls(
+        observer,
+        Arc::new(FakeNestApi::new()),
+        Some(urls),
+    );
+    m.set_current_handle("alice@example.com".into());
+    m.select_dns_provider("namecheap".into());
+    m.set_dns_creds(
+        [
+            ("api-user".into(), "apiuser".into()),
+            ("api-key".into(), "apikey".into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let err = m
+        .verify_dns()
+        .await
+        .expect_err("a still-refused address must be an error")
+        .to_string();
+    assert!(err.contains("203.0.113.7"), "must name the address: {err}");
+    assert!(
+        err.contains("API Access"),
+        "must say where to add it: {err}"
+    );
+    assert!(
+        !err.contains("rejected the credentials"),
+        "must not be the generic line: {err}"
+    );
+    let shown = m.error_message().unwrap_or_default();
+    assert!(
+        shown.contains("203.0.113.7"),
+        "snapshot names it too: {shown}"
+    );
+}

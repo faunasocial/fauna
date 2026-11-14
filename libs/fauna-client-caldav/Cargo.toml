@@ -86,6 +86,7 @@ fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"]
 fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
 
 [dev-dependencies]
+fauna-client-drafts = { path = "../fauna-client-drafts", features = ["test-helpers"] }
 # Test-only: re-derives blake3 independently so the tests below prove this
 # crate's re-exported `personal_calendar_id`/`uid_hash` really resolve to the
 # documented derivation. Production definitions live in `fauna_protocol::dav_identity`.

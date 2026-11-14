@@ -322,6 +322,38 @@ impl CacheDb {
         }
     }
 
+    /// Every guardianship link with the guardian's handle, keyed on the
+    /// supervised actor id — the admin Users projection's one batch read per
+    /// page (`family-safety.md` § App surface → *Admin take-over*; the
+    /// `list_mail_serving_overrides` pattern, never `get_guardian_of` per row).
+    /// The handle is `None` when blank or when the guardian has no users row.
+    pub async fn list_guardians_with_handles(
+        &self,
+    ) -> Result<std::collections::HashMap<Vec<u8>, (Vec<u8>, Option<String>)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT g.supervised_actor_id, g.guardian_actor_id, u.handle
+                 FROM guardianships g
+                 LEFT JOIN users u ON u.actor_id = g.guardian_actor_id",
+            )
+            .context("prepare list guardians")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let ward: Vec<u8> = row.get(0)?;
+                let guardian: Vec<u8> = row.get(1)?;
+                let handle: Option<String> = row.get(2)?;
+                Ok((ward, guardian, handle))
+            })
+            .context("query list guardians")?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (ward, guardian, handle) = r.context("read guardian row")?;
+            map.insert(ward, (guardian, handle.filter(|h| !h.is_empty())));
+        }
+        Ok(map)
+    }
+
     /// Every supervised account `guardian` guards (guardian-side read).
     pub async fn list_wards(&self, guardian: &[u8]) -> Result<Vec<GuardianshipRow>> {
         let guardian = guardian.to_vec();

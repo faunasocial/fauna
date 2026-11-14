@@ -428,6 +428,18 @@ pub struct PostSummary {
     /// keeps the menu identical on all 7 apps — no app queries publish state
     /// per row.
     pub web_slug: Option<String>,
+    /// When the author advertised this sold post on Nostr
+    /// (`FeedPostItem.nostr_advertised_at` ← `content_meta.nostr_advertised_at`,
+    /// epoch seconds). `None` = not advertised, or a nest too old to say.
+    ///
+    /// The **advertise-state half** of the own-post verb pair *Advertise on
+    /// Nostr* / *Stop advertising on Nostr*: read through
+    /// [`nostr_advertise_verb`](Self::nostr_advertise_verb), never re-derived
+    /// per app (`monetization.md` § The Nostr advertisement of a sold post →
+    /// *What the author sees and agrees to*).
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub nostr_advertised_at: Option<u64>,
     /// Set once [`crate::FeedManager::unlock_gated_post`] decrypted this
     /// gated post's full body into `body`/`document` (session-local render
     /// state; the at-rest and wire shapes stay sealed).
@@ -1194,6 +1206,28 @@ pub struct FeedSnapshot {
 }
 
 impl FeedSnapshot {
+    /// One string per feed selection — the key a cue capture hands
+    /// [`CueTracker::note_selection`](crate::CueTracker::note_selection) so a
+    /// feed switch ends every exposure. The same spelling FaunaKit's
+    /// `CueViewportObserver.selectionKey` uses: the built-in Trending feed, an
+    /// imported-posts selection, a saved feed by id, else Local; an author
+    /// window is its own selection.
+    pub fn cue_selection_key(&self) -> String {
+        if self.trending_selected {
+            return "trending".to_string();
+        }
+        if let Some(imported) = &self.imported_selected {
+            return format!("imported:{imported}");
+        }
+        if let Some(author) = &self.author_selected {
+            return format!("author:{author}");
+        }
+        if let Some(feed) = &self.selected_feed {
+            return format!("feed:{feed}");
+        }
+        "local".to_string()
+    }
+
     /// Every post this snapshot renders: the timeline list, then the
     /// [`deep_linked_post`](Self::deep_linked_post) slot. The **one** definition
     /// of that union — every render walk and every per-post lazy resolve reads it,
@@ -1247,6 +1281,81 @@ pub struct CardGate {
     pub tier: String,
     /// The reader's own label for the room, when the reader sits in it.
     pub room_label: Option<String>,
+}
+
+/// Which arm of the own-post Nostr advertisement verb pair a post's ⋯ overflow
+/// (`feed-post-actions-menu`) offers — [`PostSummary::nostr_advertise_verb`]
+/// (`monetization.md` § The Nostr advertisement of a sold post → *What the
+/// author sees and agrees to*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum NostrAdvertiseVerb {
+    /// `feed-post-advertise-nostr-button` — opens the confirm step, whose
+    /// confirm runs `fauna.nostr.advertise.set`.
+    Advertise,
+    /// `feed-post-stop-advertising-nostr-button` — `fauna.nostr.advertise.clear`.
+    StopAdvertising,
+}
+
+impl PostSummary {
+    /// Whether this post is **sold** as the apps can tell from the feed read:
+    /// its gate names a per-post unlock tier
+    /// (`fauna_client_subscriptions::UNLOCK_TIER_PREFIX`) — the same rule
+    /// `FeedManager::resolve_post_unlock_offer` keys on. A subscription-tier
+    /// post a tier also designates is the nest's to confirm; `set` answers
+    /// `fauna.nostr.not_sold` for anything this rule lets through wrongly.
+    pub fn is_sold_post(&self) -> bool {
+        self.gated_tier
+            .as_deref()
+            .is_some_and(|t| t.starts_with(fauna_client_subscriptions::UNLOCK_TIER_PREFIX))
+    }
+
+    /// The one presence rule of the own-post Nostr advertisement verb pair,
+    /// shared by all 7 apps:
+    ///
+    /// * never on someone else's post (`viewer` is the signed-in actor's hex
+    ///   id, compared with [`author`](Self::author));
+    /// * an advertised post offers [`NostrAdvertiseVerb::StopAdvertising`]
+    ///   whatever else holds — the withdrawal is de-escalation, ungated and
+    ///   compiled always, so an author is never left unable to take a priced
+    ///   note down;
+    /// * an unadvertised post offers [`NostrAdvertiseVerb::Advertise`] only
+    ///   when it [is sold](Self::is_sold_post) and `can_advertise` — the
+    ///   app's build carries the `zaps` member AND the nest advertises the
+    ///   `nostr-advertise` capability (`fauna_client_nostr`'s
+    ///   `NostrContentClient::advertise_supported`). An older nest therefore
+    ///   shows no verb.
+    ///
+    /// A linked Nostr key is deliberately NOT read here: the nest's `set` is
+    /// the one judge of the bridging gate and answers
+    /// `fauna.nostr.not_linked` / `fauna.nostr.no_custodial_key`, which the
+    /// apps show as they are — an app-side key reading would be a second,
+    /// driftable copy of that gate.
+    pub fn nostr_advertise_verb(
+        &self,
+        viewer: &str,
+        can_advertise: bool,
+    ) -> Option<NostrAdvertiseVerb> {
+        if self.author.is_empty() || self.author != viewer {
+            return None;
+        }
+        if self.nostr_advertised_at.is_some() {
+            return Some(NostrAdvertiseVerb::StopAdvertising);
+        }
+        (can_advertise && self.is_sold_post()).then_some(NostrAdvertiseVerb::Advertise)
+    }
+}
+
+/// [`PostSummary::nostr_advertise_verb`] for native (UniFFI) apps — the
+/// record-carries-no-methods posture of [`post_card_gate`]. Web reads the same
+/// rule through `fauna_wasm::postNostrAdvertiseVerb`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn post_nostr_advertise_verb(
+    post: PostSummary,
+    viewer: String,
+    can_advertise: bool,
+) -> Option<NostrAdvertiseVerb> {
+    post.nostr_advertise_verb(&viewer, can_advertise)
 }
 
 /// [`PostSummary::card_gate`] for native (UniFFI) apps — a `uniffi::Record`
@@ -1470,5 +1579,68 @@ mod tests {
         assert_eq!(emojis, ["a", "c"]);
         post.source = "bluesky".to_string();
         assert!(post.paintable_reactions().is_empty());
+    }
+
+    fn sold_own(advertised: Option<u64>) -> PostSummary {
+        PostSummary {
+            author: "aa".repeat(32),
+            gated_tier: Some(format!(
+                "{}{}",
+                fauna_client_subscriptions::UNLOCK_TIER_PREFIX,
+                "01".repeat(8)
+            )),
+            nostr_advertised_at: advertised,
+            ..Default::default()
+        }
+    }
+
+    /// The verb pair's presence rule (`monetization.md` § The Nostr
+    /// advertisement of a sold post → *What the author sees and agrees to*).
+    #[test]
+    fn the_advertise_verb_shows_on_an_own_sold_post_the_nest_can_advertise() {
+        let me = "aa".repeat(32);
+        let post = sold_own(None);
+        assert_eq!(
+            post.nostr_advertise_verb(&me, true),
+            Some(NostrAdvertiseVerb::Advertise)
+        );
+        // An older nest (no capability) or an excised build: no verb.
+        assert_eq!(post.nostr_advertise_verb(&me, false), None);
+        // Someone else's post: never.
+        assert_eq!(post.nostr_advertise_verb(&"bb".repeat(32), true), None);
+        // A subscription-gated (not per-post sold) post, or a public one: no verb.
+        let sub = PostSummary {
+            gated_tier: Some("gold".into()),
+            ..post.clone()
+        };
+        assert_eq!(sub.nostr_advertise_verb(&me, true), None);
+        let public = PostSummary {
+            gated_tier: None,
+            ..post
+        };
+        assert_eq!(public.nostr_advertise_verb(&me, true), None);
+    }
+
+    /// An advertised post offers the withdrawal whatever else holds — the
+    /// de-escalation is never hidden behind the capability or the sale.
+    #[test]
+    fn an_advertised_post_always_offers_the_withdrawal() {
+        let me = "aa".repeat(32);
+        let post = sold_own(Some(1_762_500_000));
+        for can in [true, false] {
+            assert_eq!(
+                post.nostr_advertise_verb(&me, can),
+                Some(NostrAdvertiseVerb::StopAdvertising)
+            );
+        }
+        let unsold = PostSummary {
+            gated_tier: None,
+            ..post.clone()
+        };
+        assert_eq!(
+            unsold.nostr_advertise_verb(&me, false),
+            Some(NostrAdvertiseVerb::StopAdvertising)
+        );
+        assert_eq!(post.nostr_advertise_verb(&"bb".repeat(32), true), None);
     }
 }

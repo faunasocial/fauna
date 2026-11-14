@@ -194,23 +194,25 @@ struct GroupInvitationRow: View {
 
 /// One `folder-row` for a shared set this device holds the machinery for (the
 /// co-present ceremony's own listing — `p2p.md` § Offline share initiation).
-/// Its body is the device-local folder binding and nothing else: no rename,
-/// no leave — severance is the authority's mint, not a self-scoped roster drop
-/// (`account-data-plane.md` § The recipient-set scheme). A folder bound here
-/// runs an engine with no nest leg, its content moving over the group plane
-/// (`group-set.md` § Build design — the group set). The row reads as the
-/// set's recorded name, else its short scope id, and its
-/// `folder-shared-badge` reads "Shared by ‹them›" on someone else's scope,
-/// "Shared · N" on your own — the same two readings the M2 rows use. Mirrors
-/// linux's `build_group_scope_row`.
-///
-/// `onToggle` is nil on a client with no binding to host (iOS): the row then
-/// stays a label, with nothing to expand.
-struct GroupScopeRow<BindingContent: View>: View {
+/// Its body is the device-local presence and nothing else: no rename, no
+/// leave — severance is the authority's mint, not a self-scoped roster drop
+/// (`account-data-plane.md` § The recipient-set scheme). A group set is a set
+/// like any other on the platform, so its row carries what a writer member's
+/// row carries (`group-set.md` § Build design — the group set, decision 11):
+/// the `folder-location-*` binding where the platform binds locations (macOS)
+/// and the hide-only `folder-on-demand-toggle` where it has a File Provider
+/// presence (macOS and iOS) — both in the expander body, as on
+/// `writerMemberFolderRow`. The row reads as the set's recorded name, else
+/// its short scope id, and its `folder-shared-badge` reads "Shared by ‹them›"
+/// on someone else's scope, "Shared · N" on your own — the same two readings
+/// the M2 rows use. Mirrors linux's `build_group_scope_row`.
+struct GroupScopeRow<BodyContent: View>: View {
     let scope: FfiGroupScope
     let isExpanded: Bool
-    let onToggle: (() -> Void)?
-    @ViewBuilder let binding: () -> BindingContent
+    let onToggle: () -> Void
+    /// The expander body: the platform's binding section and the on-demand
+    /// toggle (`FoldersContent` composes both).
+    @ViewBuilder let content: () -> BodyContent
 
     private var title: String { scope.pageLabel }
 
@@ -222,48 +224,36 @@ struct GroupScopeRow<BindingContent: View>: View {
     }
 
     var body: some View {
-        // Presence + name read for the indexed `folder-row`; the activate is
-        // the click toggle, as on the owner row.
-        if let onToggle {
-            row(onToggle).automationActivate(Ids.folderRow, text: { title }, perform: onToggle)
-        } else {
-            row(nil).automationValue(Ids.folderRow, text: { title })
-        }
-    }
-
-    private func row(_ onToggle: (() -> Void)?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                if let onToggle {
-                    Button(action: onToggle) {
-                        HStack(spacing: 4) {
-                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(title)
-                                .font(.body)
-                        }
-                        .contentShape(Rectangle())
+                Button(action: onToggle) {
+                    HStack(spacing: 4) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(title)
+                            .font(.body)
                     }
-                    .buttonStyle(.plain)
-                } else {
-                    Text(title)
-                        .font(.body)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
                 Spacer()
                 automationText(Ids.folderSharedBadge, badgeText)
                     .font(.caption2)
                     .foregroundStyle(.tint)
             }
             if isExpanded {
-                binding()
+                content()
             }
         }
         .padding(.vertical, 2)
         // `.contain` keeps the child ids (badge, the expander body's binding
-        // controls) queryable alongside this container id.
+        // controls and toggle) queryable alongside this container id.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.folderRow)
+        // Presence + name read for the indexed `folder-row`; the activate is
+        // the click toggle, as on the owner row.
+        .automationActivate(Ids.folderRow, text: { title }, perform: onToggle)
     }
 }
 

@@ -13,6 +13,8 @@ pub mod channel;
 pub mod engine;
 pub mod engine_role;
 pub mod error;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod forged_claim;
 pub mod replenish;
 pub mod room_message;
 pub mod room_policy;

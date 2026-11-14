@@ -42,11 +42,12 @@
     unlinkBridge,
     updateBridgeSettings,
     listBridgeFollows,
-    addBridgeFollow,
-    removeBridgeFollow,
+    addBridgeFollowOrQueue,
+    removeBridgeFollowOrQueue,
     type BridgeInfo,
     type BridgeFollow,
   } from '#lib/bridges';
+  import { changeFollow } from '#lib/bridge-follow';
   import { IDS } from '#lib/generated/uiIds';
 
   let { error = $bindable('') } = $props();
@@ -163,8 +164,7 @@
     const secret = $identity?.secretHex;
     if (!secret) return;
     try {
-      await addBridgeFollow(secret, 'bluesky', id, petname);
-      await refreshLinkedPanel();
+      if (await changeFollow(() => addBridgeFollowOrQueue(secret, 'bluesky', id, petname), refreshLinkedPanel)) error = '';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -174,8 +174,7 @@
     const secret = $identity?.secretHex;
     if (!secret) return;
     try {
-      await removeBridgeFollow(secret, 'bluesky', fId);
-      await refreshLinkedPanel();
+      if (await changeFollow(() => removeBridgeFollowOrQueue(secret, 'bluesky', fId), refreshLinkedPanel)) error = '';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     }

@@ -395,7 +395,9 @@ STORE_ARTIFACTS = {
 }
 
 #: The one track per store where a serving build is the store's public release;
-#: a build serving any other (a testing track) is still only `built`.
+#: a build serving any other (a testing track) is `live-test` — the store's own
+#: reading that a tester can install it (fleet-versions.md § The apps of a release,
+#: owner-ruled 2026-11-12).
 PUBLIC_TRACK = {"play": "production", "app-store": "app-store", "microsoft-store": "public"}
 
 #: A submission state → the artifact state it is; None: no act (a `superseded`
@@ -414,5 +416,5 @@ _ARTIFACT_STATE = {
 def artifact_state(sub: dict) -> str | None:
     """The release table's artifact state one submission's recorded state is."""
     if sub["state"] == "serving":
-        return "live" if sub["track"] == PUBLIC_TRACK[sub["store"]] else "built"
+        return "live" if sub["track"] == PUBLIC_TRACK[sub["store"]] else "live-test"
     return _ARTIFACT_STATE[sub["state"]]

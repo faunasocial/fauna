@@ -430,6 +430,17 @@ where
     )
     .await?;
 
+    // Land this identity's replica BEFORE the submit, as late as it can run:
+    // the submit revokes this identity's bearer, so a change still inside a
+    // replica autosave's debounce would never land under it, and the successor
+    // shows of a community room's past only the `history/<ch>` slice landed
+    // now (`succession-aftermath.md` § Re-key scope → *The predecessor's
+    // replica is flushed before the submit*). Here, in the one function every
+    // composition submits through — native, web, the FFI faces — so no app's
+    // ceremony can skip it. Awaited and never fatal: a failed flush is logged
+    // and the ceremony goes on; a device with no live plane owes nothing.
+    let _ = fauna_client_mls_sync::leave_flush::flush_before_retire(&old_actor_id).await;
+
     // ── the boundary ────────────────────────────────────────────────────────
     // Past this call the nest may have committed, so no failure may take the
     // seed with it. This is the `?` the finding was about.

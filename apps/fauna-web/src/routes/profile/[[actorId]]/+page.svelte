@@ -52,8 +52,9 @@
     subscriptionsReject,
     subscriptionsSubscribersList,
     subscriptionsRemoveSubscriber,
-    subscriptionsOffersList,
+    subscriptionsOffersListAcrossNests,
     subscriptionsSubscribeAcrossNests,
+    subscriptionsSubscribeAndCheckout,
     subscriptionsUnsubscribeAcrossNests,
     subscriptionsStatusGet,
     profileHeaderRead,
@@ -105,8 +106,10 @@
   import TierMoneyFields from '#lib/components/payments/TierMoneyFields.svelte';
   import TierPrice from '#lib/components/payments/TierPrice.svelte';
   import OfferPaymentLink from '#lib/components/payments/OfferPaymentLink.svelte';
+  import ClaimRedeem from '#lib/components/payments/ClaimRedeem.svelte';
   import { t } from '#lib/i18n/strings';
   import { isSafeNavUrl } from '#lib/safe-url';
+  import { openUrl } from '#lib/open-url';
   import { bestEffortCopyToClipboard } from '#lib/web-publish';
   import { IDS } from '#lib/generated/uiIds';
   import { hexToBytes } from '#lib/hex';
@@ -523,6 +526,9 @@
       }
       if (other) {
         actorHomeSlot = actorHome(carriedHome, actor, read.body, nodeUrl());
+        // The offers were read under the home this read just replaced: read
+        // them again from the new one.
+        if (offersHome !== undefined && offersHome !== actorHomeSlot) void loadOffers();
       }
     } catch {
       if (viewedActorId !== actor) return;
@@ -684,13 +690,24 @@
     }
   }
 
-  // OTHER — read the creator's offered tiers + the viewer's current status. A
-  // failed status read is non-fatal (every row defaults to "not subscribed"),
-  // mirroring linux/android. The free "followers" tier is filtered out (header
-  // follow button).
+  // The home the last offers load read under (`undefined` before the first).
+  let offersHome: string | null | undefined = undefined;
+
+  // OTHER — read the creator's offered tiers from the page's actor-home slot
+  // (through this nest, relayed to their home when it is another nest —
+  // `subscriptions.md` § Pillar 1 → *The offers browse across nests*) + the
+  // viewer's current status on this nest. A failed status read is non-fatal
+  // (every row defaults to "not subscribed"), mirroring linux/android. The free
+  // "followers" tier is filtered out (header follow button). An answer read
+  // under a home the slot has since left is dropped: the header read that moved
+  // the slot started the re-read.
   async function loadOffers(): Promise<void> {
     const s = secret();
-    if (!s || !viewedActorId) return;
+    const actor = viewedActorId;
+    if (!s || !actor) return;
+    const home = actorHomeSlot;
+    offersHome = home;
+    const stale = () => viewedActorId !== actor || actorHomeSlot !== home;
     try {
       try {
         const st = await subscriptionsStatusGet(s, viewedActorId);
@@ -700,10 +717,11 @@
         viewerStatusTier = null;
         viewerFollowPending = false;
       }
-      offers = (await subscriptionsOffersList(s, viewedActorId)).filter(
-        (tr) => tr.name !== FOLLOWERS_TIER,
-      );
+      const listed = await subscriptionsOffersListAcrossNests(s, actor, home);
+      if (stale()) return;
+      offers = listed.filter((tr) => tr.name !== FOLLOWERS_TIER);
     } catch (e) {
+      if (stale()) return;
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -938,6 +956,7 @@
     // below replaces it once the profile answers.
     const seeded = self ? null : actorHome(home, id, null, nodeUrl());
     actorHomeSlot = seeded;
+    offersHome = undefined;
     void refreshHeaderName(seeded);
     if (self) {
       void loadSelf();
@@ -1130,6 +1149,17 @@
     }
   }
 
+  // A claim code of this creator redeemed through the Tiers tab's redeem row
+  // (`ClaimRedeem`, which already cleared its input and the page error): the
+  // `subscribeOffer` fold — re-read offers + status, and a queued grant reads
+  // "Pending approval" until the creator's client commits it (tui's
+  // `Outcome::Redeemed`). The reply's shape is typed inline: this shared page
+  // never imports the payments glue.
+  async function onClaimRedeemed(reply: { tier: string; queued: boolean }): Promise<void> {
+    await loadOffers();
+    if (reply.queued) pendingTiers = new Set([...pendingTiers, reply.tier]);
+  }
+
   // The Follow ⇄ Following toggle (`subscriptions.md` § The free followers tier —
   // follow and unfollow, rule 4; lifts tui's `Action::Follow`): *Follow*
   // subscribes to the free `followers` tier; *Following* leaves it — at once for a
@@ -1297,17 +1327,50 @@
     }
   }
 
-  function openPayment(url: string): void {
+  // The offer row's payment link (`subscription-offer-payment-link`; lifts tui's
+  // `Action::OpenPaymentLink`): the subscribe to the tier the row sells goes
+  // first, across nests at the page's actor-home slot, then the checkout URL the
+  // shared reference rule composes opens (`monetization.md` § Pillar 3 →
+  // *Buyer↔actor binding (Q4)*, the Q13 rules (1) and (2)). The row shows the
+  // subscribe's outcome as its Subscribe button would; a refused subscribe is
+  // the page error and opens nothing.
+  async function payOffer(tier: SubscriptionTier): Promise<void> {
     if (typeof window === 'undefined') return;
+    const url = tier.payment_url;
+    const s = secret();
+    if (!url || !s || !viewedActorId) return;
     // The payment link is nest-supplied; refuse to open a non-https scheme
-    // (security.md § Transport trust). `noopener`
-    // is already set below; this adds the scheme allowlist a legitimate payment
-    // processor URL always satisfies.
+    // (security.md § Transport trust) before
+    // anything is sent. `openUrl` sets `noopener`; this adds the scheme
+    // allowlist a legitimate payment processor URL always satisfies.
     if (!isSafeNavUrl(url)) {
       error = t.subscriptions.unsafe_payment_url;
       return;
     }
-    window.open(url, '_blank', 'noopener');
+    offerBusy = true;
+    try {
+      const open = await subscriptionsSubscribeAndCheckout(
+        s,
+        viewedActorId,
+        tier.name,
+        url,
+        actorHomeSlot,
+      );
+      error = '';
+      if (!open) return;
+      // Opened before the re-read, while the press's user activation holds
+      // (through the SPA's one opener, the e2e's record).
+      openUrl(open.url);
+      if (open.reply.outcome === 'approved') {
+        await loadOffers();
+      } else {
+        pendingTiers = new Set([...pendingTiers, tier.name]);
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      offerBusy = false;
+    }
   }
 
   // The id the copy button last put on the clipboard, published as its `copied`
@@ -1816,7 +1879,7 @@
               {/if}
               <span class="muted small" data-testid={IDS.SUBSCRIPTION_OFFER_DESCRIPTION}>{offer.description ?? ''}</span>
               {#if __FAUNA_PAYMENTS__ && offer.payment_url}
-                <OfferPaymentLink onopen={() => openPayment(offer.payment_url!)} />
+                <OfferPaymentLink onopen={() => payOffer(offer)} />
               {/if}
               <span data-testid={IDS.SUBSCRIPTION_OFFER_STATUS}>{offerStatusLabel(offer)}</span>
               <button
@@ -1829,6 +1892,23 @@
             <p class="muted">{t.subscriptions.no_offers}</p>
           {/if}
         </div>
+        <!-- The redeem row (profile.md § Layout & flow → *Another's profile*):
+             the subscription-settings pair, here carrying this creator and the
+             page's actor-home slot (the follow's home), so a code minted on
+             another nest redeems from the creator's profile. Same compile-time
+             excision as the settings pair; keyed on the viewed actor, so a code
+             typed for one creator never rides to the next open. -->
+        {#if __FAUNA_PAYMENTS__}
+          {#key viewedActorId}
+            <ClaimRedeem
+              secretHex={$identity?.secretHex ?? null}
+              authorIdHex={viewedActorId ?? ''}
+              homeNestUrl={actorHomeSlot}
+              onredeemed={onClaimRedeemed}
+              onerror={(m) => (error = m)}
+            />
+          {/key}
+        {/if}
       </section>
     {/if}
   </div>

@@ -179,8 +179,11 @@ def test_a_reset_erases_every_account_handle_grant_domain_address_and_message(
     nest = handle.nest
     admin = nest["admin"]
     # The rows the nest writes for itself at every boot (its co-located
-    # content-processor service enrols on its kept keypair), as opposed to the
-    # admin, the two mail bridges this venue enrolled, and what the test seeds.
+    # services enrol themselves), as opposed to the admin, the two mail bridges
+    # this venue enrolled, and what the test seeds. Counted, not matched by key:
+    # the materializer's seed is wiped with the database on purpose, so its row
+    # comes back under a fresh key (`encryption-at-rest.md` § Capability
+    # tiering → *The materialization grant*; `factory_reset.rs`, step 3).
     nest_own = _users(nest) - {
         admin["actor_id_bytes"], handle.mta.ed25519_pubkey, handle.mda.ed25519_pubkey,
     }
@@ -225,10 +228,14 @@ def test_a_reset_erases_every_account_handle_grant_domain_address_and_message(
     _reset(handle)
 
     users = _users(nest)
-    assert users == {admin["actor_id_bytes"]} | nest_own, (
+    gone = {member["actor_id_bytes"], handle.mta.ed25519_pubkey, handle.mda.ed25519_pubkey}
+    assert admin["actor_id_bytes"] in users and not (users & gone) and (
+        len(users - {admin["actor_id_bytes"]}) == len(nest_own)
+    ), (
         "after the reset the only accounts may be the re-claiming admin and the "
-        "nest's own boot-time service rows — the member and both mail bridges' "
-        f"rows must be gone: {sorted(u.hex()[:8] for u in users)}"
+        f"nest's own {len(nest_own)} boot-time service row(s) — the member and both "
+        f"mail bridges' rows must be gone: now {sorted(u.hex()[:8] for u in users)}, "
+        f"before the reset the nest's own were {sorted(u.hex()[:8] for u in nest_own)}"
     )
     after = _admin_call(nest, "fauna.admin.stats", {})
     assert after["total_users"] == len(users), after

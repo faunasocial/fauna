@@ -1,5 +1,5 @@
 """Conversations — a received picture whose bytes this device no longer holds still
-opens ``image-lightbox``, as its placeholder: tui, windows, linux, web, macos, ios.
+opens ``image-lightbox``, as its placeholder: tui, windows, linux, web, macos, ios, android.
 
 ``docs/goal/ui/conversations.md`` § User actions, the ``dm-attachment-image[i]`` row:
 "A picture whose bytes the device does not hold opens as the placeholder, never a
@@ -16,8 +16,8 @@ opens ``views/lightbox.rs::show_image_lightbox_placeholder``; web makes it a but
 opening ``Lightbox.svelte`` in its placeholder mode. macos and ios share FaunaKit's
 ``DmMessageBubble``: the placeholder carries the same tap and driver-click action as
 the painted picture and opens ``ImageLightbox`` with a placeholder item (the declared
-text in the picture's place). android leaves the placeholder inert today (no click
-handler on it); widen the marks when it opens it.
+text in the picture's place). android's placeholder carries the same click as the
+painted picture and opens ``ImageLightbox`` with its declared text in the picture's place.
 
 The picture is seen painted first and then evicted through the shared test seam
 (``conversations_evict_attachment``, the retention witness's), so the placeholder is
@@ -46,6 +46,7 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 FIXTURE_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"

@@ -21,6 +21,8 @@ import {
   accountPumpCycles,
   accountPumpNow,
   accountReadMarkerState,
+  appOutboxDrainNow,
+  setOutboxDrainHold,
 } from '#lib/wasm';
 import { registerE2eCommands } from '#lib/e2e-commands';
 
@@ -30,6 +32,8 @@ const ACCOUNT_RUNTIME_COMMANDS = [
   'read_marker_state',
   'escrow_wrap_coordinates',
   'folder_set_custody',
+  'app_outbox_drain_now',
+  'outbox_drain_hold',
 ] as const;
 
 /** Register the account runtime's commands and install the
@@ -76,6 +80,26 @@ export function registerAccountRuntimeCommands(): void {
       // Same reader shape, no payload: the recovery-kit let-go journey's
       // staging read (`fleet-scope-reclamation.md` clause (3)(j)).
       return accountEscrowWrapCoordinates();
+    }
+    if (action === 'app_outbox_drain_now') {
+      // The tab's app drain loop, rung now (`fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW`):
+      // the shared loop the lend and every reconnect run, for a test that
+      // has just released the drain hold. Fire-and-forget; the barrier is
+      // the effect.
+      await appOutboxDrainNow();
+      return null;
+    }
+    if (action === 'outbox_drain_hold') {
+      // The in-process drain hold (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`): a
+      // tab has no environment or filesystem, so the desktop hold file
+      // cannot reach it. A missing or non-boolean `held` is a loud refusal
+      // (convention 11).
+      const held = payload?.held;
+      if (typeof held !== 'boolean') {
+        throw new Error('outbox_drain_hold needs a boolean `held`');
+      }
+      await setOutboxDrainHold(held);
+      return null;
     }
     // Fire-and-forget by contract: the barrier is `account_pump_cycles`,
     // never this ack (the pass itself may outlast a command's budget).

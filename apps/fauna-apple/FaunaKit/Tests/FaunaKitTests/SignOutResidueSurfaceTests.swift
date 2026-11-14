@@ -16,7 +16,7 @@ import Testing
 ///
 /// Hermetic: temp bases and a private in-memory secret store under the
 /// registry — never the developer's real Application Support root or keychain.
-/// No agent is dismissed (`dismissAgent: false`): the dismissal is shared
+/// No agent is dismissed (`caller: .gesture`): the dismissal is shared
 /// Rust's, pinned there.
 @Suite struct SignOutResidueSurfaceTests {
     private final class MemorySecretStore: FfiSecretStore, @unchecked Sendable {
@@ -72,13 +72,13 @@ import Testing
         /// The gesture's own finish — what `StatusVM.signOut` runs after the
         /// runtime's stop.
         func gestureFinish(written: [String]) -> SignOutFinishOutcome {
-            SignOutResidueSurface.finish(seat: seat, dismissAgent: false, written: written)
+            SignOutResidueSurface.finish(seat: seat, caller: .gesture, written: written)
         }
 
         /// A later run — the launch's or Remove Again's — over whatever record
         /// is on the disk.
         func laterFinish() -> SignOutFinishOutcome {
-            SignOutResidueSurface.finish(seat: seat, dismissAgent: false, written: nil)
+            SignOutResidueSurface.finish(seat: seat, caller: .gesture, written: nil)
         }
 
         func remove() {
@@ -257,7 +257,7 @@ import Testing
 
     private static func vm(_ routine: Routine) -> OnboardingVM {
         let vm = OnboardingVM()
-        vm.signOutFinish = { routine.run() }
+        vm.signOutFinish = { _ in routine.run() }
         return vm
     }
 
@@ -276,6 +276,19 @@ import Testing
         #expect(vm.signOutResidue?.line == Self.line)
         #expect(session.signOutResidue == nil)
         #expect(vm.errorMessage == nil, "the residue has its own view, never error-message")
+    }
+
+    /// Never painted over an append-mode ("Add account") wizard: that user is
+    /// signed in (`account-scoping.md` § Erasure follows scope, decision 3 —
+    /// the record waits). The record itself is kept, so the next signed-out
+    /// `identity_choice` paints it again.
+    @Test func anAppendModeWizardPaintsNoResidueButKeepsIt() {
+        let vm = OnboardingVM()
+        vm.signOutResidue = FakeResidue(Self.line)
+
+        #expect(vm.paintedSignOutResidue(appending: true) == nil)
+        #expect(vm.signOutResidue?.line == Self.line, "the record waits")
+        #expect(vm.paintedSignOutResidue(appending: false)?.line == Self.line)
     }
 
     /// The handover re-roots the wizard at `identity_choice` (`settings.md`,

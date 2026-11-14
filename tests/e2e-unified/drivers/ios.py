@@ -440,6 +440,25 @@ class IosInProcessDriver(InProcessAgentDriver):
         it could not be located."""
         return str(Path(self._app_support).parents[1]) if self._app_support else None
 
+    def app_process_identity(self) -> str | None:
+        """``"<pid>@<start epoch>"`` of the CURRENT launch's app process, asked of
+        the host kernel — or ``None`` when that process is gone.
+
+        The ios twin of ``AndroidBridgeDriver.app_process_identity``: the app's
+        background sync (`PhotoBackupEngine` over the in-process
+        `FfiSyncEngineHost`) runs in the app's own process, so "the background
+        sync was not restarted" is "the app's process was not restarted". A
+        Simulator app is a genuine host process (`_app_pid`, parsed from
+        `simctl launch`), and its `ps` start instant is what makes a recycled
+        pid read as a different process."""
+        if self._app_pid is None:
+            return None
+        try:
+            _cpu_s, started = ps_cpu_reading(self._app_pid)
+        except (ProcessLookupError, ValueError, OSError, subprocess.SubprocessError):
+            return None
+        return f"{self._app_pid}@{int(started)}"
+
     def supports_unclean_kill(self) -> bool:
         return self._app_pid is not None
 
@@ -715,6 +734,12 @@ class IosInProcessDriver(InProcessAgentDriver):
         `download_dir()`). Mirrors `MacosInProcessDriver.widget_dir()`.
         """
         return self._widget_dir
+
+    def outbox_drain_hold_file(self) -> str | None:
+        """The host file whose existence holds this launch's outbox drains
+        (`FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`, forwarded in `launch()`); None
+        before `launch()`. Driven through `helpers/outbox_drain.py`."""
+        return getattr(self, "_outbox_drain_hold_file", None)
 
     #: The resource the shell's `CloudBackupExcluder` sets — on the simulator's
     #: host-shared filesystem it is this extended attribute. **Two encodings,
@@ -996,6 +1021,20 @@ class IosInProcessDriver(InProcessAgentDriver):
         # iOS, unlike its siblings. `setdefault` before the override loop below so a
         # caller-supplied `environment["FAUNA_E2E_RESCAN_MS"]` still wins.
         env.setdefault("SIMCTL_CHILD_FAUNA_E2E_RESCAN_MS", "30000")
+        # The e2e outbox drain hold (`fauna_account_plane::outbox`'s
+        # `outbox_drain_held`, the `FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE` seam,
+        # compiled in by `fauna-ffi/test-helpers` → `fauna-sync-engine/e2e-agent`),
+        # the twin of the tui and macOS launches: a host path in this launch's
+        # scratch dir that does not exist until a test creates it
+        # (`helpers/outbox_drain.py::hold_outbox_drain`). The simulator shares
+        # the host filesystem, so the app reads the same file the harness
+        # touches — as it does `FAUNA_E2E_DOWNLOAD_DIR` above. A caller-supplied
+        # `environment` override wins (the loop below). Read back via
+        # `outbox_drain_hold_file()`.
+        self._outbox_drain_hold_file = (config.get("environment") or {}).get(
+            "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE"
+        ) or os.path.join(tmp, "outbox-drain-hold")
+        env["SIMCTL_CHILD_FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE"] = self._outbox_drain_hold_file
         # `config["real_keychain"]`: this one launch runs `KeychainStore` on the seat
         # simulator's own keychain instead of the in-memory e2e store
         # (`KeychainStore.e2eRealKeychain`), so a test can read back the class of the

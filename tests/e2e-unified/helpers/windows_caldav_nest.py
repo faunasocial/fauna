@@ -171,6 +171,15 @@ def mda_bridge_exe() -> Path:
 
 
 def seal_helper_exe() -> Path:
+    if sys.platform != "win32":
+        # The Unix build (`just seal-helper-build`) leaves the cgo binary in its
+        # Go module dir, carrying an rpath to its libfauna_ffi slot — the macOS
+        # installed-MDA test reuses this engine's credential mint through it
+        # (`tests/platform/macos/test_installer.py::TestInstallThenReach`).
+        exe = _repo_root() / "bins" / "fauna-bridges" / "seal-helper-testonly"
+        if not exe.exists():
+            pytest.skip("seal-helper-testonly not built — run `just seal-helper-build`")
+        return exe
     exe = _root_target_dir() / "seal-helper-testonly.exe"
     if not exe.exists():
         pytest.skip(
@@ -192,14 +201,17 @@ def run_seal_helper(subcommand: str, params: dict) -> bytes:
     import json as _json
 
     exe = seal_helper_exe()
-    target = _root_target_dir()
     env = os.environ.copy()
-    env["PATH"] = f"{target}{os.pathsep}{env.get('PATH', '')}"
+    cwd = None
+    if sys.platform == "win32":
+        target = _root_target_dir()
+        env["PATH"] = f"{target}{os.pathsep}{env.get('PATH', '')}"
+        cwd = str(target)
     proc = subprocess.run(
         [str(exe), subcommand],
         input=_json.dumps(params).encode(),
         capture_output=True,
-        cwd=str(target),
+        cwd=cwd,
         env=env,
     )
     if proc.returncode != 0:

@@ -424,6 +424,10 @@
       accountsError = t.settings.remove_account_blocked_other_window;
       return;
     }
+    if (blocked === 'carry_owed') {
+      accountsError = t.settings.remove_account_blocked_carry_owed;
+      return;
+    }
     try {
       await accountsRemove(actorId);
       await loadAccounts();
@@ -670,9 +674,10 @@
     recoveryQr = null;
     void loadRecoveryStatus();
     void loadDeadGenerations();
-    // The section's inherited-filters line counts these, and a Keep answered
-    // on the filter list since the last read must already be gone from it.
-    void refreshFilterMarks();
+    // The section's inherited-filters line counts the marks, and a Keep
+    // answered on the filter list since the last read must already be gone
+    // from it; the rules are re-read beside them so the two never disagree.
+    void refreshFilters();
   });
   // The discharge for a still-pending persist-failure message: the user has
   // navigated OFF the Account sub-page, having had the whole visit to read or
@@ -1165,9 +1170,16 @@
   // `inherited_filters_elements`). Counted off the same cached marks the
   // filter list paints, so the line and the per-rule marks never disagree.
   let recoveryInheritedFiltersOpen = $derived(filterMarks.length);
-  async function refreshFilterMarks() {
+  // The rules and their marks, read together: the line counts the marks and the
+  // list paints the rules, so a re-read of one without the other lets the line
+  // name a rule the list does not show yet (the successor's first visit, where
+  // the mount's read can land before the rules the ceremony carried across).
+  async function refreshFilters() {
     const id = $identity;
     if (!id) return;
+    try {
+      emailFilters = await listEmailFilters(id.secretHex);
+    } catch { /* filters not available: the list keeps what it showed */ }
     try {
       filterMarks = await filterMarksList(id.secretHex);
     } catch { /* a failed re-read leaves the cache alone (see filterMarks' own doc) */ }
@@ -1176,7 +1188,7 @@
   // succession ledger, so re-read now rather than at the next visit (linux's
   // and apple's sinks, same hook).
   $effect(() => {
-    if ($configStageSettled > 0) void refreshFilterMarks();
+    if ($configStageSettled > 0) void refreshFilters();
   });
   let showFilterForm = $state(false);
   let newFilterName = $state('');
@@ -1773,17 +1785,15 @@
       // up at sign-in and by this page's own Refresh.
       keyPackageCount = await wsKeypackageCount(id.secretHex, id.actorId);
     } catch { /* MLS key packages not available */ }
+    // Ahead of the manager wait: the rules are a nest read of their own, and
+    // the manager's build (its connection wait, the MLS restore) must not hold
+    // the list back behind the line that counts its marks.
+    await refreshFilters();
     try {
       // The channel count reads the live manager (built at sign-in anyway).
       await getConversationsManager();
       statusManagerReady = true;
     } catch { /* no manager: the Encryption section stays absent */ }
-    try {
-      emailFilters = await listEmailFilters(id.secretHex);
-    } catch { /* filters not available */ }
-    try {
-      filterMarks = await filterMarksList(id.secretHex);
-    } catch { /* a failed re-read leaves the cache alone (see filterMarks' own doc) */ }
     try {
       const prefs = await getSpamPreferences(id.secretHex);
       spamThreshold = prefs.spam_threshold;
@@ -3227,7 +3237,7 @@
         {t.muted_words.add}
       </button>
     </div>
-    {#if mutedWordsError}<p class="error">{mutedWordsError}</p>{/if}
+    {#if mutedWordsError}<p class="error" data-testid={IDS.ERROR_MESSAGE}>{mutedWordsError}</p>{/if}
     <div data-testid={IDS.MUTED_WORD_LIST} class="muted-word-list">
       {#if mutedWords.loaded && mutedWords.keywords.length === 0}
         <!-- Two conditions, not one (README.md § List pages: loading is not

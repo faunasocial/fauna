@@ -532,6 +532,7 @@ FIXTURE_START_OPTIONS = {
     "packaged_nest": frozenset({"extra_env"}),
     "provision_target_nest":frozenset({"unclaimed", "cors_origins"}),
     "reclaimable_nest": frozenset(),
+    "reclaim_mail_nest": frozenset(),
     "registration_posture_nest": frozenset({"claim_domain"}),
     "rotatable_nest": frozenset(),
     "rotatable_tls_nest": frozenset({"serve_tls"}),
@@ -700,6 +701,14 @@ FIXTURE_START_OPTIONS = {
     # whose default relays are the far relay and which may dial it on
     # loopback — the `test-hooks` seams ride `extra_env`.
     "nostr_inbound_nest": frozenset({"extra_env"}),
+    # The feed overflow's Advertise-on-Nostr witness
+    # (`tests/test_advertise_post_nostr.py`): a nest that may dial the test's
+    # loopback relay — the allow-loopback seam rides `extra_env`.
+    "advertise_nest": frozenset({"extra_env"}),
+    # The advertised note's price lifecycle witness
+    # (`tests/api/test_nostr_advertise_price_lifecycle.py`): the same
+    # allow-loopback seam rides `extra_env`.
+    "advertising_nest": frozenset({"extra_env"}),
     "dav_unclaimed_nest": frozenset({"unclaimed"}),
     "onboarding_nest": frozenset({"unclaimed"}),
     "subdomain_nest": frozenset({"claim_domain"}),
@@ -969,6 +978,18 @@ MAIL_VENUE_HOST_AFFORDANCE_READERS = {
     "tests/test_tui_mail_outbound_from.py::"
     "test_tui_outbound_from_is_handle_at_handle_domain":
         "reads the relayed message out of the in-process stub MX",
+    # Readers through a module helper the venue handle is passed to — the pin
+    # follows that hop since the 0.1.6 candidate run collected these two into
+    # docker, where they died on the declared-absent attribute.
+    "tests/test_events_imip_outbound.py::"
+    "test_inviting_someone_by_email_mails_them_the_invitation":
+        "reads the relayed iMIP REQUEST out of the in-process stub MX",
+    "tests/test_events_imip_outbound.py::"
+    "test_answering_an_outside_organizers_invitation_mails_the_reply_back":
+        "reads the relayed iMIP REPLY out of the in-process stub MX",
+    "tests/test_mail_submission_token_refresh.py::"
+    "test_a_mail_app_keeps_sending_after_the_first_token_would_have_expired":
+        "reads the relayed messages out of the in-process stub MX",
 }
 
 _VENUE_HOST_AFFORDANCE_REASON = (
@@ -1125,6 +1146,39 @@ _FEATURE_SET_BINARY_REASON = (
     "nest mode — exclusion class (9))"
 )
 
+#: Class (9)'s second door: a test that CONFIGURES the nest with something only
+#: a `test-hooks` build compiles. `test-hooks` turns on
+#: `fauna-payments/test-helpers` (`bins/fauna-nest/Cargo.toml`), which is what
+#: registers the `fake` payment provider every tier_3 payments suite drives;
+#: a release artifact answers `fauna.payments.providers.set` with
+#: `fauna.payments.unknown_provider` (`known: stripe`), so in an image-backed
+#: mode the test errors at setup forever. The dependence is in a dict literal
+#: the test, a module fixture it requests or a helper they call hands the nest
+#: (`{"kind": "fake", …}`), never in a fixture name or a route, so neither the
+#: first door nor class (6) sees it — measured on 0.1.6's candidate run, where
+#: it was the payments and membership tests red in four nest cells. Read by
+#: `kind_reach.entries_reached_by_own_code`; the pair, not either string, is the
+#: unit (`kind_reach._dict_entries`).
+#:
+#: Its third door is the app's own provider form: a journey test saves the kind
+#: through `SubscriptionsActions.add_provider("fake", …)`, so the value reaches
+#: the nest as the form's, never as a literal the test writes — measured on the
+#: same run, the three tui provider journeys red with `save provider: Something
+#: went wrong talking to the nest`. `kind_reach._call_entries` reads it as
+#: `("add_provider()", "fake")`; opening the form for the kind
+#: (`open_provider_form`) saves nothing and is not listed.
+TEST_HOOK_CONFIG_ENTRIES = frozenset({("kind", "fake"), ("add_provider()", "fake")})
+
+_TEST_HOOK_CONFIG_REASON = (
+    "configures the nest with {entries}, which only a nest compiled with "
+    "`test-hooks` accepts: that feature turns on `fauna-payments/test-helpers`, "
+    "the module that registers the `fake` payment provider "
+    "(bins/fauna-nest/Cargo.toml), so a release artifact answers "
+    "`fauna.payments.unknown_provider` and {mode!r} can never serve it: a fact "
+    "about the artifact, not a gap to close (testing.md § Default app and nest "
+    "mode — exclusion class (9))"
+)
+
 _NEST_BINARY_REASON = (
     "depends on {fixtures}, i.e. on the locally-COMPILED fauna-nest: the test "
     "stands up a nest of its own, so in this mode it would serve a local binary "
@@ -1214,6 +1268,7 @@ OWN_IMAGE_FIXTURES = frozenset({
     "family_nest",
     "forged_nest",
     "forwarder_ndr_nest",
+    "image_upgrade",
     "ip_bridge_stack",
     "ip_bridge_domain_stack",
     "lateral_nest",
@@ -2413,6 +2468,16 @@ def _verdicts(item, mode: nest_mode_mod.NestMode):
             _FEATURE_SET_BINARY_REASON.format(
                 fixtures=", ".join(named),
                 features=FEATURE_SET_BINARY_FIXTURES[named[0]],
+                mode=mode.name,
+            ),
+            RULE_FEATURE_SET_BINARY,
+        )
+    config = kind_reach.entries_reached_by_own_code(item, TEST_HOOK_CONFIG_ENTRIES)
+    if config:
+        yield Verdict(
+            DECLARED_ABSENCE,
+            _TEST_HOOK_CONFIG_REASON.format(
+                entries=", ".join(f"{k!r}: {v!r}" for k, v in sorted(config)),
                 mode=mode.name,
             ),
             RULE_FEATURE_SET_BINARY,

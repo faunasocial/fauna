@@ -37,6 +37,10 @@
 //   shared tracker, which keeps the played peak and treats an engaged media row
 //   as attended — so a video played to the end derives the media
 //   `watch-complete`, and a play under the skip gate is no skip.
+//
+// - **Feed switch:** every sample first hands the manager's
+//   `cueSelectionKey()` to the tracker's `noteSelection`, which drains every
+//   exposure when the selection changed — the shared pair tui calls.
 
 import type { WasmFeedManager } from '../../static/fauna_wasm.js';
 import { feedManagerIfReady } from './feed';
@@ -161,6 +165,11 @@ export class CueCapture {
       return Promise.resolve();
     }
     this.showing = true;
+    // A feed switch ends every exposure before the new feed is measured
+    // (`CueTracker::note_selection`, `WindowDropped`): the `{#each}` keeps a
+    // post both feeds hold as the same retained card, so neither the geometry
+    // nor the window ever ends it; the selection's own change does.
+    const switched = this.tracker.noteSelection(this.manager.cueSelectionKey(), Date.now());
     const box = this.container.getBoundingClientRect();
     const viewportStart = Math.max(box.top, 0);
     const viewportEnd = Math.min(box.bottom, window.innerHeight);
@@ -177,9 +186,10 @@ export class CueCapture {
         media_played_pm: null,
       });
     }
-    return this.emit(
-      this.tracker.sample(rows, windowPostIds, viewportStart, viewportEnd, performance.now(), Date.now()),
-    );
+    return this.emit([
+      ...switched,
+      ...this.tracker.sample(rows, windowPostIds, viewportStart, viewportEnd, performance.now(), Date.now()),
+    ]);
   }
 
   /** Everything tracked has left: drain, report, then put the rollup. */

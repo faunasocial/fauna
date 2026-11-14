@@ -126,10 +126,15 @@ impl GrantSet {
     /// XOR, § 2 — never both in one blob):
     ///
     ///   - **Master-key** (a wrap with `epoch: None`): matches any
-    ///     timestamp, exactly [`Self::key_for`]'s shape — a grant whose wrap
-    ///     carries no epoch (`build_grant_blob` mints them today) keeps
-    ///     opening everything in its window. Returned alone (it is a superset of any bounded key this
-    ///     holder might also wield from a different grant).
+    ///     timestamp, exactly [`Self::key_for`]'s shape — returned alone (a
+    ///     superset of any bounded key this holder might also wield from a
+    ///     different grant). It matches any timestamp only because its payload
+    ///     carries, per MSEK generation, the standing secret AND the mail-epoch
+    ///     root, and the one grant-holder opener
+    ///     (`fauna_mls::wrapped_blob::open_mail_record_with_grant_key`, handed
+    ///     the record's seal instant) derives the epoch keys from those roots
+    ///     (`capability-grants.md` § Capability tiering → *What a master-key
+    ///     mail wrap conveys*).
     ///   - **Bounded** (every wrap `epoch: Some(e)`): returns every held
     ///     epoch `e <= target`, **nearest first** (`target`, then
     ///     `target - 1` — the boundary/clock-skew tolerance — then any

@@ -465,7 +465,7 @@ impl ConversationDetail {
                     return;
                 };
                 // No pre-send SMTP re-register: the rail reads the session's
-                // live self-address cell at send time (seeded at AuthSuccess,
+                // live self-address cell at send time (seeded at SessionEstablished,
                 // pushed by the `IdentityRefreshed` handler —
                 // `conversations.md` § State & data shape → *Self-address:
                 // live, never baked*).

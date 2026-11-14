@@ -31,7 +31,7 @@ impl MlsManager {
     /// `db_path` is where MLS state is persisted (e.g. `~/.config/fauna/mls_state.db`).
     ///
     /// Returns the typed [`fauna_mls::error::MlsError`] (not `anyhow`, unlike
-    /// this module's other methods): the caller (`app.rs`'s `AuthSuccess` arm)
+    /// this module's other methods): the caller (`app.rs`'s `SessionEstablished` arm)
     /// must distinguish [`fauna_mls::error::MlsError::ServedElsewhere`] — the
     /// honest conversations-engine-role refusal, `account-data-plane.md`
     /// § Multi-instance concurrency — from every other engine-init failure, to

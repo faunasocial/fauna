@@ -5,12 +5,16 @@
 // `account_runtime` module); this file is only its lifecycle beside the
 // conversations manager's:
 //
-// - **Start** once the manager exists (`#lib/conversations` calls
-//   `startAccountRuntimeFor` right after installing it). The runtime
-//   registers the account-plane conversations seams on that manager at its
-//   store-ready edge — the same edge every native app uses. Only the tab that
-//   won the account's MLS-writing role builds a manager, so a second tab
-//   hosts no runtime of its own.
+// - **Start** once the manager exists — at the end of the conversations
+//   build's LOCAL stage one (`#lib/conversations` calls
+//   `startAccountRuntimeFor` right after constructing it), which never waits
+//   for the socket, so a tab loaded with the nest unreachable hosts its
+//   runtime too (`account-client-lifecycle.md` § The client-side lifecycle →
+//   *The trigger fired*, decision (k)). The runtime registers the
+//   account-plane conversations seams on that manager at its store-ready
+//   edge — the same edge every native app uses. Only the tab that won the
+//   account's MLS-writing role builds a manager, so a second tab hosts no
+//   runtime of its own.
 // - **Stop**, and the caller says why (`account-client-lifecycle.md` § The
 //   client-side lifecycle → *Ruling (4), the teardown rider*).
 //   `'sign-out'` is the sign-out gesture's own stop, run by `identity.logout()`

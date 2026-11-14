@@ -64,15 +64,16 @@ pub use error::{PairDispatchError, PairNestError, StoreError, TrustSignerError};
 pub mod deployment_seed;
 pub mod trust;
 pub use trust::{
-    BackupStateStore, BackupTrustSeams, BlessedNestsStore, GrantEventSigner, NoAccountRuntime,
-    SuccessionLedgerStore, TrustBackupKind, TrustBackupRow, TrustBackupStatus, TrustEventKind,
-    TrustFolder, TrustFolderNames, TrustGenerationRow, TrustGenerationStatus, TrustGrantDuration,
-    TrustGrantRow, TrustHistoryRow, TrustLens, TrustLiveness, TrustMintOption, TrustMintUseCase,
-    TrustPlatform, TrustRestoreOutcome, TrustScope, TrustSeams, auto_renew_check_secs,
-    backup_status_label, duration_label, grant_bound_note, grant_scope_labels, history_line_text,
-    mint_duration_options, mint_option_default_duration, mint_option_label, mint_option_note,
-    scope_label, scope_label_in_folder, status_label, trust_scope_is_bounded_mail_grant,
-    trust_scope_is_materialization_grant,
+    BackupStateStore, BackupTrustSeams, BlessedNestsStore, FolderSetNames, GrantEventSigner,
+    NoAccountRuntime, SuccessionLedgerStore, TrustBackupKind, TrustBackupRow, TrustBackupStatus,
+    TrustEventKind, TrustFolder, TrustFolderNames, TrustGenerationRow, TrustGenerationStatus,
+    TrustGrantDuration, TrustGrantRow, TrustHistoryRow, TrustLens, TrustLiveness, TrustMintOption,
+    TrustMintUseCase, TrustPlatform, TrustRestoreOutcome, TrustScope, TrustSeams,
+    auto_renew_check_secs, backup_status_label, duration_label, grant_bound_note,
+    grant_scope_labels, history_line_text, mint_duration_options, mint_option_default_duration,
+    mint_option_label, mint_option_note, principal_grant_bound_note, principal_scope_labels,
+    project_history, project_principal_grant, scope_label, scope_label_in_folder, status_label,
+    trust_scope_is_bounded_mail_grant, trust_scope_is_materialization_grant, trust_status_label,
 };
 // `HolderInfo` + `discover_holders` now live in `fauna-client-bridges` (the home
 // of `MailAdminClient`); re-exported here so `fauna_client_pair::HolderInfo` keeps
@@ -1722,12 +1723,19 @@ impl LinkedNestsMachine {
     /// A grant with no mark is a **no-op that still succeeds**: the owner may
     /// have kept it on another device already, and failing here would turn a
     /// converged state into an error.
+    ///
+    /// The press may name a row the succession re-mint has retired since the
+    /// page painted it; the verdict then belongs to the row that replaced it,
+    /// which the signer seam derives (`succession-aftermath.md`
+    /// § Adjudicating what the aftermath carries across, the grant-mark Keep).
     async fn keep_grant_action(&self, grant_id: Vec<u8>) -> Result<(), PairDispatchError> {
         let seams = self.trust_seams()?;
         let grant_id = grant_id_array(&grant_id)?;
         self.set_status(LinkedNestStatus::Working);
 
-        fauna_client_config::keep_grant_mark(seams.ledger.as_ref(), &grant_id).await?;
+        let replacement = seams.signer.remint_replacement_id(&grant_id);
+        fauna_client_config::keep_grant_mark(seams.ledger.as_ref(), &grant_id, &replacement)
+            .await?;
         self.refresh().await
     }
 
@@ -2725,6 +2733,12 @@ impl GrantEventSigner for RealGrantEventSigner {
         event
             .sign(&self.key)
             .map_err(|e| TrustSignerError::Sign(e.to_string()))
+    }
+
+    fn remint_replacement_id(&self, old_grant_id: &[u8; 16]) -> [u8; 16] {
+        // The signing key's bytes ARE the owner secret
+        // (`ActorKeypair::from_secret`), so this is the re-mint's own id.
+        fauna_client_capabilities::succession::remint_grant_id(&self.key.to_bytes(), old_grant_id)
     }
 }
 
@@ -5290,6 +5304,13 @@ mod tests {
             event
                 .sign(&self.key)
                 .map_err(|e| TrustSignerError::Sign(e.to_string()))
+        }
+
+        fn remint_replacement_id(&self, old_grant_id: &[u8; 16]) -> [u8; 16] {
+            fauna_client_capabilities::succession::remint_grant_id(
+                &self.key.to_bytes(),
+                old_grant_id,
+            )
         }
     }
 

@@ -51,7 +51,10 @@ public sealed partial class LaunchRetryPage : Page
     {
         base.OnNavigatedTo(e);
         if (e.Parameter is LaunchRetryContext ctx)
+        {
             _context = ctx;
+            LaunchIdentityLabel.Paint(IdentityText, ctx.IdentityLine);
+        }
     }
 
     /// <summary>
@@ -115,9 +118,13 @@ public sealed partial class LaunchRetryPage : Page
 /// <see cref="LaunchRetryPage.ShowRecoverButton"/> has revealed the button —
 /// and <see cref="Retire"/> opens nest_retire over this surface, which puts the
 /// surface back when it is left (nest-retirement.md § Layout &amp; flow).
+/// <see cref="IdentityLine"/> is <c>launch-identity-label</c>'s text — the bound
+/// (else active) account's cached identity, <c>FfiAccountRegistry.LaunchIdentityLine</c>
+/// read when the surface is built — or null, and the label is absent.
 /// </summary>
 public sealed record LaunchRetryContext(
     Func<Task> Retry,
     Action Fallthrough,
     Action<string[]> Recover,
-    Action Retire);
+    Action Retire,
+    string? IdentityLine = null);

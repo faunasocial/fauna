@@ -553,14 +553,18 @@ def test_a_repost_of_a_tier_gated_post_shows_an_outsider_the_teaser_and_the_tier
     target_id = target["post_id"]
     feed.repost_post(feed.card_index_by_id(target_id))
 
-    # The repost row reaches this feed through a reload; re-enter the page
-    # until it is listed (deadline-bound, convention 14).
+    # The repost row reaches this feed through a reload, and a repost reloads
+    # nothing (it folds the target's toggle locally). Re-ENTER the page until it
+    # is listed (deadline-bound, convention 14) — `reenter`, never `navigate`:
+    # tapping the Feed tab while already on the feed is no page entry on web
+    # (nor on either apple app), so it re-queries nothing and the row never
+    # comes, however long the wait.
     row = None
     deadline = time.monotonic() + RPC_ROUNDTRIP_S
     while row is None and time.monotonic() < deadline:
         row = feed.wait_for_repost_row_by_target(target_id, timeout=5.0)
         if row is None:
-            feed.navigate()
+            feed.reenter()
     assert row is not None, (
         f"the outsider's repost of {target_id} should be listed; error={app.error_text()!r}"
     )

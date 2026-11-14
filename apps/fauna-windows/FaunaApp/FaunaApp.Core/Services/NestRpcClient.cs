@@ -213,6 +213,63 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         }
     }
 
+    // ── self-identity follow ────────────────────────────────────────────
+    private Task? _selfIdentityFollow;
+
+    /// <summary>
+    /// Start the session's identity follow (idempotent): keep this session's account
+    /// row's server-data cache (handle / domain / tier) current from the session client's
+    /// own bearer mint — <c>FfiNestClient.SubscribeSelfIdentity</c>, the shared
+    /// <c>fauna_client::SelfIdentityFollower</c> (tui's <c>spawn_self_identity_follow</c>,
+    /// linux's <c>follow_self_identity</c>, FaunaKit's <c>startSelfIdentityFollow</c>;
+    /// <c>long-term-store.md</c> § Cross-app server-data cache). The current identity is
+    /// applied at once and every later one too, so a server-side rename or tier move lands
+    /// at the next re-mint, with no challenge of its own (<c>transport-connection.md</c> §
+    /// The dial budget). Each write raises <see cref="SelfDisplayHandle.Moved"/>, the
+    /// repaint hook of the profile SELF header and the Settings identity cell.
+    ///
+    /// <para>Run by both sign-in paths — <c>StartMainAppAsync</c> and the e2e session
+    /// patch, which reaches no launch machine and so no silent-challenge write of its own.
+    /// It writes only THIS session's actor row (the follower itself ends once the bearer
+    /// mints for another actor), and ends with the client: the watch's sender drops at
+    /// teardown and <c>Next()</c> returns null.</para>
+    /// </summary>
+    public void StartSelfIdentityFollow()
+    {
+        if (_selfIdentityFollow is not null || _accountRegistry is null) return;
+        _selfIdentityFollow = RunSelfIdentityFollowAsync(_accountRegistry);
+    }
+
+    private async Task RunSelfIdentityFollowAsync(Func<FfiAccountRegistry> openRegistry)
+    {
+        try
+        {
+            var actorId = _crypto.ActorIdHex;
+            var nest = await ConnectedAsync().ConfigureAwait(false);
+            using var sub = nest.SubscribeSelfIdentity();
+            if (sub is null)
+            {
+                ShellLog.Warn("NestRpcClient", "[self-identity] the session client cannot say who it is signed in as");
+                return;
+            }
+            while (await sub.Next().ConfigureAwait(false) is { } identity)
+            {
+                if (_disposed) return;
+                using (var registry = openRegistry())
+                {
+                    if (!SelfIdentityCache.Apply(registry, actorId, identity)) continue;
+                }
+                SelfDisplayHandle.RaiseMoved();
+            }
+        }
+        catch (Exception ex)
+        {
+            // Best-effort, fire-and-forget: the cache keeps the last good values, which is
+            // exactly what a failed refresh is specified to leave standing.
+            ShellLog.Warn("NestRpcClient", $"[self-identity] follow exited: {ex.Message}");
+        }
+    }
+
     /// <summary>One reconnect seen by the pump: the blanket <see cref="Reconnected"/>
     /// re-pull, plus <see cref="DevicesStale"/> when the shared classifier says a
     /// reconnect leaves the Devices &amp; Folders surface stale. Split out of the
@@ -2695,6 +2752,8 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
 
     public Task<string[]> HideReportedAsync(string id) => FaunaFfiMethods.HideReported(id);
 
+    public Task<string[]> UnhideReportedAsync(string id) => FaunaFfiMethods.UnhideReported(id);
+
     public Task<string[]> LoadHiddenContentAsync() => FaunaFfiMethods.LoadHiddenContent();
 
     public async Task<uint?> SpamThresholdOverrideGetAsync()
@@ -2791,6 +2850,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // The ward's own pending asks ride the same reply; every successful read
         // refreshes them (android's ApiClient.familyStatus does the same fold).
         FamilyStatusHandler.ApplyWardAsks(status);
+        // So does the supervision fold (the guardian floor, Guardian Notify, screen
+        // time): a ward's own Family-page visit re-reads the policy, so a guardian's
+        // edit binds without a restart (family-client-enforcement.md § Implementation
+        // status today; family-safety outcome 67, test_family_screen_time_binding.py).
+        // Only MainPage's load-time read applied it before. The three caches are
+        // lock-guarded and raise no events, so this thread-pool continuation is safe.
+        FamilyStatusHandler.ApplySupervision(status);
         return status;
     }
 
@@ -3738,10 +3804,16 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<FfiClaimRedeemReply> PaymentsClaimsRedeemAsync(string code)
+    public async Task<FfiClaimRedeemReply> PaymentsClaimsRedeemAcrossNestsAsync(
+        string code, byte[]? authorId, string? authorHomeUrl)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        return await nest.Payments().ClaimsRedeem(code).ConfigureAwait(false);
+        // No creator in hand → the caller's own id: with no home the shared method
+        // is the plain local redeem and never reads the author slot.
+        var author = authorId ?? Convert.FromHexString(_crypto.ActorIdHex);
+        return await nest.Payments()
+            .ClaimsRedeemAcrossNests(code, _crypto.SecretBytes, author, authorHomeUrl)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -3763,6 +3835,19 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await nest.Payments().ClaimsVoid(code).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiCheckoutOpen?> SubscriptionSubscribeAndCheckoutAsync(
+        byte[] authorId, string tier, string paymentUrl, string? homeNestUrl)
+    {
+        // The SubscriptionSubscribeAsync calling convention (the identity seed signs
+        // the subscribe; a blank home is the local form, normalised here as there).
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        var home = string.IsNullOrWhiteSpace(homeNestUrl) ? null : homeNestUrl;
+        return await uniffi.fauna_ffi.FaunaFfiMethods
+            .SubscriptionsSubscribeAndCheckout(nest, _crypto.SecretBytes, authorId, tier, paymentUrl, home)
+            .ConfigureAwait(false);
     }
 
 #endif   // PAYMENTS

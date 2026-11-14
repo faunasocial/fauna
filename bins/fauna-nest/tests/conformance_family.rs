@@ -39,7 +39,8 @@ use fauna_nest::{
 use fauna_protocol::admin::{
     AdminInviteCodeCreateReply, AdminInviteCodeCreateRequest, AdminInviteCodesListReply,
     AdminInviteCodesListRequest, AdminInviteRequestApproveReply, AdminInviteRequestApproveRequest,
-    AdminUserCreateRequest,
+    AdminUserCreateRequest, AdminUserGetReply, AdminUserGetRequest, AdminUsersListReply,
+    AdminUsersListRequest,
 };
 use fauna_protocol::contacts::KnockActionRequest;
 use fauna_protocol::conversations::{WelcomeDeliverRequest, WelcomeKind};
@@ -869,6 +870,70 @@ async fn admit_ward_keyed(
     .await
     .expect("child admitted");
     child
+}
+
+/// The admin Users projection names a supervised account's guardian and
+/// nobody's on a plain one (`family-safety.md` § App surface → *Admin
+/// take-over*): `fauna.admin.users.list` (one batch read per page) and
+/// `fauna.admin.users.get` (single read) agree.
+#[tokio::test]
+async fn admin_users_projection_names_the_guardian_of_a_supervised_account() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let st = state(db.clone());
+    let r = router();
+    let admin = admin_actor(&st).await;
+    let guardian = guardian_user(&db, "parent").await;
+    let plain = guardian_user(&db, "plain").await;
+    let child = admit_ward(&r, st.clone(), admin, guardian, "kiddo").await;
+
+    let list: AdminUsersListReply = decode(
+        &dispatch(
+            &r,
+            st.clone(),
+            admin,
+            "fauna.admin.users.list",
+            encode(&AdminUsersListRequest::default()),
+        )
+        .await
+        .expect("list ok"),
+    )
+    .unwrap();
+    let row = |id: [u8; 32]| {
+        list.users
+            .iter()
+            .find(|u| u.actor_id.as_ref() == id.as_slice())
+            .expect("row listed")
+            .clone()
+    };
+    let ward_row = row(child);
+    let g = ward_row
+        .guardian
+        .as_ref()
+        .expect("the ward lists its guardian");
+    assert_eq!(g.actor_id.as_ref(), guardian.as_slice());
+    assert_eq!(g.handle.as_deref(), Some("parent"));
+    assert!(row(plain).guardian.is_none(), "a plain account lists none");
+    assert!(
+        row(guardian).guardian.is_none(),
+        "a guardian is not supervised"
+    );
+
+    let got: AdminUserGetReply = decode(
+        &dispatch(
+            &r,
+            st,
+            admin,
+            "fauna.admin.users.get",
+            encode(&AdminUserGetRequest {
+                actor_id: ByteBuf::from(child.to_vec()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("get ok"),
+    )
+    .unwrap();
+    assert_eq!(got.user.guardian, ward_row.guardian);
 }
 
 #[tokio::test]

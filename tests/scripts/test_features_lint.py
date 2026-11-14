@@ -357,6 +357,31 @@ def test_rule_6_flags_a_stale_absence(tmp_path):
     assert any("the declaration is stale" in p for p in run(features, e2e, repo))
 
 
+TAGGED_WINDOWS = '''\
+import pytest
+
+pytestmark = pytest.mark.windows
+
+
+@pytest.mark.feature("feed-read")
+def test_own_post_appears(app):
+    pass
+'''
+
+
+def test_rule_6_reads_no_peer_record_as_evidence_against_an_absence(tmp_path):
+    """A test marked for other apps cannot witness the absent column (`applicable`):
+    its record there is a helper seat's — an unparametrized windows-marked journey
+    whose second device is a tui seat records `tui: passed` — and the cell render
+    already keeps it out (§ Cell semantics, the marked-witness rule). The absence
+    check reads it the same way, so the declaration does not read stale."""
+    features, e2e, repo = build(
+        tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED_WINDOWS,
+        absences="  android: docs/goal/ui/feed.md § Compose")
+    _android_passed(features, "test_own_post_appears")
+    assert not any("the declaration is stale" in p for p in run(features, e2e, repo))
+
+
 CONTRACT_TWO = CONTRACT_ONE + (
     "\n2. [app] Composing shows the thumbnail — `docs/goal/ui/feed.md` § Compose\n"
     "   - `tests/e2e-unified/tests/test_feed.py::test_compose`")

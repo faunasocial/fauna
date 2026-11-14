@@ -1,6 +1,6 @@
 ---
 slug: region-rules
-title: region-rules
+title: Your region's rules
 section: family and personalization
 goal: docs/goal/behavior/region-blocking.md § The content plane
 guide: docs/guides/app-tour.md § Settings
@@ -8,7 +8,7 @@ guide: docs/guides/app-tour.md § Settings
 
 ## What a user gets
 
-This text is being written and will appear here once it has been reviewed.
+Where a region's authority publishes rules for what may be shown there, your own device applies them and tells you so. A post or message a rule blocks is replaced, exactly where it would have appeared — in your feed, in a post opened in full, in a conversation — by a notice saying it is not shown in your region, naming the authority, and giving the authority's reason in its own words. A rule that only collapses something leaves it one step away, shown when you choose. On an end-to-end encrypted conversation the notice also says that the item is hidden from you on this device and that nothing was removed, detected or reported — unless a guardian has asked to hear about hidden content and their own rules counted it. Settings shows which region your device is in and where that came from, every policy in force with the authority behind it and its version, and when it was last checked. The same notice stands in for a blocked post on the public web pages a nest serves, under the rules of the region its admin declares. A region's rules only ever add to your own filters. No region has published rules so far, so nothing is withheld today.
 
 ## Coverage contract
 
@@ -40,26 +40,26 @@ Stamped 2026-11-07 at ef4db96e39.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web |  no run recorded | |
+| web | ✅ full | 0.1.7-dev+34330ae6 standalone |
 | linux |  no run recorded | |
 | windows |  no run recorded | |
 | macos |  no run recorded | |
 | ios |  no run recorded | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6-dev+938600f7.dirty standalone |
+| tui | ✅ full | 0.1.6-dev+ac488bd3 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_a_region_withheld_post_opened_in_full_shows_the_notice` | tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | tui (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | tui (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_settings_warns_when_the_rules_could_not_be_checked_lately` | tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_a_region_withheld_post_opened_in_full_shows_the_notice` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_settings_warns_when_the_rules_could_not_be_checked_lately` | web (linux): passed, tui (linux): passed, tui (macos): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_region_rules_web_notice.py::test_the_public_web_pages_show_the_region_notice_in_place_of_what_the_situs_policy_blocks` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | tui (macos): passed |
-| 10 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

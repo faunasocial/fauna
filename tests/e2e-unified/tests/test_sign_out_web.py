@@ -213,9 +213,8 @@ def test_web_next_load_after_the_sign_in_is_wiped_starts_from_identity_choice(
 #: The root every account store's name sits under (`helpers/web_store.py`).
 ACCOUNT_STORE_ROOT = web_store.ACCOUNT_STORE_ROOT
 
-#: The install-scoped sign-out record (`fauna_client_accounts::sign_out_record`)
-#: — outside the `fauna/` prefix the registry and the e2e agent sweep.
-SIGN_OUT_RECORD_KEY = "fauna_sign_out_record"
+#: The install-scoped sign-out record (`helpers/web_store.py`).
+SIGN_OUT_RECORD_KEY = web_store.SIGN_OUT_RECORD_KEY
 
 #: The second sign-in's fresh replica reading the first writer's `Removed` row:
 #: one escrow recovery plus one walk of the account's plane.
@@ -382,9 +381,6 @@ def test_web_load_after_a_tab_closed_mid_sign_out_finishes_the_sign_out(
 # (§ Erasure follows scope → *The residue surface*), and its retry button runs
 # the same sweep behind the other-tab refusal.
 
-#: The property the test's own holding connection is parked on.
-_HELD_STORE = "__fauna_e2e_held_account_store"
-
 #: The properties a tab's own hold of an engine-role Web Lock is parked on.
 _ROLE_RELEASE = "__fauna_e2e_engine_role_release"
 _ROLE_DONE = "__fauna_e2e_engine_role_done"
@@ -392,29 +388,9 @@ _ROLE_DONE = "__fauna_e2e_engine_role_done"
 RESIDUE_RETRY_BUTTON = "sign-out-residue-retry-button"
 
 
-def _hold_account_store(driver, name: str) -> None:
-    """Open a second connection to the database `name` and keep it — the fault
-    injection. It registers no `versionchange` handler, so it never closes for
-    a delete: the browser answers the delete request `blocked` and leaves it
-    waiting, which is what a connection another tab holds does."""
-    opened = driver.eval_js(
-        "(async () => {"
-        f" window[{json.dumps(_HELD_STORE)}] = await new Promise((resolve, reject) => {{"
-        f"  const request = indexedDB.open({json.dumps(name)});"
-        "  request.onsuccess = () => resolve(request.result);"
-        "  request.onerror = () => reject(request.error);"
-        " });"
-        f" return window[{json.dumps(_HELD_STORE)}].name;"
-        "})()"
-    )
-    assert opened == name, f"the holding connection opened {opened!r}, expected {name!r}"
-
-
-def _release_account_store(driver) -> None:
-    driver.eval_js(
-        f"(() => {{ window[{json.dumps(_HELD_STORE)}]?.close();"
-        f" delete window[{json.dumps(_HELD_STORE)}]; return true; }})()"
-    )
+#: The holder is shared with the residue witnesses of `test_sign_out_tui.py`.
+_hold_account_store = web_store.hold_account_store
+_release_account_store = web_store.release_account_store
 
 
 def _hold_engine_role(tab, actor: str) -> None:

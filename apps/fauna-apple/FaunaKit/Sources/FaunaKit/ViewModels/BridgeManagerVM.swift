@@ -276,12 +276,13 @@ public class BridgeManagerVM {
         // not on the form buffer a success clears (and a refusal can outlive).
         let source = SourceKey(bridgeId: bridgeId, operation: .follow, target: followId)
         do {
-            try await api.addBridgeFollow(bridgeId: bridgeId, followId: followId,
-                                           petname: followPetname.isEmpty ? nil : followPetname)
+            let queued = try await api.addBridgeFollowOrQueue(
+                bridgeId: bridgeId, followId: followId,
+                petname: followPetname.isEmpty ? nil : followPetname)
             guard self.api === api else { return }   // the in-flight clause
             followId = ""
             followPetname = ""
-            await refresh()
+            if settleFollowChange(queued: queued) { await refresh() }
         } catch {
             guard self.api === api else { return }
             noteFailure(error, source: source)
@@ -308,13 +309,25 @@ public class BridgeManagerVM {
     public func removeFollow(bridgeId: String, followId: String) async {
         guard let api else { return }
         do {
-            try await api.removeBridgeFollow(bridgeId: bridgeId, followId: followId)
+            let queued = try await api.removeBridgeFollowOrQueue(bridgeId: bridgeId,
+                                                                 followId: followId)
             guard self.api === api else { return }   // the in-flight clause
-            await refresh()
+            if settleFollowChange(queued: queued) { await refresh() }
         } catch {
             guard self.api === api else { return }
             errorMessage = DisplayError.http(error)
         }
+    }
+
+    /// Settle one follow/unfollow's outcome; returns whether the page re-lists.
+    /// Sent (`queued == false`) → re-list from the nest. Queued with no nest
+    /// (the bridges follow composer, account-offline-mutation.md § The
+    /// offline-mutation contract) → the page error clears and no list changes:
+    /// the nest's list after the drain is the word. Mirrors tui's queued
+    /// follow outcome and android's `BridgesVM`.
+    func settleFollowChange(queued: Bool) -> Bool {
+        if queued { errorMessage = nil }
+        return !queued
     }
 }
 #endif // !FAUNA_KIDS

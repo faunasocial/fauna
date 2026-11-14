@@ -426,6 +426,15 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         text = super().get_text(element_id, index, scope=scope)
         return self._INFOBAR_SEVERITY_ICON.sub("", text) if isinstance(text, str) else text
 
+    def get_texts(self, element_id: str, *, scope: str | None = None) -> list[str]:
+        # The bulk route reads the same aggregated text `get_text` does, and a bulk
+        # read must answer what the per-element loop answers (`PlatformDriver.
+        # get_texts`), so it takes the same strip.
+        return [
+            self._INFOBAR_SEVERITY_ICON.sub("", t) if isinstance(t, str) else t
+            for t in super().get_texts(element_id, scope=scope)
+        ]
+
     def in_viewport(self, element_id: str, *, index: int = 0,
                     scope: str | None = None) -> bool:
         """The bridge's ``in-viewport`` attribute (`flaui-bridge/Actions.cs`):

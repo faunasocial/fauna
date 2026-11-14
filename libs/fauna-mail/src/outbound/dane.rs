@@ -413,15 +413,32 @@ fn tlsa_answer_policy(
 /// [`lookup_tlsa`]; on an incapable one no records, without looking — the
 /// nest is then a pre-DANE MTA (`smtp-server.md` § MX resolution item 1, the
 /// resolver-path paragraph).
+///
+/// An MX host that is an IP address — only a configured static route names
+/// one, an MX RRset carries host names — has no `_25._tcp.<name>` owner name,
+/// so DANE does not apply and the answer is no records, without looking. An
+/// IPv6 address is no DNS label at all: asking for it fails as a TLSA lookup
+/// failure, which would make the host unreachable (RFC 7672 §2.1.2) on a
+/// route that never had a TLSA name to fail.
 #[cfg(feature = "outbound-net")]
 pub async fn lookup_tlsa_on_path(
     mx_host: &str,
     path: crate::outbound::dnssec_path::ResolverPath,
 ) -> anyhow::Result<Vec<TlsaRecord>> {
+    if mx_host_is_ip_address(mx_host) {
+        return Ok(Vec::new());
+    }
     match path {
         crate::outbound::dnssec_path::ResolverPath::Capable => lookup_tlsa(mx_host).await,
         crate::outbound::dnssec_path::ResolverPath::Incapable => Ok(Vec::new()),
     }
+}
+
+/// Is `mx_host` an IP address, bare or bracketed (`[::1]`)?
+#[cfg(feature = "outbound-net")]
+fn mx_host_is_ip_address(mx_host: &str) -> bool {
+    let bare = mx_host.trim_start_matches('[').trim_end_matches(']');
+    bare.parse::<std::net::IpAddr>().is_ok()
 }
 
 /// Live `TlsaResolver` over [`lookup_tlsa_on_path`], consulting the process's
@@ -493,6 +510,19 @@ mod path_policy_tests {
         .await
         .unwrap();
         assert!(r.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_ip_address_mx_host_has_no_tlsa_name_and_no_records() {
+        // On the capable path too: an address is never looked up — `::1`
+        // would fail as an invalid label, a TLSA lookup failure.
+        for host in ["::1", "[::1]", "127.0.0.1", "2001:db8::25"] {
+            let r = lookup_tlsa_on_path(host, crate::outbound::dnssec_path::ResolverPath::Capable)
+                .await
+                .unwrap();
+            assert!(r.is_empty(), "{host}");
+        }
+        assert!(!mx_host_is_ip_address("mx.example.com"));
     }
 }
 

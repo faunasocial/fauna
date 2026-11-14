@@ -65,20 +65,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common::sets::{
+    Actor, OwnerSeat, ingest_custody, register_agent_device, store_custody_without_a_nudge,
+};
 use common::{
     AgentWorld, AppSeat, await_agent, await_serving_engine, connected_client, expect_ok, request,
 };
-use fauna_client_folders::FolderKeyStore;
-use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_ipc::sync::{
     BearerToken, RequestMethod, ResponsePayload, ResponseResult, ServiceStatusInfo, SyncCapability,
 };
 use fauna_nest::routes::AppState;
-use fauna_protocol::RpcRequester;
 
 const SET_NAME: &str = "team-docs";
 const AGENT_DEVICE: [u8; 32] = [0x0b; 32];
-const FAR_FUTURE: u64 = u64::MAX / 2;
 
 /// A causal window: the chain it bounds (watcher flush → seal → upload →
 /// record; or edge → re-resolve → rebuild → catch-up upload) is seconds when
@@ -89,267 +88,6 @@ const EDGE_WINDOW: Duration = Duration::from_secs(90);
 /// The held-write control: a write that is NOT held would be recorded within a
 /// few seconds (the watcher flush), so absence across this window is the hold.
 const HOLD_QUIET: Duration = Duration::from_secs(15);
-
-// ─────────────────────────────────────────────────────────────────────────
-// Actors and the set
-// ─────────────────────────────────────────────────────────────────────────
-
-struct Actor {
-    secret: [u8; 32],
-    id: ActorId,
-}
-
-impl Actor {
-    async fn create(state: &AppState, handle: &str) -> Self {
-        let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret).unwrap();
-        let id = ActorKeypair::from_secret(secret).actor_id();
-        state
-            .db
-            .create_user_with_handle(&id.0, "free", handle, None)
-            .await
-            .unwrap();
-        // Group welcomes ride the Group kind; open the inbox so the share's
-        // welcome is accepted (`direct-messages.md` § Reach policy).
-        state.db.set_inbox_mode(&id.0, "open").await.unwrap();
-        Self { secret, id }
-    }
-
-    fn keypair(&self) -> ActorKeypair {
-        ActorKeypair::from_secret(self.secret)
-    }
-
-    fn backup_key(&self) -> fauna_core::crypto::BackupKey {
-        fauna_core::crypto::BackupKey::derive(&self.secret)
-    }
-
-    /// Publish one key package so an owner can add this actor to a group.
-    async fn publish_key_package(&self, state: &AppState, engine: &fauna_mls::engine::MlsEngine) {
-        let kp = engine.generate_key_packages_bytes(1).unwrap();
-        state
-            .db
-            .put_key_package(
-                &format!("{}-kp", hex::encode(&self.id.0[..4])),
-                &self.id.0,
-                &kp[0],
-                0,
-                FAR_FUTURE,
-            )
-            .await
-            .unwrap();
-    }
-}
-
-/// The owner's authoring seat — the owner's app on another of the owner's
-/// machines. Nothing here touches the agent.
-struct OwnerSeat {
-    nest: Arc<fauna_client::NestClient>,
-    app: AppSeat,
-    custody: Arc<dyn FolderKeyStore>,
-    author: fauna_client_folders::orchestration::FoldersAuthor<
-        Arc<fauna_client::NestClient>,
-        Arc<fauna_mls::engine::MlsEngine>,
-    >,
-    convs: fauna_client_conversations::ConversationsClient<Arc<fauna_client::NestClient>>,
-}
-
-impl OwnerSeat {
-    async fn open(state: &Arc<AppState>, base: &str, owner: &Actor) -> Self {
-        let nest = connected_client(base, owner.keypair()).await;
-        let app = AppSeat::sign_in(state, base, owner.secret).await;
-        let custody = app.folder_keys();
-        let engine =
-            Arc::new(fauna_mls::engine::MlsEngine::new_in_memory(owner.keypair()).unwrap());
-        let author = fauna_client_folders::orchestration::FoldersAuthor::new(
-            fauna_client_folders::FoldersClient::new(Arc::clone(&nest)),
-            owner.keypair(),
-            Arc::clone(&custody),
-            Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
-            engine,
-        );
-        let convs = fauna_client_conversations::ConversationsClient::new(Arc::clone(&nest));
-        Self {
-            nest,
-            app,
-            custody,
-            author,
-            convs,
-        }
-    }
-
-    /// Create the set (production owner path): its nonce is minted into
-    /// custody first, and every record the agent signs binds to it — a set
-    /// created straight in the nest's db has none, so its records go out
-    /// unsigned and the nest refuses them. Returns the nest's folder id.
-    async fn create_set(&self) -> i64 {
-        self.author
-            .create_set(fauna_protocol::folders::FolderCreateRequest {
-                name: SET_NAME.to_string(),
-                ..Default::default()
-            })
-            .await
-            .expect("the owner creates the set")
-            .id
-    }
-
-    /// Share the set with `member` (production owner path); returns the channel.
-    async fn share(&self, member: &Actor, access: &str) -> [u8; 32] {
-        self.author
-            .share_set(
-                &self.convs,
-                SET_NAME,
-                member.id,
-                None,
-                Some(access.to_string()),
-            )
-            .await
-            .expect("the owner shares the set")
-            .channel_id
-    }
-
-    /// Remove `member` — rotates the set's content key and advances its floor.
-    async fn remove(&self, channel: [u8; 32], member: &Actor) {
-        self.author
-            .remove_member(SET_NAME, channel, member.id)
-            .await
-            .expect("the owner removes the member (rotate-on-removal)");
-    }
-
-    /// The owner's custody keys for the set right now.
-    async fn keys(&self, channel: [u8; 32]) -> fauna_core::folder_keys::FolderContentKeys {
-        self.envelope(channel).await.keys
-    }
-
-    /// What the owner's content-key envelope carries to a member right now: the
-    /// custody keys and the set's nonce, which every signed record binds to.
-    async fn envelope(
-        &self,
-        channel: [u8; 32],
-    ) -> fauna_core::folder_keys::ContentKeyEnvelopePayload {
-        let custody = self.custody.load().await.expect("the owner's custody");
-        fauna_core::folder_keys::ContentKeyEnvelopePayload {
-            keys: fauna_client_folders::custody::content_keys(&custody, &channel)
-                .expect("owner custody"),
-            set_nonce: fauna_client_folders::custody::set_nonce_for_channel(&custody, &channel),
-            minted_by: None,
-            retired_set_nonces: Vec::new(),
-            served_at: None,
-            unserved_at: None,
-        }
-    }
-
-    /// The set's change-log record of `rel`, if any: its content-key version.
-    async fn recorded_version(&self, rel: &str) -> Option<Option<u64>> {
-        use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
-        let listed: SyncChangesListReply = self
-            .nest
-            .request(
-                "fauna.sync.changes.list",
-                SyncChangesListRequest {
-                    folder: Some(SET_NAME.to_string()),
-                    // The agent's engine stamps the set's sealed name, after
-                    // which the nest's row answers to the hash alone.
-                    name_hash: Some(fauna_protocol::ByteBuf::from(
-                        fauna_core::path_crypto::set_name_hash(SET_NAME).to_vec(),
-                    )),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("the owner lists the set's change log");
-        let want = hex::encode(fauna_core::sync::path_hash(rel));
-        listed
-            .changes
-            .iter()
-            .filter(|c| c.path_hash == want)
-            .map(|c| c.content_key_version)
-            .next()
-    }
-
-    /// Wait for `rel`'s record and return its content-key version.
-    async fn await_recorded(&self, rel: &str, what: &str) -> Option<u64> {
-        let deadline = Instant::now() + EDGE_WINDOW;
-        loop {
-            if let Some(version) = self.recorded_version(rel).await {
-                return version;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "{what}: {rel} was never recorded within {EDGE_WINDOW:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    }
-}
-
-/// Apply the owner's envelope to a member's custody the way the member app's
-/// custody ingest does (`custody_ingest.rs`, `do_merge_and_persist`): the keys
-/// first — a first ingest creates the entry — then the owner's nonce over the
-/// member's copy. Returns whether the KEYS advanced.
-fn apply_envelope(
-    custody: &mut fauna_core::data::FoldersConfig,
-    channel: [u8; 32],
-    envelope: &fauna_core::folder_keys::ContentKeyEnvelopePayload,
-) -> bool {
-    let advanced =
-        fauna_client_folders::custody::merge_received_keys(custody, channel, envelope.keys.clone());
-    if let Some(nonce) = envelope.set_nonce {
-        fauna_client_folders::custody::record_received_set_nonce(
-            custody,
-            &channel,
-            nonce,
-            fauna_core::data::Timestamp::now().0,
-        );
-    }
-    advanced
-}
-
-/// Give the member's custody the owner's envelope for `channel` — what the
-/// member's app's custody ingest writes: a plane write through the app's
-/// store, which the nest nudges the member's devices about.
-async fn ingest_custody(
-    app: &AppSeat,
-    channel: [u8; 32],
-    envelope: fauna_core::folder_keys::ContentKeyEnvelopePayload,
-) {
-    let (_, advanced) = fauna_client_folders::key_reader::update(&*app.folder_keys(), |custody| {
-        apply_envelope(custody, channel, &envelope)
-    })
-    .await
-    .expect("the member's custody takes the generation");
-    assert!(
-        advanced,
-        "the write must actually advance the member's custody"
-    );
-}
-
-/// The same custody write, with the nest's `state-fleet` nudge lost: the rows
-/// rest on the nest and no device of the member is told.
-async fn store_custody_without_a_nudge(
-    app: &AppSeat,
-    channel: [u8; 32],
-    envelope: fauna_core::folder_keys::ContentKeyEnvelopePayload,
-) {
-    app.lose_nudges(true);
-    ingest_custody(app, channel, envelope).await;
-    app.lose_nudges(false);
-}
-
-/// Register the agent's sync device for `actor` — `changes.record` gates on it.
-async fn register_agent_device(nest: &fauna_client::NestClient) {
-    let _: fauna_protocol::sync::SyncRegisterReply = nest
-        .request(
-            "fauna.sync.register",
-            fauna_protocol::sync::SyncRegisterRequest {
-                device_id: hex::encode(AGENT_DEVICE),
-                label: "agent".into(),
-                capabilities: "read,write".into(),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("register the agent's device");
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // The agent
@@ -588,11 +326,11 @@ async fn an_owner_rotation_from_another_seat_re_keys_the_agent_and_never_seals_s
     bob.publish_key_package(&state, &bob_engine).await;
 
     // Alice's other seat creates the set and binds it to a group by sharing it.
-    let seat = OwnerSeat::open(&state, &base, &alice).await;
+    let seat = OwnerSeat::open(&state, &base, &alice, SET_NAME).await;
     let folder_id = seat.create_set().await;
     let channel = seat.share(&bob, "reader").await;
     assert_eq!(seat.keys(channel).await.current_version(), 1);
-    register_agent_device(&seat.nest).await;
+    register_agent_device(&seat.nest, AGENT_DEVICE).await;
 
     // Alice's agent, handed nothing but her BackupKey and a bearer.
     let agent = Agent::serving(&state, &base, &alice, &seat.app, folder_id).await;
@@ -647,14 +385,14 @@ async fn a_member_agent_holds_its_writes_behind_the_floor_until_custody_arrives(
 
     // Alice creates the set and shares it with Bob (writer) and Carol; Bob's
     // app ingests generation 1.
-    let seat = OwnerSeat::open(&state, &base, &alice).await;
+    let seat = OwnerSeat::open(&state, &base, &alice, SET_NAME).await;
     let folder_id = seat.create_set().await;
     let channel = seat.share(&bob, "writer").await;
     seat.share(&carol, "reader").await;
     let bob_nest = connected_client(&base, bob.keypair()).await;
     let bob_app = AppSeat::sign_in(&state, &base, bob.secret).await;
     ingest_custody(&bob_app, channel, seat.envelope(channel).await).await;
-    register_agent_device(&bob_nest).await;
+    register_agent_device(&bob_nest, AGENT_DEVICE).await;
 
     // Bob's agent, handed nothing but his BackupKey and a bearer.
     let agent = Agent::serving(&state, &base, &bob, &bob_app, folder_id).await;
@@ -718,10 +456,10 @@ async fn an_agent_cut_off_from_its_control_plane_publishes_nothing_under_the_gen
     let bob_engine = fauna_mls::engine::MlsEngine::new_in_memory(bob.keypair()).unwrap();
     bob.publish_key_package(&state, &bob_engine).await;
 
-    let seat = OwnerSeat::open(&state, &base, &alice).await;
+    let seat = OwnerSeat::open(&state, &base, &alice, SET_NAME).await;
     let folder_id = seat.create_set().await;
     let channel = seat.share(&bob, "reader").await;
-    register_agent_device(&seat.nest).await;
+    register_agent_device(&seat.nest, AGENT_DEVICE).await;
 
     // Alice's agent reaches the nest only through the proxy.
     let agent = Agent::serving(&state, &proxy.url, &alice, &seat.app, folder_id).await;

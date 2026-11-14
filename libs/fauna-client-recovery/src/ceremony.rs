@@ -1185,7 +1185,8 @@ mod copy_tests {
 /// § The locked state).
 ///
 /// Composes, in the only safe order: [`crate::succeed_with_held_kit`] (parse the
-/// kit, mint the successor, author and submit the statement) → **persist the
+/// kit, mint the successor, author the statement, flush this identity's live MLS
+/// replica, submit) → **persist the
 /// successor seed** into `accounts` → the group sweep on the confirmed arm, or
 /// the reconcile on the unconfirmed one. Every arm comes back as a
 /// [`StolenOutcome`]; nothing here returns an `Err` that could drop a seed.
@@ -1265,6 +1266,20 @@ pub async fn succeed_stolen_identity(
     // precisely the case where the nest may have committed while telling us it
     // did not. Through the caller's own registry, because the unconfirmed arm
     // READS BACK through it to decide whether it may claim the seed is saved.
+    //
+    // The kit claim comes first of all: a sibling seat of this install adopts
+    // the successor only once it finds the seed persisted, so a claim taken
+    // before the persist is in place before any adoption can mint
+    // (`crate::kit_claim`). Released below on every arm that leaves this
+    // ceremony no kit to mint; the landed arm keeps it until its kit lands.
+    let successor_hex =
+        fauna_core::identity::ActorKeypair::from_secret_hex(attempt.successor_secret_hex())
+            .map(|kp| kp.actor_id_hex())
+            .ok();
+    let claims = crate::kit_claim::KitClaims::process();
+    if let Some(hex) = successor_hex.as_deref() {
+        claims.claim(hex);
+    }
     if let Err(e) = accounts.add_account(
         attempt.successor_secret_hex(),
         Some(nest_url),
@@ -1280,7 +1295,7 @@ pub async fn succeed_stolen_identity(
 
     // Everything below is the *propagation* half — it can fail without
     // unmaking the succession, so its errors ride the outcome as a report.
-    match attempt {
+    let outcome = match attempt {
         crate::SuccessionAttempt::Confirmed(handoff) => {
             let sweep = sweep_after_succession(nest_url, old_engine, &handoff, db_path_for).await;
             StolenOutcome::Landed(LandedSuccession::new(
@@ -1302,7 +1317,16 @@ pub async fn succeed_stolen_identity(
             )
             .await
         }
+    };
+    // Only a landed succession leaves this ceremony a kit to mint. Every other
+    // arm gives the claim back, so a sibling seat's adoption — the clause's
+    // "a ceremony that never reached it" — mints instead.
+    if !matches!(outcome, StolenOutcome::Landed(_))
+        && let Some(hex) = successor_hex.as_deref()
+    {
+        claims.release(hex);
     }
+    outcome
 }
 
 /// Record a landed succession in the account registry — the step every app

@@ -21,7 +21,8 @@
 
 use fauna_core::localized::LocalizedText;
 use fauna_core::offline_intent::{
-    IntentDescription, IntentTarget, MLS_INTENT_KIND, UnsentState, park_code,
+    IntentDescription, IntentTarget, MLS_INTENT_KIND, UnsentChange, UnsentState, hold_code,
+    park_code,
 };
 use serde::Deserialize;
 
@@ -77,6 +78,26 @@ pub fn state_text(state: &UnsentState) -> LocalizedText {
     }))
 }
 
+/// A held row's state in words, when [`UnsentChange::hold`] names what holds
+/// it rather than its scope's park — the row's state line in place of
+/// [`state_text`]'s *held*. A hold code this build does not name reads as
+/// the plain held line.
+pub fn hold_text(code: &str) -> LocalizedText {
+    LocalizedText::key(key(match code {
+        hold_code::CARRY_AWAITING_GROUP => "state_held_carry",
+        _ => "state_held",
+    }))
+}
+
+/// The state line of one unsent change: [`hold_text`] for a row that names
+/// its hold, else [`state_text`].
+pub fn change_state_text(change: &UnsentChange) -> LocalizedText {
+    match (&change.state, change.hold.as_deref()) {
+        (UnsentState::Held, Some(code)) => hold_text(code),
+        (state, _) => state_text(state),
+    }
+}
+
 /// A stored failure code in words — the drain's own park codes by name, any
 /// other code (the nest's error code) through the fallback, which names it.
 pub fn reason_text(code: &str) -> LocalizedText {
@@ -86,6 +107,7 @@ pub fn reason_text(code: &str) -> LocalizedText {
         park_code::MLS_NO_CHANNEL => Some("reason_mls_no_channel"),
         park_code::MLS_NOT_A_MEMBER => Some("reason_mls_not_a_member"),
         park_code::MLS_SEND_FAILED => Some("reason_mls_send_failed"),
+        park_code::MLS_ATTACHMENT_MISSING => Some("reason_mls_attachment_missing"),
         _ => None,
     };
     match named {
@@ -371,6 +393,8 @@ mod tests {
             "reason_mls_no_channel",
             "reason_mls_not_a_member",
             "reason_mls_send_failed",
+            "reason_mls_attachment_missing",
+            "state_held_carry",
             "reason_fallback",
         ];
         let en = include_str!("../../../i18n/strings/en.yaml");

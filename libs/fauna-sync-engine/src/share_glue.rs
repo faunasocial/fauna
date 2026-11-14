@@ -262,8 +262,10 @@ pub struct OnDemandReplica {
     pub db_path: PathBuf,
     /// Bodies the nest may not hold yet (the engine's root).
     pub kept_root: PathBuf,
-    /// Recorded bodies, which the OS may reclaim.
-    pub cache_root: PathBuf,
+    /// Recorded bodies, which the OS may reclaim — `None` where the OS, not
+    /// the host, keeps them (iOS's File Provider: the plane serves only the
+    /// kept root there; serving an OS-hydrated body is a deferred slice).
+    pub cache_root: Option<PathBuf>,
 }
 
 /// One on-demand host — the one writer of one set's replica on this device —
@@ -1819,7 +1821,7 @@ mod tests {
                 folder_id: ref_for(name),
                 db_path,
                 kept_root: dir.join(name).join("kept"),
-                cache_root: dir.join(name).join("cache"),
+                cache_root: Some(dir.join(name).join("cache")),
             }),
             ingested: Default::default(),
         })

@@ -213,8 +213,20 @@ public struct ConnectedAppsView: View {
         // (`connectedAppsRequestCardLines`, `connected-apps.md` § Where logic
         // lives); this view only styles each line by its role.
         let lines = consentCardLines(request)
-        let cardText = lines.map(\.text).joined(separator: "\n")
+        // A card no folder can be chosen on says why in its own text.
+        let noneEligible = request.folderPicker?.noneEligible.map(renderLocalizedText)
+        let cardText = (lines.map(\.text) + [noneEligible].compactMap { $0 })
+            .joined(separator: "\n")
         let codeText = L.atprotoSettings.consentCode(code: request.code)
+        // A bare folder card is approvable only once a folder is chosen; read
+        // live for the driver, so a pick enables it in the same frame.
+        let consentIdHex = request.consentIdHex
+        let approvable = { () -> Bool in
+            guard let picker = vm.snapshot?.requests
+                .first(where: { $0.consentIdHex == consentIdHex })?.folderPicker
+            else { return true }
+            return picker.chosen != nil
+        }
         return VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 switch line.role {
@@ -233,7 +245,13 @@ public struct ConnectedAppsView: View {
                 }
             }
 
+            if let noneEligible {
+                Text(noneEligible).font(.caption).foregroundStyle(.secondary)
+            }
+
             installSection(request)
+
+            folderPicker(request)
 
             Text(codeText)
                 .accessibilityIdentifier(Ids.connectedAppsRequestCode)
@@ -257,8 +275,9 @@ public struct ConnectedAppsView: View {
                     Task { await vm.resolveRequest(consentIdHex: request.consentIdHex, approved: true) }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(!approvable())
                 .accessibilityIdentifier(Ids.connectedAppsRequestApprove)
-                .automationActivate(Ids.connectedAppsRequestApprove) {
+                .automationActivate(Ids.connectedAppsRequestApprove, isEnabled: approvable) {
                     Task { await vm.resolveRequest(consentIdHex: request.consentIdHex, approved: true) }
                 }
                 .faunaGate("fauna.bridges.atproto.resolve_consent")
@@ -293,6 +312,56 @@ public struct ConnectedAppsView: View {
         .accessibilityIdentifier(Ids.connectedAppsRequestCard)
         .automationValue(Ids.connectedAppsRequestCard, text: { cardText })
         .automationScope(Ids.connectedAppsRequestCard, index: index)
+    }
+
+    /// The card's folder picker (`connected-apps-request-folder`), painted after
+    /// the scope rows and before the code — present exactly on a card carrying a
+    /// bare folder-plane scope (`authorization-server.md` § Consent → *The card
+    /// chooses the folder*). The shared machine composed and filtered the
+    /// options; the driver's option keys are the folders' row ids in decimal,
+    /// the painted texts their names; nothing is selected until `chosen` is set.
+    /// A card with no eligible folder paints the picker with no option — its
+    /// reason is the card's own text. Reference painter: tui
+    /// `folder_picker_element`.
+    @ViewBuilder
+    private func folderPicker(_ request: ConsentCardRow) -> some View {
+        if let picker = request.folderPicker {
+            let consentIdHex = request.consentIdHex
+            // Read live from the snapshot so the driver sees a pick at once.
+            let current = { () -> FolderPicker? in
+                vm.snapshot?.requests
+                    .first(where: { $0.consentIdHex == consentIdHex })?.folderPicker
+            }
+            Picker(L.atprotoSettings.consentFolderLabel, selection: Binding<Int64?>(
+                get: { picker.chosen },
+                set: { id in
+                    if let id { vm.setFolder(consentIdHex: consentIdHex, id: id) }
+                }
+            )) {
+                if picker.chosen == nil {
+                    Text(L.atprotoSettings.consentFolderPrompt).tag(Int64?.none)
+                }
+                ForEach(picker.options, id: \.id) { option in
+                    Text(option.name).tag(Int64?.some(option.id))
+                }
+            }
+            .disabled(picker.options.isEmpty)
+            .accessibilityIdentifier(Ids.connectedAppsRequestFolder)
+            .automationSelect(
+                Ids.connectedAppsRequestFolder,
+                value: { current()?.chosen.map(String.init) ?? "" },
+                options: { current()?.options.map(\.name) ?? [] },
+                optionKeys: { current()?.options.map { String($0.id) } ?? [] },
+                set: { wire in
+                    guard let options = current()?.options,
+                          let id = options.first(where: {
+                              String($0.id) == wire || $0.name == wire
+                          })?.id
+                    else { return }
+                    vm.setFolder(consentIdHex: consentIdHex, id: id)
+                }
+            )
+        }
     }
 
     /// The install section of an admin's hosted-plugin install card
@@ -391,6 +460,20 @@ public struct ConnectedAppsView: View {
                     .automationActivate(Ids.connectedAppsItemSettingsLink, perform: onOpenBridges)
             }
 
+            // A served principal's per-operation record; the shared composition
+            // says which rows open one (never an app-password session's row).
+            if composed.opensRecord {
+                oracleRecord(row)
+            }
+
+            // The trust facet, after the row's own leaves and before its one
+            // Revoke — which IS the participant's revoke control: no per-grant
+            // renew or revoke here (`connected-apps.md` § The trust facet and
+            // history lens). Absent, never an empty state, on a row with no keys.
+            if let trust = row.trust {
+                trustFacet(key: row.key, trust: trust)
+            }
+
             if armed {
                 Text(L.connectedApps.revokePrompt(name: name)).font(.caption)
                 // The confirm is the commit. A mail app password's revoke is a
@@ -432,6 +515,141 @@ public struct ConnectedAppsView: View {
             }
         )
         .automationScope(Ids.connectedAppsItem, index: index)
+    }
+
+    /// The row's per-operation record (`connected-apps.md` § Layout & flow,
+    /// region 3): the `connected-apps-oracle-open` control (its label toggles
+    /// while this row's record is open), then — once the read has returned — the
+    /// `connected-apps-oracle-list` holding one `connected-apps-oracle-op` per
+    /// operation, newest first as the machine orders them, or the empty state.
+    /// Each operation's words are the shared composition's
+    /// (`connectedAppsOracleOpText`), its class verbatim as the `class` value.
+    /// Reference painter: tui `oracle_record_elements`.
+    @ViewBuilder
+    private func oracleRecord(_ row: ConnectedAppRow) -> some View {
+        let record = vm.snapshot?.record.flatMap { $0.key == row.key ? $0 : nil }
+        let label = record == nil ? L.connectedApps.oracleOpen : L.connectedApps.oracleClose
+        Button(label) {
+            Task { await vm.toggleRecord(row.key) }
+        }
+        .controlSize(.small)
+        .accessibilityIdentifier(Ids.connectedAppsOracleOpen)
+        .automationActivate(Ids.connectedAppsOracleOpen) {
+            Task { await vm.toggleRecord(row.key) }
+        }
+        // Ungated, as on tui: opening the record is a Read, which the offline
+        // gate declines to decide on, and closing it is local.
+        if let record, record.loaded {
+            VStack(alignment: .leading, spacing: 4) {
+                if record.ops.isEmpty {
+                    automationText(Ids.connectedAppsOracleEmpty, L.connectedApps.oracleEmpty)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(Array(record.ops.enumerated()), id: \.offset) { index, op in
+                    let text = resolveComposedText(connectedAppsOracleOpText(op: op))
+                    Text(text)
+                        .font(.caption)
+                        .accessibilityIdentifier(Ids.connectedAppsOracleOp)
+                        .automationValue(
+                            Ids.connectedAppsOracleOp,
+                            text: { text },
+                            attributes: { ["class": op.`class`] }
+                        )
+                        .automationScope(Ids.connectedAppsOracleOp, index: index)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(Ids.connectedAppsOracleList)
+            .automationValue(Ids.connectedAppsOracleList, text: { String(record.ops.count) })
+        }
+    }
+
+    /// A keyed principal's trust facet (`connected-apps.md` § The trust facet
+    /// and history lens), on the Nests page's `nest-trust-*` IDs scoped within
+    /// this `connected-apps-item`: the Now / History lens pair, then the Now
+    /// lens's one item per live key (or `nest-trust-empty`), or the History
+    /// lens's grant-log lines. Every word is the shared `fauna-client-pair`
+    /// one (`principalScopeLabels`, `trustStatusLabel`, `grantBoundNote`,
+    /// `historyLineText`). Reference painter: tui `push_trust_facet`; the
+    /// Apple prior art is `LinkedNestsView`'s `NestTrustFacetView`.
+    @ViewBuilder
+    private func trustFacet(key: String, trust: PrincipalTrust) -> some View {
+        HStack(spacing: 8) {
+            Button(L.nests.viewNow) { Task { await vm.setLens(key, .now) } }
+                .controlSize(.small)
+                .fontWeight(trust.lens == .now ? .semibold : .regular)
+                .accessibilityIdentifier(Ids.nestTrustViewNow)
+                .automationActivate(Ids.nestTrustViewNow) { Task { await vm.setLens(key, .now) } }
+            Button(L.nests.viewHistory) { Task { await vm.setLens(key, .history) } }
+                .controlSize(.small)
+                .fontWeight(trust.lens == .history ? .semibold : .regular)
+                .accessibilityIdentifier(Ids.nestTrustViewHistory)
+                .automationActivate(Ids.nestTrustViewHistory) { Task { await vm.setLens(key, .history) } }
+        }
+        switch trust.lens {
+        case .now:
+            if trust.grants.isEmpty {
+                automationText(Ids.nestTrustEmpty, L.connectedApps.trustEmpty)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(trust.grants.enumerated()), id: \.offset) { index, grant in
+                        principalTrustGrant(grant)
+                            .automationScope(Ids.nestTrustGrantItem, index: index)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(Ids.nestTrustGrantList)
+                .automationValue(Ids.nestTrustGrantList, text: { String(trust.grants.count) })
+            }
+        case .history:
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(trust.history.enumerated()), id: \.offset) { _, h in
+                    automationText(Ids.nestTrustHistoryItem, principalTrustHistoryLine(h))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(Ids.nestTrustHistoryList)
+            .automationValue(Ids.nestTrustHistoryList, text: { String(trust.history.count) })
+        }
+    }
+
+    /// One live key on a principal's row: its scope in the consent card's
+    /// words, *lasts-until*, the liveness (an expired one says the app will ask
+    /// again — nothing renews a principal's trust) and the required
+    /// honest-bound copy.
+    private func principalTrustGrant(_ grant: TrustGrantRow) -> some View {
+        let scope = principalTrustScopeLine(grant.scope, folder: grant.folder)
+        return VStack(alignment: .leading, spacing: 2) {
+            automationText(Ids.nestTrustGrantScope, scope)
+                .font(.subheadline)
+                .fontWeight(.medium)
+            automationText(
+                Ids.nestTrustGrantLastsUntil,
+                "\(L.nests.lastsUntil) \(formatUnixLocalMs(ms: grant.lastsUntil * 1000))"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            automationText(
+                Ids.nestTrustGrantStatus,
+                renderLocalizedText(FaunaFFISwift.trustStatusLabel(l: grant.liveness, canRenew: false))
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            automationText(
+                Ids.nestTrustGrantBoundNote,
+                renderLocalizedText(FaunaFFISwift.grantBoundNote(scope: grant.scope))
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.nestTrustGrantItem)
+        .automationValue(Ids.nestTrustGrantItem, text: { scope })
     }
 
     /// The confirm is the commit. A mail app password's revoke never gates (it is
@@ -541,6 +759,22 @@ public struct ConnectedAppsView: View {
         .automationValue(Ids.connectedAppsBlockedItem, text: { "\(blocked.clientId)\n\(since)" })
         .automationScope(Ids.connectedAppsBlockedItem, index: index)
     }
+}
+
+/// A principal key's scope line: the shared `principalScopeLabels`, resolved
+/// and joined as tui joins them.
+func principalTrustScopeLine(_ scope: [TrustScope], folder: TrustFolder?) -> String {
+    FaunaFFISwift.principalScopeLabels(scope: scope, folder: folder)
+        .map(renderLocalizedText)
+        .joined(separator: "; ")
+}
+
+/// One History-lens line of a principal's trust facet, worded by the shared
+/// `historyLineText`.
+func principalTrustHistoryLine(_ h: TrustHistoryRow) -> String {
+    let scope = principalTrustScopeLine(h.scope, folder: h.folder)
+    let when = formatUnixLocalMs(ms: h.at * 1000)
+    return renderLocalizedText(FaunaFFISwift.historyLineText(kind: h.kind, scope: scope, when: when))
 }
 
 /// One line of a consent request card, with the role the view styles it by.

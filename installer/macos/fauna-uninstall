@@ -56,6 +56,8 @@ rm -f /usr/local/bin/fauna-cli
 rm -f /usr/local/bin/fauna-bridge-supervisor
 rm -f /usr/local/bin/fauna-mail-bridge
 rm -f /usr/local/bin/libfauna_ffi.dylib
+# The licence texts and notices file the social.fauna.doc component installs.
+rm -rf /usr/local/share/doc/fauna
 
 # Desktop app (the social.fauna.app component installs it to /Applications). Removing
 # the bundle is safe — the user's data lives per-user in ~/Library + the Keychain,

@@ -759,7 +759,7 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   `a_removal_whose_rotation_fails_names_the_unsevered_residue`); and witnessed
   on tui by
   `test_conversation_room_community.py::test_a_removal_whose_rekey_fails_says_so_and_the_next_pass_completes_it`
-  (surface `community-room-rekey-retry`), which refuses the mint's kind at the
+  (surface `community-room-rekey-retry`; linux, web, android, macos and ios listed built 2026-11-11 on the same shared chip path and generic page-error resolution, their runs on the verify queue), which refuses the mint's kind at the
   removal, reads the residue on `error-message` with the chip gone, lifts the
   refusal and reads the next pass's severance off the floor. A pass whose
   own-seat heal already called the door leaves the debt to the next poll, so

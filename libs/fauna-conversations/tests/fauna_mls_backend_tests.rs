@@ -3233,6 +3233,7 @@ impl fauna_core::offline_intent::OfflineIntentQueue for RecordingOutbox {
                     MLS_INTENT_KIND,
                     payload,
                 ),
+                hold: None,
             })
             .collect())
     }
@@ -3366,6 +3367,115 @@ async fn an_offline_send_on_a_bound_group_queues_a_plaintext_intent_then_drains(
         "an online send is unkeyed"
     );
     assert_eq!(nest.total_sends(), 2);
+}
+
+/// A queued MLS intent's staged attachment is pinned in the attachment store
+/// until the intent drains (`conversation-attachments.md` § Attachments →
+/// *Retention*, the queued-intent pin; `devices.md` § Offline compose): the
+/// offline send clears the draft that pinned the bytes, so without a pin of
+/// its own a receive-path insert on a store at budget evicts them and the
+/// drain parks `attachment_missing` — the user's attachment lost. Once the
+/// intent drains, the pin lifts and the bytes are an ordinary cache entry.
+#[tokio::test]
+async fn a_queued_intents_staged_attachment_outlives_eviction_until_it_drains() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let (channel_id, welcome) = alice
+        .create_group(&bob.generate_key_packages(1).unwrap())
+        .unwrap();
+    bob.join_from_welcome(welcome).unwrap();
+    let nest = Arc::new(MockNest::default());
+    let manager = ConversationsManager::new();
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    manager.register_backend(backend.clone());
+    let bob_actor = bob.identity_actor_id();
+    manager
+        .ingest_inbound(RailInboundMessage {
+            rail: Rail::FaunaMls,
+            sender: fauna_addr("bob", bob_actor),
+            recipients: vec![fauna_addr("alice", alice_actor)],
+            subject: None,
+            body: "<<setup>>".into(),
+            body_format: BodyFormat::PlainText,
+            timestamp_ms: 1,
+            message_id: MessageId("setup".into()),
+            in_reply_to: None,
+            attachments: vec![],
+            badges: MessageBadges::default(),
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            plane_ref: None,
+        })
+        .expect("setup ingest");
+    let thread_id = manager.snapshot().threads[0].thread_id.clone();
+    backend.bind_channel(thread_id.clone(), channel_id);
+    let outbox = RecordingOutbox::new("disconnected");
+    manager.set_offline_queue(Some(outbox.clone()));
+    manager.set_attachment_store_budget_for_test(100);
+
+    let staged = manager.add_attachment(
+        thread_id.clone(),
+        "report.bin".into(),
+        "application/octet-stream".into(),
+        vec![b's'; 60],
+    );
+    manager.set_compose_body(thread_id.clone(), "with a file, no nest".into());
+    manager
+        .send(thread_id.clone())
+        .await
+        .expect("queued, not failed");
+    let queued = outbox.queued.lock().unwrap().clone();
+    assert_eq!(queued.len(), 1);
+    let intent = fauna_conversations::offline_compose::MlsSendIntent::decode(&queued[0].1)
+        .expect("plaintext intent");
+    assert_eq!(intent.attachments.len(), 1);
+    assert_eq!(intent.attachments[0].blob_hash, staged);
+    let detail = manager.thread_detail(thread_id.clone()).unwrap();
+    assert!(detail.compose.attachments.is_empty(), "the draft clears");
+
+    // Two inbound attachments arrive while the intent waits; the budget forces
+    // eviction, but the queued intent's bytes are what the drain seals.
+    let cache = |bytes: Vec<u8>| {
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        manager.cache_attachment_bytes(hash.clone(), bytes);
+        hash
+    };
+    let x = cache(vec![b'x'; 60]);
+    let y = cache(vec![b'y'; 60]);
+    assert!(
+        manager.staged_attachments_resolve(&intent.attachments),
+        "a queued intent's staged bytes are pinned while its outbox row exists"
+    );
+    assert!(
+        manager.attachment_bytes(y).is_some(),
+        "the newest entry is resident"
+    );
+    assert!(
+        manager.attachment_bytes(x).is_none(),
+        "the unpinned inbound entry is what made room"
+    );
+
+    // The nest is back: the drain seals the attachment with the intent.
+    *outbox.word.lock().unwrap() = "connected".into();
+    manager
+        .send_queued_intent([5; 16], &intent, thread_id.clone())
+        .await
+        .expect("drained with its attachment");
+    assert_eq!(nest.keyed_sends.lock().unwrap().len(), 1);
+
+    // Drained: the pin lifts, and the next inserts may evict the bytes.
+    cache(vec![b'z'; 60]);
+    cache(vec![b'w'; 60]);
+    assert!(
+        !manager.staged_attachments_resolve(&intent.attachments),
+        "once drained the bytes are an ordinary cache entry"
+    );
 }
 
 /// The queued own copy's state (`account-offline-mutation.md` § The
@@ -4489,13 +4599,16 @@ async fn remove_participant_send_failure_merges_nothing_and_is_retryable() {
 /// § Cross-device MLS group-state sync. A device whose ingest cursor skipped a
 /// bridging commit (an un-processable hole) meets every later commit as
 /// `FutureEpochCommit` and is permanently stranded — MLS members cannot skip
-/// epochs. The heal: `poll_inbound_conv` rewinds its in-flight cursor to 0 once
-/// per channel per session and re-walks the log in the same call — the skipped
-/// commit applies, previously-undecryptable messages decrypt, and the device
-/// lands on the head epoch. A second tear on the same channel must NOT rewind
-/// again (an un-processable commit would otherwise loop full re-walks forever).
+/// epochs. The heal: a walk that is not anchored (it did not begin at 0 this
+/// session) rewinds its in-flight cursor to 0 and re-walks the log in the same
+/// call — the skipped commit applies, previously-undecryptable messages
+/// decrypt, and the device lands on the head epoch (`devices.md` Rule 2 → *A
+/// later epoch in a header is a claim: the re-walk from 0 decides*). A second
+/// tear later in the session — the cursor moved past the anchored walk's stop
+/// by something other than the walk — drops the anchor, so it heals the same
+/// way: one rewind per anchor, never one per session.
 #[tokio::test]
-async fn future_epoch_commit_heals_by_rewind_and_rewalk_once_per_session() {
+async fn future_epoch_commit_heals_by_rewind_and_rewalk_per_anchor() {
     let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
     let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
     let bob_kps = bob.generate_key_packages(1).unwrap();
@@ -4581,20 +4694,39 @@ async fn future_epoch_commit_heals_by_rewind_and_rewalk_once_per_session() {
         );
     }
 
-    // A SECOND tear on the same channel: the rewind is spent, so the poll must
-    // NOT re-walk again — it stays loud-but-stranded (relaunch/resync recovers).
+    assert_eq!(
+        backend.future_epoch_claim_counts().rewinds,
+        1,
+        "one rewind healed the tear"
+    );
+
+    // A SECOND tear on the same channel: the cursor jumps past the bridging
+    // commit (5), away from where the anchored walk stopped (4) — so the walk
+    // is unanchored again and heals by a second rewind.
     let healed_epoch = alice.current_epoch(&channel_id).unwrap();
-    bob_commit().await; // seq 5: skipped again below
+    bob_commit().await; // seq 5: skipped below
     bob_text("past the second tear", 3).await; // seq 6
-    bob_commit().await; // seq 7: met as FutureEpochCommit again
+    bob_commit().await; // seq 7: met as FutureEpochCommit
     let mut after2 = 5i64;
-    poll_inbound_conv(&backend, &manager, &channel_id, &mut after2, 0)
+    let second = poll_inbound_conv(&backend, &manager, &channel_id, &mut after2, 0)
         .await
         .expect("poll ok");
+    assert!(!second.stalled, "the second tear healed too");
+    assert!(
+        alice.current_epoch(&channel_id).unwrap() > healed_epoch,
+        "the re-walk applied the skipped commit"
+    );
     assert_eq!(
         alice.current_epoch(&channel_id).unwrap(),
-        healed_epoch,
-        "the once-per-session guard held: no second rewind on this channel"
+        bob.current_epoch(&channel_id).unwrap(),
+        "and reached the head epoch again"
+    );
+    assert_eq!(after2, 7);
+    let counts = backend.future_epoch_claim_counts();
+    assert_eq!(
+        (counts.rewinds, counts.skipped),
+        (2, 0),
+        "a second rewind, and nothing skipped: every claim here was real"
     );
 }
 
@@ -6761,6 +6893,68 @@ async fn manager_remove_participant_puts_the_member_back_when_the_wire_op_fails(
             .expect("and the failure must be visible")
             .key,
         "conversations.unified.error_remove_participant"
+    );
+}
+
+/// The put-back is an UNDO, so it keeps the roster's order: a failed removal of
+/// the first member returns them to the first slot. Every app's
+/// `thread-member-chip[i]` is index-parallel with `participants`; appending the
+/// member re-seated each later chip under a different person, and a retry
+/// aimed by index at the member's chip on a surface still painting the old
+/// order removed someone else (the ios removal-refusal journey's late red).
+#[tokio::test]
+async fn manager_remove_participant_put_back_keeps_the_roster_order() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let carol = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let bob_actor = bob.identity_actor_id();
+    let carol_actor = carol.identity_actor_id();
+
+    let mut kps = bob.generate_key_packages(1).unwrap();
+    kps.extend(carol.generate_key_packages(1).unwrap());
+    let (channel_id, _welcome) = alice.create_group(&kps).unwrap();
+
+    let nest = Arc::new(MockNest::default());
+    let alice_actor = alice.identity_actor_id();
+    let manager = ConversationsManager::new();
+    let tid = manager.materialize_conv_thread(
+        channel_id.to_string(),
+        vec![
+            fauna_addr("bob", bob_actor),
+            fauna_addr("carol", carol_actor),
+        ],
+    );
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    backend.bind_channel(tid.clone(), channel_id);
+    manager.register_backend(backend.clone());
+
+    let order = |m: &ConversationsManager| -> Vec<Option<ActorId>> {
+        m.thread_detail(tid.clone())
+            .expect("thread")
+            .participants
+            .iter()
+            .map(|p| match p {
+                TypedAddress::Fauna { actor_id, .. } => Some(*actor_id),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(order(&manager), vec![Some(bob_actor), Some(carol_actor)]);
+
+    nest.fail_channel_sends(true);
+    manager
+        .remove_participant(tid.clone(), fauna_addr("bob", bob_actor))
+        .await;
+
+    assert_eq!(
+        order(&manager),
+        vec![Some(bob_actor), Some(carol_actor)],
+        "the failed removal leaves bob in his own slot, not appended after carol"
     );
 }
 
@@ -10704,12 +10898,14 @@ async fn the_hold_behind_a_parked_folder_statement_survives_a_relaunch() {
 /// A custody-sink double for the forked seat's self-unlist
 /// ([`FolderCustodySink::unlist_forked_seat`]): records every call and fails
 /// the first `fail_first` of them — and every forked-seat record clear
-/// ([`FolderCustodySink::clear_forked_seat`]).
+/// ([`FolderCustodySink::clear_forked_seat`]). It answers the channel's
+/// claimant from `claimant` (`None`, the default: the read fails).
 #[derive(Default)]
 struct UnlistRecorder {
     calls: Mutex<Vec<(String, Option<String>)>>,
     fail_first: Mutex<usize>,
     clears: Mutex<Vec<[u8; 32]>>,
+    claimant: Mutex<Option<[u8; 32]>>,
 }
 
 impl UnlistRecorder {
@@ -10718,6 +10914,10 @@ impl UnlistRecorder {
             fail_first: Mutex::new(n),
             ..Default::default()
         }
+    }
+    fn claiming(self, actor: ActorId) -> Self {
+        *self.claimant.lock().unwrap() = Some(actor.0);
+        self
     }
     fn calls(&self) -> Vec<(String, Option<String>)> {
         self.calls.lock().unwrap().clone()
@@ -10760,13 +10960,22 @@ impl FolderCustodySink for UnlistRecorder {
         self.clears.lock().unwrap().push(*channel_id);
         true
     }
+    async fn folder_claimant(
+        &self,
+        _channel_id: &[u8; 32],
+        _group_id_hex: String,
+        _home_nest_url: Option<String>,
+    ) -> Option<[u8; 32]> {
+        *self.claimant.lock().unwrap()
+    }
 }
 
 /// Lay the `tui:4366` fork on bob's seat: a session with no sweep and no
 /// witness refuses the successor's remove-old against a marker still naming
 /// alice (and memoizes it), and the successor's next commit — a self-update
-/// at the epoch bob never reached — is the future-epoch hole every later walk
-/// stalls on.
+/// at the epoch bob never reached — is a future-epoch record behind that
+/// standing refusal: the walk asks the home nest's claim before it, and only
+/// a claim naming the successor marks the seat.
 async fn lay_the_succession_fork(s: &FolderSuccessionSetup) {
     run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
     post_statement(&s.alice, &s.channel, &s.nest, &s.signed).await;
@@ -10788,20 +10997,23 @@ async fn lay_the_succession_fork(s: &FolderSuccessionSetup) {
 /// A forked seat is marked and unlists itself ONCE
 /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append
 /// → *A forked seat is final, says so, and heals only by a fresh Welcome*,
-/// parts (a) and (b)). The future-epoch stall on the folder rail marks the
-/// seat forked, naming the policy-refused memo as the cause; the first
-/// marking pass asks the sink to drop bob's own roster row (here it fails),
-/// the next pass asks again and lands it, and neither a third pass nor a
-/// relaunch's fresh walk asks a third time — the mark records the drop
+/// parts (a) and (b)). The successor's self-update behind the refused
+/// remove-old is a future-epoch record met while that refusal is undecided,
+/// so the walk asks the claim there, once; the claim names the successor, so
+/// the seat is marked forked (cause: the policy-refused memo) and the walk
+/// stops. The first marking pass asks the sink to drop bob's own roster row
+/// (here it fails), the next pass — a marked seat applies nothing and reports
+/// stalled — asks again and lands it, and neither a third pass nor a
+/// relaunch's fresh walk asks a third time: the mark records the drop
 /// durably. Nothing local is forgotten: the group stays held.
 #[tokio::test]
-async fn a_future_epoch_stall_marks_the_folder_seat_forked_and_unlists_it_once() {
+async fn a_claim_proven_fork_marks_the_folder_seat_forked_and_unlists_it_once() {
     let bob_secret = [44u8; 32];
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let s = folder_succession_setup_with(Arc::new(
         MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap(),
     ));
-    let sink = Arc::new(UnlistRecorder::failing_first(1));
+    let sink = Arc::new(UnlistRecorder::failing_first(1).claiming(s.successor));
     s.bob_backend.set_folder_custody_sink(sink.clone());
     lay_the_succession_fork(&s).await;
     assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
@@ -10810,11 +11022,11 @@ async fn a_future_epoch_stall_marks_the_folder_seat_forked_and_unlists_it_once()
     let first = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
         .await
         .expect("the folder poll walks");
-    assert!(first.stalled, "the future-epoch hole stalls the walk");
+    assert!(first.stalled, "the proven fork stops the walk");
     let fork = s
         .bob_backend
         .folder_seat_forked(&s.channel)
-        .expect("the future-epoch stall marks the seat forked");
+        .expect("the claim proves the refusal was the fork");
     assert!(
         fork.policy_refused,
         "the refused remove-old's memo is the cause"
@@ -10868,7 +11080,7 @@ async fn a_future_epoch_stall_marks_the_folder_seat_forked_and_unlists_it_once()
     let relaunched = poll_inbound_folder(&backend, &channel, &mut cursor, 50)
         .await
         .expect("the folder poll walks");
-    assert!(relaunched.stalled, "the fork is final at the seat");
+    assert!(relaunched.stalled, "a marked seat's walk reports stalled");
     let fork = backend
         .folder_seat_forked(&channel)
         .expect("the mark survived");
@@ -10911,11 +11123,231 @@ async fn a_walk_held_behind_a_parked_statement_marks_no_fork() {
     assert!(sink.calls().is_empty(), "a held walk unlists nothing");
 }
 
+// ── part (a)'s second trigger: a refusal the home nest's claim proves is the
+//    fork too, with no later commit (`federation-shared-folders.md`
+//    § Cross-nest shared folders + channel append → *A forked seat is final,
+//    says so, and heals only by a fresh Welcome*) ──
+
+/// A custody sink that answers the folder channel's claimant from a settable
+/// slot (`None` = the read failed) and records every claimant read and every
+/// self-unlist ([`FolderCustodySink::folder_claimant`],
+/// [`FolderCustodySink::unlist_forked_seat`]).
+#[derive(Default)]
+struct ClaimantSink {
+    claimant: Mutex<Option<[u8; 32]>>,
+    reads: Mutex<usize>,
+    unlists: Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl ClaimantSink {
+    fn claiming(actor: Option<ActorId>) -> Self {
+        Self {
+            claimant: Mutex::new(actor.map(|a| a.0)),
+            ..Default::default()
+        }
+    }
+    fn reads(&self) -> usize {
+        *self.reads.lock().unwrap()
+    }
+    fn unlists(&self) -> usize {
+        self.unlists.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl FolderCustodySink for ClaimantSink {
+    async fn fetch_sealed_envelope(
+        &self,
+        _channel_id_hex: &str,
+    ) -> Option<fauna_conversations::backend::FetchedEnvelope> {
+        None
+    }
+    async fn merge_and_persist(
+        &self,
+        _channel_id: &[u8; 32],
+        _payload: fauna_core::folder_keys::ContentKeyEnvelopePayload,
+        _may_move: bool,
+    ) -> bool {
+        true
+    }
+    async fn folder_claimant(
+        &self,
+        _channel_id: &[u8; 32],
+        _group_id_hex: String,
+        _home_nest_url: Option<String>,
+    ) -> Option<[u8; 32]> {
+        *self.reads.lock().unwrap() += 1;
+        *self.claimant.lock().unwrap()
+    }
+    async fn unlist_forked_seat(
+        &self,
+        group_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> bool {
+        self.unlists
+            .lock()
+            .unwrap()
+            .push((group_id_hex, home_nest_url));
+        true
+    }
+}
+
+/// The web cast's gap, closed: the successor's remove-old is refused on bob's
+/// seat (no statement reached it) and the log holds NO later commit, so no
+/// future-epoch stall ever comes. The walk that meets the refusal reads the
+/// channel's claimant once; the claimant is the refused commit's committer
+/// and not the marker's actor, so the seat is marked forked (cause
+/// policy-refused) and unlists itself — and a later in-session walk, which
+/// meets no refusal, reads nothing.
+#[tokio::test]
+async fn a_refused_remove_old_the_claim_proves_marks_the_seat_forked_with_no_later_commit() {
+    let s = folder_succession_setup();
+    let sink = Arc::new(ClaimantSink::claiming(Some(s.successor)));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    run_remove_old(&s.successor_engine, &s.channel, &s.nest, &s.alice_actor).await;
+
+    let mut cursor = 0;
+    let outcome = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(
+        !outcome.stalled,
+        "a refused commit is consumed, not a stall"
+    );
+    assert_eq!(sink.reads(), 1, "the refusing walk reads the claim once");
+    let fork = s
+        .bob_backend
+        .folder_seat_forked(&s.channel)
+        .expect("the claim proves the refusal was the fork");
+    assert!(fork.policy_refused, "the cause is the refused remove-old");
+    assert!(fork.unlisted, "the seat dropped its own roster row");
+    assert_eq!(sink.unlists(), 1);
+
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert_eq!(
+        sink.reads(),
+        1,
+        "a walk that meets no refusal reads nothing"
+    );
+    assert_eq!(sink.unlists(), 1);
+}
+
+/// A rostered member's refused roster commit marks nothing: the claimant is
+/// still the actor the seat's marker names (no succession happened), so the
+/// refusal is that member's alone.
+#[tokio::test]
+async fn a_hostile_members_refused_commit_marks_nothing_while_the_claimant_is_the_marker() {
+    let s = folder_succession_setup();
+    let sink = Arc::new(ClaimantSink::claiming(Some(s.alice_actor)));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    // The seated "successor" is here just a member alice added; its
+    // remove-old of alice is a member's roster change.
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    run_remove_old(&s.successor_engine, &s.channel, &s.nest, &s.alice_actor).await;
+
+    let mut cursor = 0;
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert_eq!(sink.reads(), 1);
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+    assert_eq!(sink.unlists(), 0);
+}
+
+/// During a real succession — the claim already names the successor — a
+/// refused commit from a THIRD member marks nothing: its committer is not the
+/// claimant, so it cannot fork a seat early.
+#[tokio::test]
+async fn a_third_members_refused_commit_marks_nothing_during_a_real_succession() {
+    let s = folder_succession_setup();
+    let sink = Arc::new(ClaimantSink::claiming(Some(s.successor)));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    let carol = MlsEngine::new_in_memory(ActorKeypair::from_secret([55u8; 32])).unwrap();
+    let carol_kp = carol.generate_key_packages(1).unwrap().remove(0);
+    let (add, welcome) = s.alice.add_member(&s.channel, &carol_kp).unwrap();
+    post_folder_commit(&s.nest, &s.channel, add).await;
+    carol.join_from_welcome(welcome).unwrap();
+    let hostile = fauna_mls::succession::commit_remove_old(&carol, &s.channel, &s.alice_actor)
+        .expect("carol commits a roster change");
+    post_folder_commit(&s.nest, &s.channel, hostile).await;
+
+    let mut cursor = 0;
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert_eq!(
+        s.bob.policy_refused_committers_at_current_epoch(&s.channel),
+        vec![carol.identity_actor_id()],
+        "carol's commit is the refusal the memo holds"
+    );
+    assert_eq!(sink.reads(), 1);
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+    assert_eq!(sink.unlists(), 0);
+}
+
+/// A failed claimant read marks nothing, and nothing polls it: the next
+/// in-session walk meets no refusal and reads nothing; the next LAUNCH's
+/// 0-seeded walk replays the memo, asks again, and — the claim now readable —
+/// marks the seat.
+#[tokio::test]
+async fn a_failed_claimant_read_marks_nothing_and_the_next_launch_asks_again() {
+    let bob_secret = [46u8; 32];
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let s = folder_succession_setup_with(Arc::new(
+        MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap(),
+    ));
+    let sink = Arc::new(ClaimantSink::claiming(None));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    run_remove_old(&s.successor_engine, &s.channel, &s.nest, &s.alice_actor).await;
+
+    let mut cursor = 0;
+    for _ in 0..2 {
+        poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+            .await
+            .expect("the folder poll walks");
+    }
+    assert_eq!(sink.reads(), 1, "asked once, never polled");
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+
+    let FolderSuccessionSetup {
+        bob,
+        bob_backend,
+        channel,
+        nest,
+        successor,
+        ..
+    } = s;
+    bob.save_state()
+        .expect("the session persisted what it walked");
+    drop(bob_backend);
+    drop(bob);
+    let bob = Arc::new(MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap());
+    let backend = FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob.identity_actor_id());
+    let sink = Arc::new(ClaimantSink::claiming(Some(successor)));
+    backend.set_folder_custody_sink(sink.clone());
+    let mut cursor = 0;
+    poll_inbound_folder(&backend, &channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert_eq!(sink.reads(), 1, "the relaunch's replay asks again");
+    let fork = backend
+        .folder_seat_forked(&channel)
+        .expect("the claim now proves the fork");
+    assert!(fork.policy_refused && fork.unlisted);
+}
+
 /// The forked mark goes with the seat: `forget_group` (the leave, and part
 /// (c)'s replacement of a forked seat by a fresh Welcome) drops it.
 #[tokio::test]
 async fn forget_group_drops_the_forked_seat_mark() {
     let s = folder_succession_setup();
+    s.bob_backend
+        .set_folder_custody_sink(Arc::new(ClaimantSink::claiming(Some(s.successor))));
     lay_the_succession_fork(&s).await;
     let mut cursor = 0;
     poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
@@ -10929,6 +11361,252 @@ async fn forget_group_drops_the_forked_seat_mark() {
         None,
         "the mark goes with the group"
     );
+}
+
+/// A commit record whose header claims an epoch ahead of the seat's is no
+/// evidence of a fork (`federation-shared-folders.md` § Cross-nest shared
+/// folders + channel append → *A forked seat is final, says so, and heals only
+/// by a fresh Welcome*, part (a), *A later epoch in a header is a claim, not
+/// evidence*). The epoch sits in the message's unprotected header and is read
+/// before any decrypt, so any sender the nest admits on the channel can post
+/// one: here the bytes of a real commit with the header's epoch raised by a
+/// thousand, which nothing past the header is ever read from. Bob's walk
+/// began at 0 and refused nothing at his epoch, so no commit in front of the
+/// record can have moved the group: the record is junk, the walk goes past
+/// it, the owner's real commit behind it folds, and the seat is neither
+/// marked forked nor unlisted.
+#[tokio::test]
+async fn a_forged_future_epoch_header_neither_wedges_the_folder_walk_nor_marks_the_seat() {
+    let s = folder_succession_setup();
+    let sink = Arc::new(UnlistRecorder::default());
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+
+    let update = s.alice.self_update(&s.channel).expect("the owner rekeys");
+    s.alice
+        .merge_pending_commit(&s.channel)
+        .expect("the owner merges its own update");
+
+    // The forgery: the header is `group_id` then the epoch as a big-endian
+    // u64 (RFC 9420 § 6), both in the clear.
+    let group_id = s.bob.group_id_bytes(&s.channel).unwrap();
+    let bob_epoch = s.bob.current_epoch(&s.channel).unwrap();
+    let at = update
+        .windows(group_id.len())
+        .position(|w| w == group_id.as_slice())
+        .expect("the group id is in the clear header")
+        + group_id.len();
+    let mut forged = update.clone();
+    let claimed = u64::from_be_bytes(forged[at..at + 8].try_into().unwrap());
+    assert_eq!(claimed, bob_epoch, "the header's epoch field, in the clear");
+    forged[at..at + 8].copy_from_slice(&(claimed + 1_000).to_be_bytes());
+
+    post_folder_commit(&s.nest, &s.channel, forged).await;
+    post_folder_commit(&s.nest, &s.channel, update).await;
+
+    let mut cursor = 0;
+    let walked = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert_eq!(
+        s.bob_backend.folder_seat_forked(&s.channel),
+        None,
+        "a header's claim marks nothing"
+    );
+    assert!(sink.calls().is_empty(), "and unlists nothing");
+    assert!(!walked.stalled, "the walk goes past the forged record");
+    assert_eq!(walked.applied, 1, "the owner's real commit behind it folds");
+    assert_eq!(
+        s.bob_backend
+            .succession_statement_counts()
+            .future_epoch_skips,
+        1,
+        "the skip is counted"
+    );
+    assert_eq!(
+        s.bob.current_epoch(&s.channel).unwrap(),
+        s.alice.current_epoch(&s.channel).unwrap(),
+        "the seat is at the group's epoch"
+    );
+}
+
+/// A copy of `commit` (a real commit's bytes from `engine`'s group) with its
+/// clear header's epoch raised by `ahead` — the forgery any rostered sender
+/// can post (RFC 9420 § 6: `group_id`, then the epoch as a big-endian u64).
+fn forge_header_epoch(
+    engine: &MlsEngine,
+    channel: &ChannelId,
+    commit: &[u8],
+    ahead: u64,
+) -> Vec<u8> {
+    let group_id = engine.group_id_bytes(channel).unwrap();
+    let at = commit
+        .windows(group_id.len())
+        .position(|w| w == group_id.as_slice())
+        .expect("the group id is in the clear header")
+        + group_id.len();
+    let mut forged = commit.to_vec();
+    let claimed = u64::from_be_bytes(forged[at..at + 8].try_into().unwrap());
+    forged[at..at + 8].copy_from_slice(&(claimed + ahead).to_be_bytes());
+    forged
+}
+
+/// A forged record at the TAIL of the log does not fail the owner's gated
+/// send (*A later epoch in a header is a claim, not evidence* — the wedge it
+/// closes): the owner's catch-up is this same folder walk
+/// (`BackendCatchUp::catch_up_after` fails the gated send exactly when
+/// [`poll_inbound_folder`] reports stalled), and with nothing behind the
+/// forgery it reports clean — so the owner commits again, and a member's
+/// seat folds that commit past the junk.
+#[tokio::test]
+async fn a_forged_record_at_the_tail_does_not_fail_the_owners_gated_send() {
+    let s = folder_succession_setup();
+    let owner = FaunaMlsBackend::new(s.alice.clone(), s.nest.clone(), "alice", s.alice_actor);
+    let update = s.alice.self_update(&s.channel).expect("the owner rekeys");
+    s.alice
+        .merge_pending_commit(&s.channel)
+        .expect("the owner merges its own update");
+    let forged = forge_header_epoch(&s.alice, &s.channel, &update, 1_000);
+    post_folder_commit(&s.nest, &s.channel, update).await;
+    post_folder_commit(&s.nest, &s.channel, forged).await;
+
+    let mut owner_cursor = 0;
+    let caught_up = poll_inbound_folder(&owner, &s.channel, &mut owner_cursor, 50)
+        .await
+        .expect("the owner's catch-up walks");
+    assert!(
+        !caught_up.stalled,
+        "the owner's catch-up is clean: its gated send is not refused"
+    );
+    assert_eq!(owner.folder_seat_forked(&s.channel), None);
+
+    post_owner_self_update(&s.alice, &s.channel, &s.nest).await;
+    let mut cursor = 0;
+    let walked = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(!walked.stalled);
+    assert_eq!(walked.applied, 2, "both owner commits fold around the junk");
+    assert_eq!(
+        s.bob.current_epoch(&s.channel).unwrap(),
+        s.alice.current_epoch(&s.channel).unwrap()
+    );
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+}
+
+/// A hostile member's refused roster commit followed by a forged future-epoch
+/// record marks nothing: the record meets a refusal still undecided at bob's
+/// epoch, so the walk asks the claim — once, the end-of-walk ask folded into
+/// it — and the claim names the marker's actor, so the refusal was that
+/// member's alone. The forgery is skipped and the owner's next commit folds.
+#[tokio::test]
+async fn a_hostile_refusal_then_a_forged_record_marks_nothing_and_the_owners_commit_folds() {
+    let s = folder_succession_setup();
+    let sink = Arc::new(ClaimantSink::claiming(Some(s.alice_actor)));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    let carol = MlsEngine::new_in_memory(ActorKeypair::from_secret([56u8; 32])).unwrap();
+    let carol_kp = carol.generate_key_packages(1).unwrap().remove(0);
+    let (add, welcome) = s.alice.add_member(&s.channel, &carol_kp).unwrap();
+    post_folder_commit(&s.nest, &s.channel, add).await;
+    carol.join_from_welcome(welcome).unwrap();
+    let hostile = fauna_mls::succession::commit_remove_old(&carol, &s.channel, &s.alice_actor)
+        .expect("carol commits a roster change");
+    post_folder_commit(&s.nest, &s.channel, hostile).await;
+    let update = s.alice.self_update(&s.channel).expect("the owner rekeys");
+    s.alice.merge_pending_commit(&s.channel).unwrap();
+    let forged = forge_header_epoch(&s.alice, &s.channel, &update, 7);
+    post_folder_commit(&s.nest, &s.channel, forged).await;
+    post_folder_commit(&s.nest, &s.channel, update).await;
+
+    let mut cursor = 0;
+    let walked = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert_eq!(sink.reads(), 1, "the claim is asked once for the pass");
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+    assert_eq!(sink.unlists(), 0);
+    assert!(!walked.stalled, "the forged record is skipped");
+    assert_eq!(walked.applied, 2, "the add and the owner's update fold");
+    assert_eq!(
+        s.bob_backend
+            .succession_statement_counts()
+            .future_epoch_skips,
+        1
+    );
+    assert_eq!(
+        s.bob.current_epoch(&s.channel).unwrap(),
+        s.alice.current_epoch(&s.channel).unwrap()
+    );
+}
+
+/// A seat marked forked applies no later commit: after the claim proves the
+/// refused remove-old was the fork, a commit bob's group could still fold —
+/// the old owner's self-update at bob's epoch — is not applied, and every
+/// later walk reports stalled.
+#[tokio::test]
+async fn a_marked_folder_seat_applies_no_later_commit() {
+    let s = folder_succession_setup();
+    let sink = Arc::new(ClaimantSink::claiming(Some(s.successor)));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    run_remove_old(&s.successor_engine, &s.channel, &s.nest, &s.alice_actor).await;
+    let mut cursor = 0;
+    poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(s.bob_backend.folder_seat_forked(&s.channel).is_some());
+    let marked_epoch = s.bob.current_epoch(&s.channel).unwrap();
+
+    post_owner_self_update(&s.alice, &s.channel, &s.nest).await;
+    for _ in 0..2 {
+        let walked = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+            .await
+            .expect("the folder poll walks");
+        assert!(walked.stalled, "a marked seat's walk reports stalled");
+        assert_eq!(walked.applied, 0, "and applies nothing");
+    }
+    assert_eq!(s.bob.current_epoch(&s.channel).unwrap(), marked_epoch);
+}
+
+/// A failed claim read behind a standing refusal stops the walk before the
+/// future-epoch record, unmarked; the next pass asks again (the failed read
+/// recorded nothing), and once the claim reads it proves the fork.
+#[tokio::test]
+async fn a_failed_claim_read_behind_a_standing_refusal_stops_the_walk_unmarked() {
+    let s = folder_succession_setup();
+    let sink = Arc::new(ClaimantSink::claiming(None));
+    s.bob_backend.set_folder_custody_sink(sink.clone());
+    lay_the_succession_fork(&s).await;
+
+    let mut cursor = 0;
+    let first = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(first.stalled, "stopped before the record");
+    assert_eq!(sink.reads(), 1, "asked once for the pass");
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+    assert_eq!(
+        s.bob_backend
+            .succession_statement_counts()
+            .future_epoch_skips,
+        0,
+        "nothing skipped"
+    );
+
+    let second = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(second.stalled);
+    assert_eq!(sink.reads(), 2, "the next pass asks again");
+    assert_eq!(s.bob_backend.folder_seat_forked(&s.channel), None);
+
+    *sink.claimant.lock().unwrap() = Some(s.successor.0);
+    let third = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(third.stalled);
+    assert_eq!(sink.reads(), 3);
+    assert!(s.bob_backend.folder_seat_forked(&s.channel).is_some());
+    assert_eq!(sink.unlists(), 1);
 }
 
 /// Part (c)'s re-invite fixture: `owner` evicts bob's stale leaf and admits a
@@ -11038,6 +11716,8 @@ async fn a_fresh_folder_welcome_replaces_a_forked_seat_after_a_relaunch() {
     let s = folder_succession_setup_with(Arc::new(
         MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap(),
     ));
+    s.bob_backend
+        .set_folder_custody_sink(Arc::new(ClaimantSink::claiming(Some(s.successor))));
     lay_the_succession_fork(&s).await;
     let mut cursor = 0;
     poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
@@ -12475,6 +13155,270 @@ async fn conv_poll_stalls_before_unincorporated_own_leaf_commit() {
             .messages
             .is_empty(),
         "the post-stall message stays unconsumed for the next pass"
+    );
+}
+
+/// A commit record whose header claims an epoch ahead of the seat's is a
+/// claim, not evidence, on the chat rail too (`devices.md` § Cross-device MLS
+/// group-state sync, Rule 2 → *A later epoch in a header is a claim: the
+/// re-walk from 0 decides*). The epoch sits in the message's unprotected
+/// header and is read before any decrypt, so any member can post one: here
+/// the bytes of a commit bob staged and never sent, with the header's epoch
+/// raised by a thousand.
+///
+/// Alice's walk began at 0 this session and every pass resumed where the last
+/// stopped, so it is anchored when she meets the record: it has shown her
+/// state every record in front of it, none moved the group, and the record is
+/// junk — the walk goes past it, no rewind, and the message behind it is
+/// ingested. A second forged record later in the same session is skipped the
+/// same way. (Met unanchored, the claim rewinds first:
+/// `a_replaced_group_state_drops_the_chat_walk_anchor`.)
+///
+/// Was red, `#[ignore]`d, until the ruling was built: the walk stopped before
+/// the record on every pass and nothing behind it was ever ingested — for
+/// every member, from one record by any member.
+#[tokio::test]
+async fn a_forged_future_epoch_header_does_not_wedge_the_chat_walk() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let bob_kps = bob.generate_key_packages(1).unwrap();
+    let (channel_id, welcome) = alice.create_group(&bob_kps).unwrap();
+    bob.join_from_welcome(welcome).unwrap();
+    let channel_hex = channel_id.to_string();
+
+    let nest = Arc::new(MockNest::default());
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice.identity_actor_id(),
+    ));
+    let manager = ConversationsManager::new();
+    manager.register_backend(backend.clone());
+    let thread_id = manager.restore_channel_slice(&empty_channel_slice(
+        &channel_hex,
+        "bob",
+        fauna_addr("bob", bob.identity_actor_id()),
+    ));
+    backend.bind_channel(thread_id.clone(), channel_id);
+
+    let say = |sequence: u64, text: &str| {
+        let ct = bob
+            .encrypt(
+                &channel_id,
+                &ChannelMessage {
+                    sender: bob.identity_actor_id(),
+                    sequence,
+                    channel_epoch: 0,
+                    body: ChannelMessageBody::Text(text.into()),
+                    timestamp: Timestamp::now(),
+                },
+            )
+            .unwrap();
+        ChannelEnvelope::Application(ct).to_bytes().unwrap()
+    };
+
+    // seq 1 — an honest message; alice's cursor moves off 0, as a durable
+    // cursor restored at launch would sit.
+    nest.channel_send(channel_hex.clone(), say(1, "before"), None, vec![])
+        .await
+        .unwrap();
+    let mut cursor = 0i64;
+    let first = poll_inbound_conv(&backend, &manager, &channel_id, &mut cursor, 0)
+        .await
+        .expect("poll");
+    assert_eq!((first.ingested, first.stalled, cursor), (1, false, 1));
+
+    // The forgery: the header is `group_id` then the epoch as a big-endian
+    // u64 (RFC 9420 § 6), both in the clear. Bob never sends the real commit.
+    let staged = bob.self_update(&channel_id).expect("bob stages a commit");
+    bob.clear_pending_commit(&channel_id)
+        .expect("bob drops it unsent");
+    let group_id = bob.group_id_bytes(&channel_id).unwrap();
+    let epoch = alice.current_epoch(&channel_id).unwrap();
+    let at = staged
+        .windows(group_id.len())
+        .position(|w| w == group_id.as_slice())
+        .expect("the group id is in the clear header")
+        + group_id.len();
+    let forged_claiming = |ahead: u64| {
+        let mut forged = staged.clone();
+        let claimed = u64::from_be_bytes(forged[at..at + 8].try_into().unwrap());
+        assert_eq!(claimed, epoch, "the header's epoch field, in the clear");
+        forged[at..at + 8].copy_from_slice(&(claimed + ahead).to_be_bytes());
+        ChannelEnvelope::Commit(forged).to_bytes().unwrap()
+    };
+
+    // seq 2 the forged record, seq 3 an honest message at the group's epoch.
+    nest.channel_send(channel_hex.clone(), forged_claiming(1_000), None, vec![])
+        .await
+        .unwrap();
+    nest.channel_send(channel_hex.clone(), say(2, "behind"), None, vec![])
+        .await
+        .unwrap();
+    let second = poll_inbound_conv(&backend, &manager, &channel_id, &mut cursor, 0)
+        .await
+        .expect("poll");
+    assert!(!second.stalled, "the walk goes past the forged record");
+    assert_eq!(second.ingested, 1, "the message behind it is ingested");
+    assert_eq!(cursor, 3, "the cursor consumed the junk record");
+    assert_eq!(
+        alice.current_epoch(&channel_id).unwrap(),
+        epoch,
+        "a header's claim moves nothing"
+    );
+
+    // seq 4 a second forged record, seq 5 another message: the rewind is
+    // spent, and the session's walk has run unbroken from 0 since it.
+    nest.channel_send(channel_hex.clone(), forged_claiming(2_000), None, vec![])
+        .await
+        .unwrap();
+    nest.channel_send(channel_hex.clone(), say(3, "behind again"), None, vec![])
+        .await
+        .unwrap();
+    let third = poll_inbound_conv(&backend, &manager, &channel_id, &mut cursor, 0)
+        .await
+        .expect("poll");
+    assert_eq!((third.ingested, third.stalled, cursor), (1, false, 5));
+    assert_eq!(
+        manager
+            .thread_detail(thread_id)
+            .expect("thread")
+            .messages
+            .len(),
+        3,
+        "every honest message of the room is held"
+    );
+    let counts = backend.future_epoch_claim_counts();
+    assert_eq!(
+        (counts.rewinds, counts.skipped),
+        (0, 2),
+        "both claims skipped on the anchored walk, neither rewound"
+    );
+}
+
+/// The chat walk's anchor holds only while nothing but the walk has replaced
+/// the channel's group state (`devices.md` § Cross-device MLS group-state
+/// sync, Rule 2 → *A later epoch in a header is a claim: the re-walk from 0
+/// decides*, sentence (1)). Here alice's anchored walk skips one forged
+/// future-epoch record; then her provider replica is restored over her engine
+/// — the swap a replica resync makes — and the next forged record is met
+/// unanchored: the walk rewinds to 0 and re-walks before it judges, and the
+/// re-walk, anchored now, skips both records and holds every message.
+#[tokio::test]
+async fn a_replaced_group_state_drops_the_chat_walk_anchor() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let bob_kps = bob.generate_key_packages(1).unwrap();
+    let (channel_id, welcome) = alice.create_group(&bob_kps).unwrap();
+    bob.join_from_welcome(welcome).unwrap();
+    let channel_hex = channel_id.to_string();
+
+    let nest = Arc::new(MockNest::default());
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice.identity_actor_id(),
+    ));
+    let manager = ConversationsManager::new();
+    manager.register_backend(backend.clone());
+    let thread_id = manager.restore_channel_slice(&empty_channel_slice(
+        &channel_hex,
+        "bob",
+        fauna_addr("bob", bob.identity_actor_id()),
+    ));
+    backend.bind_channel(thread_id.clone(), channel_id);
+
+    let say = |sequence: u64, text: &str| {
+        let ct = bob
+            .encrypt(
+                &channel_id,
+                &ChannelMessage {
+                    sender: bob.identity_actor_id(),
+                    sequence,
+                    channel_epoch: 0,
+                    body: ChannelMessageBody::Text(text.into()),
+                    timestamp: Timestamp::now(),
+                },
+            )
+            .unwrap();
+        ChannelEnvelope::Application(ct).to_bytes().unwrap()
+    };
+    let staged = bob.self_update(&channel_id).expect("bob stages a commit");
+    bob.clear_pending_commit(&channel_id)
+        .expect("bob drops it unsent");
+    let group_id = bob.group_id_bytes(&channel_id).unwrap();
+    let epoch = alice.current_epoch(&channel_id).unwrap();
+    let at = staged
+        .windows(group_id.len())
+        .position(|w| w == group_id.as_slice())
+        .expect("the group id is in the clear header")
+        + group_id.len();
+    let forged_claiming = |ahead: u64| {
+        let mut forged = staged.clone();
+        forged[at..at + 8].copy_from_slice(&(epoch + ahead).to_be_bytes());
+        ChannelEnvelope::Commit(forged).to_bytes().unwrap()
+    };
+
+    // seq 1 a message, seq 2 a forged record, seq 3 a message — walked from 0.
+    nest.channel_send(channel_hex.clone(), say(1, "one"), None, vec![])
+        .await
+        .unwrap();
+    nest.channel_send(channel_hex.clone(), forged_claiming(1_000), None, vec![])
+        .await
+        .unwrap();
+    nest.channel_send(channel_hex.clone(), say(2, "two"), None, vec![])
+        .await
+        .unwrap();
+    let mut cursor = 0i64;
+    let first = poll_inbound_conv(&backend, &manager, &channel_id, &mut cursor, 0)
+        .await
+        .expect("poll");
+    assert_eq!((first.ingested, first.stalled, cursor), (2, false, 3));
+    let counts = backend.future_epoch_claim_counts();
+    assert_eq!(
+        (counts.rewinds, counts.skipped),
+        (0, 1),
+        "anchored: skipped"
+    );
+
+    // The group state is replaced by other than the walk: alice's own
+    // provider replica restored over her engine.
+    fauna_mls::state_replica::ProviderReplica::from_engine(&alice)
+        .restore_into(&alice)
+        .expect("the replica restores");
+    assert_eq!(alice.current_epoch(&channel_id).unwrap(), epoch);
+
+    // seq 4 a second forged record, seq 5 a message, met at the stored stop.
+    nest.channel_send(channel_hex.clone(), forged_claiming(2_000), None, vec![])
+        .await
+        .unwrap();
+    nest.channel_send(channel_hex.clone(), say(3, "three"), None, vec![])
+        .await
+        .unwrap();
+    let second = poll_inbound_conv(&backend, &manager, &channel_id, &mut cursor, 0)
+        .await
+        .expect("poll");
+    assert_eq!((second.ingested, second.stalled, cursor), (1, false, 5));
+    let counts = backend.future_epoch_claim_counts();
+    assert_eq!(
+        counts.rewinds, 1,
+        "the replaced state dropped the anchor: the claim rewound the walk"
+    );
+    assert_eq!(
+        counts.skipped, 3,
+        "the anchored re-walk skipped both forged records"
+    );
+    assert_eq!(alice.current_epoch(&channel_id).unwrap(), epoch);
+    assert_eq!(
+        manager
+            .thread_detail(thread_id)
+            .expect("thread")
+            .messages
+            .len(),
+        3,
+        "every honest message of the room is held"
     );
 }
 
@@ -18054,6 +18998,48 @@ async fn a_founding_whose_reception_key_cannot_be_persisted_founds_nothing() {
         0,
         "nothing reached the nest — the room does not exist to be repaired"
     );
+}
+
+/// **The group-reception seam follows the account store that installed last.**
+///
+/// A store can be replaced under a live session: an account runtime
+/// superseded during assembly after its handle was already wired, then the
+/// one that installs wired again (both edges call `conversation_seams::wire`).
+/// Kept-first, the seam stayed on the gone store and every founding refused
+/// with "could not persist" for the rest of the session (macOS, a launch's
+/// sign-in overlapping a session patch). Here the first registration is a
+/// store that refuses writes, the second a working one: the founding lands.
+#[tokio::test]
+async fn a_later_reception_key_registration_replaces_a_superseded_store() {
+    let nest = Arc::new(MockNest::default());
+    let founder = founder_seat(&nest, "founder");
+    let ceremony = ScriptedCeremony::new();
+    founder.backend.set_room_ceremony(ceremony.clone());
+    founder
+        .backend
+        .set_group_reception_keys(HeldReceptionKeys::unwritable());
+    let keys = HeldReceptionKeys::empty();
+    founder.backend.set_group_reception_keys(keys.clone());
+    founder
+        .backend
+        .set_room_roster_reader(Arc::new(ScriptedReader::new(vec![Some(vec![room_row(
+            founder.actor,
+            RoomPrincipalKind::User,
+            0xA1,
+            &GroupReceptionKeyRecord::mint(1),
+        )])])));
+
+    founder
+        .backend
+        .found_community_room(founder.thread.clone(), None)
+        .await
+        .expect("the founding keys itself to the store registered last");
+    assert_eq!(
+        keys.reception_keys().await.len(),
+        1,
+        "the minted keypair landed in the store registered last"
+    );
+    assert_eq!(ceremony.creates(), 1, "the room reached the nest once");
 }
 
 /// **A first room mints this account's wrap target; a second reuses it.**

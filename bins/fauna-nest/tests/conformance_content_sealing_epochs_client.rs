@@ -471,3 +471,153 @@ async fn windowed_mail_grant_opens_in_window_dark_past_held_epochs_renew_extends
         b"Subject: post-window\r\n\r\nnever-held epoch body"
     );
 }
+
+/// The **master-key** regime over epoch-sealed mail (`capability-grants.md`
+/// § Capability tiering → *What a master-key mail wrap conveys*, ruled
+/// 2026-11-13): the owner mints a standing `content.read{mail}` grant
+/// (`fauna_client_capabilities::mint_grant`) → the nest stores it → the
+/// holder's registry unwraps it (`keys_for_mail_epoch` returns the master
+/// payload alone) → a record the nest sealed under the published epoch key
+/// opens through `open_mail_record_with_grant_key` keyed off its seal instant,
+/// the epoch key derived from the root the payload carries.
+#[tokio::test]
+async fn master_key_mail_grant_opens_epoch_sealed_mail() {
+    let (base, state, _tmp) = start_epoch_nest().await;
+    let http = reqwest::Client::new();
+    let owner = ActorKeypair::from_secret(OWNER_SEED);
+    let owner_id = owner.actor_id().0;
+    state
+        .db
+        .create_user(&owner_id, "free", "epochowner")
+        .await
+        .unwrap();
+    let mail = MailConfig {
+        msek: Some(OWNER_MSEK.into()),
+        mail_enabled: Some(true),
+        ..MailConfig::default()
+    };
+    let e_now = mail_sealing_epoch_of(now_epoch() as u64);
+    let (_, standing_pubkey) = derive_recipient_hpke_keypair(&OWNER_MSEK);
+    let epoch_keys: Vec<EpochSealKey> = (e_now..=e_now + 1)
+        .map(|e| {
+            let (_, pk) = derive_recipient_epoch_hpke_keypair(&OWNER_MSEK, e);
+            let ek = derive_recipient_epoch_xwing_keypair(&OWNER_MSEK, e)
+                .public
+                .mlkem_encaps_key()
+                .to_vec();
+            EpochSealKey {
+                epoch: e,
+                mls_pubkey: ByteBuf::from(pk.to_vec()),
+                mlkem_ek: ByteBuf::from(ek),
+            }
+        })
+        .collect();
+    let nest = connected_client(&base, ActorKeypair::from_secret(OWNER_SEED)).await;
+    let reply: ProvisionReply = nest
+        .request(
+            "fauna.bridges.provision_recipient_mls_pubkey",
+            ProvisionRecipientMlsPubkeyRequest {
+                actor_id: ByteBuf::from(owner_id.to_vec()),
+                mls_pubkey: ByteBuf::from(standing_pubkey.to_vec()),
+                mlkem_ek: ByteBuf::from(
+                    derive_recipient_xwing_keypair(&OWNER_MSEK)
+                        .public
+                        .mlkem_encaps_key()
+                        .to_vec(),
+                ),
+                epoch_keys: Some(epoch_keys),
+                ..dav_pairs()
+            },
+        )
+        .await
+        .expect("publish the epoch schedule");
+    assert!(reply.ok);
+
+    let (holder_sec, holder_pub) = fauna_mls::wrapped_blob::generate_x25519_keypair();
+    let blob = fauna_client_capabilities::mint_grant(
+        None,
+        &mail,
+        &owner_id,
+        &[0x52u8; 16],
+        &holder_pub,
+        None,
+        GrantWindow(0, u64::MAX),
+        &[fauna_mls::wrapped_blob::ScopeTuple::mail()],
+    )
+    .expect("mint a master-key mail grant");
+    let mint_reply: MintGrantReply = nest
+        .request(
+            "fauna.capabilities.mint",
+            MintGrantRequest {
+                grant_blob: ByteBuf::from(blob.to_canonical_bytes().unwrap()),
+                extra: Default::default(),
+            },
+        )
+        .await
+        .expect("mint");
+    assert!(mint_reply.ok);
+
+    let db_for_fetch = state.db.clone();
+    let registry = fauna_capability_holder::Registry::new(
+        holder_sec,
+        None,
+        Box::new(move || {
+            let db = db_for_fetch.clone();
+            Box::pin(async move {
+                db.fetch_capability_grants_for_holder(&holder_pub, now_epoch())
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        }),
+    );
+    registry.refresh().await.expect("holder refresh");
+
+    let sealed_at = (e_now + 1) * WEEK + 100;
+    let resp = http
+        .post(format!(
+            "{base}/api/v1/test/content/inject_epoch_sealed_mail"
+        ))
+        .json(&serde_json::json!({
+            "actor_id": hex::encode(owner_id),
+            "epoch": e_now + 1,
+            "raw_rfc5322_b64": base64::engine::general_purpose::STANDARD
+                .encode(b"Subject: epoch\r\n\r\nmaster-key body"),
+            "timestamp": sealed_at as i64,
+        }))
+        .send()
+        .await
+        .expect("inject epoch-sealed mail");
+    assert!(resp.status().is_success(), "{:?}", resp.text().await);
+    let msg = resp.json::<serde_json::Value>().await.unwrap();
+    let msg_id: [u8; 32] = hex::decode(msg["message_id_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let (env, _) = fauna_nest::segments::mail::read_record_with_floor(
+        &state.mail_segments,
+        &state.db,
+        &owner_id,
+        &msg_id,
+    )
+    .await
+    .expect("read record")
+    .expect("record present");
+    let envelope =
+        fauna_mls::wrapped_blob::MailRecordEnvelope::from_canonical_bytes(&env.encrypted_body)
+            .expect("decode envelope");
+
+    let set = registry.current();
+    let candidates = set.keys_for_mail_epoch(&owner_id, None, sealed_at, now_epoch() as u64);
+    assert_eq!(candidates.len(), 1, "the master payload, alone");
+    assert!(
+        try_open_with_candidates(&envelope, &candidates).is_none(),
+        "the standing secret alone cannot open epoch-sealed mail"
+    );
+    let opened = fauna_mls::wrapped_blob::open_mail_record_with_grant_key(
+        &envelope,
+        candidates[0],
+        sealed_at,
+    )
+    .expect("the master-key payload opens epoch-sealed mail");
+    assert_eq!(opened, b"Subject: epoch\r\n\r\nmaster-key body");
+}

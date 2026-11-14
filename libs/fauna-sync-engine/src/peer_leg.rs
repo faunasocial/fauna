@@ -183,7 +183,9 @@ pub type PeerTransportFactory =
 /// advertisement. The leg fetches and writes them; the driver's handle serves
 /// the read (`Cmd::CachedNestCapabilities`), which is why the row lives in
 /// `fauna_account_plane::host_legs`.
-pub use fauna_account_plane::host_legs::{META_NEST_FACTS, PeerLegNestFacts, cached_nest_facts};
+pub use fauna_account_plane::host_legs::{
+    ForegroundSeat, META_NEST_FACTS, PeerLegNestFacts, cached_nest_facts,
+};
 const NODE_INFO_KIND: &str = "fauna.nest.info";
 
 /// The worker-owned peer-leg state: the app-supplied factory, the live node
@@ -247,6 +249,10 @@ pub(crate) struct PeerLegState {
     /// serve registry is fed (`custody_leg::CustodyLegState::serve_refresh`).
     /// Read live by both halves beside `fleet_members`; absent admits.
     pub(crate) custodied_exclusions: fauna_peer_sync::admission::CustodiedExclusions,
+    /// The app host's foreground signal ([`ForegroundSeat`]), shared with the
+    /// runtime's handle so it outlives this state's reassembly. Read at the
+    /// ensure step: out of the foreground the leg binds nothing.
+    foreground: ForegroundSeat,
 }
 
 impl PeerLegState {
@@ -270,7 +276,15 @@ impl PeerLegState {
             revoked: WithdrawalSnapshot::underived(),
             fleet_members: MemberSnapshot::underived(),
             custodied_exclusions: Default::default(),
+            foreground: ForegroundSeat::default(),
         }
+    }
+
+    /// The ensure step reads the host's foreground signal from `seat` (the
+    /// driver's, shared with the handle).
+    pub(crate) fn with_foreground(mut self, seat: ForegroundSeat) -> Self {
+        self.foreground = seat;
+        self
     }
 
     /// The serve connection opens the replica with `key`.
@@ -501,6 +515,19 @@ where
             tracing::info!("peer leg: participation is off on this device — listener closed");
         }
         return Ok(PeerLegPass::ParticipationOff);
+    }
+    // The app host out of the foreground (`p2p-shared-set-build.md` § Phone
+    // peers — design, decision 2): the leg STOPS, not pauses — a suspended
+    // phone answers nothing, so a listener there is bound for nothing (rule
+    // 5). The host's `set_foreground(false)` stood the legs down already; this
+    // keeps every later pass from binding, and drops a node a pass bound
+    // between the seat's flip and that stand-down.
+    if !state.foreground.is_foreground() {
+        if state.node.is_some() {
+            stand_down(state).await;
+            tracing::info!("peer leg: the app is in the background — listener closed");
+        }
+        return Ok(PeerLegPass::Backgrounded);
     }
     if state.node.is_some() {
         // The refresh half: best-effort nest-facts update (a nest that stops

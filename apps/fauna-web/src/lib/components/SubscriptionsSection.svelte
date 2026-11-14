@@ -57,14 +57,22 @@
     return $identity?.secretHex ?? null;
   }
 
+  // The list read's own last failure. A successful read clears only that —
+  // never an error another gesture set meanwhile: the mount read races a
+  // redeem typed straight after the page shows, and resolving last it used to
+  // wipe the redeem's refusal off the shared `error-message`.
+  let listError = '';
+
   async function loadMine(): Promise<void> {
     const s = secret();
     if (!s) return;
     try {
       subscriptions = await subscriptionsMineList(s);
-      error = '';
+      if (listError && error === listError) error = '';
+      listError = '';
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      listError = e instanceof Error ? e.message : String(e);
+      error = listError;
     }
   }
 
@@ -76,6 +84,7 @@
     if (!s) return;
     try {
       await subscriptionsUnsubscribeAcrossNests(s, sub.author_id, sub.tier, sub.home_nest_url ?? null);
+      error = '';
       await loadMine();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -117,8 +126,13 @@
        gated plane's user-facing INPUTS excise with it). The list above is
        Pillar 1 and stays. -->
   {#if __FAUNA_PAYMENTS__}
+    <!-- No creator in hand here: home null redeems on this nest and never reads
+         the author slot, so it carries our own id (the across-nests call
+         shape both redeem doors share). -->
     <ClaimRedeem
       secretHex={$identity?.secretHex ?? null}
+      authorIdHex={$identity?.actorId ?? ''}
+      homeNestUrl={null}
       onredeemed={loadMine}
       onerror={(m) => (error = m)}
     />

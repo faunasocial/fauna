@@ -59,7 +59,8 @@ pub use lan_cert::{
     seal_lan_tls_cert_entry,
 };
 pub use mail_epoch_open::{
-    open_mail_epoch_chain, unseal_mail_record_with_derived_key, unseal_record_with_derived_key,
+    open_mail_epoch_chain, open_mail_record_with_grant_key, unseal_mail_record_with_derived_key,
+    unseal_record_with_derived_key,
 };
 pub use mls_snapshot_plaintext::{
     CALENDAR_ROOT_DERIVE_CONTEXT, CARD_ROOT_DERIVE_CONTEXT, DavKind, DavSealPubkeys,
@@ -75,13 +76,15 @@ pub use mls_snapshot_plaintext::{
 pub use mls_snapshot_plaintext::{
     INDEX_SEGMENT_KEY_DERIVE_CONTEXT, LeafInitKeypair, MAIL_EPOCH_PUBLISH_HORIZON,
     MAIL_EPOCH_ROOT_DERIVE_CONTEXT, MAIL_EPOCH_SEALING_WRITE_DEFAULT, MAIL_SEALING_EPOCH_SECS,
-    MlsSnapshotPlaintext, RECIPIENT_HPKE_DERIVE_CONTEXT, RECIPIENT_HPKE_EPOCH_DERIVE_CONTEXT,
+    MASTER_MAIL_CHUNK_LEN, MAX_MASTER_MAIL_GENERATIONS, MlsSnapshotPlaintext,
+    RECIPIENT_HPKE_DERIVE_CONTEXT, RECIPIENT_HPKE_EPOCH_DERIVE_CONTEXT,
     RECIPIENT_MLKEM_DERIVE_CONTEXT, RECIPIENT_MLKEM_EPOCH_DERIVE_CONTEXT,
     SNAPSHOT_PLAINTEXT_VERSION, StandingMailKeypair, build_mls_snapshot_plaintext,
-    derive_index_segment_key, derive_mail_epoch_root, derive_recipient_epoch_hpke_keypair,
-    derive_recipient_epoch_hpke_keypair_from_root, derive_recipient_epoch_xwing_keypair,
-    derive_recipient_epoch_xwing_keypair_from_root, derive_recipient_hpke_keypair,
-    derive_recipient_mail_capability_secret, derive_recipient_mail_epoch_capability_secret,
+    derive_index_segment_key, derive_mail_epoch_root, derive_master_mail_capability_payload,
+    derive_recipient_epoch_hpke_keypair, derive_recipient_epoch_hpke_keypair_from_root,
+    derive_recipient_epoch_xwing_keypair, derive_recipient_epoch_xwing_keypair_from_root,
+    derive_recipient_hpke_keypair, derive_recipient_mail_capability_secret,
+    derive_recipient_mail_epoch_capability_secret,
     derive_recipient_mail_epoch_capability_secret_from_root, derive_recipient_xwing_keypair,
     derive_standing_mail_keypairs, generation_trial_order, mail_epoch_range_for_window,
     mail_sealing_epoch_of, open_mail_record_standing,

@@ -36,6 +36,7 @@ mod peer_files;
 mod peer_probe;
 mod pin_reaction;
 mod pipe_server;
+mod presence_roots;
 mod push_arm;
 mod reach;
 mod renewal;

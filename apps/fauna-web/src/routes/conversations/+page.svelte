@@ -1749,6 +1749,9 @@
                    reactions/⋯-actions all hidden. Mirrors windows `DmMessageBubble`'s
                    deleted bind + apple's early-return. -->
               <div data-testid={IDS.DM_MESSAGE_DELETED} class="message-deleted">{t.conversations.detail.message_deleted}</div>
+              <!-- Every collapsed arm keeps the bubble's timestamp (tui's
+                   `conversations/mod.rs` arms: the placeholder plus the timestamp). -->
+              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
             {:else if msg.legal_takedown_ref}
               <!-- Legal-takedown tombstone (moderation.md § Categories & enforcement item 1):
                    the nest withheld the sealed envelope under a legal obligation, so the bubble
@@ -1757,6 +1760,7 @@
                    `dm-message-legal-takedown`, the twin of `dm-message-deleted`. Twin of
                    linux `message_bubble.rs`'s early-return + the post `QuotedPost.svelte` paint. -->
               <div data-testid={IDS.DM_MESSAGE_LEGAL_TAKEDOWN} class="message-deleted message-legal-takedown">{resolveLocalized(legalTakedownTombstone(msg.legal_takedown_ref))}</div>
+              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
             {:else if adminBlockPaint(msg.admin_block_reason, msg.document) === 'in-place'}
               <!-- Admin-block notice (moderation.md § Admin block of a reported item):
                    the relay withheld the envelope after the admin blocked the record
@@ -1765,6 +1769,7 @@
                    keeps its body and paints the notice beside it, below the body.
                    Presentation only, no dedicated e2e id. -->
               <div class="message-deleted message-legal-takedown">{resolveLocalizedNested(adminBlockNotice(msg.admin_block_reason))}</div>
+              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
             {:else if regionPlaceholderMsg(msg)}
               <!-- A REGION verdict (`region-blocking.md` § The blocked render): the
                    placeholder in place of the body, ahead of the family arm (tui's

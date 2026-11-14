@@ -140,11 +140,66 @@ pub(crate) fn install_logging() {
 /// the store land in — and survive a `preserve_state_across_relaunch()` relaunch
 /// under — the pinned XDG base for free.
 pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(base) = test_install_base::current() {
+        return Some(base);
+    }
     fauna_core::platform_ids::xdg_app_config_dir(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
         "fauna-tui",
     )
+}
+
+/// The unit tests' private install base — what [`config_dir`] answers on a
+/// test thread once [`arm`](test_install_base::arm) has run, in place of the
+/// developer's real `~/.config/fauna-tui`.
+///
+/// Armed by `app::tests::test_credentials`, the store every test app is built
+/// on, so a test's whole `App` reaches one base of its own. Per THREAD,
+/// because libtest runs each test on a thread of its own and a current-thread
+/// tokio test keeps its spawned tasks there: two tests running side by side
+/// never share the sign-out record, the residue record or the serving locks.
+/// They used to — every `App::reset()` test read and settled the one record
+/// file under the real base, so a sibling's half-finished record (its
+/// `wipe_done` written, the wipe it owed already spent) handed this test's
+/// erase a plan with nothing to wipe, and the index it asserts gone stayed
+/// (`app::tests::a_sign_out_hands_the_loop_back_and_the_erase_waits_for_the_stop`,
+/// red once in the release lane). Armed once per thread: a
+/// test that builds two apps means them to share one install, as two windows
+/// on one login do. A thread nothing armed (a worker thread, a test with no
+/// test app) keeps the real resolution, exactly as before.
+#[cfg(test)]
+pub(crate) mod test_install_base {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BASE: RefCell<Option<tempfile::TempDir>> = const { RefCell::new(None) };
+    }
+
+    /// Give this thread its private base, unless it already has one.
+    pub(crate) fn arm() {
+        BASE.with(|base| {
+            let mut base = base.borrow_mut();
+            if base.is_none() {
+                *base = Some(
+                    tempfile::Builder::new()
+                        .prefix("fauna-tui-test-base-")
+                        .tempdir()
+                        .expect("a temp install base for the test"),
+                );
+            }
+        });
+    }
+
+    /// This thread's base, if it was armed.
+    pub(crate) fn current() -> Option<std::path::PathBuf> {
+        BASE.with(|base| {
+            base.borrow()
+                .as_ref()
+                .map(|dir| dir.path().join("fauna-tui"))
+        })
+    }
 }
 
 /// A registry view over the app's credential store. Cheap (both are stateless
@@ -1171,6 +1226,9 @@ pub fn establish(
         tx,
         app.session_generation,
     );
+    // The viewing admin's raw actor id — the Users hub's take-over offer keys
+    // on it (`family-safety.md` § App surface → *Admin take-over*).
+    app.admin.users.viewer_actor = actor.0.to_vec();
     // The gated Family page rides the same hook, with the same fail-closed
     // ordering as the admin gate: reset the gate FIRST, then fire the one
     // post-auth `fauna.family.status` read whose result reveals the `family-tab`
@@ -2603,6 +2661,22 @@ pub fn stored_account(app: &App) -> Option<(Option<String>, SecretString, String
         .and_then(|a| a.handle)
         .unwrap_or_default();
     Some((stored.nest_url, stored.secret_hex, handle))
+}
+
+/// The launch-target account's cached handle domain (the verify reply's
+/// `domain`, cached by `apply_self_identity`), bound the same way as
+/// [`stored_account`] — linux's `load_account_cache` domain. The factory reset
+/// qualifies the bare re-claim handle with it
+/// (`fauna_onboarding_machine::qualify_reclaim_handle`).
+pub fn stored_account_domain(app: &App) -> Option<String> {
+    let registry = registry(app);
+    let actor = registry
+        .resolve_launch_binding()
+        .or_else(|| registry.active())?;
+    registry
+        .session_material(&actor)
+        .and_then(|m| m.domain)
+        .filter(|d| !d.is_empty())
 }
 
 /// "Use a different nest": walk the launch-target account away from its nest,

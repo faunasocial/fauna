@@ -40,18 +40,18 @@ Stamped 2026-09-19 at 0bb8814071.
 |---|---|---|
 | web | ✅ full | 0.1.5 docker |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | |
+| windows | ✅ full | |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| tui | ⚠ partial | 0.1.6-dev+8438e5ce standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_onboarding.py::test_onboarding_identity_choice` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_sp_onboarding.py::test_sign_in_button_visible` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_sp_onboarding.py::test_sign_in_button_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_onboarding.py::test_web_onboarding_generate_identity` | web (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_handle_first_back_buttons.py::test_identity_created_back_returns_to_identity_choice` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_confirmed_identity_survives_relaunch.py::test_a_confirmed_identity_is_found_by_the_next_launch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |

@@ -504,6 +504,7 @@
     <data name="onboarding/handle_check/outcome/domain_available_inside_zone" xml:space="preserve"><value>Nothing is set up at {domain} yet. It sits inside {zone}: if you hold {zone}, continue and pick the DNS provider that hosts it. If not, you can register {domain} on the next page.</value></data>
     <data name="onboarding/handle_check/outcome/registered_no_nest" xml:space="preserve"><value>{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain.</value></data>
     <data name="onboarding/handle_check/outcome/local_no_nest" xml:space="preserve"><value>No nest is running at {domain}. Start a nest there, then check again.</value></data>
+    <data name="onboarding/handle_check/outcome/kids_no_joinable_nest" xml:space="preserve"><value>There is no nest at {domain} you can join. Ask for an invite to a nest that is already set up.</value></data>
     <data name="onboarding/handle_check/outcome/already_on_nest_handle_matches" xml:space="preserve"><value>Welcome back, {handle}.</value></data>
     <data name="onboarding/handle_check/outcome/already_on_nest_handle_differs" xml:space="preserve"><value>You're already registered on {domain} as {old_handle}. Continue to log in as that handle (you can change it after).</value></data>
     <data name="onboarding/handle_check/outcome/user_unregistered" xml:space="preserve"><value>There's a nest at {domain} but you're not registered. Request an invite or paste a code below.</value></data>
@@ -655,6 +656,7 @@
     <data name="feed/compose_attachment_stale" xml:space="preserve"><value>Attach the file again — the audience changed after it was prepared</value></data>
     <data name="feed/compose_attachment_missing" xml:space="preserve"><value>Attach {filename} again — the file is not on this device.</value></data>
     <data name="feed/compose_sell_price_invalid" xml:space="preserve"><value>Enter a smaller price</value></data>
+    <data name="feed/compose_sell_price_not_whole" xml:space="preserve"><value>Enter the price as a whole number of sats</value></data>
     <data name="feed/compose_sell_rank_unavailable" xml:space="preserve"><value>Could not check your tiers to price this post — try again</value></data>
     <data name="feed/compose_sell_account_not_ready" xml:space="preserve"><value>Your account is still loading on this device — try again in a moment</value></data>
     <data name="feed/compose_sell_tier_unavailable" xml:space="preserve"><value>Could not set up this sale — try again</value></data>
@@ -1229,6 +1231,12 @@
     <data name="atproto_settings/consent_set_heading_unnamed" xml:space="preserve"><value>Some of that comes from {nsid}:</value></data>
     <data name="atproto_settings/consent_approve_button" xml:space="preserve"><value>Approve</value></data>
     <data name="atproto_settings/consent_deny_button" xml:space="preserve"><value>Deny</value></data>
+    <data name="atproto_settings/consent_folder_label" xml:space="preserve"><value>Folder:</value></data>
+    <data name="atproto_settings/consent_folder_prompt" xml:space="preserve"><value>Choose a folder</value></data>
+    <data name="atproto_settings/consent_folder_none_deposit" xml:space="preserve"><value>None of your folders can receive files from an app — each keeps only its file list on your nest. Let one folder store its files on your nest first.</value></data>
+    <data name="atproto_settings/consent_folder_none_read" xml:space="preserve"><value>None of your folders is shared with apps for reading. Turn on serving for a folder first.</value></data>
+    <data name="atproto_settings/consent_folder_none_both" xml:space="preserve"><value>None of your folders can both receive files from an app and be read by one. Use a folder that stores its files on your nest and is served.</value></data>
+    <data name="atproto_settings/consent_folder_unreadable" xml:space="preserve"><value>Your folders could not be read just now, so none can be chosen. Try again in a moment.</value></data>
     <data name="atproto_settings/error_refresh" xml:space="preserve"><value>Failed to load app credentials: {message}</value></data>
     <data name="atproto_settings/error_mint" xml:space="preserve"><value>Failed to create the app credential: {message}</value></data>
     <data name="atproto_settings/error_revoke" xml:space="preserve"><value>Failed to revoke the app credential: {message}</value></data>
@@ -2238,7 +2246,7 @@
     <data name="settings/recovery_kit/drafts_reseal_failed" xml:space="preserve"><value>Your unsent drafts could not be recovered yet: {reason}. They are safe, and this will be retried the next time you sign in.</value></data>
     <data name="settings/icloud_backup/title" xml:space="preserve"><value>iCloud Backup</value></data>
     <data name="settings/icloud_backup/toggle" xml:space="preserve"><value>Back up identity to iCloud Keychain</value></data>
-    <data name="settings/icloud_backup/footer" xml:space="preserve"><value>When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.</value></data>
+    <data name="settings/icloud_backup/footer" xml:space="preserve"><value>When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy yet. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.</value></data>
     <data name="settings/check_for_updates" xml:space="preserve"><value>Check for Updates</value></data>
     <data name="settings/up_to_date" xml:space="preserve"><value>Up to date</value></data>
     <data name="settings/check_failed" xml:space="preserve"><value>Check failed</value></data>
@@ -2401,12 +2409,14 @@
     <data name="settings/unsent_changes/kind_other" xml:space="preserve"><value>{kind}</value></data>
     <data name="settings/unsent_changes/state_waiting" xml:space="preserve"><value>Waiting to send</value></data>
     <data name="settings/unsent_changes/state_held" xml:space="preserve"><value>Waiting behind a change that was not sent</value></data>
+    <data name="settings/unsent_changes/state_held_carry" xml:space="preserve"><value>Waiting for the conversation to move to your new identity</value></data>
     <data name="settings/unsent_changes/state_unsent" xml:space="preserve"><value>Not sent</value></data>
     <data name="settings/unsent_changes/reason_unknown_kind" xml:space="preserve"><value>This version of the app cannot send this change</value></data>
     <data name="settings/unsent_changes/reason_undecodable" xml:space="preserve"><value>This change could not be read</value></data>
     <data name="settings/unsent_changes/reason_mls_no_channel" xml:space="preserve"><value>The conversation could not be found</value></data>
     <data name="settings/unsent_changes/reason_mls_not_a_member" xml:space="preserve"><value>You are no longer a member of this conversation</value></data>
     <data name="settings/unsent_changes/reason_mls_send_failed" xml:space="preserve"><value>The message could not be sent</value></data>
+    <data name="settings/unsent_changes/reason_mls_attachment_missing" xml:space="preserve"><value>An attachment of this message is no longer on this device</value></data>
     <data name="settings/unsent_changes/reason_fallback" xml:space="preserve"><value>Your nest refused this change ({code})</value></data>
     <data name="settings/member_review_page/title" xml:space="preserve"><value>Members To Review</value></data>
     <data name="settings/member_review_page/intro" xml:space="preserve"><value>These are the people you have not decided about since you recovered your account. Keep the ones you recognise, and remove anyone you do not from your groups.</value></data>
@@ -2518,6 +2528,7 @@
     <data name="settings/sign_out_blocked_other_window" xml:space="preserve"><value>Still signed in — another Fauna window is using this account on this device. Close it, then sign out again.</value></data>
     <data name="settings/remove_account_blocked_other_window" xml:space="preserve"><value>Not removed — another Fauna window is using that account on this device. Close it, then remove the account again.</value></data>
     <data name="settings/remove_account_blocked_this_window" xml:space="preserve"><value>Not removed — this window is using that account. Close this window, then remove the account from another one.</value></data>
+    <data name="settings/remove_account_blocked_carry_owed" xml:space="preserve"><value>Not removed — this account still has changes waiting to move to your new identity. Sign in as your new identity and send or discard them first.</value></data>
     <data name="settings/switch_refused_no_secret" xml:space="preserve"><value>Not switched — this device can no longer sign in as {account}: its secret key is missing here. You are still on the identity you were using. To use {account} here again, add it back with its secret key or recovery kit.</value></data>
     <data name="settings/switch_refused" xml:space="preserve"><value>Not switched to {account} — you are still on the identity you were using.</value></data>
     <data name="settings/account_list_full" xml:space="preserve"><value>Not added — this device's account list is full. Remove an account this device no longer uses, then try again.</value></data>
@@ -2588,6 +2599,9 @@
     <data name="nests/custody_restore_unchecked" xml:space="preserve"><value>Restored — but this device couldn't confirm that the nest that answered is the one your records name for this address. Your records stand; check the address with whoever runs that nest.</value></data>
     <data name="nests/trusted_to_read" xml:space="preserve"><value>Trusted to read:</value></data>
     <data name="nests/scope_mail" xml:space="preserve"><value>Mail — and the spam-filter model and training history derived from it</value></data>
+    <data name="nests/scope_materialize_mail" xml:space="preserve"><value>Keeps your mail searchable</value></data>
+    <data name="nests/scope_materialize_calendar" xml:space="preserve"><value>Keeps your calendar searchable</value></data>
+    <data name="nests/scope_materialize_card" xml:space="preserve"><value>Keeps your contacts searchable</value></data>
     <data name="nests/scope_calendar" xml:space="preserve"><value>Calendar</value></data>
     <data name="nests/scope_card" xml:space="preserve"><value>Contacts</value></data>
     <data name="nests/scope_posts" xml:space="preserve"><value>Posts</value></data>
@@ -2608,6 +2622,9 @@
     <data name="nests/grant_unattested_mark" xml:space="preserve"><value>Given before you recovered this account — still active. Keep it, or revoke it if you don't recognise it.</value></data>
     <data name="nests/grant_keep_button" xml:space="preserve"><value>Keep</value></data>
     <data name="nests/bound_note_standing" xml:space="preserve"><value>On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation.</value></data>
+    <data name="nests/bound_note_materialize_mail" xml:space="preserve"><value>On an honest nest, revoking deletes this nest's searchable copy of your mail and its key, and stops it reading more. It cannot un-see what was already read.</value></data>
+    <data name="nests/bound_note_materialize_calendar" xml:space="preserve"><value>On an honest nest, revoking deletes this nest's searchable copy of your calendar and its key, and stops it reading more. It cannot un-see what was already read.</value></data>
+    <data name="nests/bound_note_materialize_card" xml:space="preserve"><value>On an honest nest, revoking deletes this nest's searchable copy of your contacts and its key, and stops it reading more. It cannot un-see what was already read.</value></data>
     <data name="nests/bound_note_bounded_mail" xml:space="preserve"><value>This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it.</value></data>
     <data name="nests/history_minted" xml:space="preserve"><value>Trusted to read {scope} · {when}</value></data>
     <data name="nests/history_renewed" xml:space="preserve"><value>Trust renewed: {scope} · {when}</value></data>
@@ -2634,6 +2651,12 @@
     <data name="nests/mint_button" xml:space="preserve"><value>Add trust…</value></data>
     <data name="nests/mint_scope_placeholder" xml:space="preserve"><value>Choose what to trust it with…</value></data>
     <data name="nests/mint_option_mail" xml:space="preserve"><value>Read and filter my mail — and the spam-filter model and training history derived from it</value></data>
+    <data name="nests/mint_option_materialize_mail" xml:space="preserve"><value>Keep my mail searchable on this nest</value></data>
+    <data name="nests/mint_option_materialize_calendar" xml:space="preserve"><value>Keep my calendar searchable on this nest</value></data>
+    <data name="nests/mint_option_materialize_card" xml:space="preserve"><value>Keep my contacts searchable on this nest</value></data>
+    <data name="nests/mint_materialize_note" xml:space="preserve"><value>While this is on, this nest can read your mail and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your mail — it cannot undo what a hostile nest already read.</value></data>
+    <data name="nests/mint_materialize_calendar_note" xml:space="preserve"><value>While this is on, this nest can read your calendar and keeps a searchable copy of it on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your calendar — it cannot undo what a hostile nest already read.</value></data>
+    <data name="nests/mint_materialize_card_note" xml:space="preserve"><value>While this is on, this nest can read your contacts and keeps a searchable copy of them on its disk. Anyone who can read this nest's disk can read that copy. On an honest nest, turning it off deletes the copy and the nest's key to your contacts — it cannot undo what a hostile nest already read.</value></data>
     <data name="nests/mint_option_calendar" xml:space="preserve"><value>Read my calendar</value></data>
     <data name="nests/mint_option_paywalled" xml:space="preserve"><value>Serve paywalled posts — {tier}</value></data>
     <data name="nests/mint_holder_placeholder" xml:space="preserve"><value>Which service on this nest?</value></data>
@@ -2730,6 +2753,17 @@
     <data name="web_publish/error_publish" xml:space="preserve"><value>Failed to publish post: {message}</value></data>
     <data name="web_publish/error_unpublish" xml:space="preserve"><value>Failed to unpublish post: {message}</value></data>
     <data name="web_publish/error_paywall_link" xml:space="preserve"><value>Failed to create paywall link: {message}</value></data>
+    <data name="nostr_advertise/advertise" xml:space="preserve"><value>Advertise on Nostr</value></data>
+    <data name="nostr_advertise/stop" xml:space="preserve"><value>Stop advertising on Nostr</value></data>
+    <data name="nostr_advertise/confirm_title" xml:space="preserve"><value>Advertise this post on Nostr?</value></data>
+    <data name="nostr_advertise/confirm" xml:space="preserve"><value>Advertise</value></data>
+    <data name="nostr_advertise/confirm_body" xml:space="preserve"><value>Your post's public teaser and its price will be published to your nest's relay and to your Nostr relays. Anyone on Nostr can read them, and a zap of at least that price whose receipt is signed by one of your zap signers can buy the post for the person who sent it. If you stop advertising, the note is deleted from your nest's relay and, while your nest holds your Nostr key, your Nostr relays are asked to delete their copies, but some may keep them.</value></data>
+    <data name="nostr_advertise/error_advertise" xml:space="preserve"><value>Failed to advertise the post on Nostr: {message}</value></data>
+    <data name="nostr_advertise/error_stop" xml:space="preserve"><value>Failed to stop advertising the post on Nostr: {message}</value></data>
+    <data name="sale_price/button" xml:space="preserve"><value>Change price…</value></data>
+    <data name="sale_price/title" xml:space="preserve"><value>Change price</value></data>
+    <data name="sale_price/error_load" xml:space="preserve"><value>Failed to read the post's price: {message}</value></data>
+    <data name="sale_price/error_save" xml:space="preserve"><value>Failed to change the price: {message}</value></data>
     <data name="mail_aliases/title" xml:space="preserve"><value>Aliases</value></data>
     <data name="mail_aliases/description" xml:space="preserve"><value>Extra mail addresses that all deliver to you — share a different one with each service so you can see who leaked your address and turn any of them off.</value></data>
     <data name="mail_aliases/add_button" xml:space="preserve"><value>Add alias</value></data>
@@ -2966,7 +3000,7 @@
     <data name="mail_import/next" xml:space="preserve"><value>Next</value></data>
     <data name="mail_import/back" xml:space="preserve"><value>Back</value></data>
     <data name="archive_import/title" xml:space="preserve"><value>Import from other services</value></data>
-    <data name="archive_import/description" xml:space="preserve"><value>Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.</value></data>
+    <data name="archive_import/description" xml:space="preserve"><value>Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.</value></data>
     <data name="archive_import/unavailable" xml:space="preserve"><value>Importing needs a session that holds your identity key; this one does not.</value></data>
     <data name="archive_import/source_title" xml:space="preserve"><value>Step 1 — Where the archive comes from</value></data>
     <data name="archive_import/source_help_facebook" xml:space="preserve"><value>On Facebook, open Settings &amp; privacy → Settings → Accounts Center → Your information and permissions → Download your information. Choose "Download to device", format JSON, any media quality. The download link expires after a few days, so save the zip as soon as it is ready.</value></data>
@@ -3259,6 +3293,11 @@
     <data name="admin/users_page/suspend_default_reason" xml:space="preserve"><value>Suspended by admin</value></data>
     <data name="admin/users_page/make_admin" xml:space="preserve"><value>Make Admin</value></data>
     <data name="admin/users_page/remove_admin" xml:space="preserve"><value>Remove Admin</value></data>
+    <data name="admin/users_page/supervised_by" xml:space="preserve"><value>Supervised by {guardian}</value></data>
+    <data name="admin/users_page/take_over" xml:space="preserve"><value>Take over</value></data>
+    <data name="admin/users_page/take_over_confirm_summary" xml:space="preserve"><value>Take over supervision of {ward} from {guardian}? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page.</value></data>
+    <data name="admin/users_page/take_over_confirm" xml:space="preserve"><value>Confirm take-over</value></data>
+    <data name="admin/users_page/take_over_cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="admin/users_page/prev_page" xml:space="preserve"><value>Previous</value></data>
     <data name="admin/users_page/next_page" xml:space="preserve"><value>Next</value></data>
     <data name="admin/users_page/page_indicator" xml:space="preserve"><value>Page {current} of {pages}</value></data>
@@ -4484,8 +4523,8 @@
     <data name="subscriptions/redeem_claim_title" xml:space="preserve"><value>Redeem a claim code</value></data>
     <data name="subscriptions/claim_code" xml:space="preserve"><value>Claim code</value></data>
     <data name="subscriptions/redeem" xml:space="preserve"><value>Redeem</value></data>
-    <data name="subscriptions/claim_delivery_dm" xml:space="preserve"><value>Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app with an account on the author's server and enter the code under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.</value></data>
-    <data name="subscriptions/claim_delivery_dm_link" xml:space="preserve"><value>Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. With an account on the author's server, you can also enter it in a Fauna app under Settings → Subscriptions → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.</value></data>
+    <data name="subscriptions/claim_delivery_dm" xml:space="preserve"><value>Thank you for your purchase. Your claim code is {code}. To unlock the post, sign in to a Fauna app, open the author's profile and enter the code under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features); the post opens the next time the author's app syncs.</value></data>
+    <data name="subscriptions/claim_delivery_dm_link" xml:space="preserve"><value>Thank you for your purchase. Your claim code is {code}. Enter it at {url} to unlock the post, and keep this message: the page asks for the code again after a few minutes. You can also enter it in a Fauna app, on the author's profile under Tiers → Redeem a claim code (not in the apps installed from an app store, which leave out the payment features), where the post opens the next time the author's app syncs.</value></data>
     <data name="subscriptions/offer_status_none" xml:space="preserve"><value>Not subscribed</value></data>
     <data name="subscriptions/offer_status_pending" xml:space="preserve"><value>Pending approval</value></data>
     <data name="subscriptions/offer_status_active" xml:space="preserve"><value>Subscribed</value></data>
@@ -4583,15 +4622,19 @@
     <data name="error/bluesky/not_found" xml:space="preserve"><value>this post is no longer on Bluesky.</value></data>
     <data name="error/bluesky/blocked" xml:space="preserve"><value>a block between you and its author on Bluesky hides this post.</value></data>
     <data name="error/bluesky/upstream" xml:space="preserve"><value>Bluesky could not be reached. Check that your Bluesky account is still linked on the AT Protocol page, then try again.</value></data>
-    <data name="error/nostr/not_linked" xml:space="preserve"><value>This post came from Nostr, and no Nostr key is linked for you. Link one on the Nostr page first.</value></data>
+    <data name="error/nostr/not_linked" xml:space="preserve"><value>This needs a linked Nostr key, and none is linked for you. Link one on the Nostr page first.</value></data>
     <data name="error/nostr/no_custodial_key" xml:space="preserve"><value>Your nest doesn't hold your Nostr key, so it can't sign this for you. Switch to a generated or imported key on the Nostr page.</value></data>
     <data name="error/nostr/no_relays_configured" xml:space="preserve"><value>You've removed every Nostr relay, so there is nowhere to publish this. Add a relay on the Nostr page first.</value></data>
     <data name="error/nostr/replies_off" xml:space="preserve"><value>Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.</value></data>
     <data name="error/nostr/not_sold" xml:space="preserve"><value>Only a post you sell can be advertised on Nostr. Sell this post first.</value></data>
-    <data name="error/nostr/no_asking_price" xml:space="preserve"><value>This post has no price yet, so a zap could not buy it. Set a price first, then advertise it.</value></data>
+    <data name="error/nostr/no_asking_price" xml:space="preserve"><value>This post has no asking price, so a zap could not buy it and it can't be advertised. To advertise a post you sell, choose Sell this post… when you write it and give it an asking price in sats.</value></data>
     <data name="error/nest/outdated" xml:space="preserve"><value>This nest is running an outdated version and must be updated before you can connect.</value></data>
     <data name="error/nest/schema_mismatch" xml:space="preserve"><value>This nest's database does not match its software version and must be updated.</value></data>
     <data name="error/backup/writer_seat_held" xml:space="preserve"><value>This destination already keeps your account's backup from another box. Nothing was added.</value></data>
+    <data name="error/payments/claim_not_found" xml:space="preserve"><value>No claim matches this code. Check it and try again.</value></data>
+    <data name="error/payments/claim_already_redeemed" xml:space="preserve"><value>This code has already been used.</value></data>
+    <data name="error/payments/claim_voided" xml:space="preserve"><value>This code was cancelled by the creator and can no longer be used.</value></data>
+    <data name="error/payments/claim_admits_elsewhere" xml:space="preserve"><value>This code is a membership of the creator's nest. Use it as an invite code when you join that nest. It has not been used.</value></data>
     <data name="error/federation/peer_nest_outdated" xml:space="preserve"><value>The other side's nest is running an outdated version and does not support this yet.</value></data>
     <data name="error/protocol/unknown_kind" xml:space="preserve"><value>This nest does not support that request. It may need to be updated.</value></data>
     <data name="error/protocol/malformed" xml:space="preserve"><value>The request could not be processed.</value></data>
@@ -4663,6 +4706,7 @@
     <data name="errors/recovery_prior_kit_required" xml:space="preserve"><value>A recovery key is already registered. Enter your current kit to replace it, or use the seed-alone replacement option instead.</value></data>
     <data name="errors/recovery_prior_kit_mismatch" xml:space="preserve"><value>That kit does not match the one currently registered for this identity.</value></data>
     <data name="errors/recovery_kit_for_another_account" xml:space="preserve"><value>That recovery kit belongs to a different account, not this one. Nothing was changed.</value></data>
+    <data name="errors/recovery_kit_minted_elsewhere" xml:space="preserve"><value>The window that replaced this identity is creating its new recovery kit and will show it there.</value></data>
     <data name="errors/recovery_prior_escrow_unreadable" xml:space="preserve"><value>Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it.</value></data>
     <data name="errors/recovery_group_ceremony" xml:space="preserve"><value>Updating your groups failed: {detail}</value></data>
     <data name="registrar/step/title" xml:space="preserve"><value>Register a new domain</value></data>
@@ -4869,6 +4913,11 @@
     <data name="connected_apps/oracle_requests_one" xml:space="preserve"><value>1 request answered in all</value></data>
     <data name="connected_apps/oracle_latest" xml:space="preserve"><value>Most recent, {time}: {operation} — {detail}</value></data>
     <data name="connected_apps/oracle_latest_bare" xml:space="preserve"><value>Most recent, {time}: {operation}</value></data>
+    <data name="connected_apps/oracle_open" xml:space="preserve"><value>Show what Fauna did for this app</value></data>
+    <data name="connected_apps/oracle_close" xml:space="preserve"><value>Hide what Fauna did for this app</value></data>
+    <data name="connected_apps/oracle_op" xml:space="preserve"><value>{time} · {operation} — {detail}</value></data>
+    <data name="connected_apps/oracle_op_bare" xml:space="preserve"><value>{time} · {operation}</value></data>
+    <data name="connected_apps/oracle_empty" xml:space="preserve"><value>Nothing recorded for this app yet</value></data>
     <data name="connected_apps/blocked_heading" xml:space="preserve"><value>Blocked apps</value></data>
     <data name="connected_apps/blocked_hint" xml:space="preserve"><value>Requests from these apps are never shown to you.</value></data>
     <data name="connected_apps/blocked_since" xml:space="preserve"><value>Blocked {time}</value></data>
@@ -4888,6 +4937,11 @@
     <data name="connected_apps/install_settings_heading" xml:space="preserve"><value>Settings:</value></data>
     <data name="connected_apps/install_settings_none" xml:space="preserve"><value>Settings: none</value></data>
     <data name="connected_apps/install_setting" xml:space="preserve"><value>{label} ({kind})</value></data>
+    <data name="connected_apps/trust_scope_ext_rw" xml:space="preserve"><value>Keys to your records published by {publisher}: {kinds} — read and write</value></data>
+    <data name="connected_apps/trust_scope_ext_ro" xml:space="preserve"><value>Keys to your records published by {publisher}: {kinds} — read only</value></data>
+    <data name="connected_apps/trust_status_expired" xml:space="preserve"><value>Expired — the app will ask again if it needs them</value></data>
+    <data name="connected_apps/trust_empty" xml:space="preserve"><value>This app holds no keys to your records</value></data>
+    <data name="connected_apps/trust_bound_note" xml:space="preserve"><value>On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect.</value></data>
     <data name="share_link/button" xml:space="preserve"><value>Share a link</value></data>
     <data name="share_link/create_title" xml:space="preserve"><value>Share a link to {name}</value></data>
     <data name="share_link/create_body" xml:space="preserve"><value>Anyone with the link can open this file until it expires or you revoke it.</value></data>

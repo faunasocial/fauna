@@ -9,6 +9,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.R
@@ -948,7 +950,18 @@ private fun ReseedConfirm(
     val body = pulledFrom
         ?.let { stringResource(R.string.backups_backup_reseed_pull_back_confirm_body).replace("{name}", it) }
         ?: stringResource(R.string.backups_backup_reseed_confirm_body)
-    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL)) {
+    // The modal's text is title, consequence, then each preflight line, one per
+    // line — tui's registration (`ui/backups.md` § Restore after losing the
+    // nest: the lines are the modal's body, no id of their own). A tagged Card
+    // carries no text of its own, so the bridge read ""; declared here rather
+    // than by merging descendants, which would fold the two buttons' tags in.
+    val modalText = (listOf(title, body) + preflightLines).joinToString("\n")
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(Ids.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL)
+            .semantics { text = AnnotatedString(modalText) },
+    ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 title,

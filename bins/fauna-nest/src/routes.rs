@@ -3408,6 +3408,11 @@ pub(crate) async fn run_connection(
                 }
             }
         }
+        // A close the nest is about to send (a fatal fault, a revocation) must
+        // reach the peer: keep reading until its Close answers ours.
+        if dispatch_conn.fatal_close().is_some() || dispatch_conn.is_revoked() {
+            linger_for_peer_close(&mut ws_rx).await;
+        }
     });
 
     // Wait for inbound to end (client close, protocol violation, shutdown, or
@@ -3437,6 +3442,30 @@ pub(crate) async fn run_connection(
         send_task.abort();
     }
     resync_task.abort();
+}
+
+/// The closing handshake's read half (RFC 6455 § 7.1.1), for a connection the
+/// nest closes itself: read and discard inbound frames until the peer's Close,
+/// the end of the stream, or [`REVOKED_CLOSE_GRACE`].
+///
+/// Dropping the socket while the peer's frames still sit unread in its receive
+/// buffer makes the kernel answer with a TCP reset, and a reset discards the
+/// peer's own receive queue — the close frame the send task just wrote
+/// included. The peer would then see an ordinary transport drop instead of its
+/// 4400/4401/1008/1011 code: a pre-identity flood, the one peer certain to have
+/// unread frames in flight, is exactly the case. Nothing read here is decoded
+/// or dispatched, so lingering costs no handler work.
+async fn linger_for_peer_close(
+    ws_rx: &mut futures_util::stream::SplitStream<axum::extract::ws::WebSocket>,
+) {
+    use axum::extract::ws::Message;
+    let deadline = tokio::time::Instant::now() + REVOKED_CLOSE_GRACE;
+    loop {
+        match tokio::time::timeout_at(deadline, ws_rx.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => return,
+            Ok(Some(Ok(_))) => {}
+        }
+    }
 }
 
 /// Is this outbound frame the `Reply` for `correlation_id`?

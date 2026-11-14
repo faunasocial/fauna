@@ -169,6 +169,11 @@ pub mod nostr_confirmation_rows;
 /// crate-private on purpose: the driver's handle is its only door.
 pub mod observation_intake;
 pub mod outbox;
+/// The outbox carry: a retired identity's undrained outbox moved into its
+/// successor's at the successor's store-ready on a device that attests it
+/// (`succession-aftermath.md` § Re-key scope, the device-local outbox row).
+#[cfg(feature = "account-driver")]
+pub mod outbox_carry;
 /// The road in the runtime's pass — the succession statements an account is
 /// owed at, delivered in every full pass of a seed-holding runtime
 /// (`identity-succession.md` § Enforcement on the home nest → *Every nest the

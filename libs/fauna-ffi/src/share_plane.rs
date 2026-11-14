@@ -107,6 +107,155 @@ pub fn on_demand_replica_access(actor_id: Vec<u8>) -> Result<Arc<FfiReplicaAcces
     )))
 }
 
+/// One on-demand replica hosted in ANOTHER process, as the app names it —
+/// iOS's File Provider extension, the set's one writer
+/// (`p2p-shared-set-build.md` § *Phone peers — design*, decision 3). The
+/// plane reads the set's state DB cross-process (derived here from
+/// `state_dir` and `folder_id`, the same key the extension's host opens) and
+/// serves bodies from the staging root alone: the OS owns the hydrated tree.
+#[cfg(feature = "file-provider-host")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiForeignReplica {
+    /// The nest folder name — the label the transfer surface shows.
+    pub folder: String,
+    /// The set's `FolderRef` wire string (the domain identity's ref half).
+    pub folder_id: String,
+    /// The account's engine state dir, as the extension's host was given it.
+    pub state_dir: String,
+    /// The extension's staging root for the set — iOS's kept root.
+    pub staging_root: String,
+}
+
+/// One replica host in another process, as the app reaches it. Called from a
+/// blocking thread, never the plane's runtime: an implementation may wait on
+/// its process channel (iOS: the File Provider service connection).
+#[cfg(feature = "file-provider-host")]
+#[uniffi::export(with_foreign)]
+pub trait FfiForeignReplicaHost: Send + Sync {
+    /// The replica this host serves, or `None` while it offers none.
+    fn replica(&self) -> Option<FfiForeignReplica>;
+
+    /// The ingest door, answered by the other process's host
+    /// ([`crate::file_provider_host::FfiFileProviderHost::share_ingest`]):
+    /// one page of accepted peer rows, the pre-fetched bodies at
+    /// `spool_dir` — a directory both processes reach.
+    fn share_ingest(
+        &self,
+        proven_actor_hex: String,
+        rows: Vec<Vec<u8>>,
+        spool_dir: String,
+    ) -> Result<crate::file_provider_host::FfiShareIngestOutcome, FfiError>;
+}
+
+/// The app's foreign replica hosts for the signed-in account, read afresh at
+/// every pass of the plane (a domain comes and goes with its registration).
+#[cfg(feature = "file-provider-host")]
+#[uniffi::export(with_foreign)]
+pub trait FfiForeignReplicaHosts: Send + Sync {
+    fn hosts(&self) -> Vec<Arc<dyn FfiForeignReplicaHost>>;
+}
+
+/// The replica access over hosts in another process — iOS's arm, where the
+/// File Provider extension is each set's one writer and
+/// [`on_demand_replica_access`] (this process's registry) sees none of them.
+/// Serve info reads each set's state DB and staging root from this process;
+/// the ingest door crosses to the extension through the host.
+#[cfg(feature = "file-provider-host")]
+#[uniffi::export]
+pub fn foreign_replica_access(hosts: Arc<dyn FfiForeignReplicaHosts>) -> Arc<FfiReplicaAccess> {
+    Arc::new(FfiReplicaAccess(
+        fauna_sync_engine::share_glue::on_demand_share_access(Arc::new(ForeignHosts(hosts))),
+    ))
+}
+
+#[cfg(feature = "file-provider-host")]
+struct ForeignHosts(Arc<dyn FfiForeignReplicaHosts>);
+
+#[cfg(feature = "file-provider-host")]
+impl fauna_sync_engine::share_glue::OnDemandHosts for ForeignHosts {
+    fn hosts(&self) -> Vec<Arc<dyn fauna_sync_engine::share_glue::OnDemandReplicaHost>> {
+        self.0
+            .hosts()
+            .into_iter()
+            .map(|host| {
+                Arc::new(ForeignHost(host))
+                    as Arc<dyn fauna_sync_engine::share_glue::OnDemandReplicaHost>
+            })
+            .collect()
+    }
+}
+
+#[cfg(feature = "file-provider-host")]
+struct ForeignHost(Arc<dyn FfiForeignReplicaHost>);
+
+/// The plane's replica as a foreign host describes it: the state DB keyed by
+/// the set's ref under the given state dir, the staging root as the kept
+/// root, no cache root. A replica whose ref does not parse is none.
+#[cfg(feature = "file-provider-host")]
+fn foreign_replica(r: FfiForeignReplica) -> Option<fauna_sync_engine::share_glue::OnDemandReplica> {
+    let folder_ref = match crate::sync_engine_host::parse_folder_id(&r.folder_id) {
+        Ok(folder_ref) => folder_ref,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "share plane: a foreign replica names no set; unserved this pass"
+            );
+            return None;
+        }
+    };
+    // The extension's host creates the state DB; until it has, there is no
+    // replica to read, and opening it here would create an empty one.
+    let db_path = folder_ref.state_db_path(std::path::Path::new(&r.state_dir));
+    if !db_path.is_file() {
+        return None;
+    }
+    Some(fauna_sync_engine::share_glue::OnDemandReplica {
+        folder: r.folder,
+        folder_id: folder_ref.to_wire(),
+        db_path,
+        kept_root: PathBuf::from(r.staging_root),
+        cache_root: None,
+    })
+}
+
+#[cfg(feature = "file-provider-host")]
+#[async_trait::async_trait]
+impl fauna_sync_engine::share_glue::OnDemandReplicaHost for ForeignHost {
+    async fn replica(&self) -> Option<fauna_sync_engine::share_glue::OnDemandReplica> {
+        let host = Arc::clone(&self.0);
+        tokio::task::spawn_blocking(move || host.replica())
+            .await
+            .ok()
+            .flatten()
+            .and_then(foreign_replica)
+    }
+
+    async fn share_ingest(
+        &self,
+        proven_actor_hex: &str,
+        rows: Vec<Vec<u8>>,
+        spool_dir: &std::path::Path,
+    ) -> anyhow::Result<fauna_sync_engine::share_pump::ShareIngestSummary> {
+        let host = Arc::clone(&self.0);
+        let (actor, spool) = (
+            proven_actor_hex.to_string(),
+            spool_dir.to_string_lossy().into_owned(),
+        );
+        let outcome = tokio::task::spawn_blocking(move || host.share_ingest(actor, rows, spool))
+            .await
+            .map_err(|e| anyhow::anyhow!("the foreign ingest door's thread ended: {e}"))?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(fauna_sync_engine::share_pump::ShareIngestSummary {
+            refused: outcome.refused,
+            overlaid: outcome.overlaid,
+            materialized: outcome.materialized,
+            already_current: outcome.already_current,
+            cursor: outcome.cursor,
+            storage_limited: outcome.storage_limited,
+        })
+    }
+}
+
 /// One running plane: the paint cell its driver writes, the handle that stops
 /// that driver, and the session's seat slot the driver binds through.
 /// Dropping the plane stops the driver, so a slot cannot lose track of a
@@ -250,6 +399,42 @@ async fn wait_for<T>(
     }
 }
 
+/// Run `drive` on `first`, then — each time the run ends — on the next LIVE
+/// handle `current` yields (`is_live`), until none comes within `deadline`.
+///
+/// The share plane's driver ends with the runtime it serves, while the slot
+/// it came from (`crate::account_runtime::handle`) may already hold the
+/// runtime that replaced it. The `poll` pause after every run bounds a driver
+/// that returns at once on a handle still reading live, so no run can spin.
+async fn follow_runtime<H, Fut>(
+    first: H,
+    mut current: impl FnMut() -> Option<H>,
+    is_live: impl Fn(&H) -> bool,
+    deadline: Duration,
+    poll: Duration,
+    mut drive: impl FnMut(H) -> Fut,
+) where
+    Fut: Future<Output = ()>,
+{
+    let mut handle = first;
+    loop {
+        drive(handle).await;
+        tokio::time::sleep(poll).await;
+        let Some(next) = wait_for(deadline, poll, || current().filter(|h| is_live(h))).await else {
+            tracing::info!(
+                "share plane: the account runtime it served ended and none replaced it; \
+                 the plane is down until it is started again"
+            );
+            return;
+        };
+        tracing::info!(
+            "share plane: the account runtime it served ended; following the runtime \
+             that replaced it"
+        );
+        handle = next;
+    }
+}
+
 #[fauna_uniffi_async::export]
 impl FfiNestClient {
     /// Start the share plane for the signed-in account: register the durable
@@ -280,9 +465,11 @@ impl FfiNestClient {
         listener: Arc<dyn FfiSharePlaneListener>,
     ) -> Result<(), FfiError> {
         let keypair = keypair_from_bytes(&owner_secret)?;
-        let account = wait_for(INPUTS_WAIT, INPUTS_POLL, crate::account_runtime::handle)
-            .await
-            .ok_or_else(|| general_err("the share plane needs the account runtime started"))?;
+        let account = wait_for(INPUTS_WAIT, INPUTS_POLL, || {
+            crate::account_runtime::handle().filter(|h| !h.is_closed())
+        })
+        .await
+        .ok_or_else(|| general_err("the share plane needs the account runtime started"))?;
         let conversations = wait_for(INPUTS_WAIT, INPUTS_POLL, || {
             self.conversations_session_handle()
         })
@@ -291,36 +478,56 @@ impl FfiNestClient {
         let nest = self.nest_arc();
         let secret_hex = hex::encode(&owner_secret);
 
-        fauna_client_share_host::install_durable_sink(&conversations, account.clone());
-
         let cell = SharePlaneCell::default();
         let opening_nudge = Arc::clone(&listener);
         let session_seat = crate::offline_share::session_seat_for(keypair.actor_id());
 
-        let plane = SharePlane {
-            host: Arc::new(FfiShareHost {
-                seams: ShareHostSeams {
-                    nest,
-                    secret_hex,
-                    conversations,
-                    folder_keys: crate::account_runtime::folder_key_store(),
-                },
-                session_seat: session_seat.clone(),
-                listener,
-            }),
+        let host = Arc::new(FfiShareHost {
+            seams: ShareHostSeams {
+                nest,
+                secret_hex,
+                conversations: conversations.clone(),
+                folder_keys: crate::account_runtime::folder_key_store(),
+            },
+            session_seat: session_seat.clone(),
+            listener,
+        });
+        let replica = access.0.clone();
+        let own_actor = keypair.actor_id();
+        let driver_cell = Arc::clone(&cell);
+        let spool_root = PathBuf::from(spool_dir);
+        // The driver serves ONE runtime and ends with it (`share_glue::run`
+        // selects on `closed()`), but this process's runtime can be replaced
+        // under a live plane: an app entering from two sign-in paths
+        // assembles twice, and the first runtime exits as the second mounts.
+        // A plane that took the outgoing handle would end at its next tick
+        // and nothing would start it again — no lift, no fold, and a seat that
+        // refuses every member's witness. So the plane follows the runtime:
+        // each time the one it served ends, it runs again on whichever live
+        // runtime replaced it. A teardown ends it for good (`forget`, which
+        // aborts this task).
+        let driver = follow_runtime(
             account,
-            replica: access.0.clone(),
-            own_actor: keypair.actor_id(),
-            cell: Arc::clone(&cell),
-            spool_root: PathBuf::from(spool_dir),
-            pump_interval: pump_interval_from_env(),
-        };
-        install_plane(
-            &PLANE,
-            cell,
-            session_seat,
-            fauna_sync_engine::share_glue::run(plane),
+            crate::account_runtime::handle,
+            |h: &fauna_sync_engine::account_runtime::AccountStoreHandle| !h.is_closed(),
+            INPUTS_WAIT,
+            INPUTS_POLL,
+            move |account| {
+                // The sink writes through the runtime it was given: re-pointed
+                // at each runtime the plane serves.
+                fauna_client_share_host::install_durable_sink(&conversations, account.clone());
+                fauna_sync_engine::share_glue::run(SharePlane {
+                    host: Arc::clone(&host),
+                    account,
+                    replica: replica.clone(),
+                    own_actor,
+                    cell: Arc::clone(&driver_cell),
+                    spool_root: spool_root.clone(),
+                    pump_interval: pump_interval_from_env(),
+                })
+            },
         );
+        install_plane(&PLANE, cell, session_seat, driver);
         // The opening reading, painted now rather than a whole pump cadence
         // later (the linux leg's finding): a device with nothing to serve
         // still says so. After the install, so the app's repaint reads the
@@ -420,7 +627,141 @@ impl SharePlaneHost for FfiShareHost {
 mod tests {
     use super::*;
     use fauna_sync_engine::share_glue::{ServeStatus, SharePlaneState};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A foreign replica (iOS's extension) reaches the plane keyed exactly as
+    /// the extension's own host keys it: the state DB under the given state
+    /// dir by the set's ref, the staging root as the kept root, no cache
+    /// root — and a ref that does not parse is no replica at all.
+    #[cfg(feature = "file-provider-host")]
+    #[test]
+    fn a_foreign_replica_is_keyed_as_the_extensions_host_keys_it() {
+        let state = tempfile::tempdir().unwrap();
+        let named = |state_dir: &std::path::Path| FfiForeignReplica {
+            folder: "Cabin".into(),
+            folder_id: "local:1".into(),
+            state_dir: state_dir.to_string_lossy().into_owned(),
+            staging_root: "/group/FileProvider/roots/aa/local%3A1".into(),
+        };
+        assert!(
+            foreign_replica(named(state.path())).is_none(),
+            "no state DB yet — the extension's host has not built the set"
+        );
+        let folder_ref = crate::sync_engine_host::parse_folder_id("local:1").unwrap();
+        std::fs::write(folder_ref.state_db_path(state.path()), b"").unwrap();
+        let replica = foreign_replica(named(state.path())).expect("a replica");
+        assert_eq!(replica.db_path, folder_ref.state_db_path(state.path()));
+        assert_eq!(
+            replica.kept_root,
+            PathBuf::from("/group/FileProvider/roots/aa/local%3A1")
+        );
+        assert_eq!(replica.cache_root, None, "the OS owns the hydrated tree");
+        assert_eq!(replica.folder_id, folder_ref.to_wire());
+        assert!(
+            foreign_replica(FfiForeignReplica {
+                folder: "Cabin".into(),
+                folder_id: "Cabin".into(),
+                state_dir: "/s".into(),
+                staging_root: "/r".into(),
+            })
+            .is_none(),
+            "a set name is not a ref"
+        );
+    }
+
+    /// A runtime handle for the follow loop: an id, and a closed flag the
+    /// "runtime" flips when it shuts down.
+    #[derive(Clone)]
+    struct FakeRuntime {
+        id: usize,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl FakeRuntime {
+        fn new(id: usize) -> Self {
+            Self {
+                id,
+                closed: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    /// The macOS in-person regression: the plane took the first runtime's
+    /// handle a moment before the app's second assembly replaced it. The run
+    /// on the outgoing runtime ends, and the plane runs again on the
+    /// replacement, never on the closed one the slot may still hold.
+    #[tokio::test(start_paused = true)]
+    async fn the_plane_follows_the_runtime_that_replaced_the_one_it_served() {
+        let first = FakeRuntime::new(1);
+        let second = FakeRuntime::new(2);
+        let slot = Arc::new(Mutex::new(first.clone()));
+        let served = Arc::new(Mutex::new(Vec::new()));
+
+        let follow = {
+            let slot = Arc::clone(&slot);
+            let reader = Arc::clone(&slot);
+            let served = Arc::clone(&served);
+            let second = second.clone();
+            follow_runtime(
+                first.clone(),
+                move || Some(reader.lock().unwrap().clone()),
+                |h: &FakeRuntime| !h.closed.load(Ordering::SeqCst),
+                Duration::from_secs(5),
+                Duration::from_millis(250),
+                move |h: FakeRuntime| {
+                    served.lock().unwrap().push(h.id);
+                    let slot = Arc::clone(&slot);
+                    let second = second.clone();
+                    async move {
+                        if h.id == 1 {
+                            // The first runtime exits; the slot still names it
+                            // for a moment before the second mounts.
+                            h.closed.store(true, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            *slot.lock().unwrap() = second;
+                        } else {
+                            // The replacement serves until it too ends, and
+                            // nothing replaces it.
+                            h.closed.store(true, Ordering::SeqCst);
+                        }
+                    }
+                },
+            )
+        };
+        follow.await;
+
+        assert_eq!(
+            *served.lock().unwrap(),
+            vec![1, 2],
+            "one run on the outgoing runtime, then one on its replacement"
+        );
+    }
+
+    /// With no live runtime to follow, the loop gives up at its deadline
+    /// rather than waiting for ever or re-running on the closed handle.
+    #[tokio::test(start_paused = true)]
+    async fn with_no_replacement_the_plane_stops_at_the_deadline() {
+        let only = FakeRuntime::new(1);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let follow = {
+            let only = only.clone();
+            let runs = Arc::clone(&runs);
+            follow_runtime(
+                only.clone(),
+                move || Some(only.clone()),
+                |h: &FakeRuntime| !h.closed.load(Ordering::SeqCst),
+                Duration::from_secs(5),
+                Duration::from_millis(250),
+                move |h: FakeRuntime| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    h.closed.store(true, Ordering::SeqCst);
+                    async {}
+                },
+            )
+        };
+        follow.await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
 
     /// The surface's readings are the shared labels verbatim — the FFI never
     /// makes a second decision about what a state reads as, so the four

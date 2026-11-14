@@ -707,13 +707,15 @@ struct FeedListView: View {
         await vm.configure(api: client.api, secretHex: secretHex, deviceIdHex: client.deviceId)
         // Load feeds + the current selection (the nest's Local timeline when none),
         // retrying while the client is still authenticating. `rehydrate` runs
-        // loadFeeds() + selectFeed(current | nil→Local), so posts on the default
+        // loadFeeds() + the shared `refreshCurrentFeed` (the current selection —
+        // Local, Trending, a custom feed or the imported posts — kept as is,
+        // Local when none), so posts on the default
         // feed appear PROMPTLY even on a fresh nest with no custom feeds — the
         // subscriber leg's `wait_post_count` needs the select INSIDE the retry (a
         // post-configure select gated behind a "feeds non-empty" loop lands too
         // late: on a fresh nest `feeds` never fills, so the loop burns its whole
-        // budget before selecting the Local feed). Mirrors macOS FeedSplitView's
-        // post-configure select; the loop just covers the client still authenticating.
+        // budget before selecting the Local feed). macOS FeedSplitView enters
+        // through the same `rehydrate`; the loop just covers the client still authenticating.
         for _ in 0..<10 {
             await vm.rehydrate()
             if !vm.posts.isEmpty || !vm.feeds.isEmpty { break }

@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use fauna_client::NestClient;
-use fauna_client_nostr::NostrBunkerClient;
 use fauna_client_nostr::nostr::{BunkerAppEntry, CreateBunkerInviteReply};
+use fauna_client_nostr::{NostrBunkerClient, NostrContentClient};
 // The `zaps` registry feature's half (`dynamic-features.md` § Charter members —
 // a subset member of `payments`).
 #[cfg(feature = "zaps")]
@@ -156,6 +156,67 @@ impl FfiNostrBunkerClient {
     pub async fn set_label(&self, connection_id: i64, label: String) -> Result<bool, FfiError> {
         self.client()
             .set_label(connection_id, label)
+            .await
+            .map_err(stringify)
+    }
+}
+
+// ── fauna.nostr.advertise.* ─────────────────────────────────────────────────
+
+/// UniFFI face of the Nostr advertisement of a sold post
+/// (`docs/goal/behavior/monetization.md` § The Nostr advertisement of a sold
+/// post) — `NostrContentClient`'s `advertise_supported` /
+/// `advertise_post` / `clear_advertisement`. The verb's presence rule is the
+/// shared `fauna_feed::post_nostr_advertise_verb`, fed by
+/// [`advertise_supported`](Self::advertise_supported); obtained from
+/// [`crate::nest_client::FfiNestClient::nostr_advertise`].
+///
+/// `advertise` sits on its own `zaps`-gated `impl` block (a method-level
+/// `#[cfg]` is not honoured by `#[uniffi::export]`); the withdrawal and the
+/// capability read are compiled always, like the nest's `clear`.
+#[derive(uniffi::Object)]
+pub struct FfiNostrAdvertiseClient {
+    nest: Arc<NestClient>,
+}
+
+impl FfiNostrAdvertiseClient {
+    pub(crate) fn from_nest(nest: Arc<NestClient>) -> Arc<Self> {
+        Arc::new(Self { nest })
+    }
+
+    fn client(&self) -> NostrContentClient<Arc<NestClient>> {
+        NostrContentClient::new(Arc::clone(&self.nest))
+    }
+}
+
+#[fauna_uniffi_async::export]
+impl FfiNostrAdvertiseClient {
+    /// Whether the nest advertises the `nostr-advertise` capability — the
+    /// `can_advertise` input of `post_nostr_advertise_verb` (with the build's
+    /// own `zaps` member).
+    pub async fn advertise_supported(&self) -> Result<bool, FfiError> {
+        self.client().advertise_supported().await.map_err(stringify)
+    }
+
+    /// `fauna.nostr.advertise.clear` — stop advertising `post_id` (64 hex).
+    /// `false` when it was not advertised.
+    pub async fn clear_advertisement(&self, post_id: String) -> Result<bool, FfiError> {
+        self.client()
+            .clear_advertisement(post_id)
+            .await
+            .map_err(stringify)
+    }
+}
+
+#[cfg(feature = "zaps")]
+#[fauna_uniffi_async::export]
+impl FfiNostrAdvertiseClient {
+    /// `fauna.nostr.advertise.set` — advertise one of the caller's own sold
+    /// posts; answers the act's epoch-seconds time. The nest's typed refusals
+    /// arrive as the error's text, verbatim.
+    pub async fn advertise_post(&self, post_id: String) -> Result<u64, FfiError> {
+        self.client()
+            .advertise_post(post_id)
             .await
             .map_err(stringify)
     }

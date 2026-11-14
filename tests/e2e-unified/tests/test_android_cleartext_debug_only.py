@@ -185,7 +185,7 @@ def test_only_the_debug_source_set_permits_cleartext():
     assert not offenders, (
         "a network security config outside the debug source set permits "
         f"cleartext: {offenders}. Production's no-cleartext policy is never "
-        "widened (testing.md § Default app and nest mode → Android's run venue, "
+        "widened (testing.md § Default app and nest mode → Android's emulator placement, "
         "constraint 3)."
     )
 
@@ -227,7 +227,7 @@ def test_the_debug_overlay_exists_and_permits_loopback():
     assert debug, (
         "the debug cleartext overlay is missing; without it an android e2e run "
         "cannot reach the standalone nest at http://127.0.0.1:<port> at all "
-        "(testing.md § Default app and nest mode → Android's run venue)."
+        "(testing.md § Default app and nest mode → Android's emulator placement)."
     )
     assert _permits_cleartext(debug)
     assert "127.0.0.1" in debug

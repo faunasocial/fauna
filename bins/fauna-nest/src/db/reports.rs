@@ -603,10 +603,13 @@ impl CacheDb {
             )
             .context("prepare export view")?;
         let rows: Vec<([u8; 32], String, u32)> = stmt
-            .query_map(rusqlite::params![MAX_REPORT_EXCHANGE_ENTRIES], |row| {
-                let hash: Vec<u8> = row.get(0)?;
-                Ok((hash, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
-            })
+            .query_map(
+                rusqlite::params![i64::try_from(MAX_REPORT_EXCHANGE_ENTRIES)?],
+                |row| {
+                    let hash: Vec<u8> = row.get(0)?;
+                    Ok((hash, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+                },
+            )
             .context("query export view")?
             .filter_map(|r| r.ok())
             .filter_map(|(hash, factor, n)| {

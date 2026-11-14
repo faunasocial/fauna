@@ -317,9 +317,62 @@ fn history_admission_key(channel_id: &ChannelId) -> Vec<u8> {
 /// `PastEpochCommit` — so the set only ever holds current-epoch refusals
 /// (capped as a spam backstop; an in-group flooder past the cap degrades to
 /// the pre-existing loud-stall + replica-resync posture).
-/// Value: concatenated 40-byte entries (32-byte hash ‖ 8-byte BE epoch).
-/// Additive at-rest, like every key above.
+/// Value: the version byte [`POLICY_REFUSED_COMMIT_VERSION`], then
+/// concatenated [`POLICY_REFUSED_COMMIT_ENTRY`]-byte entries (32-byte hash ‖
+/// 8-byte BE epoch ‖ the refused commit's 32-byte MLS-authenticated committer,
+/// all zero when the refusal could not read one) — the committer is what the
+/// forked-seat rule's claim trigger compares to the home nest's claimant
+/// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+/// append → *A forked seat is final, says so, and heals only by a fresh
+/// Welcome*, part (a)). A value of any other shape (the earlier unversioned
+/// 40-byte entries) reads as empty and is replaced by the next record:
+/// derived state, inside the 0.1.x compat-free window. Additive at-rest, like
+/// every key above.
 const POLICY_REFUSED_COMMIT_PREFIX: &[u8] = b"fauna:policy_refused_commit:";
+
+/// The leading byte of a [`POLICY_REFUSED_COMMIT_PREFIX`] value. Every value
+/// is `1 + 72·k` bytes long — odd — and the earlier unversioned form was
+/// `40·k` — even — so the two can never be mistaken for each other.
+const POLICY_REFUSED_COMMIT_VERSION: u8 = 2;
+
+/// One [`POLICY_REFUSED_COMMIT_PREFIX`] entry's width: hash ‖ epoch ‖ committer.
+const POLICY_REFUSED_COMMIT_ENTRY: usize = 72;
+
+/// The entries of a [`POLICY_REFUSED_COMMIT_PREFIX`] value; empty for a value
+/// of any other shape (see the prefix's note on the earlier form).
+fn policy_refused_entries(v: &[u8]) -> &[[u8; POLICY_REFUSED_COMMIT_ENTRY]] {
+    match v.split_first() {
+        Some((&POLICY_REFUSED_COMMIT_VERSION, rest))
+            if rest.len().is_multiple_of(POLICY_REFUSED_COMMIT_ENTRY) =>
+        {
+            rest.as_chunks::<POLICY_REFUSED_COMMIT_ENTRY>().0
+        }
+        _ => &[],
+    }
+}
+
+/// A memo entry's group epoch.
+fn policy_refused_entry_epoch(entry: &[u8; POLICY_REFUSED_COMMIT_ENTRY]) -> u64 {
+    u64::from_be_bytes(entry[32..40].try_into().unwrap())
+}
+
+/// A memo entry's committer, `None` when the refusal could not read one.
+fn policy_refused_entry_committer(entry: &[u8; POLICY_REFUSED_COMMIT_ENTRY]) -> Option<[u8; 32]> {
+    let committer: [u8; 32] = entry[40..72].try_into().unwrap();
+    (committer != [0u8; 32]).then_some(committer)
+}
+
+/// A memo value holding exactly `entries`, or `None` for none (the key is
+/// removed rather than stored empty).
+fn policy_refused_value<'a>(
+    entries: impl Iterator<Item = &'a [u8; POLICY_REFUSED_COMMIT_ENTRY]>,
+) -> Option<Vec<u8>> {
+    let mut v = vec![POLICY_REFUSED_COMMIT_VERSION];
+    for entry in entries {
+        v.extend_from_slice(entry);
+    }
+    (v.len() > 1).then_some(v)
+}
 
 /// The most current-epoch refusals the memo retains per channel (spam backstop).
 const POLICY_REFUSED_COMMIT_CAP: usize = 512;
@@ -560,6 +613,14 @@ pub struct DecryptedMessage {
 /// Core MLS engine that manages group state, key packages, and message
 /// encryption/decryption.
 ///
+/// The counts behind [`MlsEngine::group_install_mark`]: one per channel,
+/// plus the provider-store swaps, which replace every group at once.
+#[derive(Default)]
+struct GroupInstalls {
+    store_swaps: u64,
+    per_channel: HashMap<ChannelId, u64>,
+}
+
 /// Each engine is bound to a single actor identity and uses an in-memory
 /// OpenMLS provider with a SQLite-backed persistence layer for long-lived
 /// state.
@@ -571,6 +632,13 @@ pub struct MlsEngine {
     #[cfg(feature = "native")]
     pub(crate) storage: SqliteStorage,
     groups: Mutex<HashMap<ChannelId, MlsGroup>>,
+    /// How often each channel's group state was **replaced** by anything but
+    /// a commit applied to it — a Welcome join, a seat dropped or forgotten, a
+    /// targeted import, a provider-store swap. Read through
+    /// [`Self::group_install_mark`]: the chat walk's anchor is valid only while
+    /// the mark it was taken at still stands (`devices.md` § Cross-device MLS
+    /// group-state sync, Rule 2 → *A later epoch in a header is a claim*).
+    group_installs: Mutex<GroupInstalls>,
     // The merge-failed-commit memo lives in the provider KV, not here — see
     // `MERGE_FAILED_COMMIT_PREFIX`: it must ride the same blob/CAS as the
     // consumed ratchet state it annotates.
@@ -584,6 +652,18 @@ pub struct MlsEngine {
     /// flight). Populated by the restoring constructor, emptied per channel by
     /// any in-process stage / merge / clear.
     resumed_pending_channels: Mutex<HashSet<ChannelId>>,
+    /// Channels whose pending was staged by THIS process and gate-sent with
+    /// **no answer** (a transport fault, a lost reply), keyed to the seq the
+    /// send gated on (`expect_no_commit_since`). Such a send may have landed,
+    /// so the pending is kept — on the device and in the replica — until the
+    /// log decides it (`devices.md` § Cross-device MLS group-state sync,
+    /// Rule 2 → *An own-leaf claim is the account's replica's to answer*,
+    /// premise (a)): a walk that meets the record merges it by hash (Rule 1),
+    /// and a complete walk from at or before the gated seq that ends without
+    /// meeting it settles it ([`Self::settle_unanswered_pending`]). Session
+    /// memory only: a relaunch reloads the pending as *resumed*, which the
+    /// gate-less reconcile settles the same way.
+    unanswered_pending: Mutex<HashMap<ChannelId, i64>>,
     /// This device's **last-seen replica listing**: the channels named by a
     /// replica listing this engine adopted (the provider swap, the targeted
     /// import) or authored (a flush of its own export that landed), less the
@@ -1022,9 +1102,11 @@ impl MlsEngine {
             signer,
             storage,
             groups: Mutex::new(groups),
+            group_installs: Mutex::new(GroupInstalls::default()),
 
             retired: AtomicBool::new(false),
             resumed_pending_channels: Mutex::new(resumed),
+            unanswered_pending: Mutex::new(HashMap::new()),
             replica_listed: Mutex::new(replica_listed),
         };
         engine.lift_kept_epoch_secrets_from_sqlite();
@@ -1117,9 +1199,11 @@ impl MlsEngine {
             #[cfg(feature = "native")]
             storage,
             groups: Mutex::new(HashMap::new()),
+            group_installs: Mutex::new(GroupInstalls::default()),
 
             retired: AtomicBool::new(false),
             resumed_pending_channels: Mutex::new(HashSet::new()),
+            unanswered_pending: Mutex::new(HashMap::new()),
             replica_listed: Mutex::new(HashSet::new()),
         })
     }
@@ -1160,9 +1244,11 @@ impl MlsEngine {
             #[cfg(feature = "native")]
             storage,
             groups: Mutex::new(HashMap::new()),
+            group_installs: Mutex::new(GroupInstalls::default()),
 
             retired: AtomicBool::new(false),
             resumed_pending_channels: Mutex::new(HashSet::new()),
+            unanswered_pending: Mutex::new(HashMap::new()),
             replica_listed: Mutex::new(HashSet::new()),
         })
     }
@@ -1929,6 +2015,7 @@ impl MlsEngine {
             .lock()
             .expect("lock poisoned")
             .insert(channel_id, group);
+        self.note_group_installed(&channel_id);
 
         Ok(channel_id)
     }
@@ -2073,6 +2160,7 @@ impl MlsEngine {
             .lock()
             .expect("lock poisoned")
             .insert(channel_id, group);
+        self.note_group_installed(&channel_id);
 
         Ok(channel_id)
     }
@@ -2104,6 +2192,7 @@ impl MlsEngine {
             .map_err(|e| MlsError::Storage(format!("delete the evicted group: {e:?}")))?;
         groups.remove(channel_id);
         drop(groups);
+        self.note_group_installed(channel_id);
         // The pending stamp described the evicted seat.
         self.forget_pending_commit_hash(channel_id);
         // Off the durable `active_groups` set too, as `forget_group` does, so a
@@ -2144,6 +2233,7 @@ impl MlsEngine {
                 groups.remove(channel_id);
             }
         }
+        self.note_group_installed(channel_id);
         self.forget_group(channel_id)
     }
 
@@ -2635,6 +2725,63 @@ impl MlsEngine {
             && self.has_pending_commit(channel_id)
     }
 
+    /// Record that `channel_id`'s pending, staged by this process, was
+    /// gate-sent after `gated_on_seq` and got **no answer** — see the field
+    /// doc on `unanswered_pending`. A no-op when nothing is pending.
+    pub fn note_pending_unanswered(&self, channel_id: &ChannelId, gated_on_seq: i64) {
+        if !self.has_pending_commit(channel_id) {
+            return;
+        }
+        self.unanswered_pending
+            .lock()
+            .expect("lock poisoned")
+            .insert(*channel_id, gated_on_seq);
+    }
+
+    /// Whether `channel_id` carries a pending whose gate-send got no answer.
+    pub fn has_unanswered_pending(&self, channel_id: &ChannelId) -> bool {
+        self.unanswered_pending
+            .lock()
+            .expect("lock poisoned")
+            .contains_key(channel_id)
+    }
+
+    /// Settle an unanswered gate-send at the end of a **complete, unstalled**
+    /// walk of `channel_id`'s log that began at `walk_started_at`. Returns
+    /// `true` when the replica must be re-sealed: the pending is gone (the walk
+    /// merged it by hash, or another member's commit superseded it), or the
+    /// walk covered every record after the seq the send gated on without
+    /// meeting it — the nest admits a gated commit only as the first commit
+    /// after that seq, so a commit this walk never met never landed — and it is
+    /// cleared here. `false` when nothing was unanswered, or the walk began
+    /// past the gated seq and so proves nothing.
+    pub fn settle_unanswered_pending(
+        &self,
+        channel_id: &ChannelId,
+        walk_started_at: i64,
+    ) -> Result<bool> {
+        let Some(gated_on) = self
+            .unanswered_pending
+            .lock()
+            .expect("lock poisoned")
+            .get(channel_id)
+            .copied()
+        else {
+            return Ok(false);
+        };
+        if self.has_pending_commit(channel_id) {
+            if walk_started_at > gated_on {
+                return Ok(false);
+            }
+            self.clear_pending_commit(channel_id)?;
+        }
+        self.unanswered_pending
+            .lock()
+            .expect("lock poisoned")
+            .remove(channel_id);
+        Ok(true)
+    }
+
     /// Stamp `commit_bytes`' identity as `channel_id`'s pending-commit identity.
     /// Called by each staging primitive with the exact bytes it returns.
     fn record_pending_commit_hash(&self, channel_id: &ChannelId, commit_bytes: &[u8]) {
@@ -2645,6 +2792,11 @@ impl MlsEngine {
         // superseded (openmls forbids staging over an unmerged pending, so a
         // resumed pending was merged or cleared before reaching here).
         self.resumed_pending_channels
+            .lock()
+            .expect("lock poisoned")
+            .remove(channel_id);
+        // Likewise a fresh stage supersedes any unanswered one.
+        self.unanswered_pending
             .lock()
             .expect("lock poisoned")
             .remove(channel_id);
@@ -2994,11 +3146,42 @@ impl MlsEngine {
         values
             .get(&policy_refused_commit_key(channel_id))
             .is_some_and(|v| {
-                v.as_chunks::<40>()
-                    .0
+                policy_refused_entries(v)
                     .iter()
-                    .any(|entry| u64::from_be_bytes(entry[32..40].try_into().unwrap()) == epoch)
+                    .any(|entry| policy_refused_entry_epoch(entry) == epoch)
             })
+    }
+
+    /// The MLS-authenticated committers of the commits `channel_id`'s
+    /// policy-refused memo ([`POLICY_REFUSED_COMMIT_PREFIX`]) holds at the
+    /// group's current epoch, in record order and without repeats — the
+    /// identities the forked-seat rule's claim trigger compares to the home
+    /// nest's claimant (`federation-shared-folders.md` § Cross-nest shared
+    /// folders + channel append → *A forked seat is final, says so, and heals
+    /// only by a fresh Welcome*, part (a)). A refusal that could not read its
+    /// committer contributes none. Empty for a group this engine does not hold.
+    pub fn policy_refused_committers_at_current_epoch(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Vec<ActorId> {
+        let Ok(epoch) = self.current_epoch(channel_id) else {
+            return Vec::new();
+        };
+        let values = self.provider.storage().values.read().unwrap();
+        let mut committers: Vec<ActorId> = Vec::new();
+        if let Some(v) = values.get(&policy_refused_commit_key(channel_id)) {
+            for entry in policy_refused_entries(v) {
+                if policy_refused_entry_epoch(entry) != epoch {
+                    continue;
+                }
+                if let Some(c) = policy_refused_entry_committer(entry)
+                    && !committers.iter().any(|a| a.0 == c)
+                {
+                    committers.push(ActorId(c));
+                }
+            }
+        }
+        committers
     }
 
     /// The MLS-authenticated sender of the Welcome this device joined
@@ -3066,22 +3249,24 @@ impl MlsEngine {
         let Some(v) = values.get(&key) else {
             return false;
         };
-        let mut kept = Vec::with_capacity(v.len());
         let mut hit = false;
-        for entry in v.as_chunks::<40>().0 {
-            let epoch = u64::from_be_bytes(entry[32..40].try_into().unwrap());
-            if epoch < group_epoch {
-                continue; // pruned: openMLS's epoch precheck skips these pre-decrypt
-            }
+        // Pruned: entries below the group's epoch — openMLS's epoch precheck
+        // skips those commits pre-decrypt.
+        let kept = policy_refused_value(policy_refused_entries(v).iter().filter(|entry| {
+            let epoch = policy_refused_entry_epoch(entry);
             if entry[..32] == *commit_hash.as_slice() && epoch == group_epoch {
                 hit = true;
             }
-            kept.extend_from_slice(entry);
-        }
-        if kept.is_empty() {
-            values.remove(&key);
-        } else if kept.len() != v.len() {
-            values.insert(key, kept);
+            epoch >= group_epoch
+        }));
+        match kept {
+            None => {
+                values.remove(&key);
+            }
+            Some(kept) if kept != *v => {
+                values.insert(key, kept);
+            }
+            Some(_) => {}
         }
         hit
     }
@@ -3095,26 +3280,33 @@ impl MlsEngine {
         channel_id: &ChannelId,
         commit_hash: [u8; 32],
         group_epoch: u64,
+        committer: Option<[u8; 32]>,
     ) {
         let key = policy_refused_commit_key(channel_id);
         {
             let mut values = self.provider.storage().values.write().unwrap();
-            let mut v = values.get(&key).cloned().unwrap_or_default();
-            // Prune below-epoch entries; cap by dropping oldest.
-            let mut kept: Vec<u8> = Vec::with_capacity(v.len() + 40);
-            for entry in v.as_chunks::<40>().0 {
-                let epoch = u64::from_be_bytes(entry[32..40].try_into().unwrap());
-                if epoch >= group_epoch {
-                    kept.extend_from_slice(entry);
-                }
+            let mut entries: Vec<[u8; POLICY_REFUSED_COMMIT_ENTRY]> = values
+                .get(&key)
+                .map(|v| {
+                    // Prune below-epoch entries.
+                    policy_refused_entries(v)
+                        .iter()
+                        .filter(|entry| policy_refused_entry_epoch(entry) >= group_epoch)
+                        .copied()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut entry = [0u8; POLICY_REFUSED_COMMIT_ENTRY];
+            entry[..32].copy_from_slice(&commit_hash);
+            entry[32..40].copy_from_slice(&group_epoch.to_be_bytes());
+            entry[40..72].copy_from_slice(&committer.unwrap_or([0u8; 32]));
+            entries.push(entry);
+            // Cap by dropping the oldest.
+            let excess = entries.len().saturating_sub(POLICY_REFUSED_COMMIT_CAP);
+            entries.drain(..excess);
+            if let Some(v) = policy_refused_value(entries.iter()) {
+                values.insert(key, v);
             }
-            v = kept;
-            v.extend_from_slice(&commit_hash);
-            v.extend_from_slice(&group_epoch.to_be_bytes());
-            while v.len() / 40 > POLICY_REFUSED_COMMIT_CAP {
-                v.drain(..40);
-            }
-            values.insert(key, v);
         }
         #[cfg(feature = "native")]
         if let Err(e) = self.save_state() {
@@ -3500,7 +3692,12 @@ impl MlsEngine {
                 if let Some(owner) = self.folder_channel_owner(channel_id) {
                     let carries_proposals = staged_commit.queued_proposals().next().is_some();
                     if carries_proposals && committer_identity != Some(owner.0) {
-                        self.record_policy_refused_commit(channel_id, commit_hash, group_epoch);
+                        self.record_policy_refused_commit(
+                            channel_id,
+                            commit_hash,
+                            group_epoch,
+                            committer_identity,
+                        );
                         self.forget_merge_failed_commit(channel_id);
                         return Err(MlsError::PolicyRefusedCommit {
                             reason: format!(
@@ -3537,7 +3734,12 @@ impl MlsEngine {
                         }
                     };
                     if let CommitVerdict::Refuse(reason) = verdict {
-                        self.record_policy_refused_commit(channel_id, commit_hash, group_epoch);
+                        self.record_policy_refused_commit(
+                            channel_id,
+                            commit_hash,
+                            group_epoch,
+                            committer_identity,
+                        );
                         self.forget_merge_failed_commit(channel_id);
                         return Err(MlsError::PolicyRefusedCommit {
                             reason: format!("room policy: {reason}"),
@@ -3721,6 +3923,35 @@ impl MlsEngine {
             .is_some_and(|group| group.is_active())
     }
 
+    /// A mark that moves whenever `channel_id`'s group state is replaced by
+    /// anything but a commit applied to it: a Welcome join, a seat dropped or
+    /// forgotten, a targeted import, or a provider-store swap (which moves
+    /// every channel's mark). Equal marks mean the state a reader saw is the
+    /// one still held, advanced only by commits; the chat walk's anchor rests
+    /// on that (`devices.md` § Cross-device MLS group-state sync, Rule 2 → *A
+    /// later epoch in a header is a claim: the re-walk from 0 decides*).
+    pub fn group_install_mark(&self, channel_id: &ChannelId) -> u64 {
+        let installs = self.group_installs.lock().expect("lock poisoned");
+        installs.store_swaps + installs.per_channel.get(channel_id).copied().unwrap_or(0)
+    }
+
+    fn note_group_installed(&self, channel_id: &ChannelId) {
+        *self
+            .group_installs
+            .lock()
+            .expect("lock poisoned")
+            .per_channel
+            .entry(*channel_id)
+            .or_insert(0) += 1;
+    }
+
+    fn note_group_store_swapped(&self) {
+        self.group_installs
+            .lock()
+            .expect("lock poisoned")
+            .store_swaps += 1;
+    }
+
     /// Locally **forget** a group — the client-side leave primitive for a shared
     /// folder (`docs/goal/ui/folders.md` § Sharing: a `folder-leave-button`
     /// "to remove yourself"). Drops the group from the engine so
@@ -3748,6 +3979,7 @@ impl MlsEngine {
             let mut groups = self.groups.lock().expect("lock poisoned");
             groups.remove(channel_id);
         }
+        self.note_group_installed(channel_id);
         // A forgotten group carries no pending, so its identity stamp would be a
         // lie a later snapshot could restore.
         self.forget_pending_commit_hash(channel_id);
@@ -4038,6 +4270,9 @@ impl MlsEngine {
             }
         }
 
+        // Every group's state was just replaced, whatever reloads below.
+        self.note_group_store_swapped();
+
         // Re-store the signer so OpenMLS can find it after the storage swap.
         let _ = self.signer.store(self.provider.storage());
 
@@ -4170,6 +4405,7 @@ impl MlsEngine {
                 self.persist_group(channel_id, &group);
                 groups.insert(*channel_id, group);
                 drop(groups);
+                self.note_group_installed(channel_id);
                 // Adopted from a listing, so on this device's last-seen one.
                 self.note_replica_listed(&[*channel_id]);
                 Ok(())
@@ -4916,6 +5152,35 @@ mod tests {
         alice
             .join_from_welcome(welcome)
             .expect("a package minted after the restore joins its Welcome");
+    }
+
+    /// **The own-leaf stall is read from a claim any member can forge**
+    /// (`devices.md` § Cross-device MLS group-state sync, Rule 2 → *An own-leaf
+    /// claim is the account's replica's to answer*). A private message's sender data
+    /// is sealed under a key derived from the epoch's shared sender-data
+    /// secret, which every member holds. Mallory seals sender data naming
+    /// ALICE's leaf over a garbage ciphertext; Alice's engine reports the
+    /// cross-device resync signal for a record no device of Alice's made.
+    #[test]
+    fn a_forged_own_leaf_claim_in_sender_data_reads_as_the_resync_signal() {
+        let alice = MlsEngine::new_in_memory(ActorKeypair::from_secret([1u8; 32])).unwrap();
+        let mallory = MlsEngine::new_in_memory(ActorKeypair::from_secret([2u8; 32])).unwrap();
+        let mallory_kps = mallory.generate_key_packages(1).unwrap();
+        let (channel, welcome) = alice.create_group(&mallory_kps).unwrap();
+        mallory.join_from_welcome(welcome).unwrap();
+        let epoch = alice.current_epoch(&channel).unwrap();
+
+        // A commit Mallory stages herself gives the framing; she never sends it.
+        let honest = mallory.self_update(&channel).unwrap();
+        let forged = crate::forged_claim::forged_other_leaf_commit(&mallory, &honest);
+
+        let err = alice
+            .process_commit(&channel, &forged)
+            .expect_err("garbage cannot process");
+        assert!(
+            matches!(err, MlsError::OwnLeafCommit { epoch: e } if e == epoch),
+            "got {err:?}"
+        );
     }
 
     #[test]

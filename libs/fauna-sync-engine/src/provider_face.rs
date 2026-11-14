@@ -253,6 +253,16 @@ pub trait ProviderEngine {
     /// demotes a kept-root body to the cache root only on this proof.
     fn is_dehydration_safe(&self, rel: &str) -> bool;
 
+    /// Is the body at `rel` a second copy of bytes the nest already serves —
+    /// a `Placeholder` row whose local identity and recorded head both hash
+    /// to exactly the bytes on disk, under [`Self::is_dehydration_safe`]'s
+    /// holder-kept and group-set clauses
+    /// (`SyncEngine::is_recorded_placeholder_copy`)? What a recorded write
+    /// the staging root already demoted leaves behind when the OS re-drives
+    /// it after a lost ack: the row is already a placeholder, so only the
+    /// copy is left to remove.
+    fn is_recorded_placeholder_copy(&self, rel: &str) -> bool;
+
     /// Is the body at `rel` one the share plane landed from a peer and the
     /// nest has not confirmed yet (`SyncEngine::holds_provisional_peer_body`)?
     /// Such a body rests in an owned tree's kept root but is NOT a write
@@ -669,17 +679,22 @@ pub async fn serve_evict<E: ProviderEngine>(engine: &E, rel: &str) -> Result<()>
 /// § Apple File Provider binding → *Third-party deposit adoption on a
 /// capability host*). Row first, unlink second, on the engine's own proof
 /// that the staged bytes are the recorded head: a body that proof does not
-/// cover is left as it is.
+/// cover is left as it is. A row ALREADY demoted whose staged bytes are its
+/// recorded head — a recorded write the OS re-drove after a lost ack, which
+/// the extension re-staged and ingest acked — loses its copy the same way,
+/// on [`ProviderEngine::is_recorded_placeholder_copy`]'s proof, the row left
+/// as it is (`p2p-shared-set-build.md` § *Built — iOS's leg*).
 pub fn settle_adopted_in_staging<E: ProviderEngine>(
     engine: &E,
     staging_root: &Path,
     rel: &str,
 ) -> Result<()> {
     let staged = fauna_core::path_guard::contained_apply_target(staging_root, rel)?;
-    if !engine.is_dehydration_safe(rel) {
+    if engine.is_dehydration_safe(rel) {
+        engine.mark_placeholder(rel)?;
+    } else if !engine.is_recorded_placeholder_copy(rel) {
         return Ok(());
     }
-    engine.mark_placeholder(rel)?;
     match std::fs::remove_file(&staged) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
@@ -898,6 +913,9 @@ mod tests {
             Ok(RowPresence::Absent)
         }
         fn is_dehydration_safe(&self, _rel: &str) -> bool {
+            false
+        }
+        fn is_recorded_placeholder_copy(&self, _rel: &str) -> bool {
             false
         }
         async fn ingest(&self, rel: &str) -> Result<UploadOutcome> {

@@ -50,7 +50,7 @@ for pat in '127\.0\.0\.1' 'domain-config'; do
     n="$(grep -c -- "$pat" "$WORK/cfg.txt" || true)"
     if [ "$expect" = absent ] && [ "$n" != "0" ]; then
         echo "ERROR: $APK's network security config carries '$pat' ($n line(s)) — the debug-only" >&2
-        echo "  cleartext overlay reached a shipping artifact (testing.md § Android's run venue)." >&2
+        echo "  cleartext overlay reached a shipping artifact (testing.md § Android's emulator placement)." >&2
         fail=1
     elif [ "$expect" = present ] && [ "$n" = "0" ]; then
         echo "ERROR: $APK's network security config does not show '$pat' — the string decoding" >&2

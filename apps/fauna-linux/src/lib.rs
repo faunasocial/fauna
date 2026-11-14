@@ -171,7 +171,7 @@ pub fn run(build_commit: Option<&'static str>) {
     // the role LaunchServices plays on macOS), while each bound launch runs
     // as its own process and the shared per-account `AccountInstanceLock` —
     // not the bus name — decides whether the account is free (acquired in
-    // `app.rs`'s `AuthSuccess` arm; wizard-routed bound launches refuse in
+    // `app.rs`'s `SessionEstablished` arm; wizard-routed bound launches refuse in
     // `build_ui` below). Production keeps single-instance raise behaviour for
     // every launch that carries no binding.
     // Launch-collision detection, BEFORE GApplication is built — the one
@@ -604,7 +604,7 @@ static LAUNCH_FAILED_CLOSED: std::sync::atomic::AtomicBool =
 ///    offer, so the ordinary routing applies.
 /// 3. **That account is currently served**, per the shared display-only probe.
 ///
-/// Answering here rather than at `AuthSuccess` is deliberate: this is the last
+/// Answering here rather than at `SessionEstablished` is deliberate: this is the last
 /// moment before GApplication's uniqueness would redirect the process into the
 /// running instance, and it is upstream of the silent challenge, so a collided
 /// launch never authenticates as an account it cannot run as.
@@ -661,7 +661,7 @@ fn show_launch_instance_chooser(application: &adw::Application) -> bool {
     let on_pick = move |actor_id: &str| {
         // `bind_account` is the single gate — it re-checks the account exists,
         // has a secret, and is not re-auth-flagged. The instance lock is
-        // re-taken later, at `AuthSuccess`; between this click and that
+        // re-taken later, at `SessionEstablished`; between this click and that
         // acquire the account can still be lost to another process, which is
         // exactly why the probe is display-only.
         if let Err(e) = account_registry().bind_account(actor_id) {
@@ -1240,7 +1240,8 @@ fn sign_out_after_stop(app: &adw::Application, recorded: fauna_client_accounts::
     // the user as one line, on the onboarding window this hands them
     // (`principles.md` § The user always controls their data puts the delete
     // affordance in the app, and a log is not one).
-    let outcome = account_scope::finish(false, Some(recorded));
+    let outcome =
+        account_scope::finish(fauna_client_accounts::FinishCaller::Gesture, Some(recorded));
     // The window serves no account now: put down the process holder's
     // instance lock and its shared-root serving lock, AFTER the erase. A
     // holder kept past here made this signed-out window a "sibling" to every
@@ -1641,7 +1642,7 @@ fn register_switch_account_handler(application: &adw::Application) {
                         AgentWiring::Rebind,
                         move |node_url, secret_hex| {
                             // Swap the process holder to the incoming account BEFORE
-                            // the rebuild, not at its `AuthSuccess` (which then answers
+                            // the rebuild, not at its `SessionEstablished` (which then answers
                             // `Reused`). The rebuilt Account page keys "the account
                             // this window serves" on the holder
                             // (`fauna_client_accounts::session_account`) — so a holder
@@ -1653,7 +1654,7 @@ fn register_switch_account_handler(application: &adw::Application) {
                             // is the swap `account-scoping.md` § Concurrent instances
                             // prescribes, at the earliest point it is safe. A bound
                             // secondary switching off its binding is refused here
-                            // exactly as `AuthSuccess` refuses it.
+                            // exactly as `SessionEstablished` refuses it.
                             if let Err(refusal) =
                                 crate::account_scope::become_session_instance(&actor_id)
                             {
@@ -2871,6 +2872,11 @@ fn launch_authenticated(
         machine,
     ));
     settings::set_client(&fauna_client);
+    // The local half of the post-auth hooks first — the session instance, the
+    // MLS engine, the account runtime — whether or not the nest answers; the
+    // bearer refresh's `AuthSuccess` then carries the network half
+    // (`account-client-lifecycle.md` § The client-side lifecycle).
+    fauna_client.establish_session();
     fauna_client.authenticate();
     // Keep the server-data cache (handle/domain/tier) current from the session
     // client's own mint — the launch machine's silent challenge already carried
@@ -3615,7 +3621,10 @@ fn reset_after_stop(
         // reset look like a failed sign-out. The production path above
         // is where a survivor owes the user a say; the sweeps still log
         // their paths either way.
-        let _ = account_scope::finish(false, Some(account_scope::record_sign_out()));
+        let _ = account_scope::finish(
+            fauna_client_accounts::FinishCaller::Gesture,
+            Some(account_scope::record_sign_out()),
+        );
         // Signed out, so serving nothing — as the production sign-out.
         fauna_client_accounts::release_process_session_instance();
         let onboarding = views::onboarding::build_onboarding_window(application);
@@ -3631,7 +3640,10 @@ fn reset_after_stop(
         // as the authenticated arm above).
         // Dropped for the same reason as the arm above — no user, no
         // line.
-        let _ = account_scope::finish(false, Some(account_scope::record_sign_out()));
+        let _ = account_scope::finish(
+            fauna_client_accounts::FinishCaller::Gesture,
+            Some(account_scope::record_sign_out()),
+        );
         fauna_client_accounts::release_process_session_instance();
         if let Some(m) = current_onboarding_machine.borrow().as_ref() {
             // Already in the onboarding wizard — rewind the
@@ -4033,7 +4045,7 @@ fn handle_test_command(
                 // nest holds no handle for this actor and `silent_sign_in`'s
                 // verify returns `""` — leaving the cache handle-less. Anything
                 // keyed on the logged-in user's address (e.g. the conversations
-                // session's self-address seed at AuthSuccess) would then come
+                // session's self-address seed at SessionEstablished) would then come
                 // up empty. Writing it here mirrors
                 // a real onboarded user's cache. Both the handle and domain are
                 // written *synchronously*: the launch flow's domain write
@@ -4114,7 +4126,7 @@ fn handle_test_command(
                         // exactly as the account switcher's rebuild does: the Account
                         // page is built inside `launch_authenticated` and keys its
                         // served row on this holder, which would otherwise still name
-                        // the outgoing actor until `AuthSuccess` (now `Reused`).
+                        // the outgoing actor until `SessionEstablished` (now `Reused`).
                         if let Ok(keypair) =
                             fauna_core::identity::ActorKeypair::from_secret_hex(&hex)
                         {
@@ -5784,6 +5796,16 @@ fn handle_test_command(
                 _ => tracing::info!("account_pump_now: no account store yet (pre-auth)"),
             }
         }
+        fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW => {
+            // The app-only outbox drain, rung now — the linux twin of tui's
+            // arm: the same loop the lend, the store-ready edge and every
+            // reconnect run (`offline_outbox::spawn_mls_drain`), for a test
+            // that has just released the e2e drain hold, whose held pass ended
+            // the loop. A no-op with no conversations session yet.
+            // Fire-and-forget; the barrier is the effect.
+            // `fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW` owns the contract.
+            crate::offline_outbox::spawn_mls_drain();
+        }
         fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW => {
             // The custody owner sends again, the linux twin of tui's arm: every
             // granted ceremony re-posts its newest sent step through the shared
@@ -7029,6 +7051,11 @@ fn update_shared_state(
     // in descendant labels (no signal of its own fires when they change).
     automation::observables::observe_painted_errors();
     let painted_errors = automation::observables::painted_errors_json();
+    // Every showing, id-bearing text widget's room in the last PAINTED frame —
+    // observed on each toplevel's `after-paint`, never here, where a page not
+    // laid out yet reads 0×0 (`automation::painted_text_area`).
+    automation::painted_text_area::hook_search_roots();
+    let painted_text_area = automation::painted_text_area::painted_text_area_json();
 
     let mut state_json = json!({
         "session": {
@@ -7267,6 +7294,9 @@ fn update_shared_state(
     //
     // Delivered launch verdicts rendered vs. dropped as superseded — the tui
     // twin (`fauna_e2e_agent::LAUNCH_VERDICTS_KEY` owns the contract).
+    // Convention 17's starved text elements — the tui `painted_text_area` twin
+    // (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`), observed above.
+    state_json[fauna_e2e_agent::PAINTED_TEXT_AREA_KEY] = painted_text_area;
     state_json[fauna_e2e_agent::LAUNCH_VERDICTS_KEY] = launch_currency::verdicts_json();
     //
     // The knock toasts this process raised — the witness for `notifications`
@@ -7428,6 +7458,71 @@ mod launch_funnel_tests {
         assert!(
             first_setup < window,
             "`first_setup` is the glue that must land before the window exists"
+        );
+    }
+
+    /// A launch with the nest down never reaches `AuthSuccess` (the bearer
+    /// refresh retries on the reconnect curve), so a local hook riding it never
+    /// runs: before this split no account runtime was hosted, every store read
+    /// waited out its 60 s and the Muted words page painted neither rows nor the
+    /// first-listing refusal (`account-client-lifecycle.md` § The client-side
+    /// lifecycle → *The first listing*). tui hosts it at `session::establish`;
+    /// linux at `SessionEstablished`, posted before the bearer refresh starts.
+    #[test]
+    fn the_local_post_auth_half_runs_at_session_establishment_not_at_auth_success() {
+        let funnel = fn_body(include_str!("lib.rs"), "fn launch_authenticated(");
+        let establish = funnel
+            .find(".establish_session()")
+            .expect("`launch_authenticated` establishes the session");
+        let authenticate = funnel
+            .find(".authenticate()")
+            .expect("`launch_authenticated` starts the bearer refresh");
+        assert!(
+            establish < authenticate,
+            "the local half must be the first message the session's pump handles"
+        );
+
+        let app = include_str!("app.rs");
+        let arm = |head: &str, next: &str| -> String {
+            let after = app
+                .split_once(head)
+                .unwrap_or_else(|| panic!("`{head}` is an arm of `handle_ui_message`"))
+                .1;
+            after
+                .split_once(next)
+                .unwrap_or_else(|| panic!("`{next}` follows `{head}`"))
+                .0
+                .to_string()
+        };
+        let local = arm(
+            "DataMessage::SessionEstablished { actor_id } => {",
+            "DataMessage::AuthSuccess { handle } => {",
+        );
+        let network = arm(
+            "DataMessage::AuthSuccess { handle } => {",
+            "DataMessage::AuthFailed { error } => {",
+        );
+        for hook in [
+            "become_session_instance(",
+            "build_session_engine(",
+            "start_conversations_session(",
+            "account_runtime::install(",
+            "drafts::start(",
+            "supervision_snapshot::load()",
+        ] {
+            assert!(
+                local.contains(hook),
+                "`{hook}` reads only local state and must run at `SessionEstablished`"
+            );
+            assert!(
+                !network.contains(hook),
+                "`{hook}` rides `AuthSuccess` again — a launch with the nest down never \
+                 runs it (and a second `account_runtime::install` supersedes the first)"
+            );
+        }
+        assert!(
+            network.contains(".start_ws_rpc()") && !local.contains(".start_ws_rpc()"),
+            "the WS-RPC connect is the network half's"
         );
     }
 }

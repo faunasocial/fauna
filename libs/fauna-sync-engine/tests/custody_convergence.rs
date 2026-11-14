@@ -170,6 +170,7 @@ fn params(
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
         enrollment_device_label: None,
+        foreground: true,
     }
 }
 

@@ -112,8 +112,14 @@ public struct PluginCardsSection: View {
 
     /// Sections, so a host `List`/`Form` lays one per card and paints nothing
     /// at all while there are no cards.
+    ///
+    /// Each card's identity is its plugin's `client_id`, and the host page keys
+    /// its bridge sections on the bridge id, never on the position. Keyed on
+    /// the offset, the macOS grouped `Form` dropped every card section when a
+    /// consent added a network row above an already painted plugin card (0 → 1
+    /// bridges): the page showed neither card although both reads had landed.
     public var body: some View {
-        ForEach(Array((vm.cards ?? []).enumerated()), id: \.offset) { offset, card in
+        ForEach(Array((vm.cards ?? []).enumerated()), id: \.element.clientId) { offset, card in
             Section {
                 cardView(card, index: startIndex + offset)
             }

@@ -43,6 +43,9 @@ pub mod gate_impl;
 // inject) — native-only: the wasm leg's trigger is web's own chokepoint.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod launcher;
+// The pre-succession flush every leg's autosave registers for (the launcher's,
+// linux's glib debounce, web's `saveMlsState`) — both targets.
+pub mod leave_flush;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod nest_transport;
 pub mod orchestration;

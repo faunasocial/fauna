@@ -7,6 +7,8 @@ Requires a running app with the test agent enabled (FAUNA_E2E_BRIDGE set).
 """
 import pytest
 
+from helpers.budgets import APP_FIRST_STATE_S
+
 pytestmark = pytest.mark.tier_3
 
 
@@ -18,8 +20,16 @@ class TestStateProtocol:
         return persistent_app
 
     def test_initial_state_is_readable(self, app):
-        """Agent should push initial state within a few seconds of launch."""
-        state = app.driver.get_state()
+        """The agent's first pushed state is readable and carries session + nav.
+
+        A freshly launched or reset app may not have pushed yet, so the read
+        deadline-polls for that first state (convention 14) instead of
+        reading once.
+        """
+        state = app.driver.get_state(
+            wait_for=lambda s: "session" in s and "nav" in s,
+            timeout=APP_FIRST_STATE_S,
+        )
         assert state is not None
         assert "session" in state
         assert "nav" in state

@@ -763,7 +763,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.faunakids;
 				PRODUCT_NAME = "Fauna-Kids-iOS";
 				SDKROOT = iphoneos;
@@ -788,7 +788,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.faunakids;
 				PRODUCT_NAME = "Fauna-Kids-iOS";
 				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Fauna AppStore social.fauna.faunakids";
@@ -810,7 +810,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-Widget";
@@ -829,7 +829,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-Widget";
@@ -850,7 +850,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-iOS-Widget";
@@ -876,7 +876,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-iOS-Widget";
@@ -949,7 +949,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = Fauna;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -966,7 +966,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = Fauna;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -983,7 +983,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-FileProvider";
@@ -1002,7 +1002,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-FileProvider";
@@ -1028,7 +1028,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = "Fauna-iOS";
 				SDKROOT = iphoneos;
@@ -1056,7 +1056,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = "Fauna-iOS";
 				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Fauna AppStore social.fauna.fauna";
@@ -1079,7 +1079,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-iOS-FileProvider";
@@ -1105,7 +1105,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-iOS-FileProvider";
@@ -1128,7 +1128,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-FileProviderUI";
@@ -1147,7 +1147,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-FileProviderUI";
@@ -1167,7 +1167,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-iOS-FileProviderUI";
@@ -1192,7 +1192,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-iOS-FileProviderUI";

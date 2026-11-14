@@ -175,8 +175,8 @@ struct MacContactListView: View {
                         .padding(.vertical, 2)
                         .tag(knock.sender)
                         .accessibilityIdentifier(Ids.knockCard)
-                        // Presence anchor for the indexed knock row. Env-gated no-op.
-                        .automationValue(Ids.knockCard, text: { shortId(hex: knock.sender) })
+                        // The indexed knock row answers with its summary, as on every app (tui `a_knock_names_its_sender_by_the_shared_short_id`); the sender is `knock-sender`. Env-gated no-op.
+                        .automationValue(Ids.knockCard, text: { knock.summary ?? "" })
                     }
                 }
             }

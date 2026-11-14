@@ -343,8 +343,9 @@ class BridgesVM @Inject constructor(
         viewModelScope.launch {
             _error.value = null
             try {
-                api.addBridgeFollow(bridgeId, id, petname)
-                refresh()
+                // With no nest the follow rests in the device outbox: the error
+                // stays cleared and no list changes (tui's rule).
+                if (!api.addBridgeFollowOrQueue(bridgeId, id, petname)) refresh()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -374,8 +375,7 @@ class BridgesVM @Inject constructor(
         viewModelScope.launch {
             _error.value = null
             try {
-                api.removeBridgeFollow(bridgeId, followId)
-                refresh()
+                if (!api.removeBridgeFollowOrQueue(bridgeId, followId)) refresh()
             } catch (e: Exception) {
                 _error.value = e.message
             }

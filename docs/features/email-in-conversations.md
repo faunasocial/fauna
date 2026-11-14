@@ -83,10 +83,10 @@ Stamped 2026-11-07 at ac836c937b.
 |---|---|---|
 | web | ⚠ partial | 0.1.6-dev+73cd2201.dirty standalone |
 | linux | ⚠ partial | 0.1.6-dev+73cd2201.dirty standalone |
-| windows | ⚠ partial | 0.1.6-dev+73cd2201.dirty standalone |
+| windows | 🚧 unbuilt | 0.1.6-dev+73cd2201.dirty standalone |
 | macos | ⚠ partial | 0.1.6-dev+73cd2201.dirty standalone |
 | ios | ⚠ partial | 0.1.6-dev+73cd2201.dirty standalone |
-| android | 🚧 unbuilt | 0.1.6-dev+73cd2201.dirty standalone |
+| android |  no run recorded | |
 | tui | ⚠ partial | 0.1.6-dev+73cd2201.dirty standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
@@ -98,23 +98,23 @@ Stamped 2026-11-07 at ac836c937b.
 | 1 | app | `tests/e2e-unified/tests/test_tui_mail_outbound_from.py::test_tui_outbound_from_is_handle_at_handle_domain` | tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_client_receive.py::test_client_driven_receive_renders_decrypted` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_client_receive_over_frame_reference.py::test_client_driven_receive_renders_over_frame_reference_body` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_mail_client_reply_roundtrip.py::test_client_send_then_stub_autoreply_renders_decrypted` — requires `mail-reply-roundtrip` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_mail_client_full_roundtrip.py::test_full_client_ui_mail_roundtrip` — requires `mail-full-roundtrip` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_mail_enable_live_nest.py::test_believable_live_mail_roundtrip` | — |
-| 4 | app | `tests/e2e-unified/tests/test_mail_zero_cheat_live.py::test_live_mail_receive_ui_only` | — |
+| 3 | app | `tests/e2e-unified/tests/test_mail_client_reply_roundtrip.py::test_client_send_then_stub_autoreply_renders_decrypted` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_mail_client_full_roundtrip.py::test_full_client_ui_mail_roundtrip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_mail_enable_live_nest.py::test_believable_live_mail_roundtrip` | tui (linux): failed |
+| 4 | app | `tests/e2e-unified/tests/test_mail_zero_cheat_live.py::test_live_mail_receive_ui_only` | tui (linux): failed |
 | 5 | app | `tests/e2e-unified/tests/test_mail_sent_copy_restart.py::test_first_party_sent_copy_survives_client_restart` — requires `native-relaunch-sent-copy-proof` (test harness) (not built: ios, android, android-kids, ios-kids) | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_mail_sent_copy_restart_web.py::test_first_party_sent_copy_survives_web_reload` | web (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_mail_sent_feed.py::test_external_mua_submission_surfaces_in_conversations_sent` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_markdown_roundtrip` — requires `html-mail-markdown-roundtrip` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 7 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_remote_image_blocked_until_reveal` — requires `html-mail-inline-image` (not built: android, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_markdown_roundtrip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_remote_image_blocked_until_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_conversations_remote_image.py::test_remote_image_blocked_until_reveal` | web (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_send_over_inline_ceiling_refused_with_localized_display_text` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_send_over_inline_ceiling_refused_with_localized_display_text` — requires `compose-body-bulk-fill` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_mail_client_receive_after_reenable.py::test_mailbox_keeps_receiving_past_a_record_the_reenabled_keys_cannot_open` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_client_send_refusals.py::test_send_at_the_sending_limit_is_refused_with_a_message_saying_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_client_receive_after_rotation.py::test_mail_received_before_a_key_rotation_stays_readable_after_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_survives_four_key_rotations.py::test_mail_received_before_four_key_rotations_stays_readable_in_the_app_and_over_imap` | tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_mail_client_send_refusals.py::test_send_before_the_account_has_an_address_is_refused_on_the_spot` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_mail_client_spam_receive.py::test_client_scores_inbound_spam_to_junk` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 13 | app | `tests/e2e-unified/tests/test_mail_client_spam_receive.py::test_client_scores_inbound_spam_to_junk` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_junk_absent_from_conversations.py::test_mail_filed_as_junk_on_arrival_never_shows_in_conversations` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_mail_read_state.py::test_a_mail_nobody_opened_is_still_unread_after_a_restart` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_mail_read_state.py::test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -124,5 +124,5 @@ Stamped 2026-11-07 at ac836c937b.
 | 19 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_scripts_never_run_and_active_links_are_removed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 20 | app | `tests/e2e-unified/tests/test_mail_read_state.py::test_a_mail_read_in_the_app_reads_in_a_mail_client_and_the_mail_client_moves_it_back` | web (linux): passed, tui (linux): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_mail_app_send_from_ownership.py::test_a_mail_sent_from_the_app_goes_out_only_as_its_sender` | nest (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_keeps_quotes_lists_and_bold_italic_and_the_sent_copy_renders_formatted` — requires `document-painted-read` (test harness) (not built: windows); `html-mail-markdown-roundtrip` (not built: android, android-kids, ios-kids) | linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_mail_html_roundtrip.py::test_html_mail_keeps_quotes_lists_and_bold_italic_and_the_sent_copy_renders_formatted` — requires `document-painted-read` (test harness) (not built: windows) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

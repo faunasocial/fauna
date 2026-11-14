@@ -4,6 +4,11 @@ title: Your devices
 section: your data and devices
 goal: docs/goal/ui/devices.md § Goal
 guide: docs/guides/identity-and-devices.md § Adding a device
+absences:
+  web (outcome 27): "docs/goal/architecture/apps/sync-agent-credentials.md § Credential model"
+  web (outcome 12): "docs/goal/ui/devices.md § Where logic lives"
+  android (outcome 27): "docs/goal/architecture/apps/sync-agent-credentials.md § Credential model"
+  ios (outcome 27): "docs/goal/architecture/apps/sync-agent-credentials.md § Credential model"
 ---
 
 ## What a user gets
@@ -42,9 +47,10 @@ Stamped 2026-11-07 at ac836c937b.
    - `tests/e2e-unified/tests/test_device_member_removal.py::test_a_device_whose_entry_was_deleted_elsewhere_is_listed_by_fingerprint_and_removed`
    - `tests/e2e-unified/tests/test_device_member_removal.py::test_a_device_that_misstates_its_row_is_refused_on_its_row_and_removed_by_its_card`
 10. [app] A device of yours that holds no keys is marked relay-only — a fact shown, never a switch — `docs/goal/ui/devices.md` § Custody facet
-   - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts`
+   - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_device_that_holds_no_keys_is_marked_relay_only`
 11. [app] You ask a friend from your conversations to hold copies for you, and are told what they would see before you confirm — `docs/goal/ui/nests.md` § Trust facet — custody rows
    - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts`
+   - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_web_owner_mints_an_offer_a_native_friend_accepts`
 12. [app] What you hold for someone is metered against a budget you picked when you accepted, and you can change it here — `docs/goal/ui/devices.md` § Custody facet
    - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts`
 13. [app] An offer to hold copies that you do not want is declined and goes away — `docs/goal/ui/devices.md` § Where logic lives
@@ -97,7 +103,7 @@ Stamped 2026-11-07 at ac836c937b.
 | macos | ⚠ partial | 0.1.5-dev+7b3786bb standalone |
 | ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
+| tui | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -119,27 +125,30 @@ Stamped 2026-11-07 at ac836c937b.
 | 8 | app | `tests/e2e-unified/tests/test_device_removal_refusal.py::test_removing_the_device_in_hand_is_refused_and_deletes_nothing` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_device_member_removal.py::test_a_device_whose_entry_was_deleted_elsewhere_is_listed_by_fingerprint_and_removed` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_device_member_removal.py::test_a_device_that_misstates_its_row_is_refused_on_its_row_and_removed_by_its_card` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 10 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 10 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_device_that_holds_no_keys_is_marked_relay_only` | ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_web_owner_mints_an_offer_a_native_friend_accepts` | web (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | absent by design on web | — |
 | 13 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_declined_custody_offer_goes_away` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 15 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_removed_custody_stays_gone_when_its_owner_sends_again` — requires `custody-ceremony-resend` (test harness) (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): failed, tui (windows): passed |
+| 15 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_removed_custody_stays_gone_when_its_owner_sends_again` — requires `custody-ceremony-resend` (test harness) (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 15 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_declined_custody_offer_stays_gone_when_its_owner_sends_again` — requires `custody-ceremony-resend` (test harness) (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_removing_a_device_ends_every_sign_in_it_made_for_good` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
-| 17 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_custody_minted_on_another_device_renders_and_revokes_here` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): failed, tui (windows): passed |
+| 17 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_custody_minted_on_another_device_renders_and_revokes_here` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 18 | app | `tests/e2e-unified/tests/test_device_names.py::test_a_phone_that_syncs_no_folder_is_named_for_its_app_on_a_siblings_devices_page` | ios (macos): passed |
 | 18 | app | `tests/e2e-unified/tests/test_device_names.py::test_an_unnamed_desktop_device_is_named_for_its_app_on_a_siblings_devices_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 19 | app | `tests/e2e-unified/tests/test_device_names.py::test_a_device_renamed_on_one_seat_reads_its_new_name_on_both` | web (linux): passed, linux (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 20 | app | `tests/e2e-unified/tests/test_device_removed_returns_as_successor.py::test_a_removed_device_signed_in_again_is_one_new_device_and_keeps_its_offline_change` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_device_removed_returns_as_successor.py::test_a_removed_device_signed_in_again_is_one_new_device_and_keeps_its_offline_change` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_device_removal_linked_nests.py::test_a_device_leaving_at_one_linked_nest_is_dropped_on_the_other` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_serve.py::test_the_nest_hands_a_held_copy_back_only_to_the_owners_own_devices` | nest (linux): passed |
-| 23 | nest | `tests/e2e-unified/tests/api/test_device_removal_account_plane.py::test_a_removed_device_cannot_read_what_the_account_writes_after_the_removal` | nest (linux): passed |
-| 24 | nest | `tests/e2e-unified/tests/api/test_device_removal_account_plane.py::test_removing_a_device_keeps_for_the_others_what_only_it_had_recorded` | nest (linux): passed |
+| 23 | nest | `tests/e2e-unified/tests/api/test_device_removal_account_plane.py::test_a_removed_device_cannot_read_what_the_account_writes_after_the_removal` | nest (linux): passed, nest (macos): passed |
+| 24 | nest | `tests/e2e-unified/tests/api/test_device_removal_account_plane.py::test_removing_a_device_keeps_for_the_others_what_only_it_had_recorded` | nest (linux): passed, nest (macos): passed |
 | 25 | app | `tests/e2e-unified/tests/test_device_roster_sign_out.py::test_a_sign_out_and_back_in_keeps_one_row_on_a_siblings_devices_page` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 26 | app | `tests/e2e-unified/tests/test_device_names.py::test_an_open_devices_page_repaints_a_sibling_rename_and_removal` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_device_roster_sign_out.py::test_an_app_and_its_helper_are_one_row_and_a_cut_short_sign_out_still_retires_it` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 27 | app | absent by design on web, ios, android, android-kids, ios-kids | — |
 | 28 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_removing_a_device_closes_every_connection_it_still_had_open_at_once` | nest (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_device_name_rules.py::test_a_chosen_name_survives_its_apps_default_reregister_and_alike_names_carry_a_code` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): failed |
-| 30 | app | `tests/e2e-unified/tests/test_device_name_rules.py::test_a_rename_to_another_apps_default_name_is_refused_in_words_and_sends_nothing` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed, tui (macos): passed |
+| 29 | app | `tests/e2e-unified/tests/test_device_name_rules.py::test_a_chosen_name_survives_its_apps_default_reregister_and_alike_names_carry_a_code` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 30 | app | `tests/e2e-unified/tests/test_device_name_rules.py::test_a_rename_to_another_apps_default_name_is_refused_in_words_and_sends_nothing` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

@@ -1363,7 +1363,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_open_mail_record_with_key()
 		})
-		if checksum != 984 {
+		if checksum != 17985 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_open_mail_record_with_key: UniFFI API checksum mismatch")
 		}
@@ -1372,7 +1372,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_open_record_with_key()
 		})
-		if checksum != 52339 {
+		if checksum != 14433 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_open_record_with_key: UniFFI API checksum mismatch")
 		}
@@ -2477,6 +2477,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffibridgesclient_add_follow_or_queue()
+		})
+		if checksum != 875 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffibridgesclient_add_follow_or_queue: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffibridgesclient_approve_follow_request()
 		})
 		if checksum != 25299 {
@@ -2563,6 +2572,15 @@ func uniffiCheckChecksums() {
 		if checksum != 9520 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffibridgesclient_remove_follow: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffibridgesclient_remove_follow_or_queue()
+		})
+		if checksum != 62285 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffibridgesclient_remove_follow_or_queue: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3602,6 +3620,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_nostr_advertise()
+		})
+		if checksum != 37747 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_nostr_advertise: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_nostr_bunker()
 		})
 		if checksum != 1638 {
@@ -3733,6 +3760,24 @@ func uniffiCheckChecksums() {
 		if checksum != 61836 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffireconnectsubscription_next: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffinostradvertiseclient_advertise_supported()
+		})
+		if checksum != 28352 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinostradvertiseclient_advertise_supported: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffinostradvertiseclient_clear_advertisement()
+		})
+		if checksum != 45298 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinostradvertiseclient_clear_advertisement: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4129,6 +4174,15 @@ func uniffiCheckChecksums() {
 		if checksum != 36568 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffisubscriptionsclient_offers_list: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffisubscriptionsclient_offers_list_across_nests()
+		})
+		if checksum != 11643 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffisubscriptionsclient_offers_list_across_nests: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -6653,6 +6707,14 @@ func (_ FfiDestroyerFfiAdminClient) Destroy(value *FfiAdminClient) {
 type FfiBridgesClientInterface interface {
 	// `fauna.bridges.add_follow` — `forbid_replay`.
 	AddFollow(bridgeId string, id string, petname *string, extra *FfiCborValue) error
+	// [`Self::add_follow`] sent now or queued with no nest (the
+	// `OfflineQueued` composer, `account-offline-mutation.md` § The
+	// offline-mutation contract), over the device outbox the first connection
+	// word wired (`offline_outbox::DEVICE`), scoped to the followed account.
+	// `true` = queued: the follow is not on the nest's list until the drain,
+	// so a caller clears its error and changes no list; `false` = sent, and
+	// the caller re-lists as after a follow.
+	AddFollowOrQueue(bridgeId string, id string, petname *string, extra *FfiCborValue) (bool, error)
 	// `fauna.bridges.resolve_follow_request` with `approve: true` —
 	// idempotent; re-read the list before painting.
 	ApproveFollowRequest(bridgeId string, id string) error
@@ -6679,6 +6741,11 @@ type FfiBridgesClientInterface interface {
 	RefuseFollowRequest(bridgeId string, id string) error
 	// `fauna.bridges.remove_follow`
 	RemoveFollow(bridgeId string, followId string) error
+	// [`Self::remove_follow`] sent now or queued with no nest — the same
+	// contract as [`Self::add_follow_or_queue`], under the same per-account
+	// scope. `true` = queued: the account stays on the nest's list until the
+	// drain, so a caller changes no list.
+	RemoveFollowOrQueue(bridgeId string, followId string) (bool, error)
 	// `fauna.bridges.set_settings`
 	SetSettings(bridgeId string, settings FfiCborValue) error
 	// `fauna.bridges.unlink`
@@ -6722,6 +6789,46 @@ func (_self *FfiBridgesClient) AddFollow(bridgeId string, id string, petname *st
 	}
 
 	return err
+}
+
+// [`Self::add_follow`] sent now or queued with no nest (the
+// `OfflineQueued` composer, `account-offline-mutation.md` § The
+// offline-mutation contract), over the device outbox the first connection
+// word wired (`offline_outbox::DEVICE`), scoped to the followed account.
+// `true` = queued: the follow is not on the nest's list until the drain,
+// so a caller clears its error and changes no list; `false` = sent, and
+// the caller re-lists as after a follow.
+func (_self *FfiBridgesClient) AddFollowOrQueue(bridgeId string, id string, petname *string, extra *FfiCborValue) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiBridgesClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffibridgesclient_add_follow_or_queue(
+			_pointer, FfiConverterStringINSTANCE.Lower(bridgeId), FfiConverterStringINSTANCE.Lower(id), FfiConverterOptionalStringINSTANCE.Lower(petname), FfiConverterOptionalFfiCborValueINSTANCE.Lower(extra)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 
 // `fauna.bridges.resolve_follow_request` with `approve: true` —
@@ -7070,6 +7177,43 @@ func (_self *FfiBridgesClient) RemoveFollow(bridgeId string, followId string) er
 	}
 
 	return err
+}
+
+// [`Self::remove_follow`] sent now or queued with no nest — the same
+// contract as [`Self::add_follow_or_queue`], under the same per-account
+// scope. `true` = queued: the account stays on the nest's list until the
+// drain, so a caller changes no list.
+func (_self *FfiBridgesClient) RemoveFollowOrQueue(bridgeId string, followId string) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiBridgesClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffibridgesclient_remove_follow_or_queue(
+			_pointer, FfiConverterStringINSTANCE.Lower(bridgeId), FfiConverterStringINSTANCE.Lower(followId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 
 // `fauna.bridges.set_settings`
@@ -12195,6 +12339,11 @@ type FfiNestClientInterface interface {
 	// (queue read, training correction, report-/signal-sharing opt-ins) over
 	// this connection. Gated `User | Admin` nest-side.
 	Moderation() *FfiModerationClient
+	// Typed-call client for the Nostr advertisement of a sold post
+	// (`fauna.nostr.advertise.{set,clear}` + the `nostr-advertise`
+	// capability read — monetization.md § The Nostr advertisement of a sold
+	// post) over this connection. Ungated: `set` is gated inside it.
+	NostrAdvertise() *FfiNostrAdvertiseClient
 	// Typed-call client for the `fauna.nostr.bunker.*` kinds (the NIP-46
 	// *Connected apps* roster — nostr.md § The nest as the user's NIP-46
 	// signer) over this connection.
@@ -12595,6 +12744,19 @@ func (_self *FfiNestClient) Moderation() *FfiModerationClient {
 	}))
 }
 
+// Typed-call client for the Nostr advertisement of a sold post
+// (`fauna.nostr.advertise.{set,clear}` + the `nostr-advertise`
+// capability read — monetization.md § The Nostr advertisement of a sold
+// post) over this connection. Ungated: `set` is gated inside it.
+func (_self *FfiNestClient) NostrAdvertise() *FfiNostrAdvertiseClient {
+	_pointer := _self.ffiObject.incrementPointer("*FfiNestClient")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterFfiNostrAdvertiseClientINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_fauna_ffi_fn_method_ffinestclient_nostr_advertise(
+			_pointer, _uniffiStatus)
+	}))
+}
+
 // Typed-call client for the `fauna.nostr.bunker.*` kinds (the NIP-46
 // *Connected apps* roster — nostr.md § The nest as the user's NIP-46
 // signer) over this connection.
@@ -12865,6 +13027,168 @@ func LowerToExternalFfiNestClient(value *FfiNestClient) uint64 {
 type FfiDestroyerFfiNestClient struct{}
 
 func (_ FfiDestroyerFfiNestClient) Destroy(value *FfiNestClient) {
+	value.Destroy()
+}
+
+// UniFFI face of the Nostr advertisement of a sold post
+// (`docs/goal/behavior/monetization.md` § The Nostr advertisement of a sold
+// post) — `NostrContentClient`'s `advertise_supported` /
+// `advertise_post` / `clear_advertisement`. The verb's presence rule is the
+// shared `fauna_feed::post_nostr_advertise_verb`, fed by
+// [`advertise_supported`](Self::advertise_supported); obtained from
+// [`crate::nest_client::FfiNestClient::nostr_advertise`].
+//
+// `advertise` sits on its own `zaps`-gated `impl` block (a method-level
+// `#[cfg]` is not honoured by `#[uniffi::export]`); the withdrawal and the
+// capability read are compiled always, like the nest's `clear`.
+type FfiNostrAdvertiseClientInterface interface {
+	// Whether the nest advertises the `nostr-advertise` capability — the
+	// `can_advertise` input of `post_nostr_advertise_verb` (with the build's
+	// own `zaps` member).
+	AdvertiseSupported() (bool, error)
+	// `fauna.nostr.advertise.clear` — stop advertising `post_id` (64 hex).
+	// `false` when it was not advertised.
+	ClearAdvertisement(postId string) (bool, error)
+}
+
+// UniFFI face of the Nostr advertisement of a sold post
+// (`docs/goal/behavior/monetization.md` § The Nostr advertisement of a sold
+// post) — `NostrContentClient`'s `advertise_supported` /
+// `advertise_post` / `clear_advertisement`. The verb's presence rule is the
+// shared `fauna_feed::post_nostr_advertise_verb`, fed by
+// [`advertise_supported`](Self::advertise_supported); obtained from
+// [`crate::nest_client::FfiNestClient::nostr_advertise`].
+//
+// `advertise` sits on its own `zaps`-gated `impl` block (a method-level
+// `#[cfg]` is not honoured by `#[uniffi::export]`); the withdrawal and the
+// capability read are compiled always, like the nest's `clear`.
+type FfiNostrAdvertiseClient struct {
+	ffiObject FfiObject
+}
+
+// Whether the nest advertises the `nostr-advertise` capability — the
+// `can_advertise` input of `post_nostr_advertise_verb` (with the build's
+// own `zaps` member).
+func (_self *FfiNostrAdvertiseClient) AdvertiseSupported() (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiNostrAdvertiseClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffinostradvertiseclient_advertise_supported(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// `fauna.nostr.advertise.clear` — stop advertising `post_id` (64 hex).
+// `false` when it was not advertised.
+func (_self *FfiNostrAdvertiseClient) ClearAdvertisement(postId string) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiNostrAdvertiseClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.int8_t {
+			res := C.ffi_fauna_ffi_rust_future_complete_i8(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.int8_t) bool {
+			return FfiConverterBoolINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffinostradvertiseclient_clear_advertisement(
+			_pointer, FfiConverterStringINSTANCE.Lower(postId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_i8(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_i8(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+func (object *FfiNostrAdvertiseClient) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterFfiNostrAdvertiseClient struct{}
+
+var FfiConverterFfiNostrAdvertiseClientINSTANCE = FfiConverterFfiNostrAdvertiseClient{}
+
+func (c FfiConverterFfiNostrAdvertiseClient) Lift(handle C.uint64_t) *FfiNostrAdvertiseClient {
+	result := &FfiNostrAdvertiseClient{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_fauna_ffi_fn_clone_ffinostradvertiseclient(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_fauna_ffi_fn_free_ffinostradvertiseclient(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*FfiNostrAdvertiseClient).Destroy)
+	return result
+}
+
+func (c FfiConverterFfiNostrAdvertiseClient) Read(reader io.Reader) *FfiNostrAdvertiseClient {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterFfiNostrAdvertiseClient) Lower(value *FfiNostrAdvertiseClient) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*FfiNostrAdvertiseClient")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterFfiNostrAdvertiseClient) Write(writer io.Writer, value *FfiNostrAdvertiseClient) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalFfiNostrAdvertiseClient(handle uint64) *FfiNostrAdvertiseClient {
+	return FfiConverterFfiNostrAdvertiseClientINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalFfiNostrAdvertiseClient(value *FfiNostrAdvertiseClient) uint64 {
+	return uint64(FfiConverterFfiNostrAdvertiseClientINSTANCE.Lower(value))
+}
+
+type FfiDestroyerFfiNostrAdvertiseClient struct{}
+
+func (_ FfiDestroyerFfiNostrAdvertiseClient) Destroy(value *FfiNostrAdvertiseClient) {
 	value.Destroy()
 }
 
@@ -15146,6 +15470,13 @@ type FfiSubscriptionsClientInterface interface {
 	// read the caller's own tiers, so a prospective subscriber reads a creator's
 	// offers through this distinct kind. Replay-safe pure read.
 	OffersList(authorId []byte) ([]FfiTierItem, error)
+	// The Tiers-tab browse across nests
+	// ([`SubscriptionsClient::offers_list_across_nests`](fauna_client_subscriptions::SubscriptionsClient::offers_list_across_nests);
+	// `subscriptions.md` § Pillar 1 → *The offers browse across nests*):
+	// [`Self::offers_list`] when `home` is `None` or blank, and for an author
+	// homed on another nest the read relayed to that home through this nest.
+	// `home` is the page's `actor_home` slot.
+	OffersListAcrossNests(authorId []byte, home *string) ([]FfiTierItem, error)
 	// `fauna.subscriptions.requests.list`
 	RequestsList() ([]FfiPendingRequest, error)
 	// `fauna.subscriptions.requests.reject`
@@ -15290,6 +15621,47 @@ func (_self *FfiSubscriptionsClient) OffersList(authorId []byte) ([]FfiTierItem,
 		},
 		C.uniffi_fauna_ffi_fn_method_ffisubscriptionsclient_offers_list(
 			_pointer, FfiConverterBytesINSTANCE.Lower(authorId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// The Tiers-tab browse across nests
+// ([`SubscriptionsClient::offers_list_across_nests`](fauna_client_subscriptions::SubscriptionsClient::offers_list_across_nests);
+// `subscriptions.md` § Pillar 1 → *The offers browse across nests*):
+// [`Self::offers_list`] when `home` is `None` or blank, and for an author
+// homed on another nest the read relayed to that home through this nest.
+// `home` is the page's `actor_home` slot.
+func (_self *FfiSubscriptionsClient) OffersListAcrossNests(authorId []byte, home *string) ([]FfiTierItem, error) {
+	_pointer := _self.ffiObject.incrementPointer("*FfiSubscriptionsClient")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []FfiTierItem {
+			return FfiConverterSequenceFfiTierItemINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_ffi_fn_method_ffisubscriptionsclient_offers_list_across_nests(
+			_pointer, FfiConverterBytesINSTANCE.Lower(authorId), FfiConverterOptionalStringINSTANCE.Lower(home)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -40257,10 +40629,20 @@ func MailSealingEpochOf(unixSecs uint64) uint64 {
 // - **32 bytes**: the recipient-mail X25519 HPKE secret
 // (`derive_recipient_hpke_keypair`) — opens **classical** records only; an
 // X-Wing record returns a typed error (never a mis-decrypt).
-// - **32 + 2400 bytes** (`x25519_secret ∥ mlkem_decaps_key`, the
-// `derive_recipient_xwing_keypair` halves): opens **both** classical and
-// hybrid (X-Wing) records, exactly as the AUTH'd MDA session does via the
-// snapshot's `mlkem_dk`.
+// - **`k × (32 + 2400)` bytes** (`x25519_secret ∥ mlkem_decaps_key`, the
+// `derive_recipient_xwing_keypair` halves; `k ≥ 2` a bounded grant's
+// rotation-boundary epoch wrap): opens **both** classical and hybrid
+// (X-Wing) records under the secret(s) it carries.
+// - **`k × 2464` bytes, `k ≤ 64`**: a master-key payload — per MSEK
+// generation its standing secret then its mail-epoch root — which runs
+// the epoch trial chain keyed off `record_unix_secs`, so it opens
+// standing- and epoch-sealed mail of every generation it carries
+// (`capability-grants.md` § Capability tiering → *What a master-key mail
+// wrap conveys*).
+//
+// `record_unix_secs` is the record's seal instant (the nest's `stored_at`,
+// never the message's own `Date:`; `0` = unknown) — the instant the Go drain
+// already selects candidate keys by.
 //
 // Either shape is a minimal derived per-kind key — never MSEK / identity /
 // index-master (`key-material-hierarchy.md` rule #7). The caller (the Go drain)
@@ -40274,10 +40656,10 @@ func MailSealingEpochOf(unixSecs uint64) uint64 {
 // - `"content key must be 32 or 2432 bytes ..."` — a key of neither shape;
 // - the wrapped open failure (wrong key, tampered ciphertext, or a hybrid
 // record given only the 32-byte classical half).
-func OpenMailRecordWithKey(envelopeBytes []byte, key []byte) ([]byte, error) {
+func OpenMailRecordWithKey(envelopeBytes []byte, key []byte, recordUnixSecs uint64) ([]byte, error) {
 	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
-			inner: C.uniffi_fauna_ffi_fn_func_open_mail_record_with_key(FfiConverterBytesINSTANCE.Lower(envelopeBytes), FfiConverterBytesINSTANCE.Lower(key), _uniffiStatus),
+			inner: C.uniffi_fauna_ffi_fn_func_open_mail_record_with_key(FfiConverterBytesINSTANCE.Lower(envelopeBytes), FfiConverterBytesINSTANCE.Lower(key), FfiConverterUint64INSTANCE.Lower(recordUnixSecs), _uniffiStatus),
 		}
 	})
 	if _uniffiErr != nil {
@@ -40289,9 +40671,10 @@ func OpenMailRecordWithKey(envelopeBytes []byte, key []byte) ([]byte, error) {
 }
 
 // [`open_mail_record_with_key`] for a record of any `kind` — opens a sealed
-// envelope with a grant's derived per-kind key (a `content.read{calendar}`
-// payload is the calendar's own secret, in the mail payload's 32-vs-2432 byte
-// contract; `owner-key-material.md` § Path B-sibling-5 → *Capability
+// envelope with a grant's derived per-kind key (a mail record through the
+// grant-holder mail opener, master-key payload included; a
+// `content.read{calendar}` payload is the calendar's own secret, in the mail
+// payload's 32-vs-2432 byte contract; `owner-key-material.md` § Path B-sibling-5 → *Capability
 // payload*). The envelope must declare `kind`; a key of another kind fails the
 // open, never mis-decrypts.
 //

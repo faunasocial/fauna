@@ -90,6 +90,11 @@ pub enum RecoveryError {
     /// account on this nest.
     SuccessorExists,
 
+    /// A first kit was asked for an identity whose succession ceremony is still
+    /// running in another window of this install: that window mints the kit
+    /// and shows it (`crate::kit_claim`). Client-side, before anything is sent.
+    KitMintedElsewhere,
+
     /// A refusal that reached the nest and was declined for some other reason.
     /// Carries the wire error so the caller can render its localized message
     /// (`RpcError::localized()`, Dimension 4 — the same mechanism every other
@@ -235,6 +240,11 @@ impl fmt::Display for RecoveryError {
                     fauna_i18n::strings::errors::recovery_malformed(detail)
                 )
             }
+            Self::KitMintedElsewhere => write!(
+                f,
+                "{}",
+                fauna_i18n::strings::errors::RECOVERY_KIT_MINTED_ELSEWHERE
+            ),
             Self::PriorKitRequired => {
                 write!(
                     f,

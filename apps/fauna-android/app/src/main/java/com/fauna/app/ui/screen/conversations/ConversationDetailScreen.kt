@@ -2285,6 +2285,11 @@ private fun MessageBubble(
         documentAttachments(msg.document).forEach { att ->
             val declared = "${att.filename} (${localized(byteSize(att.sizeBytes)).orEmpty()})"
             if (att.isImage) {
+                // `image-lightbox` over the thread (conversations.md `dm-attachment-image[i]`):
+                // a tap opens it, held or placeholder; back/Escape/close dismiss it. The state
+                // lives in the bubble, so leaving the thread (the bubble leaving composition)
+                // closes it. Bytes are the shared `attachment_bytes` read — no new logic here.
+                var lightboxOpen by remember(att.blobHash) { mutableStateOf(false) }
                 val resident = attachmentResident(att.blobHash)
                 val imageBitmap = remember(att.blobHash, resident) {
                     loadAttachmentBytes(att.blobHash)?.let { bytes ->
@@ -2298,7 +2303,8 @@ private fun MessageBubble(
                         modifier = Modifier
                             .heightIn(max = 200.dp)
                             .testTag(Ids.DM_ATTACHMENT_IMAGE)
-                            .semantics { stateDescription = ATTACHMENT_STATE_PAINTED },
+                            .semantics { stateDescription = ATTACHMENT_STATE_PAINTED }
+                            .clickable { lightboxOpen = true },
                     )
                 } else {
                     Text(
@@ -2306,7 +2312,15 @@ private fun MessageBubble(
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier
                             .testTag(Ids.DM_ATTACHMENT_IMAGE)
-                            .semantics { stateDescription = ATTACHMENT_STATE_PLACEHOLDER },
+                            .semantics { stateDescription = ATTACHMENT_STATE_PLACEHOLDER }
+                            .clickable { lightboxOpen = true },
+                    )
+                }
+                if (lightboxOpen) {
+                    com.fauna.app.ui.components.ImageLightbox(
+                        model = if (imageBitmap != null) loadAttachmentBytes(att.blobHash) else null,
+                        placeholder = declared,
+                        onDismiss = { lightboxOpen = false },
                     )
                 }
             } else {

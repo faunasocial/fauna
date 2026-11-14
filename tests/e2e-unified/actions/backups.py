@@ -1436,6 +1436,36 @@ class BackupsActions:
         confirm is pressed; read the outcome with `reseed_result_text`."""
         self.reseed_from_custodian_row(index)
 
+    def open_reseed_confirm_on_row(self, index: int = 0) -> None:
+        """Press `backup-destination-reseed-button` inside
+        `backup-destination-status-row[index]` and wait for the confirm to open
+        — on a nest-kind row only once the preflight has answered — without
+        confirming. Read its lines with `reseed_preflight_lines`, then press
+        `confirm_reseed`."""
+        self.driver.click(
+            "backup-destination-reseed-button",
+            scope=f"backup-destination-status-row[{index}]",
+        )
+        self.driver.wait_for(
+            "backup-destination-reseed-confirm-button", timeout=DESTINATION_DIALOG_WAIT_S
+        )
+
+    def confirm_reseed(self) -> None:
+        """Press `backup-destination-reseed-confirm-button` on the open confirm;
+        read the outcome with `reseed_result_text`."""
+        self.driver.click("backup-destination-reseed-confirm-button")
+
+    def reseed_preflight_lines(self) -> list[str]:
+        """The pull-back confirm's per-set preflight lines (`ui/backups.md`
+        § Restore after losing the nest: the lines are the modal's body, no id
+        of their own): `backup-destination-reseed-confirm-modal`'s text, one
+        line each — title, consequence, then the shared
+        `fauna_client_backup::reseed::preflight_lines` — with the title and the
+        consequence dropped."""
+        text = self.driver.get_text("backup-destination-reseed-confirm-modal")
+        lines = [line for line in text.splitlines() if line.strip()]
+        return lines[2:]
+
     def reseed_result_text(self) -> str:
         """`backup-destination-reseed-result`'s text, or '' while it is absent."""
         if self.driver.is_absent("backup-destination-reseed-result"):
@@ -1707,12 +1737,19 @@ class BackupsActions:
             except Exception as e:  # noqa: BLE001 — diagnostic only; never mask the timeout
                 return f"{label}=<{type(e).__name__}>"
 
-        return "; ".join([
+        from helpers.diagnostics import launch_log_lines
+
+        parts = [
             read("wizard open", lambda: self.driver.is_visible("wizard-create-button")
                  or self.driver.is_visible("wizard-name-input")),
             read("list painted", lambda: self.driver.is_visible("folder-add-button")),
             read("error-message", lambda: self.driver.get_text("error-message")),
-        ])
+        ]
+        # Neither the wizard nor the list painted is a page still loading, one
+        # that lost its identity (web paints "identity required" there) or one
+        # the app left: the boot's identity lines tell those apart.
+        parts.append(f"launch log: {launch_log_lines(_DriverOnly(self.driver))}")
+        return "; ".join(parts)
 
     def wait_for_folder_row_gone(self, name: str, timeout: float = FOLDER_CREATE_WAIT_S) -> None:
         """Poll until no row's title contains `name`; ``AssertionError`` naming
@@ -2173,17 +2210,29 @@ class BackupsActions:
         return self.driver.get_text("folder-pending-share", index=index)
 
     def wait_for_pending_shares(self, expected: int, timeout: float = PENDING_SHARES_WAIT_S) -> int:
-        """Poll until the pending-share count reaches ``expected`` (or timeout),
-        re-firing the Folders page's ``connect_map`` fetch each iteration by
-        toggling Devices→Folders (the section is fetched on page-visible, not
-        pushed). Returns the final observed count."""
+        """Poll until the pending-share count reaches ``expected`` (or timeout).
+        Returns the final observed count.
+
+        The section is fetched on page-visible, not pushed, so the wait re-fires
+        that fetch by toggling Devices→Folders. But a toggle REMOUNTS the page,
+        dropping a fetch still in flight, so toggling on a fixed short period
+        loses to a page whose fetch outlasts the period: on a loaded box web
+        listed the knock on every remount and painted it on none (convention
+        14). So each re-navigation is followed by a watch on the mounted page
+        that doubles every round (2 s, 4 s, 8 s, …): the watch soon outlasts
+        whatever the fetch takes, and a fast page still answers at once."""
         deadline = time.monotonic() + timeout
         count = self.pending_share_count()
+        watch = 2.0
         while count != expected and time.monotonic() < deadline:
-            time.sleep(1)
             self.navigate_devices()
             self.navigate_folders()
+            until = min(deadline, time.monotonic() + watch)
             count = self.pending_share_count()
+            while count != expected and time.monotonic() < until:
+                time.sleep(0.5)  # sleep-ok: pacing between poll reads of a mounted page
+                count = self.pending_share_count()
+            watch *= 2
         return count
 
     def accept_pending_share(self, index: int = 0) -> None:
@@ -3305,3 +3354,10 @@ class BackupsActions:
             ),
         )
 
+
+class _DriverOnly:
+    """A stand-in carrying an action's driver, for the log readers that take an
+    app (`helpers.diagnostics` reads only ``app.driver``)."""
+
+    def __init__(self, driver):
+        self.driver = driver

@@ -19,7 +19,7 @@
   DEVICE's own loopback (tests/e2e-unified/drivers/android.py). Without this, an
   android e2e run cannot complete even its first journey, because every nest
   call dies on the base config's cleartext refusal (testing.md, section
-  "Default app and nest mode", Android's run venue, constraint 3).
+  "Default app and nest mode", Android's emulator placement, constraint 3).
 
   127.0.0.1 ONLY. No LAN range, no 10.0.2.2, and base-config is NOT flipped:
   constraint 3 is "production's no-cleartext network policy is never widened",

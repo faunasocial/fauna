@@ -58,14 +58,22 @@ public struct FeedPostActionsButton: View {
     /// on another author's post (`!isOwn`), opening the shared ``ReportHost``
     /// sheet through ``ReportSheetStore``.
     public let reportTarget: FfiReportTarget?
+    /// The post record and the viewer's actor id — the two inputs of the
+    /// shared `postNostrAdvertiseVerb` rule (`monetization.md` § The Nostr
+    /// advertisement of a sold post). `nil` post ⇒ no advertise verb.
+    public let post: PostSummary?
+    public let viewer: String
     @Environment(ContentPolicyStore.self) private var contentPolicy: ContentPolicyStore?
 
     public init(
         postId: String, vm: FeedVM, isOwn: Bool, webSlug: String?, gatedTier: String?,
         webPublish: WebPublishStore, handle: String,
         reportTarget: FfiReportTarget? = nil,
+        post: PostSummary? = nil, viewer: String = "",
         onNavigateToPersonalization: @escaping () -> Void
     ) {
+        self.post = post
+        self.viewer = viewer
         self.postId = postId
         self.vm = vm
         self.isOwn = isOwn
@@ -89,6 +97,9 @@ public struct FeedPostActionsButton: View {
     /// open (closing and reopening presents an un-copied menu again), the
     /// same lifecycle as `confirmDelete`.
     @State private var copiedWebLink: String?
+    /// The *Advertise on Nostr* confirm step is armed in place (the delete
+    /// verb's shape); a fresh open is never pre-armed.
+    @State private var confirmAdvertise = false
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -129,6 +140,10 @@ public struct FeedPostActionsButton: View {
     private func openMenu() {
         confirmDelete = false
         copiedWebLink = nil
+        confirmAdvertise = false
+        #if !FAUNA_EXCISE_PAYMENTS
+        if isOwn { Task { await vm.readNostrAdvertiseSupported() } }
+        #endif
         guard isOwn, !webPublish.isHydrated, let api = vm.api else { return }
         Task {
             await webPublish.hydrate(api: api, handle: handle)
@@ -152,6 +167,9 @@ public struct FeedPostActionsButton: View {
             if isOwn {
                 Divider()
                 webPublishVerbs
+                #if !FAUNA_EXCISE_PAYMENTS
+                nostrAdvertiseVerbs
+                #endif
             }
             if isOwn {
                 Divider()
@@ -339,6 +357,83 @@ public struct FeedPostActionsButton: View {
                 .automationActivate(Ids.feedPostUnpublishWebButton) { Task { await unpublishFromWeb() } }
         }
     }
+
+    #if !FAUNA_EXCISE_PAYMENTS
+    /// `nostr_advertise.confirm_body` — a public text landing through the
+    /// public-texts round. Absent from the catalog (`L.lookup` answers the key
+    /// itself) ⇒ `nil` ⇒ no *Advertise* verb.
+    static var nostrConfirmBody: String? {
+        let key = "nostr_advertise.confirm_body"
+        let body = L.lookup(key)
+        return body.isEmpty || body == key ? nil : body
+    }
+
+    /// The verb pair's presence: only the shared rule decides; `canAdvertise` is
+    /// the nest capability AND a catalog holding the confirm body (the build's
+    /// `zaps` member is this code compiling at all).
+    static func nostrAdvertiseVerb(
+        post: PostSummary?, viewer: String, supported: Bool?, confirmBody: String?
+    ) -> NostrAdvertiseVerb? {
+        guard let post else { return nil }
+        let can = supported == true && !(confirmBody ?? "").isEmpty
+        return postNostrAdvertiseVerb(post: post, viewer: viewer, canAdvertise: can)
+    }
+
+    @ViewBuilder private var nostrAdvertiseVerbs: some View {
+        let body = Self.nostrConfirmBody
+        switch Self.nostrAdvertiseVerb(
+            post: post, viewer: viewer, supported: vm.nostrAdvertiseSupported, confirmBody: body)
+        {
+        case .stopAdvertising:
+            Button(L.nostrAdvertise.stop) { stopAdvertising() }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .accessibilityIdentifier(Ids.feedPostStopAdvertisingNostrButton)
+                .automationActivate(Ids.feedPostStopAdvertisingNostrButton) { stopAdvertising() }
+        case .advertise:
+            if confirmAdvertise {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L.nostrAdvertise.confirmTitle).font(.caption).bold()
+                    if let body { Text(body).font(.caption2).foregroundStyle(.secondary) }
+                    HStack(spacing: 8) {
+                        Button(L.nostrAdvertise.confirm) { performAdvertise() }
+                            .buttonStyle(.borderless)
+                            .accessibilityIdentifier(Ids.advertiseNostrConfirmButton)
+                            .automationActivate(Ids.advertiseNostrConfirmButton) { performAdvertise() }
+                        Button(L.common.cancel, role: .cancel) { confirmAdvertise = false }
+                            .buttonStyle(.borderless)
+                            .accessibilityIdentifier(Ids.advertiseNostrCancelButton)
+                            .automationActivate(Ids.advertiseNostrCancelButton) { confirmAdvertise = false }
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(Ids.advertiseNostrConfirmDialog)
+                .automationValue(Ids.advertiseNostrConfirmDialog, text: { L.nostrAdvertise.confirmTitle })
+            } else {
+                Button(L.nostrAdvertise.advertise) { confirmAdvertise = true }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .accessibilityIdentifier(Ids.feedPostAdvertiseNostrButton)
+                    .automationActivate(Ids.feedPostAdvertiseNostrButton) { confirmAdvertise = true }
+            }
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private func performAdvertise() {
+        let id = postId
+        confirmAdvertise = false
+        showActions = false
+        Task { await vm.advertisePostOnNostr(id) }
+    }
+
+    private func stopAdvertising() {
+        let id = postId
+        showActions = false
+        Task { await vm.stopAdvertisingPostOnNostr(id) }
+    }
+    #endif
 
     // The three web-publishing verbs below are thin callers: each hands its
     // awaited store call, as a closure, to an `internal static` body that owns

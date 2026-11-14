@@ -52,8 +52,8 @@ PHONE_MODE = "phone"
 # Which phone app a `phone` seat means on each platform: the iOS simulator on
 # macOS, the android emulator on Linux (the `linux` key — the box whose harness
 # drives the emulator over adb, not the phone's own OS). One phone per pair: the
-# android venue provisions ONE emulator and runs one package per device
-# (testing.md § *Android's run venue*), so a phone seat is always the `phone`
+# android emulator provisions ONE emulator and runs one package per device
+# (testing.md § *Android's emulator placement*), so a phone seat is always the `phone`
 # half of a pair whose other seat is a desktop one — never two phones. The
 # device reaches the harness nest through the `adb reverse` the driver opens at
 # launch for every nest port in the seat's config (`drivers/android.py::launch`).

@@ -720,6 +720,22 @@ impl RpcError {
             Self::CODE_NEST_SCHEMA_MISMATCH => error::nest::SCHEMA_MISMATCH,
             "fauna.protocol.unknown_kind" => error::protocol::UNKNOWN_KIND,
             "fauna.federation.peer_nest_outdated" => error::federation::PEER_NEST_OUTDATED,
+            // A membership code redeemed from another nest: the remedy (join
+            // that nest with it as the invite code) is the whole sentence.
+            // Each payments arm rides the `payments` feature: a store-safe
+            // flavor must carry no `fauna.payments.*` kind string at all
+            // (`dynamic-features.md` § What "completely compiled away" means).
+            #[cfg(feature = "payments")]
+            "fauna.payments.claim_admits_elsewhere" => error::payments::CLAIM_ADMITS_ELSEWHERE,
+            // The claim redeem's other three refusals, each its own sentence —
+            // the generic fallback told a buyer with a typo'd code that the
+            // nest had failed.
+            #[cfg(feature = "payments")]
+            "fauna.payments.claim_not_found" => error::payments::CLAIM_NOT_FOUND,
+            #[cfg(feature = "payments")]
+            "fauna.payments.claim_already_redeemed" => error::payments::CLAIM_ALREADY_REDEEMED,
+            #[cfg(feature = "payments")]
+            "fauna.payments.claim_voided" => error::payments::CLAIM_VOIDED,
             "fauna.protocol.malformed" | "fauna.protocol.malformed_error" => {
                 error::protocol::MALFORMED
             }
@@ -1329,6 +1345,34 @@ mod tests {
             RpcError::new("fauna.protocol.disconnected", "k").localized(),
             error::protocol::DISCONNECTED,
         );
+        // The payments arms exist only in a `payments` build.
+        #[cfg(feature = "payments")]
+        {
+            // The cross-nest redeem's membership refusal names its remedy.
+            assert_eq!(
+                RpcError::new(
+                    "fauna.payments.claim_admits_elsewhere",
+                    "error.payments.claim_admits_elsewhere"
+                )
+                .localized(),
+                error::payments::CLAIM_ADMITS_ELSEWHERE,
+            );
+            // The redeem's other refusals each render their own sentence.
+            for (code, want) in [
+                (
+                    "fauna.payments.claim_not_found",
+                    error::payments::CLAIM_NOT_FOUND,
+                ),
+                (
+                    "fauna.payments.claim_already_redeemed",
+                    error::payments::CLAIM_ALREADY_REDEEMED,
+                ),
+                ("fauna.payments.claim_voided", error::payments::CLAIM_VOIDED),
+            ] {
+                assert_eq!(RpcError::new(code, "k").localized(), want, "{code}");
+                assert_ne!(want, error::UNEXPECTED, "{code}");
+            }
+        }
         // An unrecognised code falls back to the generic localized string, never
         // a raw code or the wire key.
         assert_eq!(

@@ -233,7 +233,7 @@ class FakeDns:
         """Bind a UDP and a TCP socket on one port number (RFC 7766).
 
         TCP carries the propagation probe's retry and is the only transport an
-        android venue's reverse carries. With ``port=0`` the kernel picks the
+        android emulator's reverse carries. With ``port=0`` the kernel picks the
         UDP port, and that number can already be taken on TCP by an unrelated
         socket (EADDRINUSE, seen in a full macOS/iOS baseline run). So an
         ephemeral pick is retried on a fresh pair; a fixed port is not.

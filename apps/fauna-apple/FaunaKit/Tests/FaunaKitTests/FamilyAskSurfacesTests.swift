@@ -75,9 +75,11 @@ private final class AskAPI: APIClient {
         throw linkError ?? ScopeTestFailure(account: "link")
     }
 
-    override func addBridgeFollow(bridgeId: String, followId: String, petname: String?) async throws {
+    override func addBridgeFollowOrQueue(bridgeId: String, followId: String,
+                                         petname: String?) async throws -> Bool {
         followCalls += 1
         if let followError { throw followError }
+        return false
     }
 }
 

@@ -116,6 +116,10 @@ pub struct TestPostSpec {
     /// `None` = not published to the web.
     #[serde(default)]
     pub web_slug: Option<String>,
+    /// The Nostr advertisement flag driving the own-post advertise verb pair;
+    /// default `None` = not advertised.
+    #[serde(default)]
+    pub nostr_advertised_at: Option<u64>,
     /// An optional **pre-folded** quoted-post embed (Slice 2b). When set, the
     /// post's `document` carries a `RenderBlock::QuotedPost` (built via the exact
     /// production [`build_post_document`](crate::manager::build_post_document)
@@ -315,6 +319,7 @@ impl TestPostSpec {
             reposted_gated_tier: self.reposted_gated_tier,
             reposted_gated_room: self.reposted_gated_room,
             web_slug: self.web_slug,
+            nostr_advertised_at: self.nostr_advertised_at,
             gated_unlocked: false,
             labels: self.labels,
             unlock_offer: self.unlock_offer,

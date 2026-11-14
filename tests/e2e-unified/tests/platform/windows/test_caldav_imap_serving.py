@@ -42,6 +42,7 @@ pytestmark = [
         reason="Exercises the Windows-native fauna-nest-svc + fauna-mail-bridge binaries",
     ),
     pytest.mark.tier_3,
+    pytest.mark.windows,
 ]
 
 
@@ -180,6 +181,66 @@ def test_windows_nest_provisions_over_its_pinned_tls_floor(tmp_path):
     finally:
         prov.cleanup()
     assert pinned_spki(prov.locator) is None, "the pin outlived its nest"
+
+
+def test_windows_nest_is_claimed_and_healthy_over_its_pinned_tls_floor(tmp_path):
+    """The install-then-reach test's nest sequence, rehearsed without an install
+    (`test_installer.py::TestInstallThenReach` needs an elevated, disruptive MSI
+    run; this runs on the shared box): the claim code the nest writes at its first
+    start, health read over the floor pinned to the nest's own
+    ``acme/fullchain.pem`` (the shared ``helpers/installed_nest_reach.py::
+    pinned_health``, which no verification-off path backs), the claim, health
+    again, and the claim code consumed. The ``--foreground`` nest runs the same
+    serve loop as the SCM service (``service.rs`` ``run_service_loop``) but binds
+    loopback, so what only the installed run shows is the install itself and the
+    box's LAN address on ``:443``."""
+    from common.auth import claim_admin, pin_nest_spki, pinned_spki, unpin_nest_spki
+    from helpers.installed_nest_reach import pinned_health
+
+    data_dir = tmp_path / "nest"
+    data_dir.mkdir()
+    port = find_free_port()
+    authority = f"127.0.0.1:{port}"
+    base = f"https://{authority}"
+    proc = eng.spawn_nest_svc(data_dir, port, serve_tls=True)
+    try:
+        claim_file = data_dir / "claim-code"
+        deadline = time.monotonic() + 60.0
+        healthy, last = None, "(never attempted)"
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                pytest.fail(
+                    f"fauna-nest-svc exited early (rc={proc.returncode}).\nlog:\n"
+                    f"{eng.log_tail(eng.nest_log_path(data_dir))}")
+            try:
+                pin_nest_spki(authority, eng.floor_cert_spki(data_dir))
+                status, body = pinned_health(base)
+                if status == 200 and (body or {}).get("status") == "ok":
+                    healthy = body
+                    break
+                last = f"HTTP {status}: {body}"
+            except (OSError, ValueError) as e:
+                last = f"{type(e).__name__}: {e}"
+            time.sleep(0.25)  # sleep-ok: poll interval of a deadline loop
+        assert healthy is not None, (
+            f"the nest never answered pinned health at {base} within 60s — last: "
+            f"{last}\nlog:\n{eng.log_tail(eng.nest_log_path(data_dir))}")
+        assert claim_file.exists(), f"no claim code at {claim_file} once the nest served"
+
+        admin = claim_admin(port, claim_file.read_text().strip(), base_url=base, handle="test")
+        assert admin["token"], f"claim at {base} returned no bearer: {admin}"
+        status, body = pinned_health(base)
+        assert status == 200 and (body or {}).get("status") == "ok", (
+            f"health at {base} after the claim: HTTP {status}: {body}")
+        deadline = time.monotonic() + 30.0
+        while claim_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.25)  # sleep-ok: poll interval of a deadline loop
+        assert not claim_file.exists(), \
+            f"{claim_file} survived the claim — the nest did not record it"
+    finally:
+        unpin_nest_spki(authority)
+        eng.terminate(proc)
+    assert pinned_spki(authority) is None, "the pin outlived its nest"
 
 
 @pytest.mark.feature("calendar-in-standard-apps")

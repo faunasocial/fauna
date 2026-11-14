@@ -39,13 +39,18 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 
+use fauna_client_connected_apps::PrincipalTrust;
 use fauna_client_connected_apps::{
     BlockedAppRow, ConnectedAppRow, ConnectedAppsGesture as Gesture, ConnectedAppsMachine,
     ConnectedAppsObserver, ConnectedAppsSnapshot, ConsentCardRow,
-    compose::{LINE_SEPARATOR, request_card_lines, request_install_text, roster_row_text},
+    compose::{
+        LINE_SEPARATOR, oracle_op_text, request_card_lines, request_install_text, roster_row_text,
+    },
+    machine::opens_record,
     observer::NullObserver,
 };
 use fauna_client_mail_settings::resolve_mua_username;
+use fauna_client_pair::{TrustFolder, TrustGrantRow, TrustHistoryRow, TrustLens, TrustScope};
 use fauna_core::localized::LocalizedText;
 use fauna_core::secret::SecretString;
 
@@ -360,6 +365,14 @@ fn visit(ctx: &Rc<Ctx>) {
     ctx.w.code_entry.set_text("");
     ctx.revoke_armed.borrow_mut().take();
     ctx.revealed.borrow_mut().clear();
+    // A fresh visit puts every row back on its Now lens, beside the page's
+    // other drafts.
+    if let Some(machine) = ctx.machine.borrow().as_ref() {
+        machine.reset_lenses();
+        // An open record is a reading of THIS visit too: the next visit
+        // starts with every row's record closed.
+        machine.close_record();
+    }
     ctx.snapshot.borrow_mut().take();
     paint(ctx);
     let handoff = ctx.pending_handoff.borrow_mut().take();
@@ -629,6 +642,19 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
         item.append(&copy_secret);
     }
 
+    // The record's open control, on a row the oracle served — never an
+    // app-password session's (the shared `opens_record` decides).
+    if opens_record(row) {
+        oracle_record(ctx, row, &item);
+    }
+
+    // The trust facet, after the row's own leaves and before its Revoke
+    // (`connected-apps.md` § The trust facet and history lens): absent on a
+    // row that holds no facet — never an empty state.
+    if let Some(trust) = &row.trust {
+        item.append(&trust_facet(ctx, &row.key, trust));
+    }
+
     if ctx.revoke_armed.borrow().as_deref() == Some(row.key.as_str()) {
         item.append(&text_label(&t::revoke_prompt(&name)));
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -677,6 +703,185 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
         item.append(&revoke);
     }
     item
+}
+
+/// A served principal's record (`connected-apps.md` § Layout & flow, region
+/// 3): the open control, then — while this row's record is open and its read
+/// has returned — the list, newest first, or its empty state. The words are
+/// the shared composition's ([`oracle_op_text`]); the record is the machine's
+/// read, never kept here. Reference painter: tui's `oracle_record_elements`.
+fn oracle_record(ctx: &Rc<Ctx>, row: &ConnectedAppRow, item: &gtk::Box) {
+    let record = ctx
+        .snapshot
+        .borrow()
+        .as_ref()
+        .and_then(|s| s.record.clone())
+        .filter(|r| r.key == row.key);
+    let open = flat_button(
+        if record.is_some() {
+            t::ORACLE_CLOSE
+        } else {
+            t::ORACLE_OPEN
+        },
+        ids::CONNECTED_APPS_ORACLE_OPEN,
+    );
+    open.set_halign(gtk::Align::Start);
+    {
+        let ctx = Rc::clone(ctx);
+        let key = row.key.clone();
+        let is_open = record.is_some();
+        // The machine keeps one record open at a time: opening this row's
+        // closes any other's.
+        open.connect_clicked(move |_| {
+            run(
+                &ctx,
+                if is_open {
+                    Gesture::CloseRecord
+                } else {
+                    Gesture::OpenRecord(key.clone())
+                },
+            );
+        });
+    }
+    item.append(&open);
+    let Some(record) = record.filter(|r| r.loaded) else {
+        return;
+    };
+    let list = vertical_box();
+    set_test_id(&list, ids::CONNECTED_APPS_ORACLE_LIST);
+    item.append(&list);
+    if record.ops.is_empty() {
+        let empty = leaf(ids::CONNECTED_APPS_ORACLE_EMPTY, t::ORACLE_EMPTY);
+        empty.add_css_class("dim-label");
+        item.append(&empty);
+        return;
+    }
+    for op in &record.ops {
+        let label = leaf(
+            ids::CONNECTED_APPS_ORACLE_OP,
+            &oracle_op_text(op).resolve(crate::i18n::strings::lookup),
+        );
+        label.add_css_class("caption");
+        set_test_attr(&label, "class", &op.class);
+        list.append(&label);
+    }
+}
+
+/// A principal's trust facet: the Now / History lens pair, then the active
+/// lens — the live keys (or *This app holds no keys to your records*) or the
+/// grant-event history. It reuses the Nests page's `nest-trust-*` ids inside
+/// the row; no renew, no per-grant revoke (the row's one Revoke is the
+/// participant's). Reference painter: tui's `push_trust_facet`.
+fn trust_facet(ctx: &Rc<Ctx>, key: &str, trust: &PrincipalTrust) -> gtk::Box {
+    use crate::i18n::strings::nests as nest_t;
+    let facet = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    facet.set_margin_top(4);
+
+    let toggle = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    for (id, label, lens) in [
+        (ids::NEST_TRUST_VIEW_NOW, nest_t::VIEW_NOW, TrustLens::Now),
+        (
+            ids::NEST_TRUST_VIEW_HISTORY,
+            nest_t::VIEW_HISTORY,
+            TrustLens::History,
+        ),
+    ] {
+        let btn = gtk::Button::with_label(label);
+        set_test_id(&btn, id);
+        if trust.lens == lens {
+            btn.add_css_class("suggested-action");
+        }
+        let ctx = Rc::clone(ctx);
+        let key = key.to_owned();
+        btn.connect_clicked(move |_| set_lens(&ctx, &key, lens));
+        toggle.append(&btn);
+    }
+    facet.append(&toggle);
+
+    match trust.lens {
+        TrustLens::Now if trust.grants.is_empty() => {
+            let empty = leaf(ids::NEST_TRUST_EMPTY, t::TRUST_EMPTY);
+            empty.add_css_class("dim-label");
+            facet.append(&empty);
+        }
+        TrustLens::Now => {
+            let list = vertical_box();
+            set_test_id(&list, ids::NEST_TRUST_GRANT_LIST);
+            for grant in &trust.grants {
+                list.append(&trust_grant_item(grant));
+            }
+            facet.append(&list);
+        }
+        TrustLens::History => {
+            let list = vertical_box();
+            set_test_id(&list, ids::NEST_TRUST_HISTORY_LIST);
+            for h in &trust.history {
+                list.append(&leaf(ids::NEST_TRUST_HISTORY_ITEM, &trust_history_line(h)));
+            }
+            facet.append(&list);
+        }
+    }
+    facet
+}
+
+/// One live key: its scope in the consent card's words, *lasts-until*, the
+/// liveness (an expired one says the app will ask again — nothing renews a
+/// principal's trust) and the required honest-bound note.
+fn trust_grant_item(grant: &TrustGrantRow) -> gtk::Box {
+    use crate::i18n::strings::nests as nest_t;
+    let item = card_box();
+    set_test_id(&item, ids::NEST_TRUST_GRANT_ITEM);
+    item.append(&leaf(
+        ids::NEST_TRUST_GRANT_SCOPE,
+        &trust_scope_line(&grant.scope, grant.folder.clone()),
+    ));
+    item.append(&leaf(
+        ids::NEST_TRUST_GRANT_LASTS_UNTIL,
+        &format!(
+            "{} {}",
+            nest_t::LASTS_UNTIL,
+            fauna_core::format::format_unix_local(grant.lasts_until)
+        ),
+    ));
+    item.append(&leaf(
+        ids::NEST_TRUST_GRANT_STATUS,
+        &resolve(&fauna_client_pair::trust_status_label(
+            grant.liveness,
+            false,
+        )),
+    ));
+    item.append(&leaf(
+        ids::NEST_TRUST_GRANT_BOUND_NOTE,
+        &resolve(&fauna_client_pair::principal_grant_bound_note()),
+    ));
+    item
+}
+
+/// A principal's scope line: the publisher and each kind's name, read and
+/// write or read only, joined with "; " (shared `principal_scope_labels`).
+fn trust_scope_line(scope: &[TrustScope], folder: Option<TrustFolder>) -> String {
+    fauna_client_pair::principal_scope_labels(scope.to_vec(), folder)
+        .iter()
+        .map(resolve)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn trust_history_line(h: &TrustHistoryRow) -> String {
+    let scope = trust_scope_line(&h.scope, h.folder.clone());
+    let when = fauna_core::format::format_unix_local(h.at);
+    resolve(&fauna_client_pair::history_line_text(h.kind, &scope, &when))
+}
+
+/// Flip row `key`'s lens — page-local in the machine, no nest call — then
+/// repaint from its snapshot.
+fn set_lens(ctx: &Rc<Ctx>, key: &str, lens: TrustLens) {
+    let Some(machine) = ctx.machine.borrow().clone() else {
+        return;
+    };
+    machine.set_lens(key.to_owned(), lens);
+    *ctx.snapshot.borrow_mut() = Some(machine.snapshot());
+    paint(ctx);
 }
 
 /// Read a mail app password's secret on demand — never in the snapshot — then
@@ -810,6 +1015,78 @@ fn append_install_section(card: &gtk::Box, consent: &ConsentCardRow) {
     }
 }
 
+/// The card's folder picker (`connected-apps-request-folder`), painted after
+/// the scope rows and before the code — present exactly on a card carrying a
+/// bare folder-plane scope (`authorization-server.md` § Consent → *The card
+/// chooses the folder*). The model holds the folders' row ids in decimal (what
+/// `get_text` reads back and `select` takes), a display expression paints each
+/// as the folder's name; nothing is selected until the user chooses. A pick
+/// runs the shared machine's `set_folder`. A card with no eligible folder
+/// paints the picker with no option: its reason is the card's own text.
+fn append_folder_picker(ctx: &Rc<Ctx>, card: &gtk::Box, consent: &ConsentCardRow) {
+    let Some(picker) = consent.folder_picker.as_ref() else {
+        return;
+    };
+    let keys: Vec<String> = picker.options.iter().map(|o| o.id.to_string()).collect();
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let names: HashMap<String, String> = picker
+        .options
+        .iter()
+        .map(|o| (o.id.to_string(), o.name.clone()))
+        .collect();
+    let dropdown = gtk::DropDown::builder()
+        .model(&gtk::StringList::new(&key_refs))
+        .build();
+    let label_expr = gtk::ClosureExpression::new::<String>(
+        &[] as &[gtk::Expression],
+        gtk::glib::closure!(move |item: gtk::StringObject| {
+            let key = item.string();
+            names
+                .get(key.as_str())
+                .cloned()
+                .unwrap_or_else(|| key.to_string())
+        }),
+    );
+    dropdown.set_expression(Some(&label_expr));
+    let chosen = picker
+        .chosen
+        .and_then(|id| picker.options.iter().position(|o| o.id == id));
+    dropdown.set_selected(chosen.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32));
+    dropdown.set_tooltip_text(Some(card_t::CONSENT_FOLDER_PROMPT));
+    set_test_id(&dropdown, ids::CONNECTED_APPS_REQUEST_FOLDER);
+    {
+        let ctx = Rc::clone(ctx);
+        let consent_id_hex = consent.consent_id_hex.clone();
+        dropdown.connect_selected_notify(move |dd| {
+            let Some(key) = dd
+                .selected_item()
+                .and_then(|o| o.downcast::<gtk::StringObject>().ok())
+            else {
+                return;
+            };
+            let Ok(id) = key.string().parse::<i64>() else {
+                return;
+            };
+            run(
+                &ctx,
+                Gesture::SetFolder {
+                    consent_id_hex: consent_id_hex.clone(),
+                    id,
+                },
+            );
+        });
+    }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.append(&text_label(card_t::CONSENT_FOLDER_LABEL));
+    row.append(&dropdown);
+    if chosen.is_none() {
+        let prompt = text_label(card_t::CONSENT_FOLDER_PROMPT);
+        prompt.add_css_class("dim-label");
+        row.append(&prompt);
+    }
+    card.append(&row);
+}
+
 /// One `connected-apps-request-card`: a third-party app is asking to act for
 /// this account and is waiting for the answer — the built consent card, with
 /// its wording (`atproto_settings.consent_*`) unchanged. Every request the
@@ -831,7 +1108,12 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
     let card = card_box();
     set_test_id(&card, ids::CONNECTED_APPS_REQUEST_CARD);
 
-    let lines = consent_card_lines(consent);
+    let mut lines = consent_card_lines(consent);
+    // A card no folder can be chosen on says why in its own text.
+    let picker = consent.folder_picker.as_ref();
+    if let Some(reason) = picker.and_then(|p| p.none_eligible.as_ref()) {
+        lines.push(resolve(reason));
+    }
     set_test_text(&card, &lines.join("\n"));
 
     let heading = text_label(&lines[0]);
@@ -842,6 +1124,9 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
     }
 
     append_install_section(&card, consent);
+    append_folder_picker(ctx, &card, consent);
+    // A bare folder card is approvable only once a folder is chosen.
+    let approvable = picker.is_none_or(|p| p.chosen.is_some());
 
     // The code carries the raw value in a `code` attr as well as inside its
     // prose: the label is localized and may be reworded; the value is not, and
@@ -873,6 +1158,9 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
         let btn = gtk::Button::builder().label(label).build();
         if approved {
             btn.add_css_class("suggested-action");
+            // Before the gate's declaration, so it reads as the page's own
+            // intent and a reconnect never re-enables it.
+            btn.set_sensitive(approvable);
         }
         set_test_id(&btn, id);
         // A decline is a nest call exactly like an approval (the waiting
@@ -921,6 +1209,7 @@ mod tests {
             sets: vec![],
             ends: ends.map(fauna_core::localized::LocalizedText::key),
             install: None,
+            folder_picker: None,
         }
     }
 

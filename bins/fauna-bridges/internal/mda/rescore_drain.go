@@ -85,7 +85,7 @@ type rescoreDrainDeps struct {
 	// Test seams — production leaves these nil.
 	worklistFn func(ctx context.Context, limit uint32) ([]wsrpc.RescoreUnit, error)
 	fetchFn    func(ctx context.Context, actorID, messageID []byte) (*wsrpc.FetchedCiphertext, error)
-	openFn     func(envelope, key []byte) ([]byte, error)
+	openFn     func(envelope, key []byte, sealUnix uint64) ([]byte, error)
 	clamdFn    func(ctx context.Context, addr string, raw []byte) (string, error)
 	rspamdFn   func(ctx context.Context, cfg scan.Config, raw []byte) (mailfauna.RspamdScore, error)
 	submitFn   func(ctx context.Context, rows []wsrpc.SubmitScoreRow) (uint32, error)
@@ -438,7 +438,7 @@ func (d *rescoreDrain) rescoreUnit(ctx context.Context, u *wsrpc.RescoreUnit) (w
 	var pt []byte
 	var openErr error
 	for _, key := range candidates {
-		pt, openErr = d.deps.openFn(ct.EncryptedBody, key)
+		pt, openErr = d.deps.openFn(ct.EncryptedBody, key, ct.SealEpochBasisUnix())
 		if openErr == nil {
 			break
 		}

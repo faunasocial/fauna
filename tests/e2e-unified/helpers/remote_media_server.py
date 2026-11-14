@@ -34,16 +34,23 @@ class RemoteMediaServer:
     """Serves ``files`` (``{path: (bytes, content_type)}``) for ``host`` over
     HTTPS on loopback, under a throwaway CA, and answers each of ``redirects``
     (``{path: location}``) with a ``302`` to its location. Every GET's path is
-    recorded in ``requests`` — the witness that a byte load reached the remote."""
+    recorded in ``requests`` — the witness that a byte load reached the remote.
 
-    def __init__(self, host: str, tmp: Path, files: dict[str, tuple[bytes, str]],
-                 redirects: dict[str, str] | None = None):
+    ``tls=False`` serves the same files over plain HTTP on loopback instead (no
+    CA, ``tmp`` unused), for an app that fetches a remote url ITSELF with a bare
+    client: such a client rightly trusts no throwaway CA and no self-signed nest,
+    so only a plain-``http`` remote is fetchable from it in every nest mode."""
+
+    def __init__(self, host: str, tmp: Path | None, files: dict[str, tuple[bytes, str]],
+                 redirects: dict[str, str] | None = None, *, tls: bool = True):
         self.host = host
         self.files = files
         self.redirects = dict(redirects or {})
         self.requests: list[str] = []
         self.port = find_free_port()
-        self.ca_pem, cert_pem, key_pem = _ca_and_leaf([host], tmp)
+        self.tls = tls
+        if tls:
+            self.ca_pem, cert_pem, key_pem = _ca_and_leaf([host], tmp)
 
         server = self
 
@@ -86,19 +93,24 @@ class RemoteMediaServer:
             def log_message(self, *_args):
                 pass
 
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(cert_pem, key_pem)
         self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
-        self._httpd.socket = ctx.wrap_socket(self._httpd.socket, server_side=True)
+        if tls:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert_pem, key_pem)
+            self._httpd.socket = ctx.wrap_socket(self._httpd.socket, server_side=True)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
 
     def url(self, path: str) -> str:
-        """The remote ``https`` url a bridged post's attachment names."""
+        """The remote ``https`` url a bridged post's attachment names — or, with
+        ``tls=False``, the plain ``http`` loopback url an app dials directly."""
+        if not self.tls:
+            return f"http://127.0.0.1:{self.port}{path}"
         return f"https://{self.host}{path}"
 
     def nest_env(self) -> dict[str, str]:
         """The two ``test-hooks`` seams the nest's media proxy reads."""
+        assert self.tls, "the media proxy dials only https; a plain server has no nest seam"
         return {
             "FAUNA_TEST_MEDIA_PROXY_RESOLVE_JSON": json.dumps(
                 {self.host: f"127.0.0.1:{self.port}"}

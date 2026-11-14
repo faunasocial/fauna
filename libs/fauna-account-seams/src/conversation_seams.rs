@@ -25,9 +25,11 @@ use crate::spawner::TaskSpawner;
 ///
 /// Wiring the same pair twice is harmless — a later read-position or overlay
 /// registration retires the earlier one (its deliveries are refused, its
-/// writer ends with the dropped seam), and the group-reception keys keep the
-/// first — so a host whose session and store land in either order may call
-/// this from both edges without a lock between them.
+/// writer ends with the dropped seam), and so does the group-reception key
+/// seam (the latest store wins — a runtime superseded after its handle was
+/// wired must not stay the session's store) — so a host whose session and
+/// store land in either order may call this from both edges without a lock
+/// between them.
 pub fn wire(session: &ConversationsSession, store: AccountStoreHandle, spawner: &impl TaskSpawner) {
     wire_parts(&session.manager(), &session.backend(), store, spawner);
 }

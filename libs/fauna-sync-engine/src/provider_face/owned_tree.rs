@@ -161,7 +161,7 @@ impl OwnedTree {
     /// a refresh re-points the row at a moved head, the cached bytes are the
     /// superseded version and are never served as the file.
     pub fn lookup_body<E: ProviderEngine>(&self, engine: &E, rel: &str) -> Result<Option<PathBuf>> {
-        body_path(&self.kept, &self.cache, rel, || {
+        body_path(&self.kept, Some(&self.cache), rel, || {
             Ok(engine.row_presence(rel)? == RowPresence::Hydrated)
         })
     }
@@ -687,17 +687,12 @@ impl OwnedTree {
         rows: &[Vec<u8>],
         spool_dir: PathBuf,
     ) -> Result<(crate::peer_share_store::PeerIngestReport, i64)> {
-        let kept = self.kept.clone();
-        let landing = crate::engine::OnDemandLanding {
-            tree: self,
-            free_space: &move || crate::share_landing::free_space(&kept),
-        };
-        crate::always_resident::ingest_share_page_landing(
+        crate::always_resident::share_ingest_on_demand(
             engine,
+            self,
             proven_actor_hex,
             rows,
             spool_dir,
-            Some(&landing),
         )
         .await
     }
@@ -784,14 +779,184 @@ impl OwnedTree {
     }
 }
 
+/// Where the share plane's ingest door lands a peer's body on an on-demand
+/// replica ([`crate::engine::OnDemandLanding`]) — the kept root's half of a
+/// tree, which is all the door touches. Two implementations: [`OwnedTree`]
+/// (a provider that owns both roots — android) and [`StagingTree`] (a
+/// provider whose OS owns the cache — iOS's File Provider extension, whose
+/// staging root is the kept root; `p2p-shared-set-build.md` § *Phone peers
+/// — design*, decision 3).
+pub trait PeerLanding {
+    /// The kept root: the engine's `root_dir`, where a landed body rests.
+    fn kept_root(&self) -> &Path;
+
+    /// A fresh temp path inside the kept root's [`TEMP_DIR`].
+    fn kept_temp_path(&self) -> Result<PathBuf>;
+
+    /// Move the body at `src` into the kept root as `rel`'s body.
+    fn land_kept(&self, rel: &str, src: &Path) -> Result<PathBuf>;
+
+    /// After the door recorded `rel`'s row as a placeholder: drop any body
+    /// this tree caches for it. A kept-root body is never touched.
+    fn placeholder_recorded(&self, engine: &crate::engine::SyncEngine, rel: &str) -> Result<()>;
+}
+
+impl PeerLanding for OwnedTree {
+    fn kept_root(&self) -> &Path {
+        &self.kept
+    }
+
+    fn kept_temp_path(&self) -> Result<PathBuf> {
+        self.temp_path(BodyRoot::Kept)
+    }
+
+    fn land_kept(&self, rel: &str, src: &Path) -> Result<PathBuf> {
+        let rel = check_rel(rel)?;
+        self.move_into(src, BodyRoot::Kept, rel)
+    }
+
+    fn placeholder_recorded(&self, engine: &crate::engine::SyncEngine, rel: &str) -> Result<()> {
+        self.record_placeholder(engine, rel)
+    }
+}
+
+/// One set's tree on a provider whose **OS owns the cache** — iOS's File
+/// Provider extension (`p2p-shared-set-build.md` § *Phone peers — design*,
+/// decision 3). The extension's staging root (the engine's `root_dir`) is
+/// the kept root: a body the share plane landed from a peer rests there,
+/// `fetchContents` answers from it before asking the nest, and the plane's
+/// serve half and the extension's relay seat read it by path. The hydrated
+/// tree is the OS's, and nothing here writes into it or serves from it
+/// (`relay-serving.md` § Relay serving → *Apple's File Provider replica*).
+///
+/// **Demotion is deletion.** Where [`OwnedTree`] moves a confirmed body to
+/// its cache root, this tree has none to move it to: once the nest records
+/// exactly the staged bytes, the row goes back to a placeholder and the
+/// staged copy is removed — the OS holds the copy it fetched, or fetches the
+/// nest's on the next open. A recorded write the user made through Files is
+/// demoted the same way ([`Self::settle_recorded`]), so the staging root
+/// keeps only what the nest cannot serve.
+#[derive(Debug)]
+pub struct StagingTree {
+    staging: PathBuf,
+}
+
+impl StagingTree {
+    /// A tree over the extension's staging root (the engine's `root_dir`).
+    pub fn new(staging: PathBuf) -> Self {
+        Self { staging }
+    }
+
+    pub fn staging_root(&self) -> &Path {
+        &self.staging
+    }
+
+    /// The staged body `fetchContents` answers with before it asks the nest
+    /// — `Some` only when the staged bytes are ones the OS may be handed as
+    /// the file: a peer's body the nest has not confirmed (the nest cannot
+    /// serve it), or bytes that hash to the row's recorded head. A staged
+    /// copy the nest's head moved past is never served as the file.
+    pub fn kept_body<E: ProviderEngine>(&self, engine: &E, rel: &str) -> Result<Option<PathBuf>> {
+        let rel = check_rel(rel)?;
+        let staged = self.staging.join(rel);
+        if !staged.is_file() {
+            return Ok(None);
+        }
+        if engine.holds_provisional_peer_body(rel)? || engine.is_dehydration_safe(rel) {
+            return Ok(Some(staged));
+        }
+        Ok(None)
+    }
+
+    /// Settle the peer-landed bodies one nest fold spoke for — the staging
+    /// twin of [`OwnedTree::settle_peer_bodies`]: a **confirmed** body is
+    /// demoted (row to placeholder, staged copy removed, on the engine's own
+    /// dehydration proof); a **superseded** one still hashing to what the
+    /// peer landed is removed, so the nest's row stands.
+    pub fn settle_peer_bodies<E: ProviderEngine>(
+        &self,
+        engine: &E,
+        reconcile: &crate::engine::OverlayReconcile,
+    ) -> Result<()> {
+        for rel in &reconcile.confirmed {
+            self.settle_recorded(engine, rel)?;
+        }
+        for body in &reconcile.superseded {
+            let Ok(rel) = check_rel(body.path.as_str()) else {
+                continue;
+            };
+            let staged = self.staging.join(rel);
+            if !staged.is_file() {
+                continue;
+            }
+            let disk = fauna_core::chunker_stream::content_hash_streaming(&staged)?;
+            if hex::encode(disk.digest()) == body.content_hash {
+                remove_if_present(&staged)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Demote `rel`'s staged body once the nest holds exactly these bytes:
+    /// the row first (a placeholder — the OS keeps or re-fetches its copy),
+    /// the staged copy second, and only on the engine's proof. A body the
+    /// proof does not cover stays.
+    pub fn settle_recorded<E: ProviderEngine>(&self, engine: &E, rel: &str) -> Result<()> {
+        if check_rel(rel).is_err() || !self.staging.join(rel).is_file() {
+            return Ok(());
+        }
+        super::settle_adopted_in_staging(engine, &self.staging, rel)
+    }
+}
+
+impl PeerLanding for StagingTree {
+    fn kept_root(&self) -> &Path {
+        &self.staging
+    }
+
+    fn kept_temp_path(&self) -> Result<PathBuf> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = self.staging.join(TEMP_DIR);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!(
+            "{}-{}.part",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )))
+    }
+
+    fn land_kept(&self, rel: &str, src: &Path) -> Result<PathBuf> {
+        let rel = check_rel(rel)?;
+        let dest = self.staging.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if std::fs::rename(src, &dest).is_err() {
+            let tmp = self.kept_temp_path()?;
+            std::fs::copy(src, &tmp).with_context(|| format!("copying {}", src.display()))?;
+            std::fs::rename(&tmp, &dest)?;
+            std::fs::remove_file(src)?;
+        }
+        Ok(dest)
+    }
+
+    fn placeholder_recorded(&self, _engine: &crate::engine::SyncEngine, rel: &str) -> Result<()> {
+        // The OS owns every cached copy; the door's own upsert already made
+        // the row a placeholder.
+        check_rel(rel).map(|_| ())
+    }
+}
+
 /// The body lookup over two bare roots — [`OwnedTree::lookup_body`]'s rule,
 /// for a reader that holds the roots and the set's state DB but not the
 /// tree's engine (the share plane's serve half,
 /// [`crate::share_body::OnDemandBodySource`]). `hydrated` answers whether
 /// `rel`'s row is hydrated; it is asked only when the cache root holds a body.
+/// A `None` cache root is a tree whose OS owns the cache ([`StagingTree`]):
+/// only the kept root is read.
 pub fn body_path(
     kept: &Path,
-    cache: &Path,
+    cache: Option<&Path>,
     rel: &str,
     hydrated: impl FnOnce() -> Result<bool>,
 ) -> Result<Option<PathBuf>> {
@@ -800,8 +965,10 @@ pub fn body_path(
     if kept.is_file() {
         return Ok(Some(kept));
     }
-    let cache = cache.join(rel);
-    if cache.is_file() && hydrated()? {
+    if let Some(cache) = cache.map(|c| c.join(rel))
+        && cache.is_file()
+        && hydrated()?
+    {
         return Ok(Some(cache));
     }
     Ok(None)
@@ -1083,6 +1250,15 @@ mod tests {
                     && r.recorded == Some(ContentHash::of_raw(&disk))
             })
         }
+        fn is_recorded_placeholder_copy(&self, rel: &str) -> bool {
+            let Ok(disk) = std::fs::read(self.kept.join(rel)) else {
+                return false;
+            };
+            self.rows.borrow().get(rel).is_some_and(|r| {
+                r.presence == RowPresence::Placeholder
+                    && r.recorded == Some(ContentHash::of_raw(&disk))
+            })
+        }
         fn holds_provisional_peer_body(&self, rel: &str) -> Result<bool> {
             Ok(self.provisional.borrow().iter().any(|p| p == rel))
         }
@@ -1091,10 +1267,11 @@ mod tests {
         }
         async fn ingest(&self, rel: &str) -> Result<UploadOutcome> {
             self.calls.borrow_mut().push(format!("ingest:{rel}"));
-            // The engine's recorded-head-proof skip.
+            // The engine's recorded-head-proof skip, and its ack of a demoted
+            // recorded write re-driven with its own bytes.
             let disk = std::fs::read(self.kept.join(rel))?;
             if self.rows.borrow().get(rel).is_some_and(|r| {
-                r.presence == RowPresence::Hydrated
+                matches!(r.presence, RowPresence::Hydrated | RowPresence::Placeholder)
                     && r.recorded == Some(ContentHash::of_raw(&disk))
             }) {
                 return Ok(UploadOutcome {
@@ -1303,6 +1480,96 @@ mod tests {
             Some(&b"my own edit"[..]),
             "a body the user wrote over is a write intent — never dropped"
         );
+    }
+
+    /// A write the user made through the OS's tree, once the engine records
+    /// it, leaves the staging root: the row goes back to a placeholder (its
+    /// recorded head kept, so the OS's item version does not move) and the
+    /// staged copy is removed — while a write the nest did not record stays,
+    /// and so does a body the proof does not cover.
+    #[tokio::test]
+    async fn a_recorded_write_leaves_the_staging_root_on_the_engines_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let owned = tree(&dir);
+        let staging = StagingTree::new(owned.kept_root().to_path_buf());
+        std::fs::create_dir_all(staging.staging_root()).unwrap();
+        let engine = TreeFake::new(&owned);
+
+        std::fs::write(staging.staging_root().join("note.txt"), b"written in Files").unwrap();
+        let ack = crate::provider_face::serve_ingest(&engine, "note.txt")
+            .await
+            .unwrap();
+        assert!(ack.acked, "the fake records the write");
+        staging.settle_recorded(&engine, "note.txt").unwrap();
+        assert_eq!(read(&staging.staging_root().join("note.txt")), None);
+        assert_eq!(engine.presence("note.txt"), RowPresence::Placeholder);
+        assert_eq!(
+            engine.rows.borrow()["note.txt"].recorded,
+            Some(ContentHash::of_raw(b"written in Files")),
+            "the recorded head stays: the item's content version is unchanged"
+        );
+
+        engine.record_ok.set(false);
+        std::fs::write(staging.staging_root().join("held.txt"), b"nest refused").unwrap();
+        crate::provider_face::serve_ingest(&engine, "held.txt")
+            .await
+            .unwrap();
+        staging.settle_recorded(&engine, "held.txt").unwrap();
+        assert_eq!(
+            read(&staging.staging_root().join("held.txt")).as_deref(),
+            Some(&b"nest refused"[..]),
+            "an unrecorded write is the only copy — it stays"
+        );
+        assert!(engine.calls("placeholder:held.txt").is_empty());
+
+        staging.settle_recorded(&engine, "absent.txt").unwrap();
+        staging.settle_recorded(&engine, "../outside.txt").unwrap();
+    }
+
+    /// A recorded write the settle already demoted, re-driven by the OS after
+    /// a lost ack, is re-staged with the same bytes and acked — and the settle
+    /// that follows removes that second copy too, leaving the row a
+    /// placeholder with its recorded head. A body under the placeholder that
+    /// is NOT the recorded head is a write intent and stays.
+    #[tokio::test]
+    async fn a_re_driven_recorded_write_leaves_the_staging_root_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let owned = tree(&dir);
+        let staging = StagingTree::new(owned.kept_root().to_path_buf());
+        std::fs::create_dir_all(staging.staging_root()).unwrap();
+        let engine = TreeFake::new(&owned);
+        let path = staging.staging_root().join("retry.txt");
+
+        std::fs::write(&path, b"written once").unwrap();
+        crate::provider_face::serve_ingest(&engine, "retry.txt")
+            .await
+            .unwrap();
+        staging.settle_recorded(&engine, "retry.txt").unwrap();
+        assert_eq!(read(&path), None);
+
+        // The OS re-drives the write: the extension stages the same bytes again.
+        std::fs::write(&path, b"written once").unwrap();
+        let ack = crate::provider_face::serve_ingest(&engine, "retry.txt")
+            .await
+            .unwrap();
+        assert!(ack.acked, "the re-driven write acks");
+        staging.settle_recorded(&engine, "retry.txt").unwrap();
+        assert_eq!(
+            read(&path),
+            None,
+            "the re-staged copy leaves the staging root"
+        );
+        assert_eq!(engine.presence("retry.txt"), RowPresence::Placeholder);
+        assert_eq!(
+            engine.rows.borrow()["retry.txt"].recorded,
+            Some(ContentHash::of_raw(b"written once")),
+            "the recorded head stays"
+        );
+
+        // Other bytes under the placeholder are not the recorded head: kept.
+        std::fs::write(&path, b"a later edit").unwrap();
+        staging.settle_recorded(&engine, "retry.txt").unwrap();
+        assert_eq!(read(&path).as_deref(), Some(&b"a later edit"[..]));
     }
 
     fn read(path: &Path) -> Option<Vec<u8>> {

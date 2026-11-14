@@ -9,8 +9,12 @@ import SwiftUI
 /// harness names (`E2eEnv.openedUrlsRecord`) — one line per open, in order, the
 /// file tui's fake opener and linux's seam append to (conftest `opened_urls`).
 ///
-/// Today's caller is the archive-import page's step-1 export link; a later
-/// external link joins it here rather than calling `openURL` itself.
+/// Today's callers are the archive-import page's step-1 export link and the two
+/// payment links — the OTHER-profile offer row's link (`ProfileView`'s
+/// `SubscriptionOfferRow`) and the sold-post teaser's link
+/// (`PostUnlockOfferTeaser`), each opening the checkout URL the shared rule
+/// returned; a later external link joins them here rather than calling `openURL`
+/// itself.
 public enum ExternalURLOpener {
     @MainActor
     public static func open(_ url: URL, with openURL: OpenURLAction) {

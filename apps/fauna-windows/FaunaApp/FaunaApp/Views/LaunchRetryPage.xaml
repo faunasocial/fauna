@@ -6,6 +6,15 @@
     xmlns:ids="using:FaunaApp.UiIds">
     <Grid Padding="48" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="500">
         <StackPanel Spacing="16" HorizontalAlignment="Center">
+            <!-- launch-identity-label: the account the app is trying, from the
+                 registry's cache (onboarding.md § App-launch routing → The cached
+                 identity on the launch surfaces); collapsed while nothing is cached. -->
+            <TextBlock x:Name="IdentityText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchIdentityLabel}"
+                       Opacity="0.7"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center"
+                       Visibility="Collapsed" />
             <TextBlock x:Name="MessageText"
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchTransientError}"
                        Style="{StaticResource SubtitleTextBlockStyle}"

@@ -29,6 +29,16 @@ public final class ConnectionWordFeed {
     public func publish(_ state: FfiConnectionState) {
         let next = connectionStateWord(state: state)
         word = next
+        // The device's offline outbox follows the transport itself, not a feed
+        // manager: an account change drops the manager (`FeedVM.reset`), and a
+        // word only it relayed stayed at the outgoing client's last
+        // `disconnected`, so a message carried across a succession never
+        // drained until the Feed page was opened (`set_device_connection_word`).
+        // The kids flavor excises the feed manager and the outbox with it
+        // (the FFI's `feed-manager` feature), so it has no outbox to feed.
+        #if !FAUNA_KIDS
+        setDeviceConnectionWord(connectionState: next)
+        #endif
         for follower in followers.values { follower(next) }
     }
 

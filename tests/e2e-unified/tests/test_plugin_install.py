@@ -283,7 +283,8 @@ def test_a_user_connects_a_plugin_from_its_settings_card_and_disconnects_it(
     ca.open_settings_link(row)
     assert bridges.is_page_visible(), "the settings link did not open the Bridges page"
     assert bridges.wait_for_plugin_bound(url, True), (
-        f"the card never read bound. page error: {bridges.page_error_text(timeout=0)!r}"
+        f"the card never read bound. page error: {bridges.page_error_text(timeout=0)!r}; "
+        f"{bridges.plugin_cards_diagnosis()}"
     )
 
     # ── Disconnect: the grant ends, the plugin stays installed ──
@@ -343,7 +344,8 @@ def _connect_from_the_card(app, url: str) -> None:
     ca.approve_request(i)
     bridges.navigate()
     assert bridges.wait_for_plugin_bound(url, True), (
-        f"the card never read bound. page error: {bridges.page_error_text(timeout=0)!r}"
+        f"the card never read bound. page error: {bridges.page_error_text(timeout=0)!r}; "
+        f"{bridges.plugin_cards_diagnosis()}"
     )
 
 

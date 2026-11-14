@@ -417,11 +417,13 @@ public struct FoldersContent<BindingContent: View>: View {
                     GroupScopeRow(
                         scope: scope,
                         isExpanded: expandedFolder == scope.folderId,
-                        // A client with no binding to host keeps the label-only row.
-                        onToggle: BindingContent.self == EmptyView.self
-                            ? nil : { toggleFolder(scope.folderId) }
+                        onToggle: { toggleFolder(scope.folderId) }
                     ) {
+                        // A writer member's body (decision 11, `group-set.md`):
+                        // the binding where the platform binds (EmptyView on
+                        // iOS), then the hide-only on-demand toggle.
                         perSetBinding(FolderBindingTarget(groupRef: scope.folderId))
+                        groupOnDemandToggle(scope)
                     }
                     // Continues the M2 folders' own index — one indexed list.
                     .automationScope(Ids.folderRow, index: folders.count + offset)
@@ -662,6 +664,22 @@ public struct FoldersContent<BindingContent: View>: View {
         #endif
     }
 
+    #if !FAUNA_EXCISE_P2P_SHARE
+    /// `folder-on-demand-toggle` on a group-scope row — what a member's row
+    /// carries (`group-set.md` § Build design — the group set, decision 11 (a)):
+    /// hide-only (the membership is the seat), default ON, keyed by the
+    /// scope's `group:` ref — the `folder_id` the presence plan lists it under.
+    @ViewBuilder
+    private func groupOnDemandToggle(_ scope: FfiGroupScope) -> some View {
+        #if canImport(FileProvider)
+            FolderOnDemandToggle(
+                vm: vm, folderRef: scope.folderId, folderName: scope.pageLabel,
+                isBound: boundSets().contains(scope.folderId),
+                onChanged: onDemandChanged, hideOnly: true)
+        #endif
+    }
+    #endif
+
     /// `binding_section`'s `parked` input: the agent's bound-location park
     /// (`revokedSets`, macOS) united with the File Provider domain's park
     /// (`FileProviderParks`, both apple platforms) — so iOS, and a macOS set
@@ -721,9 +739,17 @@ public struct FoldersContent<BindingContent: View>: View {
 /// no set is ever folder-bound (the on-demand toggle is the only presence
 /// affordance there).
 extension FoldersContent where BindingContent == EmptyView {
-    public init(vm: DevicesMachineVM, onDemandChanged: (() -> Void)? = nil) {
+    /// A page with no per-set binding (iOS) — a group set's review rows and
+    /// its restore still come in from the platform (`GroupSetReviewRows`).
+    public init(
+        vm: DevicesMachineVM,
+        setReviewRows: @escaping (String, String) -> [ConflictSummary] = { _, _ in [] },
+        useRetainedVersion: @escaping (String, Int64) async throws -> Void = { _, _ in },
+        onDemandChanged: (() -> Void)? = nil
+    ) {
         self.init(
-            vm: vm, onDemandChanged: onDemandChanged, perSetBinding: { _ in EmptyView() })
+            vm: vm, setReviewRows: setReviewRows, useRetainedVersion: useRetainedVersion,
+            onDemandChanged: onDemandChanged, perSetBinding: { _ in EmptyView() })
     }
 }
 

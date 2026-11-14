@@ -1,5 +1,6 @@
 package com.fauna.app.ui.viewmodel
 
+import com.fauna.app.BuildConfig
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.AccountStores
@@ -136,7 +137,7 @@ class AppLaunchVM @Inject constructor(
             val outcome = kotlinx.coroutines.withContext(finishDispatcher) {
                 accountStores.finishSignOut(
                     SignOutCredentialEraser(registry, secureStorage),
-                    dismissAgent = true,
+                    caller = com.fauna.ffi.FfiFinishCaller.LAUNCH,
                     written = null,
                 )
             }
@@ -294,7 +295,7 @@ class AppLaunchVM @Inject constructor(
         val outcome = kotlinx.coroutines.withContext(finishDispatcher) {
             accountStores.finishSignOut(
                 SignOutCredentialEraser(registry, secureStorage),
-                dismissAgent = false,
+                caller = com.fauna.ffi.FfiFinishCaller.GESTURE,
                 written = recorded,
             )
         }
@@ -316,7 +317,7 @@ class AppLaunchVM @Inject constructor(
         val outcome = kotlinx.coroutines.withContext(finishDispatcher) {
             accountStores.finishSignOut(
                 SignOutCredentialEraser(registry, secureStorage),
-                dismissAgent = true,
+                caller = com.fauna.ffi.FfiFinishCaller.REMOVE_AGAIN,
                 written = null,
             )
         }
@@ -892,7 +893,9 @@ class AppLaunchVM @Inject constructor(
                 // Through the same per-actor `LaunchPersistence` the machine
                 // branched on, like the two sibling resume rows.
                 val rec = launchPersistence.loadPendingFactoryReset()
-                if (rec == null) {
+                // The kids build registers no claim page (a child joins by
+                // invite), so it re-enters at handle-entry as well.
+                if (rec == null || BuildConfig.KIDS) {
                     // The machine routed here off this very slot, so its absence now
                     // means the store changed underneath us. The identity survives;
                     // handle-entry is the safe re-entry, rather than a claim page
@@ -944,19 +947,26 @@ class AppLaunchVM @Inject constructor(
                 // to claim_code regardless — WITH the latched code when present so it
                 // pre-fills, else the ordinary cold-unclaimed path (admin types it).
                 val pendingCode = host.pendingFactoryResetClaimCode
-                if (!pendingCode.isNullOrEmpty()) {
-                    host.machine.navigateToClaimCodeForKnownNestWithCode(
-                        nestUrl = sessionAccount.nestUrl ?: "",
-                        handle = sessionAccount.handle ?: "",
-                        code = pendingCode,
-                    )
+                if (BuildConfig.KIDS) {
+                    // The kids build registers no claim page: a child cannot
+                    // claim a nest, so an unclaimed saved nest re-enters at
+                    // handle-entry, whose check says there is none to join.
+                    NavTarget.Wizard("onboarding/handle-entry")
                 } else {
-                    host.machine.navigateToClaimCodeForKnownNest(
-                        nestUrl = sessionAccount.nestUrl ?: "",
-                        handle = sessionAccount.handle ?: "",
-                    )
+                    if (!pendingCode.isNullOrEmpty()) {
+                        host.machine.navigateToClaimCodeForKnownNestWithCode(
+                            nestUrl = sessionAccount.nestUrl ?: "",
+                            handle = sessionAccount.handle ?: "",
+                            code = pendingCode,
+                        )
+                    } else {
+                        host.machine.navigateToClaimCodeForKnownNest(
+                            nestUrl = sessionAccount.nestUrl ?: "",
+                            handle = sessionAccount.handle ?: "",
+                        )
+                    }
+                    NavTarget.Wizard("onboarding/claim-code")
                 }
-                NavTarget.Wizard("onboarding/claim-code")
             }
         }
     }

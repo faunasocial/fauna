@@ -26,6 +26,7 @@
   import { sharedRpcPort } from '#lib/rpc';
   import { resolveComposed, resolveLocalized } from '#lib/i18n/localized';
   import {
+    composeOracleOp,
     composeRequestCard,
     composeRequestInstall,
     composeRosterRow,
@@ -36,8 +37,18 @@
     type ConnectedAppsMachine,
     type ConnectedAppsSnapshot,
     type ConsentCardRow,
+    type PrincipalTrustHistory,
+    type TrustFolderRef,
+    type TrustScopeTuple,
   } from '#lib/wasm-connected-apps';
-  import { ensureWasm, resolveMuaUsername } from '#lib/wasm';
+  import {
+    ensureWasm,
+    principalGrantBoundNote,
+    historyLineText,
+    principalScopeLabels,
+    principalStatusLabel,
+    resolveMuaUsername,
+  } from '#lib/wasm';
   import { t } from '#lib/i18n/strings';
   import { localTimestamp } from '#lib/value-format';
   import { IDS } from '#lib/generated/uiIds';
@@ -101,6 +112,10 @@
   async function visit(): Promise<void> {
     if (!machine) return;
     reading = true;
+    machine.resetLenses();
+    // An open record is a reading of THIS visit too: the next visit starts
+    // with every row's record closed.
+    machine.closeRecord();
     snap = null;
     revokeArmed = null;
     revealed = {};
@@ -136,6 +151,14 @@
   async function resolveRequest(request: ConsentCardRow, approved: boolean): Promise<void> {
     if (!machine) return;
     await machine.resolveRequest(request.consent_id_hex, approved);
+    fold();
+  }
+
+  // A pick on a bare folder card's picker — local to the machine, no nest
+  // call; the card's Approve then mints over it.
+  function chooseFolder(request: ConsentCardRow, value: string): void {
+    if (!machine || value === '') return;
+    machine.setFolder(request.consent_id_hex, Number(value));
     fold();
   }
 
@@ -181,6 +204,23 @@
     fold();
   }
 
+  // The trust facet's words are shared Rust (`fauna_client_pair`): the scope
+  // line joined with "; ", the liveness word with no renew, the honest-bound
+  // note and the History template; times are epoch seconds.
+  function trustScope(scope: TrustScopeTuple[], folder: TrustFolderRef | null | undefined): string {
+    return principalScopeLabels(scope, folder).map(resolveLocalized).join('; ');
+  }
+  const trustTime = (secs: number): string => localTimestamp(secs * 1000);
+  function trustHistoryLine(h: PrincipalTrustHistory): string {
+    return resolveLocalized(
+      historyLineText(h.kind, trustScope(h.scope, h.folder), trustTime(h.at)),
+    );
+  }
+  function setLens(key: string, history: boolean): void {
+    machine?.setLens(key, history);
+    fold();
+  }
+
   async function copyText(value: string): Promise<void> {
     try { await navigator.clipboard.writeText(value); } catch { /* headless / no perm */ }
   }
@@ -216,6 +256,25 @@
   function opensSettingsCard(row: ConnectedAppRow): boolean {
     return composeRosterRow(row).opens_settings_card;
   }
+
+  // Whether the row opens a per-operation record — a principal the oracle
+  // served, never an app-password session's row (shared `opens_record`).
+  function opensRecord(row: ConnectedAppRow): boolean {
+    return composeRosterRow(row).opens_record;
+  }
+
+  // The record's open control toggles: the one open record closes, any other
+  // row's opens (the machine keeps one open at a time). The observer folds the
+  // open's first notify, so the control's label flips while the read runs.
+  async function toggleRecord(key: string, open: boolean): Promise<void> {
+    if (!machine) return;
+    if (open) {
+      machine.closeRecord();
+    } else {
+      await machine.openRecord(key);
+    }
+    fold();
+  }
 </script>
 
 <section class="section">
@@ -227,6 +286,7 @@
     <h3>{t.connected_apps.requests_heading}</h3>
     {#each snap?.requests ?? [] as request (request.consent_id_hex)}
       {@const install = composeRequestInstall(request)}
+      {@const picker = request.folder_picker ?? null}
       <div class="card" data-testid={IDS.CONNECTED_APPS_REQUEST_CARD}>
         <!-- The card's lines are composed once in shared Rust
              (`compose::request_card_lines`): heading, who is asking, the scopes
@@ -235,6 +295,8 @@
         {#each composeRequestCard(request).map(resolveComposed) as line, i}
           {#if i < 3}<p>{line}</p>{:else}<div class="scopes">{line}</div>{/if}
         {/each}
+        <!-- A card no folder can be chosen on says why in its own text. -->
+        {#if picker?.none_eligible}<p>{resolveLocalized(picker.none_eligible)}</p>{/if}
         <!-- An admin's hosted-plugin install card: what approving would run on
              the nest, one leaf per fact (`compose::request_install_text`), between
              the scopes and the binding code. -->
@@ -248,6 +310,27 @@
           <div class="scopes" data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_HOSTS}>{install.hosts.map(resolveComposed).join(lineSeparator())}</div>
           <div class="scopes" data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_SETTINGS}>{install.settings.map(resolveComposed).join(lineSeparator())}</div>
         {/if}
+        <!-- The card's folder picker (`connected-apps-request-folder`): one per
+             bare folder card, the option values the folders' row ids, the labels
+             their names, nothing selected until the user chooses (no
+             placeholder option — the picker paints only folders). -->
+        {#if picker}
+          <label class="actions">
+            <span>{t.atproto_settings.consent_folder_label}</span>
+            <select
+              class="input"
+              data-testid={IDS.CONNECTED_APPS_REQUEST_FOLDER}
+              title={t.atproto_settings.consent_folder_prompt}
+              value={picker.chosen === null ? '' : String(picker.chosen)}
+              onchange={(e) => chooseFolder(request, (e.currentTarget as HTMLSelectElement).value)}
+            >
+              {#each picker.options as option (option.id)}
+                <option value={String(option.id)}>{option.name}</option>
+              {/each}
+            </select>
+            {#if picker.chosen === null}<span class="muted small">{t.atproto_settings.consent_folder_prompt}</span>{/if}
+          </label>
+        {/if}
         <p data-testid={IDS.CONNECTED_APPS_REQUEST_CODE} data-code={request.code}>
           {t.atproto_settings.consent_code({ code: request.code })}
         </p>
@@ -255,7 +338,8 @@
         <!-- Both controls render unconditionally — never gated on how close the
              request is to expiring: a resolution is reported even past expiry. -->
         <div class="actions">
-          <button class="btn btn-primary" data-testid={IDS.CONNECTED_APPS_REQUEST_APPROVE} onclick={() => resolveRequest(request, true)}>
+          <!-- A bare folder card is approvable only once a folder is chosen. -->
+          <button class="btn btn-primary" data-testid={IDS.CONNECTED_APPS_REQUEST_APPROVE} disabled={picker !== null && picker.chosen === null} onclick={() => resolveRequest(request, true)}>
             {t.atproto_settings.consent_approve_button}
           </button>
           <button class="btn" data-testid={IDS.CONNECTED_APPS_REQUEST_DECLINE} onclick={() => resolveRequest(request, false)}>
@@ -348,6 +432,62 @@
             </button>
           </div>
         {/if}
+        {#if opensRecord(row)}
+          <!-- A served principal's record (`connected-apps.md` § Layout & flow,
+               region 3): the open control, then — while this row's record is
+               open and its read has returned — the list, newest first, or its
+               empty state. The words are shared Rust's (`oracle_op_text`); the
+               record is the machine's read, never kept here. -->
+          {@const record = snap.record?.key === row.key ? snap.record : null}
+          <button class="btn small" data-testid={IDS.CONNECTED_APPS_ORACLE_OPEN} onclick={() => toggleRecord(row.key, !!record)}>
+            {record ? t.connected_apps.oracle_close : t.connected_apps.oracle_open}
+          </button>
+          {#if record?.loaded}
+            <div class="oracle-list" data-testid={IDS.CONNECTED_APPS_ORACLE_LIST}>
+              {#each record.ops as op, j (j)}
+                <div class="muted small" data-testid={IDS.CONNECTED_APPS_ORACLE_OP} data-class={op.class}>{resolveComposed(composeOracleOp(op))}</div>
+              {/each}
+            </div>
+            {#if record.ops.length === 0}
+              <p class="muted small" data-testid={IDS.CONNECTED_APPS_ORACLE_EMPTY}>{t.connected_apps.oracle_empty}</p>
+            {/if}
+          {/if}
+        {/if}
+        {#if row.trust}
+          {@const trust = row.trust}
+          <!-- The trust facet (connected-apps.md § The trust facet and history
+               lens): the Nests row's per-row Now / History lens over this
+               principal's keys, reusing the nest-trust-* ids. No renew or
+               per-grant revoke — the row's one Revoke is below. -->
+          <div class="trust-facet">
+            <div class="lens-toggle" role="tablist">
+              <button class="lens-btn" class:active={trust.lens === 'Now'} data-testid={IDS.NEST_TRUST_VIEW_NOW} onclick={() => setLens(row.key, false)}>{t.nests.view_now}</button>
+              <button class="lens-btn" class:active={trust.lens === 'History'} data-testid={IDS.NEST_TRUST_VIEW_HISTORY} onclick={() => setLens(row.key, true)}>{t.nests.view_history}</button>
+            </div>
+            {#if trust.lens === 'Now'}
+              {#if trust.grants.length === 0}
+                <p class="muted small" data-testid={IDS.NEST_TRUST_EMPTY}>{t.connected_apps.trust_empty}</p>
+              {:else}
+                <div class="grant-list" data-testid={IDS.NEST_TRUST_GRANT_LIST}>
+                  {#each trust.grants as g (g.grant_id.join(','))}
+                    <div class="grant-item" data-testid={IDS.NEST_TRUST_GRANT_ITEM}>
+                      <span data-testid={IDS.NEST_TRUST_GRANT_SCOPE}>{trustScope(g.scope, g.folder)}</span>
+                      <span class="muted small" data-testid={IDS.NEST_TRUST_GRANT_LASTS_UNTIL}>{t.nests.lasts_until} {trustTime(g.lasts_until)}</span>
+                      <span class="badge" data-testid={IDS.NEST_TRUST_GRANT_STATUS}>{resolveLocalized(principalStatusLabel(g.liveness))}</span>
+                      <p class="muted small" data-testid={IDS.NEST_TRUST_GRANT_BOUND_NOTE}>{resolveLocalized(principalGrantBoundNote())}</p>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            {:else}
+              <div class="history-list" data-testid={IDS.NEST_TRUST_HISTORY_LIST}>
+                {#each trust.history as h (h.at + ':' + h.kind + ':' + h.grant_id.join(','))}
+                  <div class="history-item" data-testid={IDS.NEST_TRUST_HISTORY_ITEM}>{trustHistoryLine(h)}</div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
         {#if revokeArmed === row.key}
           <p>{t.connected_apps.revoke_prompt({ name: resolveLocalized(row.name) })}</p>
           <div class="actions">
@@ -405,5 +545,12 @@
   .mono { font-family: monospace; }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.25rem; }
   .scopes { display: flex; flex-direction: column; }
+  .trust-facet { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.25rem; }
+  .lens-toggle { display: flex; gap: 0.25rem; }
+  .lens-btn { font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); background: transparent; cursor: pointer; }
+  .lens-btn.active { background: var(--accent, #1f6feb); border-color: var(--accent, #1f6feb); color: #fff; }
+  .grant-list, .history-list { display: flex; flex-direction: column; gap: 0.5rem; }
+  .grant-item { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem; display: flex; flex-direction: column; gap: 0.25rem; }
+  .history-item { font-size: 0.8rem; }
   h3 { margin-top: 1.25rem; font-size: 1rem; }
 </style>

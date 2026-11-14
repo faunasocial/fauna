@@ -719,7 +719,7 @@ public sealed class AdminUserRow
 
     internal static AdminUserRow From(FfiAdminUser u)
     {
-        var controls = FaunaFfiMethods.AdminUserRowControls(u);
+        var controls = FaunaFfiMethods.AdminUserRowControls(u, null);
         return new()
         {
             ActorId = u.actorId,

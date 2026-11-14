@@ -105,6 +105,32 @@ pub async fn enqueue_intent<B: StoreBackend>(
     Ok(intent_id)
 }
 
+/// Append a retired identity's intent to `store` VERBATIM and, when `parked`
+/// names the predecessor row's stored reason, park it with that reason — the
+/// outbox carry's write (`crate::outbox_carry`; `succession-aftermath.md`
+/// § Re-key scope, the device-local outbox row). `false` = the intent id is
+/// already here (a re-run after a crash between this append and the
+/// predecessor's delete): nothing is written, and the row is left as it
+/// stands — perhaps retried by the user since, so it is never parked again.
+/// No `OfflineQueued` check: the predecessor's enqueue door made it.
+pub async fn carry_intent<B: StoreBackend>(
+    store: &AccountStore<B>,
+    intent: &NewOutboxIntent,
+    parked: Option<&str>,
+) -> Result<bool> {
+    let inserted = store
+        .outbox_append(intent)
+        .await
+        .context("outbox carry append")?;
+    if inserted && let Some(code) = parked {
+        store
+            .outbox_mark_failed(&intent.intent_id, code)
+            .await
+            .context("outbox carry park")?;
+    }
+    Ok(inserted)
+}
+
 /// What one drain pass did. Mirrors the pump-report idiom: counts, plus the
 /// errors that explain every parked or retried intent.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -128,6 +154,85 @@ pub struct DrainReport {
     pub errors: Vec<String>,
 }
 
+/// The environment variable naming the e2e outbox drain hold's file
+/// ([`outbox_drain_held`]).
+pub const OUTBOX_DRAIN_HOLD_FILE_ENV: &str = "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE";
+
+/// The e2e outbox drain hold: `true` while the file
+/// [`OUTBOX_DRAIN_HOLD_FILE_ENV`] names exists. While it holds, [`drain_outbox`]
+/// sends nothing and every intent stays queued, durable and listed. A test
+/// needs this because a queued intent otherwise drains in the first pass that
+/// reaches the nest. The succession outbox carry is the case: the identity
+/// ceremony needs the nest up, so without a hold a like queued as the
+/// predecessor would drain as the predecessor before the ceremony could run,
+/// and nothing would be left to carry (`succession-aftermath.md` § Re-key
+/// scope, the device-local outbox row;
+/// `test_identity_succession_outbox_carry.py`). It is a file, not an
+/// in-process flag, because on a desktop the process that pumps is the sync
+/// agent, not the app the test drives. The harness sets the variable for each
+/// launch (`drivers/tui.py`), pointing at a file that does not exist until a
+/// test holds the drain. The app inherits it, and so does the agent it spawns.
+/// Deleting the file releases the hold, and the next pump pass drains. It
+/// holds both drains: the pump's generic leg here, and the app's MLS and
+/// identity legs in `AccountOutbox::drain_app_once`, whose held pass ends the
+/// app's drain loop, so releasing an app-only intent is deleting the file and
+/// then ringing the app drain (the e2e agent's `APP_OUTBOX_DRAIN_NOW`). The
+/// carry itself runs as usual. The outer gate is the compile gate and the inner one
+/// is the variable (`fauna_account_plane`'s `FAUNA_E2E_STATED_ROW` shape;
+/// convention 15): a release build without `e2e-agent` never reads the
+/// variable.
+///
+/// **The in-process hold beside the file.** A web tab has no environment and
+/// no filesystem, and an android app hosts its account runtime in its own
+/// process, which inherits nothing from the harness; there the pump and the
+/// app drain run in the one process the test drives, so the hold is a flag in
+/// it, set and cleared through the e2e agent's `OUTBOX_DRAIN_HOLD` command
+/// ([`set_outbox_drain_hold`]). Either one holds.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub(crate) fn outbox_drain_held() -> bool {
+    held_now(
+        OUTBOX_DRAIN_HELD_IN_PROCESS.load(std::sync::atomic::Ordering::SeqCst),
+        std::env::var_os(OUTBOX_DRAIN_HOLD_FILE_ENV),
+    )
+}
+
+/// The in-process half of [`outbox_drain_held`]; the file is the other.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+static OUTBOX_DRAIN_HELD_IN_PROCESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Set or clear the in-process e2e outbox drain hold
+/// ([`outbox_drain_held`]): the seam the e2e agent's `OUTBOX_DRAIN_HOLD`
+/// command reaches on an app whose pump runs in the process the test drives
+/// (web, the UniFFI apps). Clearing it releases the hold, and the next pump
+/// pass drains; an app-only intent then also needs the app drain rung
+/// (`APP_OUTBOX_DRAIN_NOW`). Compiled out of release artifacts (convention
+/// 15).
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub fn set_outbox_drain_hold(held: bool) {
+    OUTBOX_DRAIN_HELD_IN_PROCESS.store(held, std::sync::atomic::Ordering::SeqCst);
+    tracing::info!(held, "e2e outbox drain hold set in process");
+}
+
+/// [`outbox_drain_held`]'s pure combiner: the in-process flag, or the named
+/// file existing.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn held_now(in_process: bool, path: Option<std::ffi::OsString>) -> bool {
+    in_process || hold_file_present(path)
+}
+
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+pub(crate) fn outbox_drain_held() -> bool {
+    false
+}
+
+/// [`outbox_drain_held`]'s pure half: the named file, when one is named,
+/// exists.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn hold_file_present(path: Option<std::ffi::OsString>) -> bool {
+    path.is_some_and(|path| !path.is_empty() && std::path::Path::new(&path).exists())
+}
+
 /// Drain every drainable intent, per-scope FIFO. Called by the account
 /// runtime's full pump passes (reconnect, ticker, `reconcile_now`) right
 /// after `publish_pending` — the two "push our writes out" legs.
@@ -138,6 +243,10 @@ where
     R::Error: RpcErrorClass,
 {
     let mut report = DrainReport::default();
+    if outbox_drain_held() {
+        tracing::info!("outbox drain held by the e2e hold file; nothing sent this pass");
+        return report;
+    }
     let undrained = match store.outbox_undrained().await {
         Ok(rows) => rows,
         Err(e) => {
@@ -266,4 +375,55 @@ async fn park<B: StoreBackend>(
     report
         .errors
         .push(format!("outbox intent parked ({}): {why}", intent.kind));
+}
+
+#[cfg(test)]
+mod drain_hold_tests {
+    use super::{held_now, hold_file_present};
+
+    #[test]
+    fn the_in_process_hold_holds_with_no_file_and_either_one_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("outbox-drain-hold");
+        assert!(!held_now(false, None), "neither: not held");
+        assert!(
+            held_now(true, None),
+            "the in-process flag alone holds (web, android)"
+        );
+        assert!(
+            !held_now(false, Some(file.clone().into_os_string())),
+            "a named file not yet made, and no flag: not held"
+        );
+        std::fs::write(&file, b"").unwrap();
+        assert!(
+            held_now(false, Some(file.clone().into_os_string())),
+            "the file alone holds (tui, linux)"
+        );
+        assert!(held_now(true, Some(file.into_os_string())), "both: held");
+    }
+
+    #[test]
+    fn the_drain_hold_holds_only_while_its_named_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("outbox-drain-hold");
+        assert!(!hold_file_present(None), "no variable: never held");
+        assert!(
+            !hold_file_present(Some("".into())),
+            "an empty variable: never held"
+        );
+        assert!(
+            !hold_file_present(Some(file.clone().into_os_string())),
+            "a named file that does not exist yet: the launch's inert default"
+        );
+        std::fs::write(&file, b"").unwrap();
+        assert!(
+            hold_file_present(Some(file.clone().into_os_string())),
+            "the test holds"
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            !hold_file_present(Some(file.into_os_string())),
+            "deleting releases"
+        );
+    }
 }

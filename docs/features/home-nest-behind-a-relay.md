@@ -43,7 +43,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 11. [nest] A certificate the admin's app obtains for the home nest reaches it through the relay and is installed there, and the relay can neither read nor alter it — `docs/goal/architecture/nest/tls-certificates.md` § B. Trusted-cert acquisition
    - `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_a_certificate_for_the_home_nest_reaches_it_through_the_relay`
 12. [nest] The home nest installs a delivered certificate only if one of its own admins signed it; one sent by anyone else is never served — `docs/goal/architecture/nest/tls-certificates.md` § B. Trusted-cert acquisition
-   - (none)
+   - `tests/e2e-unified/tests/live/test_relay_cert_refusal_hetzner.py::test_the_home_nest_refuses_a_relayed_certificate_its_admins_did_not_sign`
 13. [nest] A post you write on your home nest reaches the public through the relay, which serves it as yours — `docs/goal/architecture/nest/private-mode.md` § Post Forwarding
    - `tests/e2e-unified/tests/api/test_home_relay_post_forward.py::test_a_post_on_the_home_nest_reaches_the_public_through_the_relay_as_the_authors`
 
@@ -75,6 +75,6 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_two_nest_mail_relay_round_trip_and_no_readable_copy` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_a_message_over_the_relay_frame_budget_reaches_home_and_holds_up_nothing` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py::test_a_certificate_for_the_home_nest_reaches_it_through_the_relay` | nest (linux): passed |
-| 12 | nest | (none) | — |
+| 12 | nest | `tests/e2e-unified/tests/live/test_relay_cert_refusal_hetzner.py::test_the_home_nest_refuses_a_relayed_certificate_its_admins_did_not_sign` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_home_relay_post_forward.py::test_a_post_on_the_home_nest_reaches_the_public_through_the_relay_as_the_authors` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

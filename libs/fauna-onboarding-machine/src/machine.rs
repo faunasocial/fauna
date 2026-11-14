@@ -415,6 +415,14 @@ pub struct OnboardingMachine {
     /// only while the outcome is the `AlreadyOnNest` a first sign-in concluded;
     /// read only by that outcome's Continue arm (`onboarding.md` § 3b-ter).
     handle_check_first_sign_in: std::sync::atomic::AtomicBool,
+    /// The kids input (`account-age-band.md` § The account age band, the
+    /// kids-app bullet, item (4)): the kids app keeps onboarding only as
+    /// joining a nest by invite, so a handle check that would offer to set a
+    /// nest up or claim one ends in the terminal `kids_no_joinable_nest` line
+    /// instead ([`Self::kids_excises`]). Set at construction from this crate's
+    /// `kids` feature, which only the kids FFI flavor turns on (`fauna-ffi`'s
+    /// `kids-floor`); an atomic so tests can flip it (`set_kids_for_test`).
+    kids: std::sync::atomic::AtomicBool,
     invite_request: Mutex<InviteRequestSnapshot>,
     /// The `PendingReview` state a recheck in flight replaced with `Rechecking`,
     /// so [`Self::pending_invite_slot`] still answers for the request under
@@ -1007,6 +1015,7 @@ impl OnboardingMachine {
             nest_resolve_override,
             handle_check: Mutex::new(HandleCheckSnapshot::idle()),
             handle_check_first_sign_in: std::sync::atomic::AtomicBool::new(false),
+            kids: std::sync::atomic::AtomicBool::new(cfg!(feature = "kids")),
             invite_request: Mutex::new(InviteRequestSnapshot::idle()),
             rechecking_from: Mutex::new(None),
             oob_age_band: Mutex::new(None),
@@ -2309,7 +2318,13 @@ impl OnboardingMachine {
                     s.set_error(format!("Verify failed: {msg}"));
                     s.dns.verifying = false;
                 });
-                return Err(OnboardingError::ProviderUnauthorized { provider: pid });
+                // Return the provider's own text, the same one the snapshot
+                // carries: an app that shows the returned error (web's verify
+                // button) must name what to fix — a Namecheap IP refusal names
+                // the address to allowlist — never a generic credentials line.
+                return Err(OnboardingError::Other {
+                    detail: format!("Verify failed: {msg}"),
+                });
             }
         };
 
@@ -2846,7 +2861,11 @@ impl OnboardingMachine {
                     s.set_error(format!("Verify failed: {msg}"));
                     s.vps.verifying = false;
                 });
-                return Err(OnboardingError::ProviderUnauthorized { provider: pid });
+                // As in `verify_dns`: the returned error carries the provider's
+                // own text, the same one the snapshot carries.
+                return Err(OnboardingError::Other {
+                    detail: format!("Verify failed: {msg}"),
+                });
             }
         };
 
@@ -4504,6 +4523,9 @@ impl OnboardingMachine {
             // DNS for `localhost`, a LAN IP or a `.local` name. Say no nest is
             // running there, with no control checkbox and so no DNS-config
             // route (onboarding.md § 2, Local / self-hosted targets).
+            NestHealthState::ConnectionRefused if self.is_kids() => {
+                return self.complete_kids_no_joinable_nest(&domain);
+            }
             NestHealthState::ConnectionRefused if !target.is_public_dns_name => {
                 let mut snap = HandleCheckSnapshot::idle();
                 snap.phase = HandleCheckPhase::Complete;
@@ -4761,6 +4783,52 @@ impl OnboardingMachine {
         self.observer.on_changed();
     }
 
+    /// Whether this machine runs the kids build ([`Self::kids`]).
+    fn is_kids(&self) -> bool {
+        self.kids.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether the kids build excises `outcome`: the three handle-check
+    /// outcomes whose Continue sets a nest up (`DomainAvailable`,
+    /// `RegisteredNoNest`) or claims one (`UnregisteredUnclaimedNest`).
+    /// Joining by invite (`NestRunningUserUnregistered`) and signing in
+    /// (`AlreadyOnNest`) are kept.
+    fn kids_excises(&self, outcome: &crate::snapshots::HandleCheckOutcome) -> bool {
+        use crate::snapshots::HandleCheckOutcome;
+        self.is_kids()
+            && matches!(
+                outcome,
+                HandleCheckOutcome::DomainAvailable { .. }
+                    | HandleCheckOutcome::RegisteredNoNest
+                    | HandleCheckOutcome::UnregisteredUnclaimedNest
+            )
+    }
+
+    /// The kids build's terminal handle-check line: no nest at `domain` the
+    /// kid can join. The `local_no_nest` shape — a non-transient
+    /// `ProbeError`, Continue off, no control checkbox — so no app shell
+    /// matches a new outcome.
+    fn complete_kids_no_joinable_nest(&self, domain: &str) {
+        use crate::snapshots::{HandleCheckOutcome, HandleCheckPhase};
+        let mut snap = HandleCheckSnapshot::idle();
+        snap.phase = HandleCheckPhase::Complete;
+        snap.outcome = HandleCheckOutcome::ProbeError {
+            phase: HandleCheckPhase::NestProbe,
+            transient: false,
+            cause: "no joinable nest".into(),
+        };
+        snap.message = LocalizedText {
+            key: "onboarding.handle_check.outcome.kids_no_joinable_nest".into(),
+            args: HashMap::from([("domain".to_string(), domain.to_string())]),
+        };
+        snap.continue_enabled = false;
+        self.handle_check_first_sign_in
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self.handle_check.lock().unwrap() = snap;
+        self.clear_joining_rules();
+        self.observer.on_changed();
+    }
+
     fn complete(
         &self,
         outcome: crate::snapshots::HandleCheckOutcome,
@@ -4781,6 +4849,10 @@ impl OnboardingMachine {
         first_sign_in: bool,
     ) {
         use crate::snapshots::{HandleCheckOutcome, HandleCheckPhase};
+        if self.kids_excises(&outcome) {
+            let domain = args.get("domain").cloned().unwrap_or_default();
+            return self.complete_kids_no_joinable_nest(&domain);
+        }
         let continue_enabled = matches!(
             outcome,
             HandleCheckOutcome::DomainAvailable { .. }
@@ -4887,6 +4959,12 @@ impl OnboardingMachine {
             self.state.lock().unwrap().step = next;
             self.observer.on_changed();
             return next;
+        }
+        // The kids build routes no handle-entry Continue to DNS set-up or the
+        // claim page, whatever the snapshot holds (an injected one included):
+        // it stays on handle entry.
+        if self.kids_excises(&snap.outcome) {
+            return self.with_state(|s| s.step);
         }
         let next = match snap.outcome {
             HandleCheckOutcome::DomainAvailable { .. } => {
@@ -7778,6 +7856,12 @@ impl OnboardingMachine {
     /// the full `submit_handle` probe path. Replaces the old
     /// `set_domain_status_for_test` now that `domain_status` is a derived
     /// view, not stored state — leaves the rest of the snapshot untouched.
+    /// Test-only: flip the kids input ([`Self::kids`]) a build's `kids` feature
+    /// otherwise fixes at construction.
+    pub fn set_kids_for_test(&self, kids: bool) {
+        self.kids.store(kids, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn set_handle_check_outcome_for_test(&self, outcome: crate::snapshots::HandleCheckOutcome) {
         let mut snap = self.handle_check.lock().unwrap();
         self.handle_check_first_sign_in

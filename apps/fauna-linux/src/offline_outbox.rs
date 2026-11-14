@@ -31,6 +31,16 @@ fn outbox() -> &'static Arc<AccountOutbox> {
         // A retry or discard of an MLS intent (the unsent-changes doors,
         // reached through [`queue`]) drains the released channel now.
         outbox.set_drain_wake(Arc::new(spawn_mls_drain));
+        // The outbox carry (`succession-aftermath.md` § Re-key scope, the
+        // device-local outbox row): a retired identity's undrained outbox
+        // this device owes moves in at the first app drain, its MLS rows once
+        // the conversations session holds their groups.
+        match fauna_sync_engine::root::StoreRoot::platform() {
+            Ok(root) => outbox.set_carry(Some(Arc::new(
+                fauna_sync_engine::outbox_carry::OutboxCarry::new(crate::account_registry(), root),
+            ))),
+            Err(e) => tracing::warn!("outbox carry unseated: {e:#}"),
+        }
         outbox
     })
 }

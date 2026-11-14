@@ -5,8 +5,8 @@
     unlinkBridge,
     updateBridgeSettings,
     listBridgeFollows,
-    addBridgeFollow,
-    removeBridgeFollow,
+    addBridgeFollowOrQueue,
+    removeBridgeFollowOrQueue,
     listBridgeFollowRequests,
     approveBridgeFollowRequest,
     refuseBridgeFollowRequest,
@@ -14,6 +14,7 @@
     type BridgeFollow,
     type BridgeFollowRequestRow,
   } from '#lib/bridges';
+  import { changeFollow } from '#lib/bridge-follow';
   import { identity } from '#lib/store';
   import { isSafeNavUrl } from '#lib/safe-url';
   import { onMount } from 'svelte';
@@ -184,8 +185,7 @@
     const secret = $identity?.secretHex;
     if (!secret) return;
     try {
-      await addBridgeFollow(secret, bridgeId, id, petname);
-      await refresh();
+      if (await changeFollow(() => addBridgeFollowOrQueue(secret, bridgeId, id, petname), refresh)) error = '';
     } catch (e) {
       failedOrRefused(e, { bridge_id: bridgeId, operation: feedSourceOp.follow(), target: id });
     }
@@ -209,8 +209,7 @@
     const secret = $identity?.secretHex;
     if (!secret) return;
     try {
-      await removeBridgeFollow(secret, bridgeId, fId);
-      await refresh();
+      if (await changeFollow(() => removeBridgeFollowOrQueue(secret, bridgeId, fId), refresh)) error = '';
     } catch (e: any) {
       error = e.message;
     }

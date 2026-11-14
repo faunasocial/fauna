@@ -203,6 +203,55 @@ pub fn remove_account_blocked_as<'a>(
     blocked(bases, &[actor_id_hex]).map(RemoveAccountBlocked::ServedElsewhere)
 }
 
+/// Remove-account's third question, asked after [`remove_account_blocked`]:
+/// does this device still owe the account's successor its outbox?
+/// (`succession-aftermath.md` § Re-key scope, the device-local outbox row:
+/// removing a retired identity erases its store, and its undrained intents
+/// with it, so the removal refuses until the carry is done or the user has
+/// discarded what waits — the shape of the sibling-serving refusal.)
+///
+/// Owed when the registry says so ([`AccountRegistry::outbox_carry_owed`])
+/// AND the account's store rests under `store_root` — a device that never
+/// held the retired identity's store has nothing to carry. `store_root`
+/// `None` (no root resolved) asks the registry alone.
+///
+/// [`AccountRegistry::outbox_carry_owed`]: crate::AccountRegistry::outbox_carry_owed
+pub fn remove_account_carry_owed(
+    registry: &crate::AccountRegistry,
+    store_root: Option<&std::path::Path>,
+    actor_id_hex: &str,
+) -> Option<CarryOwed> {
+    if !registry.outbox_carry_owed(actor_id_hex) {
+        return None;
+    }
+    let on_disk = match store_root {
+        Some(root) => fauna_account_store::root::StoreRoot::at(root)
+            .store_dir(actor_id_hex)
+            .is_ok_and(|dir| dir.exists()),
+        None => true,
+    };
+    on_disk.then(|| CarryOwed {
+        actor_id: actor_id_hex.to_string(),
+    })
+}
+
+/// A remove-account refused because the account is a retired identity whose
+/// undrained outbox this device has not carried to its successor yet — see
+/// [`remove_account_carry_owed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarryOwed {
+    /// The retired identity the removal would erase.
+    pub actor_id: String,
+}
+
+impl CarryOwed {
+    /// The line the seat paints on the Settings page's `error-message`: its
+    /// remedy is the successor's unsent-changes list (send or discard).
+    pub fn copy(&self) -> fauna_core::localized::LocalizedText {
+        crate::erase_residue::remove_account_carry_owed_copy()
+    }
+}
+
 /// Why a remove-account was refused — see [`remove_account_blocked`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoveAccountBlocked {
@@ -604,6 +653,60 @@ mod tests {
         assert_ne!(
             RemoveAccountBlocked::ServedHere.copy(),
             RemoveAccountBlocked::ServedElsewhere(EraseBlocked { accounts: vec![] }).copy(),
+        );
+    }
+
+    /// The retired identity's removal refuses while this device owes its
+    /// successor the outbox carry (`succession-aftermath.md` § Re-key scope,
+    /// the device-local outbox row), and is allowed once the carry is
+    /// recorded — or when no store of it rests here, so nothing is owed.
+    #[test]
+    fn a_retired_identitys_removal_refuses_while_its_outbox_carry_is_owed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry =
+            crate::AccountRegistry::new(std::sync::Arc::new(crate::InMemorySecretStore::new()));
+        let pred = fauna_core::identity::ActorKeypair::from_secret([0x21; 32]);
+        let succ = fauna_core::identity::ActorKeypair::from_secret([0x42; 32]);
+        for kp in [&pred, &succ] {
+            registry
+                .add_account(&fauna_core::hex32::encode(kp.secret_bytes()), None, None)
+                .unwrap();
+        }
+        let (pred, succ) = (pred.actor_id_hex(), succ.actor_id_hex());
+        // No succession yet: an ordinary account owes nothing.
+        assert_eq!(
+            remove_account_carry_owed(&registry, Some(tmp.path()), &pred),
+            None
+        );
+        registry.record_succession(&pred, &succ).unwrap();
+        // Owed, but no store of it rests on this device: nothing to erase.
+        assert_eq!(
+            remove_account_carry_owed(&registry, Some(tmp.path()), &pred),
+            None
+        );
+        let dir = fauna_account_store::root::StoreRoot::at(tmp.path())
+            .store_dir(&pred)
+            .unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let refused = remove_account_carry_owed(&registry, Some(tmp.path()), &pred);
+        assert_eq!(
+            refused,
+            Some(CarryOwed {
+                actor_id: pred.clone()
+            })
+        );
+        assert_eq!(
+            refused.unwrap().copy(),
+            crate::erase_residue::remove_account_carry_owed_copy()
+        );
+        assert_eq!(
+            remove_account_carry_owed(&registry, Some(tmp.path()), &succ),
+            None
+        );
+        registry.record_outbox_carried(&pred).unwrap();
+        assert_eq!(
+            remove_account_carry_owed(&registry, Some(tmp.path()), &pred),
+            None
         );
     }
 }

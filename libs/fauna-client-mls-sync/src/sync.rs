@@ -761,10 +761,33 @@ impl MlsStateSync {
         &self,
         engine: &MlsEngine,
     ) -> Result<Option<ProviderReplica>, MlsReplicaClientError> {
-        let (provider, base) = self.client.load_provider_with_base().await?;
+        let (provider, base) = self.fetch_provider_with_base().await?;
         let Some(provider) = provider else {
             return Ok(None);
         };
+        self.adopt_fetched_provider(engine, provider, base)
+    }
+
+    /// Fetch this identity's `provider` replica and its CAS base, **restoring
+    /// nothing** — the read the own-leaf answer is judged on before any
+    /// restore (`devices.md` § Cross-device MLS group-state sync, Rule 2 → *An
+    /// own-leaf claim is the account's replica's to answer*). `Ok((None, _))`
+    /// is the nest answering that no replica is stored.
+    pub async fn fetch_provider_with_base(
+        &self,
+    ) -> Result<(Option<ProviderReplica>, ReplicaBase), MlsReplicaClientError> {
+        self.client.load_provider_with_base().await
+    }
+
+    /// [`Self::resync_provider`]'s restore half, over a replica already
+    /// fetched by [`Self::fetch_provider_with_base`] — so a caller that judged
+    /// the snapshot first restores exactly the bytes it judged.
+    pub fn adopt_fetched_provider(
+        &self,
+        engine: &MlsEngine,
+        provider: ProviderReplica,
+        base: ReplicaBase,
+    ) -> Result<Option<ProviderReplica>, MlsReplicaClientError> {
         // Rule (1) is an absolute over the SNAPSHOT, not over the launch: this
         // door meets the same bytes `restore_and_wire` refuses, and until
         // 2026-08-30 it swapped them in unasked. `restore_into` now asks for

@@ -1074,7 +1074,7 @@ def test_folder_pending_share_accept_decline(folder_share_recipient_app):
         # decline's roster drop is the first consumer that does: it derives the
         # channel via `ChannelId::from_group_id`, so a channel id here derives a
         # third, nonexistent channel and the leave silently no-ops.
-        conv_api.welcome_deliver(
+        inbox_id = conv_api.welcome_deliver(
             port,
             stranger,
             recipient_id,
@@ -1083,10 +1083,29 @@ def test_folder_pending_share_accept_decline(folder_share_recipient_app):
             kind={"type": "folder", "group_id": group_id_hex},
         )
         # Stash the sharer + set so a later step can read the OWNER-visible roster
-        # (the "Shared with" list a decline must stop over-reporting).
+        # (the "Shared with" list a decline must stop over-reporting), and the
+        # knock's inbox row so a count mismatch names its nest-side state.
         last_share["stranger"] = stranger
         last_share["set_name"] = set_name
+        last_share["inbox_id"] = inbox_id
         return stranger_handle, stranger["actor_id_hex"]
+
+    def knock_on_nest() -> str:
+        """The latest knock's nest-side state — splits "the page painted no knock
+        the nest holds" from "the knock was acked before the page looked"."""
+        inbox_id = last_share.get("inbox_id")
+        try:
+            held = conv_api.inbox_row_pending(port, recipient, inbox_id)
+        except Exception as exc:  # diagnosis only — never mask the real failure
+            return f"knock inbox row {inbox_id}: <unreadable: {exc}>"
+        state = "still UN-ACKED on the nest" if held else "already ACKED/gone on the nest"
+        said = ""
+        if app.driver.is_web():
+            # The page's own word on its knock read: a failed read is logged,
+            # never painted (`FoldersSection.svelte` `loadPendingShares`).
+            lines = [ln for ln in app.driver.console_log() if "pending shares" in ln]
+            said = f"; page log: {lines[-12:]!r}"
+        return f"knock inbox row {inbox_id}: {state}{said}"
 
     # ── 1. A stranger's share stages as a pending knock + renders ──────────────
     stranger_handle, stranger_id_hex = seed_stranger_share()
@@ -1094,7 +1113,8 @@ def test_folder_pending_share_accept_decline(folder_share_recipient_app):
     count = b.wait_for_pending_shares(1)
     assert count == 1, (
         "a stranger's shared folder should stage as exactly one "
-        f"folder-pending-share; count={count} error={app.error_text()!r}"
+        f"folder-pending-share; count={count} error={app.error_text()!r}; "
+        f"{knock_on_nest()}"
     )
     assert app.driver.is_visible("folder-share-accept-button"), (
         "the pending share should render its accept button: "
@@ -1215,7 +1235,8 @@ def test_folder_pending_share_accept_decline(folder_share_recipient_app):
     b.navigate_folders()
     count = b.wait_for_pending_shares(1)
     assert count == 1, (
-        f"a second stranger's share should re-stage a pending knock; count={count}"
+        f"a second stranger's share should re-stage a pending knock; count={count} "
+        f"error={app.error_text()!r}; {knock_on_nest()}"
     )
     b.decline_pending_share(0)
     count = b.wait_for_pending_shares(0)

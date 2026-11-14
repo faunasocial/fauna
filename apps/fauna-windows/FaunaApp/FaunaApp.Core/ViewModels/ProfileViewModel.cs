@@ -49,9 +49,40 @@ public partial class ProfileViewModel : ViewModelBase
     private const string FollowersTier = "followers";
     /// <summary>The creator's offered tiers (OTHER profile), excluding "followers".</summary>
     public ObservableCollection<SubscriptionOfferRow> Offers { get; } = new();
-    /// <summary><c>true</c> once the viewer follows this creator (the header
-    /// <c>profile-follow-button</c> flips its label to "Following").</summary>
-    [ObservableProperty] private bool _isFollowing;
+    // The header profile-follow-button's Follow ⇄ Following toggle state
+    // (subscriptions.md § The free followers tier — follow and unfollow, rule 4),
+    // mirroring tui's ProfileState (status, follow_flip, unfollow_armed) and
+    // FaunaKit's ProfileOffersVM. The view model is built fresh on every profile
+    // open, so an open starts disarmed with no flip.
+    /// The <c>status.get</c> reply's two fields — the inputs of the shared
+    /// <c>is_following</c>. Kept as they were when a re-read fails, so a failed
+    /// read never reads as "not following".
+    private string? _statusTier;
+    private bool _followPending;
+    /// The optimistic post-press state, set by a press's reply: it outranks the
+    /// status read for the label, so a queued leave reads <i>Follow</i> at once
+    /// (<c>profile.md</c> § Where logic lives → Follow / unfollow — the flip stays
+    /// app-side).
+    private bool? _followFlip;
+
+    /// <summary>Whether the viewer follows this creator — the header
+    /// <c>profile-follow-button</c> reads "Following" when it does. The press's
+    /// optimistic flip if one has answered, else the shared
+    /// <c>fauna_core::format::is_following</c> over the open's status read
+    /// (following ⇔ a tier is named or a follow is pending).</summary>
+    public bool IsFollowing =>
+        _followFlip ?? FaunaFfiMethods.IsFollowing(_statusTier, _followPending);
+
+    /// <summary>The first press on a paid holder's <i>Following</i> only arms the
+    /// confirm: the button reads <c>profile/unfollow_confirm</c> and the second press
+    /// leaves (the leave ends the paid tier too — rule 1). Any other press on this
+    /// page, the toggle's own reply or a fresh open disarms it.</summary>
+    [ObservableProperty] private bool _unfollowArmed;
+
+    /// <summary><c>true</c> while a follow or an unfollow press is in flight: the
+    /// page holds the button disabled and <see cref="ToggleFollowAsync"/> issues
+    /// nothing (linux <c>FollowToggle::press</c>'s insensitive button).</summary>
+    [ObservableProperty] private bool _isFollowBusy;
     /// <summary><c>true</c> when the viewer has a <c>blocked</c> contact edge with
     /// this user — drives the <c>profile-block-button</c> Block⇄Unblock toggle label
     /// (Unblock when blocked, Block otherwise). Read on OTHER-profile open from
@@ -730,9 +761,11 @@ public partial class ProfileViewModel : ViewModelBase
     // and subscribe on the per-row button. Observer-free: a manual re-read after
     // each subscribe. Mirrors apps/fauna-linux/src/views/profile/offers.rs.
 
-    /// <summary>Load the creator's offered tiers (excluding the free "followers" tier
-    /// — that is the header follow button) + this viewer's status, and render the
-    /// offer rows. A failed status read is non-fatal (every row renders "not
+    /// <summary>Load this viewer's status + the creator's offered tiers (excluding the
+    /// free "followers" tier — that is the header follow button), and render the
+    /// offer rows. The status read is the open's read for the header follow toggle
+    /// too, and goes first, so a failed offers read still leaves the toggle its
+    /// state. A failed status read is non-fatal (every row renders "not
     /// subscribed"); a failed offers read surfaces the error.</summary>
     public async Task LoadOffersAsync()
     {
@@ -740,16 +773,9 @@ public partial class ProfileViewModel : ViewModelBase
         try
         {
             var author = AuthorIdBytes();
+            // non-fatal — a failed read renders every row "not subscribed"
+            var heldTier = (await ReadFollowStatusAsync(author))?.tier;
             var offers = await _nest.SubscriptionOffersListAsync(author);
-            string? heldTier;
-            try
-            {
-                heldTier = (await _nest.SubscriptionStatusGetAsync(author)).tier;
-            }
-            catch
-            {
-                heldTier = null;   // non-fatal — every row renders "not subscribed"
-            }
             Offers.Clear();
             foreach (var t in offers)
             {
@@ -766,30 +792,17 @@ public partial class ProfileViewModel : ViewModelBase
     }
 
     /// <summary>Subscribe the viewer to <paramref name="tierName"/> (the per-row
-    /// Subscribe). <c>Approved</c> (plaintext / auto-approve) → re-read so the row
-    /// shows Active; <c>Queued</c> (encrypted) → the row flips to Pending in place (no
-    /// re-read — <c>status.get</c> only reports the confirmed tier, so a reload would
-    /// show None; linux <c>offers.rs</c> <c>subscribe_to</c>).</summary>
+    /// Subscribe), across nests at the page's actor home — the same home the
+    /// header follow carries (<see cref="ToggleFollowAsync"/>). The reply is applied by
+    /// <see cref="ApplySubscribeReplyAsync"/>.</summary>
     public async Task SubscribeToOfferAsync(string tierName)
     {
+        UnfollowArmed = false;
         ErrorMessage = null;
         try
         {
-            var reply = await _nest.SubscriptionSubscribeAsync(AuthorIdBytes(), tierName);
-            switch (reply)
-            {
-                case FfiSubscribeReply.Approved:
-                    await LoadOffersAsync();
-                    break;
-                case FfiSubscribeReply.Queued:
-                    var row = Offers.FirstOrDefault(o => o.Name == tierName);
-                    if (row is not null)
-                        // Transient post-click Pending: status.get carries no pending
-                        // discriminant, so the viewer doesn't hold tierName — a null
-                        // status_tier + pending=true resolves to Pending (precedence).
-                        row.Status = FaunaFfiMethods.OfferStatus(tierName, null, true);
-                    break;
-            }
+            var reply = await _nest.SubscriptionSubscribeAsync(AuthorIdBytes(), tierName, _actorHome);
+            await ApplySubscribeReplyAsync(tierName, reply);
         }
         catch (Exception ex)
         {
@@ -797,21 +810,176 @@ public partial class ProfileViewModel : ViewModelBase
         }
     }
 
-    /// <summary>Follow = subscribe to the free "followers" tier (<c>profile.md</c>
-    /// § Where logic lives → Follow). On success the header button flips to
-    /// "Following" (<see cref="IsFollowing"/>).</summary>
-    public async Task FollowAsync()
+    /// <summary>Render one subscribe reply onto the offer rows — the per-row
+    /// Subscribe's and the payment link's shared tail (linux <c>offers.rs</c>
+    /// <c>render_reply</c>). <c>Approved</c> (plaintext / auto-approve) → re-read so
+    /// the row shows Active; <c>Queued</c> (encrypted) → the row flips to Pending in
+    /// place (no re-read — <c>status.get</c> only reports the confirmed tier, so a
+    /// reload would show None).</summary>
+    private async Task ApplySubscribeReplyAsync(string tierName, FfiSubscribeReply reply)
     {
+        switch (reply)
+        {
+            case FfiSubscribeReply.Approved:
+                await LoadOffersAsync();
+                break;
+            case FfiSubscribeReply.Queued:
+                var row = Offers.FirstOrDefault(o => o.Name == tierName);
+                if (row is not null)
+                    // Transient post-click Pending: status.get carries no pending
+                    // discriminant, so the viewer doesn't hold tierName — a null
+                    // status_tier + pending=true resolves to Pending (precedence).
+                    row.Status = FaunaFfiMethods.OfferStatus(tierName, null, true);
+                break;
+        }
+    }
+
+#if PAYMENTS
+    /// <summary>The <c>subscription-offer-payment-link</c> gesture: subscribe FIRST
+    /// (across nests at the page's actor home), then hand back the checkout URL the
+    /// shared rule composed, so the checkout is bound to the buyer's actor
+    /// (<c>monetization.md</c> § Pillar 3 → Buyer↔actor binding (Q4), the Q13 rules
+    /// (1) and (2); the shared <c>subscriptions_subscribe_and_checkout</c>). The reply
+    /// is applied as the per-row Subscribe applies it. Returns the URL for the page to
+    /// open, or <c>null</c> — nothing to open: the shared guard refused the link
+    /// (nothing subscribed), or the subscribe was refused (the error is on
+    /// <see cref="ErrorMessage"/>). Mirrors tui <c>Action::OpenPaymentLink</c> and
+    /// linux <c>offers.rs</c> <c>pay_to</c>.</summary>
+    public async Task<string?> PayToOfferAsync(string tierName, string paymentUrl)
+    {
+        UnfollowArmed = false;
         ErrorMessage = null;
         try
         {
-            await _nest.SubscriptionSubscribeAsync(AuthorIdBytes(), FollowersTier, _actorHome);
-            IsFollowing = true;
+            var open = await _nest.SubscriptionSubscribeAndCheckoutAsync(
+                AuthorIdBytes(), tierName, paymentUrl, _actorHome);
+            if (open is null) return null;
+            await ApplySubscribeReplyAsync(tierName, open.reply);
+            return open.url;
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            return null;
+        }
+    }
+
+    // The buyer-side redeem door, gated with the payments plane
+    // (dynamic-features.md § Platform-family surface excision).
+    /// <summary>OTHER Tiers tab: the <c>subscription-claim-redeem-input</c> buffer — a
+    /// code of THIS creator, redeemed at <see cref="ActorHomeUrl"/>. Cleared only when
+    /// the nest takes the code (a refused paste stays to correct), and per open: the
+    /// view model is built fresh on every profile open, so a code typed for one
+    /// creator never rides to the next.</summary>
+    [ObservableProperty] private string _redeemCode = "";
+
+    /// <summary><c>subscription-claim-redeem-button</c> on the OTHER Tiers tab — redeem
+    /// the typed code of THIS creator where they live (<c>monetization.md</c> § Pillar 3
+    /// → <i>Which nest an in-app redeem binds on</i> → <i>The doors</i>): the trimmed
+    /// code, the viewed actor's id and the page's actor-home slot, exactly the home
+    /// <see cref="ToggleFollowAsync"/> carries. A blank buffer is a no-op, never a nest
+    /// round-trip (the settings pair's rule); the viewer's own profile has no redeem
+    /// door. Success re-reads the offers + status, marks the code's tier Pending when
+    /// the grant queued (the <see cref="SubscribeToOfferAsync"/> fold) and clears the
+    /// buffer; a typed refusal (<c>claim_not_found</c>, <c>claim_voided</c>,
+    /// <c>claim_admits_elsewhere</c>, <c>peer_nest_outdated</c>, …) surfaces via
+    /// <see cref="ViewModelBase.ShowError"/>. Returns whether the nest took the
+    /// code.</summary>
+    public async Task<bool> RedeemClaimAsync()
+    {
+        if (IsSelf) return false;
+        UnfollowArmed = false;
+        var code = RedeemCode.Trim();
+        if (code.Length == 0) return false;
+        ErrorMessage = null;
+        FfiClaimRedeemReply reply;
+        try
+        {
+            reply = await _nest.PaymentsClaimsRedeemAcrossNestsAsync(code, AuthorIdBytes(), _actorHome);
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            return false;
+        }
+        RedeemCode = "";
+        await LoadOffersAsync();
+        if (reply.queued && Offers.FirstOrDefault(o => o.Name == reply.tier) is { } row)
+            // A queued grant reads Pending until the creator's client commits it and
+            // status.get names the tier (the same transient Subscribe sets).
+            row.Status = FaunaFfiMethods.OfferStatus(reply.tier, null, true);
+        return true;
+    }
+#endif   // PAYMENTS
+
+    /// <summary>The header <c>profile-follow-button</c> press — the Follow ⇄ Following
+    /// toggle (<c>subscriptions.md</c> § The free followers tier — follow and unfollow,
+    /// rule 4; <c>profile.md</c> § Where logic lives → Follow / unfollow; tui
+    /// <c>profile::Action::Follow</c>). <i>Follow</i> subscribes to the free
+    /// "followers" tier; <i>Following</i> leaves it — the leave's floor, so a paid tier
+    /// held above it ends too (rule 1), and a follow only asked is withdrawn. The leave
+    /// is confirm-gated when the status names a paid tier (the shared
+    /// <c>unfollow_ends_paid_tier</c>): the first press only arms
+    /// <see cref="UnfollowArmed"/> and sends nothing, the second leaves. Both
+    /// directions carry the page's actor-home slot, so an author homed on another
+    /// nest is followed and left across nests (<c>federated-follow.md</c> § Decision 2);
+    /// <c>null</c> is the local arm. On success the status is re-read, then the
+    /// optimistic flip lands with the button's re-enable, so the label and the next
+    /// press's confirm decision read one settled state (linux
+    /// <c>FollowToggle::press</c>); a refusal surfaces via
+    /// <see cref="ViewModelBase.ShowError"/> and leaves the state as it was.</summary>
+    public async Task ToggleFollowAsync()
+    {
+        if (IsSelf || IsFollowBusy) return;
+        if (IsFollowing && !UnfollowArmed && FaunaFfiMethods.UnfollowEndsPaidTier(_statusTier))
+        {
+            UnfollowArmed = true;
+            return;
+        }
+        var follow = !IsFollowing;
+        ErrorMessage = null;
+        IsFollowBusy = true;
+        try
+        {
+            var author = AuthorIdBytes();
+            if (follow)
+                await _nest.SubscriptionSubscribeAsync(author, FollowersTier, _actorHome);
+            else
+                await _nest.SubscriptionUnsubscribeAsync(author, FollowersTier, _actorHome);
+            await ReadFollowStatusAsync(author);
+            _followFlip = follow;
+            OnPropertyChanged(nameof(IsFollowing));
         }
         catch (Exception ex)
         {
             ShowError(ex);
         }
+        finally
+        {
+            UnfollowArmed = false;
+            IsFollowBusy = false;
+        }
+    }
+
+    /// <summary>The viewer's <c>status.get</c> for this creator — the follow toggle's
+    /// inputs (<see cref="IsFollowing"/>) and the offer rows' held tier. <c>null</c>
+    /// when the read fails, which is non-fatal and keeps the toggle's last known
+    /// state.</summary>
+    private async Task<FfiSubscriptionStatus?> ReadFollowStatusAsync(byte[] author)
+    {
+        FfiSubscriptionStatus status;
+        try
+        {
+            status = await _nest.SubscriptionStatusGetAsync(author);
+        }
+        catch
+        {
+            return null;
+        }
+        _statusTier = status.tier;
+        _followPending = status.followPending;
+        OnPropertyChanged(nameof(IsFollowing));
+        return status;
     }
 
     /// <summary>Read the viewed actor's current contact edge
@@ -861,6 +1029,7 @@ public partial class ProfileViewModel : ViewModelBase
     /// <c>toggle_block</c>.</summary>
     public async Task ToggleBlockAsync()
     {
+        UnfollowArmed = false;
         // A press before the open-time edge read lands issues nothing (tui parity).
         if (!IsBlockKnown) return;
         ErrorMessage = null;
@@ -939,6 +1108,7 @@ public partial class ProfileViewModel : ViewModelBase
     public async Task RequestContactAsync()
     {
         if (IsSelf) return;
+        UnfollowArmed = false;
         var peer = ActorId;
         var before = KnockAsk;
         if (before.KnockSent || before.KnockInFlight) return;
@@ -967,6 +1137,7 @@ public partial class ProfileViewModel : ViewModelBase
     public async Task AskGuardianAsync()
     {
         if (IsSelf) return;
+        UnfollowArmed = false;
         var peer = ActorId;
         var before = KnockAsk;
         if (before.AskInFlight || ContactAskRenderNow() == ContactAskRender.Pending) return;

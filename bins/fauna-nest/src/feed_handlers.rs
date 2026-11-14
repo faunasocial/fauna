@@ -178,6 +178,10 @@ fn post_item(p: &FeedPostOut) -> FeedPostItem {
         // `gated_tier` this is what the ⋯ overflow derives its own-post web
         // verbs from (`ui/feed.md` § User actions). Additive + `None`-default.
         web_slug: p.web_slug.clone(),
+        // The Nostr advertisement flag (`monetization.md` § The Nostr
+        // advertisement of a sold post): the arm of the own-post advertise
+        // verb pair. Additive + `None`-default.
+        nostr_advertised_at: p.nostr_advertised_at,
         // Per-category content-label verdicts (`moderation.md` § Per-row badge
         // data path): drives the apps' `content-label-badge`. Additive +
         // empty-default on the wire.

@@ -100,7 +100,10 @@ _SEAT_PAIRS = [
 # outcomes are read on its screen exactly as on a desktop seat's, and only the
 # sibling precondition reads from tui's agent alone. Functions of their own so
 # the catalog maps the phone's column to the phone's run, as
-# `test_device_direct_transfer_switch.py` does.
+# `test_device_direct_transfer_switch.py` does. android carries the mark beside
+# ios: both phones reach the leg through the same `fauna-ffi` entry, and
+# android's foreground seam (`AccountRuntimeForeground`) makes the same
+# start/stop calls iOS makes at its own.
 _PHONE_PAIR = ("tui", sync_seats.PHONE_MODE)
 _PHONE_PAIRS = (
     [pytest.param(_PHONE_PAIR, id=sync_seats.seat_set_param_id(_PHONE_PAIR))]
@@ -236,6 +239,7 @@ def test_a_setting_changed_on_one_device_reaches_the_other_while_the_nest_is_dow
 @pytest.mark.parametrize("seat_pair", _PHONE_PAIRS)
 @pytest.mark.feature("devices-in-step-without-the-nest")
 @pytest.mark.ios
+@pytest.mark.android
 def test_a_setting_changed_on_tui_reaches_the_phone_while_the_nest_is_down(
     nest_instance, request, seat_pair
 ):
@@ -396,6 +400,7 @@ def test_a_conversation_read_on_one_device_shows_read_on_the_other_while_the_nes
 @pytest.mark.real_conversations
 @pytest.mark.feature("devices-in-step-without-the-nest")
 @pytest.mark.ios
+@pytest.mark.android
 def test_a_conversation_read_on_tui_shows_read_on_the_phone_while_the_nest_is_down(
     nest_instance, request, seat_pair
 ):

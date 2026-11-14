@@ -32,6 +32,7 @@ from __future__ import annotations
 import pytest
 
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seats are pytest fixtures adopted by import
+    bubble_texts,
     MESSAGE_BUDGET_S,
     bootstrap_room,
     index_of,
@@ -62,11 +63,6 @@ FIRST = "the member's first message"
 SECOND = "the member's second message"
 
 
-def _bubble_texts(seat) -> list[str]:
-    d = seat.app.driver
-    return [d.get_text("dm-message-text", index=i) for i in range(d.count("dm-message-text"))]
-
-
 _OPENED: set[int] = set()
 
 
@@ -91,7 +87,7 @@ def _open_with(seat, channel: str, needle: str) -> int:
     _ensure_open(seat, channel)
     texts = wait_for(
         f"a bubble carrying {needle!r} painting",
-        lambda: _bubble_texts(seat),
+        lambda: bubble_texts(seat),
         lambda ts: any(needle in t for t in ts),
         MESSAGE_BUDGET_S,
         diagnose=lambda: seat_story(seat),
@@ -104,7 +100,7 @@ def _wait_tombstoned(seat, channel: str, needle: str, tombstones: int, *, what: 
     d = seat.app.driver
     wait_for(
         what,
-        lambda: (d.count("dm-message-deleted"), _bubble_texts(seat)),
+        lambda: (d.count("dm-message-deleted"), bubble_texts(seat)),
         lambda seen: seen[0] >= tombstones and not any(needle in t for t in seen[1]),
         MESSAGE_BUDGET_S,
         diagnose=lambda: f"{seat_story(seat)}\n{d.diagnose('dm-message-deleted')}",
@@ -193,4 +189,4 @@ def test_an_admin_and_the_owner_delete_a_members_message_for_everyone(room_seats
 
     # The room's first message — nobody deleted it — still reads on every seat.
     for seat in (owner, stayer, leaver):
-        assert any("hi room" in t for t in _bubble_texts(seat)), seat_story(seat)
+        assert any("hi room" in t for t in bubble_texts(seat)), seat_story(seat)

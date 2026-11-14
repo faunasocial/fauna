@@ -1,10 +1,16 @@
 //! UniFFI host for **relay serving on an on-demand replica** — a phone's
-//! provider (`docs/goal/behavior/file-sync.md` § Relay serving → *Which seats
-//! hold*, the on-demand rows): the app announces, on its own WS-RPC
+//! provider (`docs/goal/behavior/relay-serving.md` § Relay serving → *Which
+//! seats hold*, the on-demand rows): the app announces, on its own WS-RPC
 //! connection, every set whose on-demand host this process holds, and answers
 //! the nest's asks through each host's engine — the one serve core, reading
 //! the owned tree's bodies (`p2p-shared-set-build.md` § *Phone peers —
 //! design*, decision 1).
+//!
+//! Not apple's File Provider extension: its host lives in the extension's
+//! process, not the app's, and runs its own seat over its own connection
+//! (`relay-serving.md` § Relay serving → *Apple's File Provider replica*;
+//! `file_provider_host.rs` § The relay seat). This seat serves the hosts the
+//! app's own process registers — android's provider.
 //!
 //! A phone is a **foreground** seat (decision 2): its shell calls
 //! [`FfiNestClient::start_relay_serving`] where it starts the share plane and
@@ -12,7 +18,7 @@
 //! withdraws the announce, so a backgrounded phone is asked for nothing.
 //!
 //! Its own pair of calls, not a part of the share plane: relay serving is not
-//! an excisable feature (`file-sync.md` § Relay serving → *The seat serves
+//! an excisable feature (`relay-serving.md` § Relay serving → *The seat serves
 //! from the file*), and the plane is (`p2p-share`). Everything app-agnostic —
 //! the announce, the routing, the host tracking, the withdrawal — is
 //! `fauna_sync_engine::relay_seat`'s.

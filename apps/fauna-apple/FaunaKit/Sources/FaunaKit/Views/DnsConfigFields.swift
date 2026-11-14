@@ -32,7 +32,12 @@ public func dnsConfigFields(vm: OnboardingVM) -> some View {
         // A toggle's "click" is a flip — invert the live checked state through
         // the same machine setter (mirrors MacHandleEntryView's
         // handle-control-checkbox; a bare Toggle is invisible in-process).
-        .automationActivate(Ids.dnsBuyDomainCheckbox) {
+        // `value` is the toggle's on/off — the automation server's `checked`
+        // read maps it to "true"/"false".
+        .automationActivate(
+            Ids.dnsBuyDomainCheckbox,
+            value: { vm.machine.dnsConfig().buyDomain ? "on" : "off" }
+        ) {
             vm.machine.toggleBuyDomain(on: !vm.machine.dnsConfig().buyDomain)
         }
 
@@ -47,7 +52,10 @@ public func dnsConfigFields(vm: OnboardingVM) -> some View {
         set: { vm.machine.toggleSameProviderForVps(on: $0) }
     ))
         .accessibilityIdentifier(Ids.dnsSameProviderCheckbox)
-        .automationActivate(Ids.dnsSameProviderCheckbox) {
+        .automationActivate(
+            Ids.dnsSameProviderCheckbox,
+            value: { vm.machine.dnsConfig().sameProviderForVps ? "on" : "off" }
+        ) {
             vm.machine.toggleSameProviderForVps(on: !vm.machine.dnsConfig().sameProviderForVps)
         }
 

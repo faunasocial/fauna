@@ -4,10 +4,16 @@ forgotten*).
 
 Its own module, apart from ``test_nest_retire.py``, because its apps are the
 ones whose launch-retry surface offers both ``launch-retire-button`` and
-``launch-recover-button`` over a device's own custodied seed (tui, linux,
+``launch-recover-button`` over a device's own custodied seed (tui, linux, web,
 android, macos — ``test_box_recovery_two_nest.py`` T4 — and ios). The retire
-page's module carries a web marker, and markers fold, so a test that must not
-speak for web lives under markers of its own.
+page's module carries a windows marker, and markers fold, so a test that does
+not yet speak for windows lives under markers of its own.
+
+**On web the device is one tab** (``SurvivingSeat``): left open while the box
+dies and reloaded for each later launch, over the same origin store. A browser
+custodies the nest's recovery seed like every other app
+(``box-recovery.md`` § Implementation status today), so the outcome is owed
+there too.
 
 **iOS reaches that surface through its gating case, not its common dead-box
 relaunch.** A stored session enters optimistically and stays in its cached shell
@@ -38,14 +44,13 @@ from actions.retire import RetireActions  # noqa: E402
 from common.cred_store import AppleFileCredStore  # noqa: E402
 from common.nest import stop_nest  # noqa: E402
 from conftest import _seeded_environment, get_available_apps  # noqa: E402
-from drivers import create_driver  # noqa: E402
 from helpers.app_launch import app_launch_config  # noqa: E402
 from helpers.box_recovery_launch import (  # noqa: E402
+    SurvivingSeat,
     app_path_for,
     claim_fresh_identity,
     rust_log,
     start_boxes,
-    wait_for_custody_leg,
 )
 from helpers.indexed_rows import diagnose_row, row_visible, wait_for_row  # noqa: E402
 from helpers.launch_retry_seed import stale_reset_slot_fields  # noqa: E402
@@ -54,6 +59,7 @@ pytestmark = [
     pytest.mark.tier_2,
     pytest.mark.tui,
     pytest.mark.linux,
+    pytest.mark.web,
     pytest.mark.android,
     pytest.mark.macos,
     pytest.mark.ios,
@@ -67,7 +73,8 @@ HETZNER_TOKEN = "MOCK-hetzner-token"  # the stubbed cloud accepts any token
 #: page's apps that also run the dead-saved-nest recovery journey
 #: (``test_box_recovery_two_nest.py`` T4).
 _RECOVERY_APPS = [
-    c for c in ("tui", "linux", "android", "macos", "ios") if c in get_available_apps()
+    c for c in ("tui", "linux", "web", "android", "macos", "ios")
+    if c in get_available_apps()
 ]
 
 #: The apps that enter optimistically off a stored session, so a dead saved nest
@@ -90,22 +97,33 @@ def test_retire_keeps_the_nests_recovery_key(
     same surface the person retires the server — the box they were saved
     against, so the done state routes back to the launch flow — and the
     recovery entry still lists the box, then again from a cold relaunch, which
-    reads only what the device kept."""
-    launch_keys = (
-        app_launch_config(client, request) if client == "ios"
-        else {"app_path": app_path_for(client)}
-    )
-    (nest,), stop_boxes = start_boxes(request, nest_mode, tmp_path_factory, "retire-keeps-seed")
+    reads only what the device kept. On web each later launch is a reload of
+    the one tab (``SurvivingSeat``)."""
+    browser = client == "web"
+    (nest,), stop_boxes = start_boxes(
+        request, nest_mode, tmp_path_factory, "retire-keeps-seed", browser=browser)
+    seat = None
     try:
         secret_hex = secrets.token_hex(32)
         handle = f"admin{secrets.token_hex(3)}@127.0.0.1:{nest['port']}"
-        config = {
-            **launch_keys,
-            "xdg_base": str(tmp_path / "xdg"),
-            "credential_dir": str(tmp_path / "creds"),
-            "keyring_app": "fauna-e2e-retire-keeps-seed",
-            "environment": {**_seeded_environment(request, nest), "RUST_LOG": rust_log(client)},
-        }
+        if browser:
+            config = {
+                "url": f"{request.getfixturevalue('spa_url')}/app/",
+                "environment": _seeded_environment(request, nest),
+            }
+        else:
+            launch_keys = (
+                app_launch_config(client, request) if client == "ios"
+                else {"app_path": app_path_for(client)}
+            )
+            config = {
+                **launch_keys,
+                "xdg_base": str(tmp_path / "xdg"),
+                "credential_dir": str(tmp_path / "creds"),
+                "keyring_app": "fauna-e2e-retire-keeps-seed",
+                "environment": {**_seeded_environment(request, nest),
+                                "RUST_LOG": rust_log(client)},
+            }
         if client == "android":
             # The relaunches are the same device: keep the store launch 1
             # custodied into (test_box_recovery_two_nest.py T4, the same pin).
@@ -138,18 +156,15 @@ def test_retire_keeps_the_nests_recovery_key(
                 + diagnose_row(app.driver, RECOVER_BOX_ITEM, 0)
             )
 
+        seat = SurvivingSeat(client, nest, config)
+
         # -- launch 1: claim the box; its seed rests in this device's store ----
-        driver = create_driver(client)
-        driver.launch(config)
+        driver = seat.launch()
         try:
             claim_fresh_identity(ActionLayer(driver), secret_hex, handle, nest["claim_code"])
-            wait_for_custody_leg(driver)
+            seat.await_custody(driver, secret_hex)
         finally:
-            driver.teardown()
-        if client == "ios":
-            # The same device again: launch 1's fresh install stands, for the
-            # at-rest account store the custody leg wrote into its container.
-            config["keep_container"] = True
+            seat.leave()
 
         # -- the box dies; the cloud account still holds its server ------------
         stop_nest(nest, graceful=True)
@@ -158,12 +173,17 @@ def test_retire_keeps_the_nests_recovery_key(
 
         # -- launch 2: retire the server from the launch-retry surface ---------
         withhold_optimistic_entry()
-        driver = create_driver(client)
-        driver.launch(config)
+        driver = seat.relaunch()
         try:
             app = ActionLayer(driver)
             driver.wait_for("launch-recover-button", timeout=60)
-            driver.set_provider_base_urls({"vps": fake_cloud.url_map()["vps"]})
+            provider_urls = {"vps": fake_cloud.url_map()["vps"]}
+            if browser:
+                # A tab's override is one map, and setting it reloads the page:
+                # keep the dead box's address in it, so the reloaded launch
+                # still dials the box this device is saved against.
+                provider_urls["nest"] = nest["url"]
+            driver.set_provider_base_urls(provider_urls)
             retire = RetireActions(driver)
             retire.open_from_launch()
             retire.enter_token("hetzner", HETZNER_TOKEN)
@@ -177,15 +197,13 @@ def test_retire_keeps_the_nests_recovery_key(
             driver.click("retire-done-button")
             recovery_lists_the_box(app, "right after retiring the server")
         finally:
-            driver.teardown()
+            seat.leave()
 
         # -- launch 3: a cold start reads only what the device kept ------------
         withhold_optimistic_entry()
-        driver = create_driver(client)
-        driver.launch(config)
-        try:
-            recovery_lists_the_box(ActionLayer(driver), "after a relaunch")
-        finally:
-            driver.teardown()
+        driver = seat.relaunch()
+        recovery_lists_the_box(ActionLayer(driver), "after a relaunch")
     finally:
+        if seat is not None:
+            seat.close()
         stop_boxes()

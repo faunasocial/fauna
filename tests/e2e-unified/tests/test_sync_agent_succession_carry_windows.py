@@ -76,7 +76,9 @@ the app spawns its own ``fauna-sync-agent.exe`` on the session's pipe and
 ``--data-dir`` (``conftest.py::_apply_isolated_sync_agent_env``), so the box's
 installed agent is never touched. The CFAPI root is a folder under this test's
 ``tmp_path``, and its shell registration's Id is keyed by that path, so no
-other run's root can be mistaken for it.
+other run's root can be mistaken for it. The agent keeps both registrations when
+it stops, so the session's end releases them (``conftest.py``,
+``_release_windows_sync_roots_at_session_end``) and pytest can remove the dir.
 
 Convention 8: the set is made through the wizard, the folder bound through the
 row's binding form (a fresh windows binding starts on-demand — user ruling
@@ -102,7 +104,8 @@ from helpers.succession_ceremony import (
     wait_for_successor_actor,
 )
 from helpers.waiting import wait_until
-from helpers.windows_sync_agent import list_locations, shell_sync_root_id_for
+from helpers.windows_cfapi import shell_sync_root_id_for
+from helpers.windows_sync_agent import list_locations
 
 pytestmark = [
     pytest.mark.tier_3,

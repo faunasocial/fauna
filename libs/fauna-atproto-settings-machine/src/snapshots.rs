@@ -268,6 +268,41 @@ pub struct ConsentCardRow {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub install: Option<ConsentInstallRow>,
+    /// The card's folder picker, present exactly on a card carrying a BARE
+    /// folder-plane scope (`authorization-server.md` § Consent → *The card
+    /// chooses the folder*): the account's folders every such verb on the
+    /// card can take, by name and row id, composed by the approving machine
+    /// from the owner's folder custody — never from the request. `None` on
+    /// every other card, and from [`consent_card_row`](crate::consent_card_row)
+    /// alone.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub folder_picker: Option<FolderPicker>,
+}
+
+/// The consent card's one folder picker (`connected-apps-request-folder`):
+/// one per card, however many bare folder verbs it carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct FolderPicker {
+    /// The eligible folders, by name (the owner's own, from custody), in
+    /// name order.
+    pub options: Vec<FolderOption>,
+    /// The folder the user chose, one of [`Self::options`]' ids; `None` until
+    /// they choose — the card's Approve stays disabled until then.
+    pub chosen: Option<i64>,
+    /// Why no folder can be chosen — set exactly when [`Self::options`] is
+    /// empty; the card says it and its Approve is disabled.
+    pub none_eligible: Option<LocalizedText>,
+}
+
+/// One folder the picker offers: its row id (the option key, in decimal on
+/// the automation surface) and the owner's name for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct FolderOption {
+    pub id: i64,
+    pub name: String,
 }
 
 /// The install section of the one consent card, composed (and

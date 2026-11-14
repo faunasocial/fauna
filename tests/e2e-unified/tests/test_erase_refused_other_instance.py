@@ -1,5 +1,6 @@
-"""tier_3 e2e: every user-facing erase on tui, linux and macos refuses while a
-SIBLING instance serves the account, and goes through once the sibling is gone.
+"""tier_3 e2e: every user-facing erase on tui, linux, macos and windows refuses
+while a SIBLING instance serves the account, and goes through once the sibling is
+gone.
 
 ``docs/goal/architecture/apps/account-scoping.md`` § Concurrent instances →
 *An erase refuses while a sibling serves the account*, the *Every erasing
@@ -46,12 +47,24 @@ store pair of ``test_account_switcher_apple._shared_instance_world``. iOS has
 no leg: the OS admits one instance per app (``account-scoping.md`` § Concurrent
 instances).
 
+**windows** joins the same two journeys through the same FFI doors
+(``SignOutBlocked`` at the sign-out confirm, ``RemoveAccountGesture`` behind the
+switcher's remove), its seats on the process-global holder, whose lock the
+probe itself puts down. Its world is
+``test_account_instance_lock_windows._shared_instance_world``'s: one credential
+store, one relocated ``%LOCALAPPDATA%`` (where shared Rust roots the account
+store, ``…\\Fauna\\sync``) and the data dir under it — and closing the first
+seat stops only that seat (``sweep_data_dir_peers=False``), since windows'
+default teardown also stops every instance owning the shared data dir. Its
+floor journey is ``test_erase_refused_other_instance_windows.py``.
+
 tier_3: a real ``fauna-nest`` (``nest_instance``) and real app binaries.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 
 import pytest
@@ -77,7 +90,7 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux]
 _SUPPORTED_APPS = ("tui", "linux")
 
 #: The apps the remove-account and sign-out journeys run on.
-_GESTURE_APPS = (*_SUPPORTED_APPS, "macos")
+_GESTURE_APPS = (*_SUPPORTED_APPS, "macos", "windows")
 
 #: Each app's flat base under ``XDG_CONFIG_HOME`` (``XdgScopeStore``).
 _FLAT_BASE = {"tui": "fauna-tui", "linux": "fauna"}
@@ -132,22 +145,57 @@ def app_path(app, request):
 # ── the world ────────────────────────────────────────────────────────────────
 
 
-def _shared_instance_world(app):
+def _shared_instance_world(app, request):
     """One throwaway install world for two instances to share — the same-OS-
     login premise of the guard (``test_account_instance_lock_{tui,linux}.py``).
     Each driver otherwise gives every launch a fresh base, which would put the
-    two processes in different installs contending on nothing."""
+    two processes in different installs contending on nothing.
+
+    A caller-supplied world is deleted by neither driver, so the test removes
+    it once both are down (``testing.md`` § Test temp-dir hygiene) — unless
+    ``FAUNA_E2E_KEEP_DATA_DIR`` is set, the drivers' own keep switch: windows'
+    seats write their one app log inside it."""
     base = tempfile.mkdtemp(prefix=f"fauna-e2e-{app}-erase-world-")
+    request.addfinalizer(lambda: _drop_world(base))
     if app == "macos":
         return {
             "home": os.path.join(base, "home"),
             "credential_dir": os.path.join(base, "credentials"),
+        }
+    if app == "windows":
+        # `test_account_instance_lock_windows._shared_instance_world`: all four
+        # keys are shared — the credential store (one registry), the relocated
+        # `%LOCALAPPDATA%` (one account store, `…\Fauna\sync`) and the data dir
+        # under it, laid out as production lays it out (the instance lock).
+        local_appdata = os.path.join(base, "localappdata")
+        return {
+            "credential_dir": os.path.join(base, "credentials"),
+            "keyring_app": f"fauna-e2e-{app}-erase-world-{os.path.basename(base)}",
+            "local_appdata": local_appdata,
+            "data_dir": os.path.join(local_appdata, "Fauna"),
         }
     return {
         "xdg_base": os.path.join(base, "xdg"),
         "credential_dir": os.path.join(base, "credentials"),
         "keyring_app": f"fauna-e2e-{app}-erase-world-{os.path.basename(base)}",
     }
+
+
+def _drop_world(base):
+    if os.environ.get("FAUNA_E2E_KEEP_DATA_DIR"):
+        print(f"[erase-world] keeping the shared world for inspection: {base}")
+        return
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def _close(app, driver):
+    """Stop ONE instance of a shared world. windows' default teardown also stops
+    every instance owning the shared data dir (``WindowsBridgeDriver._stop_app``) —
+    the other seat, still under test, included."""
+    if app == "windows":
+        driver.teardown(sweep_data_dir_peers=False)
+    else:
+        driver.teardown()
 
 
 def _account(nest_instance, handle):
@@ -200,9 +248,36 @@ def _wait_serving(driver, actor):
 
 
 def _scope_dirs(app, driver, actor):
-    if app == "macos":
+    """macos: the state home and its ``sync`` sibling; windows: the data dir and
+    the store root under the shared ``%LOCALAPPDATA%``, both as the driver
+    resolved them (``WindowsScopeStore``) — neither is an XDG tree."""
+    if app in ("macos", "windows"):
         return attach_scope_store(app, driver).scope_dirs(actor)
     return XdgScopeStore(app, driver.config_home, _FLAT_BASE[app]).scope_dirs(actor)
+
+
+def _open_account_page(driver, anchor):
+    """Settings → Account until ``anchor`` shows, navigating again on each miss:
+    a navigation sent while the frame is still settling after sign-in can be
+    dropped (windows rebuilds its main frame —
+    ``test_account_switcher_windows._wait_switcher_count``), and navigating
+    again is what the user would do."""
+    def landed():
+        driver.set_state(ACCOUNT_PAGE_NAV)
+        try:
+            driver.wait_for(anchor, timeout=5)
+        except Exception:  # noqa: BLE001 — a miss is retried; the diagnosis names it
+            return False
+        return True
+
+    wait_until(
+        landed,
+        LOCAL_BUDGET_S,
+        diagnose=lambda: (
+            f"Settings → Account never showed {anchor!r}; "
+            f"error-message {_errors(driver)!r}"
+        ),
+    )
 
 
 def _errors(driver) -> list[str]:
@@ -293,6 +368,7 @@ def _assert_sibling_serving(driver, actor, what):
 
 @pytest.mark.feature("multiple-accounts")
 @pytest.mark.macos
+@pytest.mark.windows
 def test_remove_account_refuses_while_another_instance_serves_it(
     app, app_path, nest_instance, request
 ):
@@ -304,7 +380,7 @@ def test_remove_account_refuses_while_another_instance_serves_it(
     instance gone, the same press removes U and erases its scope."""
     u, v = _account(nest_instance, "u"), _account(nest_instance, "v")
     u_actor, v_actor = u[0], v[0]
-    world = _shared_instance_world(app)
+    world = _shared_instance_world(app, request)
 
     first = _launch(app, app_path, nest_instance, request, world,
                     seed=_seed(nest_instance, {"u": u, "v": v}, active=u_actor))
@@ -321,8 +397,7 @@ def test_remove_account_refuses_while_another_instance_serves_it(
         second = _launch(app, app_path, nest_instance, request, world, bound=v_actor)
         _wait_serving(second, v_actor)
 
-        second.set_state(ACCOUNT_PAGE_NAV)
-        second.wait_for(SWITCHER_LIST, timeout=LOCAL_BUDGET_S)
+        _open_account_page(second, SWITCHER_LIST)
         wait_until(
             lambda: second.count(SWITCHER_ITEM) == 2 and second.count(REMOVE_BUTTON) == 1,
             LOCAL_BUDGET_S,
@@ -352,10 +427,9 @@ def test_remove_account_refuses_while_another_instance_serves_it(
         _assert_sibling_serving(first, u_actor, "after the refused removal")
 
         # ── goes through once the sibling is gone ───────────────────────────
-        first.teardown()
+        _close(app, first)
         first = None
-        second.set_state(ACCOUNT_PAGE_NAV)
-        second.wait_for(REMOVE_BUTTON, timeout=LOCAL_BUDGET_S)
+        _open_account_page(second, REMOVE_BUTTON)
         _press_until_through(
             second,
             lambda: second.click(REMOVE_BUTTON),
@@ -385,6 +459,7 @@ def test_remove_account_refuses_while_another_instance_serves_it(
 
 @pytest.mark.feature("account")
 @pytest.mark.macos
+@pytest.mark.windows
 def test_sign_out_refuses_while_another_instance_serves_the_account(
     app, app_path, nest_instance, request
 ):
@@ -397,7 +472,7 @@ def test_sign_out_refuses_while_another_instance_serves_the_account(
     "served" and a lone instance could never sign out."""
     u = _account(nest_instance, "u")
     u_actor = u[0]
-    world = _shared_instance_world(app)
+    world = _shared_instance_world(app, request)
 
     first = _launch(app, app_path, nest_instance, request, world,
                     seed=_seed(nest_instance, {"u": u}, active=u_actor))
@@ -429,7 +504,7 @@ def test_sign_out_refuses_while_another_instance_serves_the_account(
         _assert_sibling_serving(first, u_actor, "after the refused sign-out")
 
         # ── the lone instance signs out ─────────────────────────────────────
-        first.teardown()
+        _close(app, first)
         first = None
         _press_until_through(
             second,
@@ -470,12 +545,14 @@ def cross_app_pair(request):
     return request.param
 
 
-def _cross_app_world(serving, erasing):
+def _cross_app_world(serving, erasing, request):
     """One OS login for two DIFFERENT apps: a shared ``xdg_base`` (so both
     resolve one ``StoreRoot::platform()`` = ``<xdg>/fauna/sync``, where the
     serving lock lives) but each app's own credential namespace, as in
-    production, where the two never share a keyring item."""
+    production, where the two never share a keyring item. Removed once both
+    are down, as :func:`_shared_instance_world` is."""
     base = tempfile.mkdtemp(prefix=f"fauna-e2e-{serving}-{erasing}-erase-world-")
+    request.addfinalizer(lambda: _drop_world(base))
     suffix = os.path.basename(base)
     shared = {"xdg_base": os.path.join(base, "xdg")}
     return {
@@ -507,7 +584,7 @@ def test_sign_out_refuses_while_a_sibling_app_serves_the_account(
     paths = {"tui": tui_app_path, "linux": linux_app_path}
     u = _account(nest_instance, "u")
     u_actor = u[0]
-    worlds = _cross_app_world(serving, erasing)
+    worlds = _cross_app_world(serving, erasing, request)
 
     def launch(app):
         return _launch(app, paths[app], nest_instance, request, worlds[app],
@@ -594,7 +671,7 @@ def test_start_over_refuses_while_another_instance_serves_an_account(
     app_path = request.getfixturevalue(f"{app}_app_path")
     u = _account(nest_instance, "u")
     u_actor = u[0]
-    world = _shared_instance_world(app)
+    world = _shared_instance_world(app, request)
 
     first = _launch(app, app_path, nest_instance, request, world,
                     seed=_seed(nest_instance, {"u": u}, active=u_actor))
@@ -640,7 +717,7 @@ def test_start_over_refuses_while_another_instance_serves_an_account(
         _assert_sibling_serving(first, u_actor, "after the refused start-over")
 
         # ── goes through once the sibling is gone ───────────────────────────
-        first.teardown()
+        _close(app, first)
         first = None
         _press_until_through(
             second,

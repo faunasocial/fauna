@@ -406,6 +406,7 @@ public struct PostCardBody: View {
                     reportTarget: isOwn ? nil : reportPostTarget(
                         cid: post.postId, author: post.author, plaintext: post.body,
                         gated: post.gatedTier != nil || post.gatedRoom != nil),
+                    post: post, viewer: appState.session.actorId ?? "",
                     onNavigateToPersonalization: onNavigateToPersonalization)
             }
             .padding(.vertical, verticalPadding)

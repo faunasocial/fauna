@@ -100,6 +100,7 @@ from helpers.client_metadata_server import (
     manifest_payload,
     sign_manifest,
 )
+from helpers.app_surface import require_surface
 from helpers.budgets import ORCHESTRATION_STEP_S, RPC_ROUNDTRIP_S
 from helpers.waiting import wait_until
 from helpers.xrpc_client import xrpc_post
@@ -127,10 +128,14 @@ _ORACLE_REDIRECT_URI = "http://127.0.0.1:17798/callback"
 _ORACLE_AUD = "did:web:feed.example.com#bsky_fg"
 _ORACLE_LXM = "app.bsky.feed.getFeedSkeleton"
 _ORACLE_APPS = ("web", "linux", "windows", "macos", "ios", "android", "tui")
+#: One served principal per oracle case: the summary case asserts the row
+#: carries no summary before its operation, which a principal an earlier case
+#: already served would refute.
+_ORACLE_CASES = ("summary", "record")
 
 
-def _oracle_document_path(app_name: str) -> str:
-    return f"/client-metadata-{app_name}.json"
+def _oracle_document_path(app_name: str, case: str) -> str:
+    return f"/client-metadata-{case}-{app_name}.json"
 
 
 # The key-replacement case's client is a publisher's too: a `fauna:records:`
@@ -165,7 +170,10 @@ def metadata_server(tmp_path_factory):
     # One client document per app: the nest, its principals and this module's
     # metadata server outlive a case, so a shared client id would hand the next
     # app a row an earlier app's operation already served.
-    for path in (DOCUMENT_PATH, *map(_oracle_document_path, _ORACLE_APPS)):
+    oracle_paths = (
+        _oracle_document_path(app, case) for app in _ORACLE_APPS for case in _ORACLE_CASES
+    )
+    for path in (DOCUMENT_PATH, *oracle_paths):
         server.documents[path] = client_document(
             server.client_id(path),
             _ORACLE_REDIRECT_URI,
@@ -782,6 +790,174 @@ def test_a_declined_handoff_tells_the_app_no(handoff_app, consent_nest):
     )
 
 
+# ── The card chooses the folder (``authorization-server.md`` § Consent → *The
+# card chooses the folder*): a device app whose document declares the BARE
+# folder-plane scope pushes a bare request; the card offers the account's
+# folders that scope can take, by name, and approving with one mints the
+# keyless deposit grant over it and qualifies the token's scope with it. The
+# folders are arranged over the API (setup, not the journey); the choice and
+# the approve are the user's, on the card. The card is opened by the browser
+# start (PAR → the consent page → the binding code in the tray), the one start
+# every app takes: the picker is the card's, whichever start opened it.
+_FOLDER_DEPOSIT = "fauna:folder:deposit"
+_FOLDER_READ = "fauna:folder:read"
+_FOLDER_REDIRECT_URI = "http://127.0.0.1:17803/callback"
+
+
+def _bare_folder_client(consent_nest, metadata_server, app_name: str, tag: str, scope: str):
+    """A device app (a public client) whose served document declares ``scope``
+    bare, asking for it bare, with fresh attested holder and writer keys — one
+    document per app and case, so no case sees another's grant."""
+    path = f"/folder-picker-{tag}-{app_name}.json"
+    metadata_server.documents[path] = client_document(
+        metadata_server.client_id(path), _FOLDER_REDIRECT_URI, scope
+    )
+    raw = (serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    writer_key = ed25519.Ed25519PrivateKey.generate()
+    client = OAuthClient(
+        base=consent_nest["url"],
+        htu_origin=f"https://{HANDLE_DOMAIN}",
+        redirect_uri=_FOLDER_REDIRECT_URI,
+        scope=scope,
+        holder_x25519=x25519.X25519PrivateKey.generate().public_key().public_bytes(*raw),
+        writer_ed25519=writer_key.public_key().public_bytes(*raw),
+        client_id_url=metadata_server.client_id(path),
+    )
+    client.writer_key = writer_key
+    return client
+
+
+def _open_browser_card(ca: ConnectedAppsActions, device: OAuthClient) -> tuple[int, str]:
+    """The browser start: PAR, then the consent page's binding code found in
+    the tray. Returns the card's index and the page's flow token."""
+    request_uri = device.push_authorization_request()
+    browser_code, flow_token = device.open_consent_page(request_uri)
+    index = ca.wait_for_request_code(browser_code)
+    assert index is not None, (
+        "the request must open its card in the tray. "
+        f"error: {ca.current_error_text()!r} code: {browser_code!r} cards: {_cards_seen(ca)}"
+    )
+    return index, flow_token
+
+
+def _browser_answer(device: OAuthClient, flow_token: str) -> str:
+    """The consent page's redirect once the app's answer has reached the
+    nest — the poll holds while pending, so each call is the mechanism."""
+    redirect = ""
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S
+    while time.monotonic() < deadline:
+        status, redirect = device.poll(flow_token)
+        if status == "resolved":
+            break
+    return redirect
+
+
+# tui led (closing ); web, linux and android followed,
+# then macos and ios.
+@pytest.mark.feature("connected-apps")
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+def test_a_bare_folder_request_lets_the_user_choose_the_folder_on_the_card(
+    request, connected_app, consent_nest, metadata_server
+):
+    """A bare ``fauna:folder:deposit`` request's card lists the user's
+    folders by name and holds Approve until one is chosen; approving with the
+    chosen folder hands the app a token naming THAT folder, through which a
+    deposit lands in its inbox and nowhere else."""
+    from tests.api.test_folder_deposit import _http_deposit, _inbox
+
+    from helpers.principal_session import alice_client
+    from helpers.recipient_seal_key import provision_recipient_seal_key
+
+    app_name = request.node.callspec.params["app"]
+    chosen_name = f"picker-drop-{app_name}"
+    with alice_client(consent_nest) as ws:
+        chosen = ws.call("fauna.folders.create", {"name": chosen_name})["id"]
+        other = ws.call("fauna.folders.create", {"name": f"picker-other-{app_name}"})["id"]
+        provision_recipient_seal_key(ws, consent_nest["user"]["actor_id_bytes"])
+
+    from helpers.principal_session import redeem
+
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    device = _bare_folder_client(consent_nest, metadata_server, app_name, "deposit", _FOLDER_DEPOSIT)
+    index, flow_token = _open_browser_card(ca, device)
+
+    assert ca.request_has_folder_picker(index), (
+        f"a bare folder card carries the picker. card: {ca.request_text(index)!r}"
+    )
+    offered = ca.request_folder_options(index)
+    assert chosen_name in offered and f"picker-other-{app_name}" in offered, (
+        f"the picker offers the account's folders by name: {offered!r}"
+    )
+    assert ca.request_chosen_folder(index) == "", "nothing is chosen until the user chooses"
+    assert ca.request_approve_disabled(index), "no folder chosen, no approve"
+
+    ca.choose_request_folder(index, chosen)
+    wait_until(
+        lambda: ca.request_chosen_folder(index) == str(chosen),
+        ORCHESTRATION_STEP_S,
+        diagnose=lambda: (
+            f"the choice must hold on the card: {ca.request_chosen_folder(index)!r} "
+            f"error: {ca.current_error_text()!r}"
+        ),
+    )
+    assert not ca.request_approve_disabled(index), "a chosen folder enables the approve"
+    ca.approve_request(index)
+
+    tokens = redeem(device, flow_token)
+    assert tokens.get("scope") == f"{_FOLDER_DEPOSIT}:{chosen}", (
+        f"the token names the folder the user chose: {tokens!r}"
+    )
+    token = tokens["access_token"]
+    status, body = _http_deposit(consent_nest, device, token, chosen, "picked.txt", b"picked")
+    assert status == 202 and body == {"accepted": True}, (
+        f"a deposit into the chosen folder lands: {status} {body!r}"
+    )
+    assert len(_inbox(consent_nest, chosen)) == 1, "the deposit rests in the chosen folder's inbox"
+    status, body = _http_deposit(consent_nest, device, token, other, "x.txt", b"x")
+    assert status == 403, f"a folder the user did not choose is refused: {status} {body!r}"
+
+
+@pytest.mark.feature("connected-apps")
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+def test_a_bare_folder_card_no_folder_can_take_says_why_and_offers_no_approve(
+    request, connected_app, consent_nest, metadata_server
+):
+    """A bare request asking both to deposit into and to read one folder,
+    against an account none of whose folders is served for reading: the card
+    offers no folder, says why in its own text, and cannot be approved."""
+    from helpers.principal_session import alice_client
+
+    app_name = request.node.callspec.params["app"]
+    with alice_client(consent_nest) as ws:
+        ws.call("fauna.folders.create", {"name": f"picker-unserved-{app_name}"})
+
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    scope = f"{_FOLDER_DEPOSIT} {_FOLDER_READ}"
+    device = _bare_folder_client(consent_nest, metadata_server, app_name, "none", scope)
+    index, flow_token = _open_browser_card(ca, device)
+
+    assert ca.request_folder_options(index) == [], (
+        f"no folder is both depositable and served: {ca.request_folder_options(index)!r}"
+    )
+    assert S.atproto_settings.consent_folder_none_both in ca.request_text(index), (
+        f"the card says why: {ca.request_text(index)!r}"
+    )
+    assert ca.request_approve_disabled(index), "a card no folder can be chosen on cannot be approved"
+    ca.decline_request(index)
+    redirect = _browser_answer(device, flow_token)
+    assert "error=access_denied" in redirect, f"a decline answers the page with a refusal: {redirect!r}"
+
+
 # ── The account's external-apps switch (``atproto-pds-full.md`` § Detailed
 # design → F1 detail, the kill-switch bullet): OFF binds the account's
 # third-party principals too — the live session closes ``4401``, a fresh dial
@@ -878,31 +1054,20 @@ def test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it(
     )
 
 
-@pytest.mark.tui
-@pytest.mark.web
-@pytest.mark.android
-@pytest.mark.linux
-@pytest.mark.macos
-@pytest.mark.ios
-@pytest.mark.windows
-@pytest.mark.feature("connected-apps")
-def test_a_principal_the_oracle_served_shows_what_the_nest_did_on_its_row(
-    request, connected_app, consent_nest, metadata_server
-):
-    """A publisher's app holding ``fauna:identity:op:atproto.service_auth``
-    asks the oracle for a service-auth token for its declared pair; the bridge
-    mints it with the user's repo key. On the roster, that app's row then
-    carries the oracle summary — the window's count as its ``oracle_ops``
-    value and the newest operation with its detail (``<aud> <lxm>``) verbatim —
-    while a row the oracle never served carries none.
+def _serve_a_principal(request, connected_app, consent_nest, metadata_server, case):
+    """Approve a publisher's app holding ``fauna:identity:op:atproto.service_auth``
+    on its own request card, then have it ask the oracle for a service-auth
+    token for its declared pair (the bridge mints it with the user's repo key).
 
     The consent is approved on the app's own request card, which mints its
     keyless ``identity.op`` grant the product's way — the ``Mint`` recorded in
     the grant log before the deposit — so the account runtime's reconcile sweep
     keeps it (a raw ``fauna.capabilities.mint`` beside a live runtime is
     revoked as a row the log never held). The operation is the app's own call.
-    Asserts what the roster read says, never the count's value: the count is
-    the rate window's position, which a slow box may see roll over."""
+
+    ``case`` names the calling test's own client document, so each case's
+    principal is fresh. Returns ``(actions, client, row index)`` once the
+    roster shows the served row's summary."""
     from helpers.principal_session import PrincipalSession, redeem, upgrade
 
     ca: ConnectedAppsActions = connected_app.connected_apps
@@ -916,7 +1081,7 @@ def test_a_principal_the_oracle_served_shows_what_the_nest_did_on_its_row(
         scope=_ORACLE_SCOPE,
         holder_x25519=holder_pub,
         client_id_url=metadata_server.client_id(
-            _oracle_document_path(request.node.callspec.params["app"])
+            _oracle_document_path(request.node.callspec.params["app"], case)
         ),
     )
     request_uri = client.push_authorization_request()
@@ -949,17 +1114,83 @@ def test_a_principal_the_oracle_served_shows_what_the_nest_did_on_its_row(
     finally:
         session.ws.close()
 
-    detail = f"{_ORACLE_AUD} {_ORACLE_LXM}"
     row = ca.wait_for_oracle_item_containing(client.client_id)
     assert row is not None, (
         "the served app's row must carry the oracle summary. "
         f"row: {ca.item_text(ca.item_index_containing(client.client_id) or 0)!r} "
         f"error: {ca.current_error_text()!r}"
     )
+    return ca, client, row
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.feature("connected-apps")
+def test_a_principal_the_oracle_served_shows_what_the_nest_did_on_its_row(
+    request, connected_app, consent_nest, metadata_server
+):
+    """A publisher's app asks the oracle for a service-auth token
+    (`_serve_a_principal`). On the roster, that app's row then carries the
+    oracle summary — the window's count as its ``oracle_ops`` value and the
+    newest operation with its detail (``<aud> <lxm>``) verbatim — while a row
+    the oracle never served carries none.
+
+    Asserts what the roster read says, never the count's value: the count is
+    the rate window's position, which a slow box may see roll over."""
+    ca, _client, row = _serve_a_principal(
+        request, connected_app, consent_nest, metadata_server, "summary"
+    )
     ops = ca.item_oracle_ops(row)
     assert ops is not None and ops.isdigit(), f"the window's count, as a value: {ops!r}"
     text = ca.item_text(row)
+    detail = f"{_ORACLE_AUD} {_ORACLE_LXM}"
     assert detail in text, f"the newest operation's detail, verbatim: {text!r}"
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.feature("connected-apps")
+def test_a_served_principal_s_row_opens_its_record_newest_first(
+    request, connected_app, consent_nest, metadata_server
+):
+    """The served row's open control opens its per-operation record
+    (`connected-apps.md` § Layout & flow, region 3): the operation the app ran
+    is listed — its detail (``<aud> <lxm>``) verbatim in its words, its class
+    verbatim as the item's ``class`` value — and the control closes it again.
+    The record is the nest's read, never a second record the app keeps."""
+    require_surface(connected_app.driver, "connected-apps-oracle-record")
+    ca, client, row = _serve_a_principal(
+        request, connected_app, consent_nest, metadata_server, "record"
+    )
+    ops = ca.open_oracle_record(row)
+    assert ops, (
+        "the open record must list the operation the app ran. "
+        f"empty state: {ca.oracle_record_empty(row)!r} "
+        f"error: {ca.current_error_text()!r}"
+    )
+    detail = f"{_ORACLE_AUD} {_ORACLE_LXM}"
+    newest_text, newest_class = ops[0]
+    assert detail in newest_text, f"the newest operation's detail, verbatim: {ops!r}"
+    assert newest_class == "atproto.service_auth", (
+        f"the class verbatim as the item's value: {ops!r}"
+    )
+    row = ca.item_index_containing(client.client_id)
+    assert row is not None
+    ca.close_oracle_record(row)
+    assert not ca.oracle_record_open(row), (
+        "the control closes the record it opened. "
+        f"row: {ca.item_text(row)!r}"
+    )
 
 
 def _owned_grant_ids(consent_nest) -> set[bytes]:
@@ -1820,6 +2051,130 @@ def test_after_stepping_down_a_connected_app_reads_suspended_until_a_fresh_sign_
         f"row: {ca.item_text(ca.item_index_containing(client.client_id) or 0)!r}"
     )
 
+    ca.revoke_item(row)
+    assert ca.wait_for_no_item_containing(client.client_id), (
+        f"Revoke on the row ends it. error: {ca.current_error_text()!r}"
+    )
+
+
+_TRUST_FACET_REDIRECT_URI = "http://127.0.0.1:17806/callback"
+_TRUST_FACET_KEYLESS_PORT = 17807
+
+
+def _trust_facet_document_path(app_name: str) -> str:
+    return f"/client-metadata-trust-facet-{app_name}.json"
+
+
+@pytest.mark.feature("connected-apps")
+@pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+def test_a_connected_app_holding_keys_shows_them_now_and_in_its_history(
+    request, connected_app, consent_nest, metadata_server
+):
+    """``connected-apps.md`` § The trust facet and history lens: an app that
+    attested a holder key and was approved for ``fauna:records:rw:ext.example.com.*``
+    shows, on its roster row, a Now lens with one row per live key — the
+    publisher and the kind's name verbatim in quotes, *read and write*, Active,
+    *lasts-until* and the honest-bound copy — and a History lens with its
+    Minted line. A second ceremony under the SAME key adds a second key row and
+    a second Minted line above the first. A keyless OAuth client's row shows no
+    lens at all. Revoke ends the row and its lens with it — the accepted
+    consequence; the Revoked entries the owner's log keeps are pinned by the
+    shared machine's unit test (``a_revoked_grant_leaves_now_and_stays_in_history``)."""
+    from helpers.principal_session import redeem
+
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    app_name = request.node.callspec.params["app"]
+    client_id_url = _publish(
+        metadata_server,
+        _trust_facet_document_path(app_name),
+        _TRUST_FACET_REDIRECT_URI,
+        _RECORDS_SCOPE,
+        _signed_manifest(ed25519.Ed25519PrivateKey.generate(), ["notes"]),
+    )
+    holder_pub = _raw_public(x25519.X25519PrivateKey.generate())
+    writer_pub = _raw_public(ed25519.Ed25519PrivateKey.generate())
+
+    def ceremony() -> OAuthClient:
+        client = OAuthClient(
+            base=consent_nest["url"],
+            htu_origin=f"https://{HANDLE_DOMAIN}",
+            redirect_uri=_TRUST_FACET_REDIRECT_URI,
+            scope=_RECORDS_SCOPE,
+            holder_x25519=holder_pub,
+            writer_ed25519=writer_pub,
+            client_id_url=client_id_url,
+        )
+        request_uri = client.push_authorization_request()
+        browser_code, flow_token = client.open_consent_page(request_uri)
+        index = ca.wait_for_request_code(browser_code)
+        assert index is not None, (
+            "the request must open its card in the tray. "
+            f"error: {ca.current_error_text()!r} code: {browser_code!r} "
+            f"cards: {_cards_seen(ca)}"
+        )
+        ca.approve_request(index)
+        redeem(client, flow_token)
+        return client
+
+    # ── The first ceremony: one key, one Minted line. ──
+    client = ceremony()
+    row = ca.wait_for_trust_grants(client.client_id, 1)
+    assert row is not None, (
+        "the approved app's row must list the one key the approve minted. "
+        f"rows: {[ca.item_text(i) for i in range(ca.item_count())]!r} "
+        f"error: {ca.current_error_text()!r}"
+    )
+    scope = ca.trust_grant_text(row, 0, "scope")
+    assert scope == S.connected_apps.trust_scope_ext_rw(
+        publisher=_ORACLE_PUBLISHER, kinds='"notes"'
+    ), f"the key names the publisher and the kind verbatim, read and write: {scope!r}"
+    assert ca.trust_grant_text(row, 0, "status") == S.nests.status_active
+    assert ca.trust_grant_text(row, 0, "lasts-until").startswith(S.nests.lasts_until)
+    assert ca.trust_grant_text(row, 0, "bound-note"), "the honest-bound copy is required"
+    history = ca.show_trust_history(row)
+    assert len(history) == 1 and '"notes"' in history[0], (
+        f"History holds the one Minted line, naming the kind: {history!r}"
+    )
+
+    # ── The same app asks again under the same key: a second key row. ──
+    again = ceremony()
+    assert again.client_id == client.client_id, "the same document is the same app"
+    row = ca.wait_for_trust_grants(client.client_id, 2)
+    assert row is not None, (
+        "a second ceremony under the same key lists both keys. "
+        f"error: {ca.current_error_text()!r}"
+    )
+    history = ca.show_trust_history(row)
+    assert len(history) == 2, f"History holds both Minted lines: {history!r}"
+
+    # ── A keyless OAuth client's row carries no lens. ──
+    keyless = _client(consent_nest, _TRUST_FACET_KEYLESS_PORT)
+    status, started = keyless.start_polled(DEVICE_AUTHORIZATION_PATH, {})
+    assert status == 200, f"device authorization start refused: {status} {started!r}"
+    ca.connect_with_code(started["user_code"])
+    index = ca.wait_for_request_from(keyless.client_id)
+    assert index is not None, f"the keyless app's card must open: {_cards_seen(ca)}"
+    ca.approve_request(index)
+    keyless.poll_until_answered(
+        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"], timeout=RPC_ROUNDTRIP_S
+    )
+    keyless_row = ca.wait_for_item_containing(keyless.client_id)
+    assert keyless_row is not None, "the keyless app must be on the roster"
+    assert not ca.has_trust_lens(keyless_row), (
+        "a principal that attested no key has no facet — absent, never empty: "
+        f"{ca.item_text(keyless_row)!r}"
+    )
+    ca.revoke_item(keyless_row)
+    assert ca.wait_for_no_item_containing(keyless.client_id)
+
+    # ── Revoke ends the row, and its lens with it. ──
+    row = ca.item_index_containing(client.client_id)
+    assert row is not None
     ca.revoke_item(row)
     assert ca.wait_for_no_item_containing(client.client_id), (
         f"Revoke on the row ends it. error: {ca.current_error_text()!r}"

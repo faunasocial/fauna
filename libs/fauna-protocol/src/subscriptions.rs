@@ -487,6 +487,30 @@ pub struct OffersListRequest {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── offers.list_remote ─────────────────────────────────────────
+
+/// The same browse as [`OffersListRequest`], for an author homed on **another
+/// nest** (`docs/goal/behavior/subscriptions.md` § Pillar 1 → *The offers
+/// browse across nests*): the caller's own nest answers locally for an author
+/// it hosts, exactly as `offers.list` would, and otherwise originates
+/// `fauna.federation.follow.offers.list { author_id }` to `nest_url` and
+/// forwards the home's [`TiersListReply`] unstored.
+///
+/// A **distinct kind** rather than an additive home field on `offers.list`:
+/// an old own nest that ignored the field would answer its local empty list —
+/// a silent wrong answer — where an unknown kind fails loud.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OffersListRemoteRequest {
+    /// Rides as a 32-byte CBOR byte string — `ActorId`'s wire shape.
+    pub author_id: ActorId,
+    /// The author's home nest, as the app's `actor_home` slot holds it.
+    pub nest_url: String,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ── post_unlock.get ────────────────────────────────────────────
 
 /// Authenticated point read of one sold post's **public purchase fields** —

@@ -94,9 +94,27 @@ class PaymentsSiteOrigin @Inject constructor(private val store: WebPublishStore)
 }
 
 /** Redeem a post-payment claim code — binds the entitlement to this actor;
- *  the queued grant lands through Pillar 1's queue like a queued subscribe. */
-suspend fun ApiClient.paymentsClaimsRedeem(code: String) {
-    paymentsClient().claimsRedeem(code)
+ *  the queued grant lands through Pillar 1's queue like a queued subscribe.
+ *
+ *  Both redeem doors go through the shared
+ *  `PaymentsClient::claims_redeem_across_nests` (`monetization.md` § Pillar 3 →
+ *  *Which nest an in-app redeem binds on* → *The doors*): with [authorHomeUrl]
+ *  named it relays a signed intent to the creator's home nest; with `null` it is
+ *  the plain local redeem, which never reads the author slot. [authorIdHex] is
+ *  the creator the code belongs to; `null` (the `subscription-settings` page,
+ *  which knows no creator) fills the slot with the redeemer's own id, the
+ *  documented convention for the home-less branch. */
+suspend fun ApiClient.paymentsClaimsRedeemAcrossNests(
+    code: String,
+    authorIdHex: String?,
+    authorHomeUrl: String?,
+): ClaimRedeemResult {
+    val secretBytes = secret?.let { HexUtil.hexToBytes(it) }
+        ?: throw com.fauna.app.core.ApiException("No secret for claim redeem")
+    val authorId = authorIdHex?.let { HexUtil.hexToBytes(it) }
+        ?: com.fauna.ffi.actorIdFromSecret(secretBytes)
+    val reply = paymentsClient().claimsRedeemAcrossNests(code, secretBytes, authorId, authorHomeUrl)
+    return ClaimRedeemResult(tier = reply.tier, queued = reply.queued)
 }
 
 /** §5 mint — the author mints a manual claim code for [tier] (no expiry; `provider` is

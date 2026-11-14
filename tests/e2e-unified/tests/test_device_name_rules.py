@@ -146,19 +146,20 @@ def test_a_chosen_name_survives_its_apps_default_reregister_and_alike_names_carr
                 sibling_listed, _ROSTER_WINDOW, interval=2.0,
                 diagnose=lambda: f"seat a never listed seat b; nest rows: {_nest_rows(account)!r}",
             )
-            # The harness's own enrolment rests sealed too (its name is a
-            # chosen one), so b's row is the one the rename newly sealed.
-            sealed_before = {
-                d.get("device_id") for d in _raw_rows(account) if d.get("label_sealed")
-            }
+            # b's row is named by b's own session device id: the harness's own
+            # enrolment rests sealed too (its name is a chosen one) and may seal
+            # at any moment, so "the row newly sealed" is not b's row.
+            b_device = db.get_state("session.device_id")
+            assert b_device, f"seat b published no session device_id: {db.get_state()!r}"
             _rename(da, last["card"], chosen)
 
             def sealed_row():
-                rows = [
-                    d for d in _raw_rows(account)
-                    if d.get("label_sealed") and d.get("device_id") not in sealed_before
+                rows = [d for d in _raw_rows(account) if d.get("device_id") == b_device]
+                last["b_rows"] = [
+                    (d.get("device_id"), d.get("label"), bool(d.get("label_sealed")))
+                    for d in rows
                 ]
-                return rows[0] if len(rows) == 1 else None
+                return rows[0] if len(rows) == 1 and rows[0].get("label_sealed") else None
 
             def b_named() -> bool:
                 a.app.backups.navigate_devices()
@@ -172,12 +173,12 @@ def test_a_chosen_name_survives_its_apps_default_reregister_and_alike_names_carr
             wait_until(
                 b_named, _ROSTER_WINDOW, interval=2.0,
                 diagnose=lambda: (
-                    f"seat a's card for b reads {last.get('a_name')!r}, not {chosen!r}; "
+                    f"seat a's card for b reads {last.get('a_name')!r} (want {chosen!r}); "
+                    f"b's row ({b_device}) as (id, label, sealed): {last.get('b_rows')!r}; "
                     f"error-message: {_error_text(da)!r}; nest rows: {_nest_rows(account)!r}"
                 ),
             )
-            renamed = sealed_row()
-            b_device, stamped = renamed["device_id"], renamed.get("registered_at")
+            stamped = sealed_row().get("registered_at")
 
             # ── b quits and comes back: its engine registers under the default ──
             b.stop_keeping_state()

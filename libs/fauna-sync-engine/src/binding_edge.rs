@@ -56,6 +56,17 @@ pub struct BindingBasis {
 }
 
 impl BindingBasis {
+    /// A same-nest member row's basis at `access` — the crate's tests' stand-in
+    /// for a row read.
+    #[cfg(test)]
+    pub(crate) fn member_for_tests(access: &str) -> Self {
+        Self {
+            role: Some("member".into()),
+            access: Some(access.into()),
+            ..Default::default()
+        }
+    }
+
     /// The basis `summary` carries.
     #[must_use]
     pub fn of(summary: &FolderSummary) -> Self {

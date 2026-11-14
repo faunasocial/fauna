@@ -22,6 +22,12 @@ offline-share section paints whenever that plane is compiled in.
 
 Each PNG is checked against Microsoft's desktop limits: at least 1366 × 768,
 at most 3840 × 2160, under 50 MB.
+
+**A blank window is never kept.** On windows the run needs an attached desktop:
+a disconnected session (`query session` shows it `Disc`) renders the title bar
+and nothing under it. Such a run skips with that reason before seeding
+anything, and the bridge refuses a capture whose client area is one flat colour
+in any case, so a blank shot can never be written over a kept one.
 """
 
 from __future__ import annotations
@@ -130,6 +136,15 @@ def listing_dir(request, logged_in_app) -> Path:
 
 def _require_capture(driver) -> None:
     app_surface.require_surface(driver, "window-capture")
+    if app_surface.app_name(driver) == "windows":
+        # A session with no attached desktop composes no app content: the capture
+        # is a title bar over a flat client area. The bridge refuses that frame
+        # (`CaptureContent.RegionIsUniform`); this declares the cause up front,
+        # before any fixture is seeded and before a file could be written.
+        from helpers.windows_session import skip_unless_attached_desktop
+        skip_unless_attached_desktop(
+            "the window renders no app content, so a listing shot would be blank"
+        )
 
 
 def test_store_listing_feed(logged_in_app, listing_dir):

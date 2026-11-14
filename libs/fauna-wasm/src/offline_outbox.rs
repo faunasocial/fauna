@@ -15,12 +15,14 @@
 //!
 //! The MLS half drains only here, in the tab that hosts the account's
 //! conversations engine ([`spawn_mls_drain`]): at the lend, at the account
-//! store's ready edge (`crate::account_runtime`), and on every offline→online
-//! edge — the same three edges tui and linux drain at, through the same shared
-//! loop (`AccountOutbox::drain_until_settled`) and the same sealing send
+//! store's ready edge (`crate::account_runtime`), on every offline→online
+//! edge, and — web's own, its engine being in-memory — when the manager's MLS
+//! restore settles, before which nothing is sent or parked. The first three
+//! are the edges tui and linux drain at, through the same shared loop
+//! (`AccountOutbox::drain_until_settled`) and the same sealing send
 //! (`fauna_conversations::session::send_queued_mls_intent`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak as RcWeak};
 use std::sync::{Arc, Weak};
@@ -61,8 +63,7 @@ pub(crate) fn set_connection_state(word: &str) -> Arc<AccountOutbox> {
                 (Arc::clone(outbox), !was_online && is_online(word))
             }
             None => {
-                let outbox =
-                    AccountOutbox::over_source(Arc::new(crate::account_runtime::handle), word);
+                let outbox = outbox_over(word);
                 // A retry or discard of an MLS intent drains the released
                 // channel through this tab's engine now.
                 outbox.set_drain_wake(Arc::new(spawn_mls_drain));
@@ -121,14 +122,57 @@ pub(crate) fn spawn_mls_drain() {
     });
 }
 
+/// e2e-only: the `app_outbox_drain_now` poke (`fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW`)
+/// — this tab's app drain loop rung now ([`spawn_mls_drain`], the loop the
+/// lend, the store-ready edge and every reconnect run), for a test that has
+/// just released the e2e drain hold, whose held pass ended the loop.
+/// Fire-and-forget: the barrier is the effect. Keyed on `test-helpers` alone
+/// (convention 15 rule (b)).
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = appOutboxDrainNowForTest)]
+pub fn app_outbox_drain_now_for_test() {
+    spawn_mls_drain();
+}
+
+/// e2e-only: the `outbox_drain_hold` command (`fauna_e2e_agent::OUTBOX_DRAIN_HOLD`)
+/// — set or clear this tab's in-process outbox drain hold
+/// (`fauna_account_plane::outbox::set_outbox_drain_hold`). A tab has no
+/// environment or filesystem, so the hold file the desktop apps honour cannot
+/// reach it. Keyed on `test-helpers` alone (convention 15 rule (b)).
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = setOutboxDrainHoldForTest)]
+pub fn set_outbox_drain_hold_for_test(held: bool) {
+    fauna_account_plane::outbox::set_outbox_drain_hold(held);
+}
+
 /// The outbox the unsent-changes doors act through: this tab's, once a
 /// connection word built it (its MLS wake drains a released channel), else one
 /// over the same runtime with no wake — the list and the doors work before the
 /// first word too.
 fn doors() -> Arc<AccountOutbox> {
-    wired().unwrap_or_else(|| {
-        AccountOutbox::over_source(Arc::new(crate::account_runtime::handle), "disconnected")
-    })
+    wired().unwrap_or_else(|| outbox_over("disconnected"))
+}
+
+/// An outbox over this tab's account runtime with the outbox carry seated
+/// (`succession-aftermath.md` § Re-key scope, the device-local outbox row) —
+/// both of this tab's builds go through here, as the UniFFI seat's and
+/// linux's: every app drain loop first carries what a retired identity this
+/// browser owes left undrained (its IndexedDB store opened at rest), and the
+/// unsent-changes list shows what has not moved yet.
+fn outbox_over(word: &str) -> Arc<AccountOutbox> {
+    let outbox = AccountOutbox::over_source(Arc::new(crate::account_runtime::handle), word);
+    match fauna_account_store::root::StoreRoot::platform() {
+        Ok(root) => outbox.set_carry(Some(Arc::new(
+            fauna_account_plane::outbox_carry::OutboxCarry::new(
+                fauna_client_accounts::AccountRegistry::new(Arc::new(
+                    fauna_client_accounts::WebIdentityStore,
+                )),
+                root,
+            ),
+        ))),
+        Err(e) => tracing::warn!("outbox carry unseated: {e:#}"),
+    }
+    outbox
 }
 
 fn intent_id(hex_id: &str) -> Result<[u8; 16], JsValue> {
@@ -185,11 +229,26 @@ pub fn discard_unsent_change(intent_id_hex: String) -> js_sys::Promise {
 /// `pollConversations` walks with, so the drain's catch-up and the receive
 /// poll never fold one record twice). Holds everything weakly: a manager
 /// dropped by an actor switch drains nothing.
+///
+/// Web's engine is in-memory: after a reload it holds no group until the
+/// manager's `restoreMlsState` has settled, so until then the send answers
+/// retry and holds no group — never the shared send's "no longer a member"
+/// park, which would strand the message for good — and the restore's
+/// settling drains again (`devices.md` § Offline compose → *Drain*).
 pub(crate) struct WebMlsIntentSender {
     pub(crate) actor_id_hex: String,
     pub(crate) manager: Weak<ConversationsManager>,
     pub(crate) fauna_mls: Weak<FaunaMlsBackend>,
     pub(crate) cursors: RcWeak<RefCell<HashMap<ChannelId, i64>>>,
+    pub(crate) restored: RcWeak<Cell<bool>>,
+}
+
+impl WebMlsIntentSender {
+    /// Has the manager's MLS restore settled, so its engine's groups are the
+    /// whole truth? False too once the manager is gone.
+    fn restore_settled(&self) -> bool {
+        self.restored.upgrade().is_some_and(|r| r.get())
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -202,6 +261,9 @@ impl MlsIntentSender for WebMlsIntentSender {
         ) else {
             return MlsIntentOutcome::Retry("the conversations engine is gone".to_string());
         };
+        if !self.restore_settled() {
+            return MlsIntentOutcome::Retry("the conversation is not restored yet".to_string());
+        }
         send_queued_mls_intent(&fauna_mls, &manager, intent_id, payload, |channel| {
             let (fauna_mls, manager) = (Arc::clone(&fauna_mls), Arc::clone(&manager));
             async move {
@@ -220,5 +282,12 @@ impl MlsIntentSender for WebMlsIntentSender {
             }
         })
         .await
+    }
+
+    fn holds_group_of(&self, payload: &[u8]) -> bool {
+        self.restore_settled()
+            && self.fauna_mls.upgrade().is_some_and(|fauna_mls| {
+                fauna_conversations::session::intent_group_held(&fauna_mls, payload)
+            })
     }
 }

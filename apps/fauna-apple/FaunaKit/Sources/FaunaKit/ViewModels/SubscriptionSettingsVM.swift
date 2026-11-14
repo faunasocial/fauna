@@ -77,12 +77,22 @@ public final class SubscriptionSettingsVM {
     /// `mine.list`, where the queued grant renders exactly like a queued
     /// subscribe (a "pending" row). Typed `fauna.payments.claim_*` errors
     /// surface via `error-message`. Mirrors linux `redeem_claim`.
+    ///
+    /// Rides the across-nests redeem with no home — the one call shape both
+    /// redeem doors share (the OTHER profile Tiers tab names the creator's home).
     public func redeemClaim() async {
         guard let api else { return }
         let code = claimCodeInput.trimmingCharacters(in: .whitespaces)
         guard !code.isEmpty else { return }
         do {
-            _ = try await api.redeemPaymentClaim(code: code)
+            // No home → the plain local redeem, which never reads the author
+            // slot: this page has no creator in hand, so by convention it
+            // carries the redeemer's own id.
+            guard let me = api.boundActorIdHex else {
+                throw APIError.ffiError("No secret for claim redeem")
+            }
+            _ = try await api.redeemPaymentClaimAcrossNests(
+                code: code, authorIdHex: me, authorHomeUrl: nil)
             errorMessage = nil
             claimCodeInput = ""
             await hydrate()

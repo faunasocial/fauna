@@ -47,7 +47,7 @@ pytestmark = [
     pytest.mark.tier1,
     pytest.mark.tier_3,
     # android: same shared enable_mail_plain preamble as the MUA round trip; marked,
-    # not run (no android venue yet).
+    # not run (no android emulator yet).
     pytest.mark.android,
     pytest.mark.linux,
     pytest.mark.windows,

@@ -46,6 +46,17 @@ does — painted neither the warning nor the parked binding. The row asked the
 access alone; it now asks `fauna_folders_machine::binding_section`, which keys
 on the park too.
 
+The web arm (`test_a_former_writers_files_stay_listed_and_open_for_a_web_owner`)
+is step 5 alone, told from the owner's seat: web binds no folder, so it is never
+the demoted member, but outcome 22's sentence is about the files staying for the
+owner and the other members — the reader half, which runs on web. A web owner
+demotes (one arm) or removes (the other) a tui writer, and its Media listing
+must still carry the writer's file, attributed to them, and open it to the
+writer's bytes. The iOS owner arm
+(`test_a_former_writers_files_stay_listed_and_open_for_an_ios_owner`) is the
+same story with the iOS app as the owner: iOS binds no local folder either, and
+its owner reads the folder through the same shared Media listing.
+
 The android arm (`test_a_demoted_writer_on_the_documents_provider_…`) is the
 capability-host variant (`file-sync.md` § Multi-writer shared sets →
 *Revocation on a capability host*): an android member binds nothing, but its
@@ -82,9 +93,12 @@ pytestmark = [
     # and windows (each as the member, per-param below) followed. web, iOS and
     # android bind no local folder at all; android's documents provider and the
     # iOS File Provider domain are the capability-host arms at the foot of this
-    # module. The module carries only `tui` (the owner seat of every journey);
-    # `linux` sits on the first journey alone, so neither capability-host arm
-    # ever reads as a linux witness.
+    # module, and web — which reads the folder through its Media listing — is
+    # the OWNER of its own arm (the reader half of outcome 22), its claim the
+    # param's own `web` mark; iOS is likewise the owner of an arm of its own,
+    # its claim the param's `ios` mark. The module carries only `tui` (a seat of every
+    # journey); `linux` sits on the first journey alone, so neither
+    # capability-host arm ever reads as a linux witness.
     pytest.mark.tui,
 ]
 
@@ -444,6 +458,149 @@ def test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files(
         f"[member] the member's own seat refused a row it recorded while a "
         f"writer — a former writer's rows are admitted on its own pull side "
         f"too (ruling (12)(f)):\n" + "\n".join(f"    {ln}" for ln in refused[-10:])
+    )
+
+
+def _owner_opens_former_writers_file(owner_app, name: str, expected: str) -> str:
+    """Open ``name``'s detail on the owner's Media page, read its version row's
+    recorder, and download it: the saved bytes must be the member's plaintext.
+    Returns the recorder label. The download is the shared
+    ``MediaMachine::download_file`` walk (web's captured browser download), so
+    produced plaintext is the owner's reader admitting the row AND opening it."""
+    media = owner_app.media
+    media.open_item_detail(media.index_of(name))
+    try:
+        assert media.wait_for_version_count(1, timeout=OWNER_LISTING_S) >= 1, (
+            f"[owner] {name}'s version history never rendered; "
+            f"error={owner_app.error_text()!r}"
+        )
+        author = media.version_author(0)
+        got = media.download_open_item(timeout=OWNER_LISTING_S)
+        assert got == expected.encode(), (
+            f"[owner] {name} opened, but its bytes are not what the former writer "
+            f"wrote ({len(got)} bytes vs {len(expected.encode())}); "
+            f"error={owner_app.error_text()!r}"
+        )
+        return author
+    finally:
+        media.close_detail()
+
+
+def _owner_removes(owner_app, set_name: str) -> None:
+    """Owner: remove the member outright through the member row's remove control."""
+    ob = owner_app.backups
+    ob.navigate_folders()
+    owner_row = ob.find_and_expand_folder(set_name)
+    if ob.shared_member_count() == 0:
+        ob.expand_folder(owner_row)  # the toggle closed a row left open
+    ob.remove_shared_member(0, row=owner_row)
+    wait_until(
+        lambda: ob.shared_member_count() == 0,
+        30.0,
+        diagnose=lambda: f"the removal never landed; error={owner_app.error_text()!r}",
+    )
+
+
+def _former_writers_files_stay_for_the_owner(
+    request, how, folder_share_owner_app, folder_share_recipient_app, tmp_path
+) -> None:
+    """Outcome 22's reader half, told from an owner seat that binds no folder:
+    a tui writer adds a file, the owner takes write access away (``how`` —
+    ``demote`` or ``remove``), and the owner's Media listing must still carry
+    the file, attributed to the former writer, and open it to their bytes."""
+    owner_app, nest, owner = folder_share_owner_app
+    member_app, _nest, member = folder_share_recipient_app
+    request.addfinalizer(lambda: print(agent_diagnosis(member_app, "member")))
+
+    _await_member_keypackage(nest, member)
+
+    # ── 1. Owner: create, share, make them a writer ───────────────────────
+    set_name = f"revoke-{secrets.token_hex(4)}"
+    _owner_shares_as_writer(owner_app, member, set_name)
+
+    # ── 2. Member (tui): accept, bind, and a file syncs while a writer ────
+    _member_accepts(member_app, set_name)
+    member_folder = tmp_path / "member-bound"
+    member_folder.mkdir()
+    bind_location_under_set(member_app, set_name, member_folder, seat="member")
+    name = f"before-{secrets.token_hex(3)}.txt"
+    content = f"written while a writer — {secrets.token_hex(8)}\n"
+    atomic_write(member_folder / name, content)
+    await_agent_upload(member_app, name, seat="member")
+    assert _path_hash(name) in _recorded_path_hashes(nest, owner, set_name), (
+        "the member's file must be on the nest before write access goes"
+    )
+    # The vacuity guard: while the member is a writer, the owner's judged
+    # listing carries the file — so its presence afterwards is the reader
+    # admitting a FORMER writer, not a listing that never judged anything.
+    _owner_media_lists(owner_app, name, when="before write access went")
+
+    # ── 3. Owner: take write access away ──────────────────────────────────
+    if how == "demote":
+        _owner_demotes(owner_app, set_name)
+    else:
+        _owner_removes(owner_app, set_name)
+
+    # ── 4. The file stays for the owner: listed, attributed, and opens ────
+    _owner_media_lists(owner_app, name, when=f"after the {how}")
+    author = _owner_opens_former_writers_file(owner_app, name, content)
+    assert member["handle"] in author or member["actor_id_hex"] in author, (
+        f"[owner] {name} must stay attributed to the member who wrote it — a "
+        f"former writer's row is attributed to the former writer (ruling "
+        f"(12)(d)); its version row reads {author!r}"
+    )
+
+
+# The reader half of outcome 22 on web. web binds no folder, so it can never be
+# the demoted member's seat the journey above is told from; but the outcome's
+# sentence is about the files staying for the OWNER and the other members, and a
+# web owner reads the folder through its Media listing (`ui/folders.md` § Sharing
+# a folder (cross-user) — no location binding on web). So web is the owner here,
+# a tui writer — the seat that binds — writes the file, and the two arms are the
+# two ways write access goes: a demotion to reader, and a removal. This is its
+# own function so the module's `tui` mark never stands in for web: the web claim
+# is the param's own mark.
+@pytest.mark.parametrize("how", ["demote", "remove"])
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    [pytest.param("web", "tui", marks=pytest.mark.web)],
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# A web owner + a tui member with a real agent, an MLS share/accept and one
+# engine upload. A ceiling, not an expectation.
+@pytest.mark.timeout(1500)
+@pytest.mark.feature("share-a-folder")
+def test_a_former_writers_files_stay_listed_and_open_for_a_web_owner(
+    request, how, folder_share_owner_app, folder_share_recipient_app, tmp_path
+):
+    _former_writers_files_stay_for_the_owner(
+        request, how, folder_share_owner_app, folder_share_recipient_app, tmp_path
+    )
+
+
+# The same reader half with the iOS app as the owner — the seat for whom the
+# files stay. iOS binds no local folder either (its member presence is the File
+# Provider arm at the foot of this module, which is outcome 12's), but its owner
+# reads the folder through the same shared Media listing and judge. Its own
+# function for the reason the web arm is: the ios claim is the param's own mark,
+# never the module's `tui`.
+@pytest.mark.parametrize("how", ["demote", "remove"])
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    [pytest.param("ios", "tui", marks=pytest.mark.ios)],
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# An iOS owner + a tui member with a real agent, an MLS share/accept and one
+# engine upload. A ceiling, not an expectation.
+@pytest.mark.timeout(1500)
+@pytest.mark.feature("share-a-folder")
+def test_a_former_writers_files_stay_listed_and_open_for_an_ios_owner(
+    request, how, folder_share_owner_app, folder_share_recipient_app, tmp_path
+):
+    _former_writers_files_stay_for_the_owner(
+        request, how, folder_share_owner_app, folder_share_recipient_app, tmp_path
     )
 
 

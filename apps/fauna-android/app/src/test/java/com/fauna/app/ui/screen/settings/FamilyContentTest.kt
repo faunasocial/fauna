@@ -318,6 +318,18 @@ class FamilyContentTest {
         composeTestRule.onNodeWithTag("family-policy-save-button").assertExists()
     }
 
+    /** The editor states the content-category honest bound from the shared string. */
+    @Test
+    fun guardianEditorStatesTheContentCategoryBound() {
+        val w1 = ward("Ward1", actorId = ByteArray(32) { 1 })
+        render(
+            status = status(supervisedBy = null, policy = null, wards = listOf(w1), incomingTransfers = emptyList(), usageTodayMinutes = null),
+            selectedWardActorId = w1.actorId,
+        )
+        composeTestRule.onNodeWithTag("family-policy-content-hint")
+            .assertTextEquals(ctx.getString(R.string.family_policy_content_hint))
+    }
+
     @Test
     fun wardRowClickSelectsWard() {
         val w1 = ward("Ward1", actorId = ByteArray(32) { 1 })

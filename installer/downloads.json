@@ -58,7 +58,10 @@
       "fauna-nest-*",
       "fauna-front-door-*",
       "fauna-push-relay-*",
-      "fauna-cors-proxy-*"
+      "fauna-cors-proxy-*",
+      "*.NOTICES.txt",
+      "LICENSE-MIT",
+      "LICENSE-APACHE"
     ],
     "release-macos.yml": [
       "*.sha256"

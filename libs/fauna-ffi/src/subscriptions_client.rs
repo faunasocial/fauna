@@ -367,6 +367,45 @@ impl From<TierItem> for FfiTierItem {
     }
 }
 
+/// What a [`FfiSubscriptionsClient::sale_price_save`] did.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum FfiSalePriceSave {
+    /// The dialog was saved untouched: nothing was sent.
+    Unchanged,
+    /// The plan's verbs all ran. `cleared_asking_price` says the machine
+    /// price was removed — on an advertised post the nest then ends the
+    /// advertisement.
+    Saved { cleared_asking_price: bool },
+    /// The asking-price field is not a price; nothing was sent. `i18n_key`
+    /// is the catalog key to show, the composer's own refusal.
+    Refused { i18n_key: String },
+}
+
+/// The asking-price field's text as the sell composer and the *Change
+/// price…* dialog both read it — the shared
+/// [`fauna_client_subscriptions::parse_asking_price_sats`].
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum FfiAskingPriceParse {
+    /// An empty field: no machine price.
+    Empty,
+    /// A whole number of sats the wire can carry.
+    Sats { sats: u64 },
+    /// Not a price; `i18n_key` is the catalog key to show.
+    Refused { i18n_key: String },
+}
+
+/// See [`FfiAskingPriceParse`].
+#[uniffi::export]
+pub fn asking_price_parse(text: String) -> FfiAskingPriceParse {
+    match fauna_client_subscriptions::parse_asking_price_sats(&text) {
+        Ok(None) => FfiAskingPriceParse::Empty,
+        Ok(Some(sats)) => FfiAskingPriceParse::Sats { sats },
+        Err(e) => FfiAskingPriceParse::Refused {
+            i18n_key: e.i18n_key().to_string(),
+        },
+    }
+}
+
 // ── FfiSubscriptionsClient ─────────────────────────────────────────────
 
 /// UniFFI handle for the `fauna.subscriptions.*` kinds. Construct via
@@ -423,6 +462,25 @@ impl FfiSubscriptionsClient {
             .map_err(stringify)
     }
 
+    /// The Tiers-tab browse across nests
+    /// ([`SubscriptionsClient::offers_list_across_nests`](fauna_client_subscriptions::SubscriptionsClient::offers_list_across_nests);
+    /// `subscriptions.md` § Pillar 1 → *The offers browse across nests*):
+    /// [`Self::offers_list`] when `home` is `None` or blank, and for an author
+    /// homed on another nest the read relayed to that home through this nest.
+    /// `home` is the page's `actor_home` slot.
+    pub async fn offers_list_across_nests(
+        &self,
+        author_id: Vec<u8>,
+        home: Option<String>,
+    ) -> Result<Vec<FfiTierItem>, FfiError> {
+        let author = bytes_to_actor_id(&author_id)?;
+        self.client()
+            .offers_list_across_nests(author, home)
+            .await
+            .map(|tiers| tiers.into_iter().map(FfiTierItem::from).collect())
+            .map_err(stringify)
+    }
+
     /// `fauna.subscriptions.tiers.update` — each `None` field is left
     /// unchanged. Returns whether a row was updated.
     ///
@@ -463,6 +521,50 @@ impl FfiSubscriptionsClient {
             )
             .await
             .map_err(stringify)
+    }
+
+    /// The *Change price…* save of a sold post (`monetization.md` § The asking
+    /// price → *Re-pricing a sold post*): `tier` is the selling tier as
+    /// [`Self::tiers_list`] answered it when the dialog opened, `price_hint`
+    /// and `asking_price` the dialog's two field strings. Runs the shared
+    /// plan ([`fauna_client_subscriptions::plan_sale_price_edit_stored`]) and
+    /// then its verbs in order — the update before any clear — so no app
+    /// decides what to send. A refused asking-price parse sends nothing and
+    /// answers [`FfiSalePriceSave::Refused`] with the catalog key the dialog
+    /// shows; a nest refusal is the error.
+    pub async fn sale_price_save(
+        &self,
+        tier: FfiTierItem,
+        price_hint: String,
+        asking_price: String,
+    ) -> Result<FfiSalePriceSave, FfiError> {
+        let stored = tier
+            .asking_price_sats
+            .and_then(fauna_protocol::subscriptions::TierAskingPrice::from_sats);
+        let edit = match fauna_client_subscriptions::plan_sale_price_edit_stored(
+            &tier.name,
+            tier.price_hint.as_deref(),
+            stored.as_ref(),
+            &price_hint,
+            &asking_price,
+        ) {
+            Ok(edit) => edit,
+            Err(e) => {
+                return Ok(FfiSalePriceSave::Refused {
+                    i18n_key: e.i18n_key().to_string(),
+                });
+            }
+        };
+        if edit.is_empty() {
+            return Ok(FfiSalePriceSave::Unchanged);
+        }
+        self.client()
+            .apply_sale_price_edit(&edit)
+            .await
+            .map_err(stringify)?;
+        Ok(FfiSalePriceSave::Saved {
+            cleared_asking_price: edit.clears_asking_price(),
+        })
     }
 
     /// `fauna.subscriptions.tiers.delete`

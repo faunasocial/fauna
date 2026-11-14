@@ -739,6 +739,33 @@ async function call<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): P
   return fn(c);
 }
 
+/** The connection wait alone — `call`'s first half, with no request after it.
+ *  The conversations build's stage two opens with it (`account-client-lifecycle.md`
+ *  § The client-side lifecycle → *The trigger fired*, decision (k)): it throws
+ *  at the connect bound, or at once when the reconnect loop has stopped for
+ *  good, and that throw is the edge at which the build keeps its local stage
+ *  one for the receive poll's next tick. */
+export async function awaitNestConnection(secretHex: string): Promise<void> {
+  await ensureConnected(await getClient(secretHex));
+}
+
+/** `call` for a seam that never needs this socket to be up: one that reads
+ *  and writes the account's own store alone (`account_runtime::handle_source`
+ *  in shared Rust), and the two local wasm calls of the conversations build's
+ *  stage one — the manager's construction and the runtime's start
+ *  (`account-client-lifecycle.md` § The client-side lifecycle → *The trigger
+ *  fired*, decision (k)). It must not wait out a connect that is not coming,
+ *  or a never-listed replica would report the connect timeout instead of the
+ *  first-listing gate's own refusal (`common.needs_nest`), and a listed one
+ *  could not be edited offline at all (`account-client-lifecycle.md` § The
+ *  first listing). A tab loaded with the nest unreachable hosts its runtime
+ *  for that reason: stage one starts it over this call, and only stage two
+ *  waits for the socket. */
+async function callStore<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): Promise<T> {
+  const c = await getClient(secretHex);
+  return fn(c);
+}
+
 /** `call` for a seam that must live OUTSIDE this file. The one caller today is
  *  `#lib/payments`, whose functions are here-shaped but may not be *here*: this
  *  module is unconditionally in the bundle, so a `payments*` function left in it
@@ -1130,15 +1157,19 @@ export function bridgesListFollows(secretHex: string, bridgeId: string): Promise
   return call(secretHex, (c) => c.bridgesListFollows(bridgeId));
 }
 
-export function bridgesAddFollow(
+/** `fauna.bridges.add_follow`, sent now or — with no nest — queued in this
+ *  tab's outbox (the shared `OfflineQueued` composer, one drain scope per
+ *  followed account). Resolves `true` when it QUEUED: list nothing. */
+export function bridgesAddFollowOrQueue(
   secretHex: string,
   bridgeId: string,
   id: string,
   petname?: string,
   extra?: Record<string, unknown>,
-): Promise<void> {
-  return call(secretHex, (c) =>
-    c.bridgesAddFollow(bridgeId, id, petname ?? null, extra ?? null),
+): Promise<boolean> {
+  return callOrQueue(
+    secretHex,
+    (c) => c.bridgesAddFollowOrQueue(bridgeId, id, petname ?? null, extra ?? null) as Promise<boolean>,
   );
 }
 
@@ -1165,12 +1196,18 @@ export function bridgesRefuseFollowRequest(
   return call(secretHex, (c) => c.bridgesRefuseFollowRequest(bridgeId, id));
 }
 
-export function bridgesRemoveFollow(
+/** `fauna.bridges.remove_follow`, sent or queued as
+ *  {@link bridgesAddFollowOrQueue}; `true` = queued (the account stays on the
+ *  nest's list until the drain). */
+export function bridgesRemoveFollowOrQueue(
   secretHex: string,
   bridgeId: string,
   followId: string,
-): Promise<void> {
-  return call(secretHex, (c) => c.bridgesRemoveFollow(bridgeId, followId));
+): Promise<boolean> {
+  return callOrQueue(
+    secretHex,
+    (c) => c.bridgesRemoveFollowOrQueue(bridgeId, followId) as Promise<boolean>,
+  );
 }
 
 export function bridgesFeedsList(secretHex: string): Promise<FeedSubscription[]> {
@@ -1350,6 +1387,30 @@ export function nostrBadges(secretHex: string, pubkey: string): Promise<NostrBad
  *  extension signed (`eventJson` = the signed event's NIP-01 wire JSON). */
 export function nostrPublishSigned(secretHex: string, eventJson: string): Promise<void> {
   return call(secretHex, (c) => c.nostrPublishSigned(eventJson) as Promise<void>);
+}
+
+// The own-post Nostr advertisement (`monetization.md` § The Nostr
+// advertisement of a sold post). The act is the `zaps` member's: a build
+// excised of it has no `nostrAdvertisePost`, and reads as unsupported.
+
+/** Whether this build can advertise AND the nest serves `nostr-advertise`. */
+export function nostrAdvertiseSupported(secretHex: string): Promise<boolean> {
+  return call(secretHex, async (c) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (typeof (c as any).nostrAdvertisePost !== 'function') return false;
+    return (await c.nostrAdvertiseSupported()) === true;
+  });
+}
+
+/** `fauna.nostr.advertise.set` — advertise an own sold post (`postId`, hex). */
+export function nostrAdvertisePost(secretHex: string, postId: string): Promise<number> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return call(secretHex, (c) => (c as any).nostrAdvertisePost(postId) as Promise<number>);
+}
+
+/** `fauna.nostr.advertise.clear` — stop advertising `postId`. */
+export function nostrClearAdvertisement(secretHex: string, postId: string): Promise<boolean> {
+  return call(secretHex, (c) => c.nostrClearAdvertisement(postId) as Promise<boolean>);
 }
 
 // ── fauna.feed.* ────────────────────────────────────────────────────
@@ -2258,6 +2319,10 @@ export interface AdminUser {
   // `adminUserRowControls`. An omitted key ⇒ decodes `false` ⇒ the
   // controls render and the refusal surfaces in `admin-users-action-error`.
   is_admin?: boolean;
+  // Read-only: a supervised account's current guardian (absent ⇒ unsupervised).
+  // Drives `admin-users-supervised-by` and the take-over offer
+  // (family-safety.md § App surface → Admin take-over).
+  guardian?: { actor_id: Uint8Array | number[]; handle?: string } | null;
 }
 
 /** A storage/feature tier definition (`fauna.admin.tiers.list`). */
@@ -2658,18 +2723,18 @@ export function moderationAdminBlockList(secretHex: string): Promise<BlockedRow[
 
 /** The ids the owner hid by reporting them (`moderation.md` § Corollary). */
 export function loadHiddenContent(secretHex: string): Promise<string[]> {
-  return call(secretHex, (c) => c.loadHiddenContent() as Promise<string[]>);
+  return callStore(secretHex, (c) => c.loadHiddenContent() as Promise<string[]>);
 }
 
 /** Hide a reported subject for the owner; resolves to the stored list. */
 export function hideReported(secretHex: string, id: string): Promise<string[]> {
-  return call(secretHex, (c) => c.hideReported(id) as Promise<string[]>);
+  return callStore(secretHex, (c) => c.hideReported(id) as Promise<string[]>);
 }
 
 /** Show a hidden subject again (the reporter's show-again, `moderation.md`
  *  § Corollary); resolves to the stored list. */
 export function unhideReported(secretHex: string, id: string): Promise<string[]> {
-  return call(secretHex, (c) => c.unhideReported(id) as Promise<string[]>);
+  return callStore(secretHex, (c) => c.unhideReported(id) as Promise<string[]>);
 }
 
 // The post's mark-as-spam verb (`report-sharing.md` § Report capture → *The
@@ -2677,17 +2742,17 @@ export function unhideReported(secretHex: string, id: string): Promise<string[]>
 
 /** The post ids the owner marked as spam. */
 export function loadSpamMarked(secretHex: string): Promise<string[]> {
-  return call(secretHex, (c) => c.loadSpamMarked() as Promise<string[]>);
+  return callStore(secretHex, (c) => c.loadSpamMarked() as Promise<string[]>);
 }
 
 /** Mark a post as spam for the owner; resolves to the stored list. */
 export function markSpam(secretHex: string, id: string): Promise<string[]> {
-  return call(secretHex, (c) => c.markSpam(id) as Promise<string[]>);
+  return callStore(secretHex, (c) => c.markSpam(id) as Promise<string[]>);
 }
 
 /** Un-mark a post; resolves to the stored list. */
 export function unmarkSpam(secretHex: string, id: string): Promise<string[]> {
-  return call(secretHex, (c) => c.unmarkSpam(id) as Promise<string[]>);
+  return callStore(secretHex, (c) => c.unmarkSpam(id) as Promise<string[]>);
 }
 
 // Tiers (definitions — shared with admin-settings; the tier pickers' options).
@@ -3354,7 +3419,9 @@ export function conversationsManager(
   secretHex: string,
   selfAddress: string,
 ): Promise<WasmConversationsManager> {
-  return call(secretHex, (c) =>
+  // No connection wait: the role and the in-memory engine are local, so the
+  // build's stage one runs with the nest unreachable (decision (k)).
+  return callStore(secretHex, (c) =>
     Promise.resolve(c.conversationsManager(selfAddress, hexToBytes(secretHex))),
   );
 }
@@ -3366,8 +3433,10 @@ export function conversationsManager(
 // reads. The peer-token factory is the Nests page's own (`linkedNestsMachine`
 // below): the runtime connects to each linked replica nest with it
 // (`account-sync-plane.md` § The bind leg, ruling 4).
-// `stillWanted` is asked right before the call enters wasm — after the
-// connection wait, where a stop can land — so a start a stop superseded never
+// No connection wait: the runtime's assembly is local but for the succession
+// probe, which has its own bound and proceeds offline (decision (k)).
+// `stillWanted` is asked right before the call enters wasm — after the client
+// is in hand, where a stop can land — so a start a stop superseded never
 // claims an install (`#lib/account-runtime`, *Order is the contract*).
 export function startAccountRuntime(
   secretHex: string,
@@ -3376,7 +3445,7 @@ export function startAccountRuntime(
 ): Promise<void> {
   const peerTokenProviderFactory = (peerUrl: string) => (forceRefresh: boolean) =>
     getAuthToken(secretHex, peerUrl, forceRefresh);
-  return call(secretHex, (c) =>
+  return callStore(secretHex, (c) =>
     stillWanted()
       ? c.startAccountRuntime(manager, hexToBytes(secretHex), nodeUrl(), peerTokenProviderFactory)
       : Promise.reject(new Error('account runtime: superseded by a stop before it began')),
@@ -4250,7 +4319,7 @@ export function webdavPolicyMachine(secretHex: string): Promise<WasmWebdavPolicy
 /** The default conflict policy for new sets (`"auto"` | `"latest_wins_always"`),
  *  or `null` = no preference (nest column default, "auto"). */
 export function defaultConflictPolicyGet(secretHex: string): Promise<string | null> {
-  return call(secretHex, (c) => c.loadSyncPrefs() as Promise<string | null>);
+  return callStore(secretHex, (c) => c.loadSyncPrefs() as Promise<string | null>);
 }
 
 /** Set (or clear, with `null`) the default conflict policy for new sets;
@@ -4259,7 +4328,7 @@ export function defaultConflictPolicySet(
   secretHex: string,
   policy: string | null,
 ): Promise<string | null> {
-  return call(
+  return callStore(
     secretHex,
     (c) => c.saveSyncPrefs(policy ?? undefined) as Promise<string | null>,
   );
@@ -4595,7 +4664,7 @@ export interface MutedWordsSnapshot {
 }
 
 export function mutedKeywordsList(secretHex: string): Promise<MutedWordsSnapshot> {
-  return call(secretHex, (c) => c.loadMutedWords());
+  return callStore(secretHex, (c) => c.loadMutedWords());
 }
 
 /** Whole-list intents only — the page's add/remove buttons go through
@@ -4606,20 +4675,20 @@ export function mutedKeywordsSet(
   secretHex: string,
   keywords: MutedKeyword[],
 ): Promise<MutedWordsSnapshot> {
-  return call(secretHex, (c) => c.saveMutedWords(keywords));
+  return callStore(secretHex, (c) => c.saveMutedWords(keywords));
 }
 
 /** Add one term as a DELTA against the stored list — the shared seam re-reads
  *  it inside its own CAS update, so a concurrent device's term survives.
  *  Re-adding an existing term is a no-op; the stored normalization returns. */
 export function mutedKeywordsAdd(secretHex: string, word: string): Promise<MutedWordsSnapshot> {
-  return call(secretHex, (c) => c.addMutedWord(word));
+  return callStore(secretHex, (c) => c.addMutedWord(word));
 }
 
 /** Remove one term — `mutedKeywordsAdd`'s inverse; removing a term already
  *  gone is a success no-op (convergence, not an error). */
 export function mutedKeywordsRemove(secretHex: string, word: string): Promise<MutedWordsSnapshot> {
-  return call(secretHex, (c) => c.removeMutedWord(word));
+  return callStore(secretHex, (c) => c.removeMutedWord(word));
 }
 
 /** Set one term's level as a DELTA — `mutedKeywordsAdd`'s sibling; a term the
@@ -4630,7 +4699,7 @@ export function mutedKeywordsSetLevel(
   word: string,
   level: MutedKeywordLevel,
 ): Promise<MutedWordsSnapshot> {
-  return call(secretHex, (c) => c.setMutedWordLevel(word, level));
+  return callStore(secretHex, (c) => c.setMutedWordLevel(word, level));
 }
 
 // ── Trained topic factors (topic-factors.md § Authoring surface & picker).
@@ -5400,14 +5469,23 @@ export interface SubscriptionStatus {
   follow_pending: boolean; // a follow asked and waiting on the author's client
 }
 
-/** Browse another creator's offered tiers (`offers.list`); same shape as a SELF tier. */
-export function subscriptionsOffersList(
+/**
+ * Browse another creator's offered tiers; same shape as a SELF tier. `home` is
+ * the page's actor-home slot: `null` reads this nest's `offers.list`, another
+ * nest's URL relays the read to the creator's home through this nest
+ * (`subscriptions.md` § Pillar 1 → *The offers browse across nests*).
+ */
+export function subscriptionsOffersListAcrossNests(
   secretHex: string,
   authorIdHex: string,
+  home: string | null,
 ): Promise<SubscriptionTier[]> {
   return call(
     secretHex,
-    (c) => c.subscriptionsOffersList(authorIdHex) as Promise<SubscriptionTier[]>,
+    (c) =>
+      c.subscriptionsOffersListAcrossNests(authorIdHex, home ?? undefined) as Promise<
+        SubscriptionTier[]
+      >,
   );
 }
 
@@ -5458,6 +5536,35 @@ export function subscriptionsSubscribeAcrossNests(
         tier,
         homeNestUrl ?? undefined,
       ) as Promise<SubscriptionSubscribeOutcome>,
+  );
+}
+
+/**
+ * The payment-link gesture (`subscription-offer-payment-link`; `monetization.md`
+ * § Pillar 3 → *Buyer↔actor binding (Q4)*, the Q13 rules (1) and (2)): the web
+ * twin of `fauna-ffi`'s `subscriptions_subscribe_and_checkout`. The subscribe
+ * to `tier` goes first, across nests at `homeNestUrl` as
+ * `subscriptionsSubscribeAcrossNests`, then the checkout URL the shared
+ * reference rule composes comes back to open. `null` for a payment URL the
+ * shared guard refuses (nothing sent); a refused subscribe rejects.
+ */
+export function subscriptionsSubscribeAndCheckout(
+  secretHex: string,
+  authorIdHex: string,
+  tier: string,
+  paymentUrl: string,
+  homeNestUrl: string | null,
+): Promise<{ reply: SubscriptionSubscribeOutcome; url: string } | null> {
+  return call(
+    secretHex,
+    (c) =>
+      c.subscriptionsSubscribeAndCheckout(
+        secretHex,
+        authorIdHex,
+        tier,
+        paymentUrl,
+        homeNestUrl ?? undefined,
+      ) as Promise<{ reply: SubscriptionSubscribeOutcome; url: string } | null>,
   );
 }
 

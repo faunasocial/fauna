@@ -105,7 +105,7 @@ Stamped 2026-11-07 at b844c771f6.
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
 
@@ -128,7 +128,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 5 | app | `tests/e2e-unified/tests/test_conversations_history_survives_app_restart.py::test_conversations_history_survives_app_restart` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_own_message_survives_an_immediate_restart.py::test_conversations_own_message_survives_an_immediate_restart` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_history_survives_restart_cross_app.py::test_conversations_history_survives_restart_cross_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_device_sync.py::test_fauna_mls_cross_device_sync` — requires `mls-cross-device-sync-proof` (test harness) (not built: web, android, android-kids) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_device_sync.py::test_fauna_mls_cross_device_sync` — requires `mls-cross-device-sync-proof` (test harness) (not built: web) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_fauna_mls_web_cross_device_sync.py::test_fauna_mls_web_cross_device_sync` | web (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_fauna_mls_web_cross_device_sync.py::test_fauna_mls_web_concurrent_tabs` | web (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_conversations_dm_sender.py::test_bubble_shows_sender_label` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -149,14 +149,14 @@ Stamped 2026-11-07 at b844c771f6.
 | 16 | app | `tests/e2e-unified/tests/test_conversations_across_own_devices.py::test_a_message_sent_from_another_of_your_devices_raises_no_banner` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 17 | app | `tests/e2e-unified/tests/test_conversations_across_own_devices.py::test_a_conversation_read_on_one_device_shows_read_on_the_other` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 18 | app | `tests/e2e-unified/tests/test_conversations_receive_stopped.py::test_a_stopped_receive_loop_says_so_until_a_newer_loop_replaces_it` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 19 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_home_nest_account_without_key_packages_reads_not_reachable` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
-| 20 | nest | `tests/e2e-unified/tests/api/test_bridge_reconsent_moves_bridge_id.py::test_a_reconsent_under_another_bridge_id_leaves_the_old_rooms_readable_and_refused` | nest (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_conversations_message_banner.py::test_switching_identity_raises_no_banner_for_the_incoming_identitys_threads` | tui (linux): passed, tui (macos): failed |
-| 22 | app | `tests/e2e-unified/tests/test_conversations_join_reaches_running_device.py::test_a_conversation_joined_on_one_device_appears_on_the_other_while_it_runs` | tui (linux): passed, tui (macos): passed |
-| 22 | app | `tests/e2e-unified/tests/test_conversations_join_reaches_running_device.py::test_a_conversation_you_were_just_added_to_survives_an_immediate_quit` | tui (linux): passed, tui (macos): passed |
-| 23 | app | `tests/e2e-unified/tests/test_conversations_nest_unreachable_at_launch.py::test_a_device_whose_nest_was_unreachable_at_launch_gets_the_conversations_once_it_is_back` | tui (linux): passed, tui (macos): passed |
-| 24 | app | `tests/e2e-unified/tests/test_conversations_two_device_reaction_delete_merge.py::test_a_reaction_and_a_deletion_made_on_two_devices_at_once_both_survive` | tui (linux): passed, tui (macos): passed |
-| 25 | app | `tests/e2e-unified/tests/test_conversations_unread_by_nest_position.py::test_unread_follows_the_nests_order_never_the_senders_clock` | tui (linux): passed, tui (macos): passed |
-| 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_read_position.py::test_a_group_left_and_re_joined_opens_at_the_old_read_position` | macos (macos): failed, tui (linux): passed, tui (macos): passed |
-| 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_later_enrolled_device.py::test_a_device_enrolled_after_you_left_starts_the_rejoined_conversation_unread` | tui (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_home_nest_account_without_key_packages_reads_not_reachable` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/api/test_bridge_reconsent_moves_bridge_id.py::test_a_reconsent_under_another_bridge_id_leaves_the_old_rooms_readable_and_refused` | nest (linux): passed, nest (macos): passed |
+| 21 | app | `tests/e2e-unified/tests/test_conversations_message_banner.py::test_switching_identity_raises_no_banner_for_the_incoming_identitys_threads` | tui (linux): passed, tui (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_conversations_join_reaches_running_device.py::test_a_conversation_joined_on_one_device_appears_on_the_other_while_it_runs` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_conversations_join_reaches_running_device.py::test_a_conversation_you_were_just_added_to_survives_an_immediate_quit` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 23 | app | `tests/e2e-unified/tests/test_conversations_nest_unreachable_at_launch.py::test_a_device_whose_nest_was_unreachable_at_launch_gets_the_conversations_once_it_is_back` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 24 | app | `tests/e2e-unified/tests/test_conversations_two_device_reaction_delete_merge.py::test_a_reaction_and_a_deletion_made_on_two_devices_at_once_both_survive` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 25 | app | `tests/e2e-unified/tests/test_conversations_unread_by_nest_position.py::test_unread_follows_the_nests_order_never_the_senders_clock` | macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_read_position.py::test_a_group_left_and_re_joined_opens_at_the_old_read_position` | windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 26 | app | `tests/e2e-unified/tests/test_conversations_rejoin_later_enrolled_device.py::test_a_device_enrolled_after_you_left_starts_the_rejoined_conversation_unread` | macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

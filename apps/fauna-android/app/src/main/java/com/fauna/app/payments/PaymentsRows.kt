@@ -108,3 +108,15 @@ data class ClaimItem(
 
 private fun ByteArray?.contentEqualsOrBothNull(other: ByteArray?): Boolean =
     if (this == null || other == null) this == null && other == null else contentEquals(other)
+
+/**
+ * What a claim redeem answered (`fauna.payments.claims.redeem`), the seam over
+ * `FfiClaimRedeemReply`. Unlike the rows above it is a reply, not a rendered
+ * record, so it carries only what a redeem door folds: the tier the code
+ * entitles and whether the grant queued for the creator's client (the
+ * profile Tiers tab marks that tier pending, as a queued subscribe does).
+ */
+data class ClaimRedeemResult(
+    val tier: String,
+    val queued: Boolean,
+)

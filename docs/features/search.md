@@ -89,7 +89,7 @@ Stamped 2026-09-26 at 61f9d7ceb0.
 | 8 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_opens_a_contact_result_a_desktop_seat_indexed` | macos (macos): passed, ios (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_opens_a_file_result_a_desktop_seat_indexed` | macos (macos): passed, ios (macos): passed |
 | 8 | app | absent by design on web | — |
-| 9 | nest | `tests/e2e-unified/tests/api/test_search_materialized_mail.py::test_your_mail_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_it` | nest (windows): failed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_search_materialized_mail.py::test_your_mail_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_it` | nest (linux): passed, nest (windows): failed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_search_materialized_calendar.py::test_your_calendar_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view` | — |
 | 11 | nest | `tests/e2e-unified/tests/api/test_search_materialized_card.py::test_your_address_book_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view` | — |
 <!-- features-render:end -->

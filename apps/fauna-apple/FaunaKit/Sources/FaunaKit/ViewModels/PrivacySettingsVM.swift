@@ -134,14 +134,29 @@ public class PrivacySettingsVM {
             let rule = try encodeEmailFilterRuleInputs(inputs: draft.rule)
             let act = try encodeEmailFilterActionInputs(inputs: draft.action)
             let priority = try parseEmailFilterPriority(text: draft.priority)
-            try await api.createEmailFilter(name: draft.name, rules: [rule], combination: "all",
-                                            action: act, priority: Int(priority),
-                                            continueOnMatch: draft.continueOnMatch)
-            emailFilters = try await api.listEmailFilters()
-            showFilterForm = false
+            // With no nest the create queues in the device's outbox
+            // (``settleFilterCreate(queued:)``); only a sent one re-lists.
+            let queued = try await api.createEmailFilterOrQueue(
+                name: draft.name, rules: [rule], combination: "all",
+                action: act, priority: Int(priority),
+                continueOnMatch: draft.continueOnMatch)
+            if settleFilterCreate(queued: queued) {
+                emailFilters = try await api.listEmailFilters()
+            }
         } catch {
             emailFilterError = DisplayError.http(error)
         }
+    }
+
+    /// Settle one filter create's outcome; returns whether the page re-lists.
+    /// Either way the add form closes (the View clears what was typed). Sent
+    /// (`queued == false`) → re-list from the nest. Queued with no nest →
+    /// nothing is listed: the rule has no server id until the drain, and the
+    /// nest's list afterwards is the word. Mirrors tui's
+    /// `Outcome::FilterQueued` and android's `PrivacySettingsVM.createFilter`.
+    func settleFilterCreate(queued: Bool) -> Bool {
+        showFilterForm = false
+        return !queued
     }
 
     public func deleteFilter(id: Int64) async {

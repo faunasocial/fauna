@@ -30,7 +30,12 @@
 //!    member. The set is a closure the store calls at eviction time — after the
 //!    new entry is resident, with the caller holding the store's lock across the
 //!    whole insert — so it can never be a snapshot taken before a draft that is
-//!    being staged was registered.
+//!    being staged was registered. **A queued offline MLS send's attachments
+//!    are pinned the same way** until its intent is sent or discarded: queuing
+//!    clears the draft, and the drain re-resolves the bytes by hash
+//!    (`ConversationsManager::attachment_pins`). That pin is RAM like this
+//!    store, so after a relaunch the drain parks the intent
+//!    `attachment_missing` — the restored draft's floor.
 //! 3. **An evicted entry is not lost when it can be fetched again.** The
 //!    receive paths — and the FaunaMls send, for the sender's own attachments,
 //!    which it never walks back — remember, per handle, where the bytes rest

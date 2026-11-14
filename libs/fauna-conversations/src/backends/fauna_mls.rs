@@ -647,11 +647,21 @@ pub struct FaunaMlsBackend {
     /// branches take it (never [`poll_inbound_conv`] itself). Lazily created per
     /// channel; unused (never contended) when no gate is injected.
     channel_locks: Mutex<HashMap<ChannelId, Arc<futures_util::lock::Mutex<()>>>>,
-    /// Channels the Rule-2 heal already rewound this session — at most one
-    /// rewind + re-walk per channel per process, the un-processable-commit loop
-    /// guard (`devices.md` § Cross-device MLS group-state sync, Rule 2; see
-    /// [`poll_inbound_conv`]'s heal block).
-    rewound_channels: Mutex<HashSet<ChannelId>>,
+    /// Each chat channel's walk **anchor** this session: where the anchored
+    /// walk last stopped, and the engine's group-install mark it holds for
+    /// (`devices.md` § Cross-device MLS group-state sync, Rule 2 → *A later
+    /// epoch in a header is a claim: the re-walk from 0 decides*). A pass of
+    /// [`poll_inbound_conv`] is anchored when it enters at 0, or at exactly the
+    /// stored position while the mark still stands — so a cursor moved by
+    /// anything but the walk, and a group state replaced by anything but a
+    /// commit the walk applied, each drop the anchor without naming who did it.
+    chat_walk_anchors: Mutex<HashMap<ChannelId, ChatWalkAnchor>>,
+    /// What the chat walk did with future-epoch claims this session
+    /// ([`FutureEpochClaimCounts`]).
+    future_epoch_claims: FutureEpochClaimTally,
+    /// What the walks did with own-leaf claims the account's replica was asked
+    /// about this session ([`OwnLeafClaimCounts`]).
+    own_leaf_claims: OwnLeafClaimTally,
     /// The in-group succession-statement verifier ([`SuccessionWitness`]),
     /// injected by the session layer because the anchor sources the
     /// verification rule needs (cached chain heads, the anchored chain walk)
@@ -682,7 +692,16 @@ pub struct FaunaMlsBackend {
     /// write door that mints this account its first one. **Unset** ⇒ the same
     /// honest skip on the read, and a named refusal on
     /// [`FaunaMlsBackend::found_community_room`].
-    group_reception_keys: OnceLock<Arc<dyn GroupReceptionKeys>>,
+    ///
+    /// **The latest registration wins** — unlike the set-once seams beside it.
+    /// It rests on the account store, and a store can be replaced under a live
+    /// session: a runtime superseded during assembly after its handle was
+    /// already wired, then the one that installs wired again. Keeping the
+    /// first would pin every later read and write to a store that is gone
+    /// ("account runtime is shut down"), so a community room could never be
+    /// founded or opened again in that session. Same semantics as the
+    /// read-position and overlay seams (`conversation_seams::wire`).
+    group_reception_keys: std::sync::RwLock<Option<Arc<dyn GroupReceptionKeys>>>,
     /// The **room-ceremony** seam ([`RoomCeremonyRpc`]): founding a community
     /// room and publishing its generations. **Unset** ⇒ founding is refused
     /// by name — a room founded on a device that cannot key it would be a
@@ -930,7 +949,7 @@ pub struct FaunaMlsBackend {
     /// per [`CommitApplyOutcome::Advanced`] returned by [`apply_inbound_commit`],
     /// and nothing else bumps it (see [`Self::folded_commits`] for why that
     /// exclusivity is what the observable rests on). Session-scoped and RAM-only,
-    /// like [`Self::rewound_channels`]: it answers "has this *process* folded a
+    /// like [`Self::chat_walk_anchors`]: it answers "has this *process* folded a
     /// commit since I last looked", which is the only question a barrier asks.
     folded_commits: Mutex<HashMap<ChannelId, u64>>,
     /// Folder channels whose processed REMOVAL this session has already turned
@@ -938,6 +957,13 @@ pub struct FaunaMlsBackend {
     /// RAM-only, so a relaunch drops once more, which heals a crash between the
     /// merge and the drop (the store door answers 0 on a repeat).
     evicted_endpoints_dropped: Mutex<HashSet<ChannelId>>,
+    /// Folder channels whose home-nest claim read ANSWERED "not proven" this
+    /// session, keyed to the seat's epoch at the answer
+    /// ([`Self::ask_claim_proven_fork`]): a future-epoch record met behind the
+    /// same standing refusal is then skipped without asking again. RAM-only,
+    /// so a relaunch's walk asks once more; a failed read records nothing, so
+    /// the next pass asks again.
+    folder_claims_not_proven: Mutex<HashMap<ChannelId, u64>>,
     /// Folder channels whose seat a re-invite Welcome replaced this session
     /// ([`join_folder_welcome`], part (c) of `federation-shared-folders.md`
     /// § Cross-nest shared folders + channel append → *A forked seat is final,
@@ -1010,6 +1036,62 @@ pub struct FaunaMlsBackend {
     unreported_births: Mutex<std::collections::HashSet<ChannelId>>,
 }
 
+/// Where a chat channel's anchored walk stopped, and the engine's
+/// [`fauna_mls::MlsEngine::group_install_mark`] the anchor holds for — see
+/// `FaunaMlsBackend::chat_walk_anchors`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChatWalkAnchor {
+    position: i64,
+    install_mark: u64,
+}
+
+/// What the chat walk did with commit records whose header claims an epoch
+/// ahead of the seat's, session-scoped (`devices.md` § Cross-device MLS
+/// group-state sync, Rule 2 → *A later epoch in a header is a claim: the
+/// re-walk from 0 decides*). The skip has no rendered evidence of its own, so
+/// these counts and its warn line are how a defect in the commit
+/// classification, or a member posting junk, shows itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FutureEpochClaimCounts {
+    /// Claims met unanchored: the walk rewound to 0 and re-walked.
+    pub rewinds: u64,
+    /// Claims met anchored: skipped like an intrinsically invalid record.
+    pub skipped: u64,
+    /// Of `skipped`, those met while a policy-refused commit stood at the
+    /// seat's epoch — the sign of two builds judging one room-policy commit
+    /// differently, never a reason to stall.
+    pub skipped_beside_policy_refusal: u64,
+}
+
+/// What the walks did with own-leaf commit records this device's pending did
+/// not match, session-scoped (`devices.md` § Cross-device MLS group-state
+/// sync, Rule 2 → *An own-leaf claim is the account's replica's to answer*).
+/// The skip has no rendered evidence of its own; these counts and its warn
+/// line are how a forged claim, or a nest serving a stale replica, shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OwnLeafClaimCounts {
+    /// Answered *ours*: the replica was restored (a sibling device's commit).
+    pub ours: u64,
+    /// Answered *not ours*: skipped like an intrinsically invalid record.
+    pub not_ours: u64,
+    /// No answer (a failed read, an unexaminable snapshot, no gate): stalled.
+    pub unanswered: u64,
+}
+
+#[derive(Default)]
+struct OwnLeafClaimTally {
+    ours: std::sync::atomic::AtomicU64,
+    not_ours: std::sync::atomic::AtomicU64,
+    unanswered: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+struct FutureEpochClaimTally {
+    rewinds: std::sync::atomic::AtomicU64,
+    skipped: std::sync::atomic::AtomicU64,
+    skipped_beside_policy_refusal: std::sync::atomic::AtomicU64,
+}
+
 /// The receive-side tally of in-group succession statements, session-scoped.
 ///
 /// Convention 6 ("failures must diagnose themselves") for a path with **no
@@ -1070,6 +1152,16 @@ pub struct SuccessionStatementCounts {
     /// climbing after the sweep should have spoken is the sweep never reaching
     /// that owner.
     pub held_commits: u64,
+    /// Folder commit records the walk **skipped** because their unprotected
+    /// header claimed an epoch ahead of the seat's and no undecided policy
+    /// refusal at the seat's epoch could explain it
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
+    /// append → *A forked seat is final, says so, and heals only by a fresh
+    /// Welcome*, *A later epoch in a header is a claim, not evidence*). One
+    /// bump per skipped record per pass. Any rostered member can post such a
+    /// record, so a non-zero count reads as junk on the set's commit rail —
+    /// or, climbing on a seat that should be current, a classification defect.
+    pub future_epoch_skips: u64,
     /// Statements **refused by a full park slot** — the bounded set's own
     /// degrade (`identity-succession.md` § The succession statement (wire) →
     /// *The slot's replacement policy*). A slot fills only with distinct
@@ -1088,6 +1180,7 @@ struct SuccessionStatementTally {
     awaiting_remove_old: std::sync::atomic::AtomicU64,
     not_in_this_group: std::sync::atomic::AtomicU64,
     held_commits: std::sync::atomic::AtomicU64,
+    future_epoch_skips: std::sync::atomic::AtomicU64,
     park_full: std::sync::atomic::AtomicU64,
 }
 
@@ -1103,6 +1196,7 @@ impl SuccessionStatementTally {
             awaiting_remove_old: self.awaiting_remove_old.load(Relaxed),
             not_in_this_group: self.not_in_this_group.load(Relaxed),
             held_commits: self.held_commits.load(Relaxed),
+            future_epoch_skips: self.future_epoch_skips.load(Relaxed),
             park_full: self.park_full.load(Relaxed),
         }
     }
@@ -1350,14 +1444,16 @@ impl FaunaMlsBackend {
             provider_persist: OnceLock::new(),
             replica_restore_pending: AtomicBool::new(false),
             channel_locks: Mutex::new(HashMap::new()),
-            rewound_channels: Mutex::new(HashSet::new()),
+            chat_walk_anchors: Mutex::new(HashMap::new()),
+            future_epoch_claims: FutureEpochClaimTally::default(),
+            own_leaf_claims: OwnLeafClaimTally::default(),
             succession_witness: OnceLock::new(),
             room_roster_reporter: OnceLock::new(),
             room_roster_reader: OnceLock::new(),
             room_generation_reader: OnceLock::new(),
             room_ceremony: OnceLock::new(),
             room_search_posts: OnceLock::new(),
-            group_reception_keys: OnceLock::new(),
+            group_reception_keys: std::sync::RwLock::new(None),
             room_generations: Mutex::new(HashMap::new()),
             awaiting_key_rooms: Mutex::new(HashSet::new()),
             roster_reads: Mutex::new(HashMap::new()),
@@ -1381,6 +1477,7 @@ impl FaunaMlsBackend {
             folder_park_loaded: Mutex::new(HashSet::new()),
             folded_commits: Mutex::new(HashMap::new()),
             evicted_endpoints_dropped: Mutex::new(HashSet::new()),
+            folder_claims_not_proven: Mutex::new(HashMap::new()),
             folder_cursor_resets: Mutex::new(HashSet::new()),
             custody_sink: OnceLock::new(),
             custody_payloads: CustodyPayloadTally::default(),
@@ -1703,14 +1800,75 @@ impl FaunaMlsBackend {
         }
     }
 
-    /// Grant the Rule-2 cursor rewind for `channel` at most once per session:
-    /// `true` exactly on the first call per channel. See [`poll_inbound_conv`]'s
-    /// heal block for the full rationale.
-    fn grant_cursor_rewind(&self, channel: &ChannelId) -> bool {
-        self.rewound_channels
+    /// The install mark a chat walk entering `channel` at `position` is
+    /// anchored at, or `None` when it enters unanchored: anchored at 0, or at
+    /// exactly where the anchored walk last stopped while the group state it
+    /// was walked under still stands. See `Self::chat_walk_anchors`.
+    fn chat_walk_anchor_at(&self, channel: &ChannelId, position: i64) -> Option<u64> {
+        let mark = self.engine.group_install_mark(channel);
+        let stored = self
+            .chat_walk_anchors
             .lock()
             .expect("lock poisoned")
-            .insert(*channel)
+            .get(channel)
+            .copied();
+        let resumes = stored
+            == Some(ChatWalkAnchor {
+                position,
+                install_mark: mark,
+            });
+        (position == 0 || resumes).then_some(mark)
+    }
+
+    /// Whether a walk anchored at `anchor` is still anchored now: nothing but
+    /// commits applied to the group has touched its state since.
+    fn chat_walk_still_anchored(&self, channel: &ChannelId, anchor: Option<u64>) -> bool {
+        anchor == Some(self.engine.group_install_mark(channel))
+    }
+
+    /// Record where a pass of the chat walk stopped: kept as the anchor when
+    /// the pass ended anchored, dropped otherwise.
+    fn leave_chat_walk_anchor(&self, channel: &ChannelId, position: i64, anchor: Option<u64>) {
+        let still = self.chat_walk_still_anchored(channel, anchor);
+        let mut anchors = self.chat_walk_anchors.lock().expect("lock poisoned");
+        match anchor {
+            Some(install_mark) if still => {
+                anchors.insert(
+                    *channel,
+                    ChatWalkAnchor {
+                        position,
+                        install_mark,
+                    },
+                );
+            }
+            _ => {
+                anchors.remove(channel);
+            }
+        }
+    }
+
+    /// What the chat walk did with future-epoch claims this session — see
+    /// [`FutureEpochClaimCounts`].
+    pub fn future_epoch_claim_counts(&self) -> FutureEpochClaimCounts {
+        use std::sync::atomic::Ordering::Relaxed;
+        let t = &self.future_epoch_claims;
+        FutureEpochClaimCounts {
+            rewinds: t.rewinds.load(Relaxed),
+            skipped: t.skipped.load(Relaxed),
+            skipped_beside_policy_refusal: t.skipped_beside_policy_refusal.load(Relaxed),
+        }
+    }
+
+    /// What the walks did with own-leaf claims this session — see
+    /// [`OwnLeafClaimCounts`].
+    pub fn own_leaf_claim_counts(&self) -> OwnLeafClaimCounts {
+        use std::sync::atomic::Ordering::Relaxed;
+        let t = &self.own_leaf_claims;
+        OwnLeafClaimCounts {
+            ours: t.ours.load(Relaxed),
+            not_ours: t.not_ours.load(Relaxed),
+            unanswered: t.unanswered.load(Relaxed),
+        }
     }
 
     /// Inject the [`CommitGate`] — the per-app leg (slice 5) calls this once,
@@ -1819,9 +1977,22 @@ impl FaunaMlsBackend {
 
     /// Register the **group-reception key** seam
     /// ([`GroupReceptionKeys`]) — the account-plane keypairs whose secret
-    /// halves open a room's generation wraps. Set once by the session layer.
+    /// halves open a room's generation wraps. Registered by the session layer
+    /// at every account-store-ready edge; a later registration replaces the
+    /// earlier one (the field's doc says why).
     pub fn set_group_reception_keys(&self, keys: Arc<dyn GroupReceptionKeys>) {
-        let _ = self.group_reception_keys.set(keys);
+        *self
+            .group_reception_keys
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(keys);
+    }
+
+    /// The group-reception key seam registered last, if any.
+    fn group_reception_keys(&self) -> Option<Arc<dyn GroupReceptionKeys>> {
+        self.group_reception_keys
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Register the **room-ceremony** seam ([`RoomCeremonyRpc`]). Set once by
@@ -2019,7 +2190,7 @@ impl FaunaMlsBackend {
     async fn current_reception_key(
         &self,
     ) -> Result<fauna_core::group_generation::GroupReceptionKeyRecord, BackendError> {
-        let keys = self.group_reception_keys.get().ok_or_else(|| {
+        let keys = self.group_reception_keys().ok_or_else(|| {
             BackendError::Internal(
                 "this app cannot key a community room — it has no group-reception key seam"
                     .to_string(),
@@ -3157,7 +3328,7 @@ impl FaunaMlsBackend {
         }
         let (Some(reader), Some(secrets)) = (
             self.room_generation_reader.get(),
-            self.group_reception_keys.get(),
+            self.group_reception_keys(),
         ) else {
             return RoomKeyLookup::Unkeyable;
         };
@@ -3458,7 +3629,7 @@ impl FaunaMlsBackend {
     async fn room_tip_lookup(&self, channel_id: &ChannelId) -> RoomTip {
         let (Some(reader), Some(secrets)) = (
             self.room_generation_reader.get(),
-            self.group_reception_keys.get(),
+            self.group_reception_keys(),
         ) else {
             return RoomTip::Unavailable;
         };
@@ -3516,7 +3687,7 @@ impl FaunaMlsBackend {
     ) -> Vec<([u8; 32], GenerationKey, bool)> {
         let (Some(reader), Some(secrets)) = (
             self.room_generation_reader.get(),
-            self.group_reception_keys.get(),
+            self.group_reception_keys(),
         ) else {
             return Vec::new();
         };
@@ -4714,8 +4885,7 @@ impl FaunaMlsBackend {
         channel_id: &ChannelId,
         own: &crate::backend::RoomRosterKnownMember,
     ) -> Result<bool, BackendError> {
-        let (Some(keys), Some(ceremony)) =
-            (self.group_reception_keys.get(), self.room_ceremony.get())
+        let (Some(keys), Some(ceremony)) = (self.group_reception_keys(), self.room_ceremony.get())
         else {
             return Ok(false);
         };
@@ -5985,9 +6155,12 @@ impl FaunaMlsBackend {
         self.engine.folder_seat_forked(channel_id)
     }
 
-    /// Parts (a) and (b) of the forked-seat rule, on a future-epoch stall of
-    /// the folder walk: mark the seat forked (with the cause the log holds —
-    /// a policy-refused memo at the seat's epoch, or none), then, while the
+    /// Parts (a) and (b) of the forked-seat rule, on a policy refusal the home
+    /// nest's claim proves ([`Self::ask_claim_proven_fork`], the only marking
+    /// trigger — a later epoch in a header is a claim, not evidence) or on a
+    /// walk of a seat already marked, which re-asks an owed unlist: mark the
+    /// seat forked (with the cause the log holds — the policy-refused memo at
+    /// the seat's epoch), then, while the
     /// mark does not yet record it, drop this member's own roster row on the
     /// set's home nest through the custody sink
     /// ([`FolderCustodySink::unlist_forked_seat`]) and record the drop once
@@ -6031,6 +6204,109 @@ impl FaunaMlsBackend {
         if sink.unlist_forked_seat(group_id_hex, home_nest_url).await {
             self.engine.note_folder_seat_unlisted(channel_id);
         }
+    }
+
+    /// Part (a)'s second trigger, *A refusal the home nest's claim proves is
+    /// the fork too, with no later commit* (`federation-shared-folders.md`
+    /// § Cross-nest shared folders + channel append → *A forked seat is
+    /// final, says so, and heals only by a fresh Welcome*): called once at
+    /// the end of a folder walk that met a policy refusal. When the memo
+    /// holds a refusal at the seat's current epoch whose MLS-authenticated
+    /// committer is the channel's present claimant on the set's home nest
+    /// ([`FolderCustodySink::folder_claimant`]) and is not the actor the
+    /// seat's owner marker names, the group moved past this seat — the other
+    /// seats admit only the identity the owner's succession names, and the
+    /// nest moves the claim to it before its sweep can commit — so mark and
+    /// unlist ([`Self::note_forked_folder_seat`], cause policy-refused). A
+    /// rostered member's refused commit marks nothing: the claimant is then
+    /// the marker's actor, or (during a real succession) not that member. A
+    /// committer the refusal could not read, a failed read or no sink marks
+    /// nothing; the next launch's walk replays the memo and asks again. A
+    /// seat already marked only re-asks an owed unlist.
+    ///
+    /// Also asked mid-walk, once per pass, when a future-epoch record meets a
+    /// refusal standing at the seat's epoch whose claim has not yet answered
+    /// this session (*A later epoch in a header is a claim, not evidence*,
+    /// sentence (2)) — hence the three-way answer: [`ClaimRead::Proven`]
+    /// (marked here), [`ClaimRead::NotProven`] (recorded per session and
+    /// epoch, so the record is skipped and not asked about again), or
+    /// [`ClaimRead::Unanswered`] (nothing recorded; the next pass asks again).
+    /// No refusal to ask about, no owner marker or no custody sink can never
+    /// prove the refusal, so those answer `NotProven` without recording.
+    pub(crate) async fn ask_claim_proven_fork(&self, channel_id: &ChannelId) -> ClaimRead {
+        if self.engine.folder_seat_forked(channel_id).is_some() {
+            self.note_forked_folder_seat(channel_id).await;
+            return ClaimRead::Proven;
+        }
+        let committers = self
+            .engine
+            .policy_refused_committers_at_current_epoch(channel_id);
+        if committers.is_empty() {
+            return ClaimRead::NotProven;
+        }
+        let Some(marker) = self.engine.folder_channel_owner(channel_id) else {
+            return ClaimRead::NotProven;
+        };
+        let Some(sink) = self.folder_custody_sink() else {
+            return ClaimRead::NotProven;
+        };
+        let Some(raw) = self.engine.group_id_bytes(channel_id) else {
+            return ClaimRead::NotProven;
+        };
+        let group_id_hex = hex::encode(raw);
+        let home_nest_url = match self.folder_home_url(&group_id_hex).await {
+            Ok(home) => home,
+            Err(e) => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    "policy-refused folder commit: home nest unknown, the claim is asked again: {e}"
+                );
+                return ClaimRead::Unanswered;
+            }
+        };
+        let Some(claimant) = sink
+            .folder_claimant(&channel_id.0, group_id_hex, home_nest_url)
+            .await
+        else {
+            tracing::info!(
+                channel = %channel_id,
+                "policy-refused folder commit: the channel's claimant could not be read; asked again"
+            );
+            return ClaimRead::Unanswered;
+        };
+        if claimant == marker.0 || !committers.iter().any(|c| c.0 == claimant) {
+            if let Ok(epoch) = self.engine.current_epoch(channel_id) {
+                self.folder_claims_not_proven
+                    .lock()
+                    .unwrap()
+                    .insert(*channel_id, epoch);
+            }
+            return ClaimRead::NotProven;
+        }
+        self.note_forked_folder_seat(channel_id).await;
+        ClaimRead::Proven
+    }
+
+    /// Whether a future-epoch record on the folder walk must ask the claim
+    /// first (*A later epoch in a header is a claim, not evidence*, sentence
+    /// (2)'s exception): a policy refusal stands at the seat's current epoch
+    /// and its claim read has not answered "not proven" at that epoch this
+    /// session.
+    fn folder_claim_undecided(&self, channel_id: &ChannelId) -> bool {
+        if !self
+            .engine
+            .policy_refused_commit_at_current_epoch(channel_id)
+        {
+            return false;
+        }
+        let Ok(epoch) = self.engine.current_epoch(channel_id) else {
+            return false;
+        };
+        self.folder_claims_not_proven
+            .lock()
+            .unwrap()
+            .get(channel_id)
+            != Some(&epoch)
     }
 
     async fn drop_share_endpoints_if_evicted(&self, channel_id: &ChannelId) {
@@ -9423,14 +9699,16 @@ async fn redrive_parked_folder_in_channel(
 /// advancing past a stalled commit would let a rebased commit be accepted for an
 /// epoch the other members already left, a permanent fork (`devices.md` §
 /// Cross-device MLS group-state sync, Rules 1–2 — "round toward the safe side").
-/// The chat rail's one heal runs first: a *future-epoch* stall means this device
-/// skipped the bridging commit, so the cursor rewinds to 0 and re-walks within
-/// this same call (once per channel per session — a rewind cannot fill an
-/// un-processable hole, and an own-leaf stall is never healable by one, since MLS
-/// can never process an own commit). Only when that heal is unavailable or
-/// already spent does the walk stop and report the stall. For the background feed
-/// the stop is equally right: everything after an unincorporated epoch transition
-/// is future-epoch-unprocessable anyway, and the next tick retries the heal.
+/// A *future-epoch* record is not such a stall: its epoch is a claim read from
+/// an unprotected header (`devices.md` Rule 2 → *A later epoch in a header is a
+/// claim: the re-walk from 0 decides*). Met while the walk is unanchored, it
+/// rewinds the cursor to 0 and re-walks within this same call — the heal for a
+/// cursor that skipped the bridging commit; met while anchored (the session's
+/// walk has run unbroken from 0 under the group state it holds), it is junk and
+/// is skipped, logged and counted ([`FutureEpochClaimCounts`]). The stalls that
+/// stop the walk are the own-leaf commit no resync carried the group past (MLS
+/// can never process an own commit) and a local failure; for the background feed
+/// the stop is equally right, and the next tick retries.
 ///
 /// The folder twin of this contract is [`poll_inbound_folder`] /
 /// [`FolderPollOutcome`] — the two rails share [`apply_inbound_commit`] and must
@@ -9441,6 +9719,36 @@ pub async fn poll_inbound_conv(
     channel_id: &ChannelId,
     after_seq: &mut i64,
     page_limit: i64,
+) -> Result<ConvPollOutcome, BackendError> {
+    // Every exit of the walk leaves the anchor where the pass stopped (a stall
+    // restores the cursor first, so a stalled pass leaves the restored seq). A
+    // failed pass leaves the old one: the next pass then enters at another
+    // position and is unanchored — the safe side.
+    let mut anchor = backend.chat_walk_anchor_at(channel_id, *after_seq);
+    let outcome = walk_inbound_conv(
+        backend,
+        manager,
+        channel_id,
+        after_seq,
+        page_limit,
+        &mut anchor,
+    )
+    .await;
+    if outcome.is_ok() {
+        backend.leave_chat_walk_anchor(channel_id, *after_seq, anchor);
+    }
+    outcome
+}
+
+/// [`poll_inbound_conv`]'s walk proper; `anchor` is the install mark the pass
+/// is anchored at (`FaunaMlsBackend::chat_walk_anchors`), set by a rewind.
+async fn walk_inbound_conv(
+    backend: &FaunaMlsBackend,
+    manager: &ConversationsManager,
+    channel_id: &ChannelId,
+    after_seq: &mut i64,
+    page_limit: i64,
+    anchor: &mut Option<u64>,
 ) -> Result<ConvPollOutcome, BackendError> {
     // ⚠ A retired engine must not walk this log AT ALL, and the refusal has to
     // land here rather than at the `decrypt` below. The walk advances
@@ -10137,41 +10445,79 @@ pub async fn poll_inbound_conv(
                             manager.room_projection_moved(&thread_id);
                         }
                         // Already ours, or a record no member can apply.
-                        CommitApplyOutcome::Skipped => {}
-                        CommitApplyOutcome::Stalled { future_epoch } => {
-                            // The Rule-2 heal (`devices.md` § Cross-device MLS
-                            // group-state sync), for the future-epoch strand only:
-                            // this device's cursor skipped the bridging commit —
-                            // an un-processable hole ({provider, cursor}
-                            // pairs sealed under Rule 2 cannot tear). Rewind the
-                            // in-flight cursor to 0 and re-walk the log within this
-                            // same call: already-applied commits quiet-skip
-                            // (`PastEpochCommit`), already-held messages skip via
-                            // the `thread_holds_message` guard above, and the skipped commit
-                            // finally applies, so the walk lands on the head epoch.
-                            // The rewind is TRANSIENT — the caller's durable cursor
-                            // (`ChannelCursor::advance`, monotonic) only ever sees
-                            // the final position, and the next provider save then
-                            // writes a consistent {provider, cursor} pair, retiring
-                            // the torn state. Guarded to at most one rewind per
-                            // channel per session (an un-processable commit re-tears
-                            // on every walk — rewinding cannot fill that hole) and
-                            // skipped when the walk already began at 0. An own-leaf
-                            // stall is never healable this way (MLS can never
-                            // process an own commit), so it does not even try.
-                            if future_epoch
-                                && started_at > 0
-                                && backend.grant_cursor_rewind(channel_id)
-                            {
-                                tracing::warn!(
-                                    channel = %channel_id,
-                                    "future-epoch commit: durable ingest cursor outran the \
-                                     provider replica; rewinding to 0 and re-walking \
-                                     (devices.md Rule 2 heal)"
-                                );
-                                *after_seq = 0;
-                                continue 'pages;
+                        CommitApplyOutcome::Skipped | CommitApplyOutcome::PolicyRefused => {}
+                        // An own-leaf claim the account's replica answered not
+                        // ours: consumed like an invalid record, the cursor
+                        // already past it — and the anchor dropped (`devices.md`
+                        // Rule 2 → *An own-leaf claim is the account's replica's
+                        // to answer*): the denial rests on the replica, not on a
+                        // verdict every member shares, so the next future-epoch
+                        // record re-walks from 0 and asks about this one again.
+                        CommitApplyOutcome::OwnLeafDenied { .. } => {
+                            *anchor = None;
+                        }
+                        // A header claiming a later epoch (`devices.md` Rule 2 →
+                        // *A later epoch in a header is a claim: the re-walk
+                        // from 0 decides*). Anchored — the session's walk has
+                        // shown this seat's present state every record in front
+                        // of this one, so nothing on the log moved the group
+                        // off its epoch and the record is on no chain an honest
+                        // committer built: skip it like an intrinsically invalid
+                        // one, the cursor already past it.
+                        CommitApplyOutcome::Stalled {
+                            future_epoch: Some(claimed_epoch),
+                        } if backend.chat_walk_still_anchored(channel_id, *anchor) => {
+                            use std::sync::atomic::Ordering::Relaxed;
+                            let refusal_stands = backend
+                                .engine
+                                .policy_refused_commit_at_current_epoch(channel_id);
+                            let tally = &backend.future_epoch_claims;
+                            tally.skipped.fetch_add(1, Relaxed);
+                            if refusal_stands {
+                                tally.skipped_beside_policy_refusal.fetch_add(1, Relaxed);
                             }
+                            tracing::warn!(
+                                channel = %channel_id,
+                                seq,
+                                claimed_epoch,
+                                seat_epoch = ?backend.engine.current_epoch(channel_id).ok(),
+                                policy_refusal_at_seat_epoch = refusal_stands,
+                                "future-epoch claim met on an anchored walk: skipped as junk \
+                                 (devices.md Rule 2) — no commit in front of it moved the group"
+                            );
+                        }
+                        // Unanchored: the cursor may have skipped the bridging
+                        // commit (a torn {provider, cursor} pair, a cursor moved
+                        // by another walker, a group state replaced since). The
+                        // Rule-2 heal: rewind the in-flight cursor to 0 and
+                        // re-walk the log within this same call — already-applied
+                        // commits quiet-skip (`PastEpochCommit`), already-held
+                        // messages skip via the `thread_holds_message` guard
+                        // above, and a skipped commit finally applies. The
+                        // rewind anchors the walk, so the claim met again on the
+                        // re-walk is judged anchored: one rewind per anchor. The
+                        // rewind is TRANSIENT — the caller's durable cursor
+                        // (`ChannelCursor::advance`, monotonic) only ever sees
+                        // the final position.
+                        CommitApplyOutcome::Stalled {
+                            future_epoch: Some(claimed_epoch),
+                        } => {
+                            backend
+                                .future_epoch_claims
+                                .rewinds
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!(
+                                channel = %channel_id,
+                                seq,
+                                claimed_epoch,
+                                "future-epoch claim met on an unanchored walk: rewinding to 0 \
+                                 and re-walking (devices.md Rule 2 heal)"
+                            );
+                            *after_seq = 0;
+                            *anchor = Some(backend.engine.group_install_mark(channel_id));
+                            continue 'pages;
+                        }
+                        CommitApplyOutcome::Stalled { future_epoch: None } => {
                             // Unhealable in this pass. STOP BEFORE this record:
                             // restore the cursor to where it sat, so the next pass
                             // retries the heal and — decisively — a gated-send
@@ -10188,11 +10534,9 @@ pub async fn poll_inbound_conv(
                             *after_seq = before_seq;
                             tracing::error!(
                                 channel = %channel_id,
-                                future_epoch,
                                 "commit not incorporated and unhealable this pass (own-leaf \
-                                 resync pending, or a future-epoch hole with the Rule-2 rewind \
-                                 spent/unavailable): stopping the walk before it — channel \
-                                 stranded until the next resync/relaunch heals it"
+                                 resync pending, or a local failure): stopping the walk before \
+                                 it — channel stranded until the next resync/relaunch heals it"
                             );
                             return Ok(ConvPollOutcome {
                                 ingested,
@@ -10259,6 +10603,7 @@ pub async fn poll_inbound_conv(
         }
         backend.persist_engine_state();
     }
+    settle_unanswered_gate_send(backend, channel_id, started_at).await;
     // A waiting room the walk read to its end without meeting a sealed record
     // (a room nobody has written in since this member's seating): nothing
     // asked for a key, so ask for the tip now, or its notice would stay up
@@ -10375,10 +10720,11 @@ impl ConvPollOutcome {
 /// that epoch transition, so treating it as consumed lets a later gate-send pass
 /// `expect_no_commit_since` and append a forked commit for an epoch the other
 /// members already advanced past. `Stalled::future_epoch` further distinguishes
-/// the skipped-bridging-commit strand — the trigger for [`poll_inbound_conv`]'s
-/// Rule-2 heal (rewind + re-walk, once per channel per session); an own-leaf
-/// stall is NOT healable by a rewind (MLS can never process an own commit), so
-/// the heal ignores it.
+/// a header claiming a later epoch — which [`poll_inbound_conv`] rewinds on
+/// when unanchored and skips when anchored (`devices.md` Rule 2 → *A later
+/// epoch in a header is a claim: the re-walk from 0 decides*), and which the
+/// folder walk rules on by its own claim check; an own-leaf stall is NOT
+/// healable by a rewind (MLS can never process an own commit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitApplyOutcome {
     /// The commit advanced this device's epoch (a processed foreign commit, or
@@ -10391,6 +10737,25 @@ pub(crate) enum CommitApplyOutcome {
     /// invalid kind would let one garbage record from any in-group member
     /// wedge every other member's walk forever (a remote DoS).
     Skipped,
+    /// A [`Self::Skipped`] the commit policy refused
+    /// ([`MlsError::PolicyRefusedCommit`] — fresh, or the durable memo's
+    /// replay): safe to advance past exactly like `Skipped`, named apart so
+    /// the folder walk can ask whether the home nest's claim proves the
+    /// refusal was the fork (`federation-shared-folders.md` § Cross-nest
+    /// shared folders + channel append → *A forked seat is final, says so,
+    /// and heals only by a fresh Welcome*, part (a)).
+    PolicyRefused,
+    /// An own-leaf record the account's replica answered *not ours*
+    /// (`devices.md` § Cross-device MLS group-state sync, Rule 2 → *An own-leaf
+    /// claim is the account's replica's to answer*): no device of this account
+    /// made it, so the group did not move by it — safe to advance past exactly
+    /// like `Skipped`, named apart so the chat walk drops its anchor (a denial
+    /// rests on the account's replica, not on a verdict every member shares,
+    /// so the next future-epoch record must re-walk from 0 and ask again).
+    OwnLeafDenied {
+        /// The epoch the record's header claims, for the skip's log line.
+        claimed_epoch: u64,
+    },
     /// The transition is NOT locally incorporated and could not be healed in
     /// this pass: an own-leaf commit whose resync failed (or ran gate-less), a
     /// future-epoch commit (a skipped-commit strand), or a commit that failed
@@ -10398,10 +10763,12 @@ pub(crate) enum CommitApplyOutcome {
     /// group may have advanced without this device, so Rule 2 rounds the
     /// ambiguity toward stalling). A cursor must not advance past it.
     Stalled {
-        /// The stall is a future-epoch commit: this device's ingest cursor
-        /// skipped the bridging commit (an un-processable
-        /// hole). Healable by the Rule-2 rewind + re-walk.
-        future_epoch: bool,
+        /// The epoch a future-epoch commit's header claims, when that is the
+        /// stall. Only a claim — read from the unprotected header before any
+        /// decrypt, so any member can post one; a real one means this device's
+        /// cursor skipped the bridging commit. The chat walk rewinds on it
+        /// unanchored and skips it anchored.
+        future_epoch: Option<u64>,
     },
 }
 
@@ -10429,6 +10796,45 @@ pub(crate) async fn apply_inbound_commit(
         backend.note_folded_commit(channel_id);
     }
     outcome
+}
+
+/// Settle a gate-send that got no answer, at the end of a complete, unstalled
+/// walk that began at `started_at` (`devices.md` § Cross-device MLS group-state
+/// sync, Rule 2 → *An own-leaf claim is the account's replica's to answer*,
+/// premise (a)). The gate kept the pending because the send may have landed;
+/// the walk has now decided it — merged by hash mid-walk (Rule 1), superseded
+/// by another member's commit, or never met after the seq the send gated on
+/// and so never landed ([`fauna_mls::engine::MlsEngine::settle_unanswered_pending`]
+/// clears it) — and the replica must stop carrying it. Both rails call this.
+async fn settle_unanswered_gate_send(
+    backend: &FaunaMlsBackend,
+    channel_id: &ChannelId,
+    started_at: i64,
+) {
+    match backend
+        .engine
+        .settle_unanswered_pending(channel_id, started_at)
+    {
+        Ok(true) => {
+            tracing::info!(
+                channel = %channel_id,
+                "a gate-send that got no answer is settled by the log; re-sealing the replica \
+                 without its pending"
+            );
+            backend.persist_engine_state();
+            if let Some(gate) = backend.commit_gate() {
+                gate.reseal_settled_pending(*channel_id).await;
+            }
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(
+                channel = %channel_id,
+                error = ?e,
+                "settling an unanswered gate-send's pending failed; kept for the next walk"
+            );
+        }
+    }
 }
 
 /// [`apply_inbound_commit`]'s classification proper — split out so the fold-in
@@ -10461,10 +10867,11 @@ async fn classify_inbound_commit(
         // A commit for an epoch AHEAD of ours: this device skipped the commit that
         // would have bridged the gap — MLS members cannot skip epochs and no
         // member can re-issue a past transition, so without intervention every
-        // later commit on this channel lands here too. Report it as the heal
-        // trigger: the chat-rail poll rewinds its cursor and re-walks the log
-        // (once per channel per session — `poll_inbound_conv`'s heal block, per
-        // `devices.md` § Cross-device MLS group-state sync Rule 2).
+        // later commit on this channel lands here too. But the epoch is read
+        // from the unprotected header, so it is only a claim: the chat walk
+        // rewinds on it unanchored and skips it anchored (`poll_inbound_conv`,
+        // `devices.md` Rule 2 → *A later epoch in a header is a claim*); the
+        // folder walk rules on it by its own claim check.
         Err(MlsError::FutureEpochCommit { epoch }) => {
             tracing::warn!(
                 channel = %channel_id,
@@ -10472,7 +10879,9 @@ async fn classify_inbound_commit(
                 "future-epoch commit: this device's ingest cursor skipped the bridging commit \
                  (un-processable hole)"
             );
-            CommitApplyOutcome::Stalled { future_epoch: true }
+            CommitApplyOutcome::Stalled {
+                future_epoch: Some(epoch),
+            }
         }
         // An own-leaf commit (MLS can never process one). Two shapes:
         // (1) THIS device staged it and crashed (or lost the race) between the
@@ -10508,37 +10917,64 @@ async fn classify_inbound_commit(
                     }
                 }
             }
-            if let Some(gate) = backend.commit_gate() {
-                // Bind the resync's crash-window merge to *this* commit's identity
-                // (`logged_commit_hash` above): the restored step-2 pending is
-                // merged only if it is the same commit as this logged record
-                // (design §3 resync-identity hardening).
-                if let Err(e) = gate
-                    .resync_channel(*channel_id, epoch, logged_commit_hash)
-                    .await
-                {
-                    tracing::warn!(error = ?e, "own-leaf commit resync failed; group ratchet stale until the next resync trigger");
-                }
-                // Converged iff the resync actually carried the group past the
-                // logged commit's epoch (the restored replica merged/was ahead).
-                // A resync that restored a same-or-older epoch without merging
-                // (identity mismatch, no replica, transport failure) leaves the
-                // transition un-incorporated — Stalled, so a Rule-2-safe cursor
-                // stops before this commit and the next pass retries the heal.
-                match backend.engine.current_epoch(channel_id) {
-                    Ok(current) if current > epoch => CommitApplyOutcome::Advanced,
-                    _ => CommitApplyOutcome::Stalled {
-                        future_epoch: false,
-                    },
-                }
-            } else {
-                // No multi-device plane injected (single-device client): the launch-time replica load is the
-                // remaining heal path.
+            use fauna_mls::state_replica::OwnLeafAnswer;
+            use std::sync::atomic::Ordering::Relaxed;
+            let tally = &backend.own_leaf_claims;
+            let Some(gate) = backend.commit_gate() else {
+                // No multi-device plane injected (single-device client): no
+                // replica to ask, so no answer — the launch-time replica load
+                // is the remaining heal path.
+                tally.unanswered.fetch_add(1, Relaxed);
                 tracing::warn!(
                     "own-leaf foreign commit with no CommitGate injected; group ratchet stale until relaunch"
                 );
-                CommitApplyOutcome::Stalled {
-                    future_epoch: false,
+                return CommitApplyOutcome::Stalled { future_epoch: None };
+            };
+            // Any member can post a record naming this identity's leaf, so the
+            // account's replica answers for it before anything is restored
+            // (`devices.md` Rule 2 → *An own-leaf claim is the account's
+            // replica's to answer*). On *ours* the gate has restored the
+            // replica and merged its pending only when that pending is this
+            // record (design §3 resync-identity hardening).
+            match gate
+                .resync_channel(*channel_id, epoch, logged_commit_hash)
+                .await
+            {
+                // Converged iff the restore actually carried the group past the
+                // record's epoch; a restore that did not (a merge that failed)
+                // leaves the transition un-incorporated — stall, and the next
+                // pass asks again.
+                OwnLeafAnswer::Ours => {
+                    tally.ours.fetch_add(1, Relaxed);
+                    match backend.engine.current_epoch(channel_id) {
+                        Ok(current) if current > epoch => CommitApplyOutcome::Advanced,
+                        _ => CommitApplyOutcome::Stalled { future_epoch: None },
+                    }
+                }
+                OwnLeafAnswer::NotOurs { why } => {
+                    tally.not_ours.fetch_add(1, Relaxed);
+                    tracing::warn!(
+                        channel = %channel_id,
+                        claimed_epoch = epoch,
+                        seat_epoch = ?backend.engine.current_epoch(channel_id).ok(),
+                        why,
+                        "own-leaf claim answered not ours by the account's replica: skipped as \
+                         junk (devices.md Rule 2) — nothing restored, no send right revoked"
+                    );
+                    CommitApplyOutcome::OwnLeafDenied {
+                        claimed_epoch: epoch,
+                    }
+                }
+                OwnLeafAnswer::NoAnswer { why } => {
+                    tally.unanswered.fetch_add(1, Relaxed);
+                    tracing::warn!(
+                        channel = %channel_id,
+                        claimed_epoch = epoch,
+                        why = %why,
+                        "own-leaf claim: the account's replica gave no answer this pass; stalling \
+                         before the record until it does"
+                    );
+                    CommitApplyOutcome::Stalled { future_epoch: None }
                 }
             }
         }
@@ -10573,7 +11009,7 @@ async fn classify_inbound_commit(
                 channel = %channel_id,
                 "folder commit policy refused an inbound commit (non-owner roster change) — skipped"
             );
-            CommitApplyOutcome::Skipped
+            CommitApplyOutcome::PolicyRefused
         }
         // Everything else is local or ambiguous — storage, a library error, a
         // failed merge, a group this engine doesn't hold (yet): the group may
@@ -10591,9 +11027,7 @@ async fn classify_inbound_commit(
                 "MLS process_commit failed locally on an inbound commit; stalling the \
                  walk before it (Rule 2) — group ratchet stale until a retry or resync heals it"
             );
-            CommitApplyOutcome::Stalled {
-                future_epoch: false,
-            }
+            CommitApplyOutcome::Stalled { future_epoch: None }
         }
     }
 }
@@ -11565,6 +11999,19 @@ pub struct FolderPollOutcome {
 /// right: everything after an unincorporated epoch transition is
 /// future-epoch-unprocessable anyway, and the next tick retries the heal.
 ///
+/// **A walk that met a policy refusal asks, once at its end, whether the home
+/// nest's claim proves the fork** ([`FaunaMlsBackend::ask_claim_proven_fork`],
+/// `federation-shared-folders.md` § Cross-nest shared folders + channel append
+/// → *A forked seat is final, says so, and heals only by a fresh Welcome*,
+/// part (a), *A refusal the home nest's claim proves is the fork too*): the
+/// refused remove-old of an owner's successor may be the last commit the log
+/// ever holds. Fresh or the memo's replay on a later launch's 0-seeded walk —
+/// never a timer. The claim is the ONLY marking trigger: a commit record
+/// whose header claims a later epoch marks nothing and stalls nothing
+/// (*A later epoch in a header is a claim, not evidence*) — the walk skips
+/// it, asking the claim first only while a refusal at the seat's epoch is
+/// undecided — and a seat already marked applies nothing and reports stalled.
+///
 /// **After every walk, a processed removal drops the set's cached
 /// share-endpoints rows** ([`FaunaMlsBackend::drop_share_endpoints_if_evicted`],
 /// `p2p.md` stale-endpoint ruling 2's last sentence, the removal arm): a
@@ -11577,11 +12024,28 @@ pub async fn poll_inbound_folder(
     after_seq: &mut i64,
     page_limit: i64,
 ) -> Result<FolderPollOutcome, BackendError> {
-    let outcome = walk_inbound_folder(backend, channel_id, after_seq, page_limit).await;
+    let mut met_refusal = false;
+    let outcome =
+        walk_inbound_folder(backend, channel_id, after_seq, page_limit, &mut met_refusal).await;
+    if met_refusal && !backend.engine.is_retired() {
+        backend.ask_claim_proven_fork(channel_id).await;
+    }
     if !backend.engine.is_retired() {
         backend.drop_share_endpoints_if_evicted(channel_id).await;
     }
     outcome
+}
+
+/// What the home nest's claim said about a policy refusal standing at a
+/// folder seat's epoch ([`FaunaMlsBackend::ask_claim_proven_fork`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimRead {
+    /// The refusal was the fork: the seat is marked (and unlists itself).
+    Proven,
+    /// The claim answered and does not prove it, or nothing could prove it.
+    NotProven,
+    /// The read failed or the home nest is unknown: asked again next pass.
+    Unanswered,
 }
 
 /// [`poll_inbound_folder`]'s log walk proper — split out so the removal arm's
@@ -11591,6 +12055,7 @@ async fn walk_inbound_folder(
     channel_id: &ChannelId,
     after_seq: &mut i64,
     page_limit: i64,
+    met_refusal: &mut bool,
 ) -> Result<FolderPollOutcome, BackendError> {
     // ⚠ A retired engine must not walk this log AT ALL, and the refusal has to
     // land here rather than at the `decrypt` below. The walk advances
@@ -11620,11 +12085,26 @@ async fn walk_inbound_folder(
     {
         *after_seq = 0;
     }
+    // A seat marked forked applies no further commit and its walk reports
+    // stalled (`federation-shared-folders.md` § Cross-nest shared folders +
+    // channel append → *A forked seat is final, says so, and heals only by a
+    // fresh Welcome*, *A later epoch in a header is a claim, not evidence*,
+    // sentence (3)): no gated-send baseline, no custody ingest, until a fresh
+    // Welcome replaces the seat (part (c), which drops the mark). The owed
+    // unlist of part (b) is asked again on every such pass until it lands.
+    if backend.engine.folder_seat_forked(channel_id).is_some() {
+        backend.note_forked_folder_seat(channel_id).await;
+        return Ok(FolderPollOutcome {
+            applied: 0,
+            stalled: true,
+        });
+    }
     // A statement parked by an earlier launch rests with the engine; this
     // launch re-walks from 0 and cannot re-read it (its decrypt consumed the
     // ratchet generation), so the first walk takes it back into the park
     // before any record — the hold below then fires as it did then.
     backend.load_rested_folder_park(channel_id);
+    let started_at = *after_seq;
     let channel_hex = channel_id.to_string();
     let mut applied = 0usize;
     let fetch_limit = wire_fetch_limit(page_limit);
@@ -11695,28 +12175,70 @@ async fn walk_inbound_folder(
                             // verdict is moot after a fold).
                             redrive_parked_folder_in_channel(backend, channel_id).await;
                         }
-                        CommitApplyOutcome::Skipped => {}
-                        // Stop BEFORE this record — the cursor stays behind it, so
-                        // the next pass (or the next rebase round's catch-up)
-                        // retries the heal instead of silently consuming an epoch
-                        // transition the local group never incorporated. No Rule-2
-                        // rewind on this rail (future-epoch or not): the folder
-                        // cursor is RAM-only, seeded to 0 each launch (`session.rs`
-                        // `fs_cursors`), so a restart already re-walks from 0 — an
-                        // in-session future-epoch here means an un-processable
-                        // hole, which a rewind cannot fill.
-                        //
-                        // A future-epoch stall here IS the fork
+                        // An own-leaf claim the account's replica answered not
+                        // ours (`devices.md` Rule 2 → *An own-leaf claim is the
+                        // account's replica's to answer*): consumed like an
+                        // invalid record. This rail keeps no anchor.
+                        CommitApplyOutcome::Skipped | CommitApplyOutcome::OwnLeafDenied { .. } => {}
+                        // A policy refusal is the fork when the home nest's
+                        // claim proves it — asked once, at the walk's end
+                        // ([`poll_inbound_folder`]).
+                        CommitApplyOutcome::PolicyRefused => *met_refusal = true,
+                        // A later epoch in a header is a claim, not evidence
                         // (`federation-shared-folders.md` § Cross-nest shared
                         // folders + channel append → *A forked seat is final,
                         // says so, and heals only by a fresh Welcome*, part
-                        // (a)): this walk began at seq 0, so the bridging
-                        // commit was in front of it and this seat refused or
-                        // skipped it. Mark the seat and unlist it once.
-                        CommitApplyOutcome::Stalled { future_epoch } => {
-                            if future_epoch {
-                                backend.note_forked_folder_seat(channel_id).await;
+                        // (a)): the epoch is read from the unprotected header
+                        // before any decrypt, so any rostered member can post
+                        // one. This walk began at seq 0 and judged every
+                        // record in front of this one; with no undecided
+                        // policy refusal at the seat's epoch nothing it saw
+                        // moved the group, so the record is on no honest
+                        // chain from this log — skip it like an intrinsically
+                        // invalid one, mark nothing. While a refusal at the
+                        // seat's epoch is undecided, ask the claim once for
+                        // this pass first: proven marks and stops, a failed
+                        // read stops before the record unmarked (asked again
+                        // next pass), answered-not-proven skips.
+                        CommitApplyOutcome::Stalled {
+                            future_epoch: Some(claimed_epoch),
+                        } => {
+                            if backend.folder_claim_undecided(channel_id) {
+                                // This pass's one claim read: the end-of-walk
+                                // ask would only repeat it.
+                                *met_refusal = false;
+                                match backend.ask_claim_proven_fork(channel_id).await {
+                                    ClaimRead::NotProven => {}
+                                    ClaimRead::Proven | ClaimRead::Unanswered => {
+                                        return Ok(FolderPollOutcome {
+                                            applied,
+                                            stalled: true,
+                                        });
+                                    }
+                                }
                             }
+                            backend
+                                .succession_statements
+                                .future_epoch_skips
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!(
+                                channel = %channel_id,
+                                seq,
+                                claimed_epoch,
+                                seat_epoch = ?backend.engine.current_epoch(channel_id).ok(),
+                                "folder walk: commit record skipped — its header claims an epoch \
+                                 ahead of this seat's and nothing in front of it moved the group"
+                            );
+                        }
+                        // Stop BEFORE this record — the cursor stays behind it, so
+                        // the next pass (or the next rebase round's catch-up)
+                        // retries the heal instead of silently consuming an epoch
+                        // transition the local group never incorporated (a local
+                        // failure, an own-leaf commit not yet resynced). No Rule-2
+                        // rewind on this rail: the folder cursor is RAM-only,
+                        // seeded to 0 each launch (`session.rs` `fs_cursors`), so
+                        // a restart already re-walks from 0.
+                        CommitApplyOutcome::Stalled { future_epoch: None } => {
                             return Ok(FolderPollOutcome {
                                 applied,
                                 stalled: true,
@@ -11796,6 +12318,7 @@ async fn walk_inbound_folder(
             });
         }
     }
+    settle_unanswered_gate_send(backend, channel_id, started_at).await;
     // The owner's re-seal, on a CLEAN walk only for the same reason as the
     // ingest below: sealing at an epoch with a commit still un-incorporated
     // would seal at one every member has already left.

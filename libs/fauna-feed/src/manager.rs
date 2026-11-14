@@ -108,6 +108,27 @@ const PAGE_LIMIT: i64 = 50;
 /// missing; nothing to write means nothing to fail. See [`crate::personalization`].
 const MUTED_KEYWORDS_IMPLICIT_WEIGHT: i64 = 1000;
 
+/// The weight the muted-keyword scorer carries under `composition`: the sum of
+/// any explicit `muted-keywords` entries, else [`MUTED_KEYWORDS_IMPLICIT_WEIGHT`].
+fn muted_keywords_weight(composition: &[FeedCompositionEntry]) -> i64 {
+    let explicit: i64 = composition
+        .iter()
+        .filter(|e| crate::personalization::is_muted_keywords_factor(&e.factor))
+        .map(|e| e.weight_permille)
+        .sum();
+    if explicit == 0 {
+        MUTED_KEYWORDS_IMPLICIT_WEIGHT
+    } else {
+        explicit
+    }
+}
+
+/// The poll step of the muted-words read's wait for an account store still
+/// opening (`FeedManager::muted_words_and_factors_settled`), inside
+/// [`fauna_client_config::LEDGER_READY_WAIT`] — the step the store seam's own
+/// waiting reads use.
+const PREFERENCES_READY_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How often [`FeedManager::hydrate_cues`] re-reads the e2e cue-hydration hold
 /// while it is held, and how many reads it waits at most: 3000 × 200 ms = 600 s.
 const CUE_HYDRATION_HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1003,7 +1024,11 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     }
 
     /// The muted words and the trained-topic registry, off the preference
-    /// read seam — or why they could not be read.
+    /// read seam — or why they could not be read. The error stays typed so a
+    /// caller can tell a store still opening ([`StoreError::is_not_ready`],
+    /// an uninstalled seam included) from one that answered and failed.
+    ///
+    /// [`StoreError::is_not_ready`]: fauna_client_config::StoreError::is_not_ready
     async fn muted_words_and_factors(
         &self,
     ) -> Result<
@@ -1011,17 +1036,54 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             Vec<fauna_core::data::MutedKeyword>,
             Vec<fauna_core::data::TrainedFactorMeta>,
         ),
-        String,
+        fauna_client_config::StoreError,
     > {
-        let store = self
-            .preferences
-            .read()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| "the account store is not ready yet".to_string())?;
-        let moderation = store.moderation().await.map_err(|e| e.to_string())?;
-        let personalization = store.personalization().await.map_err(|e| e.to_string())?;
+        let store = self.preferences.read().unwrap().clone().ok_or_else(|| {
+            fauna_client_config::StoreError::Load(fauna_client_config::LEDGER_NOT_READY.into())
+        })?;
+        let moderation = store.moderation().await?;
+        let personalization = store.personalization().await?;
         Ok((moderation.muted_keywords, personalization.trained_factors))
+    }
+
+    /// [`Self::muted_words_and_factors`], waiting out — inside the one
+    /// [`LEDGER_READY_WAIT`](fauna_client_config::LEDGER_READY_WAIT) — an
+    /// account store still opening: right after sign-in the store (or its read
+    /// gate, until the first listing lands) answers
+    /// [`LEDGER_NOT_READY`](fauna_client_config::LEDGER_NOT_READY) for a moment,
+    /// and a reload that took that as "the muted words cannot be read" would
+    /// show the filters-off notice until the next refresh, though the store
+    /// opens seconds later. Waiting rather than publishing the posts unfiltered
+    /// with no notice: unfiltered muted content is exactly what the user asked
+    /// never to see. The refusal it cannot wait out
+    /// ([`LEDGER_AWAITING_SIBLING`](fauna_client_config::LEDGER_AWAITING_SIBLING)
+    /// — another device must act) and every other answer return at once; a
+    /// store still not up at the bound is reported like any unreadable one.
+    async fn muted_words_and_factors_settled(
+        &self,
+    ) -> Result<
+        (
+            Vec<fauna_core::data::MutedKeyword>,
+            Vec<fauna_core::data::TrainedFactorMeta>,
+        ),
+        fauna_client_config::StoreError,
+    > {
+        let polls =
+            fauna_client_config::LEDGER_READY_WAIT.as_millis() / PREFERENCES_READY_POLL.as_millis();
+        for _ in 0..polls {
+            match self.muted_words_and_factors().await {
+                Err(
+                    fauna_client_config::StoreError::Load(m)
+                    | fauna_client_config::StoreError::Save(m),
+                ) if m == fauna_client_config::LEDGER_NOT_READY => {}
+                answer => return answer,
+            }
+            // The unit tests' single-poll executor has no timer; there each
+            // poll re-reads at once, which is the loop under test.
+            #[cfg(not(test))]
+            fauna_sleep::sleep(PREFERENCES_READY_POLL).await;
+        }
+        self.muted_words_and_factors().await
     }
 
     /// The installed period-key store, or why there is none.
@@ -1089,6 +1151,16 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     }
 
     // ── Reactivity ───────────────────────────────────────────────
+
+    /// The feed selection the list shows now —
+    /// [`FeedSnapshot::cue_selection_key`] read under the state lock, without
+    /// cloning the snapshot. The key a cue capture hands
+    /// [`CueTracker::note_selection`](crate::CueTracker::note_selection) on
+    /// every sample, so a feed switch ends every exposure
+    /// (`engagement-cues.md` § Cue vocabulary & derivation, `WindowDropped`).
+    pub fn cue_selection_key(&self) -> String {
+        self.state.read().unwrap().cue_selection_key()
+    }
 
     /// A cheap clone of the current state. The observer reads this on every
     /// `on_changed()`.
@@ -1294,6 +1366,21 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         if took {
             self.notify();
         }
+    }
+
+    /// The leave door's fill of the posts rail (`reserved-folders.md` § The
+    /// leave-flush promise; `fauna_client_drafts::DraftsSync::save_on_leave`):
+    /// the launch restore's FILL of the `resting` bytes the door's own read
+    /// found ([`Self::restore_drafts`] — a composer the user typed into keeps
+    /// their text, an untouched one takes the resting draft), then the snapshot
+    /// to save. The posts-rail twin of
+    /// `ConversationsManager::fill_drafts_for_leave`; it takes no identity
+    /// epoch because a feed manager serves one identity for its whole life
+    /// (every app rebuilds it at an identity change). One body for every app's
+    /// leave door — tui, linux, web and the FFI face — never a per-app copy.
+    pub fn fill_drafts_for_leave(&self, resting: &[u8]) -> Vec<u8> {
+        self.restore_drafts(resting.to_vec());
+        self.drafts_snapshot_bytes()
     }
 
     // ── e2e test-helper surface ──────────────────────────────────
@@ -1843,6 +1930,21 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             p.in_flight = true;
         }
         self.base_scores.write().unwrap().clear();
+        // A refresh keeps its posts on screen, so read the muted words BEFORE
+        // publishing them: the muted-words page writes through the account
+        // runtime, never through this manager, so this refresh is the first the
+        // manager hears of a just-added word — and without this the kept list's
+        // first frame would paint the newly muted post unfolded on every app
+        // (and the engagement-cue capture could open an exposure on it) until
+        // the full scorer load below. A failed read leaves the loaded scorers
+        // as they are; the full load surfaces it.
+        if refreshing_same_query && let Ok((muted, _)) = self.muted_words_and_factors().await {
+            let weight = muted_keywords_weight(&self.composition.read().unwrap());
+            self.sealed
+                .write()
+                .unwrap()
+                .set_muted_keywords(muted, weight);
+        }
         self.notify();
         // Test-only: a reload the hold was armed for parks HERE — after the list
         // it kept or cleared is published, before anything is fetched — until it
@@ -2237,7 +2339,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             }
         }
 
-        let (muted, engagement_on) = match self.muted_words_and_factors().await {
+        let (muted, engagement_on) = match self.muted_words_and_factors_settled().await {
             Ok((muted, factors)) => {
                 // Batched with the muted-keyword read (never a per-observation
                 // store read): the composed topic factors whose registry meta
@@ -2251,7 +2353,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     .collect();
                 (muted, on)
             }
-            // Surfaced, never swallowed: if the record cannot be read we do not
+            // Surfaced, never swallowed (a store still opening was waited out
+            // above, so this is one that cannot be read): if the record cannot be read we do not
             // know the user's muted words, so muted content would render with no
             // hint that their filters are off — precisely the content they asked
             // never to see. The feed still loads (the posts are here); the notice
@@ -2272,19 +2375,9 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             .unwrap()
             .retain(|key, _| live_memos.contains(key));
         if !muted.is_empty() {
-            let explicit: i64 = composition
-                .iter()
-                .filter(|e| crate::personalization::is_muted_keywords_factor(&e.factor))
-                .map(|e| e.weight_permille)
-                .sum();
-            let weight = if explicit == 0 {
-                MUTED_KEYWORDS_IMPLICIT_WEIGHT
-            } else {
-                explicit
-            };
             entries.push(SealedEntry {
                 factor: fauna_core::scoring::factor::MUTED_KEYWORDS.to_string(),
-                weight_permille: weight,
+                weight_permille: muted_keywords_weight(composition),
                 scorer: SealedScorer::MutedKeywords(muted),
             });
         }
@@ -4090,6 +4183,29 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         });
         self.notify();
         Ok(build.encrypted_blob)
+    }
+
+    /// The sell composer's asking-price field as sats, read by the one shared
+    /// rule ([`fauna_client_subscriptions::parse_asking_price_sats`], which
+    /// the *Change price…* dialog reads too): `Ok(None)` when not selling or
+    /// the field is empty, `Ok(Some(sats))` for a price. Text that is not a
+    /// whole number of sats is REFUSED — stamped on `compose-error` with the
+    /// rule's own catalog key — rather than read as "no price", so an author
+    /// who mistyped a price never publishes a post a zap cannot buy. Call it
+    /// before either sell phase and pass its answer to both.
+    pub fn compose_sell_asking_price_sats(&self) -> Result<Option<u64>, String> {
+        let text = {
+            let s = self.state.read().unwrap();
+            match &s.compose.sell {
+                Some(sell) => sell.asking_price.clone(),
+                None => return Ok(None),
+            }
+        };
+        fauna_client_subscriptions::parse_asking_price_sats(&text).map_err(|e| {
+            self.state.write().unwrap().compose.error = Some(LocalizedText::key(e.i18n_key()));
+            self.notify();
+            e.to_string()
+        })
     }
 
     /// **Phase one of "Sell this post…"** — mint the unlock tier and persist
@@ -7136,6 +7252,9 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         // Web-publish state → the ⋯ overflow's own-post web verbs. Carried
         // straight from the wire item; no per-row query.
         web_slug: p.web_slug,
+        // The Nostr advertisement flag → the own-post advertise verb pair
+        // (`PostSummary::nostr_advertise_verb`). Straight from the wire item.
+        nostr_advertised_at: p.nostr_advertised_at,
         gated_unlocked: false,
         labels: p.labels,
         // Resolved lazily by `resolve_post_unlock_offer` when `gated_tier`
@@ -7258,6 +7377,7 @@ fn map_fetched_post(
         reposted_room_label: None,
         reply_audience: None,
         web_slug: None,
+        nostr_advertised_at: None,
         gated_unlocked: false,
         labels: Vec::new(),
         unlock_offer: None,
@@ -8065,10 +8185,29 @@ mod tests {
         personalization: Mutex<fauna_core::data::PersonalizationConfig>,
         /// Every read fails — the account store cannot be read.
         unreadable: AtomicBool,
+        /// This many reads answer the not-ready refusal before the store
+        /// answers — the store still opening after sign-in.
+        not_ready_reads: std::sync::atomic::AtomicUsize,
+        /// Every read answers the awaiting-sibling refusal.
+        awaiting_sibling: AtomicBool,
     }
 
     impl TestPreferences {
         fn check(&self) -> Result<(), fauna_client_config::StoreError> {
+            if self.awaiting_sibling.load(Ordering::SeqCst) {
+                return Err(fauna_client_config::StoreError::Load(
+                    fauna_client_config::LEDGER_AWAITING_SIBLING.into(),
+                ));
+            }
+            if self
+                .not_ready_reads
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(fauna_client_config::StoreError::Load(
+                    fauna_client_config::LEDGER_NOT_READY.into(),
+                ));
+            }
             if self.unreadable.load(Ordering::SeqCst) {
                 Err(fauna_client_config::StoreError::Load(
                     "the account runtime is not running".into(),
@@ -9899,6 +10038,50 @@ mod tests {
         assert_eq!(m.snapshot().posts[0].post_id, "cc");
     }
 
+    /// The first paint after a mute is already folded. The muted-words page
+    /// writes through the account runtime, never through this manager, so the
+    /// refresh a client fires on re-entering its feed is the first the manager
+    /// hears of the new word — and a same-query refresh publishes the list it
+    /// keeps before it fetches anything. That kept list must already report the
+    /// newly muted post muted, or every app paints it unfolded for a frame (and
+    /// the engagement-cue capture can open an exposure on it).
+    #[test]
+    fn a_refresh_after_a_mute_publishes_its_kept_list_already_folded() {
+        let nest = MockNest::arc();
+        nest.seed_muted_keywords(&[]);
+        let mut spoiler = post("muted", 2);
+        spoiler.body = "SPOILER: the butler did it".into();
+        nest.push_page(vec![spoiler.clone(), post("plain", 1)], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        assert!(!m.is_muted("muted"), "nothing is muted yet");
+
+        // The user mutes a word on the muted-words page (the account store),
+        // then comes back to the feed; hold that refresh at its first publish.
+        nest.seed_muted_keywords(&["spoiler"]);
+        m.hold_next_reload_for_test();
+        nest.push_page(vec![spoiler, post("plain", 1)], None);
+        let mut refresh = Box::pin(m.refresh_current_feed());
+        assert!(
+            poll_once(&mut refresh).is_pending(),
+            "the held reload parks"
+        );
+        assert_eq!(
+            ids(&m),
+            vec!["muted", "plain"],
+            "the kept list is on screen"
+        );
+        assert!(
+            m.is_muted("muted"),
+            "the kept list's first frame already folds the newly muted post",
+        );
+        assert!(!m.is_muted("plain"));
+
+        m.release_held_reload_for_test();
+        assert!(poll_once(&mut refresh).is_ready());
+        assert!(m.is_muted("muted"), "and the landed page keeps it folded");
+    }
+
     /// Start a reload that parks before its fetch, so the page the mock serves
     /// it is the one queued NOW — a page fetched before whatever the caller
     /// does next. Returns the parked reload for [`release_and_land`].
@@ -10234,6 +10417,57 @@ mod tests {
             snap.error.is_some(),
             "the user must be told their muted words are not being applied",
         );
+    }
+
+    /// A store still opening is not an unreadable one: right after sign-in the
+    /// account store answers not-ready for a moment, and a feed reloaded in that
+    /// window waits it out instead of saying the filters are off — the notice
+    /// would otherwise stay until the next refresh, though the store opens
+    /// seconds later — and applies the muted words once the store answers.
+    #[test]
+    fn a_store_still_opening_is_waited_out_and_the_muted_words_apply() {
+        let nest = MockNest::arc();
+        nest.seed_muted_keywords(&["spoiler"]);
+        nest.preferences.not_ready_reads.store(3, Ordering::SeqCst);
+        let mut spoiler = post("muted", 2);
+        spoiler.body = "SPOILER: the butler did it".into();
+        nest.push_page(vec![spoiler, post("plain", 1)], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let snap = m.snapshot();
+        assert_eq!(snap.status, FeedStatus::Loaded);
+        assert_eq!(snap.posts.len(), 2);
+        assert!(
+            snap.error.is_none(),
+            "a store still opening is no lasting error: {:?}",
+            snap.error,
+        );
+        assert!(m.is_muted("muted"), "the muted words apply once it answers");
+        assert_eq!(
+            nest.preferences.not_ready_reads.load(Ordering::SeqCst),
+            0,
+            "every not-ready answer was waited out",
+        );
+    }
+
+    /// A store held for another of the account's devices cannot be waited out
+    /// (another device must act): the feed loads at once and says the filters
+    /// are off, as for any store that cannot be read.
+    #[test]
+    fn a_store_awaiting_another_device_says_the_filters_are_off() {
+        let nest = MockNest::arc();
+        nest.preferences
+            .awaiting_sibling
+            .store(true, Ordering::SeqCst);
+        nest.push_page(vec![post("aa", 2), post("bb", 1)], None);
+        let m = mgr(nest);
+        block_on(m.select_feed(None));
+
+        let snap = m.snapshot();
+        assert_eq!(snap.status, FeedStatus::Loaded, "the posts still load");
+        assert_eq!(snap.posts.len(), 2);
+        assert!(snap.error.is_some(), "the filters are off, and it says so");
     }
 
     #[test]
@@ -11247,6 +11481,7 @@ mod tests {
                         "fauna.posts.interact",
                         &r.2,
                     ),
+                    hold: None,
                 })
                 .collect())
         }
@@ -19860,6 +20095,30 @@ mod tests {
     /// The dedup baseline `DraftsSync::save_if_changed` compares is these
     /// bytes, so equal composer state MUST produce equal bytes — otherwise
     /// every launch would re-upload an unchanged draft to the user's fleet.
+    /// The leave door's fill (`DraftsSync::save_on_leave`): an untouched
+    /// composer takes the resting draft, so the snapshot it returns IS what
+    /// rests and the door writes nothing over it; a typed composer keeps the
+    /// user's text, so the snapshot is theirs and gets saved.
+    #[test]
+    fn the_leave_fill_takes_the_resting_draft_only_into_an_untouched_compose() {
+        let a = mgr(Arc::new(MockNest::default()));
+        a.update_compose("resting on the nest".into(), "walrus".into(), None);
+        let resting = a.drafts_snapshot_bytes();
+
+        let untouched = mgr(Arc::new(MockNest::default()));
+        assert_eq!(untouched.fill_drafts_for_leave(&resting), resting);
+
+        let typed = mgr(Arc::new(MockNest::default()));
+        typed.update_compose("typed before the gate opened".into(), String::new(), None);
+        let saved = typed.fill_drafts_for_leave(&resting);
+        assert_eq!(saved, typed.drafts_snapshot_bytes());
+        assert_ne!(saved, resting);
+        assert_eq!(
+            typed.snapshot().compose.text,
+            "typed before the gate opened"
+        );
+    }
+
     #[test]
     fn equal_composer_state_produces_equal_bytes_across_managers() {
         let a = mgr(Arc::new(MockNest::default()));

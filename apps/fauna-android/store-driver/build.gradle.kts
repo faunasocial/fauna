@@ -50,26 +50,35 @@ android {
     }
 }
 
-// ⚠ NO `dependencies` block yet, and `settings.gradle.kts` does not include
-// this module yet: its two dependency declarations are queued for the owner's
-// bump round (`supply-chain/bump-queue.toml`, needs 28 and 29), and land in
-// that round with the `include(":store-driver")` line. Until then nothing
-// configures or builds this module, so the app's own `assembleDebug` is
-// untouched. What the round adds, measured to build green 2026-11-03
-// against the existing `gradle/verification-metadata.xml` (no new artifact):
-//
-//   dependencies {
-//       implementation("androidx.test.uiautomator:uiautomator:2.3.0")
-//       implementation("org.nanohttpd:nanohttpd:2.3.1")
-//       // This small graph resolved to exactly the versions the app's
-//       // `debugAndroidTestRuntimeClasspath` resolves (read off
-//       // `:app:dependencies --configuration debugAndroidTestRuntimeClasspath`);
-//       // left alone, UiAutomator's own floor resolves annotation 1.4.0, which
-//       // the verified set does not hold.
-//       constraints {
-//           implementation("androidx.annotation:annotation") { version { strictly("1.8.0") } }
-//           implementation("androidx.annotation:annotation-jvm") { version { strictly("1.8.2") } }
-//           implementation("androidx.tracing:tracing") { version { strictly("1.0.0") } }
-//           implementation("org.jetbrains.kotlin:kotlin-stdlib") { version { strictly("2.0.21") } }
-//       }
-//   }
+// ⚠ NO active `dependencies` block yet, and `settings.gradle.kts` does not
+// include this module yet: its two dependency declarations are queued for the
+// owner's bump round (`supply-chain/bump-queue.toml`). The block below is
+// INERT: every line commented out between the two `bump-round inert` marker
+// lines. The round's resolve step for either need activates the
+// whole block (markers dropped, each line's `// ` removed, the need's
+// coordinate written at its one version) and writes the
+// `include(":store-driver")` line into `settings.gradle.kts`; the other
+// need's resolve then finds its line already written (nothing moved). Never
+// edit the block's coordinates by hand: a moved coordinate is a dependency
+// step (dependency-bump-report.md § Implementation status today, a Gradle add
+// into a module). Until the round activates it nothing configures or builds
+// this module, so the app's own `assembleDebug` is untouched. Measured to
+// build green 2026-11-03 against the existing
+// `gradle/verification-metadata.xml` (no new artifact).
+// bump-round inert: begin
+// dependencies {
+//     implementation("androidx.test.uiautomator:uiautomator:2.3.0")
+//     implementation("org.nanohttpd:nanohttpd:2.3.1")
+//     // This small graph resolved to exactly the versions the app's
+//     // `debugAndroidTestRuntimeClasspath` resolves (read off
+//     // `:app:dependencies --configuration debugAndroidTestRuntimeClasspath`);
+//     // left alone, UiAutomator's own floor resolves annotation 1.4.0, which
+//     // the verified set does not hold.
+//     constraints {
+//         implementation("androidx.annotation:annotation") { version { strictly("1.8.0") } }
+//         implementation("androidx.annotation:annotation-jvm") { version { strictly("1.8.2") } }
+//         implementation("androidx.tracing:tracing") { version { strictly("1.0.0") } }
+//         implementation("org.jetbrains.kotlin:kotlin-stdlib") { version { strictly("2.0.21") } }
+//     }
+// }
+// bump-round inert: end

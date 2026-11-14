@@ -210,7 +210,36 @@ public final class ConversationsVM {
     /// Throws rather than swallowing: every call site already wraps its own
     /// best-effort `do/catch` around the three statements this replaces, so
     /// the failure handling stays exactly where it was.
+    ///
+    /// **Rebuilds run one at a time, in call order.** Two logins can overlap in
+    /// one process — a launch's own sign-in still building its session when an
+    /// e2e session patch (or an account switch) starts the next — and the build
+    /// registers its rails on the one shared `manager`, so whichever build
+    /// FINISHED last would own the rails, however stale its client. Chaining each
+    /// call behind the previous one makes the latest login's build the last to
+    /// run, every time.
     public func rebuild(
+        api: APIClient, selfAddress: String, selfSecretHex: String,
+        deviceIdHex: String, predecessorBackupKeys: [Data],
+        archiveLinks: ArchiveLinksStore
+    ) async throws {
+        let previous = rebuildTail
+        let mine = Task { @MainActor in
+            await previous?.value
+            try await self.rebuildNow(
+                api: api, selfAddress: selfAddress, selfSecretHex: selfSecretHex,
+                deviceIdHex: deviceIdHex, predecessorBackupKeys: predecessorBackupKeys,
+                archiveLinks: archiveLinks)
+        }
+        rebuildTail = Task { @MainActor in _ = try? await mine.value }
+        try await mine.value
+    }
+
+    /// The tail of the `rebuild` chain — completes (never throws) when the most
+    /// recently started rebuild has.
+    @ObservationIgnored private var rebuildTail: Task<Void, Never>?
+
+    private func rebuildNow(
         api: APIClient, selfAddress: String, selfSecretHex: String,
         deviceIdHex: String, predecessorBackupKeys: [Data],
         archiveLinks: ArchiveLinksStore
@@ -471,17 +500,25 @@ public final class ConversationsVM {
     /// which reach this VM through `AppState.conversationsVM`. The events rail's
     /// twin is `EventsVM.flushDraftsNow`; `FeedVM` carries the mirror of this one.
     ///
-    /// Cancels the debounced task first so the two cannot both fire, then runs
-    /// the save it would have run. A no-op when no `draftsSync` is attached
+    /// Cancels the debounced task first so the two cannot both fire, then saves
+    /// through the rail's leave face, `FfiDraftsSync.saveConversationsOnLeave` —
+    /// so a door taken before the launch load has lifted the save gate still
+    /// saves, by one read of its own. A no-op when no `draftsSync` is attached
     /// (pre-login / E2E), which is what lets the leave doors call it
     /// unconditionally.
     public func flushDraftsNow() async {
         draftsSaveTask?.cancel()
         draftsSaveTask = nil
         guard let sync = draftsSync else { return }
+        // Captured at the door, before the first await: a teardown that clears
+        // the manager after this moves its epoch, and the leave face's fill then
+        // fills nothing, so `captured` is what is saved.
         let manager = self.manager
-        await flushDraftsAutosave(sync: sync, logTarget: "fauna.conversations.drafts") {
-            manager.draftsSnapshotBytes()
+        let epoch = manager.identityEpoch()
+        let captured = manager.draftsSnapshotBytes()
+        await flushDraftsAutosave(logTarget: "fauna.conversations.drafts") {
+            _ = try await sync.saveConversationsOnLeave(manager: manager, epoch: epoch,
+                                                        captured: captured)
         }
     }
 

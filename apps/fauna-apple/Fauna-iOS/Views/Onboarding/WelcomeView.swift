@@ -12,7 +12,7 @@ struct WelcomeView: View {
                 switch vm.step {
                 case .identityChoice:
                     // Shared FaunaKit view (priority #2, mirrors `TrustPromptView`).
-                    IdentityChoiceView(vm: vm)
+                    IdentityChoiceView(vm: vm, isAddingAccount: appState.isAddingAccount)
                 case .identityCreated:
                     IdentityCreatedView(vm: vm)
                 case .identityImport:
@@ -21,10 +21,11 @@ struct WelcomeView: View {
                     HandleEntryView(vm: vm)
                 // Nest setup is compiled out of Fauna Kids: a child joins their
                 // guardian's nest by invite, so the build never reaches a hosting or
-                // DNS provider (dynamic-features.md, the kids spine paragraph). The
-                // steps stay on handle entry, as on the android leg.
+                // DNS provider, nor a nest's claim — claiming makes its admin
+                // (dynamic-features.md, the kids spine paragraph). The steps stay on
+                // handle entry, as on the android leg.
                 #if FAUNA_KIDS
-                case .dnsConfig, .vpsConfig, .nestProvisioning:
+                case .dnsConfig, .vpsConfig, .nestProvisioning, .claimCode, .natModeChoice:
                     HandleEntryView(vm: vm)
                 #else
                 case .dnsConfig:
@@ -33,17 +34,17 @@ struct WelcomeView: View {
                     VpsConfigView(vm: vm)
                 case .nestProvisioning:
                     NestProvisioningView(vm: vm)
-                #endif
-                case .dnsPostInstructions:
-                    DnsPostInstructionsView(vm: vm)
-                case .inviteRequest:
-                    InviteRequestView(vm: vm)
                 // claim_code on an unclaimed nest, then the terminal admin-path
                 // NAT-mode confirm step (docs/goal/behavior/onboarding.md §3b-bis).
                 case .claimCode:
                     ClaimCodeView(vm: vm)
                 case .natModeChoice:
                     NatModeChoiceView(vm: vm)
+                #endif
+                case .dnsPostInstructions:
+                    DnsPostInstructionsView(vm: vm)
+                case .inviteRequest:
+                    InviteRequestView(vm: vm)
                 // Box-recovery step-4 recovery-wizard steps (box-recovery.md § Recovery
                 // UI, Task E) — shared FaunaKit views (priority #2, mirrors
                 // `AwaitingManualDnsView`). Mirrors `OnboardingContainerView` (macOS).

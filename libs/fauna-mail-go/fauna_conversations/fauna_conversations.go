@@ -1106,6 +1106,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_fill_drafts_for_leave()
+		})
+		if checksum != 10088 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_fill_drafts_for_leave: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_handle_for_person()
 		})
 		if checksum != 35460 {
@@ -2473,6 +2482,16 @@ type ConversationsManagerInterface interface {
 	// harvest (`identity-succession.md` § The succession statement → *the
 	// harvest wait*).
 	FaunaRosterActors() []ActorId
+	// The leave door's fill (`reserved-folders.md` § The leave-flush
+	// promise; `fauna_client_drafts::DraftsSync::save_on_leave`): the same
+	// FILL as [`Self::restore_drafts_at`] — a thread's live compose the user
+	// typed into keeps their text, an untouched one takes the resting draft,
+	// and a moved `epoch` fills nothing — but WITHOUT the restored-recipient
+	// probe. The session is leaving: the probe would spend the door's bounded
+	// budget on a rail answer nobody will see, and the snapshot taken right
+	// after carries the recipient's typed address either way. Returns the
+	// snapshot to save, [`Self::drafts_snapshot_bytes`] after the fill.
+	FillDraftsForLeave(epoch uint64, bytes []byte) []byte
 	// The handle `person` is currently seated under in the owner's own
 	// threads, for the two review surfaces that render a person **outside any
 	// one group** and therefore have no chip to read a name off.
@@ -4034,6 +4053,26 @@ func (_self *ConversationsManager) FaunaRosterActors() []ActorId {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_conversations_fn_method_conversationsmanager_fauna_roster_actors(
 				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// The leave door's fill (`reserved-folders.md` § The leave-flush
+// promise; `fauna_client_drafts::DraftsSync::save_on_leave`): the same
+// FILL as [`Self::restore_drafts_at`] — a thread's live compose the user
+// typed into keeps their text, an untouched one takes the resting draft,
+// and a moved `epoch` fills nothing — but WITHOUT the restored-recipient
+// probe. The session is leaving: the probe would spend the door's bounded
+// budget on a rail answer nobody will see, and the snapshot taken right
+// after carries the recipient's typed address either way. Returns the
+// snapshot to save, [`Self::drafts_snapshot_bytes`] after the fill.
+func (_self *ConversationsManager) FillDraftsForLeave(epoch uint64, bytes []byte) []byte {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBytesINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_method_conversationsmanager_fill_drafts_for_leave(
+				_pointer, FfiConverterUint64INSTANCE.Lower(epoch), FfiConverterBytesINSTANCE.Lower(bytes), _uniffiStatus),
 		}
 	}))
 }

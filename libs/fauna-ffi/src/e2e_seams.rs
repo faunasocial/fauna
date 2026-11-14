@@ -7,13 +7,18 @@
 //! (`crate::critical_alerts`). tui is the reference leg. The knock-toast log
 //! (`fauna_e2e_agent::KNOCK_NOTICES_KEY`) rides here too: the same shape of
 //! seam — a shared counter an app's firing arm feeds and its state publishes.
+//! So does convention 17's `painted_text_area` record
+//! (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`): an app measures each laid-out
+//! text element's room and the shared builder keeps the starved ones.
 //!
 //! `test-helpers` only (convention 15 rule (b)): the `*-ffi-test` flavors carry
 //! these; the production flavors — the shipped artifacts — compile them out.
 
 use std::sync::{Arc, Mutex};
 
-use fauna_e2e_contract::{ConnectionReports, KnockNotices, PaintedErrorTally};
+use fauna_e2e_contract::{
+    ConnectionReports, KnockNotices, LaidOutText, PaintedErrorTally, PaintedTextArea,
+};
 
 use crate::nest_client::FfiConnectionState;
 use crate::{FfiError, FfiNestClient};
@@ -128,6 +133,22 @@ pub fn subscriptions_hold_author_drain_for_test() {
 #[uniffi::export]
 pub fn subscriptions_release_author_drain_for_test() {
     fauna_client_subscriptions::orchestration::release_author_drain_for_test();
+}
+
+/// Ring the app-only outbox drain now — the `app_outbox_drain_now` agent
+/// command's mechanism on the UniFFI apps (`fauna_e2e_agent::APP_OUTBOX_DRAIN_NOW`
+/// owns the contract; tui's arm is the reference). It starts the process
+/// outbox's own drain through the lent conversations session
+/// (`crate::offline_outbox::DEVICE`), the same loop the lend, the store's
+/// ready edge and every offline→online word start, never a second one: a test
+/// that has just deleted the e2e drain-hold file rings it, because the held
+/// pass ended the loop. A no-op before the first connection word or with no
+/// session (pre-auth). Fire-and-forget — the barrier is the effect.
+#[cfg(feature = "test-helpers")]
+#[cfg(feature = "feed-manager")]
+#[uniffi::export]
+pub fn app_outbox_drain_now_for_test() {
+    crate::offline_outbox::DEVICE.drain();
 }
 
 /// The counter behind `fauna_e2e_agent::CONNECTION_REPORTS_KEY`. An app holds
@@ -308,5 +329,70 @@ mod tests {
                 "fired": [{ "key": "notifications.row_knock", "text": "hello", "replace_id": 1003 }],
             })
         );
+    }
+}
+
+/// A layout box's size in layout units (DIP) — the `pane` of a [`FfiLaidOutText`].
+#[derive(uniffi::Record)]
+pub struct FfiLayoutSize {
+    pub width: f64,
+    pub height: f64,
+}
+
+/// One id-bearing text element as the app's layout placed it — the UniFFI face
+/// of `fauna_e2e_contract::LaidOutText`, which owns the meaning of each field:
+/// `width`/`height` the ROOM the layout gave it (capped by every clipping
+/// ancestor, a scroll viewport excepted), `pane` its nearest ancestor that has
+/// a box, `depth` the box-less ancestors between them.
+#[derive(uniffi::Record)]
+pub struct FfiLaidOutText {
+    pub id: String,
+    pub text: String,
+    pub width: f64,
+    pub height: f64,
+    pub pane: Option<FfiLayoutSize>,
+    pub depth: u32,
+}
+
+/// The record behind `fauna_e2e_agent::PAINTED_TEXT_AREA_KEY` — convention
+/// 17's `painted-text-has-area` field. An app holds ONE, fed every laid-out
+/// frame's text elements (every one — the shared `PaintedTextArea` keeps the
+/// starved ones and caps them), and publishes [`Self::json`] under that key.
+#[derive(uniffi::Object)]
+pub struct FfiPaintedTextAreaForTest {
+    inner: Mutex<PaintedTextArea>,
+}
+
+#[uniffi::export]
+impl FfiPaintedTextAreaForTest {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(PaintedTextArea::default()),
+        })
+    }
+
+    /// Replace the record with one laid-out frame.
+    pub fn observe(&self, frame: Vec<FfiLaidOutText>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(frame.into_iter().map(|e| LaidOutText {
+                id: e.id,
+                text: e.text,
+                width: e.width,
+                height: e.height,
+                pane: e.pane.map(|p| (p.width, p.height)),
+                depth: e.depth,
+            }));
+    }
+
+    /// The `painted_text_area` state value, as JSON text.
+    pub fn json(&self) -> String {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .json()
+            .to_string()
     }
 }

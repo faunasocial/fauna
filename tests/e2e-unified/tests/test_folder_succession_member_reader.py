@@ -86,7 +86,7 @@ from helpers.succession_ceremony import (
     settled_actor_id,
     wait_for_successor_actor,
 )
-from helpers.succession_file_door import seat_file_door, stolen_seat
+from helpers.succession_file_door import seat_file_door, seat_media_door, stolen_seat
 from helpers.waiting import wait_until
 from i18n.strings import S
 from tests.test_folder_member_media_decrypt import _member_opens_and_reads
@@ -116,6 +116,9 @@ pytestmark = [
 _HYDRATION_S = 180.0
 #: A nest round trip for a change-row read.
 _ROSTER_S = 30.0
+#: An earlier file already in the seat's copy, read again after the re-share:
+#: the Media page's re-list and re-download, never a crossing.
+_STAYED_S = 60.0
 
 
 @pytest.mark.timeout(1800)
@@ -205,9 +208,21 @@ def test_after_the_owner_takes_the_account_back_a_member_keeps_the_old_files_and
     # A fresh Media re-entry re-judges the listing whole: A's row is signed by
     # the retired identity and served naming the successor.
     _member_opens_and_reads(bob_app, bob_app.driver, file_a0, payload_a0.encode())
-    assert m_door.read(file_a0) == payload_a0, (
-        f"[M] {file_a0} left M's copy after A's recovery — a member's copy of "
-        "the owner's earlier file must stay"
+    # A short wait, not a one-shot read (the re-share witness's own shape): the
+    # door re-enters the page and re-scopes its filter, so a repaint is "not
+    # yet", and the door's reason splits a file the listing lost from one whose
+    # download failed. A one-shot read here went red on iOS with `None` and no
+    # reason, one line after the open above had read the same file.
+    wait_until(
+        lambda: m_door.read(file_a0) == payload_a0,
+        _STAYED_S,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[M] {file_a0} left M's copy after A's recovery — a member's copy "
+            f"of the owner's earlier file must stay: {m_door.last_read_why}\n"
+            f"[M] folders.list now: {_member_rows(nest_instance, bob)}\n"
+            + m_door.diagnosis()
+        ),
     )
 
     # ── 5. Observable 2: the stolen key's later file is refused ────────────
@@ -268,6 +283,18 @@ def _member_badges(app) -> list[str]:
     except LookupError:  # the list repainted under the read; next tick
         return []
     return out
+
+
+def _member_rows(nest, member) -> str:
+    """The member's own ``fauna.folders.list`` rows with the member-visible
+    projection, as a diagnosis string — the stored fact the claimant read
+    keys on (convention 5: a tier_3 read inside a diagnose)."""
+    from tests.api import conv_api
+
+    try:
+        return repr(conv_api.folder_rows(nest["port"], member))
+    except Exception as exc:  # noqa: BLE001 — diagnosis only
+        return f"<unavailable: {exc!r}>"
 
 
 def _owner_member_count(app, set_name: str) -> int | None:
@@ -351,6 +378,13 @@ def test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shar
     m_door = seat_file_door(
         bob_app, set_name, tmp_path, seat="member", shared_from=(nest_instance, alice)
     )
+    # M's judged door (step 6) is addressed NOW: its row id is read off the nest
+    # as the owner, and after step 3 the owner's old identity is superseded —
+    # the nest refuses its bearer (`fauna.auth.superseded`). The row itself
+    # survives the recovery, so the address read here stays good.
+    m_judged = seat_media_door(
+        bob_app, set_name, tmp_path, seat="member", shared_from=(nest_instance, alice)
+    )
     request.addfinalizer(lambda: print(m_door.diagnosis()))
     request.addfinalizer(lambda: print(a_door.diagnosis()))
     file_a0 = f"owner-before-{secrets.token_hex(3)}.txt"
@@ -412,6 +446,7 @@ def test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shar
             # it (no fork to paint): the witness's own report says which.
             f"[M] data.succession_witness="
             f"{bob_app.driver.get_state('data.succession_witness')!r}\n"
+            f"[M] folders.list now: {_member_rows(nest_instance, bob)}\n"
             + m_door.diagnosis()
         ),
     )
@@ -467,10 +502,39 @@ def test_a_member_whose_copy_could_not_follow_the_owners_new_identity_is_re_shar
             f"reached M. error={bob_app.error_text()!r}\n" + m_door.diagnosis()
         ),
     )
+    # The owner's earlier file is read where M's app JUDGES it, not only where
+    # its bytes rest: on a bound-folder app the file stays on disk whether or
+    # not M's listing admits the row, and the cut makes the owner's
+    # pre-ceremony head history until the successor's take-over re-records it
+    # (`succession-cut.md` ruling (11)(c), (d), and (l) where no engine runs).
+    # `m_judged` was addressed at step 1, before the owner's identity retired.
+    wait_until(
+        lambda: m_judged.read(file_a0) == payload_a0,
+        _STAYED_S,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[M] {file_a0}, the owner's file from before the recovery, is not "
+            f"listed and readable on M's Media page — the successor's take-over "
+            f"did not re-record it, so M judges it history: "
+            f"{m_judged.last_read_why}\n"
+            f"[M] folders.list now: {_member_rows(nest_instance, bob)}\n"
+            + m_judged.diagnosis()
+        ),
+    )
     for name, payload in ((file_a0, payload_a0), (file_m0, payload_m0)):
-        assert m_door.read(name) == payload, (
-            f"[M] {name}, in M's copy before the recovery, did not stay through "
-            "the fork and the re-share"
+        # A short wait, not a one-shot read: the Media page's door re-lists and
+        # re-downloads, so a repaint is "not yet", and the door's own reason
+        # splits a file the listing lost from one whose generation fails closed.
+        wait_until(
+            lambda name=name, payload=payload: m_door.read(name) == payload,
+            _STAYED_S,
+            interval=2.0,
+            diagnose=lambda name=name: (
+                f"[M] {name}, in M's copy before the recovery, did not stay "
+                f"through the fork and the re-share: {m_door.last_read_why}\n"
+                f"[M] folders.list now: {_member_rows(nest_instance, bob)}\n"
+                + m_door.diagnosis()
+            ),
         )
     assert not bob_app.has_error(), (
         f"[M] the member's app surfaced an error: {bob_app.error_text()!r}"

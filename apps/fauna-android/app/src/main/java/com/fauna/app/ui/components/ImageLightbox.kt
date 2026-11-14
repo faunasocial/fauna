@@ -1,6 +1,14 @@
 package com.fauna.app.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
@@ -24,7 +32,12 @@ import com.fauna.app.R
 import social.fauna.generated.Ids
 
 @Composable
-fun ImageLightbox(model: Any, onDismiss: () -> Unit) {
+fun ImageLightbox(model: Any?, onDismiss: () -> Unit, placeholder: String? = null) {
+    // `model == null` is the placeholder form (conversations.md `dm-attachment-image[i]`: a
+    // picture whose bytes this device does not hold opens as its declared placeholder, never a
+    // dropped click) — same `image-lightbox` node, the declared filename-and-size in the middle.
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
 
@@ -42,21 +55,42 @@ fun ImageLightbox(model: Any, onDismiss: () -> Unit) {
                 .fillMaxSize()
                 .testTag(Ids.IMAGE_LIGHTBOX)
                 .background(Color.Black.copy(alpha = 0.9f))
+                // Escape closes it (the other apps' dismiss; ui.yaml declares no dismiss
+                // element inside the lightbox) — back is the dialog's own onDismissRequest.
+                .focusRequester(focusRequester)
+                .focusable()
+                .onPreviewKeyEvent { e ->
+                    if (e.type == KeyEventType.KeyDown && e.key == Key.Escape) {
+                        onDismiss()
+                        true
+                    } else {
+                        false
+                    }
+                }
         ) {
-            AsyncImage(
-                model = model,
-                contentDescription = "Image",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = offset.x,
-                        translationY = offset.y
-                    )
-                    .transformable(state = transformableState)
-            )
+            if (model != null) {
+                AsyncImage(
+                    model = model,
+                    contentDescription = "Image",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offset.x,
+                            translationY = offset.y
+                        )
+                        .transformable(state = transformableState)
+                )
+            } else {
+                Text(
+                    placeholder.orEmpty(),
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
 
             IconButton(
                 onClick = onDismiss,

@@ -16,6 +16,15 @@ struct ContactSplitView: View {
             ContactsViewSegment(showAddressBook: $showAddressBook)
                 .padding([.horizontal, .top], 12)
 
+            // The page's own error — a refused knock action (a ward's dismiss of a
+            // held knock, `family-safety.md` § Reach), a failed accept/confirm —
+            // rendered at page level so it shows with no contact selected.
+
+            if !showAddressBook, let error = vm.errorMessage {
+                ErrorBanner(message: error)
+                    .padding(.horizontal, 12)
+            }
+
             if showAddressBook {
                 AddressBookView(
                     pendingUidHash: appState.pendingContactUidHash,

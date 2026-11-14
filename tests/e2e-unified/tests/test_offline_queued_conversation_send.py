@@ -41,10 +41,10 @@ import time
 
 import pytest
 
-from common.nest import start_nest_in_place, stop_nest
+from common.nest import start_nest_in_place
 from helpers.conversations_restart import fauna_thread, wait_fauna_thread
+from helpers.nest_outage import hold_nest_down
 from helpers.waiting import wait_until
-from i18n.strings import S
 from tests.api import conv_api
 
 pytestmark = [
@@ -58,9 +58,6 @@ pytestmark = [
     pytest.mark.real_conversations,
 ]
 
-#: The connection indicator leaving ``Connected`` once the nest is held down.
-DISCONNECT_S = 90.0
-
 #: The offline send painting its own copy (a local outbox write).
 QUEUE_S = 60.0
 
@@ -72,24 +69,6 @@ def _stamp() -> int:
     return int(time.time() * 1000) % 1_000_000
 
 
-def _hold_nest_down(app, nest_instance) -> None:
-    stop_nest(nest_instance, graceful=True)
-    status = {}
-
-    def disconnected() -> bool:
-        if not app.is_visible("connection-status"):
-            return False
-        status["text"] = app.driver.get_text("connection-status")
-        return status["text"] != S.common.connected
-
-    wait_until(
-        disconnected, DISCONNECT_S,
-        diagnose=lambda: (
-            f"connection-status still read {status.get('text')!r} with the nest "
-            "down — the seat never noticed the outage, so the send below would "
-            "not be offline at all"
-        ),
-    )
 
 
 def _rendered_texts(app) -> list[str]:
@@ -126,7 +105,7 @@ def test_a_conversation_message_sent_offline_is_queued_kept_across_restart_and_d
     line = f"typed with no nest {_stamp():06d}"
     app.conversations.navigate()
     app.conversations.open_thread_by_channel(channel_hex)
-    _hold_nest_down(app, nest_instance)
+    hold_nest_down(app, nest_instance, act="the send below")
     try:
         app.conversations.send_in_open_thread(line)
         seen: dict = {}

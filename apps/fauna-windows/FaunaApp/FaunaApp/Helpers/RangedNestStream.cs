@@ -14,7 +14,7 @@ namespace FaunaApp.Helpers;
 /// <see cref="GetInputStreamAt"/> answer independent cursors over the same reader, which
 /// the pipeline opens to parse beside the playing stream.
 /// <para>Disposing it releases nothing: the reader is shared by every clone and belongs to
-/// <c>VideoThumbnailView</c>, which releases it once, with the player.</para>
+/// the slot's <c>InlineVideoSession</c>, which releases it once, with the player.</para>
 /// </summary>
 internal sealed class RangedNestStream : IRandomAccessStream
 {

@@ -709,6 +709,13 @@ class _StubConfig:
             # Inert: the public-clone path (`--public-clone`) is not the subject
             # of any pin here; `None` is its "flag absent" answer.
             return None
+        if name == "basetemp":
+            # Inert: `take_elevated_temproot` (tests/common/elevation.py) leaves an
+            # explicit `--basetemp` alone, so a set value is the one answer that
+            # moves no temp root and reclaims nothing in the real session this
+            # stub's hook call runs in. `None` would let an elevated run's hook
+            # re-point the process's temp.
+            return "stub-basetemp"
         raise AssertionError(
             f"_StubConfig was asked for an option it has no answer for: {name!r}. "
             f"`conftest.pytest_configure` grew a new option — decide what this "

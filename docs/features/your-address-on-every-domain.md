@@ -37,7 +37,7 @@ Stamped 2026-10-27 at 7942c4870f.
 | macos | ✅ full | 0.1.5-dev+30b3fe7d standalone |
 | ios | ✅ full | 0.1.5-dev+30b3fe7d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+5a315c21.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

@@ -1,0 +1,364 @@
+# The notices manifest: every artifact Fauna ships in binary form and the roots
+# of the closure its THIRD-PARTY-NOTICES covers, per ecosystem.
+#
+# Owner: docs/goal/architecture/shipped-notices.md § How the notices file is
+# produced. The generator is scripts/shipped-notices.py, run as
+# `just shipped-notices <artifact> <out>`; the cheap gate
+# `just shipped-notices-check` holds that every `channel` below is a row of the
+# goal doc's § Per channel table and that every licence id in deny.toml's
+# allow list has its fallback text under supply-chain/licence-texts/.
+#
+# Each artifact names:
+#   name     the product name the notices file's header prints
+#   channel  the goal doc's § Per channel row, verbatim
+#   rust     one root group, or a list of them — one per cargo invocation the
+#            artifact's build makes: packages, features, no_default_features,
+#            target or targets (empty = the host). Resolved per group with
+#            CARGO_RESOLVER_FEATURE_UNIFICATION=selected, normal edges only,
+#            proc-macros left out (they run in the compiler, not in the binary).
+#   go       binaries: the built Go binaries whose recorded module list
+#            (`go version -m`) is the closure; paths relative to the
+#            repository root, replaced per run by one (`--set go.binary=<path>`).
+#            module: the main module's directory, from which a local `replace`
+#            path (a fork in the tree) resolves — the binary's own directory
+#            when unnamed. A module under Fauna's own path is Fauna's and left
+#            out; a linked module the module cache lacks is fetched inside the
+#            main module (go.sum-checked) before its files are copied.
+#   npm      dir (package.json + deno.lock + node_modules), and `bundled`: the
+#            build-time packages whose runtime code the bundler inlines into
+#            the served app (Svelte's runtime and SvelteKit's client).
+#   nuget    assets: the published project's project.assets.json; deps: the
+#            published app's <app>.deps.json, whose `runtimepack` libraries are
+#            the runtime packs a self-contained publish copies into the output
+#            (the .NET runtime, the Windows SDK projection) — `{rid}` is filled
+#            from the run's Windows target (`--target`) — and whose
+#            `runtimeTarget` names the runtime of the app host the published
+#            .exe is (Microsoft.NETCore.App.Host.<rid>: the restore's download
+#            when it fetched one, else the .NET SDK's own copy at the runtime
+#            pack's version, with that pack's id and files).
+#   gradle   report: the `gradle :app:dependencies --configuration <c>` output
+#            the Android build writes for the release runtime classpath.
+#   bundled  dir (where the build staged them, replaced per run by
+#            `--set bundled.dir=<dir>`) and components: the binaries the
+#            artifact ships that no package resolver lists, each with its
+#            name, version, origin, source, licence (an SPDX id inside
+#            deny.toml's allow list, or one an exception below passes, with its
+#            reading), the binary's file name under `dir` (it
+#            must be there) and the licence files its build staged beside it
+#            (copied byte for byte; one missing fails the run; none named,
+#            and the licence's standard text stands in).
+#
+# No line names the toolchain's own runtime code: the generator adds it to
+# every artifact that links it (its `toolchain` leg) — the Rust standard
+# library where an artifact names `rust` (from `rustc -vV` and the sysroot's
+# share/doc/rust/COPYRIGHT-library.html), the Go standard library and runtime
+# once per Go version its `go` binaries record (LICENSE at `go env GOROOT`,
+# asked in the binary's main module, which must be that version).
+#
+# The roots below were read off the release recipes and workflows on
+# 2026-11-12 (justfile tui-release, linux-release, windows-ffi,
+# windows-services-release, windows-store-package, apple-ffi-host,
+# apple-ffi-store-safe, _android-ffi-flavor, nest, servers-release,
+# the wasm-* recipes, the Dockerfile, installer/macos/build.sh). A recipe that
+# changes what it builds changes its artifact here in the same commit.
+
+# --- Terminal archives -------------------------------------------------------
+
+[artifact.terminal-archive-linux]
+name = "Fauna terminal apps"
+channel = "Terminal archives (`.tar.gz`, `.zip`)"
+rust = { packages = ["fauna-tui", "fauna-sync-agent", "fauna-cli-device"], targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }
+
+[artifact.terminal-archive-macos]
+name = "Fauna terminal apps"
+channel = "Terminal archives (`.tar.gz`, `.zip`)"
+rust = { packages = ["fauna-tui", "fauna-sync-agent", "fauna-cli-device"], targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"] }
+
+[artifact.terminal-archive-windows]
+name = "Fauna terminal apps"
+channel = "Terminal archives (`.tar.gz`, `.zip`)"
+rust = [
+    { packages = ["fauna-tui", "fauna-cli-device"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-sync-agent"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+]
+
+# --- Bare binaries published as release assets --------------------------------
+
+[artifact.release-nest]
+name = "Fauna nest"
+channel = "A bare binary published as a release asset"
+rust = { packages = ["fauna-nest"], features = ["bluesky", "nostr", "activitypub"], targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"] }
+
+[artifact.release-push-relay]
+name = "Fauna push relay"
+channel = "A bare binary published as a release asset"
+rust = { packages = ["fauna-push-relay"], targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"] }
+
+[artifact.release-cors-proxy]
+name = "Fauna CORS proxy"
+channel = "A bare binary published as a release asset"
+rust = { packages = ["fauna-cors-proxy"], targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"] }
+
+[artifact.release-front-door]
+name = "Fauna front door"
+channel = "A bare binary published as a release asset"
+rust = { packages = ["fauna-front-door"], targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"] }
+
+[artifact.release-linux-desktop]
+name = "Fauna for Linux"
+channel = "A bare binary published as a release asset"
+rust = { packages = ["fauna-linux", "fauna-sync-agent"], targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }
+
+# --- Linux desktop, every packaging -------------------------------------------
+
+[artifact.linux-desktop]
+name = "Fauna for Linux"
+channel = "Linux desktop, every packaging"
+rust = { packages = ["fauna-linux", "fauna-sync-agent"], targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }
+
+# --- Windows ------------------------------------------------------------------
+
+[artifact.windows-msi]
+name = "Fauna for Windows"
+channel = "Windows MSI"
+rust = [
+    { packages = ["fauna-ffi"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-sync-agent"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-nest-service"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-bridge-service"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-shell-ext"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-tui", "fauna-cli-device"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    # the mail bridge's own FFI library (gnullvm, labeler only)
+    { packages = ["fauna-ffi"], no_default_features = true, features = ["labeler"], targets = ["x86_64-pc-windows-gnullvm", "aarch64-pc-windows-gnullvm"] },
+]
+# `just windows-mail-bridge-build` stages the bridge in target/, away from its
+# module; `module` is where the module's local `replace` paths resolve from.
+go = { binaries = ["target/fauna-mail-bridge.exe"], module = "bins/fauna-bridges" }
+# `deps`: the self-contained publish of `just windows-app-publish` (its
+# PUBLISH_DIR, with `{rid}` for its runtime identifier).
+nuget = { assets = "apps/fauna-windows/FaunaApp/FaunaApp/obj/project.assets.json", deps = "apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/net10.0-windows10.0.26100/{rid}/publish/FaunaApp.deps.json" }
+
+# The Bridge feature's libunwind.dll (ServiceBridge.wxs), the gnullvm FFI
+# library's one runtime dependency outside the OS: `_windows-go-cgo-build` takes
+# it from the llvm-mingw toolchain (its target triple's copy) and stages it in
+# target/ beside the bridge, with the toolchain's own licence file (its root
+# LICENSE.TXT) as llvm-mingw/LICENSE.TXT; release.yml's mail-bridge part carries
+# both, and `just windows-msi-notices` points `dir` at the bridge's directory.
+# `version` is the LLVM release the toolchain is built from (`clang --version`
+# of llvm-mingw 20260616); `origin` and `source` name the llvm-mingw release
+# release.yml and the win setup guide pin, which a tier_1 test holds equal.
+[artifact.windows-msi.bundled]
+dir = "target"
+
+[[artifact.windows-msi.bundled.components]]
+name = "libunwind"
+version = "22.1.8"
+origin = "the llvm-mingw toolchain, release 20260616"
+source = "https://github.com/mstorsjo/llvm-mingw/releases/tag/20260616"
+licence = "Apache-2.0 WITH LLVM-exception"
+binary = "libunwind.dll"
+files = ["llvm-mingw/LICENSE.TXT"]
+
+# The mingw-w64 runtime the gnullvm link puts into the mail bridge and its FFI
+# library (its startup objects and the static part of its C runtime;
+# shipped-notices.md § How the notices file is produced, the toolchain bullet,
+# Owed (d)), named as a whole. llvm-mingw builds it from mingw-w64's sources
+# and names no mingw-w64 version, so `version` is the toolchain release.
+# `_windows-go-cgo-build` stages the licence files the toolchain carries for it
+# (<root>/<triple>/share/mingw32/COPYING*) beside the bridge as
+# llvm-mingw/mingw32/, and release.yml's mail-bridge part carries them. Its id is
+# outside deny.toml's allow list and passes on the exception below.
+[[artifact.windows-msi.bundled.components]]
+name = "mingw-w64 runtime"
+version = "20260616"
+origin = "the llvm-mingw toolchain, release 20260616"
+source = "https://github.com/mstorsjo/llvm-mingw/releases/tag/20260616"
+licence = "LicenseRef-Fedora-Public-Domain AND ZPL-2.1"
+binary = "fauna-mail-bridge.exe"
+files = [
+    "llvm-mingw/mingw32/COPYING",
+    "llvm-mingw/mingw32/COPYING.MinGW-w64-runtime.txt",
+    "llvm-mingw/mingw32/COPYING.MinGW-w64.txt",
+    "llvm-mingw/mingw32/COPYING.winpthreads.txt",
+    "llvm-mingw/mingw32/COPYING.winstorecompat.txt",
+]
+
+[artifact.windows-store]
+name = "Fauna for Windows"
+channel = "Microsoft Store package (MSIX)"
+rust = [
+    { packages = ["fauna-ffi"], no_default_features = true, features = ["store-safe", "p2p-share"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-sync-agent"], no_default_features = true, features = ["p2p-share"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-shell-ext"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+]
+nuget = { assets = "apps/fauna-windows/FaunaApp/FaunaApp/obj/project.assets.json", deps = "apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/net10.0-windows10.0.26100/{rid}/publish/FaunaApp.deps.json" }
+
+# `windows-store` above is the store-no-payments flavour, the one an upload
+# carries; `just windows-store-package` builds two more, each packed with the
+# notices of its own closure (the recipe's flavour table picks the artifact).
+[artifact.windows-store-safe]
+name = "Fauna for Windows"
+channel = "Microsoft Store package (MSIX)"
+rust = [
+    { packages = ["fauna-ffi"], no_default_features = true, features = ["store-safe"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-sync-agent"], no_default_features = true, targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-shell-ext"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+]
+nuget = { assets = "apps/fauna-windows/FaunaApp/FaunaApp/obj/project.assets.json", deps = "apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/net10.0-windows10.0.26100/{rid}/publish/FaunaApp.deps.json" }
+
+[artifact.windows-store-full]
+name = "Fauna for Windows"
+channel = "Microsoft Store package (MSIX)"
+rust = [
+    { packages = ["fauna-ffi"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-sync-agent"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+    { packages = ["fauna-shell-ext"], targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] },
+]
+nuget = { assets = "apps/fauna-windows/FaunaApp/FaunaApp/obj/project.assets.json", deps = "apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/net10.0-windows10.0.26100/{rid}/publish/FaunaApp.deps.json" }
+
+# --- Apple --------------------------------------------------------------------
+
+[artifact.macos-app]
+name = "Fauna for macOS"
+channel = "macOS `.app` (in the `.dmg` and the `.pkg`)"
+rust = [
+    { packages = ["fauna-ffi"], features = ["file-provider-host"], target = "aarch64-apple-darwin" },
+    { packages = ["fauna-sync-agent"], target = "aarch64-apple-darwin" },
+]
+
+[artifact.macos-pkg-tools]
+name = "Fauna for macOS"
+channel = "macOS `.pkg`, the parts outside the app"
+rust = [
+    { packages = ["fauna-nest-daemon", "fauna-sync-agent", "fauna-bridge-supervisor", "fauna-tui", "fauna-cli-device"], target = "aarch64-apple-darwin" },
+    { packages = ["fauna-ffi"], no_default_features = true, features = ["labeler"], target = "aarch64-apple-darwin" },
+]
+go = { binaries = ["bins/fauna-bridges/fauna-mail-bridge"] }
+
+[artifact.ios-app]
+name = "Fauna for iOS"
+channel = "iOS app"
+rust = { packages = ["fauna-ffi"], no_default_features = true, features = ["store-safe", "file-provider-host"], target = "aarch64-apple-ios" }
+
+# --- Android ------------------------------------------------------------------
+
+# One artifact per shipping build type: each packages its own FFI flavor
+# (justfile _android-ffi-flavor) and resolves its own runtime classpath. The
+# report is written by `just _android-notices <buildtype>` (`gradle
+# :app:dependencies --configuration <buildtype>RuntimeClasspath`), which every
+# shipping recipe runs before Gradle packages the notices into `assets/`.
+
+# android-release, android-bundle: the production FFI flavor.
+[artifact.android-release]
+name = "Fauna for Android"
+channel = "Android app (every channel)"
+rust = { packages = ["fauna-ffi"], features = ["file-provider-host"], targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"] }
+gradle = { report = "apps/fauna-android/app/build/shipped-notices/release/runtime-classpath.txt" }
+
+# android-foss: the production FFI flavor, no Play client libraries.
+[artifact.android-foss]
+name = "Fauna for Android"
+channel = "Android app (every channel)"
+rust = { packages = ["fauna-ffi"], features = ["file-provider-host"], targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"] }
+gradle = { report = "apps/fauna-android/app/build/shipped-notices/foss/runtime-classpath.txt" }
+
+# android-store-safe, android-bundle-store-safe.
+[artifact.android-store-safe]
+name = "Fauna for Android"
+channel = "Android app (every channel)"
+rust = { packages = ["fauna-ffi"], no_default_features = true, features = ["store-safe", "file-provider-host"], targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"] }
+gradle = { report = "apps/fauna-android/app/build/shipped-notices/storeSafe/runtime-classpath.txt" }
+
+# android-store-no-payments, android-bundle-store-no-payments: the Play upload.
+[artifact.android-store-no-payments]
+name = "Fauna for Android"
+channel = "Android app (every channel)"
+rust = { packages = ["fauna-ffi"], no_default_features = true, features = ["store-safe", "p2p-share", "file-provider-host"], targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"] }
+gradle = { report = "apps/fauna-android/app/build/shipped-notices/storeNoPayments/runtime-classpath.txt" }
+
+# android-kids: the Fauna Kids identity.
+[artifact.android-kids]
+name = "Fauna for Android"
+channel = "Android app (every channel)"
+rust = { packages = ["fauna-ffi"], no_default_features = true, features = ["kids-safe", "kids-floor", "file-provider-host"], targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"] }
+gradle = { report = "apps/fauna-android/app/build/shipped-notices/kids/runtime-classpath.txt" }
+
+# --- Nest image and web app -----------------------------------------------------
+
+[artifact.nest-image]
+name = "Fauna nest"
+channel = "Nest image"
+rust = [
+    { packages = ["fauna-nest", "fauna-sandbox", "fauna-sni-router"], features = ["bluesky", "nostr", "activitypub"] },
+    { packages = ["fauna-ffi"], no_default_features = true, features = ["labeler"] },
+    { packages = ["fauna-iroh-relay"], features = ["fauna-iroh-relay/relay"] },
+    { packages = ["fauna-updater"] },
+    { packages = ["fauna-wasm", "fauna-wasm-onboarding", "fauna-wasm-launch", "fauna-wasm-folders", "fauna-wasm-backups", "fauna-wasm-media", "fauna-wasm-labeler-catalog", "fauna-wasm-share", "fauna-wasm-connected-apps", "fauna-wasm-atproto-settings"], target = "wasm32-unknown-unknown" },
+]
+go = { binaries = ["bins/fauna-bridges/fauna-mail-bridge", "bins/fauna-bridges/fauna-supervisor", "bins/fauna-bridges/fauna-atproto-bridge"] }
+npm = { dir = "apps/fauna-web", bundled = ["svelte", "@sveltejs/kit"] }
+
+[artifact.web-app]
+name = "Fauna for the web"
+channel = "Web app"
+rust = { packages = ["fauna-wasm", "fauna-wasm-onboarding", "fauna-wasm-launch", "fauna-wasm-folders", "fauna-wasm-backups", "fauna-wasm-media", "fauna-wasm-labeler-catalog", "fauna-wasm-share", "fauna-wasm-connected-apps", "fauna-wasm-atproto-settings"], target = "wasm32-unknown-unknown" }
+npm = { dir = "apps/fauna-web", bundled = ["svelte", "@sveltejs/kit"] }
+
+# --- Exceptions -----------------------------------------------------------------
+# A component whose licence id is missing or outside deny.toml's allow list
+# passes only with an entry here carrying its reading. `name` may end in `*`.
+
+[[exception]]
+ecosystem = "nuget"
+name = "Microsoft.WindowsAppSDK*"
+licence = "LicenseRef-Microsoft-WindowsAppSDK"
+reading = "The Windows App SDK runtime is under Microsoft's own terms, which permit redistributing it with an application; the package's own licence file is copied into the notices."
+
+[[exception]]
+ecosystem = "nuget"
+name = "Microsoft.Web.WebView2"
+licence = "LicenseRef-Microsoft-WebView2"
+reading = "The WebView2 loader is under Microsoft's own terms, which permit redistributing it with an application; the package's own licence file is copied into the notices."
+
+[[exception]]
+ecosystem = "nuget"
+name = "Microsoft.Windows.SDK.NET.Ref"
+licence = "LicenseRef-Microsoft-WindowsSDK"
+reading = "The Windows SDK projection (Microsoft.Windows.SDK.NET.dll and WinRT.Runtime.dll), a runtime pack the .NET SDK copies into the published output of an app that targets a Windows version (the published app's deps.json lists it as a runtimepack library). Its nuspec for 10.0.26100.57 declares no licence expression and the package carries no licence file; the nuspec names Microsoft's Windows SDK licence by URL (licenseUrl https://aka.ms/WinSDKLicenseURL, requireLicenseAcceptance true, authors Microsoft; read 2026-11-13). Recorded under those terms; no text is copied, and the entry names them."
+
+[[exception]]
+ecosystem = "bundled"
+name = "mingw-w64 runtime"
+licence = "LicenseRef-Fedora-Public-Domain AND ZPL-2.1"
+reading = "The mingw-w64 runtime's startup objects and the static part of its C runtime, which the gnullvm link puts into fauna-mail-bridge.exe and the fauna_ffi.dll beside it, as llvm-mingw 20260616 builds them from mingw-w64's sources (the release names no mingw-w64 version). No package resolver lists it and the toolchain carries no structured licence record. Fedora's package of the same runtime, mingw-crt 14.0.0, declares LicenseRef-Fedora-Public-Domain AND ZPL-2.1 in its spec's License field (src.fedoraproject.org rpms/mingw-crt, rawhide, read 2026-11-13); Arch Linux's mingw-w64-crt 14.0.0 records only LicenseRef-custom (its package API, read the same day). Recorded as Fedora's record declares it, ZPL-2.1 being outside the allow list; ZPL-2.1 asks a redistribution in binary form to reproduce its notice. The five licence files the toolchain carries for mingw-w64 (share/mingw32/COPYING* under its target triple's directory) are copied byte for byte, and the runtime is named as a whole."
+
+
+[[exception]]
+ecosystem = "npm"
+name = "@contentauth/c2pa-types"
+licence = "MIT"
+reading = "The package's package.json declares no licence, and neither the npm registry nor deps.dev records one for 0.7.5. Its registry metadata names its source repository, contentauth/c2pa-js, whose licence GitHub's licence API reports as MIT (spdx_id MIT, read 2026-11-12); @contentauth/c2pa-web 0.15.2, published from the same repository and the web app's direct dependency, declares MIT. Recorded as MIT; the standard MIT text stands in if the package carries no file of its own."
+
+[[exception]]
+ecosystem = "go"
+name = "github.com/ipfs/bbloom"
+licence = "MIT"
+reading = "The repository's notices file leaves v0.0.4 unverified (deps.dev holds no licence data for it). ClearlyDefined's definition for go/golang/github.com/ipfs/bbloom v0.0.4 declares MIT, and GitHub's licence API reports MIT (spdx_id MIT) for its source repository, ipfs/bbloom (both read 2026-11-12). The module's own licence file is copied into the notices."
+
+[[exception]]
+ecosystem = "go"
+name = "github.com/multiformats/go-base36"
+licence = "Apache-2.0 AND MIT"
+reading = "The repository's notices file leaves v0.2.0 unverified (deps.dev holds no licence data for it), and GitHub's licence API reports NOASSERTION for its source repository, multiformats/go-base36 — a licence file it does not classify. ClearlyDefined's definition for go/golang/github.com/multiformats/go-base36 v0.2.0 declares Apache-2.0 AND MIT (read 2026-11-12), both in the allow list; recorded as ClearlyDefined declares it, the stricter reading of a dual licence. The module's own licence file is copied into the notices."
+
+[[exception]]
+ecosystem = "gradle"
+name = "com.google.android.gms:*"
+licence = "LicenseRef-Google-Android-SDK"
+reading = "Google Play services client libraries (pulled in by the Play-distributed build types' store-age arm) are under Google's Android Software Development Kit License Agreement, which permits distributing them as part of an app; their POMs name no licence, so the entry names the terms; an archive's own licence file is copied where it passes the copy limits (core-common's and integrity's are over 256 KiB, left out and reported)."
+
+[[exception]]
+ecosystem = "gradle"
+name = "com.google.android.play:*"
+licence = "LicenseRef-Google-Android-SDK"
+reading = "Google Play client libraries (Play Integrity, Play Age Signals and their common core, on the Play-distributed build types only) are under Google's Android Software Development Kit License Agreement and each API's own terms, which permit distributing them as part of an app; their POMs name no licence, so the entry names the terms; an archive's own licence file is copied where it passes the copy limits (core-common's and integrity's are over 256 KiB, left out and reported)."

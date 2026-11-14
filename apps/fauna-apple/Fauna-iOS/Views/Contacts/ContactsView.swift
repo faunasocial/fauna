@@ -39,6 +39,14 @@ struct ContactsView: View {
                 // iOS Events. Cost: rows lose `.insetGrouped` inset styling (accepted
                 // rule-6 production-UI tradeoff).
                 VStack(alignment: .leading, spacing: 16) {
+                // The page's own error — a refused knock action (a ward's dismiss of a
+                // held knock, `family-safety.md` § Reach), a failed accept/confirm —
+                // rendered at page level so it shows with no contact selected.
+
+                if let error = vm.errorMessage {
+                    ErrorBanner(message: error)
+                }
+
                 // Contact roster filter (`contacts-search-field`) — local,
                 // case-insensitive substring over the already-loaded contacts via
                 // the shared roster filter (`ContactsVM.rosterGroups`); `common.search`
@@ -206,8 +214,8 @@ struct ContactsView: View {
                             .padding(.vertical, 2)
                             .accessibilityElement(children: .contain)
                             .accessibilityIdentifier(Ids.knockCard)
-                            // Presence anchor for the indexed knock row. Env-gated no-op.
-                            .automationValue(Ids.knockCard, text: { shortId(hex: knock.sender) })
+                            // The indexed knock row answers with its summary, as on every app (tui `a_knock_names_its_sender_by_the_shared_short_id`); the sender is `knock-sender`. Env-gated no-op.
+                            .automationValue(Ids.knockCard, text: { knock.summary ?? "" })
                         }
                     }
                 }

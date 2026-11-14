@@ -410,6 +410,32 @@ def test_a_test_failing_on_one_platform_is_mixed_even_if_another_platform_passed
     assert fc.compute_cell(pages[0], "tui", ledger).state == "partial"
 
 
+@pytest.mark.parametrize("refresh", ["mixed", "failed"])
+def test_a_cross_platform_mix_with_no_other_pass_is_mixed_never_failing(tmp_path, refresh):
+    """§ Cell semantics, the ⚠ row: one test passing on linux and failing on windows
+    is "mixed" — so a cell whose only pass is one platform of a test is ⚠, never ❌
+    (the features page's Failing meaning: "none of them passed")."""
+    mixed = {**rec(platform="linux"), **rec(outcome="failed", platform="windows")}
+    pages, ledger = _catalog(tmp_path, {"tui": ledger_file("tui", {"feed-read": {
+        "cell": cell_entry(),
+        "tests": {
+            OWN: mixed,
+            REFRESH: mixed if refresh == "mixed" else rec("failed"),
+        }}})})
+    assert fc.compute_cell(pages[0], "tui", ledger).state == "partial"
+
+
+def test_a_test_failing_on_every_platform_still_folds_to_failing(tmp_path):
+    pages, ledger = _catalog(tmp_path, {"tui": ledger_file("tui", {"feed-read": {
+        "cell": cell_entry(),
+        "tests": {
+            OWN: {**rec(outcome="failed", platform="linux"),
+                  **rec(outcome="error", platform="windows")},
+            REFRESH: rec("failed"),
+        }}})})
+    assert fc.compute_cell(pages[0], "tui", ledger).state == "failing"
+
+
 def test_a_test_passing_on_every_platform_that_recorded_it_still_folds_to_full(tmp_path):
     text = PAGE.replace("   - (none)",
                         "   - `tests/e2e-unified/tests/api/test_delete.py::test_delete`")

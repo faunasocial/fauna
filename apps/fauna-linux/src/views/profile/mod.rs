@@ -92,6 +92,13 @@ pub fn open_actor(client: &FaunaClient, actor_id: &str, home: Option<String>) ->
 /// (`profile.md` § Where logic lives → *The actor's home*).
 type HomeSlot = Rc<RefCell<Option<String>>>;
 
+/// The home a write to the viewed actor carries, read off the page's slot at
+/// press time — the one read the follow and the Tiers tab's claim redeem share,
+/// so a code redeems exactly where the follow would subscribe.
+fn press_home(slot: &RefCell<Option<String>>) -> Option<String> {
+    slot.borrow().clone()
+}
+
 /// What the open page reports as `data.profile` (ui.yaml `profile.is_self`,
 /// `profile.actor_id`, `profile.home_nest_url`).
 struct PageReport {
@@ -364,13 +371,20 @@ pub fn build_profile_view(
     // The published display_name (once `fauna.profile.get` returns) feeds the
     // header's names: on the SELF profile over the cached handle, then the
     // actor_id; on another's through the shared resolver ([`HeaderNames`]).
+    // Filled once the OTHER Tiers tab is built (below): the header read calls
+    // it after writing the slot.
+    let home_moved: HomeMovedHook = Rc::new(RefCell::new(None));
     let refresh_header: Rc<dyn Fn()> = {
         let client = Rc::clone(client);
         let names = header_widgets.names.clone();
         let pictures = header_widgets.pictures.clone();
         let actor_id = actor_id.clone();
         // SELF has no home to resolve, so no slot to fill.
-        let home = (!is_self).then(|| (Rc::clone(&actor_home), carried_home.clone()));
+        let home = (!is_self).then(|| HeaderHome {
+            slot: Rc::clone(&actor_home),
+            carried: carried_home.clone(),
+            moved: Rc::clone(&home_moved),
+        });
         Rc::new(move || refresh_header_name(&client, &names, &pictures, &actor_id, home.clone()))
     };
     // The text-only edit form (publish via `fauna.profile.set`) is SELF-only.
@@ -397,10 +411,14 @@ pub fn build_profile_view(
     let (tiers_page, refresh_tiers) = if is_self {
         tiers::build_tiers_tab(client, error_label.clone())
     } else {
-        // Another actor's offered tiers (subscriber browse). A malformed target
-        // hex degrades to an empty offers list rather than panicking.
+        // Another actor's offered tiers (subscriber browse), read from the
+        // page's actor-home slot. A malformed target hex degrades to an empty
+        // offers list rather than panicking.
         let author = ActorId::from_hex(&actor_id).unwrap_or(ActorId([0u8; 32]));
-        offers::build_offers_tab(client, error_label.clone(), author)
+        let (page, refresh, moved) =
+            offers::build_offers_tab(client, error_label.clone(), author, Rc::clone(&actor_home));
+        *home_moved.borrow_mut() = Some(moved);
+        (page, refresh)
     };
     stack.add_named(&tiers_page, Some("tiers"));
     stack.set_visible_child_name("posts");
@@ -644,7 +662,7 @@ fn build_header(
             let actor_home = Rc::clone(actor_home);
             let toggle = Rc::clone(&toggle);
             follow_btn.connect_clicked(move |_| {
-                let home = actor_home.borrow().clone();
+                let home = press_home(&actor_home);
                 toggle.press(&client, &actor_id, home)
             });
         }
@@ -1117,7 +1135,7 @@ fn toggle_block(
 /// `fetch_pictures`. Every call (a save included) refetches both.
 ///
 /// `home` (OTHER only) is the page's actor-home slot with the hint the open
-/// carried: the slot as the open seeded it is where the relay goes, and the
+/// carried (and the Tiers tab's re-read hook, run after the slot is written): the slot as the open seeded it is where the relay goes, and the
 /// SAME read replaces it through the shared rule ([`actor_home_for`]) — the
 /// profile the header renders is the one whose home a follow or knock from this
 /// page goes to.
@@ -1126,7 +1144,7 @@ fn refresh_header_name(
     names: &HeaderNames,
     pictures: &HeaderPictures,
     actor_id: &str,
-    home: Option<(HomeSlot, Option<String>)>,
+    home: Option<HeaderHome>,
 ) {
     let nest = client.nest_rpc().clone();
     let actor_id = actor_id.to_string();
@@ -1135,8 +1153,8 @@ fn refresh_header_name(
     let pictures = pictures.clone();
     let blob_client = Rc::clone(client);
     let painted = actor_id.clone();
-    let relay_home = home.as_ref().and_then(|(slot, _)| slot.borrow().clone());
-    let carried = home.as_ref().and_then(|(_, carried)| carried.clone());
+    let relay_home = home.as_ref().and_then(|h| h.slot.borrow().clone());
+    let carried = home.as_ref().and_then(|h| h.carried.clone());
     let is_other = home.is_some();
     spawn_with_snapshot(
         &client.runtime_handle(),
@@ -1191,13 +1209,32 @@ fn refresh_header_name(
         move |(display_name, resolved, named)| {
             *names.display_name.borrow_mut() = display_name;
             names.paint(&painted);
-            if let Some((slot, _)) = home {
-                *slot.borrow_mut() = resolved;
+            if let Some(h) = home {
+                *h.slot.borrow_mut() = resolved;
+                // The OTHER Tiers tab re-reads its offers if they were read
+                // under the home this read just replaced.
+                let moved = h.moved.borrow().clone();
+                if let Some(moved) = moved {
+                    moved();
+                }
             }
             fetch_header_pictures(&blob_client, &pictures, named);
         },
     );
 }
+
+/// What the OTHER header read needs of the page's actor home: the slot it
+/// reads and replaces, the hint the open carried, and the hook the Tiers tab
+/// sets so a replaced slot re-reads the offers (filled once the tab is built).
+#[derive(Clone)]
+struct HeaderHome {
+    slot: HomeSlot,
+    carried: Option<String>,
+    moved: HomeMovedHook,
+}
+
+/// The OTHER Tiers tab's `home_moved` entry point, set after the tab is built.
+type HomeMovedHook = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
 /// The pictures a header read found named: their hex blob hashes, and the
 /// nest whose blob route serves them ([`picture_home`]).

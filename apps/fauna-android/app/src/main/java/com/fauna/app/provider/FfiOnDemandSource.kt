@@ -132,6 +132,19 @@ class FfiOnDemandSource @Inject constructor(
         desired.values.map { it.first }
     }
 
+    /**
+     * The sets this provider binds an engine to — the plan's presences plus any
+     * host still open — for the engine roster ([com.fauna.app.core.EngineRoster],
+     * `succession-cut.md` ruling (11)(l)). Unlike [sets], a plan that could not
+     * be read THROWS rather than answering empty: an empty answer would let the
+     * take-over claim a set this provider presents.
+     */
+    suspend fun boundScopedIds(): List<String> = lock.withLock {
+        val acct = currentAccount() ?: throw IllegalStateException("no account to plan the on-demand sets of")
+        if (desired.isEmpty()) replan(acct)
+        (desired.keys + hosts.keys).toList()
+    }
+
     override suspend fun host(scopedId: String): OnDemandSetHost? {
         hosts[scopedId]?.let { return it }
         return lock.withLock {

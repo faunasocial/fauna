@@ -480,21 +480,129 @@ pub async fn reconcile_supervisor(
     carddav_enabled: bool,
     webdav_enabled: bool,
 ) {
-    notify_service(
-        MTA_SERVICE,
-        mta_should_run(node_mode, scanners, mail_enabled),
+    let (mta_up, mda_up) = supervisor_decision(
+        node_mode,
+        scanners,
+        ServiceToggles {
+            mail: mail_enabled,
+            caldav: caldav_enabled,
+            carddav: carddav_enabled,
+            webdav: webdav_enabled,
+        },
+    );
+    notify_service(MTA_SERVICE, mta_up).await;
+    notify_service(MDA_SERVICE, mda_up).await;
+}
+
+/// The one up/down decision for the two mail-bridge roles: `(mta_up, mda_up)`.
+/// [`reconcile_supervisor`] (the enable handlers' send) and
+/// [`reassert_supervisor_once`] (the periodic re-assert) both act on it.
+fn supervisor_decision(
+    node_mode: crate::config::NodeMode,
+    scanners: fauna_core::mail_availability::ContentScanners,
+    t: ServiceToggles,
+) -> (bool, bool) {
+    (
+        mta_should_run(node_mode, scanners, t.mail),
+        mda_should_run(t.mail, t.caldav, t.carddav, t.webdav),
     )
-    .await;
-    notify_service(
-        MDA_SERVICE,
-        mda_should_run(
-            mail_enabled,
-            caldav_enabled,
-            carddav_enabled,
-            webdav_enabled,
-        ),
-    )
-    .await;
+}
+
+/// What one supervisor re-assert pass did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorReassert {
+    /// Each role's command was sent (best-effort) with these desired states.
+    Sent { mta_up: bool, mda_up: bool },
+    /// A factory reset is staged: the handler already forced every role down
+    /// and the process is about to exit into the wipe — sending nothing.
+    ResetStaged,
+    /// The toggles could not be read; nothing sent. An all-off guess would
+    /// down a serving box on a transient read error.
+    ToggleReadFailed,
+}
+
+/// One pass of the supervisor re-assert: re-send each mail-bridge role's
+/// up/down from the persisted toggles and the live NAT axis.
+///
+/// The flag reconcile heals a flag that disagrees with the toggle, but a role
+/// can also be DOWN with its flag on disk: an enable that lands inside a
+/// run-script's boot flag guard (the guard read the flags before the enable
+/// wrote them; the nest's `up` arrived while that run-script was still alive,
+/// changing nothing; the guard's own `s6-svc -d` then won). Nothing else ever
+/// re-sends the `up`, so this pass does. `s6-svc -u` on an up service and `-d`
+/// on a down one are no-ops, so re-sending every pass is idempotent.
+///
+/// A pass racing a disable can re-up a role once (its read predates the
+/// disable); the run-script's flag guard re-downs it — the handler removes the
+/// flag before it sends — and the next pass sends the down. Logs at debug: the
+/// enable handlers' sends are the info-level record of an admin's change.
+/// Per `mail-bridge-lifecycle.md` § Default-off on first claim.
+pub async fn reassert_supervisor_once(
+    db: &crate::db::CacheDb,
+    data_dir: &Path,
+    node_mode: crate::config::NodeMode,
+    scanners: fauna_core::mail_availability::ContentScanners,
+    socket: &str,
+) -> SupervisorReassert {
+    if crate::factory_reset::marker_path(data_dir).exists() {
+        return SupervisorReassert::ResetStaged;
+    }
+    let toggles = match effective_service_toggles(db).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                target: "mail_enable",
+                error = %format!("{e:#}"),
+                "supervisor re-assert skipped — toggle read failed"
+            );
+            return SupervisorReassert::ToggleReadFailed;
+        }
+    };
+    let (mta_up, mda_up) = supervisor_decision(node_mode, scanners, toggles);
+    for (service, up) in [(MTA_SERVICE, mta_up), (MDA_SERVICE, mda_up)] {
+        let action = if up { "up" } else { "down" };
+        match send_supervisor_command(socket, action, service).await {
+            Ok(()) => tracing::debug!(
+                target: "mail_enable",
+                action,
+                service,
+                "supervisor re-assert sent"
+            ),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => tracing::warn!(
+                target: "mail_enable",
+                socket,
+                action,
+                service,
+                error = %e,
+                "supervisor re-assert failed"
+            ),
+            Err(_) => {}
+        }
+    }
+    SupervisorReassert::Sent { mta_up, mda_up }
+}
+
+/// Spawn the boot-plus-periodic supervisor re-assert ([`reassert_supervisor_once`]
+/// against [`SUPERVISOR_SOCKET`]): the first pass runs at boot, then every
+/// `interval`. The NAT axis is read live each pass (an admin may change it at
+/// runtime); the scanner declaration is fixed for the process. Spawned only
+/// when the deployment has a data dir, beside the flag reconciles.
+pub fn spawn_supervisor_reconciliation(
+    db: std::sync::Arc<crate::db::CacheDb>,
+    node_mode: std::sync::Arc<tokio::sync::RwLock<crate::config::NodeMode>>,
+    scanners: fauna_core::mail_availability::ContentScanners,
+    data_dir: PathBuf,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    // spawn-ok(returns-handle-for-scope): caller adopts via `AppState::scope_handle`
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            let mode = *node_mode.read().await;
+            reassert_supervisor_once(&db, &data_dir, mode, scanners, SUPERVISOR_SOCKET).await;
+        }
+    })
 }
 
 /// One reconciliation pass: compare the persisted `mail_enabled` toggle against
@@ -1249,6 +1357,125 @@ mod tests {
             reconcile_supervisor(mode, ContentScanners::Unknown, false, false, false, true).await;
             reconcile_supervisor(mode, ContentScanners::Unknown, false, false, false, false).await;
         }
+    }
+
+    /// Capture every line-framed command written to a fake supervisor socket.
+    /// The path sits under `/tmp` because a unix socket path is capped near 108
+    /// bytes and the test temp dir may be deeper than that.
+    #[cfg(unix)]
+    #[allow(clippy::type_complexity)]
+    fn fake_supervisor() -> (
+        PathBuf,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::AsyncReadExt;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = PathBuf::from(format!("/tmp/fsup-{}-{nanos}.sock", std::process::id()));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        // spawn-ok(test)
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = String::new();
+                let _ = stream.read_to_string(&mut buf).await;
+                sink.lock().unwrap().extend(buf.lines().map(str::to_string));
+            }
+        });
+        (path, seen, handle)
+    }
+
+    /// **The reconcile heals the supervisor state, not only the flag.**
+    ///
+    /// The docker CalDAV-only venue enabled CalDAV inside the MDA run-script's
+    /// boot flag guard: the nest's `up` landed while the guard's run-script was
+    /// still alive, and the guard's own `s6-svc -d` then won — MDA down, its
+    /// flag on disk, and the 60 s pass rewrote only flags, so nothing healed it.
+    /// A pass whose toggles say a role runs must re-send that role's command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_reassert_resends_each_roles_command_from_the_toggles() {
+        use crate::config::NodeMode;
+        use fauna_core::mail_availability::ContentScanners;
+        let db = crate::db::CacheDb::open_in_memory().unwrap();
+        db.set_caldav_enabled(true).await.unwrap();
+        let tmp = TmpDir::new();
+        let (sock, seen, server) = fake_supervisor();
+
+        let outcome = reassert_supervisor_once(
+            &db,
+            tmp.path(),
+            NodeMode::Public,
+            ContentScanners::Wired,
+            sock.to_str().unwrap(),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            SupervisorReassert::Sent {
+                mta_up: false,
+                mda_up: true
+            }
+        );
+        for _ in 0..100 {
+            if seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                supervisor_command("down", MTA_SERVICE)
+                    .trim_end()
+                    .to_string(),
+                supervisor_command("up", MDA_SERVICE).trim_end().to_string(),
+            ],
+            "a CalDAV-only nest re-asserts MTA down and MDA up on every pass"
+        );
+        server.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// The factory-reset handler forces every role down and then exits into the
+    /// wipe; a reconcile tick between that down and the exit must not re-up a
+    /// service from toggles the wipe is about to erase.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_reassert_stands_down_while_a_factory_reset_is_staged() {
+        use crate::config::NodeMode;
+        use fauna_core::mail_availability::ContentScanners;
+        let db = crate::db::CacheDb::open_in_memory().unwrap();
+        db.set_mail_enabled(true).await.unwrap();
+        let tmp = TmpDir::new();
+        crate::factory_reset::stage_factory_reset(tmp.path(), "code").unwrap();
+        let (sock, seen, server) = fake_supervisor();
+
+        let outcome = reassert_supervisor_once(
+            &db,
+            tmp.path(),
+            NodeMode::Public,
+            ContentScanners::Wired,
+            sock.to_str().unwrap(),
+        )
+        .await;
+
+        assert_eq!(outcome, SupervisorReassert::ResetStaged);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no supervisor command while a factory reset is staged"
+        );
+        server.abort();
+        let _ = std::fs::remove_file(&sock);
     }
 
     #[test]

@@ -61,31 +61,32 @@ def feed_row(seat: Seat, text: str):
     return seat.app.feed.post_state_by_text(text)
 
 
-def follow_across_nests(follower: Seat, author: Seat, home: dict, away: dict) -> None:
-    """``follower`` (on ``away``) follows ``author`` (on ``home``) through the
-    UI, and returns once the follower's own nest holds the follow as approved
-    in the followers tier."""
+def open_profile_across_nests(viewer: Seat, author: Seat, home: dict):
+    """``viewer`` opens ``author``'s Profile (the author homed on ``home``)
+    through Find User by ``handle@authority`` — the door that carries the
+    author's home into the page's actor-home slot — and returns the viewer's
+    profile actions once the page names that home."""
     author_address = f"{author.handle}@{home['authority']}"
 
     # ── The door: Find User across nests → the author's profile ──────────
-    contacts = follower.app.contacts
+    contacts = viewer.app.contacts
     contacts.navigate()
     contacts.find_by_handle(author_address)
     wait_for(
-        "the follower's Find User resolving the author on their home nest",
+        "the viewer's Find User resolving the author on their home nest",
         contacts.actor_id_result_text,
         lambda text: text == author.actor_hex,
         CROSSING_BUDGET_S,
-        diagnose=lambda: f"find-error={contacts.find_error_text()!r}\n{seat_story(follower)}",
+        diagnose=lambda: f"find-error={contacts.find_error_text()!r}\n{seat_story(viewer)}",
     )
     contacts.open_found_profile()
-    profile = follower.app.profile
+    profile = viewer.app.profile
     assert profile.wait_for_viewed_actor(author.actor_hex) == author.actor_hex, (
         f"the door opens the found author: error={profile.error_text()!r}"
     )
     carried = wait_for(
         "the door carrying the author's home into the profile",
-        lambda: ((follower.app.driver.get_state() or {}).get("data", {}).get("profile") or {}).get(
+        lambda: ((viewer.app.driver.get_state() or {}).get("data", {}).get("profile") or {}).get(
             "home_nest_url"
         ),
         bool,
@@ -95,6 +96,14 @@ def follow_across_nests(follower: Seat, author: Seat, home: dict, away: dict) ->
         f"the carried home names the author's nest: profile.home_nest_url={carried!r}, "
         f"authority={home['authority']!r}"
     )
+    return profile
+
+
+def follow_across_nests(follower: Seat, author: Seat, home: dict, away: dict) -> None:
+    """``follower`` (on ``away``) follows ``author`` (on ``home``) through the
+    UI, and returns once the follower's own nest holds the follow as approved
+    in the followers tier."""
+    profile = open_profile_across_nests(follower, author, home)
     assert profile.wait_for_follow_button(), seat_story(follower)
 
     # ── Follow at the home ────────────────────────────────────────────────

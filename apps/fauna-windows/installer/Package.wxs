@@ -6,7 +6,7 @@
   Build (the -ext flags are required — Util + UI + Firewall extensions):
     wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext \
       -ext WixToolset.Firewall.wixext \
-      -o Fauna-Setup-x64.msi installer/*.wxs \
+      -o Fauna-Setup-x64.msi installer/*.wxs -loc installer/Strings.wxl \
       -d SyncBin=stage/x64/fauna-sync-agent.exe \
       -d TuiBin=stage/x64/fauna-tui.exe \
       -d CliBin=stage/x64/fauna-cli.exe \
@@ -14,7 +14,11 @@
       -d BridgeBin=stage/x64/fauna-bridge-svc.exe \
       -d ShellDll=stage/x64/fauna_shell.dll \
       -d IconDir=stage/x64/icons/ \
-      -d AppDir=stage/x64/app/
+      -d AppDir=stage/x64/app/ \
+      -d NoticesDir=stage/x64/notices/
+
+  NoticesDir holds the three licence files `just windows-msi-notices <dir> <arch>`
+  writes (Notices.wxs).
 
   (fauna-ctl no longer exists — no CtlBin var; see § Feature Tree in
    docs/goal/architecture/installers/windows.md. The Bridge/MailBridge -d vars
@@ -32,7 +36,7 @@
   <Package
     Name="Fauna"
     Manufacturer="Fauna Social"
-    Version="0.1.6"
+    Version="0.1.7"
     UpgradeCode="4a7b8c00-f1e2-4d3a-b5c6-000000000001"
     Scope="perMachine"
     InstallerVersion="500">
@@ -58,6 +62,10 @@
 
     <!-- ── UI ── -->
     <ui:WixUI Id="WixUI_FeatureTree" />
+    <!-- The dialog set's licence page shows this file; unset, WiX shows its built-in
+         placeholder text. The page's words are a public text (License.rtf). Anchored to
+         this file's directory so the build's working directory does not matter. -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf" />
 
     <!-- ── Force-kill the INSTALL-FOLDER FaunaApp only if Restart Manager couldn't: scoped last-resort net ──
       FaunaApp.exe can linger as a windowless background process, locking FaunaApp.exe and
@@ -407,6 +415,8 @@
       <ComponentGroupRef Id="AppComponents" />
       <ComponentGroupRef Id="ProtocolComponents" />
       <ComponentGroupRef Id="StartMenuComponents" />
+      <!-- The three licence files ride every top-level feature (Notices.wxs). -->
+      <ComponentGroupRef Id="NoticesComponents" />
     </Feature>
 
     <!-- Sync — optional, default on (per-user logon agent, not a machine service) -->
@@ -426,6 +436,7 @@
            to clean, so the value is unneeded there.) MSI component
            reference-counting handles the shared component. -->
       <ComponentGroupRef Id="DataCleanup" />
+      <ComponentGroupRef Id="NoticesComponents" />
 
       <!-- Explorer Integration (child of Sync) — default ON (Level=1, USER-decision
            2026-06-23). The shell-ext DLL loads into explorer.exe via COM. Under Path 1
@@ -467,6 +478,7 @@
              AllowAbsent="yes">
     <!-- public-text-end: windows-installer-descriptions -->
       <ComponentGroupRef Id="TerminalAppComponents" />
+      <ComponentGroupRef Id="NoticesComponents" />
     </Feature>
 
     <!-- Nest — optional, default OFF (Level=1000, same default-off pattern as
@@ -489,6 +501,7 @@
            (Sync deselected) still writes the DataDir reg value + arms the
            ProgramData uninstall cleanup via this ref. -->
       <ComponentGroupRef Id="DataCleanup" />
+      <ComponentGroupRef Id="NoticesComponents" />
 
       <!-- Bridge — optional child of Nest, default off (Level=1000), requires Nest.
            The Nest requirement is enforced by the parent/child nesting ALONE: the

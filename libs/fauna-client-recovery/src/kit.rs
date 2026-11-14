@@ -263,6 +263,68 @@ where
     R: RpcRequester,
     R::Error: RpcErrorClass,
 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        create_kit_with_claims(
+            client,
+            identity,
+            prior,
+            recovery,
+            predecessors,
+            crate::kit_claim::KitClaims::process(),
+        )
+        .await
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        mint_kit(client, identity, prior, recovery, predecessors).await
+    }
+}
+
+/// [`create_kit_with_root`] over an explicit [`crate::kit_claim::KitClaims`] —
+/// production passes the process's own; a test passes one per simulated seat.
+///
+/// **A succession's kit is minted once, by the seat whose ceremony claimed
+/// it** (`succession-propagation.md` § Propagation → *Own device fleet*, the
+/// relaunch-adoption clause: an adoption owes the kit only for a ceremony that
+/// never reached it). A first registration for an identity another live
+/// process of this install has claimed is refused before anything is read or
+/// sent ([`RecoveryError::KitMintedElsewhere`]); a kit this process mints
+/// releases its own claim, so the account is ordinary again from here on.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn create_kit_with_claims<R>(
+    client: &RecoveryClient<R>,
+    identity: &ActorKeypair,
+    prior: Option<&RecoveryKey>,
+    recovery: RecoveryKey,
+    predecessors: &[PredecessorSeed],
+    claims: &crate::kit_claim::KitClaims,
+) -> Result<RecoveryKit>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    let actor_hex = identity.actor_id_hex();
+    if prior.is_none() && claims.owned_elsewhere(&actor_hex) {
+        return Err(RecoveryError::KitMintedElsewhere);
+    }
+    let kit = mint_kit(client, identity, prior, recovery, predecessors).await?;
+    claims.release(&actor_hex);
+    Ok(kit)
+}
+
+/// The ceremony itself — arm selection, carry-forward, registration, escrow.
+async fn mint_kit<R>(
+    client: &RecoveryClient<R>,
+    identity: &ActorKeypair,
+    prior: Option<&RecoveryKey>,
+    recovery: RecoveryKey,
+    predecessors: &[PredecessorSeed],
+) -> Result<RecoveryKit>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
     let actor_id = identity.actor_id();
     let head = client.chain_head(&actor_id).await?;
     let seq = next_seq(head.as_ref(), prior)?;

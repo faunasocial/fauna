@@ -47,8 +47,8 @@ Stamped 2026-10-01 at d8cb0887cb.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
-| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
+| web | ✅ full | 0.1.6-dev+ca5c8cfc standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |

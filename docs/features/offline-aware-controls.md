@@ -46,11 +46,11 @@ W4 in `docs/goal/architecture/account-data-plane.md` § Workstreams; that table'
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+d6b5dbea.dirty standalone |
-| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| web | ✅ full | 0.1.5-dev+d6b5dbea.dirty standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.4-dev+874eb894.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.6-dev+4c3abb30 standalone |
 | android-kids |  no run recorded | |
@@ -65,8 +65,8 @@ W4 in `docs/goal/architecture/account-data-plane.md` § Workstreams; that table'
 | 3 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_connection_status_flips_while_nest_down` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_connection_gap_rules.py::test_a_failing_connection_reads_cannot_connect_until_one_succeeds` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_connection_gap_rules.py::test_a_passing_gap_raises_no_error_anywhere` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_offline_preference_edits.py::test_an_offline_change_is_kept_across_restart_and_reaches_the_nest` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_offline_preference_edits.py::test_an_offline_change_is_kept_across_restart_and_reaches_the_nest` | linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_offline_queued_like.py::test_a_like_given_offline_is_queued_kept_across_restart_and_reaches_the_nest` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_offline_queued_conversation_send.py::test_a_conversation_message_sent_offline_is_queued_kept_across_restart_and_delivered_once` | web (linux): failed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 7 | app | `tests/e2e-unified/tests/test_offline_preference_edits.py::test_a_device_before_its_first_sync_says_it_needs_the_nest_and_refuses_edits` | linux (linux): failed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_offline_queued_conversation_send.py::test_a_conversation_message_sent_offline_is_queued_kept_across_restart_and_delivered_once` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_offline_preference_edits.py::test_a_device_before_its_first_sync_says_it_needs_the_nest_and_refuses_edits` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

@@ -2813,6 +2813,14 @@ type UnsentChange struct {
 	// Attempts that did not conclude.
 	Attempts    uint32
 	Description IntentDescription
+	// Why a [`UnsentState::Held`] row waits, when it is not the scope's
+	// parked head: a stable code of [`hold_code`]'s. `None` on every row of
+	// this device's own outbox — those are held by their scope's park, the
+	// three-state derivation's own hold. `Some` on a retired identity's row
+	// not yet carried into this outbox (`succession-aftermath.md` § Re-key
+	// scope, the device-local outbox row): the state still says *held*, and
+	// this says by what. Additive: an older reader drops it.
+	Hold *string
 }
 
 func (r *UnsentChange) Destroy() {
@@ -2823,6 +2831,7 @@ func (r *UnsentChange) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.CreatedAt)
 	FfiDestroyerUint32{}.Destroy(r.Attempts)
 	FfiDestroyerIntentDescription{}.Destroy(r.Description)
+	FfiDestroyerOptionalString{}.Destroy(r.Hold)
 }
 
 type FfiConverterUnsentChange struct{}
@@ -2842,6 +2851,7 @@ func (c FfiConverterUnsentChange) Read(reader io.Reader) UnsentChange {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint32INSTANCE.Read(reader),
 		FfiConverterIntentDescriptionINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 	}
 }
 
@@ -2861,6 +2871,7 @@ func (c FfiConverterUnsentChange) Write(writer io.Writer, value UnsentChange) {
 	FfiConverterUint64INSTANCE.Write(writer, value.CreatedAt)
 	FfiConverterUint32INSTANCE.Write(writer, value.Attempts)
 	FfiConverterIntentDescriptionINSTANCE.Write(writer, value.Description)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.Hold)
 }
 
 type FfiDestroyerUnsentChange struct{}

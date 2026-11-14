@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { connectionStatus, identity } from '#lib/store';
-  import { connectionStateLabel, ensureWasm } from '#lib/wasm';
-  import { resolveLocalized } from '#lib/i18n/localized';
+  import { identity } from '#lib/store';
+  import { ensureWasm } from '#lib/wasm';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { onMount } from 'svelte';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
   import AppShellFrame from '#lib/components/AppShellFrame.svelte';
+  import ConnectionStatusIndicator from '#lib/components/ConnectionStatusIndicator.svelte';
 
   // The admin shell is a vertical **sidebar-swap** (admin.md § Navigation
   // model, ratified 2026-06-01, vertical-rail form 2026-06-03): while in the
@@ -18,23 +18,12 @@
   // …) is replaced in place rather than sitting beside a horizontal admin
   // nav-bar. `admin-nav-back` (atop the rail) swaps it back. The shared
   // `.shell`/`.sidebar`/`.content` frame lives in `AppShellFrame` (this
-  // shell's own `.tab`/`.connection-status`/etc. stay here — see that
+  // shell's own `.tab`/nav-back/title chrome stay here — see that
   // component's doc comment). Reference: linux `views/admin.rs` (the
   // StackSidebar rail) + windows (NavigationView PaneDisplayMode=Left).
 
   let { children } = $props();
   let booting = $state(true);
-  let wasmReady = $state(false);
-
-  // Same derivation as the root layout's (keep the two in sync, as the shell
-  // shape already is): the state → label decision is the shared
-  // `fauna_core::format::connection_state_label` over wasm, never a web-local
-  // ternary, so this rail and the root sidebar cannot disagree about what
-  // "connected" means — and neither can the offline gate, which reads the same
-  // store. transport.md § Connection-status indicator.
-  let connectionLabel = $derived(
-    wasmReady ? resolveLocalized(connectionStateLabel($connectionStatus)) : t.common.disconnected,
-  );
 
   // The `am-i-admin` gate is on the nav ENTRY, never on this shell's content
   // (admin.md § Shell + § Navigation model point 1): the root layout's
@@ -54,10 +43,9 @@
   //
   // What stays is the AUTHENTICATION gate — no identity means no app at all,
   // admin or otherwise — plus the wasm/identity boot barrier the rail's own
-  // connection label needs.
+  // connection indicator needs.
   onMount(async () => {
     await ensureWasm();
-    wasmReady = true;
     identity.init();
     if (!$identity?.secretHex) { goto('/app/settings'); return; }
     booting = false;
@@ -111,13 +99,7 @@
          everything is OnlineOnly — was the one place a web admin could not
          see the link drop. Same store, same shared label fn as the root
          layout's, so the two cannot disagree. -->
-    <div
-      class="connection-status"
-      class:connected={$connectionStatus === 'connected'}
-      data-testid={IDS.CONNECTION_STATUS}
-    >
-      {connectionLabel}
-    </div>
+    <ConnectionStatusIndicator />
     <div class="admin-links">
       {#each navLinks as link}
         <a
@@ -160,15 +142,6 @@
     font-weight: 700;
     padding: 0.5rem 1rem 1rem;
     color: var(--accent);
-  }
-  /* Mirrors lib/components/RootShell.svelte's indicator, like the rest of this shell. */
-  .connection-status {
-    font-size: 0.75rem;
-    padding: 0 1rem 0.75rem;
-    color: var(--text-muted);
-  }
-  .connection-status.connected {
-    color: var(--text);
   }
   .admin-links {
     display: flex;

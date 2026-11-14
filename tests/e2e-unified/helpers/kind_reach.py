@@ -210,6 +210,59 @@ def _subscript_keys(node: ast.AST) -> set:
     return out
 
 
+def _dict_entries(node: ast.AST) -> set[tuple[str, str]]:
+    """Every `"key": "value"` entry of a dict literal under `node` whose key and
+    value are both string constants — what the `entries=` selector filters.
+
+    The question it answers is a CONFIGURATION one: which value a test hands
+    the nest under a given key (`{"kind": "fake", …}` to
+    `fauna.payments.providers.set`). The pair is the unit, not either string:
+    `"fake"` alone is an everyday word in a test tree and `"kind"` is on every
+    WS-RPC frame, while the two together name one thing. Keyword arguments are
+    not dict literals and are not read — a wrapper taking the value as a
+    parameter is reached through the literal its caller passes, or not at all,
+    which is the conservative direction for a deselect.
+    """
+    out: set[tuple[str, str]] = set()
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Dict):
+            continue
+        for k, v in zip(sub.keys, sub.values):
+            if (isinstance(k, ast.Constant) and isinstance(k.value, str)
+                    and isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                out.add((k.value, v.value))
+    return out
+
+
+def _call_entries(node: ast.AST) -> set[tuple[str, str]]:
+    """Every call under `node` whose FIRST positional argument is a string
+    constant, as `("<callee>()", "<argument>")` — the `entries=` selector's
+    second shape, unioned with `_dict_entries` per node.
+
+    The configuration question again, asked of a journey test: the app's own
+    form carries the value to the nest, so the test names it as an argument to
+    the action that fills the form (`subs.add_provider("fake", …)`), never in a
+    dict literal it writes. The callee is the attribute or bare name called;
+    the parentheses keep a call apart from a dict key of the same spelling.
+    Only the first positional argument is read, and only a constant one: a
+    keyword, a later positional or a variable is not a configuring value this
+    reader can see, which is the conservative direction for a deselect.
+    """
+    out: set[tuple[str, str]] = set()
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call) or not sub.args:
+            continue
+        first = sub.args[0]
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            continue
+        func = sub.func
+        name = (func.attr if isinstance(func, ast.Attribute)
+                else func.id if isinstance(func, ast.Name) else None)
+        if name:
+            out.add((f"{name}()", first.value))
+    return out
+
+
 def _key_reads(node: ast.AST, keys: frozenset[str]) -> set[str]:
     """Contract keys READ off a mapping under `node` — `handle["peer_url"]`.
 
@@ -393,6 +446,9 @@ class _Graph(NamedTuple):
     strings: dict[str, frozenset[str]]
     reads: dict[str, frozenset]
     calls: dict[str, frozenset[str]]
+    #: node → `_dict_entries` (no module constants folded: a configuration
+    #: entry is written where it is sent).
+    entries: dict[str, frozenset] = {}
 
 
 def build_reach(
@@ -401,6 +457,7 @@ def build_reach(
     *,
     prefix: str | None = None,
     keys: frozenset[str] | None = None,
+    entries: frozenset[tuple[str, str]] | None = None,
     keyed: bool = False,
 ) -> dict[str, frozenset[str]]:
     """Map every function name in the e2e and common trees to the strings it can reach.
@@ -413,16 +470,19 @@ def build_reach(
     computed to a fixpoint so a name three wrappers deep still lands on the test.
 
     Exactly one of `vocabulary` (closed-set membership — WS-RPC kinds),
-    `prefix` (route paths) or `keys` (contract keys read off a handle) selects
+    `prefix` (route paths), `keys` (contract keys read off a handle) or
+    `entries` (`(key, value)` pairs of a dict literal, `_dict_entries`, or a
+    call's callee and first constant argument, `_call_entries`) selects
     what counts. The graph itself is the same walk every way, which is the
     point: a second scanner would drift from this one, and every caller depends
     on the same "usually one wrapper away" fact. It is built once per process
     (`_graph`); a selector only filters each node's summary and runs the
     fixpoint.
     """
-    selectors = [vocabulary is not None, prefix is not None, keys is not None]
+    selectors = [vocabulary is not None, prefix is not None, keys is not None,
+                 entries is not None]
     if sum(selectors) != 1:
-        raise ValueError("pass exactly one of vocabulary=, prefix= or keys=")
+        raise ValueError("pass exactly one of vocabulary=, prefix=, keys= or entries=")
     graph = _graph((root,)) if root is not None else _default_graph()
 
     if prefix is not None:
@@ -431,6 +491,9 @@ def build_reach(
         }
     elif keys is not None:
         reach = {key: set(reads & keys) for key, reads in graph.reads.items()}
+    elif entries is not None:
+        reach = {key: set(graph.entries.get(key, frozenset()) & entries)
+                 for key in graph.strings}
     else:
         reach = {key: set(strings & vocabulary) for key, strings in graph.strings.items()}
 
@@ -485,6 +548,7 @@ def _graph(roots: tuple[Path, ...]) -> _Graph:
     # name — still the safe direction.
     strings: dict[str, set[str]] = {}  # node → `_strings`, its constants folded in
     reads: dict[str, set] = {}  # node → `_subscript_keys`, its constants folded in
+    entries: dict[str, set] = {}  # node → `_dict_entries` ∪ `_call_entries`
     # node → module → the calls that node's definition(s) in that module make. A
     # public name is one merged node across modules, and each definition's
     # private calls must resolve in ITS OWN module: keeping only the first
@@ -530,6 +594,7 @@ def _graph(roots: tuple[Path, ...]) -> _Graph:
             own_reads = reads.setdefault(key, set())
             own_strings |= _strings(fn)
             own_reads |= _subscript_keys(fn)
+            entries.setdefault(key, set()).update(_dict_entries(fn) | _call_entries(fn))
             for name in _names_loaded(fn) & constants.keys():
                 held_strings, held_reads = constants[name]
                 own_strings |= held_strings
@@ -598,6 +663,7 @@ def _graph(roots: tuple[Path, ...]) -> _Graph:
     return _Graph(
         strings={key: frozenset(found) for key, found in strings.items()},
         reads={key: frozenset(found) for key, found in reads.items()},
+        entries={key: frozenset(found) for key, found in entries.items()},
         calls=calls,
     )
 
@@ -761,6 +827,30 @@ def routes_reached_by_own_code(item, prefix: str) -> frozenset[str]:
 @lru_cache(maxsize=4)
 def _cached_keyed_route_reach(prefix: str) -> dict[str, frozenset[str]]:
     return build_reach(prefix=prefix, keyed=True)
+
+
+@lru_cache(maxsize=4)
+def _cached_keyed_entry_reach(entries: frozenset) -> dict[str, frozenset]:
+    return build_reach(entries=entries, keyed=True)
+
+
+def entries_reached_by_own_code(item, entries: frozenset) -> frozenset:
+    """The `(key, value)` dict-literal entries in `entries` that `item` can
+    reach: its test function and every function of its own code (the module
+    fixtures it requests and the private helpers those call), each followed
+    through the merged graph — the shape of `routes_reached_by_own_code`, and
+    for the same reason: a configuration pair is a rare thing (`_dict_entries`),
+    and the module fixture that configures the nest (`paid_nest`, or one that
+    calls a shared starter such as `start_member_nest`) is the test's as surely
+    as its body."""
+    path = getattr(item, "path", None) or getattr(item, "fspath", None)
+    module = str(Path(str(path)).resolve()) if path else ""
+    reach = _cached_keyed_entry_reach(entries)
+    out: set = set(reach.get(test_function_name(item), frozenset()))
+    for fn in own_code(item):
+        key = f"{module}::{fn.name}" if _is_private(fn.name) else fn.name
+        out |= reach.get(key, frozenset())
+    return frozenset(out)
 
 
 def _shared_sources():

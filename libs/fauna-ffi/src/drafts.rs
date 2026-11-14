@@ -31,8 +31,10 @@
 use std::sync::Arc;
 
 use fauna_client::NestClient;
-use fauna_client_drafts::{DraftsClient, DraftsSync};
+use fauna_client_drafts::{DraftsClient, DraftsClientError, DraftsSync};
+use fauna_conversations::ConversationsManager;
 use fauna_core::identity::ActorKeypair;
+use fauna_protocol::RpcRequester;
 
 use crate::{FfiError, general_err};
 
@@ -165,6 +167,70 @@ impl FfiDraftsSync {
             .await
             .map_err(general_err)
     }
+
+    /// The conversations rail's **leave-door save**
+    /// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise):
+    /// the shared `DraftsSync::save_on_leave` with this rail's FILL rule,
+    /// `ConversationsManager::fill_drafts_for_leave` — so a door taken before
+    /// the launch load has lifted the save gate still saves, by one read of
+    /// its own, a fill of `manager` as the launch restore would, then the
+    /// save. With the gate already open it is `save_if_changed(captured)`.
+    ///
+    /// The door hands over what it captured AT the door, before it tore
+    /// anything down: `captured` is `manager.draftsSnapshotBytes()` and
+    /// `epoch` is `manager.identityEpoch()`, both read then — a teardown
+    /// that clears the manager before this runs moves its epoch, and the
+    /// fill then fills nothing, so `captured` is what is saved. The caller
+    /// bounds the call (the shared leave budget); a failed read saves
+    /// nothing. Returns `true` when it wrote.
+    pub async fn save_conversations_on_leave(
+        &self,
+        manager: Arc<ConversationsManager>,
+        epoch: u64,
+        captured: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        conversations_leave_save(&self.sync, &manager, epoch, captured)
+            .await
+            .map_err(general_err)
+    }
+}
+
+/// The body of [`FfiDraftsSync::save_conversations_on_leave`], over any
+/// transport — the seam its tests drive over an in-memory nest.
+async fn conversations_leave_save<R: RpcRequester>(
+    sync: &DraftsSync<R>,
+    manager: &ConversationsManager,
+    epoch: u64,
+    captured: Vec<u8>,
+) -> Result<bool, DraftsClientError<R::Error>> {
+    sync.save_on_leave(captured, |resting| {
+        manager.fill_drafts_for_leave(epoch, &resting)
+    })
+    .await
+}
+
+impl FfiDraftsSync {
+    /// The wrapped shared sync — for a sibling face in this crate that drives a
+    /// shared body over it (the posts rail's leave save,
+    /// `FfiFeedManager::save_drafts_on_leave`). Outside the export block.
+    pub(crate) fn drafts_sync(&self) -> &DraftsSync<Arc<NestClient>> {
+        &self.sync
+    }
+}
+
+/// The body of the posts rail's leave face, `FfiFeedManager::save_drafts_on_leave`,
+/// over any transport — the seam its tests drive over an in-memory nest. The
+/// face itself lives on the feed manager, not on [`FfiDraftsSync`], so this
+/// type's foreign interface is the same in every build flavor (a flavor that
+/// excises the feed plane keeps `drafts`).
+#[cfg(feature = "feed-manager")]
+pub(crate) async fn posts_leave_save<R: RpcRequester, N: RpcRequester + Clone>(
+    sync: &DraftsSync<R>,
+    manager: &fauna_feed::FeedManager<N>,
+    captured: Vec<u8>,
+) -> Result<bool, DraftsClientError<R::Error>> {
+    sync.save_on_leave(captured, |resting| manager.fill_drafts_for_leave(&resting))
+        .await
 }
 
 #[cfg(test)]
@@ -181,5 +247,140 @@ mod tests {
             autosave_debounce_ms() as u128,
             fauna_client_drafts::AUTOSAVE_DEBOUNCE.as_millis()
         );
+    }
+
+    use fauna_client_drafts::testing::{MemoryDraftsNest, SharedDraftsNest};
+    use fauna_client_testkit::block_on;
+
+    fn keypair() -> ActorKeypair {
+        ActorKeypair::from_secret([7u8; 32])
+    }
+
+    fn sync(nest: &Arc<MemoryDraftsNest>, rail: &str) -> DraftsSync<SharedDraftsNest> {
+        DraftsSync::new(SharedDraftsNest(Arc::clone(nest)), &keypair(), rail)
+    }
+
+    /// `bytes` resting on `nest` for `rail`, as another device of the same
+    /// identity would have left them.
+    fn rest(nest: &Arc<MemoryDraftsNest>, rail: &str, bytes: &[u8]) {
+        let other = sync(nest, rail);
+        block_on(other.load()).unwrap();
+        assert!(block_on(other.save_if_changed(bytes)).unwrap());
+    }
+
+    fn resting(nest: &Arc<MemoryDraftsNest>, rail: &str) -> Option<Vec<u8>> {
+        block_on(sync(nest, rail).load()).unwrap()
+    }
+
+    fn puts(nest: &MemoryDraftsNest) -> u32 {
+        *nest.puts.lock().unwrap()
+    }
+
+    fn conversations_with_new_thread(body: &str) -> Arc<ConversationsManager> {
+        let manager = ConversationsManager::new();
+        manager.start_new_conversation();
+        manager.set_new_thread_body(body.to_string());
+        manager
+    }
+
+    /// A conversations door taken before the launch load lifted the gate
+    /// still saves what the user typed — the gap the face exists to close
+    /// (`save_if_changed` alone writes nothing behind a shut gate).
+    #[test]
+    fn a_conversations_door_before_the_launch_load_saves_the_typed_draft() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        let rail = fauna_protocol::drafts::RAIL_CONVERSATIONS;
+        rest(
+            &nest,
+            rail,
+            &conversations_with_new_thread("resting").drafts_snapshot_bytes(),
+        );
+
+        let typed = conversations_with_new_thread("typed before the gate opened");
+        let captured = typed.drafts_snapshot_bytes();
+        let leaving = sync(&nest, rail);
+        let wrote = block_on(conversations_leave_save(
+            &leaving,
+            &typed,
+            typed.identity_epoch(),
+            captured.clone(),
+        ))
+        .unwrap();
+
+        assert!(wrote);
+        assert_eq!(resting(&nest, rail), Some(captured));
+    }
+
+    /// An untouched composer takes the resting draft, so the door writes
+    /// nothing over it — the fill rule, not the captured empty snapshot.
+    #[test]
+    fn a_conversations_door_with_nothing_typed_never_overwrites_the_resting_draft() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        let rail = fauna_protocol::drafts::RAIL_CONVERSATIONS;
+        let resting_bytes = conversations_with_new_thread("resting").drafts_snapshot_bytes();
+        rest(&nest, rail, &resting_bytes);
+        let before = puts(&nest);
+
+        let untouched = ConversationsManager::new();
+        let wrote = block_on(conversations_leave_save(
+            &sync(&nest, rail),
+            &untouched,
+            untouched.identity_epoch(),
+            untouched.drafts_snapshot_bytes(),
+        ))
+        .unwrap();
+
+        assert!(!wrote);
+        assert_eq!(puts(&nest), before);
+        assert_eq!(resting(&nest, rail), Some(resting_bytes));
+    }
+
+    #[cfg(feature = "feed-manager")]
+    fn feed_with(text: &str) -> fauna_feed::FeedManager<Arc<SharedDraftsNest>> {
+        let manager = fauna_feed::FeedManager::new(
+            Arc::new(SharedDraftsNest(Arc::new(MemoryDraftsNest::default()))),
+            [9u8; 32],
+        );
+        manager.update_compose(text.to_string(), String::new(), None);
+        manager
+    }
+
+    /// The posts rail's twin of the conversations door test.
+    #[cfg(feature = "feed-manager")]
+    #[test]
+    fn a_posts_door_before_the_launch_load_saves_the_typed_draft() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        let rail = fauna_protocol::drafts::RAIL_POSTS;
+        rest(&nest, rail, &feed_with("resting").drafts_snapshot_bytes());
+
+        let typed = feed_with("typed before the gate opened");
+        let captured = typed.drafts_snapshot_bytes();
+        let wrote = block_on(posts_leave_save(
+            &sync(&nest, rail),
+            &typed,
+            captured.clone(),
+        ))
+        .unwrap();
+
+        assert!(wrote);
+        assert_eq!(resting(&nest, rail), Some(captured));
+    }
+
+    #[cfg(feature = "feed-manager")]
+    #[test]
+    fn a_posts_door_with_nothing_typed_never_overwrites_the_resting_draft() {
+        let nest = Arc::new(MemoryDraftsNest::default());
+        let rail = fauna_protocol::drafts::RAIL_POSTS;
+        let resting_bytes = feed_with("resting").drafts_snapshot_bytes();
+        rest(&nest, rail, &resting_bytes);
+        let before = puts(&nest);
+
+        let untouched = feed_with("");
+        let captured = untouched.drafts_snapshot_bytes();
+        let wrote = block_on(posts_leave_save(&sync(&nest, rail), &untouched, captured)).unwrap();
+
+        assert!(!wrote);
+        assert_eq!(puts(&nest), before);
+        assert_eq!(resting(&nest, rail), Some(resting_bytes));
     }
 }

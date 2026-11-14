@@ -53,6 +53,7 @@ Stamped 2026-11-07 at 6a0ded1015.
    - `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_lists_once_a_post_both_a_desktop_seats_index_and_the_nest_find`
 11. [app] After you rotate your mail keys, searching on this device still finds the mail from before — `docs/goal/architecture/owner-key-material.md` § Implementation status today
    - `tests/e2e-unified/tests/test_search_private_index.py::test_mail_indexed_before_a_mail_key_rotation_is_still_found_after_it`
+   - `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_finds_mail_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation`
 12. [app] An event on your calendar is found by search on this device, and still after you rotate your mail keys — `docs/goal/behavior/content-index.md` § What's indexed
    - `tests/e2e-unified/tests/test_search_private_index.py::test_an_event_on_your_calendar_is_found_by_search_and_still_after_a_mail_key_rotation`
    - `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_finds_and_opens_an_event_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation`
@@ -65,8 +66,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 | web | — absent | |
 | linux | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
-| ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
+| macos | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android-kids |  no run recorded | |
@@ -94,7 +95,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 9 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_opens_a_draft_a_desktop_seat_indexed_into_the_composer_holding_it` | ios (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_a_post_found_by_both_the_private_index_and_the_nest_is_listed_once` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_lists_once_a_post_both_a_desktop_seats_index_and_the_nest_find` | ios (macos): passed |
-| 11 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_mail_indexed_before_a_mail_key_rotation_is_still_found_after_it` | tui (linux): passed, tui (windows): passed |
-| 12 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_an_event_on_your_calendar_is_found_by_search_and_still_after_a_mail_key_rotation` | tui (windows): passed |
-| 12 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_finds_and_opens_an_event_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation` | — |
+| 11 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_mail_indexed_before_a_mail_key_rotation_is_still_found_after_it` | macos (macos): passed, tui (linux): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_finds_mail_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation` | ios (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_an_event_on_your_calendar_is_found_by_search_and_still_after_a_mail_key_rotation` | macos (macos): passed, tui (linux): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_a_phone_finds_and_opens_an_event_a_desktop_seat_indexed_and_still_after_a_mail_key_rotation` | ios (macos): passed |
 <!-- features-render:end -->

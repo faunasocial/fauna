@@ -63,15 +63,24 @@ from helpers.waiting import wait_until
 
 pytestmark = [
     pytest.mark.tier_3,
-    # tui is the lead app, macOS and linux followed; windows rides the per-app
-    # trickle-down (web, ios and android are the page's declared absences). Each
-    # arrives with its marker AND a `built` entry on the
-    # `folder-place-accepts-hold` surface. macOS' production spawner is launchd,
-    # so its seats run an agent only under `real_sync_agent`.
+    # tui is the lead app, macOS, linux and windows followed (web, ios and
+    # android are the page's declared absences). Each arrives with its marker
+    # AND a `built` entry on the `folder-place-accepts-hold` surface. macOS'
+    # production spawner is launchd, so its seats run an agent only under
+    # `real_sync_agent`. windows spawns its agent detached: `real_sync_agent`
+    # runs one, and `isolated_sync_agent` puts it on this run's own pipe rather
+    # than the box's per-SID one — device B on a pipe of its own too
+    # (`conftest._second_seat_config`) — and lets `app_stderr_text()` read the
+    # agent's log, where `_held_passes` counts. Both are windows-only switches.
+    # A windows seat is a cfapi root, so its held rail is the placeholder fold
+    # (`SyncEngine::populate_placeholders_from_nest`), whose held line carries
+    # the same leading words.
     pytest.mark.tui,
     pytest.mark.macos,
     pytest.mark.linux,
+    pytest.mark.windows,
     pytest.mark.real_sync_agent,
+    pytest.mark.isolated_sync_agent,
 ]
 
 #: Device B's id — `alice_second_device`'s own constant.

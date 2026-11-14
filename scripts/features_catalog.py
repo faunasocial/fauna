@@ -1553,11 +1553,24 @@ def _fold_platform_records(by_platform: dict) -> dict:
     like any other) — passing only if EVERY platform passed, else a representative
     non-passing record, so one failing platform is never masked by a passing sibling.
     The representative is a real red first, so an `unbuilt` skip on one platform
-    never hides a failure on another (§ Cell semantics, the *unbuilt* row).
-    `compute_cell` reads only `outcome` and `skip_class` off the result."""
+    never hides a failure on another (§ Cell semantics, the *unbuilt* row). A
+    non-passing fold some platform DID pass is a copy carrying `PLATFORM_PASS`, so
+    the cell reads that cross-platform mix as ⚠, never ❌ (§ Cell semantics, the ⚠
+    row: "one test passing on linux and failing on windows is exactly this row's
+    'mixed'"). `compute_cell` reads only `outcome`, `skip_class` and `PLATFORM_PASS`
+    off the result."""
     non_passing = [r for r in by_platform.values() if r.get("outcome") not in PASSING]
+    if not non_passing:
+        return next(iter(by_platform.values()))
     non_passing.sort(key=lambda r: not is_real_red(r))
-    return non_passing[0] if non_passing else next(iter(by_platform.values()))
+    if len(non_passing) < len(by_platform):
+        return {**non_passing[0], PLATFORM_PASS: True}
+    return non_passing[0]
+
+
+#: The key a non-passing fold carries when another platform of the same test passed
+#: (`_fold_platform_records`): the fold is not a pass, and not a "none passed" either.
+PLATFORM_PASS = "platform_pass"
 
 
 def ledger_for(surface: str, app: str) -> str:
@@ -2017,7 +2030,9 @@ def compute_cell(page: Page, app: str, ledger: dict, app_marks: dict | None = No
     mapped = len(app_tests) + len(nest_tests)
     passed = [r for r in records if r.get("outcome") in PASSING]
 
-    if not passed:
+    # ❌ is "none of them passed": a test passing on one platform and failing on
+    # another passed somewhere, so its cell is the ⚠ mix (§ Cell semantics).
+    if not passed and not any(r.get(PLATFORM_PASS) for r in records):
         return Cell("failing", stamp, date, dirty)
     if page.full_for(app, app_marks) and len(records) == mapped and len(passed) == len(records):
         return Cell("full", stamp, date, dirty)

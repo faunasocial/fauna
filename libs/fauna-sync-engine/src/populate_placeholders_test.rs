@@ -588,6 +588,7 @@ async fn cross_pull_delete_reports_the_stale_placeholder_and_its_apply_removes_i
         vec![crate::engine::FoldedDelete {
             relative_path: "a".to_string(),
             deleting_device: Some("device".to_string()),
+            seq: Some(2),
         }],
         "the delete is reported to the host, with the device that made it"
     );

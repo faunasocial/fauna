@@ -272,7 +272,6 @@ def test_a_cold_device_restores_its_account_state_from_a_custodian_nest(
     bob_app = rig["bob_app"]
     home, custodian = rig["home"], rig["custodian"]
     fleet_app.custody.require_supported()
-    alice_app.nest_trust.require_custody_restore_supported()
     alice_secret = bytes(alice["signing_key"])
 
     # ── The custody, through both UIs, held on bob's NEST.

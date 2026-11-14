@@ -276,6 +276,12 @@ fn restrict_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     fauna_ipc::win_acl::restrict_to_owner(path).map_err(|e| std::io::Error::other(format!("{e:#}")))
 }
 
+/// [`fauna_ipc::win_acl::copy_dacl`] as an `io::Error`, as above.
+#[cfg(windows)]
+fn copy_dacl(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    fauna_ipc::win_acl::copy_dacl(from, to).map_err(|e| std::io::Error::other(format!("{e:#}")))
+}
+
 /// `config` with this domain's earlier door entry (from its marker line to the
 /// blank line closing it) removed and a fresh one appended. Written to a
 /// sibling file and renamed over the target — the resolved target, so a
@@ -333,11 +339,13 @@ fn write_host_entry(
             f.set_permissions(meta.permissions())?;
         }
         // A config this writes fresh is owner-only, as the unix `0o600` above
-        // makes it. One the admin already had is replaced by a file that takes
-        // its directory's ACL — not yet a copy of the old file's own, the one
-        // place this falls short of the unix arm's kept mode.
+        // makes it. One the admin already had keeps its own DACL, protection
+        // included: the rename keeps the temp file's, so the old file's is
+        // copied onto it first — the twin of the unix arm's kept mode.
         #[cfg(windows)]
-        if std::fs::metadata(&target).is_err() {
+        if std::fs::metadata(&target).is_ok() {
+            copy_dacl(&target, &tmp)?;
+        } else {
             restrict_to_owner(&tmp)?;
         }
         f.write_all(kept.as_bytes())?;
@@ -486,6 +494,15 @@ mod tests {
         let ssh = scratch("again");
         std::fs::write(ssh.join("fauna-a.example"), "the admin's own file").unwrap();
         std::fs::write(ssh.join("config"), "Host build\n    HostName 10.0.0.2\n").unwrap();
+        // The admin's own `config` ACL — here narrowed to the owner, where the
+        // scratch directory hands down a wider one — is kept across every
+        // rewrite, as the unix arm keeps the old file's mode. Red-verify: with
+        // the copy left out the rewritten file takes the directory's ACL.
+        #[cfg(windows)]
+        let admins_dacl = {
+            restrict_to_owner(&ssh.join("config")).unwrap();
+            fauna_ipc::win_acl::dacl_sddl(&ssh.join("config")).unwrap()
+        };
 
         let first = install_key(&ssh, "a.example", &mint("a.example")).unwrap();
         assert_eq!(first.key_path, ssh.join("fauna-a.example-2"));
@@ -509,6 +526,12 @@ mod tests {
         assert!(config.contains(&format!("\"{}\"", second.key_path.display())));
         assert!(!config.contains(&format!("\"{}\"", first.key_path.display())));
         assert!(config.contains(&format!("\"{}\"", other.key_path.display())));
+        #[cfg(windows)]
+        assert_eq!(
+            fauna_ipc::win_acl::dacl_sddl(&ssh.join("config")).unwrap(),
+            admins_dacl,
+            "the rewritten config must carry the admin's own DACL"
+        );
         std::fs::remove_dir_all(ssh).unwrap();
     }
 

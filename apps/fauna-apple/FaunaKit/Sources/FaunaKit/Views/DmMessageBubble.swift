@@ -401,10 +401,14 @@ public struct DmMessageBubble: View {
         // § D4) → the manager folds `Resolved`/`Failed` onto the block + re-emits → the card paints.
         // Keyed on the resolving-url set so it fires once and settles (the feed card's fire-once
         // pattern). A deleted message carries no document blocks, so this is a no-op there.
+        // The kids build asks the nest for no preview: its card is compiled out, and a resolve
+        // would have the nest fetch the linked page on the kids app's behalf.
         .task(id: resolvingLinkPreviewUrls(message.document)) {
+            #if !FAUNA_KIDS
             for url in resolvingLinkPreviewUrls(message.document) {
                 onResolveLinkPreview(url)
             }
+            #endif
         }
         .imageLightbox(item: $lightboxItem)
     }

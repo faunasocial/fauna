@@ -245,6 +245,12 @@ pub struct ProfileState {
     /// OTHER Tiers tab: a transient post-click `Queued` flag for one tier
     /// (encrypted-mode subscribe), shown until the next `status.get` confirms it.
     pending_tier: Option<String>,
+    /// OTHER Tiers tab: `subscription-claim-redeem-input` — a code of THIS
+    /// creator, redeemed at [`Self::actor_home`]. A local buffer committed only
+    /// on `subscription-claim-redeem-button`, cleared only when the nest takes
+    /// the code (a refused paste stays to correct), and per open: a code typed
+    /// for one creator never rides to the next.
+    redeem_input: String,
     /// SELF Tiers tab: the author-management sections §§1–5 ([`tiers`]).
     pub(crate) author: tiers::AuthorState,
     /// This box's nest base URL — the §4 webhook-URL preview's prefix
@@ -259,6 +265,12 @@ pub struct ProfileState {
     /// at the open ([`Self::seed_actor_home`]), replaced by the epoch-checked
     /// open read's answer over the profile it fetched.
     actor_home: Option<String>,
+    /// OTHER Tiers tab: the [`Self::actor_home`] the latest offers load was
+    /// issued for (`None` = no load this open). When the header read replaces
+    /// the slot after the tab loaded, [`offers_reload_op`] reads the offers
+    /// again from the new home (`subscriptions.md` § Pillar 1 → *The offers
+    /// browse across nests*).
+    offers_home: Option<Option<String>>,
     /// OTHER: the open target's routing hint — the nest the door met the actor
     /// on (a Find User hit, a relayed post's origin, a contact edge). Never
     /// identity; [`Self::actor_home`] is what the follow and knock read.
@@ -381,8 +393,10 @@ impl ProfileState {
         self.offers.clear();
         self.status = None;
         self.pending_tier = None;
+        self.redeem_input.clear();
         self.author.reset();
         self.actor_home = None;
+        self.offers_home = None;
         self.carried_home = None;
         self.knock_sent = false;
         self.guardian_refused = false;
@@ -588,6 +602,9 @@ pub fn spawn_open_refresh(
 /// the mandated cross-page naming, not a lint-worthy accident).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProfileField {
+    /// `subscription-claim-redeem-input` on the OTHER Tiers tab — the redeem
+    /// row's code buffer ([`ProfileState::redeem_input`]).
+    RedeemCode,
     /// A SELF Tiers-tab form buffer (§1 tier form / §4 provider form) — see
     /// [`tiers::TierField`]. Kept as one arm so the page has a single
     /// `Field::Profile` dispatch.
@@ -626,11 +643,15 @@ pub fn field(state: &ProfileState, field: &ProfileField) -> String {
     if let Some(value) = private::field(state, field) {
         return value;
     }
+    if let ProfileField::RedeemCode = field {
+        return state.redeem_input.clone();
+    }
     let Some(edit) = &state.edit else {
         return String::new();
     };
     match field {
         ProfileField::Tier(_)
+        | ProfileField::RedeemCode
         | ProfileField::PrivateNickname
         | ProfileField::PrivateNotes
         | ProfileField::PrivateLabel => unreachable!("handled above"),
@@ -662,11 +683,16 @@ pub fn set_field(state: &mut ProfileState, field: ProfileField, value: String) {
     if private::set_field(state, &field, value.clone()) {
         return;
     }
+    if let ProfileField::RedeemCode = field {
+        state.redeem_input = value;
+        return;
+    }
     let Some(edit) = &mut state.edit else {
         return;
     };
     match field {
         ProfileField::Tier(_)
+        | ProfileField::RedeemCode
         | ProfileField::PrivateNickname
         | ProfileField::PrivateNotes
         | ProfileField::PrivateLabel => unreachable!("handled above"),
@@ -750,6 +776,12 @@ pub enum Action {
     /// money plane's buyer half, with the offer row's link that paints it.
     #[cfg(feature = "payments")]
     OpenPaymentLink { tier: String, url: String },
+    /// `subscription-claim-redeem-button` on the OTHER Tiers tab — redeem the
+    /// typed code of THIS creator at the page's [`ProfileState::actor_home`]
+    /// (`PaymentsClient::claims_redeem_across_nests`; `monetization.md`
+    /// § Pillar 3 → *Which nest an in-app redeem binds on* → *The doors*).
+    #[cfg(feature = "payments")]
+    RedeemClaim,
 
     // ── OTHER private section ([`private`]) ─────────────────────────────
     /// `profile-label-add-button` — stage the typed label.
@@ -857,6 +889,8 @@ impl Action {
             // rule (1)) — the same online-only write.
             #[cfg(feature = "payments")]
             Action::OpenPaymentLink { .. } => Some("fauna.subscriptions.subscribe"),
+            #[cfg(feature = "payments")]
+            Action::RedeemClaim => Some("fauna.payments.claims.redeem"),
             // The knock rides `fauna.inbox.send`, the ask its family twin —
             // the same kinds the contacts page's pair sends.
             Action::RequestContact => Some("fauna.inbox.send"),
@@ -1151,7 +1185,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // OTHER loads the offers browse; SELF loads the §§1–5 author
             // management (`tiers`).
             match st.viewing.clone() {
-                Some(author) => Some(Op::LoadOffers { nest, author }),
+                Some(author) => {
+                    st.offers_home = Some(st.actor_home.clone());
+                    Some(Op::LoadOffers {
+                        nest,
+                        author,
+                        home: st.actor_home.clone(),
+                    })
+                }
                 None => Some(Op::LoadAuthor {
                     nest,
                     roster_tier: st.author.roster_tier.clone(),
@@ -1194,6 +1235,23 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 tier,
                 home_nest_url: st.actor_home.clone(),
                 checkout: Some(url),
+            })
+        }
+        // A blank buffer is a no-op, never a nest round-trip (the settings
+        // pair's rule). The code redeems where THIS creator lives: the page's
+        // home slot, exactly as the follow carries it.
+        #[cfg(feature = "payments")]
+        Action::RedeemClaim => {
+            let code = st.redeem_input.trim();
+            if code.is_empty() {
+                return None;
+            }
+            Some(Op::RedeemClaim {
+                nest: st.nest.clone()?,
+                secret: st.secret.clone()?,
+                author: st.viewing.clone()?,
+                code: code.to_string(),
+                home_nest_url: st.actor_home.clone(),
             })
         }
 
@@ -1532,10 +1590,14 @@ pub enum Op {
     /// `fauna.family.contact.request` + the status re-read
     /// (`crate::contacts::ask_guardian`).
     AskGuardian { nest: Arc<NestClient>, peer: String },
-    /// `offers.list(author)` + `status.get(author)`.
+    /// `offers_list_across_nests(author, home)` + `status.get(author)` — the
+    /// offers read from the actor's home through this nest when `home` (the
+    /// page's [`ProfileState::actor_home`]) names another one; the status
+    /// always from this nest.
     LoadOffers {
         nest: Arc<NestClient>,
         author: String,
+        home: Option<String>,
     },
     /// `subscribe(author, tier)` → refetch offers — across nests when the
     /// page's [`ProfileState::actor_home`] names another nest
@@ -1551,6 +1613,16 @@ pub enum Op {
         tier: String,
         home_nest_url: Option<String>,
         checkout: Option<String>,
+    },
+    /// `PaymentsClient::claims_redeem_across_nests(code, me, author, home)` →
+    /// refetch offers + status, so the tier's badge reads the nest's answer.
+    #[cfg(feature = "payments")]
+    RedeemClaim {
+        nest: Arc<NestClient>,
+        secret: SecretArray32,
+        author: String,
+        code: String,
+        home_nest_url: Option<String>,
     },
 
     // ── SELF Tiers tab §§1–5 ────────────────────────────────────────────
@@ -1712,14 +1784,26 @@ pub enum Outcome {
     /// The ask itself failed (cap reached, peer blocked, knob off — typed
     /// refusals the ward reads verbatim).
     ContactRequestFailed(String),
-    /// A fresh offers list + the viewer's status read.
+    /// A fresh offers list + the viewer's status read, with the home the
+    /// offers were read from — dropped if the page's slot has since moved.
     Offers {
         offers: Vec<TierItem>,
         status: Option<FollowStatus>,
+        home: Option<String>,
     },
     /// A subscribe landed; carries the refetched offers/status + whether the
     /// nest queued it (encrypted mode) so the transient pending flag can settle.
     Subscribed {
+        offers: Vec<TierItem>,
+        status: Option<FollowStatus>,
+        tier: String,
+        queued: bool,
+    },
+    /// A claim code redeemed on the OTHER Tiers tab: the refetched
+    /// offers/status, the tier the code entitles and whether the grant queued
+    /// for the creator's client — the [`Self::Subscribed`] fold, plus the
+    /// spent code leaving the input.
+    Redeemed {
         offers: Vec<TierItem>,
         status: Option<FollowStatus>,
         tier: String,
@@ -1912,10 +1996,16 @@ impl Op {
                     Err(e) => Outcome::ContactRequestFailed(e),
                 }
             }
-            Op::LoadOffers { nest, author } => match fetch_offers(&nest, &author).await {
-                Ok((offers, status)) => Outcome::Offers { offers, status },
-                Err(e) => Outcome::Failed(e),
-            },
+            Op::LoadOffers { nest, author, home } => {
+                match fetch_offers(&nest, &author, home.clone()).await {
+                    Ok((offers, status)) => Outcome::Offers {
+                        offers,
+                        status,
+                        home,
+                    },
+                    Err(e) => Outcome::Failed(e),
+                }
+            }
             Op::Subscribe {
                 nest,
                 secret,
@@ -1929,6 +2019,7 @@ impl Op {
                 };
                 let kp = ActorKeypair::from_secret(secret.to_array());
                 let subs = SubscriptionsClient::new(Arc::clone(&nest));
+                let reread_home = home_nest_url.clone();
                 let reply = match checkout {
                     // The payment link: intent first, then the browser.
                     Some(url) => subs
@@ -1955,12 +2046,46 @@ impl Op {
                     Err(e) => return Outcome::Failed(format!("subscribe: {e}")),
                 };
                 // Re-read authoritatively (linux's refresh-after-subscribe).
-                match fetch_offers(&nest, &author).await {
+                match fetch_offers(&nest, &author, reread_home).await {
                     Ok((offers, status)) => Outcome::Subscribed {
                         offers,
                         status,
                         tier,
                         queued,
+                    },
+                    Err(e) => Outcome::Failed(e),
+                }
+            }
+
+            #[cfg(feature = "payments")]
+            Op::RedeemClaim {
+                nest,
+                secret,
+                author,
+                code,
+                home_nest_url,
+            } => {
+                let Ok(author_id) = ActorId::from_hex(&author) else {
+                    return Outcome::Failed("redeem claim: malformed actor id".into());
+                };
+                let kp = ActorKeypair::from_secret(secret.to_array());
+                // The typed refusals (`claim_not_found`, `claim_voided`,
+                // `claim_admits_elsewhere`, `peer_nest_outdated`, …) render
+                // through `RpcError::localized`, as the settings pair's do.
+                let reread_home = home_nest_url.clone();
+                let reply = match PaymentsClient::new(Arc::clone(&nest))
+                    .claims_redeem_across_nests(code, &kp, author_id, home_nest_url)
+                    .await
+                {
+                    Ok(reply) => reply,
+                    Err(e) => return Outcome::Failed(format!("redeem claim: {e}")),
+                };
+                match fetch_offers(&nest, &author, reread_home).await {
+                    Ok((offers, status)) => Outcome::Redeemed {
+                        offers,
+                        status,
+                        tier: reply.tier,
+                        queued: reply.queued,
                     },
                     Err(e) => Outcome::Failed(e),
                 }
@@ -2407,20 +2532,55 @@ async fn fetch_block_state(nest: &Arc<NestClient>, actor_id: &str) -> bool {
     }
 }
 
-/// `fauna.subscriptions.offers.list` + `status.get` — the OTHER-profile offers
-/// browse reads. A failed status read is non-fatal (the viewer may hold no
-/// subscription), so it degrades to `None` rather than failing the whole load.
+/// The OTHER-profile offers browse reads: the shared
+/// `offers_list_across_nests` (`fauna.subscriptions.offers.list`, or
+/// `offers.list_remote` relayed to `home` through this nest) + `status.get`
+/// on this nest, which answers a remote author from its follow records
+/// (`subscriptions.md` § Pillar 1 → *The offers browse across nests*). A failed
+/// status read is non-fatal (the viewer may hold no subscription), so it
+/// degrades to `None` rather than failing the whole load.
 async fn fetch_offers(
     nest: &Arc<NestClient>,
     author: &str,
+    home: Option<String>,
 ) -> Result<(Vec<TierItem>, Option<FollowStatus>), String> {
     let author_id = ActorId::from_hex(author).map_err(|e| format!("offers: bad actor id: {e}"))?;
     let client = SubscriptionsClient::new(Arc::clone(nest));
     let offers = client
-        .offers_list(author_id)
+        .offers_list_across_nests(author_id, home)
         .await
-        .map_err(|e| format!("load offers: {e}"))?;
+        .map_err(|e| offers_error_text(&e))?;
     Ok((offers, fetch_follow_status(nest, author).await))
+}
+
+/// A failed offers read's text for the page's error line: a refusal the nest
+/// (or the relayed home) answered renders its shared localized sentence —
+/// `peer_nest_outdated` for a home that predates the relay — and a transport
+/// fault keeps its diagnostic.
+fn offers_error_text(e: &fauna_client::NestClientError) -> String {
+    match e {
+        fauna_client::NestClientError::Rpc(rpc) => rpc.localized().to_string(),
+        other => format!("load offers: {other}"),
+    }
+}
+
+/// The offers re-read a moved actor-home slot owes: the OTHER Tiers tab
+/// loaded under one home and the header read has since replaced it, so the
+/// tiers listed are the wrong nest's (or none). Called after every profile
+/// outcome fold; `None` when nothing moved.
+pub fn offers_reload_op(app: &mut App) -> Option<Op> {
+    let st = &mut app.profile;
+    if !matches!(st.tab, Tab::Tiers) || st.offers_home.as_ref()? == &st.actor_home {
+        return None;
+    }
+    let author = st.viewing.clone()?;
+    let nest = st.nest.clone()?;
+    st.offers_home = Some(st.actor_home.clone());
+    Some(Op::LoadOffers {
+        nest,
+        author,
+        home: st.actor_home.clone(),
+    })
 }
 
 /// Fold an outcome back into the page — one function for both dispatch paths.
@@ -2556,7 +2716,16 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::ContactRequestFailed(e) => {
             app.errors.insert(Page::Profile, e);
         }
-        Outcome::Offers { offers, status } => {
+        Outcome::Offers {
+            offers,
+            status,
+            home,
+        } => {
+            // Read under a home the slot has since left: the reload the
+            // moved slot issued answers instead.
+            if home != st.actor_home {
+                return;
+            }
             st.offers = offers;
             st.status = status;
             app.errors.remove(&Page::Profile);
@@ -2572,6 +2741,20 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // Auto-approve/plaintext ⇒ Approved ⇒ status_tier now names the
             // tier ⇒ the transient is spent; encrypted ⇒ Queued ⇒ keep it.
             st.pending_tier = queued.then_some(tier);
+            app.errors.remove(&Page::Profile);
+        }
+        Outcome::Redeemed {
+            offers,
+            status,
+            tier,
+            queued,
+        } => {
+            st.offers = offers;
+            st.status = status;
+            // A queued grant reads "Pending approval" until the creator's
+            // client commits it and `status.get` names the tier.
+            st.pending_tier = queued.then_some(tier);
+            st.redeem_input.clear();
             app.errors.remove(&Page::Profile);
         }
         Outcome::Author(snapshot) => {
@@ -2993,6 +3176,33 @@ pub fn elements(app: &App) -> Vec<Element> {
                 true,
                 Gesture::Profile(Action::Subscribe(tier.name.clone())),
             ));
+        }
+        // The redeem row (`profile.md` § Layout & flow → *Another's profile*):
+        // the `subscription-settings` pair, here carrying this creator's home,
+        // so a code minted on another nest redeems from the creator's profile.
+        // Same compile-time excision and the same Dim-3 courtesy gate as the
+        // settings pair — one decision, read from the shared crate.
+        #[cfg(feature = "payments")]
+        {
+            out.push(Element::chrome(s::REDEEM_CLAIM_TITLE));
+            out.push(
+                Element::input(
+                    ids::SUBSCRIPTION_CLAIM_REDEEM_INPUT,
+                    st.redeem_input.clone(),
+                    Field::Profile(ProfileField::RedeemCode),
+                )
+                .labelled(s::CLAIM_CODE),
+            );
+            let gate = crate::settings::subscriptions::redeem_gate(&app.settings);
+            out.push(Element::gesture_button(
+                ids::SUBSCRIPTION_CLAIM_REDEEM_BUTTON,
+                s::REDEEM,
+                gate.is_none(),
+                Gesture::Profile(Action::RedeemClaim),
+            ));
+            if let Some(reason) = gate {
+                out.push(Element::chrome(reason));
+            }
         }
     }
 
@@ -3422,6 +3632,128 @@ mod tests {
         app.profile.reset_for_open();
         assert!(!app.profile.unfollow_armed);
         assert_eq!(text_of(&app, "profile-follow-button"), "Follow");
+    }
+
+    /// The OTHER Tiers tab reads the offers from the viewed actor's home
+    /// (`subscriptions.md` § Pillar 1 → *The offers browse across nests*): the
+    /// load carries the page's actor-home slot, and a header read that moves
+    /// the slot under the open tab owes one re-read from the new home — and
+    /// none when it confirms the slot. An answer read under the old home is
+    /// dropped, so the wrong nest's tiers never paint.
+    #[test]
+    fn the_tiers_tab_reads_the_offers_from_the_actors_home() {
+        let mut app = with_nest(other_app());
+        app.profile.nest_url = "https://home.test".to_string();
+        app.profile.reset_for_open();
+        app.profile
+            .seed_actor_home(Some("https://met.test".to_string()));
+
+        match apply_local(&mut app, Action::ShowTiers) {
+            Some(Op::LoadOffers { home, .. }) => {
+                assert_eq!(home.as_deref(), Some("https://met.test"))
+            }
+            other => panic!("the tab must load the offers, got {:?}", other.is_some()),
+        }
+        assert!(
+            offers_reload_op(&mut app).is_none(),
+            "nothing moved, nothing to re-read"
+        );
+
+        let epoch = app.profile.open_epoch;
+        apply_outcome(
+            &mut app,
+            Outcome::HeaderName {
+                epoch,
+                name: None,
+                actor_home: Some("https://met.test".to_string()),
+                pictures: HeaderPictures::default(),
+            },
+        );
+        assert!(
+            offers_reload_op(&mut app).is_none(),
+            "a header read confirming the slot owes no re-read"
+        );
+
+        apply_outcome(
+            &mut app,
+            Outcome::HeaderName {
+                epoch,
+                name: None,
+                actor_home: Some("https://moved.test".to_string()),
+                pictures: HeaderPictures::default(),
+            },
+        );
+        match offers_reload_op(&mut app) {
+            Some(Op::LoadOffers { home, .. }) => {
+                assert_eq!(home.as_deref(), Some("https://moved.test"))
+            }
+            other => panic!(
+                "a moved slot must re-read the offers, got {:?}",
+                other.is_some()
+            ),
+        }
+        assert!(
+            offers_reload_op(&mut app).is_none(),
+            "the re-read is owed once"
+        );
+
+        // The first load's answer, read under the old home, arrives late.
+        apply_outcome(
+            &mut app,
+            Outcome::Offers {
+                offers: vec![a_tier("gold", None)],
+                status: None,
+                home: Some("https://met.test".to_string()),
+            },
+        );
+        assert_eq!(count_id(&app, "subscription-offer-row"), 0);
+        apply_outcome(
+            &mut app,
+            Outcome::Offers {
+                offers: vec![a_tier("gold", None)],
+                status: None,
+                home: Some("https://moved.test".to_string()),
+            },
+        );
+        assert_eq!(count_id(&app, "subscription-offer-row"), 1);
+    }
+
+    /// A header read off the Tiers tab owes no offers read: the next
+    /// activation loads under the slot as it then stands.
+    #[test]
+    fn a_moved_slot_off_the_tiers_tab_reads_no_offers() {
+        let mut app = with_nest(other_app());
+        app.profile.reset_for_open();
+        app.profile
+            .seed_actor_home(Some("https://met.test".to_string()));
+        let epoch = app.profile.open_epoch;
+        apply_outcome(
+            &mut app,
+            Outcome::HeaderName {
+                epoch,
+                name: None,
+                actor_home: Some("https://moved.test".to_string()),
+                pictures: HeaderPictures::default(),
+            },
+        );
+        assert!(offers_reload_op(&mut app).is_none());
+    }
+
+    /// A refusal the relayed home answered renders the shared localized
+    /// sentence in the page's error line, where a failed local load paints.
+    #[test]
+    fn a_relay_refusal_reads_as_its_localized_sentence() {
+        let rpc = fauna_protocol::RpcError::new(
+            "fauna.federation.peer_nest_outdated",
+            "error.federation.peer_nest_outdated",
+        );
+        let text = offers_error_text(&fauna_client::NestClientError::Rpc(rpc.clone()));
+        assert_eq!(text, rpc.localized());
+        assert!(!text.contains("fauna.federation"));
+        assert!(
+            offers_error_text(&fauna_client::NestClientError::RpcTimeout)
+                .starts_with("load offers:")
+        );
     }
 
     /// The open target's carried home seeds the actor-home slot at once, so a
@@ -4419,6 +4751,7 @@ mod tests {
             Outcome::Offers {
                 offers: vec![a_tier("followers", None), a_tier("gold", Some("$5/mo"))],
                 status: None,
+                home: None,
             },
         );
         assert!(
@@ -5328,6 +5661,87 @@ mod tests {
             }
             _ => panic!("Subscribe must emit the subscribe"),
         }
+    }
+
+    /// The OTHER Tiers tab carries the redeem pair (`profile.md` § Layout &
+    /// flow → *Another's profile*); the SELF tab and the Posts tab do not.
+    #[cfg(feature = "payments")]
+    #[test]
+    fn the_redeem_row_paints_on_the_other_tiers_tab_only() {
+        let mut app = other_app();
+        assert!(!ids(&app).contains(&"subscription-claim-redeem-input".to_string()));
+        app.profile.tab = Tab::Tiers;
+        let painted = ids(&app);
+        assert!(painted.contains(&"subscription-claim-redeem-input".to_string()));
+        assert!(painted.contains(&"subscription-claim-redeem-button".to_string()));
+
+        let mut own = self_app();
+        own.profile.tab = Tab::Tiers;
+        assert!(!ids(&own).contains(&"subscription-claim-redeem-button".to_string()));
+    }
+
+    /// The redeem names the page's home exactly as the follow does, with the
+    /// trimmed code, under this creator's id; a blank buffer sends nothing.
+    #[cfg(feature = "payments")]
+    #[test]
+    fn the_redeem_goes_to_the_viewed_creators_home() {
+        let mut app = knock_ready(Some("https://author-home.test"));
+        app.profile.tab = Tab::Tiers;
+        assert!(
+            apply_local(&mut app, Action::RedeemClaim).is_none(),
+            "a blank code is a no-op, never a nest round-trip"
+        );
+        set_field(
+            &mut app.profile,
+            ProfileField::RedeemCode,
+            "  CODE42 ".into(),
+        );
+        assert_eq!(field(&app.profile, &ProfileField::RedeemCode), "  CODE42 ");
+        let viewed = app.profile.viewing.clone();
+        match apply_local(&mut app, Action::RedeemClaim) {
+            Some(Op::RedeemClaim {
+                author,
+                code,
+                home_nest_url,
+                ..
+            }) => {
+                assert_eq!(Some(author), viewed);
+                assert_eq!(code, "CODE42");
+                assert_eq!(home_nest_url, follow_home(&mut app));
+                assert_eq!(home_nest_url.as_deref(), Some("https://author-home.test"));
+            }
+            _ => panic!("the redeem button must emit the cross-nest redeem"),
+        }
+    }
+
+    /// A taken code leaves the input and the tier reads pending until the
+    /// creator's client commits the grant; a refusal keeps the code to
+    /// correct; a fresh open drops a code typed for the previous creator.
+    #[cfg(feature = "payments")]
+    #[test]
+    fn a_redeemed_code_clears_the_input_and_marks_the_tier_pending() {
+        let mut app = other_app();
+        app.profile.tab = Tab::Tiers;
+        set_field(&mut app.profile, ProfileField::RedeemCode, "CODE42".into());
+        apply_outcome(&mut app, Outcome::Failed("redeem claim: refused".into()));
+        assert_eq!(app.profile.redeem_input, "CODE42");
+
+        apply_outcome(
+            &mut app,
+            Outcome::Redeemed {
+                offers: vec![a_tier("gold", Some("$5/mo"))],
+                status: None,
+                tier: "gold".to_string(),
+                queued: true,
+            },
+        );
+        assert_eq!(app.profile.redeem_input, "");
+        assert_eq!(app.profile.pending_tier.as_deref(), Some("gold"));
+        assert!(!app.errors.contains_key(&Page::Profile));
+
+        set_field(&mut app.profile, ProfileField::RedeemCode, "OTHER".into());
+        app.profile.reset_for_open();
+        assert_eq!(app.profile.redeem_input, "");
     }
 
     /// The repeatable-links sub-list landmark paints with the edit form (the

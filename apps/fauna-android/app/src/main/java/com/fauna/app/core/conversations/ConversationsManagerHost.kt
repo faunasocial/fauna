@@ -520,24 +520,38 @@ class ConversationsManagerHost @Inject constructor(
      * snapshot NOW, synchronously, and returns the save for the caller to run
      * before it tears the client down — [stopDraftsSync] nulls the handle
      * right after, so a flush that read the host's fields later would find
-     * nothing. `null` when no session is wired. Same `saveIfChanged` launch
-     * gate and dedup as [onStop].
+     * nothing. `null` when no session is wired. The same shared leave save
+     * as [onStop] — [captureLeaveSave].
      */
     fun captureLeaveFlush(): (suspend () -> Unit)? {
         val sync = synchronized(this) { draftsSync } ?: return null
-        val snapshot = manager.draftsSnapshotBytes()
-        return { sync.saveIfChanged(snapshot) }
+        return captureLeaveSave(sync)
     }
 
     /**
-     * The leave-flush: force an immediate `saveIfChanged` of the shared
-     * manager's drafts snapshot, bypassing the debounce, on the app's
-     * background transition — the android leg of `drafts-survive` outcome 5,
-     * the twin of apple's `ConversationsVM.flushDraftsNow` and of
+     * One rail's leave save (`reserved-folders.md` § The leave-flush promise),
+     * captured NOW: the manager, its identity epoch and its drafts snapshot,
+     * handed to the shared `FfiDraftsSync.saveConversationsOnLeave` — so a door
+     * taken before the launch load has lifted the save gate still saves, by
+     * one read of its own and the rail's FILL rule (a teardown that clears the
+     * manager first moves its epoch, and the fill then fills nothing).
+     */
+    private fun captureLeaveSave(sync: FfiDraftsSync): suspend () -> Unit {
+        val m = manager
+        val epoch = m.identityEpoch()
+        val snapshot = m.draftsSnapshotBytes()
+        return { sync.saveConversationsOnLeave(m, epoch, snapshot) }
+    }
+
+    /**
+     * The leave-flush: force an immediate save of the shared manager's drafts
+     * snapshot, bypassing the debounce, on the app's background transition —
+     * the android leg of `drafts-survive` outcome 5, the twin of apple's
+     * `ConversationsVM.flushDraftsNow` and of
      * [com.fauna.app.core.events.EventDraftsHost.onStop]. Best-effort like any
-     * such handler (no async work is guaranteed after `onStop`).
-     * `saveIfChanged` keeps its launch gate and unchanged-snapshot dedup, so a
-     * flush before the restore completes, or with nothing new, is a no-op.
+     * such handler (no async work is guaranteed after `onStop`). The shared
+     * leave save keeps the unchanged-snapshot dedup, and before the launch
+     * restore completes it reads once rather than skipping the save.
      */
     override fun onStop(owner: LifecycleOwner) {
         val sync = synchronized(this) {
@@ -545,9 +559,10 @@ class ConversationsManagerHost @Inject constructor(
             draftsSaveJob = null
             draftsSync ?: return
         }
+        val save = captureLeaveSave(sync)
         draftsScope.launch {
             try {
-                sync.saveIfChanged(manager.draftsSnapshotBytes())
+                save()
             } catch (e: Exception) {
                 ShellLog.d("ConversationsDrafts", "leave-flush drafts failed: ${e.message}")
             }

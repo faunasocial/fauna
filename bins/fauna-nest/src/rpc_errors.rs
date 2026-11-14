@@ -512,6 +512,17 @@ mod tests {
         assert_eq!(e.details, None);
     }
 
+    /// The offers browse across nests (`subscriptions.md` § Pillar 1, the
+    /// old-peer part): a home predating `fauna.federation.follow.offers.list`
+    /// refuses it at its allowlist, and the reader gets the update code, never
+    /// an empty tier list it would read as "this creator offers nothing".
+    #[test]
+    fn an_old_home_refusing_the_offers_browse_is_peer_nest_outdated() {
+        let e = map_peer_relay_error(unauthenticated(), "the cross-nest offers browse");
+        assert_eq!(e.code, "fauna.federation.peer_nest_outdated");
+        assert_eq!(e.action(), RpcErrorAction::NeedsUpdate);
+    }
+
     #[test]
     fn schema_shape_errors_are_detected() {
         assert!(is_schema_shape_error("no such column: user_pref_v2"));

@@ -32,15 +32,15 @@ use fauna_core::subscription::{FOLLOWERS_TIER, FOLLOWERS_TIER_RANK};
 use fauna_protocol::subscriptions::{
     ApproveRequestReply, ApproveRequestRequest, DelegateUploadReply, DelegateUploadRequest,
     EncapsKeyPublishReply, EncapsKeyPublishRequest, EncryptedKeyBlobUpload, KeyBlobGetReply,
-    KeyBlobGetRequest, MineListReply, MineListRequest, MineSubscription, OffersListRequest,
-    PendingRequest, PostUnlockGetReply, PostUnlockGetRequest, PostUnlockOffer, RejectRequestReply,
-    RejectRequestRequest, RemoveSubscriberReply, RemoveSubscriberRequest, RequestsListReply,
-    RequestsListRequest, RotateKeyBlobReply, RotateKeyBlobRequest, StatusGetReply,
-    StatusGetRequest, SubscribeReply, SubscribeRequest, SubscriberEntry, SubscribersListReply,
-    SubscribersListRequest, TierClearFieldReply, TierClearFieldRequest, TierClearableField,
-    TierCreateReply, TierCreateRequest, TierDeleteReply, TierDeleteRequest, TierItem,
-    TierUpdateReply, TierUpdateRequest, TiersListReply, TiersListRequest, UnsubscribeReply,
-    UnsubscribeRequest,
+    KeyBlobGetRequest, MineListReply, MineListRequest, MineSubscription, OffersListRemoteRequest,
+    OffersListRequest, PendingRequest, PostUnlockGetReply, PostUnlockGetRequest, PostUnlockOffer,
+    RejectRequestReply, RejectRequestRequest, RemoveSubscriberReply, RemoveSubscriberRequest,
+    RequestsListReply, RequestsListRequest, RotateKeyBlobReply, RotateKeyBlobRequest,
+    StatusGetReply, StatusGetRequest, SubscribeReply, SubscribeRequest, SubscriberEntry,
+    SubscribersListReply, SubscribersListRequest, TierClearFieldReply, TierClearFieldRequest,
+    TierClearableField, TierCreateReply, TierCreateRequest, TierDeleteReply, TierDeleteRequest,
+    TierItem, TierUpdateReply, TierUpdateRequest, TiersListReply, TiersListRequest,
+    UnsubscribeReply, UnsubscribeRequest,
 };
 use fauna_protocol::{RpcError, Value, decode_strict as decode};
 
@@ -731,55 +731,102 @@ fn offers_list_handler() -> RpcHandler {
     Box::new(|state, _caller_id, payload| {
         Box::pin(async move {
             let req: OffersListRequest = decode(&payload).map_err(malformed_upload)?;
+            encode_reply(&offered_tiers(&state, &req.author_id.0).await?)
+        })
+    })
+}
 
-            let rows = state
+/// The offered tiers of `author` as this nest holds them — the ONE body both
+/// doors answer through, the local `fauna.subscriptions.offers.list` and the
+/// home's `fauna.federation.follow.offers.list` (`subscriptions.md` § Pillar 1
+/// → *The offers browse across nests*), so the three withholdings cannot drift
+/// between them: no per-post tier, no hidden tier, no `asking_price`. An
+/// author with no tier here — one this nest does not host included — answers
+/// the empty list.
+pub(crate) async fn offered_tiers(
+    state: &Arc<AppState>,
+    author: &[u8; 32],
+) -> Result<TiersListReply, RpcError> {
+    let rows = state
+        .db
+        .list_subscription_tiers(author)
+        .await
+        .map_err(internal)?;
+
+    // A per-post pay-to-unlock tier is NEVER offered in a generic
+    // tier browse (`monetization.md:128`): it is a degenerate tier
+    // auto-minted for one post, and its affordance renders on that
+    // post (teaser card / detail / the Pillar-2 web teaser page).
+    // Listing it here would show a stranger a nameless "tier" they
+    // cannot situate — and would let them enumerate an author's
+    // for-sale posts from the tier list. The author's own
+    // `tiers.list` above is the surface that carries them.
+    let tiers = rows
+        .into_iter()
+        // A hidden tier is never offered (monetization.md § The
+        // unifying model — A tier may be hidden): the reserved
+        // owner-only tier exists to seal imported content to its
+        // author alone, and listing it would offer strangers a tier
+        // nobody can join.
+        .filter(|t| t.unlocks_post.is_none() && !t.hidden)
+        .map(|t| TierItem {
+            // Deliberately NOT carried on the public offer surface:
+            // the asking price is the author's own machine threshold,
+            // and a browsing stranger reads `price_hint`. Withholding
+            // it also keeps a prospective buyer from discovering the
+            // exact number that would auto-grant, which is the
+            // author's business and not part of the offer.
+            asking_price: None,
+            unlocks_post: t.unlocks_post,
+            name: t.name,
+            rank: t.rank as u32,
+            description: t.description,
+            price_hint: t.price_hint,
+            payment_url: t.payment_url,
+            auto_approve: t.auto_approve,
+            // SubscriptionTierRow.created_at is epoch seconds; Timestamp is micros.
+            created_at: Timestamp((t.created_at as u64).saturating_mul(1_000_000)),
+            hidden: t.hidden,
+            extra: Default::default(),
+        })
+        .collect();
+
+    Ok(TiersListReply {
+        tiers,
+        extra: Default::default(),
+    })
+}
+
+/// `fauna.subscriptions.offers.list_remote` — the browse of an author homed on
+/// **another nest**, relayed by the reader's own nest (`subscriptions.md`
+/// § Pillar 1 → *The offers browse across nests*). In `subscribe_core_from`'s
+/// arm order: an author this nest hosts is answered locally, exactly as
+/// `offers.list` would; any other is read from `nest_url` through
+/// `fauna.federation.follow.offers.list` and forwarded unstored. No reach gate:
+/// the home serves these same fields to anyone on its public route.
+fn offers_list_remote_handler() -> RpcHandler {
+    Box::new(|state, _caller_id, payload| {
+        Box::pin(async move {
+            let req: OffersListRemoteRequest = decode(&payload).map_err(malformed_upload)?;
+            let author = req.author_id.0;
+            let hosted = state
                 .db
-                .list_subscription_tiers(&req.author_id.0)
+                .get_user(&author)
                 .await
-                .map_err(internal)?;
-
-            // A per-post pay-to-unlock tier is NEVER offered in a generic
-            // tier browse (`monetization.md:128`): it is a degenerate tier
-            // auto-minted for one post, and its affordance renders on that
-            // post (teaser card / detail / the Pillar-2 web teaser page).
-            // Listing it here would show a stranger a nameless "tier" they
-            // cannot situate — and would let them enumerate an author's
-            // for-sale posts from the tier list. The author's own
-            // `tiers.list` above is the surface that carries them.
-            let tiers = rows
-                .into_iter()
-                // A hidden tier is never offered (monetization.md § The
-                // unifying model — A tier may be hidden): the reserved
-                // owner-only tier exists to seal imported content to its
-                // author alone, and listing it would offer strangers a tier
-                // nobody can join.
-                .filter(|t| t.unlocks_post.is_none() && !t.hidden)
-                .map(|t| TierItem {
-                    // Deliberately NOT carried on the public offer surface:
-                    // the asking price is the author's own machine threshold,
-                    // and a browsing stranger reads `price_hint`. Withholding
-                    // it also keeps a prospective buyer from discovering the
-                    // exact number that would auto-grant, which is the
-                    // author's business and not part of the offer.
-                    asking_price: None,
-                    unlocks_post: t.unlocks_post,
-                    name: t.name,
-                    rank: t.rank as u32,
-                    description: t.description,
-                    price_hint: t.price_hint,
-                    payment_url: t.payment_url,
-                    auto_approve: t.auto_approve,
-                    // SubscriptionTierRow.created_at is epoch seconds; Timestamp is micros.
-                    created_at: Timestamp((t.created_at as u64).saturating_mul(1_000_000)),
-                    hidden: t.hidden,
-                    extra: Default::default(),
-                })
-                .collect();
-
-            encode_reply(&TiersListReply {
-                tiers,
-                extra: Default::default(),
-            })
+                .map_err(internal)?
+                .is_some();
+            if hosted {
+                return encode_reply(&offered_tiers(&state, &author).await?);
+            }
+            let home_url = req.nest_url.trim();
+            if home_url.is_empty() {
+                return Err(malformed_upload(
+                    "nest_url must name the author's home nest (same-nest reads use offers.list)",
+                ));
+            }
+            encode_reply(
+                &crate::follow_federation::remote_offers_list(&state, &author, home_url).await?,
+            )
         })
     })
 }
@@ -2814,6 +2861,14 @@ pub fn register_subscription_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(5),
             handler: offers_list_handler(),
+        },
+    );
+    b.add(
+        "fauna.subscriptions.offers.list_remote",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(30),
+            handler: offers_list_remote_handler(),
         },
     );
     b.add(
@@ -7065,5 +7120,96 @@ mod tests {
         assert!(stored.entries.is_empty());
         // The stamp the client's owed-derivation reads back.
         assert_eq!(stored.author.0, author);
+    }
+
+    /// `subscriptions.md` § Pillar 1 → *The offers browse across nests*, the
+    /// relay's first arm: an author this nest hosts is answered locally,
+    /// exactly as `offers.list` would — whatever home the caller names, so no
+    /// peer is dialed (the named home here does not exist).
+    #[tokio::test]
+    async fn offers_list_remote_answers_a_hosted_author_locally() {
+        let state = fixture_state().await;
+        let author = actor_from_seed(0x51);
+        let reader = actor_from_seed(0x52);
+        state
+            .db
+            .create_user(&author, "free", "author")
+            .await
+            .unwrap();
+        state
+            .db
+            .create_subscription_tier(
+                &author,
+                "gold",
+                20,
+                None,
+                Some("$10/mo"),
+                None,
+                false,
+                None,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .create_subscription_tier(
+                &author,
+                "backstage",
+                30,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let req = OffersListRemoteRequest {
+            author_id: ActorId(author),
+            nest_url: "https://no-such-home.invalid".into(),
+            extra: Default::default(),
+        };
+        let remote: TiersListReply = decode_reply(
+            &offers_list_remote_handler()(state.clone(), reader, encode_req(&req))
+                .await
+                .expect("a hosted author is answered locally"),
+        );
+        let local: TiersListReply = decode_reply(
+            &offers_list_handler()(
+                state.clone(),
+                reader,
+                encode_req(&OffersListRequest {
+                    author_id: ActorId(author),
+                    extra: Default::default(),
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(remote, local);
+        let names: Vec<&str> = remote.tiers.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["gold"]);
+    }
+
+    /// An unhosted author with no home named is a malformed request, not the
+    /// local empty list — the silent wrong answer the distinct kind exists to
+    /// remove.
+    #[tokio::test]
+    async fn offers_list_remote_with_no_home_for_an_unhosted_author_is_refused() {
+        let state = fixture_state().await;
+        let req = OffersListRemoteRequest {
+            author_id: ActorId(actor_from_seed(0x53)),
+            nest_url: "  ".into(),
+            extra: Default::default(),
+        };
+        let err = offers_list_remote_handler()(state, actor_from_seed(0x54), encode_req(&req))
+            .await
+            .expect_err("no home to read from");
+        assert_eq!(err.code, "fauna.subscriptions.malformed_upload");
     }
 }

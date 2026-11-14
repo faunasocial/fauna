@@ -794,12 +794,12 @@ class AppLaunchVMTest {
         f.vm.start()
 
         org.mockito.Mockito.inOrder(f.accountStores, f.machine).apply {
-            verify(f.accountStores).finishSignOut(anyHost(), org.mockito.ArgumentMatchers.eq(true), org.mockito.ArgumentMatchers.isNull())
+            verify(f.accountStores).finishSignOut(anyHost(), eqCaller(com.fauna.ffi.FfiFinishCaller.LAUNCH), org.mockito.ArgumentMatchers.isNull())
             // Both launches drive the machine; only the first ran the finish.
             verify(f.machine, org.mockito.Mockito.times(2)).start()
         }
         verify(f.accountStores, org.mockito.Mockito.times(1))
-            .finishSignOut(anyHost(), org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.any())
+            .finishSignOut(anyHost(), anyCaller(), org.mockito.ArgumentMatchers.any())
         assertFalse(f.vm.failedClosed.value)
     }
 
@@ -814,7 +814,7 @@ class AppLaunchVMTest {
         val f = makeVm()
         val refusal = mock(com.fauna.ffi.FfiSignOutResidue::class.java)
         whenever(
-            f.accountStores.finishSignOut(anyHost(), org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.any())
+            f.accountStores.finishSignOut(anyHost(), anyCaller(), org.mockito.ArgumentMatchers.any())
         ).thenReturn(
             CLEAN_FINISH.copy(failsClosed = true, refused = true, residue = refusal),
             CLEAN_FINISH,
@@ -834,12 +834,24 @@ class AppLaunchVMTest {
     private fun cleanStores(): com.fauna.app.core.AccountStores {
         val stores = mock(com.fauna.app.core.AccountStores::class.java)
         whenever(
-            stores.finishSignOut(anyHost(), org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.any())
+            stores.finishSignOut(anyHost(), anyCaller(), org.mockito.ArgumentMatchers.any())
         ).thenReturn(CLEAN_FINISH)
         return stores
     }
 
     /** `ArgumentMatchers.any` for a non-null Kotlin parameter. */
+    /** Mockito's `eq` answers `null` for an enum, which a Kotlin non-null parameter refuses. */
+    private fun eqCaller(caller: com.fauna.ffi.FfiFinishCaller): com.fauna.ffi.FfiFinishCaller {
+        org.mockito.ArgumentMatchers.eq(caller)
+        return caller
+    }
+
+    /** Mockito's `any` answers `null`, which a Kotlin non-null parameter refuses. */
+    private fun anyCaller(): com.fauna.ffi.FfiFinishCaller {
+        org.mockito.ArgumentMatchers.any(com.fauna.ffi.FfiFinishCaller::class.java)
+        return com.fauna.ffi.FfiFinishCaller.LAUNCH
+    }
+
     private fun anyHost(): com.fauna.ffi.FfiSignOutHost {
         org.mockito.ArgumentMatchers.any(com.fauna.ffi.FfiSignOutHost::class.java)
         return NO_HOST

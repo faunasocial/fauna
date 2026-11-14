@@ -371,6 +371,33 @@ impl SealedScorers {
         })
     }
 
+    /// Replace the muted-keyword scorer with `muted`, keeping the weight the
+    /// loaded entry already carries (`implicit_weight` when none was loaded),
+    /// and drop it when the list is empty. Every other entry is untouched.
+    ///
+    /// The early half of a reload's scorer load: the muted words are a local
+    /// account read, so a refresh swaps them in before it publishes the list it
+    /// keeps — the first frame after a mute is already folded — while the
+    /// composition-dependent scorers wait for the full load.
+    pub(crate) fn set_muted_keywords(&mut self, muted: Vec<MutedKeyword>, implicit_weight: i64) {
+        let at = self
+            .entries
+            .iter()
+            .position(|e| matches!(e.scorer, SealedScorer::MutedKeywords(_)));
+        match (at, muted.is_empty()) {
+            (Some(i), true) => {
+                self.entries.remove(i);
+            }
+            (Some(i), false) => self.entries[i].scorer = SealedScorer::MutedKeywords(muted),
+            (None, true) => {}
+            (None, false) => self.entries.push(SealedEntry {
+                factor: factor::MUTED_KEYWORDS.to_string(),
+                weight_permille: implicit_weight,
+                scorer: SealedScorer::MutedKeywords(muted),
+            }),
+        }
+    }
+
     /// Swap in a just-trained model for `factor`, so the loaded window re-ranks
     /// against it immediately. A no-op when the factor is not part of *this*
     /// feed's composition — training a topic the current feed does not compose

@@ -181,6 +181,13 @@ E2E_LABEL_VALUE = "1"
 #: `RunProvisioning()` arm — never `StartProvisioning()`, which needs an ambient
 #: tokio runtime the WinUI UI thread does not have.
 #:
+#: android joined 2026-11-12 on its build, not yet on a live run: its
+#: `TestAgent.kt` already routed `call_machine_method` through the ASYNC
+#: dispatcher, and gained the `start_provisioning`/`retry_provisioning` arm
+#: launching `runProvisioning()` on its own scope (the production buttons'
+#: export, `NestProvisioningVM`); the driver surfaces `fauna.log` through
+#: `app_log_text`.
+#:
 #: ⚠ The lesson from the five sessions it took, because it generalises and it
 #: cost the most: for three of them the box could not answer *which client the
 #: Online poll had built*, and each session guessed a different cause instead.
@@ -332,6 +339,39 @@ def drive_provisioning(app, box, token: str, *,
         drv.call_machine_method("set_provision_image_tag", json.dumps(image_tag))
     # Fire-and-forget; the bridge returns immediately and we poll the snapshot.
     drv.call_machine_method("start_provisioning")
+
+
+class _RecordingDriver:
+    """Stands in for an app driver so :func:`provision_app_less` sends exactly
+    the calls :func:`drive_provisioning` sends — one list, two carriers."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def call_machine_method(self, method: str, json_arg: str = "") -> None:
+        self.calls.append([method, json_arg])
+
+
+def provision_app_less(box, token: str, *, dns_token: str,
+                       max_claim_retries: int = 2, **kwargs) -> dict:
+    """Provision ``box`` with NO app: :func:`drive_provisioning`'s own calls,
+    sent through the harness library's ``fauna_harness_provision`` to the same
+    shared onboarding machine every app runs, then the run to its end — its
+    ``Online`` step claims the box as ``box.identity_secret_hex``. A transient
+    claim probe is retried as the page's Retry would (:func:`await_provisioning`'s
+    rule). Returns the final provisioning snapshot. For a ``[nest]`` witness
+    that needs a provisioned box but must launch no app driver
+    (``feature-catalog.md`` § The two surfaces)."""
+    from types import SimpleNamespace
+
+    from fauna_ffi import harness_provision
+
+    rec = _RecordingDriver()
+    drive_provisioning(SimpleNamespace(driver=rec), box, token,
+                       dns_token=dns_token, **kwargs)
+    assert rec.calls[-1] == ["start_provisioning", ""], rec.calls[-1]
+    return harness_provision(rec.calls[:-1], retry_error=_TRANSIENT_CLAIM_NOT_YET,
+                             max_retries=max_claim_retries)
 
 
 def read_snapshot(app):
